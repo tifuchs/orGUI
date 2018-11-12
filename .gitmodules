@@ -1,0 +1,3 @@
+[submodule "datautils"]
+	path = datautils
+	url = https://gitlab.physik.uni-kiel.de/fuchs/datautils.git
