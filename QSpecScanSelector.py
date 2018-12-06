@@ -1,5 +1,7 @@
+# -*- coding: utf-8 -*-
 import sys
 import os
+import shutil
 from PyMca5.PyMcaGui import PyMcaQt as qt
 
 from PyMca5.PyMcaGui.io.QSpecFileWidget import QSpecFileWidget
@@ -7,6 +9,12 @@ from PyMca5.PyMcaGui.pymca import QDataSource
 from PyMca5.PyMcaGui.io.QSourceSelector import QSourceSelector
 from PyMca5.PyMcaGui import PyMca_Icons as icons
 from PyMca5.PyMcaGui.io import PyMcaFileDialogs
+from PyMca5.PyMcaGui.pymca.PyMcaNexusWidget import PyMcaNexusWidget
+from PyMca5.PyMcaGui.io.hdf5 import QNexusWidget
+from PyMca5.PyMcaCore import SpecFileDataSource
+import warnings
+
+from PyMca5.PyMcaCore import NexusDataSource
 
 
 class QSpecScanSelector(qt.QMainWindow):
@@ -18,11 +26,17 @@ class QSpecScanSelector(qt.QMainWindow):
         
         self.mainwidget = qt.QWidget()
         self.mainLayout = qt.QVBoxLayout()
+        maintab = qt.QTabWidget()
+        
+        
         self.specfileWidget = QSpecFileWidget(self,True)
         self.sourceSelector = QSourceSelector(self,["Spec Files (*spec)",
                                                     "Spec Files (*dat)",
                                                     "SPE Files (*SPE)",
+                                                    "hdf Files (*.h5)",
                                                     "All Files (*)"])
+        self.nexusWidget = PyMcaNexusWidget()
+        
     
         self.specfileWidget.autoOffBox.setEnabled(False)
         self.specfileWidget.autoAddBox.setEnabled(False)
@@ -40,8 +54,9 @@ class QSpecScanSelector(qt.QMainWindow):
     
         self.sourceSelector.sigSourceSelectorSignal.connect(self._onSourceSelected)
         
-        
         self.specfileWidget.sigReplaceSelection.connect(self._onReplaceSelection)
+        self.nexusWidget.hdf5Widget.sigHDF5WidgetSignal.connect(self._onNEXUSChange)        
+        
         
         pathSelector = qt.QSplitter(self)
         pathSelector.setOrientation(qt.Qt.Horizontal)
@@ -71,8 +86,15 @@ class QSpecScanSelector(qt.QMainWindow):
         
         self.mainLayout.addWidget(self.sourceSelector)
         self.mainLayout.addWidget(pathSelector)
-        self.mainLayout.addWidget(self.specfileWidget)
+
+        maintab.addTab(self.specfileWidget,"Spec file")
+        maintab.addTab(self.nexusWidget,"NEXUS")
+        
+        self.mainLayout.addWidget(maintab)
+        
         #self.mainLayout.addWidget(self.slider)
+        
+        
         
         self.mainwidget.setLayout(self.mainLayout)
         self.setCentralWidget(self.mainwidget)
@@ -121,7 +143,9 @@ class QSpecScanSelector(qt.QMainWindow):
         
         
         #self.addToolBar(qt.Qt.BottomToolBarArea,self.toolbar)
-        self.th = None
+        self.th = None            
+            
+            
         
         self.selectedScan = None
         
@@ -195,18 +219,33 @@ class QSpecScanSelector(qt.QMainWindow):
         self.setRange(0,th.size-1)
         
     def _onSourceSelected(self,ddict):
-        #print(ddict)
         event = ddict['event']
-        if (event == 'SourceSelected' or event == 'NewSourceSelected'):    
-            ds = QDataSource.QDataSource(ddict['sourcelist'][0])
-            self.specfileWidget.setDataSource(ds)
+        if (event == 'SourceSelected' or event == 'NewSourceSelected' or event == 'SourceReloaded'):
+            dataname = ddict['sourcelist'][0]
+            datatype = QDataSource.getSourceType(dataname)
+            datapath,_ = os.path.split(dataname)
+            
+            
+            if datatype == NexusDataSource.SOURCE_TYPE:
+                shutil.copy(dataname,datapath + '/temp.h5')
+                ds = QDataSource.QDataSource(datapath + '/temp.h5',datatype)
+                self.nexusWidget.setDataSource(ds)
+            elif datatype == SpecFileDataSource.SOURCE_TYPE:
+                ds = QDataSource.QDataSource(dataname,datatype)
+                self.specfileWidget.setDataSource(ds)
+            else:
+                warnings.warn("not implemented data source: %s" % dataname)
             self.selectedScan = None
             self.sigScanChanged.emit([])
-            
+
     
     def _onReplaceSelection(self,sel_list):
         print(sel_list)
         self.sigScanChanged.emit(sel_list)
+        
+    def _onNEXUSChange(self,ddict):
+        if ddict['event'] == "itemDoubleClicked":
+            self.sigScanChanged.emit(ddict)
         
     def _onSelectImageFolder(self):
         folder = PyMcaFileDialogs.getExistingDirectory(self,"select directory containing the images for the current scan")

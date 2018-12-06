@@ -1,4 +1,4 @@
-
+# -*- coding: utf-8 -*-
 from io import StringIO
 from PyMca5.PyMcaGui import PyMcaQt as qt
 
@@ -19,20 +19,21 @@ class QUBCalculator(qt.QTabWidget):
     def __init__(self, parent=None):
         qt.QTabWidget.__init__(self, parent=None)
         sdd = 0.729
-        E = 68.
+        E = 78.
         pixelsize = 172e-6
         cp = [731.0,1587.856]
-        #self.reflections = reflectionhandler
+        self.mu = np.deg2rad(0.05)
+        self.chi = 0.
+        self.phi = 0.
+        self.n = 1 - 1.1415e-06
         self.crystal = HKLVlieg.Crystal([3.9242,3.9242,3.9242],[90.,90.,90.])
         self.detectorCal = DetectorCalibration.DetectorCalibration(E,self.crystal,pixelsize)
         self.detectorCal.setCalibration(cp,sdd)
         self.ubCal = HKLVlieg.UBCalculator(self.crystal,E)
         self.ubCal.defaultU()
-        self.mu = np.deg2rad(0.05)
-        self.chi = 0.
-        self.phi = 0.
+        
         self.angles = HKLVlieg.VliegAngles(self.ubCal)
-        self.n = 1 - 1.1415e-06
+        
         
         paramlist = [E,self.mu,sdd,pixelsize,cp,0.,0.]
         

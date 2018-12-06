@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import sys
 import os
 from PyMca5.PyMcaGui import PyMcaQt as qt
@@ -32,7 +33,7 @@ from datautils.xrayutils import HKLVlieg
 #if __name__ == "__main__":
 #    os.chdir("..")
     
-from datautils.xrayutils.id31_tools_5 import Fastscan
+from datautils.xrayutils.id31_tools_5 import Fastscan, BlissScan
 
 QTVERSION = qt.qVersion()
 DEBUG = 0
@@ -224,31 +225,37 @@ class orGUI(qt.QMainWindow):
         
         
     def _onScanChanged(self,sel_list):
-        #print(sel_list)
         self.resetZoom = True
-        self.sel_list = sel_list
-        if len(sel_list):
-            self.specfile = sel_list[0]['SourceName']
-            self.scanno = int(float(sel_list[0]['Key']))-1
-            self.fscan = Fastscan(self.specfile,self.scanno)
-            self.imageno = 0
-            self.reflectionSel.setImage(self.imageno)
-            if self.imagepath != '':
-                self.fscan.set_image_folder(self.imagepath)
-                self.plotImage()
-                
-                #self.scanSelector.slider.setMinimum(0)
-                #self.scanSelector.slider.setMaximum(self.fscan.nopoints-1)
-                self.scanSelector.setTh(self.fscan.th)
-                #print(self.fscan.nopoints)
-                #self.readAllImages()
+        if isinstance(sel_list,list): 
+            self.sel_list = sel_list
+            if len(sel_list):
+                self.specfile = sel_list[0]['SourceName']
+                self.scanno = int(float(sel_list[0]['Key']))-1
+                self.fscan = Fastscan(self.specfile,self.scanno)
+                self.imageno = 0
+                self.reflectionSel.setImage(self.imageno)
+                if self.imagepath != '':
+                    self.fscan.set_image_folder(self.imagepath)
+                    self.plotImage()
+                    
+                    #self.scanSelector.slider.setMinimum(0)
+                    #self.scanSelector.slider.setMaximum(self.fscan.nopoints-1)
+                    self.scanSelector.setTh(self.fscan.th)
+                    #print(self.fscan.nopoints)
+                    #self.readAllImages()
+                    #print(self.centralPlot._callback)
+                    
+            else:
+                self.scanSelector.setRange(0,0)
+                self.imageno = 0
+                self.reflectionSel.setImage(self.imageno)
                 #print(self.centralPlot._callback)
-                
         else:
-            self.scanSelector.setRange(0,0)
-            self.imageno = 0
-            self.reflectionSel.setImage(self.imageno)
-            #print(self.centralPlot._callback)
+            self.hdffile = sel_list['file']
+            self.scanname = sel_list['name'].strip("/")
+            self.fscan = BlissScan(self.hdffile,self.scanname)
+            
+                
             
             
     def _onImagePathChanged(self,path):

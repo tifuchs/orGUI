@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # /*#########################################################################
 # Copyright (C) 2004-2017 V.A. Sole, European Synchrotron Radiation Facility
 #
