@@ -222,17 +222,22 @@ class QSpecScanSelector(qt.QMainWindow):
         event = ddict['event']
         if (event == 'SourceSelected' or event == 'NewSourceSelected' or event == 'SourceReloaded'):
             dataname = ddict['sourcelist'][0]
+            
             datatype = QDataSource.getSourceType(dataname)
             datapath,_ = os.path.split(dataname)
-            
-            
             if datatype == NexusDataSource.SOURCE_TYPE:
                 shutil.copy(dataname,datapath + '/temp.h5')
                 ds = QDataSource.QDataSource(datapath + '/temp.h5',datatype)
                 self.nexusWidget.setDataSource(ds)
             elif datatype == SpecFileDataSource.SOURCE_TYPE:
-                ds = QDataSource.QDataSource(dataname,datatype)
-                self.specfileWidget.setDataSource(ds)
+                try:
+                    ds = QDataSource.QDataSource(dataname,datatype)
+                    self.specfileWidget.setDataSource(ds)
+                except Exception:
+                    warnings.warn("didn't find good datasource in %s , try to read as P212 CrudeScan" % dataname)
+                    self.sigScanChanged.emit([{'SourceName' : dataname}])
+                    self.selectedScan = None
+                    return 
             else:
                 warnings.warn("not implemented data source: %s" % dataname)
             self.selectedScan = None

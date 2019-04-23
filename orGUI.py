@@ -34,6 +34,7 @@ from datautils.xrayutils import HKLVlieg
 #    os.chdir("..")
     
 from datautils.xrayutils.id31_tools_5 import Fastscan, BlissScan
+from datautils.xrayutils.P212_tools import CrudeThScan
 
 QTVERSION = qt.qVersion()
 DEBUG = 0
@@ -63,7 +64,7 @@ class orGUI(qt.QMainWindow):
     
         ubWidget = qt.QWidget()
         ubLayout = qt.QHBoxLayout()
-        self.ubcalc = QUBCalculator()
+        self.ubcalc = QUBCalculator("./config")
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
         
         
@@ -230,9 +231,15 @@ class orGUI(qt.QMainWindow):
             self.sel_list = sel_list
             if len(sel_list):
                 self.specfile = sel_list[0]['SourceName']
-                self.scanno = int(float(sel_list[0]['Key']))-1
-                self.fscan = Fastscan(self.specfile,self.scanno)
-                self.imageno = 0
+                try:
+                    self.scanno = int(float(sel_list[0]['Key']))-1
+                    self.fscan = Fastscan(self.specfile,self.scanno)
+                    self.imageno = 0
+                except Exception:
+                    self.scanno = 0
+                    self.fscan = CrudeThScan(self.specfile,'PE1',r"C:\Timo_loc\P21_2_comissioning\Pt111_HClO4_0.4\PE1\dark00001.tif.gz")
+                    self.imageno = 0
+                    self.imagepath = self.fscan.path + "/" + 'PE1'
                 self.reflectionSel.setImage(self.imageno)
                 if self.imagepath != '':
                     self.fscan.set_image_folder(self.imagepath)
@@ -290,7 +297,7 @@ class orGUI(qt.QMainWindow):
             
     def loadAll(self):
         try:
-            image = self.fscan.get_raw_p3_img(0)
+            image = self.fscan.get_raw_PE_img(0)
         except Exception as e:
             print("no images found! %s" % e)
             return
@@ -299,7 +306,7 @@ class orGUI(qt.QMainWindow):
         progress = qt.QProgressDialog("Reading images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
         for i in range(len(self.fscan)):
-            image = self.fscan.get_raw_p3_img(i)
+            image = self.fscan.get_raw_PE_img(i)
             self.allimgsum += image.img
             self.allimgmax = np.maximum(self.allimgmax,image.img)
             progress.setValue(i)
@@ -347,7 +354,7 @@ class orGUI(qt.QMainWindow):
         
     def plotImage(self,key=0):
         try:
-            image = self.fscan.get_raw_p3_img(key)
+            image = self.fscan.get_raw_PE_img(key)
             if self.currentImageLabel is not None:
                 self.centralPlot.removeImage(self.currentImageLabel)
 
