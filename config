@@ -11,12 +11,9 @@ pixelsize = 172e-6
 # central pixel (prim beam position)
 cpx = 731.0
 cpy = 1587.856
-# usually known as delta (n = 1 - delta), has only minor effect
-refractionindex = 1.1415e-06
-# angle of incidence
-mu = 0.25
-chi = 0
-phi = 0
+
+
+
 
 [Lattice]
 # direct lattice (in Angstrom and degrees)
@@ -26,3 +23,14 @@ a3 = 6.7960
 alpha1 = 90.0
 alpha2 = 90.0
 alpha3 = 120.0
+# usually known as delta (n = 1 - delta), has only minor effect
+refractionindex = 1.1415e-06
+
+[Diffractometer]
+azimuthal_reference = 0
+
+# angle of incidence
+mu = 0.25
+
+chi = 0
+phi = 0

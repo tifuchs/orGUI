@@ -154,25 +154,37 @@ class QUBCalculator(qt.QTabWidget):
             return False
         try:
             machine = config['Machine']
+            lattice = config['Lattice']
+            diffrac = config['Diffractometer']
+            
+            self.azimuth = diffrac.getfloat('azimuthal_reference',0)
+            if 'poni' in machine:
+                if machine['poni']:
+                    dc = DetectorCalibration.Detector2D_SXRD()
+                    dc.load(machine['poni'])
+                    dc.setAzimuthalReference( self.azimuth)
+                    
+                    
+                    
+                
             sdd = machine.getfloat('SDD',0.729)
             E =  machine.getfloat('E',78.0)
             pixelsize = machine.getfloat('pixelsize',172e-6)
             cpx = machine.getfloat('cpx',731)
             cpy = machine.getfloat('cpy',1587)
             cp = [cpx,cpy]
-            self.mu = np.deg2rad(machine.getfloat('mu',0.05))
-            self.chi = np.deg2rad(machine.getfloat('chi',0.0))
-            self.phi = np.deg2rad(machine.getfloat('phi',0.0))
-            self.n = 1 - machine.getfloat('refractionindex',0.0)
+            self.mu = np.deg2rad(diffrac.getfloat('mu',0.05))
+            self.chi = np.deg2rad(diffrac.getfloat('chi',0.0))
+            self.phi = np.deg2rad(diffrac.getfloat('phi',0.0))
             
-            lattice = config['Lattice']
-            
+
             a1 = lattice.getfloat('a1')
             a2 = lattice.getfloat('a2')
             a3 = lattice.getfloat('a3')
             alpha1 = lattice.getfloat('alpha1')
             alpha2 = lattice.getfloat('alpha2')
             alpha3 = lattice.getfloat('alpha3')
+            self.n = 1 - lattice.getfloat('refractionindex',0.0)
             
             self.crystal = HKLVlieg.Crystal([a1,a2,a3],[alpha1,alpha2,alpha3])
             self.detectorCal = DetectorCalibration.DetectorCalibration(E,self.crystal,pixelsize)
