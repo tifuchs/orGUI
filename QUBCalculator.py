@@ -157,22 +157,17 @@ class QUBCalculator(qt.QTabWidget):
             lattice = config['Lattice']
             diffrac = config['Diffractometer']
             
-            self.azimuth = diffrac.getfloat('azimuthal_reference',0)
-            if 'poni' in machine:
-                if machine['poni']:
-                    dc = DetectorCalibration.Detector2D_SXRD()
-                    dc.load(machine['poni'])
-                    dc.setAzimuthalReference( self.azimuth)
-                    
-                    
-                    
-                
-            sdd = machine.getfloat('SDD',0.729)
-            E =  machine.getfloat('E',78.0)
-            pixelsize = machine.getfloat('pixelsize',172e-6)
+            self.azimuth = np.deg2rad(diffrac.getfloat('azimuthal_reference',0))
+            self.polaxis = np.deg2rad(diffrac.getfloat('polarization_axis',0))
+            self.polfactor = diffrac.getfloat('polarization_factor',0)
+            
+            sdd = machine.getfloat('SDD',0.729) #m
+            E =  machine.getfloat('E',78.0) #keV
+            pixelsize = machine.getfloat('pixelsize',172e-6) #m
             cpx = machine.getfloat('cpx',731)
             cpy = machine.getfloat('cpy',1587)
             cp = [cpx,cpy]
+            
             self.mu = np.deg2rad(diffrac.getfloat('mu',0.05))
             self.chi = np.deg2rad(diffrac.getfloat('chi',0.0))
             self.phi = np.deg2rad(diffrac.getfloat('phi',0.0))
@@ -187,11 +182,24 @@ class QUBCalculator(qt.QTabWidget):
             self.n = 1 - lattice.getfloat('refractionindex',0.0)
             
             self.crystal = HKLVlieg.Crystal([a1,a2,a3],[alpha1,alpha2,alpha3])
-            self.detectorCal = DetectorCalibration.DetectorCalibration(E,self.crystal,pixelsize)
-            self.detectorCal.setCalibration(cp,sdd)
             self.ubCal = HKLVlieg.UBCalculator(self.crystal,E)
             self.ubCal.defaultU()
             self.angles = HKLVlieg.VliegAngles(self.ubCal)
+            
+            self.detectorCal = DetectorCalibration.Detector2D_SXRD()
+            if 'poni' in machine:
+                if machine['poni']:
+                    self.detectorCal.load(machine['poni'])
+                else:
+                    self.detectorCal.setFit2D(sdd*1e-3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
+                    self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+            else:
+                self.detectorCal.setFit2D(sdd*1e-3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
+                self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+                
+            self.detectorCal.setAzimuthalReference(self.azimuth)
+            self.detectorCal.setPolarization(self.polaxis,self.polfactor)
+
             paramlist = [E,self.mu,sdd,pixelsize,cp,self.chi,self.phi]
             self.crystalparams.setValues(self.crystal,self.n)
             self.machineParams.setValues(paramlist)
