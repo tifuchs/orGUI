@@ -1,7 +1,7 @@
-[Machine]
+
 #only giving a poni file from pyFAI is allowed in this section for more complex configurations
-#otherwise leave this line blank!
-poni = 
+[Machine]
+poni = C:\Timo_loc\P21_2_comissioning\calibration_Au_PE1\PE1_calibration.poni
 # beam energy in keV
 E = 70.4
 # Sample detector distance in m (as in Fit2D)
@@ -11,8 +11,6 @@ pixelsize = 172e-6
 # central pixel (prim beam position)
 cpx = 731.0
 cpy = 1587.856
-
-
 
 
 [Lattice]
@@ -28,6 +26,8 @@ refractionindex = 1.1415e-06
 
 [Diffractometer]
 azimuthal_reference = 0
+polarization_axis = 0
+polarization_factor = 1
 
 # angle of incidence
 mu = 0.25

@@ -131,9 +131,8 @@ class orGUI(qt.QMainWindow):
         for i in self.reflectionSel.reflections:
             refl = self.reflectionSel.reflections[i]
             #print(refl.xy)
-            delta, gamma = self.ubcalc.detectorCal.xyToDelGam(refl.xy[0],refl.xy[1])
+            delta, gamma = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([refl.xy[0]]),np.array([refl.xy[1]]),self.ubcalc.mu)
             delta = float(delta); gamma = float(gamma)
-            gamma -= self.ubcalc.mu
             pos = [self.ubcalc.mu,delta,gamma,self.imageNoToOmega(refl.imageno),self.ubcalc.chi,self.ubcalc.phi]
             #print(pos)
             hkls.append(refl.hkl)
@@ -197,8 +196,7 @@ class orGUI(qt.QMainWindow):
             
     def newXyHKLConverter(self):
         def xyToHKL(x,y):
-            delta, gamma = self.ubcalc.detectorCal.xyToDelGam(x,y)
-            gamma -= self.ubcalc.mu
+            gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([x]),np.array([y]),self.ubcalc.mu)
             pos = [self.ubcalc.mu,delta,gamma,self.imageNoToOmega(self.imageno),self.ubcalc.chi,self.ubcalc.phi]
             pos = HKLVlieg.crystalAngles(pos,self.ubcalc.n)
             hkl = self.ubcalc.angles.anglesToHkl(pos)
