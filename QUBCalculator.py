@@ -18,6 +18,7 @@ import os
 
 class QUBCalculator(qt.QTabWidget):
     sigNewReflection = qt.pyqtSignal(list)
+    sigPlottableMachineParamsChanged = qt.pyqtSignal(list)
     #sigQueryImageChange = qt.pyqtSignal(int)
     #sigImagePathChanged = qt.pyqtSignal(object)
     #sigImageNoChanged = qt.pyqtSignal(object)
@@ -110,7 +111,7 @@ class QUBCalculator(qt.QTabWidget):
     def calcReflection(self,hkl,mirrorx=False):
         pos = self.angles.anglesZmode(hkl,self.mu,'in',self.chi,self.phi,mirrorx=mirrorx)
         alpha, delta, gamma, omega, chi, phi = HKLVlieg.vacAngles(pos,self.n)
-        x,y = self.detectorCal.pixelsSurfacePoint([delta],[gamma],alpha)[0]
+        y,x = self.detectorCal.pixelsSurfacePoint([delta],[gamma],alpha)[0]
         return [hkl,x,y,omega]
         
     def _onCalcReflection(self):
@@ -149,6 +150,12 @@ class QUBCalculator(qt.QTabWidget):
         self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
         self.detectorCal.setAzimuthalReference(azim)
         self.detectorCal.setPolarization(polax,polf)
+        try:
+            azimy,azimx = self.detectorCal.pixelsPrimPoint([0.05],[0])[0]
+            self.sigPlottableMachineParamsChanged.emit([cp,[azimx,azimy],polax])
+        except Exception as e:
+            # here is a bug with the init of the detector cal
+            pass
         #print(self.detectorCal.get_wavelength())
         #print(self.detectorCal.getFit2D())
         

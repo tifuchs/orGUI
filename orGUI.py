@@ -114,6 +114,7 @@ class orGUI(qt.QMainWindow):
         
         self.ubcalc.setReflectionHandler(self.getReflections)
         
+        self.ubcalc.sigPlottableMachineParamsChanged.connect(self._onPlotMachineParams)
         self.allimgsum = None
         self.allimgmax = None
 
@@ -131,7 +132,7 @@ class orGUI(qt.QMainWindow):
         for i in self.reflectionSel.reflections:
             refl = self.reflectionSel.reflections[i]
             #print(refl.xy)
-            delta, gamma = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([refl.xy[0]]),np.array([refl.xy[1]]),self.ubcalc.mu)
+            delta, gamma = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([refl.xy[1]]),np.array([refl.xy[0]]),self.ubcalc.mu)
             delta = float(delta); gamma = float(gamma)
             pos = [self.ubcalc.mu,delta,gamma,self.imageNoToOmega(refl.imageno),self.ubcalc.chi,self.ubcalc.phi]
             #print(pos)
@@ -178,6 +179,10 @@ class orGUI(qt.QMainWindow):
         
         #print(hkls,angles)
         
+    def _onPlotMachineParams(self,paramslist):
+        [cp,azimxy,polax] = paramslist
+        self.centralPlot.addMarker(cp[0],cp[1],legend="CentralPixel",text="CP",color='yellow',symbol='+')
+        self.centralPlot.addMarker(azimxy[0],azimxy[1],legend="azimuth",text="Azim",color='yellow',symbol='+')
 
     def _onNewReflection(self,refl):
         [hkl,x,y,omega] = refl
@@ -196,10 +201,17 @@ class orGUI(qt.QMainWindow):
             
     def newXyHKLConverter(self):
         def xyToHKL(x,y):
-            gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([x]),np.array([y]),self.ubcalc.mu)
-            pos = [self.ubcalc.mu,delta,gamma,self.imageNoToOmega(self.imageno),self.ubcalc.chi,self.ubcalc.phi]
+            #print("xytoHKL:")
+            #print("x,y = %s, %s" % (x,y))
+            gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([y]),np.array([x]),self.ubcalc.mu)
+            #print(self.ubcalc.detectorCal)
+            #print(x,y)
+            #print(self.ubcalc.detectorCal.tth(np.array([y]),np.array([x])))
+            
+            pos = [self.ubcalc.mu,delta[0],gamma[0],self.imageNoToOmega(self.imageno),self.ubcalc.chi,self.ubcalc.phi]
             pos = HKLVlieg.crystalAngles(pos,self.ubcalc.n)
             hkl = self.ubcalc.angles.anglesToHkl(pos)
+
             #print(self.ubcalc.crystal)
             return hkl.A1
         return xyToHKL
@@ -295,7 +307,7 @@ class orGUI(qt.QMainWindow):
             
     def loadAll(self):
         try:
-            image = self.fscan.get_raw_PE_img(0)
+            image = self.fscan.get_raw_img(0)
         except Exception as e:
             print("no images found! %s" % e)
             return
@@ -304,7 +316,7 @@ class orGUI(qt.QMainWindow):
         progress = qt.QProgressDialog("Reading images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
         for i in range(len(self.fscan)):
-            image = self.fscan.get_raw_PE_img(i)
+            image = self.fscan.get_raw_img(i)
             self.allimgsum += image.img
             self.allimgmax = np.maximum(self.allimgmax,image.img)
             progress.setValue(i)
@@ -352,7 +364,7 @@ class orGUI(qt.QMainWindow):
         
     def plotImage(self,key=0):
         try:
-            image = self.fscan.get_raw_PE_img(key)
+            image = self.fscan.get_raw_img(key)
             if self.currentImageLabel is not None:
                 self.centralPlot.removeImage(self.currentImageLabel)
 
