@@ -80,6 +80,7 @@ class QUBCalculator(qt.QTabWidget):
         
         self.machineParams = QMachineParameters()
         self.machineParams.sigMachineParamsChanged.connect(self._onMachineParamsChanged)
+        self.machineParams.loadConfigButton.clicked.connect(self._onLoadConfig)
         self.addTab(self.machineParams,"Machine")
         
                 
@@ -159,7 +160,18 @@ class QUBCalculator(qt.QTabWidget):
         #print(self.detectorCal.get_wavelength())
         #print(self.detectorCal.getFit2D())
         
-        
+    def _onLoadConfig(self):
+        fileTypeList = ['All files (*)']
+        newfile, filetype = PyMcaFileDialogs.getFileList(parent=self,
+                                               filetypelist=fileTypeList,
+                                               message="please select a file",
+                                               mode="LOAD",
+                                               getfilter=True,
+                                               single=True)
+        if not newfile:
+            return
+        filename = newfile[0]
+        self.readConfig(filename)
 
     def setReflectionHandler(self,refls):
         self.reflections = refls
@@ -420,8 +432,9 @@ class QMachineParameters(qt.QWidget):
         mainLayout.addWidget(qt.QLabel("phi:"),3,2)
         mainLayout.addWidget(qt.QLabel("polarization axis:"),4,2)
         
-        
-        
+        self.loadConfigButton = qt.QPushButton("load config",self) 
+        self.loadConfigButton.setToolTip("load machine and crystal configuration from configfile,\naccepts poni file from pyFAI")
+        mainLayout.addWidget(self.loadConfigButton,5,2)
         
         self.Ebox = qt.QDoubleSpinBox()
         self.Ebox.setRange(0.1,1000)
