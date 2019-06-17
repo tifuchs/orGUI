@@ -62,8 +62,39 @@ class QUBCalculator(qt.QTabWidget):
         umatrixsplitter.addWidget(self.Ueditor)
         self.calUButton = qt.QPushButton("calculate U")
         self.calUButton.setToolTip("calculate orientation matrix based on the given reflections")
-        umatrixsplitter.addWidget(self.calUButton)
+                
+        vertCalUSplitter = qt.QSplitter()
+        vertCalUSplitter.setOrientation(qt.Qt.Vertical)
+        
+        fitUbox = qt.QGroupBox("fit options (only available with enough reflections)")
+        
+        self.latnofit = qt.QRadioButton("don't fit lattice")
+        self.latnofit.setChecked(True)
+        self.latscale = qt.QRadioButton("fit scale of lattice")
+        self.latfitall = qt.QRadioButton("fit all lattice parameters")
+        
+        fitUboxlayout = qt.QVBoxLayout()
+        fitUboxlayout.addWidget(self.latnofit)
+        fitUboxlayout.addWidget(self.latscale)
+        fitUboxlayout.addWidget(self.latfitall)
+        fitUboxlayout.addStretch(1)
+        
+        fitUbox.setLayout(fitUboxlayout)
+        
+        
+        vertCalUSplitter.addWidget(fitUbox)
+        
+        vertCalUSplitter.addWidget(self.calUButton)
+        
+        
+        
+        
+        umatrixsplitter.addWidget(vertCalUSplitter)
+        
         umatrixwidget.addWidget(umatrixsplitter)
+        
+
+        
         
         
         self.calUButton.clicked.connect(self._onCalcU)
@@ -112,7 +143,8 @@ class QUBCalculator(qt.QTabWidget):
     def calcReflection(self,hkl,mirrorx=False):
         pos = self.angles.anglesZmode(hkl,self.mu,'in',self.chi,self.phi,mirrorx=mirrorx)
         alpha, delta, gamma, omega, chi, phi = HKLVlieg.vacAngles(pos,self.n)
-        y,x = self.detectorCal.pixelsSurfacePoint([delta],[gamma],alpha)[0]
+        print(np.rad2deg([alpha, delta, gamma, omega, chi, phi]))
+        y,x = self.detectorCal.pixelsSurfacePoint([gamma],[delta],alpha)[0]
         return [hkl,x,y,omega]
         
     def _onCalcReflection(self):
@@ -282,13 +314,27 @@ class QUBCalculator(qt.QTabWidget):
     def _onCalcU(self):
         hkls,angles = self.reflections()
         if len(hkls) < 2:
-            qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 2 reflections to calculate a orientation matrix")
+            qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 2 reflections to calculate an orientation matrix")
             return
         self.ubCal.setPrimaryReflection(angles[0],hkls[0])
         self.ubCal.setSecondayReflection(angles[1],hkls[1])
         self.ubCal.calculateU()
+        
         if len(hkls) > 2:
-            self.ubCal.refineU(hkls,angles)
+            if self.latnofit.isChecked():
+                self.ubCal.refineU(hkls,angles)
+                
+            if self.latscale.isChecked():
+                if len(hkls) > 3:
+                    self.ubCal.refineULattice(hkls,angles,'scale')
+                else:
+                    qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 4 reflections to fit lattice scale and U")
+            if self.latfitall.isChecked():
+                if len(hkls) > 5:
+                    self.ubCal.refineULattice(hkls,angles,'lat')
+                else:
+                    qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 6 reflections to fit lattice and U")
+            self.crystalparams.setValues(self.crystal,self.n)
         self.Ueditor.setPlainText(str(self.ubCal.getU()))
             
         

@@ -132,7 +132,7 @@ class orGUI(qt.QMainWindow):
         for i in self.reflectionSel.reflections:
             refl = self.reflectionSel.reflections[i]
             #print(refl.xy)
-            delta, gamma = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([refl.xy[1]]),np.array([refl.xy[0]]),self.ubcalc.mu)
+            gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([refl.xy[1]]),np.array([refl.xy[0]]),self.ubcalc.mu)
             delta = float(delta); gamma = float(gamma)
             pos = [self.ubcalc.mu,delta,gamma,self.imageNoToOmega(refl.imageno),self.ubcalc.chi,self.ubcalc.phi]
             #print(pos)
@@ -247,7 +247,8 @@ class orGUI(qt.QMainWindow):
                     self.imageno = 0
                 except Exception:
                     self.scanno = 0
-                    self.fscan = CrudeThScan(self.specfile,'PE1',r"C:\Timo_loc\P21_2_comissioning\Pt111_HClO4_0.4\PE1\dark00001.tif.gz")
+                    #self.fscan = CrudeThScan(self.specfile,'PE1',r"C:\Timo_loc\P21_2_comissioning\Pt111_HClO4_0.4\PE1\dark00001.tif.gz")
+                    self.fscan = CrudeThScan(self.specfile,'PE1')
                     self.imageno = 0
                     self.imagepath = self.fscan.path + "/" + 'PE1'
                 self.reflectionSel.setImage(self.imageno)
