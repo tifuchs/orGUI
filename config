@@ -1,7 +1,7 @@
 
 #only giving a poni file from pyFAI is allowed in this section for more complex configurations
 [Machine]
-poni = C:\Timo_loc\P21_2_comissioning\calibration_Au_PE1\PE1_calibration.poni
+poni = /home/fuchstim/binoc_configs/poni/third_pilatus.poni
 # beam energy in keV
 E = 70.4
 # Sample detector distance in m (as in Fit2D)
@@ -15,12 +15,12 @@ cpy = 1587.856
 
 [Lattice]
 # direct lattice (in Angstrom and degrees)
-a1 = 2.7740 
-a2 = 2.7740 
-a3 = 6.7960 
+a1 = 3.9242 
+a2 = 2.7748 
+a3 = 2.7748 
 alpha1 = 90.0
 alpha2 = 90.0
-alpha3 = 120.0
+alpha3 = 90.0
 # usually known as delta (n = 1 - delta), has only minor effect
 refractionindex = 1.1415e-06
 
@@ -30,7 +30,7 @@ polarization_axis = 0
 polarization_factor = 1
 
 # angle of incidence
-mu = 0.25
+mu = 0.2
 
 chi = 0
 phi = 0

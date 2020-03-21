@@ -32,9 +32,12 @@ import numpy as np
 from datautils.xrayutils import HKLVlieg
 #if __name__ == "__main__":
 #    os.chdir("..")
-    
-from datautils.xrayutils.id31_tools_5 import Fastscan, BlissScan
-from datautils.xrayutils.P212_tools import CrudeThScan
+
+import sys
+#sys.path.append('/home/fuchstim/repos/datautils/datautils/xrayutils')
+#from datautils.xrayutils.id31_tools_5 import Fastscan, BlissScan
+from datautils.xrayutils.P212_tools import CrudeThScan, FioFastsweep
+#from P212_tools import CrudeThScan, FioFastsweep
 
 QTVERSION = qt.qVersion()
 DEBUG = 0
@@ -237,6 +240,8 @@ class orGUI(qt.QMainWindow):
         
     def _onScanChanged(self,sel_list):
         self.resetZoom = True
+        print(sel_list)
+
         if isinstance(sel_list,list): 
             self.sel_list = sel_list
             if len(sel_list):
@@ -246,11 +251,12 @@ class orGUI(qt.QMainWindow):
                     self.fscan = Fastscan(self.specfile,self.scanno)
                     self.imageno = 0
                 except Exception:
+                    print('HERE')
                     self.scanno = 0
                     #self.fscan = CrudeThScan(self.specfile,'PE1',r"C:\Timo_loc\P21_2_comissioning\Pt111_HClO4_0.4\PE1\dark00001.tif.gz")
-                    self.fscan = CrudeThScan(self.specfile,'PE1')
+                    self.fscan = FioFastsweep(self.specfile)
                     self.imageno = 0
-                    self.imagepath = self.fscan.path + "/" + 'PE1'
+                    #self.imagepath = self.fscan.path + "/" + 'PE1'
                 self.reflectionSel.setImage(self.imageno)
                 if self.imagepath != '':
                     self.fscan.set_image_folder(self.imagepath)

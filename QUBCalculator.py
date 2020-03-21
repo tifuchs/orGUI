@@ -261,9 +261,12 @@ class QUBCalculator(qt.QTabWidget):
                 else:
                     self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
                     self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+                    self.detectorCal.detector.shape = (2880,2880) # Perkin 
+                    
             else:
                 self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
                 self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+                self.detectorCal.detector.shape = (2880,2880)
                 
             self.detectorCal.setAzimuthalReference(self.azimuth)
             self.detectorCal.setPolarization(self.polaxis,self.polfactor)
