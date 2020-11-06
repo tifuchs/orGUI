@@ -32,8 +32,12 @@ import numpy as np
 from datautils.xrayutils import HKLVlieg
 #if __name__ == "__main__":
 #    os.chdir("..")
-    
-from datautils.xrayutils.id31_tools_5 import Fastscan, BlissScan
+
+import sys
+#sys.path.append('/home/fuchstim/repos/datautils/datautils/xrayutils')
+#from datautils.xrayutils.id31_tools_5 import Fastscan, BlissScan
+from datautils.xrayutils.P212_tools import CrudeThScan, FioFastsweep
+#from P212_tools import CrudeThScan, FioFastsweep
 
 QTVERSION = qt.qVersion()
 DEBUG = 0
@@ -63,7 +67,7 @@ class orGUI(qt.QMainWindow):
     
         ubWidget = qt.QWidget()
         ubLayout = qt.QHBoxLayout()
-        self.ubcalc = QUBCalculator()
+        self.ubcalc = QUBCalculator("./config")
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
         
         
@@ -113,6 +117,7 @@ class orGUI(qt.QMainWindow):
         
         self.ubcalc.setReflectionHandler(self.getReflections)
         
+        self.ubcalc.sigPlottableMachineParamsChanged.connect(self._onPlotMachineParams)
         self.allimgsum = None
         self.allimgmax = None
 
@@ -130,9 +135,8 @@ class orGUI(qt.QMainWindow):
         for i in self.reflectionSel.reflections:
             refl = self.reflectionSel.reflections[i]
             #print(refl.xy)
-            delta, gamma = self.ubcalc.detectorCal.xyToDelGam(refl.xy[0],refl.xy[1])
+            gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([refl.xy[1]]),np.array([refl.xy[0]]),self.ubcalc.mu)
             delta = float(delta); gamma = float(gamma)
-            gamma -= self.ubcalc.mu
             pos = [self.ubcalc.mu,delta,gamma,self.imageNoToOmega(refl.imageno),self.ubcalc.chi,self.ubcalc.phi]
             #print(pos)
             hkls.append(refl.hkl)
@@ -178,6 +182,10 @@ class orGUI(qt.QMainWindow):
         
         #print(hkls,angles)
         
+    def _onPlotMachineParams(self,paramslist):
+        [cp,azimxy,polax] = paramslist
+        self.centralPlot.addMarker(cp[0],cp[1],legend="CentralPixel",text="CP",color='yellow',symbol='+')
+        self.centralPlot.addMarker(azimxy[0],azimxy[1],legend="azimuth",text="Azim",color='yellow',symbol='+')
 
     def _onNewReflection(self,refl):
         [hkl,x,y,omega] = refl
@@ -196,11 +204,17 @@ class orGUI(qt.QMainWindow):
             
     def newXyHKLConverter(self):
         def xyToHKL(x,y):
-            delta, gamma = self.ubcalc.detectorCal.xyToDelGam(x,y)
-            gamma -= self.ubcalc.mu
-            pos = [self.ubcalc.mu,delta,gamma,self.imageNoToOmega(self.imageno),self.ubcalc.chi,self.ubcalc.phi]
+            #print("xytoHKL:")
+            #print("x,y = %s, %s" % (x,y))
+            gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([y]),np.array([x]),self.ubcalc.mu)
+            #print(self.ubcalc.detectorCal)
+            #print(x,y)
+            #print(self.ubcalc.detectorCal.tth(np.array([y]),np.array([x])))
+            
+            pos = [self.ubcalc.mu,delta[0],gamma[0],self.imageNoToOmega(self.imageno),self.ubcalc.chi,self.ubcalc.phi]
             pos = HKLVlieg.crystalAngles(pos,self.ubcalc.n)
             hkl = self.ubcalc.angles.anglesToHkl(pos)
+
             #print(self.ubcalc.crystal)
             return hkl.A1
         return xyToHKL
@@ -226,13 +240,23 @@ class orGUI(qt.QMainWindow):
         
     def _onScanChanged(self,sel_list):
         self.resetZoom = True
+        print(sel_list)
+
         if isinstance(sel_list,list): 
             self.sel_list = sel_list
             if len(sel_list):
                 self.specfile = sel_list[0]['SourceName']
-                self.scanno = int(float(sel_list[0]['Key']))-1
-                self.fscan = Fastscan(self.specfile,self.scanno)
-                self.imageno = 0
+                try:
+                    self.scanno = int(float(sel_list[0]['Key']))-1
+                    self.fscan = Fastscan(self.specfile,self.scanno)
+                    self.imageno = 0
+                except Exception:
+                    print('HERE')
+                    self.scanno = 0
+                    #self.fscan = CrudeThScan(self.specfile,'PE1',r"C:\Timo_loc\P21_2_comissioning\Pt111_HClO4_0.4\PE1\dark00001.tif.gz")
+                    self.fscan = FioFastsweep(self.specfile)
+                    self.imageno = 0
+                    #self.imagepath = self.fscan.path + "/" + 'PE1'
                 self.reflectionSel.setImage(self.imageno)
                 if self.imagepath != '':
                     self.fscan.set_image_folder(self.imagepath)
@@ -290,7 +314,7 @@ class orGUI(qt.QMainWindow):
             
     def loadAll(self):
         try:
-            image = self.fscan.get_raw_p3_img(0)
+            image = self.fscan.get_raw_img(0)
         except Exception as e:
             print("no images found! %s" % e)
             return
@@ -299,7 +323,7 @@ class orGUI(qt.QMainWindow):
         progress = qt.QProgressDialog("Reading images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
         for i in range(len(self.fscan)):
-            image = self.fscan.get_raw_p3_img(i)
+            image = self.fscan.get_raw_img(i)
             self.allimgsum += image.img
             self.allimgmax = np.maximum(self.allimgmax,image.img)
             progress.setValue(i)
@@ -347,7 +371,7 @@ class orGUI(qt.QMainWindow):
         
     def plotImage(self,key=0):
         try:
-            image = self.fscan.get_raw_p3_img(key)
+            image = self.fscan.get_raw_img(key)
             if self.currentImageLabel is not None:
                 self.centralPlot.removeImage(self.currentImageLabel)
 

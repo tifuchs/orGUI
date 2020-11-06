@@ -6,37 +6,24 @@ from PyMca5.PyMcaGui import PyMca_Icons as icons
 from PyMca5.PyMcaGui.io import PyMcaFileDialogs
 import numpy as np
 
+
+
 from datautils.xrayutils import HKLVlieg
 from datautils.xrayutils import DetectorCalibration
+import warnings
+import configparser
+import os 
 
 # reflectionhandler must implement the method getReflections
 
 class QUBCalculator(qt.QTabWidget):
     sigNewReflection = qt.pyqtSignal(list)
+    sigPlottableMachineParamsChanged = qt.pyqtSignal(list)
     #sigQueryImageChange = qt.pyqtSignal(int)
     #sigImagePathChanged = qt.pyqtSignal(object)
     #sigImageNoChanged = qt.pyqtSignal(object)
-    def __init__(self, parent=None):
+    def __init__(self,configfile=None, parent=None):
         qt.QTabWidget.__init__(self, parent=None)
-        sdd = 0.729
-        E = 78.
-        pixelsize = 172e-6
-        cp = [731.0,1587.856]
-        self.mu = np.deg2rad(0.05)
-        self.chi = 0.
-        self.phi = 0.
-        self.n = 1 - 1.1415e-06
-        self.crystal = HKLVlieg.Crystal([3.9242,3.9242,3.9242],[90.,90.,90.])
-        self.detectorCal = DetectorCalibration.DetectorCalibration(E,self.crystal,pixelsize)
-        self.detectorCal.setCalibration(cp,sdd)
-        self.ubCal = HKLVlieg.UBCalculator(self.crystal,E)
-        self.ubCal.defaultU()
-        
-        self.angles = HKLVlieg.VliegAngles(self.ubCal)
-        
-        
-        paramlist = [E,self.mu,sdd,pixelsize,cp,0.,0.]
-        
         #self.setOrientation(qt.Qt.Vertical)
         
         
@@ -71,30 +58,68 @@ class QUBCalculator(qt.QTabWidget):
         umatrixsplitter = qt.QSplitter()
         umatrixsplitter.setOrientation(qt.Qt.Horizontal)
         
-        self.Ueditor = qt.QTextEdit(str(self.ubCal.getU()))
+        self.Ueditor = qt.QTextEdit("")
         umatrixsplitter.addWidget(self.Ueditor)
         self.calUButton = qt.QPushButton("calculate U")
         self.calUButton.setToolTip("calculate orientation matrix based on the given reflections")
-        umatrixsplitter.addWidget(self.calUButton)
+                
+        vertCalUSplitter = qt.QSplitter()
+        vertCalUSplitter.setOrientation(qt.Qt.Vertical)
+        
+        fitUbox = qt.QGroupBox("fit options (only available with enough reflections)")
+        
+        self.latnofit = qt.QRadioButton("don't fit lattice")
+        self.latnofit.setChecked(True)
+        self.latscale = qt.QRadioButton("fit scale of lattice")
+        self.latfitall = qt.QRadioButton("fit all lattice parameters")
+        
+        fitUboxlayout = qt.QVBoxLayout()
+        fitUboxlayout.addWidget(self.latnofit)
+        fitUboxlayout.addWidget(self.latscale)
+        fitUboxlayout.addWidget(self.latfitall)
+        fitUboxlayout.addStretch(1)
+        
+        fitUbox.setLayout(fitUboxlayout)
+        
+        
+        vertCalUSplitter.addWidget(fitUbox)
+        
+        vertCalUSplitter.addWidget(self.calUButton)
+        
+        
+        
+        
+        umatrixsplitter.addWidget(vertCalUSplitter)
+        
         umatrixwidget.addWidget(umatrixsplitter)
+        
+
+        
         
         
         self.calUButton.clicked.connect(self._onCalcU)
         self.addTab(umatrixwidget,"U Matrix")
         
-        self.crystalparams = QCrystalParameter(self.crystal,self.n)
+        self.crystalparams = QCrystalParameter()
+        #self.crystalparams.setValues(self.crystal,self.n)
         self.addTab(self.crystalparams,"Crystal")
+        
         
         self.crystalparams.sigCrystalParamsChanged.connect(self._onCrystalParamsChanged)
         
         #paramsSplitter.setOrientation(qt.Qt.Horizontal)
         
-        self.machineParams = QMachineParameters(paramlist)
+        self.machineParams = QMachineParameters()
         self.machineParams.sigMachineParamsChanged.connect(self._onMachineParamsChanged)
+        self.machineParams.loadConfigButton.clicked.connect(self._onLoadConfig)
         self.addTab(self.machineParams,"Machine")
         
-        
-        
+                
+        if configfile is not None:
+            if not self.readConfig(configfile):
+                self.toFallbackConfig()
+        else:
+            self.toFallbackConfig()
         
         """
         
@@ -118,8 +143,8 @@ class QUBCalculator(qt.QTabWidget):
     def calcReflection(self,hkl,mirrorx=False):
         pos = self.angles.anglesZmode(hkl,self.mu,'in',self.chi,self.phi,mirrorx=mirrorx)
         alpha, delta, gamma, omega, chi, phi = HKLVlieg.vacAngles(pos,self.n)
-        gamma += self.mu
-        x,y = self.detectorCal.delGamToxy(delta,gamma)
+        print(np.rad2deg([alpha, delta, gamma, omega, chi, phi]))
+        y,x = self.detectorCal.pixelsSurfacePoint([gamma],[delta],alpha)[0]
         return [hkl,x,y,omega]
         
     def _onCalcReflection(self):
@@ -129,7 +154,7 @@ class QUBCalculator(qt.QTabWidget):
         
     def _onCrystalParamsChanged(self,crystal,n):
         a,alpha,_,_ = crystal.getLatticeParameters()
-        self.crystal.setLattice(a,alpha)
+        self.crystal.setLattice(a,np.rad2deg(alpha))
         self.n = n
         #self.ubCal.defaultU()
         print("New %s,\nyou have to recalculate the UB matrix to apply the changes" % self.crystal) 
@@ -137,36 +162,189 @@ class QUBCalculator(qt.QTabWidget):
         #print(n)
 
     def _onMachineParamsChanged(self,params):
-        [E,mu,sdd,pixsize,cp,chi,phi] = params
+        [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi] = params
         self.mu = mu
         self.chi = chi
         self.phi = phi
-        self.detectorCal.setE(E)
-        self.detectorCal.setCalibration(cp,sdd)
         self.ubCal.setEnergy(E)
-        # pixsize missing!
+        fit2DCal = self.detectorCal.getFit2D()
+        fit2DCal['centerX'] = cp[0]
+        fit2DCal['centerY'] = cp[1]
+        fit2DCal['directDist'] = sdd*1e3
+        f2d = [fit2DCal['directDist'],
+               fit2DCal['centerX'],
+               fit2DCal['centerY'],
+               fit2DCal['tilt'],
+               fit2DCal['tiltPlanRotation'],
+               pixsize*1e6,
+               pixsize*1e6,
+               fit2DCal['splineFile']]
+        self.detectorCal.setFit2D(*f2d)
+        self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+        self.detectorCal.setAzimuthalReference(azim)
+        self.detectorCal.setPolarization(polax,polf)
+        try:
+            azimy,azimx = self.detectorCal.pixelsPrimPoint([0.05],[0])[0]
+            self.sigPlottableMachineParamsChanged.emit([cp,[azimx,azimy],polax])
+        except Exception as e:
+            # here is a bug with the init of the detector cal
+            pass
+        #print(self.detectorCal.get_wavelength())
+        #print(self.detectorCal.getFit2D())
         
+    def _onLoadConfig(self):
+        fileTypeList = ['All files (*)']
+        newfile, filetype = PyMcaFileDialogs.getFileList(parent=self,
+                                               filetypelist=fileTypeList,
+                                               message="please select a file",
+                                               mode="LOAD",
+                                               getfilter=True,
+                                               single=True)
+        if not newfile:
+            return
+        filename = newfile[0]
+        self.readConfig(filename)
 
     def setReflectionHandler(self,refls):
         self.reflections = refls
         
+    def readConfig(self,configfile):
+        config = configparser.ConfigParser()
+        try:
+            if os.path.isfile(configfile):
+                config.read(configfile)
+            else:
+                raise Exception("File does not exist")
+        except Exception as e:
+            qt.QMessageBox.warning(self,"Can not read config","Can not read config file:\nException occured during read of configfile %s,\nException:\n %s" % (configfile,e))
+            return False
+        try:
+            machine = config['Machine']
+            lattice = config['Lattice']
+            diffrac = config['Diffractometer']
+            
+            self.azimuth = np.deg2rad(diffrac.getfloat('azimuthal_reference',0))
+            self.polaxis = np.deg2rad(diffrac.getfloat('polarization_axis',0))
+            self.polfactor = diffrac.getfloat('polarization_factor',0)
+            
+            sdd = machine.getfloat('SDD',0.729) #m
+            E =  machine.getfloat('E',78.0) #keV
+            pixelsize = machine.getfloat('pixelsize',172e-6) #m
+            cpx = machine.getfloat('cpx',731)
+            cpy = machine.getfloat('cpy',1587)
+            cp = [cpx,cpy]
+            
+            self.mu = np.deg2rad(diffrac.getfloat('mu',0.05))
+            self.chi = np.deg2rad(diffrac.getfloat('chi',0.0))
+            self.phi = np.deg2rad(diffrac.getfloat('phi',0.0))
+            
+
+            a1 = lattice.getfloat('a1')
+            a2 = lattice.getfloat('a2')
+            a3 = lattice.getfloat('a3')
+            alpha1 = lattice.getfloat('alpha1')
+            alpha2 = lattice.getfloat('alpha2')
+            alpha3 = lattice.getfloat('alpha3')
+            self.n = 1 - lattice.getfloat('refractionindex',0.0)
+            
+            self.crystal = HKLVlieg.Crystal([a1,a2,a3],[alpha1,alpha2,alpha3])
+            self.ubCal = HKLVlieg.UBCalculator(self.crystal,E)
+            self.ubCal.defaultU()
+            self.angles = HKLVlieg.VliegAngles(self.ubCal)
+            
+            self.detectorCal = DetectorCalibration.Detector2D_SXRD()
+            if 'poni' in machine:
+                if machine['poni']:
+                    self.detectorCal.load(machine['poni'])
+                    self.ubCal.setLambda(self.detectorCal.get_wavelength()*1e10)
+                    
+                else:
+                    self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
+                    self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+                    self.detectorCal.detector.shape = (2880,2880) # Perkin 
+                    
+            else:
+                self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
+                self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+                self.detectorCal.detector.shape = (2880,2880)
+                
+            self.detectorCal.setAzimuthalReference(self.azimuth)
+            self.detectorCal.setPolarization(self.polaxis,self.polfactor)
+            
+            fit2dCal = self.detectorCal.getFit2D()
+
+            paramlist = [self.ubCal.getEnergy(),self.mu,fit2dCal['directDist']/1e3,
+                         fit2dCal['pixelX']*1e-6,[fit2dCal['centerX'],fit2dCal['centerY']],self.polaxis
+                         ,self.polfactor,self.azimuth,self.chi,self.phi]
+            self.crystalparams.setValues(self.crystal,self.n)
+            self.machineParams.setValues(paramlist)
+            return True
+            
+        except Exception as e:
+            qt.QMessageBox.warning(self,"Can not parse config","Can not parse config file:\nException occured during parsing of configfile %s,\nException:\n %s" % (configfile,e))
+            return False
+        
+    def toFallbackConfig(self):
+        sdd = 0.729 #m
+        E = 78.
+        pixelsize = 172e-6
+        cp = [731.0,1587.856]
+        self.mu = np.deg2rad(0.05)
+        self.chi = 0.
+        self.phi = 0.
+        self.n = 1 - 1.1415e-06
+        self.crystal = HKLVlieg.Crystal([3.9242,3.9242,3.9242],[90.,90.,90.])
+        self.ubCal = HKLVlieg.UBCalculator(self.crystal,E)
+        self.ubCal.defaultU()
+        self.polaxis = 0
+        self.polfactor = 0
+        self.azimuth = 0
+        self.detectorCal = DetectorCalibration.Detector2D_SXRD()
+        
+        self.detectorCal.setFit2D(sdd*1e3,cp[0],cp[1],pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
+        self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+        
+        fit2dCal = self.detectorCal.getFit2D()
+        self.angles = HKLVlieg.VliegAngles(self.ubCal)
+        paramlist = [self.ubCal.getEnergy(),self.mu,fit2dCal['directDist']/1e3,
+                     fit2dCal['pixelX']*1e-6,[fit2dCal['centerX'],fit2dCal['centerY']],self.polaxis,
+                     self.polfactor,self.azimuth,self.chi,self.phi]
+        self.crystalparams.setValues(self.crystal,self.n)
+        self.machineParams.setValues(paramlist)
+        
+        
+        
     def _onCalcU(self):
         hkls,angles = self.reflections()
         if len(hkls) < 2:
-            qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 2 reflections to calculate a orientation matrix")
+            qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 2 reflections to calculate an orientation matrix")
             return
         self.ubCal.setPrimaryReflection(angles[0],hkls[0])
         self.ubCal.setSecondayReflection(angles[1],hkls[1])
         self.ubCal.calculateU()
+        
         if len(hkls) > 2:
-            self.ubCal.refineU(hkls,angles)
+            if self.latnofit.isChecked():
+                self.ubCal.refineU(hkls,angles)
+                
+            if self.latscale.isChecked():
+                if len(hkls) > 3:
+                    self.ubCal.refineULattice(hkls,angles,'scale')
+                else:
+                    qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 4 reflections to fit lattice scale and U")
+            if self.latfitall.isChecked():
+                if len(hkls) > 5:
+                    self.ubCal.refineULattice(hkls,angles,'lat')
+                else:
+                    qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 6 reflections to fit lattice and U")
+            self.crystalparams.setValues(self.crystal,self.n)
         self.Ueditor.setPlainText(str(self.ubCal.getU()))
             
         
         
 class QCrystalParameter(qt.QSplitter):
     sigCrystalParamsChanged = qt.pyqtSignal(HKLVlieg.Crystal,float)
-    def __init__(self,crystal, n,parent=None):
+    def __init__(self,parent=None):
         qt.QSplitter.__init__(self, parent=None)
         self.setOrientation(qt.Qt.Vertical)
         
@@ -242,7 +420,7 @@ class QCrystalParameter(qt.QSplitter):
         refractionindexLayout.addWidget(self.refractionIndexBox)
         
         refractionindexGroup.setLayout(refractionindexLayout)
-        self.setValues(crystal,n)
+        #self.setValues(crystal,n)
         
         self.addWidget(refractionindexGroup)
         self.a1box.valueChanged.connect(self._onAnyValueChanged)
@@ -283,10 +461,10 @@ class QCrystalParameter(qt.QSplitter):
         
 class QMachineParameters(qt.QWidget):
     sigMachineParamsChanged = qt.pyqtSignal(list)
-    def __init__(self,params,parent=None):
+    def __init__(self,parent=None):
         qt.QWidget.__init__(self, parent=None)
         
-        [E,mu,sdd,pixsize,cp,chi,phi] = params
+        #[E,mu,sdd,pixsize,cp,chi,phi] = params
         
         mainLayout = qt.QGridLayout()
         
@@ -294,12 +472,18 @@ class QMachineParameters(qt.QWidget):
         mainLayout.addWidget(qt.QLabel("SDD:"),1,0)
         mainLayout.addWidget(qt.QLabel("mu:"),2,0)
         mainLayout.addWidget(qt.QLabel("chi:"),3,0)
+        mainLayout.addWidget(qt.QLabel("azimuth:"),4,0)
+        mainLayout.addWidget(qt.QLabel("Pol factor:"),5,0)
         
         mainLayout.addWidget(qt.QLabel("Centr X:"),0,2)
         mainLayout.addWidget(qt.QLabel("Centr Y:"),1,2)
         mainLayout.addWidget(qt.QLabel("pixel size:"),2,2)
         mainLayout.addWidget(qt.QLabel("phi:"),3,2)
+        mainLayout.addWidget(qt.QLabel("polarization axis:"),4,2)
         
+        self.loadConfigButton = qt.QPushButton("load config",self) 
+        self.loadConfigButton.setToolTip("load machine and crystal configuration from configfile,\naccepts poni file from pyFAI")
+        mainLayout.addWidget(self.loadConfigButton,5,2)
         
         self.Ebox = qt.QDoubleSpinBox()
         self.Ebox.setRange(0.1,1000)
@@ -328,7 +512,19 @@ class QMachineParameters(qt.QWidget):
         
         mainLayout.addWidget(self.chibox,3,1)
         
+        self.azimbox = qt.QDoubleSpinBox()
+        self.azimbox.setRange(0,360)
+        self.azimbox.setDecimals(4)
+        self.azimbox.setSuffix(u" °")
         
+        mainLayout.addWidget(self.azimbox,4,1)        
+
+        self.polfbox = qt.QDoubleSpinBox()
+        self.polfbox.setRange(-1,1)
+        self.polfbox.setDecimals(4)
+        #self.polfbox.setSuffix(u" °")
+        
+        mainLayout.addWidget(self.polfbox,5,1)
         
         
         self.cpXbox = qt.QDoubleSpinBox()
@@ -359,7 +555,14 @@ class QMachineParameters(qt.QWidget):
         
         mainLayout.addWidget(self.phibox,3,3)
         
-        self.setValues(params)
+        self.polaxbox = qt.QDoubleSpinBox()
+        self.polaxbox.setRange(0,360)
+        self.polaxbox.setDecimals(4)
+        self.polaxbox.setSuffix(u" °")
+        
+        mainLayout.addWidget(self.polaxbox,4,3)
+        
+        #self.setValues(params)
         
         self.Ebox.valueChanged.connect(self._onAnyValueChanged)
         self.mubox.valueChanged.connect(self._onAnyValueChanged)
@@ -369,12 +572,14 @@ class QMachineParameters(qt.QWidget):
         self.chibox.valueChanged.connect(self._onAnyValueChanged)
         self.phibox.valueChanged.connect(self._onAnyValueChanged)
         self.pixsizebox.valueChanged.connect(self._onAnyValueChanged)
-        
+        self.polaxbox.valueChanged.connect(self._onAnyValueChanged)
+        self.azimbox.valueChanged.connect(self._onAnyValueChanged)
+        self.polfbox.valueChanged.connect(self._onAnyValueChanged)
         
         self.setLayout(mainLayout)
         
     def setValues(self,params):
-        [E,mu,sdd,pixsize,cp,chi,phi] = params
+        [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi] = params
         self.Ebox.setValue(E)
         self.SDDbox.setValue(sdd)
         self.mubox.setValue(np.rad2deg(mu))
@@ -383,8 +588,9 @@ class QMachineParameters(qt.QWidget):
         self.cpYbox.setValue(cp[1])
         self.pixsizebox.setValue(pixsize*1e3)
         self.phibox.setValue(np.rad2deg(phi))
-        
-        
+        self.polaxbox.setValue(np.rad2deg(polax))
+        self.azimbox.setValue(np.rad2deg(azim))
+        self.polfbox.setValue(polf)
         
     def _onAnyValueChanged(self):
         E = self.Ebox.value()
@@ -394,7 +600,10 @@ class QMachineParameters(qt.QWidget):
         cp = [self.cpXbox.value(),self.cpYbox.value()]
         chi = np.deg2rad(self.chibox.value())
         phi = np.deg2rad(self.phibox.value())
-        sigList = [E,mu,sdd,pixsize,cp,chi,phi]
+        azim = np.deg2rad(self.azimbox.value())
+        polax = np.deg2rad(self.polaxbox.value())
+        polf = self.polfbox.value()
+        sigList = [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi]
         self.sigMachineParamsChanged.emit(sigList)
         
         
