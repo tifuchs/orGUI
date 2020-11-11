@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 from io import StringIO
-from PyMca5.PyMcaGui import PyMcaQt as qt
+from silx.gui import qt
 
-from PyMca5.PyMcaGui import PyMca_Icons as icons
-from PyMca5.PyMcaGui.io import PyMcaFileDialogs
+#from PyMca5.PyMcaGui import PyMca_Icons as icons
+#from PyMca5.PyMcaGui.io import PyMcaFileDialogs
 import numpy as np
 
-
+import traceback
 
 from datautils.xrayutils import HKLVlieg
 from datautils.xrayutils import DetectorCalibration
@@ -193,6 +193,7 @@ class QUBCalculator(qt.QTabWidget):
         #print(self.detectorCal.getFit2D())
         
     def _onLoadConfig(self):
+        return
         fileTypeList = ['All files (*)']
         newfile, filetype = PyMcaFileDialogs.getFileList(parent=self,
                                                filetypelist=fileTypeList,
@@ -319,9 +320,12 @@ class QUBCalculator(qt.QTabWidget):
         if len(hkls) < 2:
             qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 2 reflections to calculate an orientation matrix")
             return
-        self.ubCal.setPrimaryReflection(angles[0],hkls[0])
-        self.ubCal.setSecondayReflection(angles[1],hkls[1])
-        self.ubCal.calculateU()
+        try:
+            self.ubCal.setPrimaryReflection(angles[0],hkls[0])
+            self.ubCal.setSecondayReflection(angles[1],hkls[1])
+            self.ubCal.calculateU()
+        except Exception as e:
+            qt.QMessageBox.critical(self,"Cannot calculate UB matrix","Error during UB matrix calculation:\n%s" % traceback.format_exc())
         
         if len(hkls) > 2:
             if self.latnofit.isChecked():

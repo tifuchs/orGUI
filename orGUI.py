@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
-from PyMca5.PyMcaGui import PyMcaQt as qt
+from silx.gui import qt
 import warnings
 
-from PyMca5.PyMcaGui.io.QSpecFileWidget import QSpecFileWidget
-from PyMca5.PyMcaGui.pymca import QDataSource
-from PyMca5.PyMcaGui.io.QSourceSelector import QSourceSelector
-from PyMca5.PyMcaGui import PyMca_Icons as icons
-from PyMca5.PyMcaGui.misc import NumpyArrayTableWidget, NumpyArrayTableModel
-from PyMca5.PyMcaGui.misc import FrameBrowser
-from PyMca5.PyMcaGui.misc.NumpyArrayTableView import HorizontalHeader, VerticalHeader
-from PyMca5.PyMcaGui.io import PyMcaFileDialogs
+#from PyMca5.PyMcaGui.io.QSpecFileWidget import QSpecFileWidget
+#from PyMca5.PyMcaGui.pymca import QDataSource
+#from PyMca5.PyMcaGui.io.QSourceSelector import QSourceSelector
+#from PyMca5.PyMcaGui import PyMca_Icons as icons
+#from PyMca5.PyMcaGui.misc import NumpyArrayTableWidget, NumpyArrayTableModel
+#from PyMca5.PyMcaGui.misc import FrameBrowser
+#from PyMca5.PyMcaGui.misc.NumpyArrayTableView import HorizontalHeader, VerticalHeader
+#from PyMca5.PyMcaGui.io import PyMcaFileDialogs
 #from SilxMaskImageWidget import SilxMaskImageWidget
 
 import silx.gui.plot
@@ -23,8 +23,10 @@ import silx
 from silx.utils.weakref import WeakMethodProxy
 from silx.gui.plot.Profile import ProfileToolBar
 from silx.gui.plot.AlphaSlider import NamedImageAlphaSlider
+from silx.gui.dialog import ImageFileDialog
+import traceback
 
-from NumpyView import NumpyArrayEditTableWidget
+#from NumpyView import NumpyArrayEditTableWidget
 from QSpecScanSelector import QSpecScanSelector
 from QReflectionSelector import QReflectionSelector
 from QUBCalculator import QUBCalculator
@@ -33,11 +35,13 @@ from datautils.xrayutils import HKLVlieg
 #if __name__ == "__main__":
 #    os.chdir("..")
 
+os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
+
 import sys
 #sys.path.append('/home/fuchstim/repos/datautils/datautils/xrayutils')
-#from datautils.xrayutils.id31_tools_5 import Fastscan, BlissScan
-from datautils.xrayutils.P212_tools import CrudeThScan, FioFastsweep
-#from P212_tools import CrudeThScan, FioFastsweep
+from datautils.xrayutils.id31_tools_5 import BlissScan_EBS#Fastscan, BlissScan
+#from datautils.xrayutils.P212_tools import CrudeThScan, FioFastsweep
+#from P212_tools import BlissScan_EBS#CrudeThScan, FioFastsweep
 
 QTVERSION = qt.qVersion()
 DEBUG = 0
@@ -51,17 +55,27 @@ class orGUI(qt.QMainWindow):
         
         self.fscan = None
         
+        self.filedialogdir = os.getcwd()
+        
         self.currentImageLabel = None
         self.currentAddImageLabel = None
         
         selectorDock = qt.QDockWidget()
         selectorDock.setAllowedAreas(qt.Qt.LeftDockWidgetArea | qt.Qt.RightDockWidgetArea)
-        self.scanSelector = QSpecScanSelector()
+        self.scanSelector = QSpecScanSelector(self)
         selectorDock.setWidget(self.scanSelector)
         self.addDockWidget(qt.Qt.LeftDockWidgetArea,selectorDock)
     
         self.imagepath = ''
         self.imageno = 0
+        
+        menu_bar = qt.QMenuBar() 
+        file = menu_bar.addMenu("&File")
+        file.addAction(self.scanSelector.openFileAction)
+        file.addAction(self.scanSelector.refreshFileAction)
+        file.addAction(self.scanSelector.closeFileAction)
+        self.setMenuBar(menu_bar)
+        
         
         #self.reflections = np.array([])
     
@@ -144,26 +158,32 @@ class orGUI(qt.QMainWindow):
         return np.array(hkls), np.array(angles)
         
     def _onSaveReflections(self):
-        fileTypeList = ['dat Files (*.dat)', 'txt Files (*.txt)','All files (*)']
-        newfile, filetype = PyMcaFileDialogs.getFileList(parent=self,
-                                               filetypelist=fileTypeList,
-                                               message="please select a file",
-                                               mode="SAVE",
-                                               getfilter=True,
-                                               single=True)
-        if not newfile:
+        
+        fileTypeDict = {'dat Files (*.dat)': '.dat', 'txt Files (*.txt)': '.txt', 'All files (*)': '', }
+        fileTypeFilter = ""
+        for f in fileTypeDict:
+            fileTypeFilter += f + ";;"
+            
+        filename, filetype = qt.QFileDialog.getSaveFileName(self,"Save reflections",
+                                                  self.filedialogdir,
+                                                  fileTypeFilter[:-2])
+        if filename == '':
             return
-        filename = newfile[0]
+        
+        self.filedialogdir = os.path.splitext(filename)[0]
+        filename += fileTypeDict[filetype]
         hkls, angles = self.getReflections()
-        angles = np.rad2deg(angles)
-        angles[:,3] *= -1 # om to th
-        hklangles = np.concatenate([hkls,angles],axis=1)
-        np.savetxt(filename,hklangles,header="H K L mu del gam th chi phi",fmt='%.5f')
+        if angles.size > 0:
+            angles = np.rad2deg(angles)
+            angles[:,3] *= -1 # om to th
+            hklangles = np.concatenate([hkls,angles],axis=1)
+            np.savetxt(filename,hklangles,header="H K L mu del gam th chi phi",fmt='%.5f')
         
         #print(hkls,angles)
         
     def _onLoadReflections(self):
-        fileTypeList = ['dat Files (*.dat)', 'txt Files (*.txt)','All files (*)']
+        return
+        fileTypeList = "dat Files (*.dat);;txt Files (*.txt);;All files (*)"
         newfile, filetype = PyMcaFileDialogs.getFileList(parent=self,
                                                filetypelist=fileTypeList,
                                                message="please select a file",
@@ -276,9 +296,26 @@ class orGUI(qt.QMainWindow):
                 #print(self.centralPlot._callback)
         else:
             self.hdffile = sel_list['file']
-            self.scanname = sel_list['name'].strip("/")
-            self.fscan = BlissScan(self.hdffile,self.scanname)
-            
+            #self.scanname = sel_list['name'].strip("/")
+            try:
+                msg = qt.QMessageBox(self)
+                msg.setWindowTitle("Loading Scan")
+                msg.setText("Loading Scan. This might take a while...")
+                msg.setStandardButtons(qt.QMessageBox.Cancel)
+                msg.setModal(True)
+                msg.show()
+                if 'node' in sel_list:
+                    self.fscan = BlissScan_EBS(sel_list['node'],sel_list['scanno'])
+                else:
+                    self.fscan = BlissScan_EBS(self.hdffile,sel_list['scanno'])
+                self.plotImage()
+                self.scanSelector.setTh(self.fscan.th)
+                msg.hide()
+                self._onLoadAll()
+                self.scanSelector.showMaxButton.setChecked(True)
+            except Exception:
+                msg.hide()
+                qt.QMessageBox.critical(self,"Cannot open scan", "Cannot open scan:\n%s" % traceback.format_exc())
                 
             
             
@@ -309,7 +346,7 @@ class orGUI(qt.QMainWindow):
             
         
     def _onLoadAll(self):
-        if self.fscan is not None and self.imagepath != '':
+        if self.fscan is not None:
             self.loadAll()
             
     def loadAll(self):
