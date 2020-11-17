@@ -312,6 +312,7 @@ class orGUI(qt.QMainWindow):
                 self.scanSelector.setTh(self.fscan.th)
                 msg.hide()
                 self._onLoadAll()
+                self.scanSelector.showMaxButton.setChecked(False)
                 self.scanSelector.showMaxButton.setChecked(True)
             except Exception:
                 msg.hide()

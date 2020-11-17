@@ -26,7 +26,7 @@ class QUBCalculator(qt.QTabWidget):
         qt.QTabWidget.__init__(self, parent=None)
         #self.setOrientation(qt.Qt.Vertical)
         
-        
+        self.configdir = os.getcwd()
         #self.mainLayout = qt.QVBoxLayout()
         
         umatrixwidget = qt.QSplitter()
@@ -157,7 +157,7 @@ class QUBCalculator(qt.QTabWidget):
         self.crystal.setLattice(a,np.rad2deg(alpha))
         self.n = n
         #self.ubCal.defaultU()
-        print("New %s,\nyou have to recalculate the UB matrix to apply the changes" % self.crystal) 
+        #print("New %s,\nyou have to recalculate the UB matrix to apply the changes" % self.crystal) 
         #print(crystal)
         #print(n)
 
@@ -193,17 +193,16 @@ class QUBCalculator(qt.QTabWidget):
         #print(self.detectorCal.getFit2D())
         
     def _onLoadConfig(self):
-        return
-        fileTypeList = ['All files (*)']
-        newfile, filetype = PyMcaFileDialogs.getFileList(parent=self,
-                                               filetypelist=fileTypeList,
-                                               message="please select a file",
-                                               mode="LOAD",
-                                               getfilter=True,
-                                               single=True)
-        if not newfile:
+        fileTypeDict = {'config files (*)': '' }
+        fileTypeFilter = ""
+        for f in fileTypeDict:
+            fileTypeFilter += f + ";;"
+        filename, filetype = qt.QFileDialog.getOpenFileName(self,"Open config file",
+                                                  self.configdir,
+                                                  fileTypeFilter[:-2])
+        if filename == '':
             return
-        filename = newfile[0]
+        self.configdir = os.path.splitext(filename)[0]
         self.readConfig(filename)
 
     def setReflectionHandler(self,refls):
@@ -317,15 +316,23 @@ class QUBCalculator(qt.QTabWidget):
         
     def _onCalcU(self):
         hkls,angles = self.reflections()
-        if len(hkls) < 2:
-            qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 2 reflections to calculate an orientation matrix")
+        if len(hkls) < 1:
+            qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 1 reflection to calculate an orientation matrix")
             return
-        try:
-            self.ubCal.setPrimaryReflection(angles[0],hkls[0])
-            self.ubCal.setSecondayReflection(angles[1],hkls[1])
-            self.ubCal.calculateU()
-        except Exception as e:
-            qt.QMessageBox.critical(self,"Cannot calculate UB matrix","Error during UB matrix calculation:\n%s" % traceback.format_exc())
+        elif len(hkls) == 1:
+            try:
+                self.ubCal.zmodeUSingleRefl(angles[0],hkls[0])
+            except Exception as e:
+                qt.QMessageBox.critical(self,"Cannot calculate UB matrix","Error during UB matrix calculation:\n%s" % traceback.format_exc())
+                return
+        else:
+            try:
+                self.ubCal.setPrimaryReflection(angles[0],hkls[0])
+                self.ubCal.setSecondayReflection(angles[1],hkls[1])
+                self.ubCal.calculateU()
+            except Exception as e:
+                qt.QMessageBox.critical(self,"Cannot calculate UB matrix","Error during UB matrix calculation:\n%s" % traceback.format_exc())
+                return
         
         if len(hkls) > 2:
             if self.latnofit.isChecked():
