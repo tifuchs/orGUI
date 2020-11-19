@@ -4,15 +4,6 @@ import os
 from silx.gui import qt
 import warnings
 
-#from PyMca5.PyMcaGui.io.QSpecFileWidget import QSpecFileWidget
-#from PyMca5.PyMcaGui.pymca import QDataSource
-#from PyMca5.PyMcaGui.io.QSourceSelector import QSourceSelector
-#from PyMca5.PyMcaGui import PyMca_Icons as icons
-#from PyMca5.PyMcaGui.misc import NumpyArrayTableWidget, NumpyArrayTableModel
-#from PyMca5.PyMcaGui.misc import FrameBrowser
-#from PyMca5.PyMcaGui.misc.NumpyArrayTableView import HorizontalHeader, VerticalHeader
-#from PyMca5.PyMcaGui.io import PyMcaFileDialogs
-#from SilxMaskImageWidget import SilxMaskImageWidget
 
 import silx.gui.plot
 from silx.gui.plot import items
@@ -26,10 +17,10 @@ from silx.gui.plot.AlphaSlider import NamedImageAlphaSlider
 from silx.gui.dialog import ImageFileDialog
 import traceback
 
-#from NumpyView import NumpyArrayEditTableWidget
-from QSpecScanSelector import QSpecScanSelector
-from QReflectionSelector import QReflectionSelector
-from QUBCalculator import QUBCalculator
+
+from .QSpecScanSelector import QSpecScanSelector
+from .QReflectionSelector import QReflectionSelector
+from .QUBCalculator import QUBCalculator
 import numpy as np
 from datautils.xrayutils import HKLVlieg
 #if __name__ == "__main__":
@@ -48,7 +39,7 @@ DEBUG = 0
 
 
 class orGUI(qt.QMainWindow):
-    def __init__(self,parent=None):
+    def __init__(self,configfile,parent=None):
         qt.QMainWindow.__init__(self, parent)
         
         self.resetZoom = True
@@ -81,7 +72,7 @@ class orGUI(qt.QMainWindow):
     
         ubWidget = qt.QWidget()
         ubLayout = qt.QHBoxLayout()
-        self.ubcalc = QUBCalculator("./config")
+        self.ubcalc = QUBCalculator(configfile)
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
         
         
@@ -569,17 +560,13 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
         """
         return self.profile.getProfilePlot()
         
-    
-
-
-a = qt.QApplication(sys.argv)
-
-mainWindow = orGUI()
-mainWindow.show()
-
-
-
-a.lastWindowClosed.connect(a.quit)
-
-a.exec_()
-
+def main(configfile):
+	a = qt.QApplication(['orGUI'])
+	mainWindow = orGUI(configfile)
+	mainWindow.show()
+	a.lastWindowClosed.connect(a.quit)
+	return a.exec_()
+	
+            
+if __name__ == '__main__':
+	main("./config")

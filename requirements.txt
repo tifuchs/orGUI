@@ -1,0 +1,13 @@
+numpy >= 1.12
+scipy >= 1.0
+matplotlib >= 1.2
+fabio >= 0.7
+silx >= 0.9
+pyFAI >= 0.16
+pymca >= 5.3
+xraydb >= 4.0
+numdifftools
+
+#optional
+pyperclip
+xrayutilities
