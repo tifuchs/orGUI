@@ -22,7 +22,10 @@ from .QSpecScanSelector import QSpecScanSelector
 from .QReflectionSelector import QReflectionSelector
 from .QUBCalculator import QUBCalculator
 import numpy as np
-from datautils.xrayutils import HKLVlieg
+from datautils.xrayutils import HKLVlieg, CTRcalc
+from datautils.xrayutils import ReciprocalNavigation as rn
+
+
 #if __name__ == "__main__":
 #    os.chdir("..")
 
@@ -65,6 +68,13 @@ class orGUI(qt.QMainWindow):
         file.addAction(self.scanSelector.openFileAction)
         file.addAction(self.scanSelector.refreshFileAction)
         file.addAction(self.scanSelector.closeFileAction)
+        
+        calcCTRsAvailableAct = qt.QAction("Calculate available CTRs",self)
+        calcCTRsAvailableAct.triggered.connect(self._onCalcAvailableCTR)
+        rs = menu_bar.addMenu("&Reciprocal space")
+        rs.addAction(calcCTRsAvailableAct)
+        
+        
         self.setMenuBar(menu_bar)
         
         
@@ -133,6 +143,46 @@ class orGUI(qt.QMainWindow):
         ubWidget.setLayout(ubLayout)
         ubDock.setWidget(ubWidget)
         self.addDockWidget(qt.Qt.BottomDockWidgetArea,ubDock)
+        
+    def _onCalcAvailableCTR(self):
+        fileTypeDict = {'bulk files (*.bul)': '.bul', 'Crystal Files (*.xtal)': '.txt', 'All files (*)': '', }
+        fileTypeFilter = ""
+        for f in fileTypeDict:
+            fileTypeFilter += f + ";;"
+            
+        filename, filetype = qt.QFileDialog.getOpenFileName(self,"Open crystal file with atom locations",
+                                                  self.filedialogdir,
+                                                  fileTypeFilter[:-2])
+        if filename == '':
+            return
+        
+        self.filedialogdir = os.path.splitext(filename)[0]
+        #filename += fileTypeDict[filetype]
+        
+        if filetype == 'bulk files (*.bul)':
+            try:
+                xtal = CTRcalc.UnitCell.fromBULfile(filename)
+            except Exception:
+                qt.QMessageBox.critical(self,"Cannot open xtal", "Cannot open:\n%s" % traceback.format_exc())
+                return
+        else:
+            qt.QMessageBox.critical(self,"Cannot open xtal", "File extension not understood")
+            return
+        
+        try:
+            ommin = np.amin(self.fscan.omega)
+            ommax = np.amax(self.fscan.omega)
+            dc = self.ubcalc.detectorCal
+            mu = np.rad2deg(self.ubcalc.mu)
+            ub = self.ubcalc.ubCal
+            xtal.setEnergy(ub.getEnergy()*1e3)
+            hk = rn.thscanCTRs(xtal,ub,mu,dc,(ommin,ommax))
+        except Exception:
+            qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
+            return
+        
+        qt.QMessageBox.information(self,"Available reflections", str(hk))
+        
         
     def getReflections(self):
         hkls = []
