@@ -181,7 +181,21 @@ class orGUI(qt.QMainWindow):
             qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
             return
         
-        qt.QMessageBox.information(self,"Available reflections", str(hk))
+        fileTypeDict = {'dat Files (*.dat)': '.dat', 'txt Files (*.txt)': '.txt', 'All files (*)': '', }
+        fileTypeFilter = ""
+        for f in fileTypeDict:
+            fileTypeFilter += f + ";;"
+            
+        filename, filetype = qt.QFileDialog.getSaveFileName(self,"Save reflections",
+                                                  self.filedialogdir,
+                                                  fileTypeFilter[:-2])
+        if filename == '':
+            return
+        
+        self.filedialogdir = os.path.splitext(filename)[0]
+        filename += fileTypeDict[filetype]
+        np.savetxt(filename,hk,header="H K",fmt='%d')
+        #qt.QMessageBox.information(self,"Available reflections", str(hk))
         
         
     def getReflections(self):
@@ -223,23 +237,29 @@ class orGUI(qt.QMainWindow):
         #print(hkls,angles)
         
     def _onLoadReflections(self):
-        return
-        fileTypeList = "dat Files (*.dat);;txt Files (*.txt);;All files (*)"
-        newfile, filetype = PyMcaFileDialogs.getFileList(parent=self,
-                                               filetypelist=fileTypeList,
-                                               message="please select a file",
-                                               mode="LOAD",
-                                               getfilter=True,
-                                               single=True)
-        if not newfile:
+        fileTypeDict = {'dat Files (*.dat)': '.dat', 'txt Files (*.txt)': '.txt', 'All files (*)': '', }
+        fileTypeFilter = ""
+        for f in fileTypeDict:
+            fileTypeFilter += f + ";;"
+            
+        filename, filetype = qt.QFileDialog.getOpenFileName(self,"Open file with reflections",
+                                                  self.filedialogdir,
+                                                  fileTypeFilter[:-2])
+        if filename == '':
             return
-        filename = newfile[0]
-        hklangles = np.loadtxt(filename,skiprows=1)
-        hkls, angles = hklangles[:,:3], np.deg2rad(hklangles[:,3:])
-        self.getReflections()
-        angles = np.rad2deg(angles)
-        angles[:,3] *= -1 # om to th
-        hklangles = np.concatenate([hkls,angles],axis=1)
+        self.filedialogdir = os.path.splitext(filename)[0]
+        try:
+            hklangles = np.loadtxt(filename,skiprows=1)
+            hkls, angles = hklangles[:,:3], np.deg2rad(hklangles[:,3:])
+            
+            #self.getReflections()
+            angles = np.rad2deg(angles)
+            angles[:,3] *= -1 # om to th
+            hklangles = np.concatenate([hkls,angles],axis=1)
+            for refl in hklangles:
+                self._onNewReflection(refl)
+        except Exception:
+            qt.QMessageBox.critical(self,"Error during loading of reflections","Error during loading of reflections.\n%s" % traceback.format_exc())
         
         #print(hkls,angles)
         
@@ -250,15 +270,20 @@ class orGUI(qt.QMainWindow):
 
     def _onNewReflection(self,refl):
         [hkl,x,y,omega] = refl
+        notmirrored = [hkl,x,y,omega]
+        
         try:
             imageno = self.omegaToImageNo(omega)
         except:
             warnings.warn("Not xmirrored: Didn't find the corresponding image")
             [hkl,x,y,omega] = self.ubcalc.calcReflection(hkl,True)
+            mirrored = [hkl,x,y,omega]
             try:
                 imageno = self.omegaToImageNo(omega)
             except Exception as e:
-                qt.QMessageBox.warning(self,"Could not find reflection","Didn't find the corresponding reflection on any image.\n%s" % str(e))
+                errormsg = "[hkl, x, y, om]\nnot mirrored: %s\nmirrored: %s" % (notmirrored,mirrored)
+                
+                qt.QMessageBox.warning(self,"Could not find reflection","Didn't find the corresponding reflection on any image.\nError: %s\nShould be at location%s" % (str(e),errormsg))
                 return
         eventdict = {'x' : x, 'y': y}
         self.reflectionSel.addReflection(eventdict,imageno,hkl)
@@ -287,7 +312,8 @@ class orGUI(qt.QMainWindow):
             ommin = np.amin(omrad)
             #print(ommin,omega,ommax)
             if omega < ommin or omega > ommax:
-                raise Exception("omega not in range")
+                omdeg =  np.rad2deg([ommin,omega,ommax])
+                raise Exception("omega not in range: %s < %s < %s" % tuple(omdeg))
             return np.argmin(np.abs(omrad -omega))
         else:
             raise Exception("No Scan selected")

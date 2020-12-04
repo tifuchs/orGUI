@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import sys
+import traceback
 import os
 from io import StringIO
 from PyMca5.PyMcaGui import PyMcaQt as qt
@@ -126,12 +127,13 @@ class QReflectionSelector(qt.QSplitter):
         
         loadReflButton = qt.QPushButton("load reflections")
         loadReflButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Minimum, qt.QSizePolicy.Minimum))
-        loadReflButton.setToolTip("load reflections fro file")
+        loadReflButton.setToolTip("load reflections from file")
         loadReflButton.clicked.connect(self._onLoadReflections)
         
         
         operations.addWidget(fromEditorButton)
         operations.addWidget(saveReflButton)
+        operations.addWidget(loadReflButton)
         
         editorSplitter.addWidget(operations)
         
@@ -156,15 +158,19 @@ class QReflectionSelector(qt.QSplitter):
         
     def reflectionsFromEditor(self):
         plaintxt = self.refleditor.toPlainText()
-        if len(plaintxt.splitlines()) > 1:
-            txt = StringIO(self.refleditor.toPlainText())
-            asarr = np.genfromtxt(txt,skip_header=1)
-            if asarr.size == 0:
-                return
-            reflist = HKLReflection.fromArray(asarr)
-            self.setReflections(reflist)
-        else:
-            self.setReflections([])
+        try:
+            if len(plaintxt.splitlines()) > 1:
+                txt = StringIO(self.refleditor.toPlainText())
+                asarr = np.genfromtxt(txt,skip_header=1)
+                if asarr.size == 0:
+                    return
+                reflist = HKLReflection.fromArray(asarr)
+                self.setReflections(reflist)
+            else:
+                self.setReflections([])
+        except Exception:
+            qt.QMessageBox.critical(self,"Cannot read reflections", "Cannot read reeflections %s" % traceback.format_exc())
+            return
         
     def setReflections(self,refls):
         self.plot.clearMarkers()
