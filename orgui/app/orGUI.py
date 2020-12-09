@@ -181,22 +181,36 @@ class orGUI(qt.QMainWindow):
             qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
             return
         
-        fileTypeDict = {'dat Files (*.dat)': '.dat', 'txt Files (*.txt)': '.txt', 'All files (*)': '', }
-        fileTypeFilter = ""
-        for f in fileTypeDict:
-            fileTypeFilter += f + ";;"
+        #making the hk list of arrays into a reasonable string
+        hkstring="";
+        rowcount=0;
+        for i in hk:
+            if rowcount!=5:
+                hkstring=hkstring+"%s "%i;
+                rowcount=rowcount+1;
+            else:
+                hkstring=hkstring+"%s \n"%i;
+                rowcount=0;
+                
+        #Question dialog for saving the possible CTR locations        
+        clickedbutton=qt.QMessageBox.question(self, 'Saving CTR locations...', 'Do you want to save the following positions: \n' + hkstring +"?");
+        if clickedbutton==qt.QMessageBox.Yes:
+            #File saving
+            fileTypeDict = {'dat Files (*.dat)': '.dat', 'txt Files (*.txt)': '.txt', 'All files (*)': '', }
+            fileTypeFilter = ""
+            for f in fileTypeDict:
+                fileTypeFilter += f + ";;"
+                
+            filename, filetype = qt.QFileDialog.getSaveFileName(self,"Save reflections",
+                                                      self.filedialogdir,
+                                                      fileTypeFilter[:-2])
+            if filename == '':
+                return
             
-        filename, filetype = qt.QFileDialog.getSaveFileName(self,"Save reflections",
-                                                  self.filedialogdir,
-                                                  fileTypeFilter[:-2])
-        if filename == '':
-            return
-        
-        self.filedialogdir = os.path.splitext(filename)[0]
-        filename += fileTypeDict[filetype]
-        np.savetxt(filename,hk,header="H K",fmt='%d')
-        #qt.QMessageBox.information(self,"Available reflections", str(hk))
-        
+            self.filedialogdir = os.path.splitext(filename)[0]
+            filename += fileTypeDict[filetype]
+            np.savetxt(filename,hk,header="H K",fmt='%d')
+            
         
     def getReflections(self):
         hkls = []
