@@ -354,18 +354,30 @@ class QSpecScanSelector(qt.QMainWindow):
         if len(nodes) > 0:
             obj = nodes[0]
             if 'NX_class' in obj.attrs:
-                if obj.attrs['NX_class'] == 'NXentry':
-            #if ddict['event'] == "itemDoubleClicked":
-                    scanname = obj.local_name
-                    scansuffix = scanname.split('_')[-1]
-                    scanname_nosuffix = '_'.join(scanname.split('_')[:-1])
-                    scanno, subscanno = scansuffix.split('.')
+                try:
+                    nxcls = obj.attrs['NX_class'].decode("utf-8")
+                    ch5523bliss = True
+                except AttributeError:
+                    nxcls = obj.attrs['NX_class']
+                    ch5523bliss = False
+                if nxcls == 'NXentry':
+                    if ch5523bliss:
+                        scanname = obj.local_name
+                        scanno = scanname.split('_')[-1]
+                    else:
+                    
+                        scanname = obj.local_name
+                        scansuffix = scanname.split('_')[-1]
+                        scanname_nosuffix = '_'.join(scanname.split('_')[:-1])
+                        scanno, subscanno = scansuffix.split('.')
+                        
                     ddict = dict()
                     ddict['event'] = "itemDoubleClicked"
                     ddict['file'] = obj.local_filename
                     ddict['name'] = obj.local_name
                     ddict['node'] = obj
                     ddict['scanno'] = int(scanno)
+                    ddict['ch5523'] = ch5523bliss
                     self.pathedit.setText(obj.local_filename)
                     self.scannoBox.setValue(int(scanno))
                     self.sigScanChanged.emit(ddict)

@@ -33,7 +33,7 @@ os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
 
 import sys
 #sys.path.append('/home/fuchstim/repos/datautils/datautils/xrayutils')
-from datautils.xrayutils.id31_tools_5 import BlissScan_EBS#Fastscan, BlissScan
+from datautils.xrayutils.id31_tools_5 import BlissScan_EBS, Fastscan, BlissScan
 #from datautils.xrayutils.P212_tools import CrudeThScan, FioFastsweep
 #from P212_tools import BlissScan_EBS#CrudeThScan, FioFastsweep
 
@@ -352,7 +352,7 @@ class orGUI(qt.QMainWindow):
                     self.fscan = Fastscan(self.specfile,self.scanno)
                     self.imageno = 0
                 except Exception:
-                    print('HERE')
+ 
                     self.scanno = 0
                     #self.fscan = CrudeThScan(self.specfile,'PE1',r"C:\Timo_loc\P21_2_comissioning\Pt111_HClO4_0.4\PE1\dark00001.tif.gz")
                     self.fscan = FioFastsweep(self.specfile)
@@ -385,10 +385,14 @@ class orGUI(qt.QMainWindow):
                 msg.setStandardButtons(qt.QMessageBox.Cancel)
                 msg.setModal(True)
                 msg.show()
-                if 'node' in sel_list:
-                    self.fscan = BlissScan_EBS(sel_list['node'],sel_list['scanno'])
+                ch5523 = sel_list.get('ch5523',False)
+                if ch5523:
+                    self.fscan = BlissScan(self.hdffile,sel_list['name'].strip('/'))
                 else:
-                    self.fscan = BlissScan_EBS(self.hdffile,sel_list['scanno'])
+                    if 'node' in sel_list:
+                        self.fscan = BlissScan_EBS(sel_list['node'],sel_list['scanno'])
+                    else:
+                        self.fscan = BlissScan_EBS(self.hdffile,sel_list['scanno'])
                 self.plotImage()
                 self.scanSelector.setTh(self.fscan.th)
                 msg.hide()
