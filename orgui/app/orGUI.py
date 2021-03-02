@@ -4,7 +4,9 @@ import os
 from silx.gui import qt
 import warnings
 
+from io import StringIO
 
+from IPython import embed
 import silx.gui.plot
 from silx.gui.plot import items
 from silx.gui.colors import Colormap
@@ -33,7 +35,7 @@ os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
 
 import sys
 #sys.path.append('/home/fuchstim/repos/datautils/datautils/xrayutils')
-from datautils.xrayutils.id31_tools_5 import BlissScan_EBS, Fastscan, BlissScan
+from datautils.xrayutils.id31_tools import BlissScan_EBS, Fastscan, BlissScan
 #from datautils.xrayutils.P212_tools import CrudeThScan, FioFastsweep
 #from P212_tools import BlissScan_EBS#CrudeThScan, FioFastsweep
 
@@ -176,12 +178,16 @@ class orGUI(qt.QMainWindow):
             mu = np.rad2deg(self.ubcalc.mu)
             ub = self.ubcalc.ubCal
             xtal.setEnergy(ub.getEnergy()*1e3)
-            hk = rn.thscanCTRs(xtal,ub,mu,dc,(ommin,ommax))
+            hk, xmirror = rn.thscanCTRs(xtal,ub,mu,dc,(ommin,ommax))
         except Exception:
             qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
             return
-        
+        xmirror = np.array(xmirror).astype(np.float)
         #making the hk list of arrays into a reasonable string
+        hkm = np.concatenate((np.array(hk), xmirror.reshape((1,xmirror.size)).T), axis=1)
+        sio = StringIO()
+        np.savetxt(sio,hkm,fmt="%.3f", delimiter='\t',header="H K detectorRight")
+        """
         hkstring="";
         rowcount=0;
         for i in hk:
@@ -191,9 +197,17 @@ class orGUI(qt.QMainWindow):
             else:
                 hkstring=hkstring+"%s \n"%i;
                 rowcount=0;
-                
+        """
+        #Question dialog for saving the possible CTR locations     
+        msgbox = qt.QMessageBox(qt.QMessageBox.Question,'Saving CTR locations...', 
+                                'Found CTRs. Do you want to save the following positions?',
+                                qt.QMessageBox.Yes | qt.QMessageBox.No, self)
+        msgbox.setDetailedText(sio.getvalue())
+        
+        clickedbutton = msgbox.exec()
         #Question dialog for saving the possible CTR locations        
-        clickedbutton=qt.QMessageBox.question(self, 'Saving CTR locations...', 'Do you want to save the following positions: \n' + hkstring +"?");
+        #clickedbutton=qt.QMessageBox.question(self, 'Saving CTR locations...', 'Do you want to save the following positions: \n' + hkstring +"?");
+        
         if clickedbutton==qt.QMessageBox.Yes:
             #File saving
             fileTypeDict = {'dat Files (*.dat)': '.dat', 'txt Files (*.txt)': '.txt', 'All files (*)': '', }
@@ -209,7 +223,7 @@ class orGUI(qt.QMainWindow):
             
             self.filedialogdir = os.path.splitext(filename)[0]
             filename += fileTypeDict[filetype]
-            np.savetxt(filename,hk,header="H K",fmt='%d')
+            np.savetxt(filename,hkm,fmt="%.3f",header="H K mirror")
             
         
     def getReflections(self):
@@ -313,10 +327,9 @@ class orGUI(qt.QMainWindow):
             
             pos = [self.ubcalc.mu,delta[0],gamma[0],self.imageNoToOmega(self.imageno),self.ubcalc.chi,self.ubcalc.phi]
             pos = HKLVlieg.crystalAngles(pos,self.ubcalc.n)
-            hkl = self.ubcalc.angles.anglesToHkl(pos)
+            hkl = np.array(self.ubcalc.angles.anglesToHkl(*pos))
 
-            #print(self.ubcalc.crystal)
-            return hkl.A1
+            return hkl
         return xyToHKL
         
     def omegaToImageNo(self,omega):
