@@ -112,7 +112,10 @@ class QUBCalculator(qt.QTabWidget):
         self.machineParams = QMachineParameters()
         self.machineParams.sigMachineParamsChanged.connect(self._onMachineParamsChanged)
         self.machineParams.loadConfigButton.clicked.connect(self._onLoadConfig)
-        self.addTab(self.machineParams,"Machine")
+        #self.addTab(self.machineParams,"Machine")
+        
+        self.machineDialog = QMachineParametersDialog(self.machineParams)
+        
         
                 
         if configfile is not None:
@@ -465,10 +468,7 @@ class QCrystalParameter(qt.QSplitter):
             self.sigCrystalParamsChanged.emit(newCrystal,n)
         except Exception as e:
             qt.QMessageBox.warning(self,"Can not calculate B Matrix","The B Matrix can not be calculated\nError: %s" % str(e))
-        
-        
-        
-        
+                
         
 class QMachineParameters(qt.QWidget):
     sigMachineParamsChanged = qt.pyqtSignal(list)
@@ -495,7 +495,7 @@ class QMachineParameters(qt.QWidget):
         self.loadConfigButton = qt.QPushButton("load config",self) 
         self.loadConfigButton.setToolTip("load machine and crystal configuration from configfile,\naccepts poni file from pyFAI")
         mainLayout.addWidget(self.loadConfigButton,5,2)
-        
+         
         self.Ebox = qt.QDoubleSpinBox()
         self.Ebox.setRange(0.1,1000)
         self.Ebox.setDecimals(4)
@@ -591,6 +591,7 @@ class QMachineParameters(qt.QWidget):
         
     def setValues(self,params):
         [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi] = params
+        self.blockSignals(True)
         self.Ebox.setValue(E)
         self.SDDbox.setValue(sdd)
         self.mubox.setValue(np.rad2deg(mu))
@@ -602,8 +603,9 @@ class QMachineParameters(qt.QWidget):
         self.polaxbox.setValue(np.rad2deg(polax))
         self.azimbox.setValue(np.rad2deg(azim))
         self.polfbox.setValue(polf)
+        self.blockSignals(False)
         
-    def _onAnyValueChanged(self):
+    def getParameters(self):
         E = self.Ebox.value()
         mu = np.deg2rad(self.mubox.value())
         sdd = self.SDDbox.value()
@@ -614,12 +616,32 @@ class QMachineParameters(qt.QWidget):
         azim = np.deg2rad(self.azimbox.value())
         polax = np.deg2rad(self.polaxbox.value())
         polf = self.polfbox.value()
-        sigList = [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi]
-        self.sigMachineParamsChanged.emit(sigList)
+        return [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi]
+        
+        
+    def _onAnyValueChanged(self):
+        self.sigMachineParamsChanged.emit(self.getParameters())
         
         
         
+class QMachineParametersDialog(qt.QDialog):
+    def __init__(self,machineparams,parent=None):
+        qt.QDialog.__init__(self, parent=None)
+        self.machineparams = machineparams
+        layout = qt.QHBoxLayout()
+        layout.addWidget(machineparams)
+        self.setLayout(layout)
+        self.savedParams = self.machineparams.getParameters()
         
-        
-        
+    def showEvent(self, event):
+        print("show")
+        if event.spontaneous():
+            print("spontan")
+            super().showEvent(event)
+        else:
+            self.savedParams = self.machineparams.getParameters()
+            print("non spontan")
+            super().showEvent(event)
+    
+
         

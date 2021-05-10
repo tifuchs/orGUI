@@ -3,10 +3,8 @@ import sys
 import traceback
 import os
 from io import StringIO
-from PyMca5.PyMcaGui import PyMcaQt as qt
+from silx.gui import qt
 
-from PyMca5.PyMcaGui import PyMca_Icons as icons
-from PyMca5.PyMcaGui.io import PyMcaFileDialogs
 import numpy as np
 
 class HKLReflection(object):
@@ -54,6 +52,8 @@ class QReflectionSelector(qt.QSplitter):
         self.reflections = {}
         self.nextNo = 0
         self.imageno = 0
+        
+        self._showReferenceReflections = True
         
         self.activeReflection = None
         
@@ -140,6 +140,14 @@ class QReflectionSelector(qt.QSplitter):
         
         self.addWidget(editorSplitter)
         
+    def setReferenceReflectionsVisible(self, visible):
+        if visible:
+            self._showReferenceReflections = True
+            self.redrawRefReflections()
+        else:
+            self._showReferenceReflections = False
+            self.clearPlotRefReflections()
+        
     def setImage(self,imageno):
         self.imageno = imageno
         
@@ -171,14 +179,23 @@ class QReflectionSelector(qt.QSplitter):
         except Exception:
             qt.QMessageBox.critical(self,"Cannot read reflections", "Cannot read reeflections %s" % traceback.format_exc())
             return
+            
+    def clearPlotRefReflections(self):
+        for refl in self.reflections:
+            self.plot.removeMarker(refl)
+            
+    def redrawRefReflections(self):
+        self.setReflections(self.reflections.values())
         
     def setReflections(self,refls):
-        self.plot.clearMarkers()
+        self.clearPlotRefReflections()
         self.activeReflection = None
         self.nextNo = 0
-        self.reflections.clear()
+        self.reflections = {}
         for refl in refls:
-            identifier = self.plot.addMarker(refl.xy[0],refl.xy[1],legend=str(self.nextNo),text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='blue',selectable=True,draggable=True,symbol='.')
+            identifier = 'ref_'+str(self.nextNo)
+            if self._showReferenceReflections:
+                self.plot.addMarker(refl.xy[0],refl.xy[1],legend=identifier,text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='blue',selectable=True,draggable=True,symbol='.')
             self.reflections[identifier] = refl
             self.nextNo += 1
         if self.nextNo > 0:
@@ -186,11 +203,13 @@ class QReflectionSelector(qt.QSplitter):
         else:
             self.markerNo.setMaximum(0)
         if self.reflections:
-                newactive = next(iter(self.reflections.keys()))
-                self.setReflectionActive(newactive)
+            newactive = next(iter(self.reflections.keys()))
+            self.setReflectionActive(newactive)
         
     def addReflection(self,eventdict,imageno,hkl=np.array([np.nan,np.nan,np.nan])):
-        identifier = self.plot.addMarker(eventdict['x'],eventdict['y'],legend=str(self.nextNo),text="(%0.1f,%0.1f,%0.1f)" % tuple(hkl),color='blue',selectable=True,draggable=True,symbol='.')
+        identifier = 'ref_'+str(self.nextNo)
+        if self._showReferenceReflections:
+            self.plot.addMarker(eventdict['x'],eventdict['y'],legend=identifier,text="(%0.1f,%0.1f,%0.1f)" % tuple(hkl),color='blue',selectable=True,draggable=True,symbol='.')
         self.reflections[identifier] = HKLReflection([eventdict['x'],eventdict['y']],hkl,imageno)
         self.markerNo.setMaximum(self.nextNo)
         self.setReflectionActive(identifier)
@@ -198,20 +217,26 @@ class QReflectionSelector(qt.QSplitter):
         self.updateEditor()
         
     def setReflectionActive(self,identifier):
-        if self.activeReflection is not None:
-            self.setReflectionInactive(self.activeReflection)
-        self.plot.removeMarker(identifier)
-        refl = self.reflections[identifier]
-        self.plot.addMarker(refl.xy[0],refl.xy[1],legend=str(identifier),text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='red',selectable=True,draggable=True,symbol='.')
-        self.activeReflection = identifier
-        self._setactiveHKLVals(refl.hkl)
-        self.markerNo.setValue(int(identifier))
-        
+        if self._showReferenceReflections:
+            if self.activeReflection is not None:
+                self.setReflectionInactive(self.activeReflection)
+            self.plot.removeMarker(identifier)
+            refl = self.reflections[identifier]
+            self.plot.addMarker(refl.xy[0],refl.xy[1],legend=str(identifier),text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='red',selectable=True,draggable=True,symbol='.')
+            self.activeReflection = identifier
+            self._setactiveHKLVals(refl.hkl)
+            self.markerNo.setValue(int(identifier.split('_')[-1]))
+        else:
+            self.activeReflection = identifier
+            refl = self.reflections[identifier]
+            self._setactiveHKLVals(refl.hkl)
+            self.markerNo.setValue(int(identifier.split('_')[-1]))
     
     def setReflectionInactive(self,identifier):
-        self.plot.removeMarker(identifier)
-        refl = self.reflections[identifier]
-        self.plot.addMarker(refl.xy[0],refl.xy[1],legend=str(identifier),text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='blue',selectable=True,draggable=True,symbol='.')
+        if self._showReferenceReflections:
+            self.plot.removeMarker(identifier)
+            refl = self.reflections[identifier]
+            self.plot.addMarker(refl.xy[0],refl.xy[1],legend=str(identifier),text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='blue',selectable=True,draggable=True,symbol='.')
         
     def moveReflection(self,identifier,xy):
         self.reflections[identifier].xy = xy
@@ -234,9 +259,10 @@ class QReflectionSelector(qt.QSplitter):
             self.updateEditor()
             
     def redrawActiveReflection(self):
-        self.plot.removeMarker(self.activeReflection)
-        refl = self.reflections[self.activeReflection]
-        self.plot.addMarker(refl.xy[0],refl.xy[1],legend=str(self.activeReflection),text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='red',selectable=True,draggable=True,symbol='.')
+        if self._showReferenceReflections:
+            self.plot.removeMarker(self.activeReflection)
+            refl = self.reflections[self.activeReflection]
+            self.plot.addMarker(refl.xy[0],refl.xy[1],legend=str(self.activeReflection),text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='red',selectable=True,draggable=True,symbol='.')
         
     def _onGotoImage(self):
         if self.activeReflection is not None:
@@ -257,7 +283,8 @@ class QReflectionSelector(qt.QSplitter):
         if identifier not in self.reflections:
             return
         del self.reflections[identifier]
-        self.plot.removeMarker(identifier)
+        if self._showReferenceReflections:
+            self.plot.removeMarker(identifier)
         if self.activeReflection == identifier:
             self.activeReflection = None
             if self.reflections:

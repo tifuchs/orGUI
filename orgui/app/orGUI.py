@@ -65,19 +65,7 @@ class orGUI(qt.QMainWindow):
         self.imagepath = ''
         self.imageno = 0
         
-        menu_bar = qt.QMenuBar() 
-        file = menu_bar.addMenu("&File")
-        file.addAction(self.scanSelector.openFileAction)
-        file.addAction(self.scanSelector.refreshFileAction)
-        file.addAction(self.scanSelector.closeFileAction)
-        
-        calcCTRsAvailableAct = qt.QAction("Calculate available CTRs",self)
-        calcCTRsAvailableAct.triggered.connect(self._onCalcAvailableCTR)
-        rs = menu_bar.addMenu("&Reciprocal space")
-        rs.addAction(calcCTRsAvailableAct)
-        
-        
-        self.setMenuBar(menu_bar)
+
         
         
         #self.reflections = np.array([])
@@ -86,8 +74,6 @@ class orGUI(qt.QMainWindow):
         ubLayout = qt.QHBoxLayout()
         self.ubcalc = QUBCalculator(configfile)
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
-        
-        
 
         self.centralPlot = Plot2DHKL(self.newXyHKLConverter(),parent=self)
         self.centralPlot.setDefaultColormap(Colormap(name='jet',normalization='log'))
@@ -145,6 +131,44 @@ class orGUI(qt.QMainWindow):
         ubWidget.setLayout(ubLayout)
         ubDock.setWidget(ubWidget)
         self.addDockWidget(qt.Qt.BottomDockWidgetArea,ubDock)
+        
+        
+        
+        menu_bar = qt.QMenuBar() 
+        file = menu_bar.addMenu("&File")
+        file.addAction(self.scanSelector.openFileAction)
+        file.addAction(self.scanSelector.refreshFileAction)
+        file.addAction(self.scanSelector.closeFileAction)
+        
+        config_menu =  menu_bar.addMenu("&Config")
+        loadConfigAct = qt.QAction("Load machine config",self) # connected with UBCalculator below
+        loadXtalAct = qt.QAction("Load Crystal file",self)
+        machineParamsAct = qt.QAction("Machine parameters",self)
+        machineParamsAct.setCheckable(True)
+        
+        loadConfigAct.triggered.connect(self.ubcalc._onLoadConfig)        
+        machineParamsAct.toggled.connect(lambda checked: self.ubcalc.machineDialog.setVisible(checked))
+
+        config_menu.addAction(loadConfigAct)
+        config_menu.addAction(loadXtalAct)
+        config_menu.addSeparator()
+        config_menu.addAction(machineParamsAct)
+        
+        view_menu = menu_bar.addMenu("&View")
+        showRefReflectionsAct = view_menu.addAction("show reference reflections")
+        showRefReflectionsAct.setCheckable(True)
+        showRefReflectionsAct.setChecked(True)
+        showRefReflectionsAct.toggled.connect(lambda checked: self.reflectionSel.setReferenceReflectionsVisible(checked))
+        
+        
+        calcCTRsAvailableAct = qt.QAction("Calculate available CTRs",self)
+        calcCTRsAvailableAct.triggered.connect(self._onCalcAvailableCTR)
+        rs = menu_bar.addMenu("&Reciprocal space")
+        rs.addAction(calcCTRsAvailableAct)
+        
+        
+        self.setMenuBar(menu_bar)
+        
         
     def _onCalcAvailableCTR(self):
         fileTypeDict = {'bulk files (*.bul)': '.bul', 'Crystal Files (*.xtal)': '.txt', 'All files (*)': '', }
