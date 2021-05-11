@@ -145,14 +145,22 @@ class orGUI(qt.QMainWindow):
         loadXtalAct = qt.QAction("Load Crystal file",self)
         machineParamsAct = qt.QAction("Machine parameters",self)
         machineParamsAct.setCheckable(True)
+        xtalParamsAct = qt.QAction("Crystal parameters",self)
+        xtalParamsAct.setCheckable(True)
         
         loadConfigAct.triggered.connect(self.ubcalc._onLoadConfig)        
         machineParamsAct.toggled.connect(lambda checked: self.ubcalc.machineDialog.setVisible(checked))
+        self.ubcalc.machineDialog.sigHide.connect(lambda : machineParamsAct.setChecked(False))
+        
+        xtalParamsAct.toggled.connect(lambda checked: self.ubcalc.xtalDialog.setVisible(checked))
+        self.ubcalc.xtalDialog.sigHide.connect(lambda : xtalParamsAct.setChecked(False))
+        
 
         config_menu.addAction(loadConfigAct)
         config_menu.addAction(loadXtalAct)
         config_menu.addSeparator()
         config_menu.addAction(machineParamsAct)
+        config_menu.addAction(xtalParamsAct)
         
         view_menu = menu_bar.addMenu("&View")
         showRefReflectionsAct = view_menu.addAction("show reference reflections")

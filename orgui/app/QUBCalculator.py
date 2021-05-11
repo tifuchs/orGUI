@@ -102,7 +102,7 @@ class QUBCalculator(qt.QTabWidget):
         
         self.crystalparams = QCrystalParameter()
         #self.crystalparams.setValues(self.crystal,self.n)
-        self.addTab(self.crystalparams,"Crystal")
+        #self.addTab(self.crystalparams,"Crystal")
         
         
         self.crystalparams.sigCrystalParamsChanged.connect(self._onCrystalParamsChanged)
@@ -115,7 +115,7 @@ class QUBCalculator(qt.QTabWidget):
         #self.addTab(self.machineParams,"Machine")
         
         self.machineDialog = QMachineParametersDialog(self.machineParams)
-        
+        self.xtalDialog = QCrystalParameterDialog(self.crystalparams)
         
                 
         if configfile is not None:
@@ -456,15 +456,20 @@ class QCrystalParameter(qt.QSplitter):
         self.alpha3box.setValue(alpha3)
         self.refractionIndexBox.setValue((1.-n)*1e6)
         
-        
-    def _onAnyValueChanged(self):
+    def getCrystal(self):
         a = np.array([self.a1box.value(),self.a2box.value(),self.a3box.value()])
         alpha = np.array([self.alpha1box.value(),self.alpha2box.value(),self.alpha3box.value()])
         if np.any(a == 0) or np.any(alpha == 0):
-            return
+            raise Exception("No crystal set")
+        return HKLVlieg.Crystal(a,alpha)
+        
+    def getRefractionIndex(self):
+        return 1 - self.refractionIndexBox.value()*1e-6
+        
+    def _onAnyValueChanged(self):
         try:
-            newCrystal = HKLVlieg.Crystal(a,alpha)
-            n = 1 - self.refractionIndexBox.value()*1e-6
+            newCrystal = self.getCrystal()
+            n = self.getRefractionIndex()
             self.sigCrystalParamsChanged.emit(newCrystal,n)
         except Exception as e:
             qt.QMessageBox.warning(self,"Can not calculate B Matrix","The B Matrix can not be calculated\nError: %s" % str(e))
@@ -625,23 +630,96 @@ class QMachineParameters(qt.QWidget):
         
         
 class QMachineParametersDialog(qt.QDialog):
+    sigHide = qt.pyqtSignal()
+
     def __init__(self,machineparams,parent=None):
         qt.QDialog.__init__(self, parent=None)
         self.machineparams = machineparams
-        layout = qt.QHBoxLayout()
+        layout = qt.QVBoxLayout()
         layout.addWidget(machineparams)
-        self.setLayout(layout)
+        
         self.savedParams = self.machineparams.getParameters()
         
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel | qt.QDialogButtonBox.Reset,
+                                      qt.Qt.Horizontal)
+        layout.addWidget(buttons)
+        
+        okbtn = buttons.button(qt.QDialogButtonBox.Ok)
+        cancelbtn = buttons.button(qt.QDialogButtonBox.Cancel)
+        resetbtn = buttons.button(qt.QDialogButtonBox.Reset)
+        
+        okbtn.clicked.connect(self.hide)
+        cancelbtn.clicked.connect(self.onCancel)
+        resetbtn.clicked.connect(self.resetParameters)
+        
+        self.setLayout(layout)
+        
     def showEvent(self, event):
-        print("show")
         if event.spontaneous():
-            print("spontan")
             super().showEvent(event)
         else:
             self.savedParams = self.machineparams.getParameters()
-            print("non spontan")
             super().showEvent(event)
+            
+    def hideEvent(self, event):
+        self.sigHide.emit()
+        super().hideEvent(event)
+            
+    def resetParameters(self):
+        self.machineparams.setValues(self.savedParams)
+        self.machineparams._onAnyValueChanged()
+            
+    def onCancel(self):
+        self.resetParameters()
+        self.hide()
     
+        
+class QCrystalParameterDialog(qt.QDialog):
+    sigHide = qt.pyqtSignal()
+
+    def __init__(self,crystalparams,parent=None):
+        qt.QDialog.__init__(self, parent=None)
+        self.crystalparams = crystalparams
+        layout = qt.QVBoxLayout()
+        layout.addWidget(crystalparams)
+        
+        self.savedParams = None
+        
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel | qt.QDialogButtonBox.Reset,
+                                      qt.Qt.Horizontal)
+        layout.addWidget(buttons)
+        
+        okbtn = buttons.button(qt.QDialogButtonBox.Ok)
+        cancelbtn = buttons.button(qt.QDialogButtonBox.Cancel)
+        resetbtn = buttons.button(qt.QDialogButtonBox.Reset)
+        
+        okbtn.clicked.connect(self.hide)
+        cancelbtn.clicked.connect(self.onCancel)
+        resetbtn.clicked.connect(self.resetParameters)
+        
+        self.setLayout(layout)
+        
+    def showEvent(self, event):
+        if event.spontaneous():
+            super().showEvent(event)
+        else:
+            try:
+                self.savedParams = self.crystalparams.getCrystal(), self.crystalparams.getRefractionIndex()
+            except Exception:
+                self.savedParams = None
+            super().showEvent(event)
+            
+    def hideEvent(self, event):
+        self.sigHide.emit()
+        super().hideEvent(event)
+            
+    def resetParameters(self):
+        if self.savedParams is not None:
+            self.crystalparams.setValues(*self.savedParams)
+            self.crystalparams._onAnyValueChanged()
+            
+    def onCancel(self):
+        self.resetParameters()
+        self.hide()
 
         
