@@ -13,6 +13,21 @@ from datautils.xrayutils import DetectorCalibration
 import warnings
 import configparser
 import os 
+from contextlib import contextmanager
+
+@contextmanager
+def blockSignals(qobjects):
+    try:
+        for obj in qobjects:
+            obj.blockSignals(True)
+        yield
+        for obj in qobjects:
+            obj.blockSignals(False)
+    except TypeError:
+        qobject.blockSignals(True)
+        yield
+        qobject.blockSignals(False)
+
 
 # reflectionhandler must implement the method getReflections
 
@@ -448,13 +463,19 @@ class QCrystalParameter(qt.QSplitter):
     def setValues(self,crystal,n):
         [a1,a2,a3],alpha,_,_ = crystal.getLatticeParameters()
         [alpha1,alpha2,alpha3] = np.rad2deg(alpha)
-        self.a1box.setValue(a1)
-        self.a2box.setValue(a2)    
-        self.a3box.setValue(a3)
-        self.alpha1box.setValue(alpha1)
-        self.alpha2box.setValue(alpha2)
-        self.alpha3box.setValue(alpha3)
-        self.refractionIndexBox.setValue((1.-n)*1e6)
+        signList = [self.a1box, self.a2box, self.a3box,
+                    self.alpha1box, self.alpha2box, self.alpha3box,
+                    self.refractionIndexBox]
+        with blockSignals(signList):
+            self.a1box.setValue(a1)
+            self.a2box.setValue(a2)    
+            self.a3box.setValue(a3)
+            self.alpha1box.setValue(alpha1)
+            self.alpha2box.setValue(alpha2)
+            self.alpha3box.setValue(alpha3)
+            self.refractionIndexBox.setValue((1.-n)*1e6)
+        #self.blockSignals(False)
+        self._onAnyValueChanged()
         
     def getCrystal(self):
         a = np.array([self.a1box.value(),self.a2box.value(),self.a3box.value()])
@@ -596,19 +617,23 @@ class QMachineParameters(qt.QWidget):
         
     def setValues(self,params):
         [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi] = params
-        self.blockSignals(True)
-        self.Ebox.setValue(E)
-        self.SDDbox.setValue(sdd)
-        self.mubox.setValue(np.rad2deg(mu))
-        self.chibox.setValue(np.rad2deg(chi))
-        self.cpXbox.setValue(cp[0])
-        self.cpYbox.setValue(cp[1])
-        self.pixsizebox.setValue(pixsize*1e3)
-        self.phibox.setValue(np.rad2deg(phi))
-        self.polaxbox.setValue(np.rad2deg(polax))
-        self.azimbox.setValue(np.rad2deg(azim))
-        self.polfbox.setValue(polf)
-        self.blockSignals(False)
+        signList = [self.Ebox, self.SDDbox, self.mubox,
+                    self.chibox, self.cpXbox, self.cpYbox,
+                    self.pixsizebox, self.phibox, self.polaxbox,
+                    self.azimbox, self.polfbox]
+        with blockSignals(signList):
+            self.Ebox.setValue(E)
+            self.SDDbox.setValue(sdd)
+            self.mubox.setValue(np.rad2deg(mu))
+            self.chibox.setValue(np.rad2deg(chi))
+            self.cpXbox.setValue(cp[0])
+            self.cpYbox.setValue(cp[1])
+            self.pixsizebox.setValue(pixsize*1e3)
+            self.phibox.setValue(np.rad2deg(phi))
+            self.polaxbox.setValue(np.rad2deg(polax))
+            self.azimbox.setValue(np.rad2deg(azim))
+            self.polfbox.setValue(polf)
+        self._onAnyValueChanged()
         
     def getParameters(self):
         E = self.Ebox.value()
@@ -667,7 +692,7 @@ class QMachineParametersDialog(qt.QDialog):
             
     def resetParameters(self):
         self.machineparams.setValues(self.savedParams)
-        self.machineparams._onAnyValueChanged()
+        #self.machineparams._onAnyValueChanged()
             
     def onCancel(self):
         self.resetParameters()
@@ -716,7 +741,7 @@ class QCrystalParameterDialog(qt.QDialog):
     def resetParameters(self):
         if self.savedParams is not None:
             self.crystalparams.setValues(*self.savedParams)
-            self.crystalparams._onAnyValueChanged()
+            #self.crystalparams._onAnyValueChanged()
             
     def onCancel(self):
         self.resetParameters()
