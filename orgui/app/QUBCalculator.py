@@ -2,17 +2,22 @@
 from io import StringIO
 from silx.gui import qt
 
+import pyFAI
+#from pyFAI.gui.dialog import GeometryDialog, DetectorSelectorDialog
+
 #from PyMca5.PyMcaGui import PyMca_Icons as icons
 #from PyMca5.PyMcaGui.io import PyMcaFileDialogs
 import numpy as np
 
 import traceback
 
-from datautils.xrayutils import HKLVlieg
+from datautils.xrayutils import HKLVlieg, CTRcalc
 from datautils.xrayutils import DetectorCalibration
+from datautils.xrayutils import unitcells
 import warnings
 import configparser
-import os 
+import os
+import copy
 from contextlib import contextmanager
 
 @contextmanager
@@ -171,13 +176,13 @@ class QUBCalculator(qt.QTabWidget):
         
         
     def _onCrystalParamsChanged(self,crystal,n):
-        a,alpha,_,_ = crystal.getLatticeParameters()
-        self.crystal.setLattice(a,np.rad2deg(alpha))
+        #a,alpha,_,_ = crystal.getLatticeParameters()
+        #self.crystal.setLattice(a,np.rad2deg(alpha))
+        
+        self.crystal = crystal
         self.n = n
-        #self.ubCal.defaultU()
-        #print("New %s,\nyou have to recalculate the UB matrix to apply the changes" % self.crystal) 
-        #print(crystal)
-        #print(n)
+        self.ubCal.setCrystal(self.crystal)
+        self.ubCal.defaultU()
 
     def _onMachineParamsChanged(self,params):
         [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi] = params
@@ -201,12 +206,16 @@ class QUBCalculator(qt.QTabWidget):
         self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
         self.detectorCal.setAzimuthalReference(azim)
         self.detectorCal.setPolarization(polax,polf)
+        self.crystal.setEnergy(E*1e3)
         try:
-            azimy,azimx = self.detectorCal.pixelsPrimPoint([0.05],[0])[0]
+            gam_p,_ = self.detectorCal.rangedelgam_p
+            
+            azimy,azimx = self.detectorCal.pixelsPrimeBeam(gam_p[1]/5, 0 )[0]
             self.sigPlottableMachineParamsChanged.emit([cp,[azimx,azimy],polax])
         except Exception as e:
             # here is a bug with the init of the detector cal
-            pass
+            print(traceback.format_exc())
+            #pass
         #print(self.detectorCal.get_wavelength())
         #print(self.detectorCal.getFit2D())
         
@@ -264,8 +273,11 @@ class QUBCalculator(qt.QTabWidget):
             alpha2 = lattice.getfloat('alpha2')
             alpha3 = lattice.getfloat('alpha3')
             self.n = 1 - lattice.getfloat('refractionindex',0.0)
+
+            self.crystal = CTRcalc.UnitCell([a1,a2,a3],[alpha1,alpha2,alpha3])
+            self.crystal.addAtom('Pt',[0.,0.,0.],0.1,0.1,1.)
+            self.crystal.setEnergy(E*1e3)
             
-            self.crystal = HKLVlieg.Crystal([a1,a2,a3],[alpha1,alpha2,alpha3])
             self.ubCal = HKLVlieg.UBCalculator(self.crystal,E)
             self.ubCal.defaultU()
             self.angles = HKLVlieg.VliegAngles(self.ubCal)
@@ -311,14 +323,17 @@ class QUBCalculator(qt.QTabWidget):
         self.chi = 0.
         self.phi = 0.
         self.n = 1 - 1.1415e-06
-        self.crystal = HKLVlieg.Crystal([3.9242,3.9242,3.9242],[90.,90.,90.])
+        self.crystal = CTRcalc.UnitCell([3.9242,3.9242,3.9242],[90.,90.,90.])
+        self.crystal.addAtom('Pt',[0.,0.,0.],0.1,0.1,1.)
+        self.crystal.setEnergy(E*1e3)
+        
         self.ubCal = HKLVlieg.UBCalculator(self.crystal,E)
         self.ubCal.defaultU()
         self.polaxis = 0
         self.polfactor = 0
         self.azimuth = 0
         self.detectorCal = DetectorCalibration.Detector2D_SXRD()
-        
+        self.detectorCal.detector = pyFAI.detector_factory("Pilatus2m")
         self.detectorCal.setFit2D(sdd*1e3,cp[0],cp[1],pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
         self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
         
@@ -377,62 +392,68 @@ class QCrystalParameter(qt.QSplitter):
         qt.QSplitter.__init__(self, parent=None)
         self.setOrientation(qt.Qt.Vertical)
         
-        crystalParamsGroup = qt.QGroupBox("Lattice parameters")
-        crystalParamsLayout = qt.QGridLayout()
+        latticeParamsGroup = qt.QGroupBox("Lattice parameters")
+        latticeParamsLayout = qt.QGridLayout()
         
+        self.filedialogdir = '.'
         
+        self._uc = CTRcalc.UnitCell([3.9242,3.9242,3.9242],[90.,90.,90.])
+        self._uc.addAtom('Pt',[0.,0.,0.],0.1,0.1,1.)
+        self._uc.setEnergy(70000.)
         
-        crystalParamsLayout.addWidget(qt.QLabel("a1:"),0,0)
-        crystalParamsLayout.addWidget(qt.QLabel("a2:"),1,0)
-        crystalParamsLayout.addWidget(qt.QLabel("a3:"),2,0)
+        self._n = 1.
+        
+        latticeParamsLayout.addWidget(qt.QLabel("a1:"),0,0)
+        latticeParamsLayout.addWidget(qt.QLabel("a2:"),1,0)
+        latticeParamsLayout.addWidget(qt.QLabel("a3:"),2,0)
         self.a1box = qt.QDoubleSpinBox()
         self.a1box.setRange(0,100)
         self.a1box.setDecimals(4)
         self.a1box.setSuffix(u" \u212B")
         
-        crystalParamsLayout.addWidget(self.a1box,0,1)
+        latticeParamsLayout.addWidget(self.a1box,0,1)
         
         self.a2box = qt.QDoubleSpinBox()
         self.a2box.setRange(0,100)
         self.a2box.setDecimals(4)
         self.a2box.setSuffix(u" \u212B")
 
-        crystalParamsLayout.addWidget(self.a2box,1,1)
+        latticeParamsLayout.addWidget(self.a2box,1,1)
         
         self.a3box = qt.QDoubleSpinBox()
         self.a3box.setRange(0,100)
         self.a3box.setDecimals(4)
         self.a3box.setSuffix(u" \u212B")
         
-        crystalParamsLayout.addWidget(self.a3box,2,1)
+        latticeParamsLayout.addWidget(self.a3box,2,1)
 
-        crystalParamsLayout.addWidget(qt.QLabel("alpha1:"),0,2)
-        crystalParamsLayout.addWidget(qt.QLabel("alpha2:"),1,2)
-        crystalParamsLayout.addWidget(qt.QLabel("alpha3:"),2,2)
+        latticeParamsLayout.addWidget(qt.QLabel("alpha1:"),0,2)
+        latticeParamsLayout.addWidget(qt.QLabel("alpha2:"),1,2)
+        latticeParamsLayout.addWidget(qt.QLabel("alpha3:"),2,2)
         self.alpha1box = qt.QDoubleSpinBox()
         self.alpha1box.setRange(0,180)
         self.alpha1box.setDecimals(2)
         self.alpha1box.setSuffix(" °")
         
-        crystalParamsLayout.addWidget(self.alpha1box,0,3)
+        latticeParamsLayout.addWidget(self.alpha1box,0,3)
         
         self.alpha2box = qt.QDoubleSpinBox()
         self.alpha2box.setRange(0,180)
         self.alpha2box.setDecimals(2)
         self.alpha2box.setSuffix(" °")
        
-        crystalParamsLayout.addWidget(self.alpha2box,1,3)
+        latticeParamsLayout.addWidget(self.alpha2box,1,3)
         
         self.alpha3box = qt.QDoubleSpinBox()
         self.alpha3box.setRange(0,180)
         self.alpha3box.setDecimals(2)
         self.alpha3box.setSuffix(" °")
         
-        crystalParamsLayout.addWidget(self.alpha3box,2,3)
+        latticeParamsLayout.addWidget(self.alpha3box,2,3)
         
         
-        crystalParamsGroup.setLayout(crystalParamsLayout)
-        self.addWidget(crystalParamsGroup)
+        latticeParamsGroup.setLayout(latticeParamsLayout)
+        
         
         
         refractionindexGroup = qt.QGroupBox("refraction index")
@@ -451,7 +472,34 @@ class QCrystalParameter(qt.QSplitter):
         refractionindexGroup.setLayout(refractionindexLayout)
         #self.setValues(crystal,n)
         
+        
+        
+        crystalParamsGroup = qt.QGroupBox("Crystal")
+        crystalParamsLayout = qt.QGridLayout()
+        
+        crystalParamsLayout.addWidget(qt.QLabel("Crystal:"),0,0)
+        
+        self.crystalComboBox = qt.QComboBox()
+        crystalParamsLayout.addWidget(self.crystalComboBox,0,1)
+        
+        for uc in unitcells.availablebulk:
+            self.crystalComboBox.addItem(uc, uc)
+            
+        loadxtalbtn = qt.QPushButton("Load bulk file")
+        crystalParamsLayout.addWidget(loadxtalbtn,1,1)
+        loadxtalbtn.clicked.connect(self.onLoadXtal)
+        
+        self.crystalComboBox.activated.connect(self.onSwitchCrystal)
+        
+        
+        crystalParamsGroup.setLayout(crystalParamsLayout)
+        
+        self.addWidget(crystalParamsGroup)
+        self.addWidget(latticeParamsGroup)
         self.addWidget(refractionindexGroup)
+        
+        
+        
         self.a1box.valueChanged.connect(self._onAnyValueChanged)
         self.a2box.valueChanged.connect(self._onAnyValueChanged)
         self.a3box.valueChanged.connect(self._onAnyValueChanged)
@@ -460,6 +508,47 @@ class QCrystalParameter(qt.QSplitter):
         self.alpha3box.valueChanged.connect(self._onAnyValueChanged)
         self.refractionIndexBox.valueChanged.connect(self._onAnyValueChanged)
     
+    def onLoadXtal(self):
+        fileTypeDict = {'bulk files (*.bul)': '.bul', 'Crystal Files (*.xtal)': '.txt', 'All files (*)': '', }
+        fileTypeFilter = ""
+        for f in fileTypeDict:
+            fileTypeFilter += f + ";;"
+            
+        filename, filetype = qt.QFileDialog.getOpenFileName(self,"Open crystal file with atom locations",
+                                                  self.filedialogdir,
+                                                  fileTypeFilter[:-2])
+        if filename == '':
+            return
+        
+        self.filedialogdir = os.path.splitext(filename)[0]
+        #filename += fileTypeDict[filetype]
+        
+        if filetype == 'bulk files (*.bul)':
+            try:
+                uc_bulk = CTRcalc.UnitCell.fromBULfile(filename)
+            except Exception:
+                qt.QMessageBox.critical(self,"Cannot open xtal", "Cannot open:\n%s" % traceback.format_exc())
+                return
+        else:
+            qt.QMessageBox.critical(self,"Cannot open xtal", "File extension not understood")
+            return
+            
+        uc_name = os.path.splitext(os.path.basename(filename) )[0]
+        self.crystalComboBox.addItem(uc_name, uc_bulk)
+        idx = self.crystalComboBox.findText(uc_name)
+        self.crystalComboBox.setCurrentIndex(idx)
+        self.onSwitchCrystal(idx)
+        
+    def onSwitchCrystal(self, index):
+        selectiondata = self.crystalComboBox.itemData(index)
+        if isinstance(selectiondata, str):
+            uc = unitcells.unitcell(selectiondata)
+            self.crystalComboBox.setItemData(index,uc)
+            uc = copy.deepcopy(uc)
+        else:
+            uc = copy.deepcopy(selectiondata)
+        self.setValues(uc,self.getRefractionIndex())
+        
     def setValues(self,crystal,n):
         [a1,a2,a3],alpha,_,_ = crystal.getLatticeParameters()
         [alpha1,alpha2,alpha3] = np.rad2deg(alpha)
@@ -468,13 +557,14 @@ class QCrystalParameter(qt.QSplitter):
                     self.refractionIndexBox]
         with blockSignals(signList):
             self.a1box.setValue(a1)
-            self.a2box.setValue(a2)    
+            self.a2box.setValue(a2)
             self.a3box.setValue(a3)
             self.alpha1box.setValue(alpha1)
             self.alpha2box.setValue(alpha2)
             self.alpha3box.setValue(alpha3)
             self.refractionIndexBox.setValue((1.-n)*1e6)
         #self.blockSignals(False)
+        self._uc = crystal
         self._onAnyValueChanged()
         
     def getCrystal(self):
@@ -482,7 +572,10 @@ class QCrystalParameter(qt.QSplitter):
         alpha = np.array([self.alpha1box.value(),self.alpha2box.value(),self.alpha3box.value()])
         if np.any(a == 0) or np.any(alpha == 0):
             raise Exception("No crystal set")
-        return HKLVlieg.Crystal(a,alpha)
+        self._uc.setLattice(a,alpha)
+        if len(self._uc.basis) < 1.:
+            self._uc.addAtom('Pt',[0.,0.,0.],0.1,0.1,1.)
+        return self._uc
         
     def getRefractionIndex(self):
         return 1 - self.refractionIndexBox.value()*1e-6
