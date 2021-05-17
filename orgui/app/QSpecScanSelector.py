@@ -1,4 +1,23 @@
 # -*- coding: utf-8 -*-
+###############################################################################
+# Copyright (c) 2020 Timo Fuchs, Olaf Magnussen all rights reserved
+#
+# This software was developed during the PhD work of Timo Fuchs,
+# within the group of Olaf Magnussen. Usage within the group is hereby granted.
+###############################################################################
+"""Module descripiton
+
+"""
+__author__ = "Timo Fuchs"
+__copyright__ = "Copyright 2020, Timo Fuchs, Olaf Magnussen all rights reserved"
+__credits__ = []
+__license__ = "all rights reserved"
+__version__ = "1.0.0"
+__maintainer__ = "Timo Fuchs"
+__email__ = "fuchs@physik.uni-kiel.de"
+
+
+
 import sys
 import os
 import shutil
@@ -15,17 +34,7 @@ import silx.gui.hdf5
 from silx.gui.data import DataViewerFrame
 import h5py
 
-#from PyMca5.PyMcaGui.io.QSpecFileWidget import QSpecFileWidget
-#from PyMca5.PyMcaGui.pymca import QDataSource
-#from PyMca5.PyMcaGui.io.QSourceSelector import QSourceSelector
-#from PyMca5.PyMcaGui import PyMca_Icons as icons
-#from PyMca5.PyMcaGui.io import PyMcaFileDialogs
-#from PyMca5.PyMcaGui.pymca. import PyMcahdfTreeView
-#from PyMca5.PyMcaGui.io.hdf5 import QhdfTreeView
-#from PyMca5.PyMcaCore import SpecFileDataSource
 import warnings
-
-#from PyMca5.PyMcaCore import NexusDataSource
 
 
 class QSpecScanSelector(qt.QMainWindow):

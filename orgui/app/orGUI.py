@@ -1,4 +1,21 @@
 # -*- coding: utf-8 -*-
+###############################################################################
+# Copyright (c) 2020 Timo Fuchs, Olaf Magnussen all rights reserved
+#
+# This software was developed during the PhD work of Timo Fuchs,
+# within the group of Olaf Magnussen. Usage within the group is hereby granted.
+###############################################################################
+"""Module descripiton
+
+"""
+__author__ = "Timo Fuchs"
+__copyright__ = "Copyright 2020, Timo Fuchs, Olaf Magnussen all rights reserved"
+__credits__ = []
+__license__ = "all rights reserved"
+__version__ = "1.0.0"
+__maintainer__ = "Timo Fuchs"
+__email__ = "fuchs@physik.uni-kiel.de"
+
 import sys
 import os
 from silx.gui import qt
@@ -23,9 +40,14 @@ import traceback
 from .QSpecScanSelector import QSpecScanSelector
 from .QReflectionSelector import QReflectionSelector
 from .QUBCalculator import QUBCalculator
+from .fscan import SimulationThScan
+
 import numpy as np
 from datautils.xrayutils import HKLVlieg, CTRcalc
 from datautils.xrayutils import ReciprocalNavigation as rn
+
+
+
 
 
 #if __name__ == "__main__":
@@ -174,11 +196,16 @@ class orGUI(qt.QMainWindow):
         rs = menu_bar.addMenu("&Reciprocal space")
         rs.addAction(calcCTRsAvailableAct)
         
+        simul = menu_bar.addMenu("&Simulation")
+        
+        createScanAct = simul.addAction("Create dummy scan")
+        createScanAct.triggered.connect(self._onCreateScan)
         
         self.setMenuBar(menu_bar)
         
         
     def _onCalcAvailableCTR(self):
+        """
         fileTypeDict = {'bulk files (*.bul)': '.bul', 'Crystal Files (*.xtal)': '.txt', 'All files (*)': '', }
         fileTypeFilter = ""
         for f in fileTypeDict:
@@ -202,8 +229,9 @@ class orGUI(qt.QMainWindow):
         else:
             qt.QMessageBox.critical(self,"Cannot open xtal", "File extension not understood")
             return
-        
+        """
         try:
+            xtal = self.ubcalc.crystal
             ommin = np.amin(self.fscan.omega)
             ommax = np.amax(self.fscan.omega)
             dc = self.ubcalc.detectorCal
@@ -382,6 +410,15 @@ class orGUI(qt.QMainWindow):
             return np.deg2rad(self.fscan.omega[imageno])
         else:
             return 0.
+            
+    def _onCreateScan(self):
+        diag = QScanCreator()
+        if diag.exec() == qt.QDialog.Accepted:
+            shape = self.ubcalc.detectorCal.detector.shape
+            fscan = SimulationThScan(shape, diag.omstart.value(),
+                                     diag.omend.value(),
+                                     diag.no.value())
+            self._onScanChanged(fscan)
         
         
     def _onScanChanged(self,sel_list):
@@ -420,6 +457,13 @@ class orGUI(qt.QMainWindow):
                 self.imageno = 0
                 self.reflectionSel.setImage(self.imageno)
                 #print(self.centralPlot._callback)
+        elif isinstance(sel_list,SimulationThScan):
+            self.scanno = 1
+            self.fscan = sel_list
+            self.imageno = 0
+            self.plotImage()
+            self.scanSelector.setTh(self.fscan.th)
+        
         else:
             self.hdffile = sel_list['file']
             #self.scanname = sel_list['name'].strip("/")
@@ -447,6 +491,7 @@ class orGUI(qt.QMainWindow):
             except Exception:
                 msg.hide()
                 qt.QMessageBox.critical(self,"Cannot open scan", "Cannot open scan:\n%s" % traceback.format_exc())
+        
                 
             
             
@@ -698,6 +743,45 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
         :return: :class:`Plot1D`
         """
         return self.profile.getProfilePlot()
+        
+class QScanCreator(qt.QDialog):
+    
+    def __init__(self, parent=None):
+        qt.QDialog.__init__(self, parent)
+        
+        layout = qt.QGridLayout()
+        
+        layout.addWidget(qt.QLabel("omega start:"),0,0)
+        layout.addWidget(qt.QLabel("omega end:"),1,0)
+        layout.addWidget(qt.QLabel("no points:"),2,0)
+
+        self.omstart = qt.QDoubleSpinBox()
+        self.omstart.setRange(0,360)
+        self.omstart.setDecimals(4)
+        self.omstart.setSuffix(u" °")
+        self.omstart.setValue(0)
+        
+        self.omend = qt.QDoubleSpinBox()
+        self.omend.setRange(0,360)
+        self.omend.setDecimals(4)
+        self.omend.setSuffix(u" °")
+        self.omend.setValue(180)
+        
+        self.no = qt.QSpinBox()
+        self.no.setRange(1,1000000000)
+        self.no.setValue(180)
+        
+        layout.addWidget(self.omstart,0,1)
+        layout.addWidget(self.omend,1,1)
+        layout.addWidget(self.no,2,1)
+        
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
+        layout.addWidget(buttons,0,2,-1,-1)
+        
+        buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.accept)
+        buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
+        
+        self.setLayout(layout)
         
 def main(configfile):
 	a = qt.QApplication(['orGUI'])

@@ -1,4 +1,21 @@
 # -*- coding: utf-8 -*-
+###############################################################################
+# Copyright (c) 2020 Timo Fuchs, Olaf Magnussen all rights reserved
+#
+# This software was developed during the PhD work of Timo Fuchs,
+# within the group of Olaf Magnussen. Usage within the group is hereby granted.
+###############################################################################
+"""Module descripiton
+
+"""
+__author__ = "Timo Fuchs"
+__copyright__ = "Copyright 2020, Timo Fuchs, Olaf Magnussen all rights reserved"
+__credits__ = []
+__license__ = "all rights reserved"
+__version__ = "1.0.0"
+__maintainer__ = "Timo Fuchs"
+__email__ = "fuchs@physik.uni-kiel.de"
+
 from io import StringIO
 from silx.gui import qt
 
@@ -205,11 +222,11 @@ class QUBCalculator(qt.QTabWidget):
         self.detectorCal.setFit2D(*f2d)
         self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
         self.detectorCal.setAzimuthalReference(azim)
+        self.azimuth = np.deg2rad(azim)
         self.detectorCal.setPolarization(polax,polf)
         self.crystal.setEnergy(E*1e3)
         try:
             gam_p,_ = self.detectorCal.rangedelgam_p
-            
             azimy,azimx = self.detectorCal.pixelsPrimeBeam(gam_p[1]/5, 0 )[0]
             self.sigPlottableMachineParamsChanged.emit([cp,[azimx,azimy],polax])
         except Exception as e:
