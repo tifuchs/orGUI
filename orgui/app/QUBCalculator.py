@@ -222,7 +222,7 @@ class QUBCalculator(qt.QTabWidget):
         self.detectorCal.setFit2D(*f2d)
         self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
         self.detectorCal.setAzimuthalReference(azim)
-        self.azimuth = np.deg2rad(azim)
+        self.azimuth = azim
         self.detectorCal.setPolarization(polax,polf)
         self.crystal.setEnergy(E*1e3)
         try:

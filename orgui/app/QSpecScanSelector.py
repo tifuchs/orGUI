@@ -369,12 +369,18 @@ class QSpecScanSelector(qt.QMainWindow):
                 except AttributeError:
                     nxcls = obj.attrs['NX_class']
                     ch5523bliss = False
+
                 if nxcls == 'NXentry':
-                    if ch5523bliss:
+                    if 'fiofile' in obj.h5py_target['instrument']:
+                        p212H5 = True
+                        scanname = obj.basename
+                        scanno, subscanno = scanname.split('.')
+                    elif ch5523bliss:
+                        p212H5 = False
                         scanname = obj.local_name
                         scanno = scanname.split('_')[-1]
                     else:
-                    
+                        p212H5 = False
                         scanname = obj.local_name
                         scansuffix = scanname.split('_')[-1]
                         scanname_nosuffix = '_'.join(scanname.split('_')[:-1])
@@ -387,6 +393,7 @@ class QSpecScanSelector(qt.QMainWindow):
                     ddict['node'] = obj
                     ddict['scanno'] = int(scanno)
                     ddict['ch5523'] = ch5523bliss
+                    ddict['p212H5'] = p212H5
                     self.pathedit.setText(obj.local_filename)
                     self.scannoBox.setValue(int(scanno))
                     self.sigScanChanged.emit(ddict)

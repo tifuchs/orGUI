@@ -67,10 +67,13 @@ class QReflectionSelector(qt.QSplitter):
         self.plot = plot
         
         self.reflections = {}
+        self.reflBragg = {}
+        
         self.nextNo = 0
         self.imageno = 0
         
         self._showReferenceReflections = True
+        self.showBraggReflections = False
         
         self.activeReflection = None
         
@@ -157,6 +160,24 @@ class QReflectionSelector(qt.QSplitter):
         
         self.addWidget(editorSplitter)
         
+    def setBraggReflectionsVisible(self, visible):
+        if visible:
+            self.showBraggReflections = True
+            self.redrawBraggReflections()
+        else:
+            self.showBraggReflections = False
+            self.clearPlotBraggReflections()
+        
+    def setBraggReflections(self, hkls, yx, angles):
+        for i, (hkl, yxr, pos) in enumerate(zip(hkls, yx, angles)):
+            identifier = 'bragg_'+str(i)
+            self.reflBragg[identifier] = HKLReflection(yxr[::-1], hkl,1)
+        if self.showBraggReflections:
+            self.redrawBraggReflections()
+        else:
+            self.clearPlotBraggReflections()
+            
+        
     def setReferenceReflectionsVisible(self, visible):
         if visible:
             self._showReferenceReflections = True
@@ -200,6 +221,19 @@ class QReflectionSelector(qt.QSplitter):
     def clearPlotRefReflections(self):
         for refl in self.reflections:
             self.plot.removeMarker(refl)
+            
+    def clearPlotBraggReflections(self):
+        for refl in self.reflBragg:
+            self.plot.removeMarker(refl)
+            
+    def redrawBraggReflections(self):
+        self.clearPlotBraggReflections()
+        if self.showBraggReflections:
+            for identifier in self.reflBragg:
+                refl = self.reflBragg[identifier]
+                #text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl)
+                self.plot.addMarker(refl.xy[0],refl.xy[1],legend=identifier,color='g',selectable=False,draggable=False,symbol='x', text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl))
+        
             
     def redrawRefReflections(self):
         self.setReflections(self.reflections.values())

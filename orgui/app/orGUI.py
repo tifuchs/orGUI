@@ -58,7 +58,7 @@ os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
 import sys
 #sys.path.append('/home/fuchstim/repos/datautils/datautils/xrayutils')
 from datautils.xrayutils.id31_tools import BlissScan_EBS, Fastscan, BlissScan
-#from datautils.xrayutils.P212_tools import CrudeThScan, FioFastsweep
+from datautils.xrayutils.P212_tools import H5Fastsweep
 #from P212_tools import BlissScan_EBS#CrudeThScan, FioFastsweep
 
 QTVERSION = qt.qVersion()
@@ -190,6 +190,11 @@ class orGUI(qt.QMainWindow):
         showRefReflectionsAct.setChecked(True)
         showRefReflectionsAct.toggled.connect(lambda checked: self.reflectionSel.setReferenceReflectionsVisible(checked))
         
+        showBraggAct = view_menu.addAction("show allowed Bragg reflections")
+        showBraggAct.setCheckable(True)
+        showBraggAct.setChecked(False)
+        showBraggAct.toggled.connect(self.onShowBragg)
+        
         
         calcCTRsAvailableAct = qt.QAction("Calculate available CTRs",self)
         calcCTRsAvailableAct.triggered.connect(self._onCalcAvailableCTR)
@@ -203,6 +208,30 @@ class orGUI(qt.QMainWindow):
         
         self.setMenuBar(menu_bar)
         
+    def onShowBragg(self,visible):
+        self.reflectionSel.setBraggReflectionsVisible(visible)
+        self.calcBraggRefl()
+        
+        
+    def calcBraggRefl(self):
+        if self.fscan is not None and self.reflectionSel.showBraggReflections:
+            try:
+                xtal = self.ubcalc.crystal
+                ommin = np.deg2rad(np.amin(self.fscan.omega))
+                ommax = np.deg2rad(np.amax(self.fscan.omega))
+                dc = self.ubcalc.detectorCal
+                mu = self.ubcalc.mu
+                ub = self.ubcalc.ubCal
+                xtal.setEnergy(ub.getEnergy()*1e3)
+               
+                
+                hkls, yx, angles = rn.thscanBragg(xtal,ub,mu,dc,(ommin,ommax))
+                self.reflectionSel.setBraggReflections(hkls, yx, angles)
+            except Exception:
+                qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\n%s" % traceback.format_exc())
+        
+
+    
         
     def _onCalcAvailableCTR(self):
         """
@@ -232,10 +261,10 @@ class orGUI(qt.QMainWindow):
         """
         try:
             xtal = self.ubcalc.crystal
-            ommin = np.amin(self.fscan.omega)
-            ommax = np.amax(self.fscan.omega)
+            ommin = np.deg2rad(np.amin(self.fscan.omega))
+            ommax = np.deg2rad(np.amax(self.fscan.omega))
             dc = self.ubcalc.detectorCal
-            mu = np.rad2deg(self.ubcalc.mu)
+            mu = self.ubcalc.mu
             ub = self.ubcalc.ubCal
             xtal.setEnergy(ub.getEnergy()*1e3)
             hk, xmirror = rn.thscanCTRs(xtal,ub,mu,dc,(ommin,ommax))
@@ -299,6 +328,7 @@ class orGUI(qt.QMainWindow):
             hkls.append(refl.hkl)
             angles.append(pos)
         return np.array(hkls), np.array(angles)
+        
         
     def _onSaveReflections(self):
         
@@ -477,6 +507,8 @@ class orGUI(qt.QMainWindow):
                 ch5523 = sel_list.get('ch5523',False)
                 if ch5523:
                     self.fscan = BlissScan(self.hdffile,sel_list['name'].strip('/'))
+                elif sel_list.get('p212H5',False):
+                    self.fscan = H5Fastsweep(self.hdffile,sel_list['scanno'])
                 else:
                     if 'node' in sel_list:
                         self.fscan = BlissScan_EBS(sel_list['node'],sel_list['scanno'])
