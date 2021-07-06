@@ -41,6 +41,8 @@ class QSpecScanSelector(qt.QMainWindow):
     sigScanChanged = qt.pyqtSignal(object)
     sigImagePathChanged = qt.pyqtSignal(object)
     sigImageNoChanged = qt.pyqtSignal(object)
+    sigROIChanged = qt.pyqtSignal()
+    sigROIintegrate = qt.pyqtSignal()
     def __init__(self,parentmainwindow , parent=None):
         qt.QMainWindow.__init__(self ,parent=None)
         self.parentmainwindow = parentmainwindow
@@ -178,18 +180,21 @@ class QSpecScanSelector(qt.QMainWindow):
         
         self.selectedScan = None
         
+        ### SCAN DISPLAY
         
-        self.integrateTab = qt.QWidget()
+        self.scanDisplayTab = qt.QWidget()
+        self.scanDisplayTabLayout = qt.QVBoxLayout()
         
-        self.integrateTabLayout = qt.QGridLayout()
+        ## Scan display
         
-        self.loadallButton = qt.QPushButton("load all")
+        loadScanGroup = qt.QGroupBox("load scan required to display max/sum")
+        self.loadScanGroupLayout = qt.QVBoxLayout()
+        
+        loadScanGroupButtonlayout = qt.QHBoxLayout()
+        self.loadallButton = qt.QPushButton("load scan")
         self.loadallButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
         self.loadallButton.setToolTip("open all images and calculate sum and maximum")
         #self.loadallButton.clicked.connect(self._onLoadAll)
-        
-        
-        
         
         self.showMaxButton = qt.QPushButton("show max")
         self.showMaxButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
@@ -202,18 +207,135 @@ class QSpecScanSelector(qt.QMainWindow):
         self.showSumButton.setToolTip("plot sum of the scan")
         self.showSumButton.setCheckable(True)
         
-        self.integrateTabLayout.addWidget(self.loadallButton,0,0)
-        self.integrateTabLayout.addWidget(self.showMaxButton,1,0)
-        self.integrateTabLayout.addWidget(self.showSumButton,2,0)
+        loadScanGroupButtonlayout.addWidget(self.loadallButton)
+        loadScanGroupButtonlayout.addWidget(self.showMaxButton)
+        loadScanGroupButtonlayout.addWidget(self.showSumButton)
         
-        #self.integrateTabLayout.addWidget(qt.QLabel("hier kommt integration basierend\n auf dem masking widget"),0,1)
+        self.loadScanGroupLayout.addLayout(loadScanGroupButtonlayout)
         
-        self.integrateTab.setLayout(self.integrateTabLayout)
-        maintab.addTab(self.integrateTab,"Integrate")
-        #self.specfileWidget.mainTab.addTab(self.integrateTab,"Integrate")
-        #self.specfileWidget.mainTab.setCurrentWidget(self.integrateTab)
         
-        #QDataSource.QDataSource()
+        
+        loadScanGroup.setLayout(self.loadScanGroupLayout)
+        self.scanDisplayTabLayout.addWidget(loadScanGroup)
+        
+
+        
+        self.scanDisplayTab.setLayout(self.scanDisplayTabLayout)
+        maintab.addTab(self.scanDisplayTab,"scan display")
+        
+        
+        ## ROI
+                
+        self.roiIntegrateTab = qt.QWidget()
+        self.roiIntegrateTabLayout = qt.QVBoxLayout()
+        
+        roiGroup = qt.QGroupBox("ROI definition (in pixel)")
+        roiGroupLayout = qt.QGridLayout()
+        
+        self.hsize = qt.QDoubleSpinBox()
+        self.vsize = qt.QDoubleSpinBox()
+        self.left = qt.QDoubleSpinBox()
+        self.right = qt.QDoubleSpinBox()
+        self.top = qt.QDoubleSpinBox()
+        self.bottom = qt.QDoubleSpinBox()
+        
+        self.hsize.setRange(1,20000)
+        self.hsize.setDecimals(1)
+        self.hsize.setSuffix(" px")
+        self.hsize.setValue(6.)
+        
+        self.vsize.setRange(1,20000)
+        self.vsize.setDecimals(1)
+        self.vsize.setSuffix(" px")
+        self.vsize.setValue(6.)
+        
+        self.left.setRange(0,20000)
+        self.left.setDecimals(1)
+        self.left.setSuffix(" px")
+        self.left.setValue(6.)
+        
+        self.right.setRange(0,20000)
+        self.right.setDecimals(1)
+        self.right.setSuffix(" px")
+        self.right.setValue(6.)
+
+        self.top.setRange(0,20000)
+        self.top.setDecimals(1)
+        self.top.setSuffix(" px")
+        self.top.setValue(0.)
+        
+        self.bottom.setRange(0,20000)
+        self.bottom.setDecimals(1)
+        self.bottom.setSuffix(" px")
+        self.bottom.setValue(0.)
+
+        roiGroupLayout.addWidget(qt.QLabel('center roi (h x v):'),0,0)
+        roiGroupLayout.addWidget(self.hsize,0,1)
+        roiGroupLayout.addWidget(self.vsize,0,2)
+
+        roiGroupLayout.addWidget(qt.QLabel('bg roi (left, right):'),1,0)
+        roiGroupLayout.addWidget(self.left,1,1)
+        roiGroupLayout.addWidget(self.right,1,2)
+        
+        roiGroupLayout.addWidget(qt.QLabel('bg roi (top, bottom):'),2,0)
+        roiGroupLayout.addWidget(self.top,2,1)
+        roiGroupLayout.addWidget(self.bottom,2,2)
+
+        self.hsize.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.vsize.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.left.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.right.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.top.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.bottom.valueChanged.connect(lambda : self.sigROIChanged.emit())
+                
+        roiGroup.setLayout(roiGroupLayout)
+        
+        self.H_0 = [qt.QDoubleSpinBox() for i in range(3)]
+        [h.setRange(-20000,20000) for h in self.H_0]
+        [h.setDecimals(2) for h in self.H_0]
+        self.H_0[0].setValue(1.)
+        self.H_0[1].setValue(0.)
+        self.H_0[2].setValue(0.)
+        [h.valueChanged.connect(lambda : self.sigROIChanged.emit()) for h in self.H_0]
+        
+        
+        self.H_1 = [qt.QDoubleSpinBox() for i in range(3)]
+        [h.setRange(-20000,20000) for h in self.H_1]
+        [h.setDecimals(2) for h in self.H_1]
+        self.H_1[0].setValue(0.)
+        self.H_1[1].setValue(0.)
+        self.H_1[2].setValue(1.)
+        [h.valueChanged.connect(lambda : self.sigROIChanged.emit()) for h in self.H_1]
+        
+        directionGroup = qt.QGroupBox("Direction H_1 (hkl)")
+        directionGroupLayout = qt.QHBoxLayout()
+        [directionGroupLayout.addWidget(h) for h in self.H_1]
+        directionGroup.setLayout(directionGroupLayout)
+        
+        locationGroup = qt.QGroupBox("Location vector H_0 (hkl)")
+        locationGroupLayout = qt.QHBoxLayout()
+        [locationGroupLayout.addWidget(h) for h in self.H_0]
+        locationGroup.setLayout(locationGroupLayout)
+        
+        self.roiIntegrateTabLayout.addWidget(roiGroup)
+        self.roiIntegrateTabLayout.addWidget(qt.QLabel("Integrate along a line given by:\nH(s) = H_1 * s + H_0"))
+        self.roiIntegrateTabLayout.addWidget(directionGroup)
+        self.roiIntegrateTabLayout.addWidget(locationGroup)
+        
+        self.integrateROIBtn = qt.QPushButton("ROI integrate scan")
+        self.integrateROIBtn.clicked.connect(lambda : self.sigROIintegrate.emit())
+        self.roiIntegrateTabLayout.addWidget(self.integrateROIBtn)
+        
+        #self.showROICheckBox = qt.QCheckBox("Show ROI")
+        #self.roiIntegrateTabLayout.addWidget(self.showROICheckBox)
+        
+        self.roiIntegrateTab.setLayout(self.roiIntegrateTabLayout)
+        
+        
+        
+        maintab.addTab(self.roiIntegrateTab,"ROI integration")
+
+
         
     #def setImageNo(self,imageno):
     #    self.slider.setValue(imageno)

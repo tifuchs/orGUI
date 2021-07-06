@@ -34,6 +34,10 @@ from silx.utils.weakref import WeakMethodProxy
 from silx.gui.plot.Profile import ProfileToolBar
 from silx.gui.plot.AlphaSlider import NamedImageAlphaSlider
 from silx.gui.dialog import ImageFileDialog
+from silx.gui.plot.tools.roi import RegionOfInterestManager
+from silx.gui.plot.tools.roi import RegionOfInterestTableWidget
+from silx.gui.plot.items.roi import RectangleROI, PolygonROI, ArcROI
+
 import traceback
 
 
@@ -46,13 +50,6 @@ import numpy as np
 from datautils.xrayutils import HKLVlieg, CTRcalc
 from datautils.xrayutils import ReciprocalNavigation as rn
 
-
-
-
-
-#if __name__ == "__main__":
-#    os.chdir("..")
-
 os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
 
 import sys
@@ -63,6 +60,8 @@ from datautils.xrayutils.P212_tools import H5Fastsweep
 
 QTVERSION = qt.qVersion()
 DEBUG = 0
+
+silx.config.DEFAULT_PLOT_SYMBOL = '.'
 
 
 class orGUI(qt.QMainWindow):
@@ -111,15 +110,23 @@ class orGUI(qt.QMainWindow):
         self.scanSelector.showMaxButton.toggled.connect(self._onMaxToggled)
         self.scanSelector.showSumButton.toggled.connect(self._onSumToggled)
         
+        self.scanSelector.sigROIChanged.connect(self.updateROI)
+        
         self.alphaslider = NamedImageAlphaSlider(self,self.centralPlot,self.currentAddImageLabel)
         self.alphaslider.setOrientation(qt.Qt.Horizontal)
         self.alphaslider.setEnabled(True)
         
-        self.scanSelector.integrateTabLayout.addWidget(self.alphaslider,2,1)
+        alphasliderwidget = qt.QWidget()
+        alphasliderwidgetLayout = qt.QHBoxLayout()
+        alphasliderwidgetLayout.addWidget(qt.QLabel("Transparancy:"))
+        alphasliderwidgetLayout.addWidget(self.alphaslider)
+        alphasliderwidget.setLayout(alphasliderwidgetLayout)
+
+        self.scanSelector.loadScanGroupLayout.addWidget(alphasliderwidget)
+        
+        self.scanSelector.sigROIintegrate.connect(self.integrateROI)
         
 
-
-        
         toolbar = self.scanSelector.getScanToolbar()
         self.centralPlot.addToolBar(qt.Qt.BottomToolBarArea,toolbar)
         
@@ -127,7 +134,31 @@ class orGUI(qt.QMainWindow):
         self.setCentralWidget(self.centralPlot)
         
         
+        # Create the object controlling the ROIs and set it up
+        self.roiManager = RegionOfInterestManager(self.centralPlot)
+        self.roiManager.setColor('pink')  # Set the color of ROI
         
+        #self.roiTable = RegionOfInterestTableWidget()
+        #self.roiTable.setRegionOfInterestManager(self.roiManager)
+        
+        #roi order: left, top, right, bottom,  croi
+        self.rois = []
+        for i in range(5):
+            
+            roi = RectangleROI()
+            roi.setGeometry(origin=(0, 0), size=(0, 0))
+            if i == 4:
+                roi.setColor('red') # center color
+            else:
+                roi.setColor('pink') # bg color
+
+                #roi.setEditable(False)
+            roi.setLineWidth(2)
+            roi.setLineStyle('-')
+            roi.setVisible(True)
+
+            self.roiManager.addRoi(roi,useManagerColor=False)
+            self.rois.append(roi)
         
         #self.reflTable.view._model.dataChanged.connect(printmodel)
         #self.reflTable.setArrayData(np.array([0,0,0,0,10,10],dtype=np.float))
@@ -195,6 +226,12 @@ class orGUI(qt.QMainWindow):
         showBraggAct.setChecked(False)
         showBraggAct.toggled.connect(self.onShowBragg)
         
+        showROIAct = view_menu.addAction("show ROI")
+        showROIAct.setCheckable(True)
+        showROIAct.setChecked(False)
+        showROIAct.toggled.connect(self.onShowROI)
+        self.roivisible = False
+        #self.scanSelector.showROICheckBox.addAction(showROIAct)
         
         calcCTRsAvailableAct = qt.QAction("Calculate available CTRs",self)
         calcCTRsAvailableAct.triggered.connect(self._onCalcAvailableCTR)
@@ -211,6 +248,10 @@ class orGUI(qt.QMainWindow):
     def onShowBragg(self,visible):
         self.reflectionSel.setBraggReflectionsVisible(visible)
         self.calcBraggRefl()
+        
+    def onShowROI(self,visible):
+        self.roivisible = visible
+        self.updateROI()
         
         
     def calcBraggRefl(self):
@@ -612,7 +653,7 @@ class orGUI(qt.QMainWindow):
                 self.currentAddImageLabel = None
                 self.centralPlot.setActiveImage(self.currentImageLabel)
         
-        
+    
         
     def plotImage(self,key=0):
         try:
@@ -627,9 +668,218 @@ class orGUI(qt.QMainWindow):
             self.resetZoom = False
             self.imageno = key
             self.reflectionSel.setImage(self.imageno)
+            self.updateROI()
+                        
         except Exception as e:
+            print(traceback.format_exc())
             print("no image %s" % e)
         
+    def updateROI(self):
+        if not self.roivisible:
+            for roi in self.rois:
+                roi.setVisible(False)
+            self.roiManager._roisUpdated()
+            self.centralPlot.removeMarker('main_croi_loc')
+            return
+        
+        #dc = self.ubcalc.detectorCal
+        #mu = self.ubcalc.mu
+        #angles = self.ubcalc.angles
+        
+        H_1 = np.array([h.value() for h in self.scanSelector.H_1])
+        H_0 = np.array([h.value() for h in self.scanSelector.H_0])
+        
+        hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(self.imageno)
+
+        
+        """
+        hkl_del_gam_1, hkl_del_gam_2 = angles.anglesIntersectLineEwald(H_0, H_1, mu,self.imageNoToOmega(self.imageno),self.ubcalc.phi,self.ubcalc.chi)
+        
+        delta1 = hkl_del_gam_1[...,3]
+        delta2 = hkl_del_gam_2[...,3]
+        gam1 = hkl_del_gam_1[...,4]
+        gam2 = hkl_del_gam_2[...,4]
+        
+        yx1 = dc.pixelsSurfaceAngles(gam1, delta1, mu)
+        yx2 = dc.pixelsSurfaceAngles(gam2, delta2, mu)
+        
+        ymask1 = np.logical_and(yx1[...,0] >= 0, yx1[...,0] < dc.detector.shape[0])
+        xmask1 = np.logical_and(yx1[...,1] >= 0, yx1[...,1] < dc.detector.shape[1])
+        yxmask1 = np.logical_and(xmask1,ymask1)
+    
+        ymask2 = np.logical_and(yx2[...,0] >= 0, yx2[...,0] < dc.detector.shape[0])
+        xmask2 = np.logical_and(yx2[...,1] >= 0, yx2[...,1] < dc.detector.shape[1])
+        yxmask2 = np.logical_and(xmask2,ymask2)
+        """
+        
+        if hkl_del_gam_1[0,-1] or hkl_del_gam_2[0,-1]:
+            if hkl_del_gam_1[0,-1]:
+                self.plotROI(hkl_del_gam_1[0,6:8])
+
+            if hkl_del_gam_2[0,-1]:
+                self.plotROI(hkl_del_gam_2[0,6:8])
+        else:
+            for roi in self.rois:
+                roi.setVisible(False)
+            self.centralPlot.removeMarker('main_croi_loc')
+        
+    def getROIloc(self, imageno=None):
+        if self.fscan is None:
+            raise Exception("No scan loaded!")
+        
+        if imageno is None:
+            om = np.deg2rad(self.fscan.omega)
+        else:
+            om = np.deg2rad(self.fscan.omega[imageno])
+            
+        dc = self.ubcalc.detectorCal
+        mu = self.ubcalc.mu
+        angles = self.ubcalc.angles
+        
+        H_1 = np.array([h.value() for h in self.scanSelector.H_1])
+        H_0 = np.array([h.value() for h in self.scanSelector.H_0])
+        
+        hkl_del_gam_1, hkl_del_gam_2 = angles.anglesIntersectLineEwald(H_0, H_1, mu, om, self.ubcalc.phi,self.ubcalc.chi)
+        
+        delta1 = hkl_del_gam_1[...,3]
+        delta2 = hkl_del_gam_2[...,3]
+        gam1 = hkl_del_gam_1[...,4]
+        gam2 = hkl_del_gam_2[...,4]
+        
+        yx1 = dc.pixelsSurfaceAngles(gam1, delta1, mu)
+        yx2 = dc.pixelsSurfaceAngles(gam2, delta2, mu)
+        
+        ymask1 = np.logical_and(yx1[...,0] >= 0, yx1[...,0] < dc.detector.shape[0])
+        xmask1 = np.logical_and(yx1[...,1] >= 0, yx1[...,1] < dc.detector.shape[1])
+        yxmask1 = np.logical_and(xmask1,ymask1)
+    
+        ymask2 = np.logical_and(yx2[...,0] >= 0, yx2[...,0] < dc.detector.shape[0])
+        xmask2 = np.logical_and(yx2[...,1] >= 0, yx2[...,1] < dc.detector.shape[1])
+        yxmask2 = np.logical_and(xmask2,ymask2)
+        
+        xy1 = yx1[...,::-1]
+        xy2 = yx2[...,::-1]
+        
+        return np.concatenate((np.atleast_2d(hkl_del_gam_1), xy1, yxmask1[...,np.newaxis]),axis=-1),\
+               np.concatenate((np.atleast_2d(hkl_del_gam_2), xy2, yxmask2[...,np.newaxis]),axis=-1)
+
+    def plotROI(self, loc):
+
+        key = self.intkey(loc)
+        bkgkey = self.bkgkeys(loc)
+        for roi in self.rois:
+           roi.setVisible(True)
+        
+        #print([(roi, roi.isEditable()) for roi in self.rois])
+        
+        #croi:
+        self.rois[4].setGeometry(origin=(key[0].start, key[1].start), size=(key[0].stop - key[0].start, key[1].stop - key[1].start))
+        #self.rois[4].setVisible(True)
+        for i,k in enumerate(bkgkey,0):
+            self.rois[i].setGeometry(origin=(k[0].start, k[1].start), size=( k[0].stop - k[0].start, k[1].stop - k[1].start))
+
+        self.roiManager._roisUpdated()
+        
+        #print([str(r) for r in self.roiManager.getRois()])
+        self.centralPlot.addMarker(loc[0],loc[1],legend='main_croi_loc')
+        
+    def integrateROI(self):
+        print("integr")
+        try:
+            image = self.fscan.get_raw_img(0)
+        except Exception as e:
+            print("no images found! %s" % e)
+            return
+            
+        H_1 = np.array([h.value() for h in self.scanSelector.H_1])
+        H_0 = np.array([h.value() for h in self.scanSelector.H_0])
+        
+        hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc()
+        
+        dataavail = np.logical_or(hkl_del_gam_1[:,-1],hkl_del_gam_2[:,-1])
+
+        croi1 = np.zeros_like(dataavail)
+        cpixel1 = np.zeros_like(dataavail)
+        bgroi1 = np.zeros_like(dataavail)
+        bgpixel1 = np.zeros_like(dataavail)
+        
+        croi2 = np.zeros_like(dataavail)
+        cpixel2 = np.zeros_like(dataavail)
+        bgroi2 = np.zeros_like(dataavail)
+        bgpixel2 = np.zeros_like(dataavail)
+
+        progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
+        progress.setWindowModality(qt.Qt.WindowModal)
+        for i in range(len(self.fscan)):
+            if not dataavail[i]:
+                croi1[i] = np.nan; croi2[i] = np.nan
+                cpixel1[i] = np.nan; cpixel2[i] = np.nan
+                bgroi1[i] = np.nan; bgroi2[i] = np.nan
+                bgpixel1[i] = np.nan; bgpixel2[i] = np.nan
+                progress.setValue(i)
+                if progress.wasCanceled():
+                    break
+                continue
+            image = self.fscan.get_raw_img(i)
+            if hkl_del_gam_1[i,-1]:
+                key = self.intkey(hkl_del_gam_1[i,6:8])
+                bkgkey = self.bkgkeys(hkl_del_gam_1[i,6:8])
+                
+                cimg = image.img[key]
+                # !!!!!!!!!! add mask here  !!!!!!!!!
+                croi1[i] = np.nansum(cimg)
+                cpixel1[i] = cimg.size
+                for bg in bkgkey:
+                    bgimg = image.img[bg]
+                    bgroi1[i] += np.nansum(bgimg)
+                    bgpixel1[i] += bgimg.size
+            else:
+                croi1[i] = np.nan
+                cpixel1[i] = np.nan
+                bgroi1[i] = np.nan
+                bgpixel1[i] = np.nan
+            
+            if hkl_del_gam_2[i,-1]:
+                key = self.intkey(hkl_del_gam_2[i,6:8])
+                bkgkey = self.bkgkeys(hkl_del_gam_2[i,6:8])
+                
+                cimg = image.img[key]
+                # !!!!!!!!!! add mask here  !!!!!!!!!
+                croi2[i] = np.nansum(cimg)
+                cpixel2[i] = cimg.size
+                for bg in bkgkey:
+                    bgimg = image.img[bg]
+                    bgroi2[i] += np.nansum(bgimg)
+                    bgpixel2[i] += bgimg.size
+            else:
+                croi2[i] = np.nan
+                cpixel2[i] = np.nan
+                bgroi2[i] = np.nan
+                bgpixel2[i] = np.nan
+            
+            progress.setValue(i)
+            if progress.wasCanceled():
+                break
+        if np.any(bgpixel1):
+            croibg1 = croi1 - (cpixel1/bgpixel1) * bgroi1
+        else:
+            croibg1 = croi1
+            
+        if np.any(bgpixel2):
+            croibg2 = croi2 - (cpixel2/bgpixel2) * bgroi2
+        else:
+            croibg2 = croi2
+        progress.setValue(len(self.fscan))
+        
+        s1 = hkl_del_gam_1[:,5]
+        s2 = hkl_del_gam_2[:,5]
+        
+        name = str(H_1) + "*s +" + str(H_0)
+        pt = silx.gui.plot.Plot1D()
+        
+        pt.addCurve(s1,croibg1,legend=name+' s1')
+        pt.addCurve(s2,croibg2,legend=name+' s2')
+        pt.show()
         
         
     def _graphCallback(self,eventdict):
@@ -644,6 +894,61 @@ class orGUI(qt.QMainWindow):
             self.reflectionSel.setReflectionActive(eventdict['label'])
         if eventdict['event'] == 'markerClicked':
             self.reflectionSel.setReflectionActive(eventdict['label'])
+        
+    def intkey(self, coords):
+
+        vsize = int(self.scanSelector.vsize.value())
+        hsize = int(self.scanSelector.hsize.value())
+        
+        detvsize, dethsize = self.ubcalc.detectorCal.detector.shape
+        
+        coord_restr = np.clip( np.asarray(coords), [0,0], [dethsize, detvsize])
+
+        
+        vhalfsize = vsize // 2
+        hhalfsize = hsize // 2
+        fromcoords = np.round(np.asarray(coord_restr) - np.array([hhalfsize, vhalfsize]))
+        tocoords = np.round(np.asarray(coord_restr) + np.array([hhalfsize, vhalfsize]))
+        
+        if hsize % 2:
+            if coord_restr[0] % 1 > 0.5:
+                tocoords[0] += 1
+            else:
+                fromcoords[0] -= 1
+        if vsize % 2:
+            if coord_restr[1] % 1 > 0.5:
+                tocoords[1] += 1
+            else:
+                fromcoords[1] -= 1
+                
+        fromcoords = np.clip( np.asarray(fromcoords), [0,0], [dethsize, detvsize])
+        tocoords = np.clip( np.asarray(tocoords), [0,0], [dethsize, detvsize])
+
+        loc = tuple(slice(int(fromcoord), int(tocoord)) for fromcoord, tocoord in zip(fromcoords,tocoords))
+        
+        #from IPython import embed; embed()
+
+        return loc
+
+    def bkgkeys(self, coords):
+
+        left = int(self.scanSelector.left.value())
+        right = int(self.scanSelector.right.value())
+        top = int(self.scanSelector.top.value())
+        bottom = int(self.scanSelector.bottom.value())
+        
+        detvsize, dethsize = self.ubcalc.detectorCal.detector.shape
+        
+        croi = self.intkey(coords)
+        hcroikey = croi[0]
+        vcroikey = croi[1]
+        
+        leftkey = (slice(int(np.clip(croi[0].start - left, 0, dethsize)), croi[0].start), croi[1]) 
+        rightkey = (slice(croi[0].stop,int(np.clip(croi[0].stop + right, 0, dethsize))), croi[1])
+        
+        topkey = (croi[0], slice(int(np.clip(croi[1].start - top, 0, detvsize)), croi[1].start))
+        bottomkey = (croi[0], slice(croi[1].stop, int(np.clip(croi[1].stop + bottom,0,detvsize)) ))
+        return leftkey, rightkey, topkey, bottomkey
         
         
 class Plot2DHKL(silx.gui.plot.PlotWindow):
