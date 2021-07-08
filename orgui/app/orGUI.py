@@ -24,6 +24,7 @@ import warnings
 from io import StringIO
 import concurrent.futures
 import queue
+import threading
 
 #from IPython import embed
 import silx.gui.plot
@@ -73,6 +74,7 @@ class orGUI(qt.QMainWindow):
         self.resetZoom = True
         
         self.fscan = None
+        self.numberthreads = 8
         
         self.filedialogdir = os.getcwd()
         
@@ -629,38 +631,31 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         progress.setWindowModality(qt.Qt.WindowModal)
         #tasks = queue.Queue()
         #[tasks.put(i) for i in range(len(self.fscan))]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor: # can consume a lot of memory!!!
-            future_img = {executor.submit(self.fscan.get_raw_img, i): i for i in range(len(self.fscan))}
-            while(future_img):
-                fdone, pending = concurrent.futures.wait(future_img, return_when=concurrent.futures.FIRST_COMPLETED)
-                future = fdone.pop()
-                imgno = future_img[future]
-                try:
-                    image = future.result()
-                except CancelledError:
-                    pass
-                except Exception as exc:
-                    print('Cannot read image: %s' % (exc))
-                else:
+        lock = threading.Lock()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor: # speedup only for the file reads 
+            futures = {}
+            def readfile_max(imgno):
+                image = self.fscan.get_raw_img(imgno) # here speedup during file read
+                with lock:
                     self.allimgsum += image.img
                     self.allimgmax = np.maximum(self.allimgmax,image.img)
-                progress.setValue(imgno)
-                del future_img[future]
-                if progress.wasCanceled():
-                    [f.cancel() for f in future_img]
-                    break
-            
-            """
+                return imgno
             for i in range(len(self.fscan)):
-                image = self.fscan.get_raw_img(i)
-                self.allimgsum += image.img
-                self.allimgmax = np.maximum(self.allimgmax,image.img)
-                progress.setValue(i)
+                futures[executor.submit(readfile_max, i)] = i
+            
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    imgno = f.result()
+                    progress.setValue(imgno)
+                except concurrent.futures.CancelledError:
+                    pass
+                except Exception as e:
+                    print("Cannot read image:\n%s" % traceback.format_exc())
+
                 if progress.wasCanceled():
-                    #self.allimgsum = None
-                    #self.allimgmax = None
+                    [f.cancel() for f in futures]
                     break
-            """       
+
         progress.setValue(len(self.fscan))
         
     def _onMaxToggled(self,value):
@@ -835,6 +830,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             print("no images found! %s" % e)
             return
             
+
         H_1 = np.array([h.value() for h in self.scanSelector.H_1])
         H_0 = np.array([h.value() for h in self.scanSelector.H_0])
         
@@ -842,19 +838,125 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         
         dataavail = np.logical_or(hkl_del_gam_1[:,-1],hkl_del_gam_2[:,-1])
 
-        croi1 = np.zeros_like(dataavail,dtype=np.float64)
-        cpixel1 = np.zeros_like(dataavail,dtype=np.float64)
-        bgroi1 = np.zeros_like(dataavail,dtype=np.float64)
-        bgpixel1 = np.zeros_like(dataavail,dtype=np.float64)
+        croi1_a = np.zeros_like(dataavail,dtype=np.float64)
+        cpixel1_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgroi1_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgpixel1_a = np.zeros_like(dataavail,dtype=np.float64)
         
-        croi2 = np.zeros_like(dataavail,dtype=np.float64)
-        cpixel2 = np.zeros_like(dataavail,dtype=np.float64)
-        bgroi2 = np.zeros_like(dataavail,dtype=np.float64)
-        bgpixel2 = np.zeros_like(dataavail,dtype=np.float64)
+        croi2_a = np.zeros_like(dataavail,dtype=np.float64)
+        cpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgroi2_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
 
         progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
         
+        def sumImage(i):
+            if not dataavail[i]:
+                croi1 = np.nan; croi2 = np.nan
+                cpixel1 = np.nan; cpixel2 = np.nan
+                bgroi1 = np.nan; bgroi2 = np.nan
+                bgpixel1 = np.nan; bgpixel2 = np.nan
+            else:
+                image = self.fscan.get_raw_img(i)
+                if hkl_del_gam_1[i,-1]:
+                    key = self.intkey(hkl_del_gam_1[i,6:8])
+                    bkgkey = self.bkgkeys(hkl_del_gam_1[i,6:8])
+                    
+                    cimg = image.img[key[::-1]]
+                    
+                    # !!!!!!!!!! add mask here  !!!!!!!!!
+                    croi1 = np.nansum(cimg)
+                    cpixel1 = float(cimg.size)
+                    bgroi1 = 0.
+                    bgpixel1 = 0.
+                    for bg in bkgkey:
+                        bgimg = image.img[bg[::-1]]
+                        bgroi1 += np.nansum(bgimg)
+                        bgpixel1 += bgimg.size
+                else:
+                    croi1 = np.nan
+                    cpixel1 = np.nan
+                    bgroi1 = np.nan
+                    bgpixel1 = np.nan
+                
+                if hkl_del_gam_2[i,-1]:
+                    key = self.intkey(hkl_del_gam_2[i,6:8])
+                    bkgkey = self.bkgkeys(hkl_del_gam_2[i,6:8])
+                    
+                    cimg = image.img[key[::-1]]
+                    # !!!!!!!!!! add mask here  !!!!!!!!!
+                    croi2 = np.nansum(cimg)
+                    cpixel2 = cimg.size
+                    bgroi2 = 0.
+                    bgpixel2 = 0.
+                    for bg in bkgkey:
+                        bgimg = image.img[bg[::-1]]
+                        bgroi2 += np.nansum(bgimg)
+                        bgpixel2 += bgimg.size
+
+                else:
+                    croi2 = np.nan
+                    cpixel2 = np.nan
+                    bgroi2 = np.nan
+                    bgpixel2 = np.nan
+
+            return (croi1, cpixel1, bgroi1, bgpixel1), (croi2, cpixel2, bgroi2, bgpixel2)
+                
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor: # speedup only for the file reads 
+            futures = {}
+            for i in range(len(self.fscan)):
+                futures[executor.submit(sumImage, i)] = i
+            
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    (croi1, cpixel1, bgroi1, bgpixel1), (croi2, cpixel2, bgroi2, bgpixel2) = f.result()
+                    i = futures[f]
+                    croi1_a[i] = croi1
+                    cpixel1_a[i] = cpixel1
+                    bgroi1_a[i] = bgroi1
+                    bgpixel1_a[i] = bgpixel1
+                    croi2_a[i] = croi2
+                    cpixel2_a[i] = cpixel2
+                    bgroi2_a[i] = bgroi2
+                    bgpixel2_a[i] = bgpixel2
+                    
+                    progress.setValue(futures[f])
+                except concurrent.futures.CancelledError:
+                    pass
+                except Exception as e:
+                    print("Cannot read image:\n%s" % traceback.format_exc())
+
+                if progress.wasCanceled():
+                    [f.cancel() for f in futures]
+                    break
+            
+            
+        progress.setValue(len(self.fscan))
+        
+        if np.any(bgpixel1):
+            croibg1_a = croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a
+        else:
+            croibg1_a = croi1_a
+            
+        if np.any(bgpixel2):
+            croibg2_a = croi2_a - (cpixel2_a/bgpixel2_a) * bgroi2_a
+        else:
+            croibg2_a = croi2_a
+
+        
+        s1 = hkl_del_gam_1[:,5]
+        s2 = hkl_del_gam_2[:,5]
+        
+        name = str(H_1) + "*s +" + str(H_0)
+        pt = silx.gui.plot.Plot1D()
+        
+        pt.addCurve(s1,croibg1_a,legend=name+' s1')
+        pt.addCurve(s2,croibg2_a,legend=name+' s2')
+        pt.show()
+        
+        """
         for i in range(len(self.fscan)):
             if not dataavail[i]:
                 croi1[i] = np.nan; croi2[i] = np.nan
@@ -930,7 +1032,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         pt.addCurve(s1,croibg1,legend=name+' s1')
         pt.addCurve(s2,croibg2,legend=name+' s2')
         pt.show()
-        
+        """
         
     def _graphCallback(self,eventdict):
         #print(eventdict)

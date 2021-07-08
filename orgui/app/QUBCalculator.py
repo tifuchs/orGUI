@@ -199,7 +199,7 @@ class QUBCalculator(qt.QTabWidget):
         self.crystal = crystal
         self.n = n
         self.ubCal.setCrystal(self.crystal)
-        self.ubCal.defaultU()
+        #self.ubCal.defaultU()
 
     def _onMachineParamsChanged(self,params):
         [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi] = params
@@ -387,6 +387,7 @@ class QUBCalculator(qt.QTabWidget):
         if len(hkls) > 2:
             if self.latnofit.isChecked():
                 self.ubCal.refineU(hkls,angles)
+                print(self.ubCal.getU())
                 
             if self.latscale.isChecked():
                 if len(hkls) > 3:
@@ -398,7 +399,9 @@ class QUBCalculator(qt.QTabWidget):
                     self.ubCal.refineULattice(hkls,angles,'lat')
                 else:
                     qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 6 reflections to fit lattice and U")
+            print(self.ubCal.getU())
             self.crystalparams.setValues(self.crystal,self.n)
+        print(self.ubCal.getU())
         self.Ueditor.setPlainText(str(self.ubCal.getU()))
             
         
