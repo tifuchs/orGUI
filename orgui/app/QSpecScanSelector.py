@@ -493,7 +493,7 @@ class QSpecScanSelector(qt.QMainWindow):
                     ch5523bliss = False
 
                 if nxcls == 'NXentry':
-                    if 'fiofile' in obj.h5py_target['instrument']:
+                    if 'instrument' in obj.h5py_target and 'fiofile' in obj.h5py_target['instrument']:
                         p212H5 = True
                         scanname = obj.basename
                         scanno, subscanno = scanname.split('.')

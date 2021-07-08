@@ -22,8 +22,10 @@ from silx.gui import qt
 import warnings
 
 from io import StringIO
+import concurrent.futures
+import queue
 
-from IPython import embed
+#from IPython import embed
 import silx.gui.plot
 from silx.gui.plot import items
 from silx.gui.colors import Colormap
@@ -92,7 +94,7 @@ class orGUI(qt.QMainWindow):
         #self.reflections = np.array([])
     
         ubWidget = qt.QWidget()
-        ubLayout = qt.QHBoxLayout()
+        ubLayout = qt.QVBoxLayout()
         self.ubcalc = QUBCalculator(configfile)
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
 
@@ -183,7 +185,7 @@ class orGUI(qt.QMainWindow):
         
         ubWidget.setLayout(ubLayout)
         ubDock.setWidget(ubWidget)
-        self.addDockWidget(qt.Qt.BottomDockWidgetArea,ubDock)
+        self.addDockWidget(qt.Qt.RightDockWidgetArea,ubDock)
         
         
         
@@ -243,6 +245,13 @@ class orGUI(qt.QMainWindow):
         createScanAct = simul.addAction("Create dummy scan")
         createScanAct.triggered.connect(self._onCreateScan)
         
+        helpmenu = menu_bar.addMenu("&Help")
+        aboutAct = helpmenu.addAction("About")
+        aboutAct.triggered.connect(self._onShowAbout)
+        
+        aboutQtAct = helpmenu.addAction("About Qt")
+        aboutQtAct.triggered.connect(lambda : qt.QMessageBox.aboutQt(self))
+        
         self.setMenuBar(menu_bar)
         
     def onShowBragg(self,visible):
@@ -253,6 +262,16 @@ class orGUI(qt.QMainWindow):
         self.roivisible = visible
         self.updateROI()
         
+    def _onShowAbout(self):
+        qt.QMessageBox.about(self, "About orGUI", 
+        """Copyright (c) 2021 Timo Fuchs, Olaf Magnussen all rights reserved
+
+For internal use only. 
+Do not redistribute!
+
+"orGUI" and its dependeny "datautils" were developed during the PhD work of Timo Fuchs,
+within the group of Olaf Magnussen. Usage within the group is hereby granted.
+""")
         
     def calcBraggRefl(self):
         if self.fscan is not None and self.reflectionSel.showBraggReflections:
@@ -608,15 +627,40 @@ class orGUI(qt.QMainWindow):
         self.allimgmax = np.zeros_like(image.img)
         progress = qt.QProgressDialog("Reading images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
-        for i in range(len(self.fscan)):
-            image = self.fscan.get_raw_img(i)
-            self.allimgsum += image.img
-            self.allimgmax = np.maximum(self.allimgmax,image.img)
-            progress.setValue(i)
-            if progress.wasCanceled():
-                #self.allimgsum = None
-                #self.allimgmax = None
-                break
+        #tasks = queue.Queue()
+        #[tasks.put(i) for i in range(len(self.fscan))]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor: # can consume a lot of memory!!!
+            future_img = {executor.submit(self.fscan.get_raw_img, i): i for i in range(len(self.fscan))}
+            while(future_img):
+                fdone, pending = concurrent.futures.wait(future_img, return_when=concurrent.futures.FIRST_COMPLETED)
+                future = fdone.pop()
+                imgno = future_img[future]
+                try:
+                    image = future.result()
+                except CancelledError:
+                    pass
+                except Exception as exc:
+                    print('Cannot read image: %s' % (exc))
+                else:
+                    self.allimgsum += image.img
+                    self.allimgmax = np.maximum(self.allimgmax,image.img)
+                progress.setValue(imgno)
+                del future_img[future]
+                if progress.wasCanceled():
+                    [f.cancel() for f in future_img]
+                    break
+            
+            """
+            for i in range(len(self.fscan)):
+                image = self.fscan.get_raw_img(i)
+                self.allimgsum += image.img
+                self.allimgmax = np.maximum(self.allimgmax,image.img)
+                progress.setValue(i)
+                if progress.wasCanceled():
+                    #self.allimgsum = None
+                    #self.allimgmax = None
+                    break
+            """       
         progress.setValue(len(self.fscan))
         
     def _onMaxToggled(self,value):
@@ -798,18 +842,19 @@ class orGUI(qt.QMainWindow):
         
         dataavail = np.logical_or(hkl_del_gam_1[:,-1],hkl_del_gam_2[:,-1])
 
-        croi1 = np.zeros_like(dataavail)
-        cpixel1 = np.zeros_like(dataavail)
-        bgroi1 = np.zeros_like(dataavail)
-        bgpixel1 = np.zeros_like(dataavail)
+        croi1 = np.zeros_like(dataavail,dtype=np.float64)
+        cpixel1 = np.zeros_like(dataavail,dtype=np.float64)
+        bgroi1 = np.zeros_like(dataavail,dtype=np.float64)
+        bgpixel1 = np.zeros_like(dataavail,dtype=np.float64)
         
-        croi2 = np.zeros_like(dataavail)
-        cpixel2 = np.zeros_like(dataavail)
-        bgroi2 = np.zeros_like(dataavail)
-        bgpixel2 = np.zeros_like(dataavail)
+        croi2 = np.zeros_like(dataavail,dtype=np.float64)
+        cpixel2 = np.zeros_like(dataavail,dtype=np.float64)
+        bgroi2 = np.zeros_like(dataavail,dtype=np.float64)
+        bgpixel2 = np.zeros_like(dataavail,dtype=np.float64)
 
         progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
+        
         for i in range(len(self.fscan)):
             if not dataavail[i]:
                 croi1[i] = np.nan; croi2[i] = np.nan
@@ -820,19 +865,22 @@ class orGUI(qt.QMainWindow):
                 if progress.wasCanceled():
                     break
                 continue
+            #from IPython import embed; embed() 
             image = self.fscan.get_raw_img(i)
             if hkl_del_gam_1[i,-1]:
                 key = self.intkey(hkl_del_gam_1[i,6:8])
                 bkgkey = self.bkgkeys(hkl_del_gam_1[i,6:8])
                 
-                cimg = image.img[key]
+                cimg = image.img[key[::-1]]
+                
                 # !!!!!!!!!! add mask here  !!!!!!!!!
                 croi1[i] = np.nansum(cimg)
                 cpixel1[i] = cimg.size
                 for bg in bkgkey:
-                    bgimg = image.img[bg]
+                    bgimg = image.img[bg[::-1]]
                     bgroi1[i] += np.nansum(bgimg)
                     bgpixel1[i] += bgimg.size
+                print(croi1[i], cpixel1[i], bgroi1[i], bgpixel1[i])
             else:
                 croi1[i] = np.nan
                 cpixel1[i] = np.nan
@@ -843,19 +891,21 @@ class orGUI(qt.QMainWindow):
                 key = self.intkey(hkl_del_gam_2[i,6:8])
                 bkgkey = self.bkgkeys(hkl_del_gam_2[i,6:8])
                 
-                cimg = image.img[key]
+                cimg = image.img[key[::-1]]
                 # !!!!!!!!!! add mask here  !!!!!!!!!
                 croi2[i] = np.nansum(cimg)
                 cpixel2[i] = cimg.size
                 for bg in bkgkey:
-                    bgimg = image.img[bg]
+                    bgimg = image.img[bg[::-1]]
                     bgroi2[i] += np.nansum(bgimg)
                     bgpixel2[i] += bgimg.size
+                print(croi2[i], cpixel2[i], bgroi2[i], bgpixel2[i])
             else:
                 croi2[i] = np.nan
                 cpixel2[i] = np.nan
                 bgroi2[i] = np.nan
                 bgpixel2[i] = np.nan
+            
             
             progress.setValue(i)
             if progress.wasCanceled():

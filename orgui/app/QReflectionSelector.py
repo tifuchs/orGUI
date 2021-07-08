@@ -100,28 +100,31 @@ class QReflectionSelector(qt.QSplitter):
         self.Lbox.setRange(-100,100)
         self.Lbox.setDecimals(2)
 
+        self.actionbuttons = qt.QSplitter(self)
+        self.actionbuttons.setOrientation(qt.Qt.Horizontal)
         
-        applyButton = qt.QPushButton("Apply",self.reflectionWidget)
+        applyButton = qt.QPushButton("Apply",self.actionbuttons)
         #applyButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
         applyButton.setToolTip("Accept changes")
         applyButton.clicked.connect(self._onApplyChange)
         
-        gotoImageButton = qt.QPushButton("goto Image",self.reflectionWidget)
+        gotoImageButton = qt.QPushButton("goto Image",self.actionbuttons)
         #applyButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
         gotoImageButton.setToolTip("diplay image with this reflection")
         gotoImageButton.clicked.connect(self._onGotoImage)
         
-        setImageButton = qt.QPushButton("set Image",self.reflectionWidget)
+        setImageButton = qt.QPushButton("set Image",self.actionbuttons)
         #applyButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
         setImageButton.setToolTip("set this image for this reflection")
         setImageButton.clicked.connect(self._onSetImage)
         
-        deleteButton = qt.QPushButton("Delete",self.reflectionWidget)
+        deleteButton = qt.QPushButton("Delete",self.actionbuttons)
         #applyButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
         deleteButton.setToolTip("Delete Reflection")
         deleteButton.clicked.connect(self._onDelete)
         
         self.addWidget(self.reflectionWidget)
+        self.addWidget(self.actionbuttons)
         
         editorSplitter = qt.QSplitter()
         editorSplitter.setOrientation(qt.Qt.Horizontal)
