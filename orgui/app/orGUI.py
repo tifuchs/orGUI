@@ -74,7 +74,9 @@ class orGUI(qt.QMainWindow):
         self.resetZoom = True
         
         self.fscan = None
-        self.numberthreads = 8
+        self.numberthreads = int(min(os.cpu_count(), 8)) if os.cpu_count() is not None else 1 
+        if 'SLURM_CPUS_ON_NODE' in os.environ:
+            self.numberthreads = int(os.environ['SLURM_CPUS_ON_NODE'])
         
         self.filedialogdir = os.getcwd()
         
@@ -198,12 +200,14 @@ class orGUI(qt.QMainWindow):
         file.addAction(self.scanSelector.closeFileAction)
         
         config_menu =  menu_bar.addMenu("&Config")
-        loadConfigAct = qt.QAction("Load machine config",self) # connected with UBCalculator below
-        loadXtalAct = qt.QAction("Load Crystal file",self)
+        loadConfigAct = qt.QAction("Load config",self) # connected with UBCalculator below
+        #loadXtalAct = qt.QAction("Load Crystal file",self)
         machineParamsAct = qt.QAction("Machine parameters",self)
         machineParamsAct.setCheckable(True)
         xtalParamsAct = qt.QAction("Crystal parameters",self)
         xtalParamsAct.setCheckable(True)
+        cpucountAct = qt.QAction("Set CPU count",self)
+        
         
         loadConfigAct.triggered.connect(self.ubcalc._onLoadConfig)        
         machineParamsAct.toggled.connect(lambda checked: self.ubcalc.machineDialog.setVisible(checked))
@@ -212,12 +216,15 @@ class orGUI(qt.QMainWindow):
         xtalParamsAct.toggled.connect(lambda checked: self.ubcalc.xtalDialog.setVisible(checked))
         self.ubcalc.xtalDialog.sigHide.connect(lambda : xtalParamsAct.setChecked(False))
         
-
+        cpucountAct.triggered.connect(self._onSelectCPUcount)
+        
         config_menu.addAction(loadConfigAct)
-        config_menu.addAction(loadXtalAct)
+        #config_menu.addAction(loadXtalAct)
         config_menu.addSeparator()
         config_menu.addAction(machineParamsAct)
         config_menu.addAction(xtalParamsAct)
+        config_menu.addSeparator()
+        config_menu.addAction(cpucountAct)
         
         view_menu = menu_bar.addMenu("&View")
         showRefReflectionsAct = view_menu.addAction("show reference reflections")
@@ -274,6 +281,18 @@ Do not redistribute!
 "orGUI" and its dependeny "datautils" were developed during the PhD work of Timo Fuchs,
 within the group of Olaf Magnussen. Usage within the group is hereby granted.
 """)
+
+    def _onSelectCPUcount(self):
+        maxavail = os.cpu_count() if os.cpu_count() is not None else 1 
+        if 'SLURM_CPUS_ON_NODE' in os.environ:
+            maxavail = int(os.environ['SLURM_CPUS_ON_NODE'])
+        
+        cpus, success = qt.QInputDialog.getInt(self,"CPU count",
+                               "CPU count (detected: %s)" % maxavail,
+                               self.numberthreads,1)
+        if success:
+            self.numberthreads = cpus
+        
         
     def calcBraggRefl(self):
         if self.fscan is not None and self.reflectionSel.showBraggReflections:

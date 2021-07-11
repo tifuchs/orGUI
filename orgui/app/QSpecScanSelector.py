@@ -30,11 +30,19 @@ from  silx.gui.hdf5.Hdf5TreeModel import Hdf5TreeModel
 from silx.gui.dialog import ImageFileDialog
 from silx.gui import icons
 
+#from silx.gui.widgets import HorizontalSliderWithBrowser
+
 import silx.gui.hdf5
 from silx.gui.data import DataViewerFrame
 import h5py
 
 import warnings
+
+
+#class ThBrowser(HorizontalSliderWithBrowser):
+# todo    
+    
+        
 
 
 class QSpecScanSelector(qt.QMainWindow):
@@ -157,8 +165,8 @@ class QSpecScanSelector(qt.QMainWindow):
         self.toolbar.addWidget(self.thSelector)
         
         self.toolbar.addWidget(self.slider)
-        decreaseImageNo = self.toolbar.addAction("previous image")
-        increaseImageNo = self.toolbar.addAction("next image")
+        decreaseImageNo = self.toolbar.addAction(icons.getQIcon("previous"),"previous image")
+        increaseImageNo = self.toolbar.addAction(icons.getQIcon("next"),"next image")
         
         
         increaseImageNo.setShortcut(qt.QKeySequence( qt.Qt.Key_Plus))
