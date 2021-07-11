@@ -325,10 +325,26 @@ class QSpecScanSelector(qt.QMainWindow):
         [locationGroupLayout.addWidget(h) for h in self.H_0]
         locationGroup.setLayout(locationGroupLayout)
         
+        optionsGroup = qt.QGroupBox("Integration options")
+        optionsGroupLayout = qt.QGridLayout()
+        self.useMaskBox = qt.QCheckBox("Use pixel mask")
+        self.useLorentzBox = qt.QCheckBox("Lorentz correction")
+        self.useLorentzBox.setEnabled(False)
+        self.useSolidAngleBox = qt.QCheckBox("Solid angle correction")
+        self.usePolarizationBox = qt.QCheckBox("Polarization correction")
+        
+        optionsGroupLayout.addWidget(self.useMaskBox,0,0)
+        optionsGroupLayout.addWidget(self.useLorentzBox,1,0)
+        optionsGroupLayout.addWidget(self.useSolidAngleBox,0,1)
+        optionsGroupLayout.addWidget(self.usePolarizationBox,1,1)
+        
+        optionsGroup.setLayout(optionsGroupLayout)
+        
         self.roiIntegrateTabLayout.addWidget(roiGroup)
         self.roiIntegrateTabLayout.addWidget(qt.QLabel("Integrate along a line given by:\nH(s) = H_1 * s + H_0"))
         self.roiIntegrateTabLayout.addWidget(directionGroup)
         self.roiIntegrateTabLayout.addWidget(locationGroup)
+        self.roiIntegrateTabLayout.addWidget(optionsGroup)
         
         self.integrateROIBtn = qt.QPushButton("ROI integrate scan")
         self.integrateROIBtn.clicked.connect(lambda : self.sigROIintegrate.emit())

@@ -83,7 +83,7 @@ class orGUI(qt.QMainWindow):
         self.currentImageLabel = None
         self.currentAddImageLabel = None
         
-        selectorDock = qt.QDockWidget()
+        selectorDock = qt.QDockWidget("Scan data")
         selectorDock.setAllowedAreas(qt.Qt.LeftDockWidgetArea | qt.Qt.RightDockWidgetArea)
         self.scanSelector = QSpecScanSelector(self)
         selectorDock.setWidget(self.scanSelector)
@@ -101,14 +101,23 @@ class orGUI(qt.QMainWindow):
         ubLayout = qt.QVBoxLayout()
         self.ubcalc = QUBCalculator(configfile)
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
-
+        
+        
+        
+        maincentralwidget = qt.QTabWidget()
+        
+        self.integrdataPlot = silx.gui.plot.Plot1D(self)
+        legendwidget = self.integrdataPlot.getLegendsDockWidget()
+        
+        self.integrdataPlot.addDockWidget(qt.Qt.RightDockWidgetArea,legendwidget)
+        legendwidget.show()
+        
         self.centralPlot = Plot2DHKL(self.newXyHKLConverter(),parent=self)
         self.centralPlot.setDefaultColormap(Colormap(name='jet',normalization='log'))
         self.centralPlot.setCallback(self._graphCallback)
 
         self.scanSelector.sigImageNoChanged.connect(self._onSliderValueChanged)
-        
-        
+
         self.scanSelector.sigImagePathChanged.connect(self._onImagePathChanged)
         self.scanSelector.sigScanChanged.connect(self._onScanChanged)
         
@@ -136,8 +145,10 @@ class orGUI(qt.QMainWindow):
         toolbar = self.scanSelector.getScanToolbar()
         self.centralPlot.addToolBar(qt.Qt.BottomToolBarArea,toolbar)
         
-
-        self.setCentralWidget(self.centralPlot)
+        maincentralwidget.addTab(self.centralPlot,"Scan Image browser")
+        maincentralwidget.addTab(self.integrdataPlot,"ROI integrated data")
+        
+        self.setCentralWidget(maincentralwidget)
         
         
         # Create the object controlling the ROIs and set it up
@@ -168,7 +179,7 @@ class orGUI(qt.QMainWindow):
         
         #self.reflTable.view._model.dataChanged.connect(printmodel)
         #self.reflTable.setArrayData(np.array([0,0,0,0,10,10],dtype=np.float))
-        ubDock = qt.QDockWidget()
+        ubDock = qt.QDockWidget("Reciprocal space navigation")
         ubDock.setAllowedAreas(qt.Qt.LeftDockWidgetArea | qt.Qt.RightDockWidgetArea | qt.Qt.BottomDockWidgetArea)
         
         self.reflectionSel = QReflectionSelector(self.centralPlot)
@@ -189,7 +200,7 @@ class orGUI(qt.QMainWindow):
         
         ubWidget.setLayout(ubLayout)
         ubDock.setWidget(ubWidget)
-        self.addDockWidget(qt.Qt.RightDockWidgetArea,ubDock)
+        self.centralPlot.addDockWidget(qt.Qt.RightDockWidgetArea,ubDock)
         
         
         
@@ -842,16 +853,34 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         self.centralPlot.addMarker(loc[0],loc[1],legend='main_croi_loc')
         
     def integrateROI(self):
-        print("integr")
         try:
             image = self.fscan.get_raw_img(0)
         except Exception as e:
             print("no images found! %s" % e)
             return
-            
+        
+        dc = self.ubcalc.detectorCal
+        mu = self.ubcalc.mu
+        angles = self.ubcalc.angles
 
         H_1 = np.array([h.value() for h in self.scanSelector.H_1])
         H_0 = np.array([h.value() for h in self.scanSelector.H_0])
+        
+        if self.scanSelector.useMaskBox.isChecked():
+            imgmask = self.centralPlot.getMaskToolsDockWidget().getSelectionMask()
+        else:
+            imgmask = slice(None)
+        
+        corr = self.scanSelector.useSolidAngleBox.isChecked() or\
+            self.scanSelector.usePolarizationBox.isChecked()
+        
+        if corr:
+            C_arr = np.ones_like(imgmask,dtype=np.float64)
+            if self.scanSelector.useSolidAngleBox.isChecked():
+                C_arr /= dc.solidAngleArray()
+            if self.scanSelector.usePolarizationBox.isChecked():
+                C_arr /= dc.polarization(factor=dc._polFactor,axis_offset=dc._polAxis)
+
         
         hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc()
         
@@ -877,22 +906,27 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 bgroi1 = np.nan; bgroi2 = np.nan
                 bgpixel1 = np.nan; bgpixel2 = np.nan
             else:
-                image = self.fscan.get_raw_img(i)
+                image = self.fscan.get_raw_img(i).img
+                image[imgmask] = np.nan
+                pixelavail = (~imgmask).astype(np.float64)
+                if corr:
+                    image *= C_arr
+                    
                 if hkl_del_gam_1[i,-1]:
                     key = self.intkey(hkl_del_gam_1[i,6:8])
                     bkgkey = self.bkgkeys(hkl_del_gam_1[i,6:8])
                     
-                    cimg = image.img[key[::-1]]
+                    cimg = image[key[::-1]]
                     
                     # !!!!!!!!!! add mask here  !!!!!!!!!
                     croi1 = np.nansum(cimg)
-                    cpixel1 = float(cimg.size)
+                    cpixel1 = np.nansum(pixelavail[key[::-1]])
                     bgroi1 = 0.
                     bgpixel1 = 0.
                     for bg in bkgkey:
-                        bgimg = image.img[bg[::-1]]
+                        bgimg = image[bg[::-1]]
                         bgroi1 += np.nansum(bgimg)
-                        bgpixel1 += bgimg.size
+                        bgpixel1 += np.nansum(pixelavail[bg[::-1]])
                 else:
                     croi1 = np.nan
                     cpixel1 = np.nan
@@ -903,16 +937,16 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                     key = self.intkey(hkl_del_gam_2[i,6:8])
                     bkgkey = self.bkgkeys(hkl_del_gam_2[i,6:8])
                     
-                    cimg = image.img[key[::-1]]
+                    cimg = image[key[::-1]]
                     # !!!!!!!!!! add mask here  !!!!!!!!!
                     croi2 = np.nansum(cimg)
-                    cpixel2 = cimg.size
+                    cpixel2 = np.nansum(pixelavail[key[::-1]])
                     bgroi2 = 0.
                     bgpixel2 = 0.
                     for bg in bkgkey:
-                        bgimg = image.img[bg[::-1]]
+                        bgimg = image[bg[::-1]]
                         bgroi2 += np.nansum(bgimg)
-                        bgpixel2 += bgimg.size
+                        bgpixel2 += np.nansum(pixelavail[bg[::-1]])
 
                 else:
                     croi2 = np.nan
@@ -964,16 +998,20 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         else:
             croibg2_a = croi2_a
 
+        rod_mask1 = np.isfinite(croibg1_a)
+        rod_mask2 = np.isfinite(croibg2_a)
         
-        s1 = hkl_del_gam_1[:,5]
-        s2 = hkl_del_gam_2[:,5]
+        s1 = hkl_del_gam_1[:,5][rod_mask1]
+        s2 = hkl_del_gam_2[:,5][rod_mask2]
+        
+        croibg1_a = croibg1_a[rod_mask1]
+        croibg2_a = croibg2_a[rod_mask2]
         
         name = str(H_1) + "*s +" + str(H_0)
-        pt = silx.gui.plot.Plot1D()
-        
-        pt.addCurve(s1,croibg1_a,legend=name+' s1')
-        pt.addCurve(s2,croibg2_a,legend=name+' s2')
-        pt.show()
+        if croibg1_a.size > 0:
+            self.integrdataPlot.addCurve(s1,croibg1_a,legend=name+' s1')
+        if croibg2_a.size > 0:
+            self.integrdataPlot.addCurve(s2,croibg2_a,legend=name+' s2')
         
         """
         for i in range(len(self.fscan)):
@@ -1141,7 +1179,7 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
                              curveStyle=False, colormap=True,
                              aspectRatio=True, yInverted=True,
                              copy=True, save=True, print_=True,
-                             control=False, position=posInfo,
+                             control=True, position=posInfo,
                              roi=False, mask=True)
         
         if parent is None:
@@ -1149,8 +1187,9 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
         self.getXAxis().setLabel('Columns')
         self.getYAxis().setLabel('Rows')
 
-        if silx.config.DEFAULT_PLOT_IMAGE_Y_AXIS_ORIENTATION == 'downward':
-            self.getYAxis().setInverted(True)
+        #if silx.config.DEFAULT_PLOT_IMAGE_Y_AXIS_ORIENTATION == 'downward':
+        self.getYAxis().setInverted(True)
+        
 
         self.profile = ProfileToolBar(plot=self)
         self.addToolBar(self.profile)
@@ -1237,6 +1276,15 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
             return value, "Masked"
         return value
 
+    def _getImageDims(self, *args):
+        activeImage = self.getActiveImage()
+        if (activeImage is not None and
+                    activeImage.getData(copy=False) is not None):
+            dims = activeImage.getData(copy=False).shape[1::-1]
+            return 'x'.join(str(dim) for dim in dims)
+        else:
+            return '-'
+
     def getProfileToolbar(self):
         """Profile tools attached to this plot
 
@@ -1244,6 +1292,9 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
         """
         return self.profile
 
+    #@deprecated(replacement="getProfilePlot", since_version="0.5.0")
+    def getProfileWindow(self):
+        return self.getProfilePlot()
 
     def getProfilePlot(self):
         """Return plot window used to display profile curve.
