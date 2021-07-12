@@ -866,16 +866,22 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         H_1 = np.array([h.value() for h in self.scanSelector.H_1])
         H_0 = np.array([h.value() for h in self.scanSelector.H_0])
         
+        imgmask = None
+        
         if self.scanSelector.useMaskBox.isChecked():
-            imgmask = self.centralPlot.getMaskToolsDockWidget().getSelectionMask()
-        else:
-            imgmask = slice(None)
+            if self.centralPlot.getMaskToolsDockWidget().getSelectionMask() is None:
+                btn = qt.QMessageBox.question(self,"No mask available","""No mask was selected with the masking tool.
+Do you want to continue without mask?""")
+                if btn != qt.QMessageBox.Yes:
+                    return
+            else:
+                imgmask = self.centralPlot.getMaskToolsDockWidget().getSelectionMask()
         
         corr = self.scanSelector.useSolidAngleBox.isChecked() or\
             self.scanSelector.usePolarizationBox.isChecked()
         
         if corr:
-            C_arr = np.ones_like(imgmask,dtype=np.float64)
+            C_arr = np.ones(dc.detector.shape,dtype=np.float64)
             if self.scanSelector.useSolidAngleBox.isChecked():
                 C_arr /= dc.solidAngleArray()
             if self.scanSelector.usePolarizationBox.isChecked():
@@ -907,8 +913,11 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 bgpixel1 = np.nan; bgpixel2 = np.nan
             else:
                 image = self.fscan.get_raw_img(i).img
-                image[imgmask] = np.nan
-                pixelavail = (~imgmask).astype(np.float64)
+                if imgmask is not None:
+                    image[imgmask] = np.nan
+                    pixelavail = (~imgmask).astype(np.float64)
+                else:
+                    pixelavail = np.ones_like(image)
                 if corr:
                     image *= C_arr
                     
@@ -1120,12 +1129,12 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         tocoords = np.round(np.asarray(coord_restr) + np.array([hhalfsize, vhalfsize]))
         
         if hsize % 2:
-            if coord_restr[0] % 1 > 0.5:
+            if coord_restr[0] % 1 < 0.5:
                 tocoords[0] += 1
             else:
                 fromcoords[0] -= 1
         if vsize % 2:
-            if coord_restr[1] % 1 > 0.5:
+            if coord_restr[1] % 1 < 0.5:
                 tocoords[1] += 1
             else:
                 fromcoords[1] -= 1
