@@ -283,14 +283,25 @@ class QUBCalculator(qt.QTabWidget):
             self.phi = np.deg2rad(diffrac.getfloat('phi',0.0))
             
 
-            a1 = lattice.getfloat('a1')
-            a2 = lattice.getfloat('a2')
-            a3 = lattice.getfloat('a3')
-            alpha1 = lattice.getfloat('alpha1')
-            alpha2 = lattice.getfloat('alpha2')
-            alpha3 = lattice.getfloat('alpha3')
+            a1 = lattice.getfloat('a1',-1)
+            a2 = lattice.getfloat('a2',-1)
+            a3 = lattice.getfloat('a3',-1)
+            alpha1 = lattice.getfloat('alpha1',-1)
+            alpha2 = lattice.getfloat('alpha2',-1)
+            alpha3 = lattice.getfloat('alpha3',-1)
             self.n = 1 - lattice.getfloat('refractionindex',0.0)
-
+            
+            lat = np.array([a1,a2,a3])
+            
+            latticeoverride = True
+            latangle = np.array([alpha1,alpha2,alpha3])
+            if np.any(lat < 0.) or np.any(latangle < 0):
+                latticeoverride = False
+                a1 = a2 = a3 = 1.
+                alpha1 = alpha2 = alpha3 = 90.
+                print("Fallback lattice vectors")
+                
+            
             self.crystal = CTRcalc.UnitCell([a1,a2,a3],[alpha1,alpha2,alpha3])
             self.crystal.addAtom('Pt',[0.,0.,0.],0.1,0.1,1.)
             self.crystal.setEnergy(E*1e3)
@@ -298,6 +309,19 @@ class QUBCalculator(qt.QTabWidget):
             self.ubCal = HKLVlieg.UBCalculator(self.crystal,E)
             self.ubCal.defaultU()
             self.angles = HKLVlieg.VliegAngles(self.ubCal)
+            
+            if 'crystal' in lattice:
+                idx = self.crystalparams.crystalComboBox.findText(lattice['crystal'],qt.Qt.MatchFixedString)
+                if idx == -1:
+                    qt.QMessageBox.warning(self,"Did not find crystal","Can not find crystal <%s> \nException occured during read of configfile %s,\nException:\n%s" % (unitcellsconfigfile,traceback.format_exc()))
+                else:
+                    self.crystalparams.crystalComboBox.setCurrentIndex(idx)
+                    self.crystalparams.onSwitchCrystal(idx)
+                    #self.crystal = self.crystalparams.getCrystal()
+
+            if latticeoverride:
+                print('foo')
+                self.crystal.setLattice([a1,a2,a3],[alpha1,alpha2,alpha3])
             
             self.detectorCal = DetectorCalibration.Detector2D_SXRD()
             if 'poni' in machine:
@@ -328,7 +352,7 @@ class QUBCalculator(qt.QTabWidget):
             return True
             
         except Exception as e:
-            qt.QMessageBox.warning(self,"Can not parse config","Can not parse config file:\nException occured during parsing of configfile %s,\nException:\n %s" % (configfile,e))
+            qt.QMessageBox.warning(self,"Can not parse config","Can not parse config file:\nException occured during parsing of configfile %s,\nException:\n %s" % (configfile,traceback.format_exc()))
             return False
         
     def toFallbackConfig(self):
