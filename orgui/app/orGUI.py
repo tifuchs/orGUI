@@ -248,16 +248,18 @@ class orGUI(qt.QMainWindow):
         showBraggAct.setChecked(False)
         showBraggAct.toggled.connect(self.onShowBragg)
         
-        saveBraggAct = view_menu.addAction("save allowed Bragg reflections")
-        saveBraggAct.setCheckable(False)
-        saveBraggAct.triggered.connect(self.saveBraggRefl)
-        
         showROIAct = view_menu.addAction("show ROI")
         showROIAct.setCheckable(True)
         showROIAct.setChecked(False)
         showROIAct.toggled.connect(self.onShowROI)
         self.roivisible = False
         #self.scanSelector.showROICheckBox.addAction(showROIAct)
+        
+        view_menu.addSeparator()
+        
+        saveBraggAct = view_menu.addAction("save allowed Bragg reflections")
+        saveBraggAct.setCheckable(False)
+        saveBraggAct.triggered.connect(self.saveBraggRefl)
         
         calcCTRsAvailableAct = qt.QAction("Calculate available CTRs",self)
         calcCTRsAvailableAct.triggered.connect(self._onCalcAvailableCTR)
@@ -284,7 +286,10 @@ class orGUI(qt.QMainWindow):
         
     def onShowROI(self,visible):
         self.roivisible = visible
-        self.updateROI()
+        try:
+            self.updateROI()
+        except Exception:
+            qt.QMessageBox.critical(self,"Cannot show ROI", "Cannot Cannot show ROI:\n%s" % traceback.format_exc())
         
     def _onShowAbout(self):
         qt.QMessageBox.about(self, "About orGUI", 
@@ -328,26 +333,28 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         
 
     def saveBraggRefl(self):
-        if self.fscan is not None and self.reflectionSel.showBraggReflections:
-            try:
-                xtal = self.ubcalc.crystal
-                ommin = np.deg2rad(np.amin(self.fscan.omega))
-                ommax = np.deg2rad(np.amax(self.fscan.omega))
-                dc = self.ubcalc.detectorCal
-                mu = self.ubcalc.mu
-                ub = self.ubcalc.ubCal
-                xtal.setEnergy(ub.getEnergy()*1e3)
-               
-                
-                hkls, yx, angles = rn.thscanBragg(xtal,ub,mu,dc,(ommin,ommax))
-                
-                
-                #self.reflectionSel.setBraggReflections(hkls, yx, angles)
-            except Exception:
-                qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\n%s" % traceback.format_exc())
+        try:
+            hkls, yx, angles = self.reflectionSel.getBraggReflections()
+        except ValueError:
+            if self.fscan is not None:
+                try:
+                    xtal = self.ubcalc.crystal
+                    ommin = np.deg2rad(np.amin(self.fscan.omega))
+                    ommax = np.deg2rad(np.amax(self.fscan.omega))
+                    dc = self.ubcalc.detectorCal
+                    mu = self.ubcalc.mu
+                    ub = self.ubcalc.ubCal
+                    xtal.setEnergy(ub.getEnergy()*1e3)
+                    hkls, yx, angles = rn.thscanBragg(xtal,ub,mu,dc,(ommin,ommax))
+                    
+                    
+                    #self.reflectionSel.setBraggReflections(hkls, yx, angles)
+                except Exception:
+                    qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\n%s" % traceback.format_exc())
+                    return
+            else:
+                qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\nNo scan loaded.")
                 return
-        else:
-            return
 
         hkm = np.concatenate((hkls, yx[:,::-1], np.rad2deg(angles)), axis=1)
 
@@ -355,8 +362,8 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         np.savetxt(sio,hkm,fmt="%.3f", delimiter='\t',header="H K L x y alpha delta gamma omega chi phi")
 
         #Question dialog for saving the possible CTR locations     
-        msgbox = qt.QMessageBox(qt.QMessageBox.Question,'Saving CTR locations...', 
-                                'Found CTRs. Do you want to save the following positions?',
+        msgbox = qt.QMessageBox(qt.QMessageBox.Question,'Saving Bragg reflection ...', 
+                                'Found possible Bragg reflections. Do you want to save the following positions?',
                                 qt.QMessageBox.Yes | qt.QMessageBox.No, self)
         
         msgbox.setDetailedText(sio.getvalue())
