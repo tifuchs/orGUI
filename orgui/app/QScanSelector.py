@@ -21,8 +21,8 @@ __email__ = "fuchs@physik.uni-kiel.de"
 import sys
 import os
 import shutil
-
-
+from dateutil import parser as dateparser
+from datetime import datetime
 
 from silx.gui import qt
 
@@ -35,17 +35,13 @@ from silx.gui import icons
 import silx.gui.hdf5
 from silx.gui.data import DataViewerFrame
 import h5py
+import traceback
 
 import warnings
 
+from ..backend import backends
 
-#class ThBrowser(HorizontalSliderWithBrowser):
-# todo    
-    
-        
-
-
-class QSpecScanSelector(qt.QMainWindow):
+class QScanSelector(qt.QMainWindow):
     sigScanChanged = qt.pyqtSignal(object)
     sigImagePathChanged = qt.pyqtSignal(object)
     sigImageNoChanged = qt.pyqtSignal(object)
@@ -84,7 +80,7 @@ class QSpecScanSelector(qt.QMainWindow):
 
         self.hdfTreeView.setModel(self.__treeModelSorted)
         
-        self.hdfTreeView.doubleClicked.connect(self._onNEXUSChange)
+        self.hdfTreeView.doubleClicked.connect(self._onNEXUSDoubleClicked)
         
         self.dataviewer = DataViewerFrame.DataViewerFrame()
         self.dataviewerDialog = qt.QDialog(self)
@@ -498,50 +494,33 @@ class QSpecScanSelector(qt.QMainWindow):
             self.sigScanChanged.emit([])
             
     """
-
-    
-    def _onReplaceSelection(self,sel_list):
-        print(sel_list)
-        self.sigScanChanged.emit(sel_list)
         
-    def _onNEXUSChange(self,index):
+    def _onNEXUSDoubleClicked(self,index): # ToDo add try except with popup message!
         nodes = list(self.hdfTreeView.selectedH5Nodes())
         if len(nodes) > 0:
             obj = nodes[0]
             if 'NX_class' in obj.attrs:
                 try:
                     nxcls = obj.attrs['NX_class'].decode("utf-8")
-                    ch5523bliss = True
                 except AttributeError:
                     nxcls = obj.attrs['NX_class']
-                    ch5523bliss = False
 
                 if nxcls == 'NXentry':
-                    if 'instrument' in obj.h5py_target and 'fiofile' in obj.h5py_target['instrument']:
-                        p212H5 = True
-                        scanname = obj.basename
-                        scanno, subscanno = scanname.split('.')
-                    elif ch5523bliss:
-                        p212H5 = False
-                        scanname = obj.local_name
-                        scanno = scanname.split('_')[-1]
-                    else:
-                        p212H5 = False
-                        scanname = obj.local_name
-                        scansuffix = scanname.split('_')[-1]
-                        scanname_nosuffix = '_'.join(scanname.split('_')[:-1])
-                        scanno, subscanno = scansuffix.split('.')
-                        
-                    ddict = dict()
+                    try:    
+                        dt = dateparser.parse(obj.h5py_target['start_time'][()])
+                    except Exception as e:
+                        raise Exception("""Cannot parse start time of the scan:
+%s""" % traceback.format_exc())
+                
+                    btid = backends.getBeamtimeId(dt)
+                    
+                    ddict = backends.scannoConverter[btid](obj)
                     ddict['event'] = "itemDoubleClicked"
                     ddict['file'] = obj.local_filename
-                    ddict['name'] = obj.local_name
                     ddict['node'] = obj
-                    ddict['scanno'] = int(scanno)
-                    ddict['ch5523'] = ch5523bliss
-                    ddict['p212H5'] = p212H5
+                    ddict['beamtime'] = btid
                     self.pathedit.setText(obj.local_filename)
-                    self.scannoBox.setValue(int(scanno))
+                    self.scannoBox.setValue(ddict['scanno'])
                     self.sigScanChanged.emit(ddict)
     """    
     def _onSelectImageFolder(self):

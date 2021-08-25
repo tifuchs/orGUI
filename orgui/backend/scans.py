@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 ###############################################################################
-# Copyright (c) 2020 Timo Fuchs, Olaf Magnussen all rights reserved
+# Copyright (c) 2021 Timo Fuchs, Olaf Magnussen all rights reserved
 #
 # This software was developed during the PhD work of Timo Fuchs,
 # within the group of Olaf Magnussen. Usage within the group is hereby granted.
@@ -9,15 +9,30 @@
 
 """
 __author__ = "Timo Fuchs"
-__copyright__ = "Copyright 2020, Timo Fuchs, Olaf Magnussen all rights reserved"
+__copyright__ = "Copyright 2021, Timo Fuchs, Olaf Magnussen all rights reserved"
 __credits__ = []
 __license__ = "all rights reserved"
 __version__ = "1.0.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
-
 import numpy as np
+
+
+class Scan():
+
+    def __init__(self,hdffilepath_orNode=None, scanno=None):
+        self.axisname = None # either "th" or "mu"
+        self.axis = None # value of either "th" or "mu"
+        self.th = None # or self.mu, depending on scanaxis
+        self.omega = None # = -1*th
+
+    def __len__(self):
+        raise NotImplementedError()
+
+    def get_raw_img(self, i):
+        raise NotImplementedError()
+        
 
 
 class h5_Image:
@@ -29,15 +44,20 @@ class h5_Image:
         self.counters = dict()
 
 
-class SimulationThScan():
+class SimulationScan(Scan):
 
-    def __init__(self, detshape, ommin, ommax, points):
+    def __init__(self, detshape, axismin, axismax, points, axis='th'):
         
         self.shape = detshape
-        
-        self.omega = np.linspace(ommin,ommax,points)
-        self.th = -1*self.omega
-        
+        self.axisname = axis
+        self.axis = np.linspace(axismin,axismax,points)
+        if axis == 'th':
+            self.th = self.axis
+            self.omega = -1*self.th
+        elif axis == 'mu':
+            self.mu = self.axis
+        else:
+            raise ValueError("%s is not an implemented scan axis." % axis)
         self.nopoints = points
         
         self.images = np.zeros((points,*detshape))
@@ -52,3 +72,4 @@ class SimulationThScan():
         self.images[i] = data
         
         
+

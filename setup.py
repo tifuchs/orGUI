@@ -23,8 +23,7 @@ logger = logging.getLogger('orgui')
 
 #from distutils.core import setup
 
-packages = ['orgui',"orgui.app"]
-#package_data = {'datautils.xrayutils' : ['element_colors.txt','water_scattering.dat','water_density_molecularformfactor.dat']}
+packages = ['orgui',"orgui.app", "orgui.backend"]
 
 dry_run = False
 

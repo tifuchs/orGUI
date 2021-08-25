@@ -44,16 +44,17 @@ from silx.gui.plot.items.roi import RectangleROI, PolygonROI, ArcROI
 import traceback
 
 
-from .QSpecScanSelector import QSpecScanSelector
+from .QScanSelector import QScanSelector
 from .QReflectionSelector import QReflectionSelector
 from .QUBCalculator import QUBCalculator
-from .fscan import SimulationThScan
+from ..backend.scans import SimulationScan
+from ..backend import backends
 
 import numpy as np
 from datautils.xrayutils import HKLVlieg, CTRcalc
 from datautils.xrayutils import ReciprocalNavigation as rn
 
-os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
+#os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
 
 import sys
 #sys.path.append('/home/fuchstim/repos/datautils/datautils/xrayutils')
@@ -85,7 +86,7 @@ class orGUI(qt.QMainWindow):
         
         selectorDock = qt.QDockWidget("Scan data")
         selectorDock.setAllowedAreas(qt.Qt.LeftDockWidgetArea | qt.Qt.RightDockWidgetArea)
-        self.scanSelector = QSpecScanSelector(self)
+        self.scanSelector = QScanSelector(self)
         selectorDock.setWidget(self.scanSelector)
         self.addDockWidget(qt.Qt.LeftDockWidgetArea,selectorDock)
     
@@ -601,9 +602,12 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             
     def _onCreateScan(self):
         diag = QScanCreator()
+        diag.shape1.setValue(self.ubcalc.detectorCal.detector.shape[0])
+        diag.shape2.setValue(self.ubcalc.detectorCal.detector.shape[1])
         if diag.exec() == qt.QDialog.Accepted:
-            shape = self.ubcalc.detectorCal.detector.shape
-            fscan = SimulationThScan(shape, diag.omstart.value(),
+            shape = (diag.shape1.value(), diag.shape2.value())
+            self.ubcalc.detectorCal.detector.shape = shape
+            fscan = SimulationScan(shape, diag.omstart.value(),
                                      diag.omend.value(),
                                      diag.no.value())
             self._onScanChanged(fscan)
@@ -622,30 +626,21 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                     self.fscan = Fastscan(self.specfile,self.scanno)
                     self.imageno = 0
                 except Exception:
- 
                     self.scanno = 0
-                    #self.fscan = CrudeThScan(self.specfile,'PE1',r"C:\Timo_loc\P21_2_comissioning\Pt111_HClO4_0.4\PE1\dark00001.tif.gz")
                     self.fscan = FioFastsweep(self.specfile)
                     self.imageno = 0
-                    #self.imagepath = self.fscan.path + "/" + 'PE1'
                 self.reflectionSel.setImage(self.imageno)
                 if self.imagepath != '':
                     self.fscan.set_image_folder(self.imagepath)
                     self.plotImage()
-                    
-                    #self.scanSelector.slider.setMinimum(0)
-                    #self.scanSelector.slider.setMaximum(self.fscan.nopoints-1)
                     self.scanSelector.setTh(self.fscan.th)
-                    #print(self.fscan.nopoints)
-                    #self.readAllImages()
-                    #print(self.centralPlot._callback)
                     
             else:
                 self.scanSelector.setRange(0,0)
                 self.imageno = 0
                 self.reflectionSel.setImage(self.imageno)
                 #print(self.centralPlot._callback)
-        elif isinstance(sel_list,SimulationThScan):
+        elif isinstance(sel_list,SimulationScan):
             self.scanno = 1
             self.fscan = sel_list
             self.imageno = 0
@@ -662,16 +657,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 msg.setStandardButtons(qt.QMessageBox.Cancel)
                 msg.setModal(True)
                 msg.show()
-                ch5523 = sel_list.get('ch5523',False)
-                if ch5523:
-                    self.fscan = BlissScan(self.hdffile,sel_list['name'].strip('/'))
-                elif sel_list.get('p212H5',False):
-                    self.fscan = H5Fastsweep(self.hdffile,sel_list['scanno'])
-                else:
-                    if 'node' in sel_list:
-                        self.fscan = BlissScan_EBS(sel_list['node'],sel_list['scanno'])
-                    else:
-                        self.fscan = BlissScan_EBS(self.hdffile,sel_list['scanno'])
+                self.fscan = backends.openScan(sel_list['beamtime'], sel_list)
                 self.plotImage()
                 self.scanSelector.setTh(self.fscan.th)
                 msg.hide()
@@ -1385,9 +1371,11 @@ class QScanCreator(qt.QDialog):
         
         layout = qt.QGridLayout()
         
-        layout.addWidget(qt.QLabel("omega start:"),0,0)
-        layout.addWidget(qt.QLabel("omega end:"),1,0)
+        layout.addWidget(qt.QLabel("theta start:"),0,0)
+        layout.addWidget(qt.QLabel("theta end:"),1,0)
         layout.addWidget(qt.QLabel("no points:"),2,0)
+        layout.addWidget(qt.QLabel("Det pixel1:"),3,0)
+        layout.addWidget(qt.QLabel("Det pixel2:"),4,0)
 
         self.omstart = qt.QDoubleSpinBox()
         self.omstart.setRange(0,360)
@@ -1405,12 +1393,22 @@ class QScanCreator(qt.QDialog):
         self.no.setRange(1,1000000000)
         self.no.setValue(180)
         
+        self.shape1 = qt.QSpinBox()
+        self.shape1.setRange(1,1000000000)
+        self.shape1.setValue(1)
+        
+        self.shape2 = qt.QSpinBox()
+        self.shape2.setRange(1,1000000000)
+        self.shape2.setValue(1)
+        
         layout.addWidget(self.omstart,0,1)
         layout.addWidget(self.omend,1,1)
         layout.addWidget(self.no,2,1)
+        layout.addWidget(self.shape1,3,1)
+        layout.addWidget(self.shape2,4,1)
         
         buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
-        layout.addWidget(buttons,0,2,-1,-1)
+        layout.addWidget(buttons,5,0,-1,-1)
         
         buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.accept)
         buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
