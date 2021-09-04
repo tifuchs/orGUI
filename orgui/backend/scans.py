@@ -24,8 +24,8 @@ class Scan():
     def __init__(self,hdffilepath_orNode=None, scanno=None):
         self.axisname = None # either "th" or "mu"
         self.axis = None # value of either "th" or "mu"
-        self.th = None # or self.mu, depending on scanaxis
-        self.omega = None # = -1*th
+        self.th = 0. # or self.mu, depending on scanaxis
+        self.omega = 0. # = -1*th
 
     def __len__(self):
         raise NotImplementedError()

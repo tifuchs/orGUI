@@ -147,18 +147,18 @@ class QScanSelector(qt.QMainWindow):
         self.noSelector = qt.QSpinBox()
         self.noSelector.setRange(0,0)
         
-        thlabel = qt.QLabel("th:")
-        self.thSelector = qt.QDoubleSpinBox()
-        self.thSelector.setRange(-1000,1000)
-        self.thSelector.setReadOnly(True)
-        self.thSelector.setSuffix(" °")
+        self.axislabel = qt.QLabel("axis:")
+        self.axisSelector = qt.QDoubleSpinBox()
+        self.axisSelector.setRange(-1000,1000)
+        self.axisSelector.setReadOnly(True)
+        self.axisSelector.setSuffix(" °")
         
         
         
         self.toolbar.addWidget(imglabel)
         self.toolbar.addWidget(self.noSelector)
-        self.toolbar.addWidget(thlabel)
-        self.toolbar.addWidget(self.thSelector)
+        self.toolbar.addWidget(self.axislabel)
+        self.toolbar.addWidget(self.axisSelector)
         
         self.toolbar.addWidget(self.slider)
         decreaseImageNo = self.toolbar.addAction(icons.getQIcon("previous"),"previous image")
@@ -178,7 +178,7 @@ class QScanSelector(qt.QMainWindow):
         
         
         #self.addToolBar(qt.Qt.BottomToolBarArea,self.toolbar)
-        self.th = None            
+        self.axis = None            
             
             
         
@@ -444,7 +444,7 @@ class QScanSelector(qt.QMainWindow):
     
     def _onSliderChanged(self,scanno):
         #self.noSelector.setValue(self.slider.value())
-        self.thSelector.setValue(self.th[self.slider.value()])
+        self.axisSelector.setValue(self.axis[self.slider.value()])
         self.sigImageNoChanged.emit(self.slider.value())
     
     def _onNoSelectorChanged(self):
@@ -461,9 +461,10 @@ class QScanSelector(qt.QMainWindow):
         self.slider.setRange(minimum,maximum)
         self.noSelector.setRange(minimum,maximum)
         
-    def setTh(self,th):
-        self.th = th
-        self.setRange(0,th.size-1)
+    def setAxis(self,axis,label='th'):
+        self.axislabel.setText(label)
+        self.axis = axis
+        self.setRange(0,axis.size-1)
     """    
     def _onSourceSelected(self,ddict):
         event = ddict['event']

@@ -256,6 +256,12 @@ class orGUI(qt.QMainWindow):
         self.roivisible = False
         #self.scanSelector.showROICheckBox.addAction(showROIAct)
         
+        self.showCTRreflAct = view_menu.addAction("show CTR reflections")
+        self.showCTRreflAct.setCheckable(True)
+        self.showCTRreflAct.setChecked(False)
+        self.showCTRreflAct.toggled.connect(self.onShowCTRreflections)
+        self.reflectionsVisible = False
+        
         view_menu.addSeparator()
         
         saveBraggAct = view_menu.addAction("save allowed Bragg reflections")
@@ -282,8 +288,11 @@ class orGUI(qt.QMainWindow):
         self.setMenuBar(menu_bar)
         
     def onShowBragg(self,visible):
-        self.reflectionSel.setBraggReflectionsVisible(visible)
-        self.calcBraggRefl()
+        try:
+            self.reflectionSel.setBraggReflectionsVisible(visible)
+            self.calcBraggRefl()
+        except Exception:
+            qt.QMessageBox.critical(self,"Cannot show show Bragg reflections", "Cannot Cannot show Bragg reflections:\n%s" % traceback.format_exc())
         
     def onShowROI(self,visible):
         self.roivisible = visible
@@ -291,6 +300,23 @@ class orGUI(qt.QMainWindow):
             self.updateROI()
         except Exception:
             qt.QMessageBox.critical(self,"Cannot show ROI", "Cannot Cannot show ROI:\n%s" % traceback.format_exc())
+            
+    def onShowCTRreflections(self,visible):
+        self.reflectionsVisible = visible
+        if self.reflectionsVisible:
+            try: 
+                hkm = self.calculateAvailableCTR()
+            except Exception:
+                qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
+                self.showCTRreflAct.setChecked(False)
+                self.reflectionsVisible = False
+                return
+            hk = np.unique(hkm[:,:2],axis=0)
+            H_0 = np.hstack((hk, np.zeros((hk.shape[0],1))))
+            H_1 = np.array([0,0,1])
+            
+            self.reflectionsToDisplay = H_0, H_1
+        self.updateReflections()
         
     def _onShowAbout(self):
         qt.QMessageBox.about(self, "About orGUI", 
@@ -317,6 +343,8 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         
     def calcBraggRefl(self):
         if self.fscan is not None and self.reflectionSel.showBraggReflections:
+            if self.fscan.axisname != 'th':
+                raise NotImplementedError("Calculation of available Bragg reflections is not implemented for %s - scans" % self.fscan.axisname)
             try:
                 xtal = self.ubcalc.crystal
                 ommin = np.deg2rad(np.amin(self.fscan.omega))
@@ -390,62 +418,33 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             filename += fileTypeDict[filetype]
             np.savetxt(filename,hkm,fmt="%.3f",header="H K L x y alpha delta gamma omega chi phi")
 
-    
-        
-    def _onCalcAvailableCTR(self):
-        """
-        fileTypeDict = {'bulk files (*.bul)': '.bul', 'Crystal Files (*.xtal)': '.txt', 'All files (*)': '', }
-        fileTypeFilter = ""
-        for f in fileTypeDict:
-            fileTypeFilter += f + ";;"
-            
-        filename, filetype = qt.QFileDialog.getOpenFileName(self,"Open crystal file with atom locations",
-                                                  self.filedialogdir,
-                                                  fileTypeFilter[:-2])
-        if filename == '':
-            return
-        
-        self.filedialogdir = os.path.splitext(filename)[0]
-        #filename += fileTypeDict[filetype]
-        
-        if filetype == 'bulk files (*.bul)':
-            try:
-                xtal = CTRcalc.UnitCell.fromBULfile(filename)
-            except Exception:
-                qt.QMessageBox.critical(self,"Cannot open xtal", "Cannot open:\n%s" % traceback.format_exc())
-                return
-        else:
-            qt.QMessageBox.critical(self,"Cannot open xtal", "File extension not understood")
-            return
-        """
-        try:
-            xtal = self.ubcalc.crystal
-            ommin = np.deg2rad(np.amin(self.fscan.omega))
-            ommax = np.deg2rad(np.amax(self.fscan.omega))
-            dc = self.ubcalc.detectorCal
-            mu = self.ubcalc.mu
-            ub = self.ubcalc.ubCal
-            xtal.setEnergy(ub.getEnergy()*1e3)
-            hk, xmirror = rn.thscanCTRs(xtal,ub,mu,dc,(ommin,ommax))
-        except Exception:
-            qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
-            return
+    def calculateAvailableCTR(self):
+        if self.fscan is None:
+            raise Exception("No scan selected!")
+        if self.fscan.axisname != 'th':
+            raise NotImplementedError("Calculation of available CTRs is not implemented for %s - scans" % self.fscan.axisname)
+        xtal = self.ubcalc.crystal
+        ommin = np.deg2rad(np.amin(self.fscan.omega))
+        ommax = np.deg2rad(np.amax(self.fscan.omega))
+        dc = self.ubcalc.detectorCal
+        mu = self.ubcalc.mu
+        ub = self.ubcalc.ubCal
+        xtal.setEnergy(ub.getEnergy()*1e3)
+        hk, xmirror = rn.thscanCTRs(xtal,ub,mu,dc,(ommin,ommax))
         xmirror = np.array(xmirror).astype(np.float)
         #making the hk list of arrays into a reasonable string
         hkm = np.concatenate((np.array(hk), xmirror.reshape((1,xmirror.size)).T), axis=1)
+        return hkm
+        
+    def _onCalcAvailableCTR(self):
+        try: 
+            hkm = self.calculateAvailableCTR()
+        except Exception:
+            qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
+            return
         sio = StringIO()
         np.savetxt(sio,hkm,fmt="%.3f", delimiter='\t',header="H K detectorRight")
-        """
-        hkstring="";
-        rowcount=0;
-        for i in hk:
-            if rowcount!=5:
-                hkstring=hkstring+"%s "%i;
-                rowcount=rowcount+1;
-            else:
-                hkstring=hkstring+"%s \n"%i;
-                rowcount=0;
-        """
+
         #Question dialog for saving the possible CTR locations     
         msgbox = qt.QMessageBox(qt.QMessageBox.Question,'Saving CTR locations...', 
                                 'Found CTRs. Do you want to save the following positions?',
@@ -569,17 +568,46 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         def xyToHKL(x,y):
             #print("xytoHKL:")
             #print("x,y = %s, %s" % (x,y))
-            gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([y]),np.array([x]),self.ubcalc.mu)
+            if self.fscan is None:
+                return np.array([np.nan,np.nan,np.nan, np.nan, np.nan])
+            mu, om = self.getMuOm(self.imageno)
+            gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([y]),np.array([x]), mu)
             #print(self.ubcalc.detectorCal)
             #print(x,y)
             #print(self.ubcalc.detectorCal.tth(np.array([y]),np.array([x])))
-            
-            pos = [self.ubcalc.mu,delta[0],gamma[0],self.imageNoToOmega(self.imageno),self.ubcalc.chi,self.ubcalc.phi]
+            pos = [mu,delta[0],gamma[0],om,self.ubcalc.chi,self.ubcalc.phi]
             pos = HKLVlieg.crystalAngles(pos,self.ubcalc.n)
-            hkl = np.array(self.ubcalc.angles.anglesToHkl(*pos))
-
+            hkl = np.concatenate((np.array(self.ubcalc.angles.anglesToHkl(*pos)),np.rad2deg([delta[0],gamma[0]])))
             return hkl
         return xyToHKL
+        
+    def getMuOm(self, imageno=None):
+        if imageno is not None:
+            if self.fscan.axisname == 'th':
+                mu = self.ubcalc.mu
+                om = -1 * np.deg2rad(self.imageNoToAxis(imageno))
+            elif self.fscan.axisname == 'mu':
+                mu = np.deg2rad(self.imageNoToAxis(imageno))
+                om = -1 * self.fscan.th
+                if len(np.asarray(om).shape) > 0:
+                    om = om[0]
+            else:
+                mu = self.ubcalc.mu
+                om = -1 * self.fscan.th
+                if len(np.asarray(om).shape) > 0:
+                    om = om[0]
+            return mu, om
+        else:
+            if self.fscan.axisname == 'th':
+                mu = self.ubcalc.mu
+                om = -1 * np.deg2rad(self.fscan.axis)
+            elif self.fscan.axisname == 'mu':
+                mu = np.deg2rad(self.fscan.axis)
+                om = -1 * self.fscan.th
+            else:
+                mu = self.ubcalc.mu
+                om = -1 * self.fscan.th
+            return mu, om
         
     def omegaToImageNo(self,omega):
         if self.fscan is not None:
@@ -599,6 +627,25 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             return np.deg2rad(self.fscan.omega[imageno])
         else:
             return 0.
+
+    def imageNoToAxis(self,imageno):
+        if self.fscan is not None:
+            return self.fscan.axis[imageno]
+        else:
+            return 0.
+
+    def axisToImageNo(self,axisval):
+        if self.fscan is not None:
+            #axis = np.deg2rad(self.fscan.axis)
+            axismax = np.amax(self.fscan.axis)
+            axismin = np.amin(self.fscan.axis)
+            #print(ommin,omega,ommax)
+            if axisval < axismin or axisval > axismax:
+                axisrange = [axismin,axisval,axismax]
+                raise Exception("Value of scan axis \"%s\" not in range: %s < %s < %s" % tuple([self.fscan.axisname]+axisrange))
+            return np.argmin(np.abs(self.fscan.axis - axisval))
+        else:
+            raise Exception("No Scan selected")
             
     def _onCreateScan(self):
         diag = QScanCreator()
@@ -633,7 +680,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 if self.imagepath != '':
                     self.fscan.set_image_folder(self.imagepath)
                     self.plotImage()
-                    self.scanSelector.setTh(self.fscan.th)
+                    self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
                     
             else:
                 self.scanSelector.setRange(0,0)
@@ -645,7 +692,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             self.fscan = sel_list
             self.imageno = 0
             self.plotImage()
-            self.scanSelector.setTh(self.fscan.th)
+            self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
         
         else:
             self.hdffile = sel_list['file']
@@ -659,7 +706,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 msg.show()
                 self.fscan = backends.openScan(sel_list['beamtime'], sel_list)
                 self.plotImage()
-                self.scanSelector.setTh(self.fscan.th)
+                self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
                 msg.hide()
                 self._onLoadAll()
                 self.scanSelector.showMaxButton.setChecked(False)
@@ -677,7 +724,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         if self.fscan is not None:
             self.fscan.set_image_folder(self.imagepath)
             self.plotImage()
-            self.scanSelector.setTh(self.fscan.th)
+            self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
             #self.scanSelector.slider.setMinimum(0)
             #self.scanSelector.slider.setMaximum(self.fscan.nopoints-1)
         else:
@@ -790,10 +837,31 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             self.imageno = key
             self.reflectionSel.setImage(self.imageno)
             self.updateROI()
+            self.updateReflections()
                         
         except Exception as e:
             print(traceback.format_exc())
             print("no image %s" % e)
+        
+    def updateReflections(self):
+        if not self.reflectionsVisible:
+            self.centralPlot.removeCurve('all_image_reflections')
+            return
+        H_0, H_1 = self.reflectionsToDisplay
+        #H_0 = np.array([[1,0,0], [1,1,0]])
+        #H_1 = np.array([[0,0,1], [0,0,1]])
+        
+        hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(self.imageno, H_0, H_1)
+        
+        mask1 = hkl_del_gam_1[:,-1].nonzero()
+        mask2 = hkl_del_gam_2[:,-1].nonzero()
+        
+        masked_hkl_del_gam = np.vstack((hkl_del_gam_1[mask1],hkl_del_gam_2[mask2]))
+        
+        self.centralPlot.addCurve(masked_hkl_del_gam[:,-3],masked_hkl_del_gam[:,-2],legend='all_image_reflections',
+                                  linestyle=' ', symbol='.', color='y')
+        
+    
         
     def updateROI(self):
         if not self.roivisible:
@@ -844,21 +912,19 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 roi.setVisible(False)
             self.centralPlot.removeMarker('main_croi_loc')
         
-    def getROIloc(self, imageno=None):
+    def getROIloc(self, imageno=None, H_0=None, H_1=None):
         if self.fscan is None:
             raise Exception("No scan loaded!")
         
-        if imageno is None:
-            om = np.deg2rad(self.fscan.omega)
-        else:
-            om = np.deg2rad(self.fscan.omega[imageno])
+
+        mu, om = self.getMuOm(imageno)
             
         dc = self.ubcalc.detectorCal
-        mu = self.ubcalc.mu
+        #mu = self.ubcalc.mu
         angles = self.ubcalc.angles
-        
-        H_1 = np.array([h.value() for h in self.scanSelector.H_1])
-        H_0 = np.array([h.value() for h in self.scanSelector.H_0])
+        if H_0 is None or H_1 is None:
+            H_1 = np.array([h.value() for h in self.scanSelector.H_1])
+            H_0 = np.array([h.value() for h in self.scanSelector.H_0])
         
         hkl_del_gam_1, hkl_del_gam_2 = angles.anglesIntersectLineEwald(H_0, H_1, mu, om, self.ubcalc.phi,self.ubcalc.chi)
         
@@ -867,8 +933,8 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         gam1 = hkl_del_gam_1[...,4]
         gam2 = hkl_del_gam_2[...,4]
         
-        yx1 = dc.pixelsSurfaceAngles(gam1, delta1, mu)
-        yx2 = dc.pixelsSurfaceAngles(gam2, delta2, mu)
+        yx1 = dc.pixelsCrystalAngles(gam1, delta1, mu, self.ubcalc.n)
+        yx2 = dc.pixelsCrystalAngles(gam2, delta2, mu, self.ubcalc.n)
         
         ymask1 = np.logical_and(yx1[...,0] >= 0, yx1[...,0] < dc.detector.shape[0])
         xmask1 = np.logical_and(yx1[...,1] >= 0, yx1[...,1] < dc.detector.shape[1])
@@ -912,7 +978,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             return
         
         dc = self.ubcalc.detectorCal
-        mu = self.ubcalc.mu
+        #mu = self.ubcalc.mu
         angles = self.ubcalc.angles
 
         H_1 = np.array([h.value() for h in self.scanSelector.H_1])
@@ -1051,13 +1117,17 @@ Do you want to continue without mask?""")
         
         if np.any(bgpixel1):
             croibg1_a = croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a
+            croibg1_err_a = np.sqrt(croi1_a + (cpixel1_a/bgpixel1_a) * bgroi1_a)
         else:
             croibg1_a = croi1_a
+            croibg1_err_a = np.sqrt(croi1_a)
             
         if np.any(bgpixel2):
             croibg2_a = croi2_a - (cpixel2_a/bgpixel2_a) * bgroi2_a
+            croibg2_err_a = np.sqrt(croi2_a + (cpixel2_a/bgpixel2_a) * bgroi2_a)
         else:
             croibg2_a = croi2_a
+            croibg2_err_a = np.sqrt(croi2_a)
 
         rod_mask1 = np.isfinite(croibg1_a)
         rod_mask2 = np.isfinite(croibg2_a)
@@ -1067,6 +1137,9 @@ Do you want to continue without mask?""")
         
         croibg1_a = croibg1_a[rod_mask1]
         croibg2_a = croibg2_a[rod_mask2]
+        
+        croibg1_err_a = croibg1_err_a[rod_mask1]
+        croibg2_err_a = croibg2_err_a[rod_mask2]
         
         name = str(H_1) + "*s +" + str(H_0)
         if croibg1_a.size > 0:
@@ -1232,6 +1305,8 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
             ('H', lambda x, y: self.xyHKLConverter(x,y)[0]),
             ('K', lambda x, y: self.xyHKLConverter(x,y)[1]),
             ('L', lambda x, y: self.xyHKLConverter(x,y)[2]),
+            ('del', lambda x, y: self.xyHKLConverter(x,y)[3]),
+            ('gam', lambda x, y: self.xyHKLConverter(x,y)[4]),
             ('Data', WeakMethodProxy(self._getImageValue))]
         
         super(Plot2DHKL, self).__init__(parent=parent, backend=backend,
