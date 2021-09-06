@@ -16,4 +16,4 @@ __version__ = "1.0.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
-__all__ = ['orGUI','QReflectionSelector','QSpecScanSelector','QUBCalculator']
+__all__ = ['orGUI','QReflectionSelector','QSpecScanSelector','QUBCalculator','database']

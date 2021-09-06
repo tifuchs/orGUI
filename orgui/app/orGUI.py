@@ -47,6 +47,7 @@ import traceback
 from .QScanSelector import QScanSelector
 from .QReflectionSelector import QReflectionSelector
 from .QUBCalculator import QUBCalculator
+from .database import DataBase
 from ..backend.scans import SimulationScan
 from ..backend import backends
 
@@ -71,10 +72,12 @@ silx.config.DEFAULT_PLOT_SYMBOL = '.'
 class orGUI(qt.QMainWindow):
     def __init__(self,configfile,parent=None):
         qt.QMainWindow.__init__(self, parent)
+        self.h5database = None # must be a h5py file-like, by default not opened to avoid reading issues at beamtimes!
         
         self.resetZoom = True
         
         self.fscan = None
+        self.activescanname = "scan"
         self.numberthreads = int(min(os.cpu_count(), 8)) if os.cpu_count() is not None else 1 
         if 'SLURM_CPUS_ON_NODE' in os.environ:
             self.numberthreads = int(os.environ['SLURM_CPUS_ON_NODE'])
@@ -112,6 +115,12 @@ class orGUI(qt.QMainWindow):
         
         self.integrdataPlot.addDockWidget(qt.Qt.RightDockWidgetArea,legendwidget)
         legendwidget.show()
+        self.database = DataBase(self.integrdataPlot)
+        dbdockwidget = qt.QDockWidget("Integrated data")
+        dbdockwidget.setWidget(self.database)
+        
+        self.integrdataPlot.addDockWidget(qt.Qt.RightDockWidgetArea,dbdockwidget)
+        
         
         self.centralPlot = Plot2DHKL(self.newXyHKLConverter(),parent=self)
         self.centralPlot.setDefaultColormap(Colormap(name='jet',normalization='log'))
@@ -588,12 +597,12 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 om = -1 * np.deg2rad(self.imageNoToAxis(imageno))
             elif self.fscan.axisname == 'mu':
                 mu = np.deg2rad(self.imageNoToAxis(imageno))
-                om = -1 * self.fscan.th
+                om = -1 * np.deg2rad(self.fscan.th)
                 if len(np.asarray(om).shape) > 0:
                     om = om[0]
             else:
                 mu = self.ubcalc.mu
-                om = -1 * self.fscan.th
+                om = -1 * np.deg2rad(self.fscan.th)
                 if len(np.asarray(om).shape) > 0:
                     om = om[0]
             return mu, om
@@ -603,10 +612,10 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 om = -1 * np.deg2rad(self.fscan.axis)
             elif self.fscan.axisname == 'mu':
                 mu = np.deg2rad(self.fscan.axis)
-                om = -1 * self.fscan.th
+                om = -1 * np.deg2rad(self.fscan.th)
             else:
                 mu = self.ubcalc.mu
-                om = -1 * self.fscan.th
+                om = -1 * np.deg2rad(self.fscan.th)
             return mu, om
         
     def omegaToImageNo(self,omega):
@@ -663,7 +672,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
     def _onScanChanged(self,sel_list):
         self.resetZoom = True
         print(sel_list)
-
+        self.activescanname = "scan"
         if isinstance(sel_list,list): 
             self.sel_list = sel_list
             if len(sel_list):
@@ -693,8 +702,12 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             self.imageno = 0
             self.plotImage()
             self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
-        
+            self.activescanname = "%s-sim %s-%s" % (self.fscan.axisname, np.amin(self.fscan.axis),np.amax(self.fscan.axis))
         else:
+            if 'name' in sel_list:
+                self.activescanname = sel_list['name']
+            else:
+                self.activescanname = "scan"
             self.hdffile = sel_list['file']
             #self.scanname = sel_list['name'].strip("/")
             try:
@@ -976,7 +989,9 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         except Exception as e:
             print("no images found! %s" % e)
             return
-        
+        if self.database.nxfile is None:
+            print("No database available")
+            return
         dc = self.ubcalc.detectorCal
         #mu = self.ubcalc.mu
         angles = self.ubcalc.angles
@@ -1014,11 +1029,15 @@ Do you want to continue without mask?""")
         cpixel1_a = np.zeros_like(dataavail,dtype=np.float64)
         bgroi1_a = np.zeros_like(dataavail,dtype=np.float64)
         bgpixel1_a = np.zeros_like(dataavail,dtype=np.float64)
+        x_coord1_a = hkl_del_gam_1[:,6]
+        y_coord1_a = hkl_del_gam_1[:,7]
         
         croi2_a = np.zeros_like(dataavail,dtype=np.float64)
         cpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
         bgroi2_a = np.zeros_like(dataavail,dtype=np.float64)
         bgpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
+        x_coord2_a = hkl_del_gam_2[:,6]
+        y_coord2_a = hkl_del_gam_2[:,7]
 
         progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
@@ -1132,98 +1151,169 @@ Do you want to continue without mask?""")
         rod_mask1 = np.isfinite(croibg1_a)
         rod_mask2 = np.isfinite(croibg2_a)
         
-        s1 = hkl_del_gam_1[:,5][rod_mask1]
-        s2 = hkl_del_gam_2[:,5][rod_mask2]
+        s1_masked = hkl_del_gam_1[:,5][rod_mask1]
+        s2_masked = hkl_del_gam_2[:,5][rod_mask2]
         
-        croibg1_a = croibg1_a[rod_mask1]
-        croibg2_a = croibg2_a[rod_mask2]
+        croibg1_a_masked = croibg1_a[rod_mask1]
+        croibg2_a_masked = croibg2_a[rod_mask2]
         
-        croibg1_err_a = croibg1_err_a[rod_mask1]
-        croibg2_err_a = croibg2_err_a[rod_mask2]
+        croibg1_err_a_masked = croibg1_err_a[rod_mask1]
+        croibg2_err_a_masked = croibg2_err_a[rod_mask2]
         
-        name = str(H_1) + "*s +" + str(H_0)
-        if croibg1_a.size > 0:
-            self.integrdataPlot.addCurve(s1,croibg1_a,legend=name+' s1')
-        if croibg2_a.size > 0:
-            self.integrdataPlot.addCurve(s2,croibg2_a,legend=name+' s2')
+        #name = str(H_1) + "*s+" + str(H_0)
         
-        """
-        for i in range(len(self.fscan)):
-            if not dataavail[i]:
-                croi1[i] = np.nan; croi2[i] = np.nan
-                cpixel1[i] = np.nan; cpixel2[i] = np.nan
-                bgroi1[i] = np.nan; bgroi2[i] = np.nan
-                bgpixel1[i] = np.nan; bgpixel2[i] = np.nan
-                progress.setValue(i)
-                if progress.wasCanceled():
-                    break
-                continue
-            #from IPython import embed; embed() 
-            image = self.fscan.get_raw_img(i)
-            if hkl_del_gam_1[i,-1]:
-                key = self.intkey(hkl_del_gam_1[i,6:8])
-                bkgkey = self.bkgkeys(hkl_del_gam_1[i,6:8])
-                
-                cimg = image.img[key[::-1]]
-                
-                # !!!!!!!!!! add mask here  !!!!!!!!!
-                croi1[i] = np.nansum(cimg)
-                cpixel1[i] = cimg.size
-                for bg in bkgkey:
-                    bgimg = image.img[bg[::-1]]
-                    bgroi1[i] += np.nansum(bgimg)
-                    bgpixel1[i] += bgimg.size
-                print(croi1[i], cpixel1[i], bgroi1[i], bgpixel1[i])
-            else:
-                croi1[i] = np.nan
-                cpixel1[i] = np.nan
-                bgroi1[i] = np.nan
-                bgpixel1[i] = np.nan
-            
-            if hkl_del_gam_2[i,-1]:
-                key = self.intkey(hkl_del_gam_2[i,6:8])
-                bkgkey = self.bkgkeys(hkl_del_gam_2[i,6:8])
-                
-                cimg = image.img[key[::-1]]
-                # !!!!!!!!!! add mask here  !!!!!!!!!
-                croi2[i] = np.nansum(cimg)
-                cpixel2[i] = cimg.size
-                for bg in bkgkey:
-                    bgimg = image.img[bg[::-1]]
-                    bgroi2[i] += np.nansum(bgimg)
-                    bgpixel2[i] += bgimg.size
-                print(croi2[i], cpixel2[i], bgroi2[i], bgpixel2[i])
-            else:
-                croi2[i] = np.nan
-                cpixel2[i] = np.nan
-                bgroi2[i] = np.nan
-                bgpixel2[i] = np.nan
-            
-            
-            progress.setValue(i)
-            if progress.wasCanceled():
-                break
-        if np.any(bgpixel1):
-            croibg1 = croi1 - (cpixel1/bgpixel1) * bgroi1
+        name1 = str(H_1) + "*s1+" + str(H_0)
+        name2 = str(H_1) + "*s2+" + str(H_0)
+        
+        defaultS1 = croibg1_a_masked.size > croibg2_a_masked.size
+        
+        if hasattr(self.fscan, "title"):
+            title = str(self.fscan.title)
         else:
-            croibg1 = croi1
+            title = u"%s-scan" % self.fscan.axisname
+        
+        mu, om = self.getMuOm()
+        if len(np.asarray(om).shape) == 0:
+            om = np.full_like(mu,om)
+        if len(np.asarray(mu).shape) == 0:
+            mu = np.full_like(om,mu)
+        
+        suffix = ''
+        i = 0
+
+        while(self.activescanname + "/measurement/" + name1 + suffix in self.database.nxfile):
+            suffix = "_%s" % i
+            i += 1
+        availname1 = name1 + suffix
+        
+        suffix = ''
+        i = 0
+        while(self.activescanname + "/measurement/" + name2 + suffix in self.database.nxfile):
+            suffix = "_%s" % i
+            i += 1
+        
+        availname2 = name2 + suffix
+        
+        if croibg1_a_masked.size > 0:
+            self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
+                                         xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
+        if croibg2_a_masked.size > 0:
+            self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
+                                         xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
             
-        if np.any(bgpixel2):
-            croibg2 = croi2 - (cpixel2/bgpixel2) * bgroi2
-        else:
-            croibg2 = croi2
-        progress.setValue(len(self.fscan))
+        data = {self.activescanname:{
+                    "instrument": {
+                        "@NX_class": u"NXinstrument",
+                        "positioners": {
+                            "@NX_class": u"NXcollection",
+                            self.fscan.axisname: self.fscan.axis
+                        }
+                    },
+                    "measurement": {
+                        "@NX_class": u"NXentry",
+                        "@default": availname1 if defaultS1 else availname2,
+                       
+                        availname1: {
+                            "@NX_class": u"NXdata",
+                            "sixc_angles": {
+                                "@NX_class": u"NXpositioner",
+                                "alpha" : np.rad2deg(mu),
+                                "omega" :  np.rad2deg(om),
+                                "theta" :  np.rad2deg(-1*om),
+                                "delta" : np.rad2deg(hkl_del_gam_1[:,3]),
+                                "gamma" :  np.rad2deg(hkl_del_gam_1[:,4]),
+                                "chi" :  np.rad2deg(self.ubcalc.chi),
+                                "phi" :  np.rad2deg(self.ubcalc.phi),
+                                "@unit" : u"deg"
+                            },
+                            "hkl": {
+                                "@NX_class": u"NXcollection",
+                                "h" :  hkl_del_gam_1[:,0],
+                                "k" :  hkl_del_gam_1[:,1],
+                                "l" : hkl_del_gam_1[:,2]
+                            },
+                            "counters":{
+                                "@NX_class": u"NXdetector",
+                                "croibg"  : croibg1_a,
+                                "croibg_errors" :  croibg1_err_a,
+                                "croi" :  croi1_a,
+                                "bgroi"  : bgroi1_a,
+                                "croi_pix"  : cpixel1_a,
+                                "bgroi_pix" : bgpixel1_a
+                            },
+                            "pixelcoord": {
+                                "@NX_class": u"NXdetector",
+                                "x" : x_coord1_a,
+                                "y"  : y_coord1_a
+                            },
+                            "trajectory" : {
+                                "@NX_class": u"NXcollection",
+                                "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
+                                "H_1"  : H_1,
+                                "H_0" : H_0,
+                                "s" : hkl_del_gam_1[:,5]
+                            },
+                            "@signal" : u"counters/croibg",
+                            "@axes": u"trajectory/s",
+                            "@title": self.activescanname + "_" + availname1,
+                            "@orgui_meta": u"roi"
+                        },
+                        availname2: {
+                            "@NX_class": u"NXdata",
+                            "sixc_angles": {
+                                "@NX_class": u"NXpositioner",
+                                "alpha" : np.rad2deg(mu),
+                                "omega" :  np.rad2deg(om),
+                                "theta" :  np.rad2deg(-1*om),
+                                "delta" : np.rad2deg(hkl_del_gam_2[:,3]),
+                                "gamma" :  np.rad2deg(hkl_del_gam_2[:,4]),
+                                "chi" :  np.rad2deg(self.ubcalc.chi),
+                                "phi" :  np.rad2deg(self.ubcalc.phi),
+                                "@unit" : u"deg"
+                            },
+                            "hkl": {
+                                "@NX_class": u"NXcollection",
+                                "h" :  hkl_del_gam_2[:,0],
+                                "k" :  hkl_del_gam_2[:,1],
+                                "l" : hkl_del_gam_2[:,2]
+                            },
+                            "counters":{
+                                "@NX_class": u"NXdetector",
+                                "croibg"  : croibg2_a,
+                                "croibg_errors" :  croibg2_err_a,
+                                "croi" :  croi2_a,
+                                "bgroi"  : bgroi2_a,
+                                "croi_pix"  : cpixel2_a,
+                                "bgroi_pix" : bgpixel2_a
+                            },
+                            "pixelcoord": {
+                                "@NX_class": u"NXdetector",
+                                "x" : x_coord2_a,
+                                "y"  : y_coord2_a
+                            },
+                            "trajectory" : {
+                                "@NX_class": u"NXcollection",
+                                "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
+                                "H_1"  : H_1,
+                                "H_0" : H_0,
+                                "s" : hkl_del_gam_2[:,5]
+                            },
+                            "@signal" : u"counters/croibg",
+                            "@axes": u"trajectory/s",
+                            "@title": self.activescanname + "_" + availname2,
+                            "@orgui_meta": u"roi"
+                        },
+                    },
+                    "title":u"%s" % title,
+                    "@NX_class": u"NXentry",
+                    "@default": u"measurement/%s" % (availname1 if defaultS1 else availname2),
+                    "@orgui_meta": u"scan"
+                }
+            }
+        self.database.add_nxdict(data)
         
-        s1 = hkl_del_gam_1[:,5]
-        s2 = hkl_del_gam_2[:,5]
         
-        name = str(H_1) + "*s +" + str(H_0)
-        pt = silx.gui.plot.Plot1D()
-        
-        pt.addCurve(s1,croibg1,legend=name+' s1')
-        pt.addCurve(s2,croibg2,legend=name+' s2')
-        pt.show()
-        """
+            
         
     def _graphCallback(self,eventdict):
         #print(eventdict)
@@ -1292,6 +1382,10 @@ Do you want to continue without mask?""")
         topkey = (croi[0], slice(int(np.clip(croi[1].start - top, 0, detvsize)), croi[1].start))
         bottomkey = (croi[0], slice(croi[1].stop, int(np.clip(croi[1].stop + bottom,0,detvsize)) ))
         return leftkey, rightkey, topkey, bottomkey
+        
+    def closeEvent(self,event):
+        self.database.close()
+        super().closeEvent(event)
         
         
 class Plot2DHKL(silx.gui.plot.PlotWindow):

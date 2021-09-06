@@ -26,7 +26,7 @@ from datetime import datetime
 
 from silx.gui import qt
 
-from  silx.gui.hdf5.Hdf5TreeModel import Hdf5TreeModel
+from silx.gui.hdf5.Hdf5TreeModel import Hdf5TreeModel
 from silx.gui.dialog import ImageFileDialog
 from silx.gui import icons
 
