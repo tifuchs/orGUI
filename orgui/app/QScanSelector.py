@@ -242,6 +242,8 @@ class QScanSelector(qt.QMainWindow):
         self.right = qt.QDoubleSpinBox()
         self.top = qt.QDoubleSpinBox()
         self.bottom = qt.QDoubleSpinBox()
+        self.offsetx = qt.QDoubleSpinBox()
+        self.offsety = qt.QDoubleSpinBox()
         
         self.hsize.setRange(1,20000)
         self.hsize.setDecimals(1)
@@ -272,6 +274,16 @@ class QScanSelector(qt.QMainWindow):
         self.bottom.setDecimals(1)
         self.bottom.setSuffix(" px")
         self.bottom.setValue(0.)
+        
+        self.offsetx.setRange(-20000,20000)
+        self.offsetx.setDecimals(1)
+        self.offsetx.setSuffix(" px")
+        self.offsetx.setValue(0.)
+        
+        self.offsety.setRange(-20000,20000)
+        self.offsety.setDecimals(1)
+        self.offsety.setSuffix(" px")
+        self.offsety.setValue(0.)
 
         roiGroupLayout.addWidget(qt.QLabel('center roi (h x v):'),0,0)
         roiGroupLayout.addWidget(self.hsize,0,1)
@@ -284,6 +296,10 @@ class QScanSelector(qt.QMainWindow):
         roiGroupLayout.addWidget(qt.QLabel('bg roi (top, bottom):'),2,0)
         roiGroupLayout.addWidget(self.top,2,1)
         roiGroupLayout.addWidget(self.bottom,2,2)
+        
+        roiGroupLayout.addWidget(qt.QLabel('roi loc offset (x, y):'),3,0)
+        roiGroupLayout.addWidget(self.offsetx,3,1)
+        roiGroupLayout.addWidget(self.offsety,3,2)
 
         self.hsize.valueChanged.connect(lambda : self.sigROIChanged.emit())
         self.vsize.valueChanged.connect(lambda : self.sigROIChanged.emit())
@@ -291,6 +307,8 @@ class QScanSelector(qt.QMainWindow):
         self.right.valueChanged.connect(lambda : self.sigROIChanged.emit())
         self.top.valueChanged.connect(lambda : self.sigROIChanged.emit())
         self.bottom.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.offsetx.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.offsety.valueChanged.connect(lambda : self.sigROIChanged.emit())
                 
         roiGroup.setLayout(roiGroupLayout)
         
@@ -375,7 +393,7 @@ class QScanSelector(qt.QMainWindow):
         self.sigScanChanged.emit(ddict)
         
     def _onOpenFile(self):
-        fileTypeDict = {'NEXUS files (*.h5 *.hdf5)': '.h5', 'All files (*)': '' }
+        fileTypeDict = {'NEXUS files (*.h5 *.hdf5)': '.h5', "SPEC files (*.spec *.spc)": '.spec', 'All files (*)': '' }
         fileTypeFilter = ""
         for f in fileTypeDict:
             fileTypeFilter += f + ";;"
@@ -385,10 +403,18 @@ class QScanSelector(qt.QMainWindow):
         if filename == '':
             return
         self.parentmainwindow.filedialogdir = os.path.splitext(filename)[0]
-        self.hdf5model.appendFile(filename)
+        try:
+            self.hdf5model.appendFile(filename)
+        except:
+            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open file', 
+                        'Cannot open file %s.' % filename,
+                        qt.QMessageBox.Ok, self)
+            msgbox.setDetailedText(traceback.format_exc())
+            clickedbutton = msgbox.exec()
+            
         
     def _onSelectFilePath(self):
-        fileTypeDict = {'NEXUS files (*.h5 *.hdf5)': '.h5', 'All files (*)': '' }
+        fileTypeDict = {'NEXUS files (*.h5 *.hdf5)': '.h5', "SPEC files (*.spec *.spc)": '.spec','All files (*)': '' }
         fileTypeFilter = ""
         for f in fileTypeDict:
             fileTypeFilter += f + ";;"
@@ -409,19 +435,20 @@ class QScanSelector(qt.QMainWindow):
 
     def nexus_treeview_callback(self,event):
         objects = list(event.source().selectedH5Nodes())
-        obj = objects[0]  # for single selection
-        menu = event.menu()
-        action = qt.QAction("Refresh", menu)
-        action.triggered.connect(lambda:  self.hdf5model.synchronizeH5pyObject(obj))
-        menu.addAction(action)
-        if obj.ntype is h5py.Dataset:
+        if len(objects) > 0:
+            obj = objects[0]  # for single selection
+            menu = event.menu()
+            action = qt.QAction("Refresh", menu)
+            action.triggered.connect(lambda:  self.hdf5model.synchronizeH5pyObject(obj))
+            menu.addAction(action)
+            #if obj.ntype is h5py.Dataset:
             action = qt.QAction("display data", menu)
             action.triggered.connect(lambda:  self.view_data_callback(obj))
             menu.addAction(action)
-        if obj.ntype is h5py.File:
-            action = qt.QAction("remove", menu)
-            action.triggered.connect(lambda:  self._onCloseFile())
-            menu.addAction(action)
+            if obj.ntype is h5py.File:
+                action = qt.QAction("remove", menu)
+                action.triggered.connect(lambda:  self._onCloseFile())
+                menu.addAction(action)
             
      
     def _onRefreshFile(self):
@@ -510,11 +537,20 @@ class QScanSelector(qt.QMainWindow):
                     try:    
                         dt = dateparser.parse(obj.h5py_target['start_time'][()])
                     except Exception as e:
-                        raise Exception("""Cannot parse start time of the scan:
-%s""" % traceback.format_exc())
-                
-                    btid = backends.getBeamtimeId(dt)
-                    
+                        msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open scan', 
+                            'Cannot parse start time of the scan.', qt.QMessageBox.Ok, self)
+                        msgbox.setDetailedText(traceback.format_exc())
+                        clickedbutton = msgbox.exec()
+                        return
+                        
+                    try:
+                        btid = backends.getBeamtimeId(dt)
+                    except Exception as e:
+                        msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open scan', 
+                            'Cannot open scan: %s' % str(e), qt.QMessageBox.Ok, self)
+                        msgbox.setDetailedText(traceback.format_exc())
+                        clickedbutton = msgbox.exec()
+                        return
                     ddict = backends.scannoConverter[btid](obj)
                     ddict['event'] = "itemDoubleClicked"
                     ddict['file'] = obj.local_filename

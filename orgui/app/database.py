@@ -36,9 +36,6 @@ import traceback
 from silx.io.dictdump import dicttonx ,nxtodict
 
 
-#dicttonx(gauss,"test.h5")
-
-
 class DataBase(qt.QMainWindow):
     
     def __init__(self, plot, parent=None):
@@ -51,7 +48,19 @@ class DataBase(qt.QMainWindow):
         self.view.setSortingEnabled(True)
         
         #self.view.addContextMenuCallback(self.nexus_treeview_callback)
-        self.hdf5model = self.view.findHdf5TreeModel()
+        #self.hdf5model = self.view.findHdf5TreeModel()
+        
+        customModel = Hdf5TreeModel
+        customModel.NAME_COLUMN = 0
+        customModel.DESCRIPTION_COLUMN = 1
+        customModel.VALUE_COLUMN = 2
+        customModel.SHAPE_COLUMN = 3
+        customModel.TYPE_COLUMN = 4
+        customModel.NODE_COLUMN = 5
+        customModel.LINK_COLUMN = 6
+        
+        self.hdf5model = customModel(self.view)
+        self.view.setModel(self.hdf5model)
 
         self.dataviewer = DataViewerFrame.DataViewerFrame()
         self.dataviewerDialog = qt.QDialog(self)
@@ -144,13 +153,26 @@ class DataBase(qt.QMainWindow):
         action = qt.QAction("details", menu)
         action.triggered.connect(lambda:  self.view_data_callback(obj))
         menu.addAction(action)
+        
         if obj.ntype is h5py.Dataset:
             roi_node = self.get_roinode(obj.h5py_object)
             if roi_node is not None:
                 action = qt.QAction("plot %s" % obj.name, menu)
                 action.triggered.connect(lambda:  self.plot_signal_callback(roi_node, obj))
                 menu.addAction(action)
-            
+        
+        if obj.ntype is h5py.Group:
+            meta = obj.h5py_object.attrs.get('orgui_meta', False)
+            if meta and meta == 'roi':
+                menu.addSeparator()
+                action = qt.QAction("delete", menu)
+                action.triggered.connect(lambda:  self.delete_node(obj.h5py_object))
+                menu.addAction(action)
+            if meta and meta == 'scan':
+                menu.addSeparator()
+                action = qt.QAction("delete", menu)
+                action.triggered.connect(lambda:  self.onDeleteScan(obj.h5py_object))
+                menu.addAction(action)
             
         """    
         if obj.ntype is h5py.File:
@@ -256,12 +278,28 @@ class DataBase(qt.QMainWindow):
         self.nxfile = silx.io.h5py_utils.File(filename,'a')
         self._filepath = filename
         self.hdf5model.insertH5pyObject(self.nxfile)
+        self.view.expandToDepth(1)
 
     def add_nxdict(self, nxentry):
         if self.nxfile is None:
             raise Exception("No database file open.")
         dicttonx(nxentry, self.nxfile, update_mode='add')
         self.hdf5model.synchronizeH5pyObject(self.nxfile)
+        self.view.expandToDepth(1)
+        
+    def onDeleteScan(self, obj):
+        btn = qt.QMessageBox.question(self,"Delete scan?","Are you sure that you want to delete %s from the orgui database?" % obj.name.split("/")[-1])
+        if btn == qt.QMessageBox.Yes:
+            self.delete_node(obj)
+        
+    def delete_node(self, obj):
+        basename = obj.name.split("/")[-1]
+        objpar = obj.parent
+        del objpar[basename]
+        self.hdf5model.synchronizeH5pyObject(self.nxfile)
+        self.view.expandToDepth(1)
+        
+        
         
     def close(self):
         if self.nxfile is not None:

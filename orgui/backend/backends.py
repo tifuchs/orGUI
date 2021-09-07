@@ -22,7 +22,7 @@ from .scans import Scan
 from datetime import datetime
 import pytz
 
-# --- parse h5node name and return the scan number and  ---
+# --- parse h5node name and return the scan number and name ---
 
 def parseCH5523(obj):
     ddict = dict() 
@@ -49,6 +49,9 @@ def parseID31Bliss(obj):
     ddict['scanno'] = int(scanno)
     ddict['name'] = obj.local_name
     return ddict
+    
+# orgui will search for these counters in the Scan object and copy them into the database, if available
+auxillary_counters = ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch']
     
 # assign the name parser to the beamtime identifiers:
              

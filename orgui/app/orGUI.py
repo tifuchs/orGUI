@@ -32,6 +32,8 @@ from silx.gui.plot import items
 from silx.gui.colors import Colormap
 import weakref
 
+from silx import sx
+
 import silx
 from silx.utils.weakref import WeakMethodProxy
 from silx.gui.plot.Profile import ProfileToolBar
@@ -960,6 +962,16 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         xy1 = yx1[...,::-1]
         xy2 = yx2[...,::-1]
         
+        xoffset = self.scanSelector.offsetx.value()
+        yoffset = self.scanSelector.offsety.value()
+        
+        if xoffset != 0. or yoffset != 0.:
+            warnings.warn("Nonzero pixel offset selected. Experimental feature! Angles and hkl are incorrect!!!")
+            xy1[..., 0] += xoffset
+            xy2[..., 0] += xoffset
+            xy1[..., 1] += yoffset
+            xy2[..., 1] += yoffset
+        
         return np.concatenate((np.atleast_2d(hkl_del_gam_1), xy1, yxmask1[...,np.newaxis]),axis=-1),\
                np.concatenate((np.atleast_2d(hkl_del_gam_2), xy2, yxmask2[...,np.newaxis]),axis=-1)
 
@@ -1008,7 +1020,7 @@ Do you want to continue without mask?""")
                 if btn != qt.QMessageBox.Yes:
                     return
             else:
-                imgmask = self.centralPlot.getMaskToolsDockWidget().getSelectionMask()
+                imgmask = self.centralPlot.getMaskToolsDockWidget().getSelectionMask() > 0.
         
         corr = self.scanSelector.useSolidAngleBox.isChecked() or\
             self.scanSelector.usePolarizationBox.isChecked()
@@ -1049,7 +1061,7 @@ Do you want to continue without mask?""")
                 bgroi1 = np.nan; bgroi2 = np.nan
                 bgpixel1 = np.nan; bgpixel2 = np.nan
             else:
-                image = self.fscan.get_raw_img(i).img
+                image = self.fscan.get_raw_img(i).img.astype(np.float64)
                 if imgmask is not None:
                     image[imgmask] = np.nan
                     pixelavail = (~imgmask).astype(np.float64)
@@ -1134,14 +1146,14 @@ Do you want to continue without mask?""")
             
         progress.setValue(len(self.fscan))
         
-        if np.any(bgpixel1):
+        if np.any(bgpixel1_a):
             croibg1_a = croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a
             croibg1_err_a = np.sqrt(croi1_a + (cpixel1_a/bgpixel1_a) * bgroi1_a)
         else:
             croibg1_a = croi1_a
             croibg1_err_a = np.sqrt(croi1_a)
             
-        if np.any(bgpixel2):
+        if np.any(bgpixel2_a):
             croibg2_a = croi2_a - (cpixel2_a/bgpixel2_a) * bgroi2_a
             croibg2_err_a = np.sqrt(croi2_a + (cpixel2_a/bgpixel2_a) * bgroi2_a)
         else:
@@ -1200,6 +1212,13 @@ Do you want to continue without mask?""")
         if croibg2_a_masked.size > 0:
             self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
                                          xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
+                                         
+        auxcounters = {"@NX_class": u"NXcollection"}
+        for auxname in backends.auxillary_counters:
+            if hasattr(self.fscan, auxname):
+                cntr = getattr(self.fscan, auxname)
+                if cntr is not None:
+                    auxcounters[auxname] = cntr
             
         data = {self.activescanname:{
                     "instrument": {
@@ -1209,6 +1228,7 @@ Do you want to continue without mask?""")
                             self.fscan.axisname: self.fscan.axis
                         }
                     },
+                    "auxillary" : auxcounters,
                     "measurement": {
                         "@NX_class": u"NXentry",
                         "@default": availname1 if defaultS1 else availname2,
@@ -1319,7 +1339,7 @@ Do you want to continue without mask?""")
         #print(eventdict)
         if eventdict['event'] == 'mouseDoubleClicked':
             #newReflection = np.array([1,1,1,self.imageno,eventdict['x'],eventdict['y']])
-            hkl = self.centralPlot.xyHKLConverter(eventdict['x'],eventdict['y'])
+            hkl = self.centralPlot.xyHKLConverter(eventdict['x'],eventdict['y'])[:3]
             self.reflectionSel.addReflection(eventdict,self.imageno,hkl)
             
         if eventdict['event'] == 'markerMoved':

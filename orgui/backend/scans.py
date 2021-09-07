@@ -26,6 +26,7 @@ class Scan():
         self.axis = None # value of either "th" or "mu"
         self.th = 0. # or self.mu, depending on scanaxis
         self.omega = 0. # = -1*th
+        self.title = "generic_scan"
 
     def __len__(self):
         raise NotImplementedError()
@@ -61,6 +62,7 @@ class SimulationScan(Scan):
         self.nopoints = points
         
         self.images = np.zeros((points,*detshape))
+        self.title = "sim ascan %s %s %s %s" % (self.axisname,axismin,axismax,points)
         
     def __len__(self):
         return self.nopoints
