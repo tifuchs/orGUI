@@ -815,9 +815,10 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 self.scanSelector.showMaxButton.setChecked(False)
         else:
             if self.currentAddImageLabel is not None:
+                self.centralPlot.setActiveImage(self.currentImageLabel)
                 self.centralPlot.removeImage(self.currentAddImageLabel)
                 self.currentAddImageLabel = None
-                self.centralPlot.setActiveImage(self.currentImageLabel)
+
         
     def _onSumToggled(self,value):
         if self.scanSelector.showMaxButton.isChecked():
@@ -832,19 +833,20 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 self.scanSelector.showSumButton.setChecked(False)
         else:
             if self.currentAddImageLabel is not None:
+                self.centralPlot.setActiveImage(self.currentImageLabel)
                 self.centralPlot.removeImage(self.currentAddImageLabel)
                 self.currentAddImageLabel = None
-                self.centralPlot.setActiveImage(self.currentImageLabel)
+
         
     
         
     def plotImage(self,key=0):
         try:
             image = self.fscan.get_raw_img(key)
-            if self.currentImageLabel is not None:
-                self.centralPlot.removeImage(self.currentImageLabel)
+            #if self.currentImageLabel is not None:
+            #    self.centralPlot.removeImage(self.currentImageLabel)
 
-            self.currentImageLabel = self.centralPlot.addImage(image.img,legend="No %i" % key,
+            self.currentImageLabel = self.centralPlot.addImage(image.img,legend="scan_image",
                                                                replace=False,resetzoom=self.resetZoom,copy=True)
             if self.currentAddImageLabel is None:
                 self.centralPlot.setActiveImage(self.currentImageLabel)
