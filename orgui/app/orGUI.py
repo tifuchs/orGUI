@@ -52,6 +52,7 @@ from .QUBCalculator import QUBCalculator
 from .database import DataBase
 from ..backend.scans import SimulationScan
 from ..backend import backends
+from .. import resources
 
 import numpy as np
 from datautils.xrayutils import HKLVlieg, CTRcalc
@@ -75,9 +76,9 @@ class orGUI(qt.QMainWindow):
     def __init__(self,configfile,parent=None):
         qt.QMainWindow.__init__(self, parent)
         self.h5database = None # must be a h5py file-like, by default not opened to avoid reading issues at beamtimes!
-        
+        self.images_loaded = False
         self.resetZoom = True
-        
+        icon = resources.getQicon("sum_image.svg")
         self.fscan = None
         self.activescanname = "scan"
         self.numberthreads = int(min(os.cpu_count(), 8)) if os.cpu_count() is not None else 1 
@@ -85,6 +86,10 @@ class orGUI(qt.QMainWindow):
             self.numberthreads = int(os.environ['SLURM_CPUS_ON_NODE'])
         
         self.filedialogdir = os.getcwd()
+        
+        self.centralPlot = Plot2DHKL(self.newXyHKLConverter(),parent=self)
+        self.centralPlot.setDefaultColormap(Colormap(name='jet',normalization='log'))
+        self.centralPlot.setCallback(self._graphCallback)
         
         self.currentImageLabel = None
         self.currentAddImageLabel = None
@@ -123,38 +128,50 @@ class orGUI(qt.QMainWindow):
         
         self.integrdataPlot.addDockWidget(qt.Qt.RightDockWidgetArea,dbdockwidget)
         
-        
-        self.centralPlot = Plot2DHKL(self.newXyHKLConverter(),parent=self)
-        self.centralPlot.setDefaultColormap(Colormap(name='jet',normalization='log'))
-        self.centralPlot.setCallback(self._graphCallback)
 
         self.scanSelector.sigImageNoChanged.connect(self._onSliderValueChanged)
 
         self.scanSelector.sigImagePathChanged.connect(self._onImagePathChanged)
         self.scanSelector.sigScanChanged.connect(self._onScanChanged)
         
-        self.scanSelector.loadallButton.clicked.connect(self._onLoadAll)
-        self.scanSelector.showMaxButton.toggled.connect(self._onMaxToggled)
-        self.scanSelector.showSumButton.toggled.connect(self._onSumToggled)
+        #self.scanSelector.loadallButton.clicked.connect(self._onLoadAll)
+        self.scanSelector.showMaxAct.toggled.connect(self._onMaxToggled)
+        self.scanSelector.showSumAct.toggled.connect(self._onSumToggled)
         
         self.scanSelector.sigROIChanged.connect(self.updateROI)
         
+        """
         self.alphaslider = NamedImageAlphaSlider(self,self.centralPlot,self.currentAddImageLabel)
         self.alphaslider.setOrientation(qt.Qt.Horizontal)
         self.alphaslider.setEnabled(True)
         
-        alphasliderwidget = qt.QWidget()
-        alphasliderwidgetLayout = qt.QHBoxLayout()
-        alphasliderwidgetLayout.addWidget(qt.QLabel("Transparancy:"))
-        alphasliderwidgetLayout.addWidget(self.alphaslider)
-        alphasliderwidget.setLayout(alphasliderwidgetLayout)
+        alpha_menu = qt.QMenu()
+        
+        alphasliderwidget = qt.QWidgetAction(alpha_menu)
+        alphasliderwidget.setDefaultWidget(self.alphaslider)
 
-        self.scanSelector.loadScanGroupLayout.addWidget(alphasliderwidget)
+        alpha_menu.addAction(alphasliderwidget)
+        
+        
+        alpha_action = qt.QAction(resources.getQicon("sum_image.svg"),"slider")
+        alpha_action.setMenu(alpha_menu)
+        toolbar.addAction(alpha_action)
+        """
+        #alphasliderwidgetLayout = qt.QHBoxLayout()
+        #alphasliderwidgetLayout.addWidget(qt.QLabel("Transparancy:"))
+        #alphasliderwidgetLayout.addWidget(self.alphaslider)
+        #alphasliderwidget.setLayout(alphasliderwidgetLayout)
+        #act2 = self.scanSelector.toolbar.actions()[1]
+        
+
+        #self.scanSelector.loadScanGroupLayout.addWidget(alphasliderwidget)
         
         self.scanSelector.sigROIintegrate.connect(self.integrateROI)
         
 
         toolbar = self.scanSelector.getScanToolbar()
+
+        
         self.centralPlot.addToolBar(qt.Qt.BottomToolBarArea,toolbar)
         
         maincentralwidget.addTab(self.centralPlot,"Scan Image browser")
@@ -221,6 +238,10 @@ class orGUI(qt.QMainWindow):
         file.addAction(self.scanSelector.openFileAction)
         file.addAction(self.scanSelector.refreshFileAction)
         file.addAction(self.scanSelector.closeFileAction)
+        file.addSeparator()
+        
+        self.loadImagesAct = file.addAction("load scan images")
+        self.loadImagesAct.triggered.connect(self._onLoadAll)
         
         config_menu =  menu_bar.addMenu("&Config")
         loadConfigAct = qt.QAction("Load config",self) # connected with UBCalculator below
@@ -241,6 +262,10 @@ class orGUI(qt.QMainWindow):
         
         cpucountAct.triggered.connect(self._onSelectCPUcount)
         
+        self.autoLoadAct = qt.QAction("Auto load scans",self)
+        self.autoLoadAct.setCheckable(True)
+        self.autoLoadAct.setChecked(True)
+        
         config_menu.addAction(loadConfigAct)
         #config_menu.addAction(loadXtalAct)
         config_menu.addSeparator()
@@ -248,6 +273,7 @@ class orGUI(qt.QMainWindow):
         config_menu.addAction(xtalParamsAct)
         config_menu.addSeparator()
         config_menu.addAction(cpucountAct)
+        config_menu.addAction(self.autoLoadAct)
         
         view_menu = menu_bar.addMenu("&View")
         showRefReflectionsAct = view_menu.addAction("show reference reflections")
@@ -724,8 +750,6 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
                 msg.hide()
                 self._onLoadAll()
-                self.scanSelector.showMaxButton.setChecked(False)
-                self.scanSelector.showMaxButton.setChecked(True)
             except Exception:
                 msg.hide()
                 qt.QMessageBox.critical(self,"Cannot open scan", "Cannot open scan:\n%s" % traceback.format_exc())
@@ -760,8 +784,11 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             
         
     def _onLoadAll(self):
-        if self.fscan is not None:
+        self.images_loaded = False
+        if self.fscan is not None and self.autoLoadAct.isChecked():
             self.loadAll()
+            self.scanSelector.showMaxAct.setChecked(False)
+            self.scanSelector.showMaxAct.setChecked(True)
             
     def loadAll(self):
         try:
@@ -776,6 +803,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         #tasks = queue.Queue()
         #[tasks.put(i) for i in range(len(self.fscan))]
         lock = threading.Lock()
+        self.images_loaded = True
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor: # speedup only for the file reads 
             futures = {}
             def readfile_max(imgno):
@@ -798,21 +826,29 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
 
                 if progress.wasCanceled():
                     [f.cancel() for f in futures]
+                    self.images_loaded = False
                     break
 
         progress.setValue(len(self.fscan))
         
     def _onMaxToggled(self,value):
-        if self.scanSelector.showSumButton.isChecked():
-            self.scanSelector.showSumButton.setChecked(False)
+        if self.scanSelector.showSumAct.isChecked():
+            self.scanSelector.showSumAct.setChecked(False)
         if value:
+            if not self.images_loaded and self.fscan is not None:
+                btn = qt.QMessageBox.question(self,"Incomplete sum / max image", "Sum/Max image was not loaded completely. Displayed maximum image will be incomplete! Do you want to load all images?",qt.QMessageBox.Yes | qt.QMessageBox.No | qt.QMessageBox.Cancel)
+                if btn == qt.QMessageBox.Yes: 
+                    self.loadAll()
+                elif btn == qt.QMessageBox.Cancel:
+                    self.scanSelector.showMaxAct.setChecked(False)
+                    return
             if self.allimgmax is not None:
                 self.currentAddImageLabel = self.centralPlot.addImage(self.allimgmax,legend="special",
                                                                replace=False,resetzoom=False,copy=True,z=1)
                 self.centralPlot.setActiveImage(self.currentAddImageLabel)
-                self.alphaslider.setLegend(self.currentAddImageLabel)
+                self.scanSelector.alphaslider.setLegend(self.currentAddImageLabel)
             else:
-                self.scanSelector.showMaxButton.setChecked(False)
+                self.scanSelector.showMaxAct.setChecked(False)
         else:
             if self.currentAddImageLabel is not None:
                 self.centralPlot.setActiveImage(self.currentImageLabel)
@@ -821,16 +857,23 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
 
         
     def _onSumToggled(self,value):
-        if self.scanSelector.showMaxButton.isChecked():
-            self.scanSelector.showMaxButton.setChecked(False)
+        if self.scanSelector.showMaxAct.isChecked():
+            self.scanSelector.showMaxAct.setChecked(False)
         if value:
+            if not self.images_loaded and self.fscan is not None:
+                btn = qt.QMessageBox.question(self,"Incomplete sum / max image", "Sum/Max image was not loaded completely. Displayed sum image will be incomplete! Do you want to load all images?",qt.QMessageBox.Yes | qt.QMessageBox.No | qt.QMessageBox.Cancel)
+                if btn == qt.QMessageBox.Yes: 
+                    self.loadAll()
+                elif btn == qt.QMessageBox.Cancel:
+                    self.scanSelector.showSumAct.setChecked(False)
+                    return
             if self.allimgsum is not None:
                 self.currentAddImageLabel = self.centralPlot.addImage(self.allimgsum,legend="special",
                                                                replace=False,resetzoom=False,copy=True,z=1)
                 self.centralPlot.setActiveImage(self.currentAddImageLabel)
-                self.alphaslider.setLegend(self.currentAddImageLabel)
+                self.scanSelector.alphaslider.setLegend(self.currentAddImageLabel)
             else:
-                self.scanSelector.showSumButton.setChecked(False)
+                self.scanSelector.showSumAct.setChecked(False)
         else:
             if self.currentAddImageLabel is not None:
                 self.centralPlot.setActiveImage(self.currentImageLabel)
@@ -1207,13 +1250,6 @@ Do you want to continue without mask?""")
             i += 1
         
         availname2 = name2 + suffix
-        
-        if croibg1_a_masked.size > 0:
-            self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
-                                         xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
-        if croibg2_a_masked.size > 0:
-            self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
-                                         xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
                                          
         auxcounters = {"@NX_class": u"NXcollection"}
         for auxname in backends.auxillary_counters:
@@ -1221,6 +1257,99 @@ Do you want to continue without mask?""")
                 cntr = getattr(self.fscan, auxname)
                 if cntr is not None:
                     auxcounters[auxname] = cntr
+                    
+                    
+        datas1 = {
+            "@NX_class": u"NXdata",
+            "sixc_angles": {
+                "@NX_class": u"NXpositioner",
+                "alpha" : np.rad2deg(mu),
+                "omega" :  np.rad2deg(om),
+                "theta" :  np.rad2deg(-1*om),
+                "delta" : np.rad2deg(hkl_del_gam_1[:,3]),
+                "gamma" :  np.rad2deg(hkl_del_gam_1[:,4]),
+                "chi" :  np.rad2deg(self.ubcalc.chi),
+                "phi" :  np.rad2deg(self.ubcalc.phi),
+                "@unit" : u"deg"
+            },
+            "hkl": {
+                "@NX_class": u"NXcollection",
+                "h" :  hkl_del_gam_1[:,0],
+                "k" :  hkl_del_gam_1[:,1],
+                "l" : hkl_del_gam_1[:,2]
+            },
+            "counters":{
+                "@NX_class": u"NXdetector",
+                "croibg"  : croibg1_a,
+                "croibg_errors" :  croibg1_err_a,
+                "croi" :  croi1_a,
+                "bgroi"  : bgroi1_a,
+                "croi_pix"  : cpixel1_a,
+                "bgroi_pix" : bgpixel1_a
+            },
+            "pixelcoord": {
+                "@NX_class": u"NXdetector",
+                "x" : x_coord1_a,
+                "y"  : y_coord1_a
+            },
+            "trajectory" : {
+                "@NX_class": u"NXcollection",
+                "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
+                "H_1"  : H_1,
+                "H_0" : H_0,
+                "s" : hkl_del_gam_1[:,5]
+            },
+            "@signal" : u"counters/croibg",
+            "@axes": u"trajectory/s",
+            "@title": self.activescanname + "_" + availname1,
+            "@orgui_meta": u"roi"
+        }
+        
+        datas2 = {
+            "@NX_class": u"NXdata",
+            "sixc_angles": {
+                "@NX_class": u"NXpositioner",
+                "alpha" : np.rad2deg(mu),
+                "omega" :  np.rad2deg(om),
+                "theta" :  np.rad2deg(-1*om),
+                "delta" : np.rad2deg(hkl_del_gam_2[:,3]),
+                "gamma" :  np.rad2deg(hkl_del_gam_2[:,4]),
+                "chi" :  np.rad2deg(self.ubcalc.chi),
+                "phi" :  np.rad2deg(self.ubcalc.phi),
+                "@unit" : u"deg"
+            },
+            "hkl": {
+                "@NX_class": u"NXcollection",
+                "h" :  hkl_del_gam_2[:,0],
+                "k" :  hkl_del_gam_2[:,1],
+                "l" : hkl_del_gam_2[:,2]
+            },
+            "counters":{
+                "@NX_class": u"NXdetector",
+                "croibg"  : croibg2_a,
+                "croibg_errors" :  croibg2_err_a,
+                "croi" :  croi2_a,
+                "bgroi"  : bgroi2_a,
+                "croi_pix"  : cpixel2_a,
+                "bgroi_pix" : bgpixel2_a
+            },
+            "pixelcoord": {
+                "@NX_class": u"NXdetector",
+                "x" : x_coord2_a,
+                "y"  : y_coord2_a
+            },
+            "trajectory" : {
+                "@NX_class": u"NXcollection",
+                "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
+                "H_1"  : H_1,
+                "H_0" : H_0,
+                "s" : hkl_del_gam_2[:,5]
+            },
+            "@signal" : u"counters/croibg",
+            "@axes": u"trajectory/s",
+            "@title": self.activescanname + "_" + availname2,
+            "@orgui_meta": u"roi"
+        }
             
         data = {self.activescanname:{
                     "instrument": {
@@ -1234,97 +1363,6 @@ Do you want to continue without mask?""")
                     "measurement": {
                         "@NX_class": u"NXentry",
                         "@default": availname1 if defaultS1 else availname2,
-                       
-                        availname1: {
-                            "@NX_class": u"NXdata",
-                            "sixc_angles": {
-                                "@NX_class": u"NXpositioner",
-                                "alpha" : np.rad2deg(mu),
-                                "omega" :  np.rad2deg(om),
-                                "theta" :  np.rad2deg(-1*om),
-                                "delta" : np.rad2deg(hkl_del_gam_1[:,3]),
-                                "gamma" :  np.rad2deg(hkl_del_gam_1[:,4]),
-                                "chi" :  np.rad2deg(self.ubcalc.chi),
-                                "phi" :  np.rad2deg(self.ubcalc.phi),
-                                "@unit" : u"deg"
-                            },
-                            "hkl": {
-                                "@NX_class": u"NXcollection",
-                                "h" :  hkl_del_gam_1[:,0],
-                                "k" :  hkl_del_gam_1[:,1],
-                                "l" : hkl_del_gam_1[:,2]
-                            },
-                            "counters":{
-                                "@NX_class": u"NXdetector",
-                                "croibg"  : croibg1_a,
-                                "croibg_errors" :  croibg1_err_a,
-                                "croi" :  croi1_a,
-                                "bgroi"  : bgroi1_a,
-                                "croi_pix"  : cpixel1_a,
-                                "bgroi_pix" : bgpixel1_a
-                            },
-                            "pixelcoord": {
-                                "@NX_class": u"NXdetector",
-                                "x" : x_coord1_a,
-                                "y"  : y_coord1_a
-                            },
-                            "trajectory" : {
-                                "@NX_class": u"NXcollection",
-                                "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
-                                "H_1"  : H_1,
-                                "H_0" : H_0,
-                                "s" : hkl_del_gam_1[:,5]
-                            },
-                            "@signal" : u"counters/croibg",
-                            "@axes": u"trajectory/s",
-                            "@title": self.activescanname + "_" + availname1,
-                            "@orgui_meta": u"roi"
-                        },
-                        availname2: {
-                            "@NX_class": u"NXdata",
-                            "sixc_angles": {
-                                "@NX_class": u"NXpositioner",
-                                "alpha" : np.rad2deg(mu),
-                                "omega" :  np.rad2deg(om),
-                                "theta" :  np.rad2deg(-1*om),
-                                "delta" : np.rad2deg(hkl_del_gam_2[:,3]),
-                                "gamma" :  np.rad2deg(hkl_del_gam_2[:,4]),
-                                "chi" :  np.rad2deg(self.ubcalc.chi),
-                                "phi" :  np.rad2deg(self.ubcalc.phi),
-                                "@unit" : u"deg"
-                            },
-                            "hkl": {
-                                "@NX_class": u"NXcollection",
-                                "h" :  hkl_del_gam_2[:,0],
-                                "k" :  hkl_del_gam_2[:,1],
-                                "l" : hkl_del_gam_2[:,2]
-                            },
-                            "counters":{
-                                "@NX_class": u"NXdetector",
-                                "croibg"  : croibg2_a,
-                                "croibg_errors" :  croibg2_err_a,
-                                "croi" :  croi2_a,
-                                "bgroi"  : bgroi2_a,
-                                "croi_pix"  : cpixel2_a,
-                                "bgroi_pix" : bgpixel2_a
-                            },
-                            "pixelcoord": {
-                                "@NX_class": u"NXdetector",
-                                "x" : x_coord2_a,
-                                "y"  : y_coord2_a
-                            },
-                            "trajectory" : {
-                                "@NX_class": u"NXcollection",
-                                "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
-                                "H_1"  : H_1,
-                                "H_0" : H_0,
-                                "s" : hkl_del_gam_2[:,5]
-                            },
-                            "@signal" : u"counters/croibg",
-                            "@axes": u"trajectory/s",
-                            "@title": self.activescanname + "_" + availname2,
-                            "@orgui_meta": u"roi"
-                        },
                     },
                     "title":u"%s" % title,
                     "@NX_class": u"NXentry",
@@ -1332,6 +1370,16 @@ Do you want to continue without mask?""")
                     "@orgui_meta": u"scan"
                 }
             }
+            
+        if np.any(cpixel1_a > 0.):
+            self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
+                                         xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
+            data[self.activescanname]["measurement"][availname1] = datas1
+        if np.any(cpixel2_a > 0.):
+            self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
+                                         xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
+            data[self.activescanname]["measurement"][availname2] = datas2
+            
         self.database.add_nxdict(data)
         
         

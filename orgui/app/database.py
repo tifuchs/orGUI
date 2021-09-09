@@ -243,8 +243,16 @@ class DataBase(qt.QMainWindow):
             return
         
         self.filedialogdir = os.path.splitext(filename)[0]
-        filename += fileTypeDict[filetype]
-        self.openDBFile(filename)
+        #filename += fileTypeDict[filetype]
+        try:
+            self.openDBFile(filename)
+        except:
+            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open db file', 
+            'Cannot open db file %s.' % filename,
+            qt.QMessageBox.Ok, self)
+            msgbox.setDetailedText(traceback.format_exc())
+            clickedbutton = msgbox.exec()
+        
         
     def saveNewDBFile(self, filename):
         alldata = nxtodict(self.nxfile)
@@ -268,8 +276,15 @@ class DataBase(qt.QMainWindow):
             datadict = fileattrs
         else:
             datadict.update(fileattrs)
-        dicttonx(datadict, filename)
-        self.openDBFile(filename)
+        try:
+            dicttonx(datadict, filename)
+            self.openDBFile(filename)
+        except:
+            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
+            'Cannot create file %s.' % filename,
+            qt.QMessageBox.Ok, self)
+            msgbox.setDetailedText(traceback.format_exc())
+            clickedbutton = msgbox.exec()
         
     def openDBFile(self, filename):
         if self.nxfile is not None:
@@ -278,14 +293,14 @@ class DataBase(qt.QMainWindow):
         self.nxfile = silx.io.h5py_utils.File(filename,'a')
         self._filepath = filename
         self.hdf5model.insertH5pyObject(self.nxfile)
-        self.view.expandToDepth(1)
+        self.view.expandToDepth(0)
 
     def add_nxdict(self, nxentry):
         if self.nxfile is None:
             raise Exception("No database file open.")
         dicttonx(nxentry, self.nxfile, update_mode='add')
         self.hdf5model.synchronizeH5pyObject(self.nxfile)
-        self.view.expandToDepth(1)
+        self.view.expandToDepth(0)
         
     def onDeleteScan(self, obj):
         btn = qt.QMessageBox.question(self,"Delete scan?","Are you sure that you want to delete %s from the orgui database?" % obj.name.split("/")[-1])
@@ -297,7 +312,7 @@ class DataBase(qt.QMainWindow):
         objpar = obj.parent
         del objpar[basename]
         self.hdf5model.synchronizeH5pyObject(self.nxfile)
-        self.view.expandToDepth(1)
+        self.view.expandToDepth(0)
         
         
         

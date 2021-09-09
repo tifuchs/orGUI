@@ -23,8 +23,8 @@ logger = logging.getLogger('orgui')
 
 #from distutils.core import setup
 
-packages = ['orgui',"orgui.app", "orgui.backend"]
-
+packages = ['orgui',"orgui.app", "orgui.backend", "orgui.resources"]
+package_data = {'orgui.resources' : ['icons/*.svg','icons/*.png']}
 dry_run = False
 
 if dry_run:
@@ -50,6 +50,7 @@ setup(name='orgui', version='1.0.0',
       entry_points = {
         'console_scripts': ['orGUI=orgui.main:main']
       },
+      package_data=package_data,
       author="Timo Fuchs",
       author_email="fuchs@physik.uni-kiel.de",
       url='FIXME',

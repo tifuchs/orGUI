@@ -29,7 +29,7 @@ from silx.gui import qt
 from silx.gui.hdf5.Hdf5TreeModel import Hdf5TreeModel
 from silx.gui.dialog import ImageFileDialog
 from silx.gui import icons
-
+from silx.gui.plot.AlphaSlider import NamedImageAlphaSlider
 #from silx.gui.widgets import HorizontalSliderWithBrowser
 
 import silx.gui.hdf5
@@ -38,7 +38,7 @@ import h5py
 import traceback
 
 import warnings
-
+from .. import resources
 from ..backend import backends
 
 class QScanSelector(qt.QMainWindow):
@@ -153,7 +153,38 @@ class QScanSelector(qt.QMainWindow):
         self.axisSelector.setReadOnly(True)
         self.axisSelector.setSuffix(" °")
         
+        self.showMaxAct = qt.QAction(resources.getQicon("max_image2"), "plot maximum of the scan")
+        self.showMaxAct.setCheckable(True)
         
+        self.showSumAct = qt.QAction(resources.getQicon("sum_image2"), "plot sum of the scan")
+        self.showSumAct.setCheckable(True)
+        
+        self.alphaslider = NamedImageAlphaSlider(self,self.parentmainwindow.centralPlot,self.parentmainwindow.currentAddImageLabel)
+        self.alphaslider.setOrientation(qt.Qt.Horizontal)
+        self.alphaslider.setEnabled(True)
+        
+        self.alpha_menu = qt.QMenu()
+        
+        self.alphasliderwidget = qt.QWidgetAction(self.alpha_menu)
+        self.alphasliderwidget.setDefaultWidget(self.alphaslider)
+
+        self.alpha_menu.addAction(self.alphasliderwidget)
+        
+        #self.alpha_btn = qt.QToolButton(resources.getQicon("sum_image.png"),"slider")
+        self.alpha_btn = qt.QToolButton()
+        self.alpha_btn.setIcon(resources.getQicon("alpha"))
+        self.alpha_btn.setToolTip("Transparency of max / sum image")
+        self.alpha_btn.setPopupMode(qt.QToolButton.InstantPopup)
+        self.alpha_btn.setMenu(self.alpha_menu)
+        
+        self.alpha_btn_act = qt.QWidgetAction(self)
+        self.alpha_btn_act.setDefaultWidget(self.alpha_btn)
+        
+
+        self.toolbar.addAction(self.showMaxAct)
+        self.toolbar.addAction(self.showSumAct)
+        self.toolbar.addAction(self.alpha_btn_act)
+        self.toolbar.addSeparator()
         
         self.toolbar.addWidget(imglabel)
         self.toolbar.addWidget(self.noSelector)
@@ -185,7 +216,7 @@ class QScanSelector(qt.QMainWindow):
         self.selectedScan = None
         
         ### SCAN DISPLAY
-        
+        """
         self.scanDisplayTab = qt.QWidget()
         self.scanDisplayTabLayout = qt.QVBoxLayout()
         
@@ -199,21 +230,23 @@ class QScanSelector(qt.QMainWindow):
         self.loadallButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
         self.loadallButton.setToolTip("open all images and calculate sum and maximum")
         #self.loadallButton.clicked.connect(self._onLoadAll)
+
         
-        self.showMaxButton = qt.QPushButton("show max")
-        self.showMaxButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
-        self.showMaxButton.setToolTip("plot maximum of the scan")
-        self.showMaxButton.setCheckable(True)
+        #self.showMaxButton = qt.QPushButton("show max")
+        #self.showMaxButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
+        #self.showMaxButton.setToolTip("plot maximum of the scan")
+        #self.showMaxButton.setCheckable(True)
         #showMaxButton.clicked.connect(self._onLoadAll)
+
         
-        self.showSumButton = qt.QPushButton("show sum")
-        self.showSumButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
-        self.showSumButton.setToolTip("plot sum of the scan")
-        self.showSumButton.setCheckable(True)
+        #self.showSumButton = qt.QPushButton("show sum")
+        #self.showSumButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
+        #self.showSumButton.setToolTip("plot sum of the scan")
+        #self.showSumButton.setCheckable(True)
         
         loadScanGroupButtonlayout.addWidget(self.loadallButton)
-        loadScanGroupButtonlayout.addWidget(self.showMaxButton)
-        loadScanGroupButtonlayout.addWidget(self.showSumButton)
+        #loadScanGroupButtonlayout.addWidget(self.showMaxButton)
+        #loadScanGroupButtonlayout.addWidget(self.showSumButton)
         
         self.loadScanGroupLayout.addLayout(loadScanGroupButtonlayout)
         
@@ -226,7 +259,7 @@ class QScanSelector(qt.QMainWindow):
         
         self.scanDisplayTab.setLayout(self.scanDisplayTabLayout)
         maintab.addTab(self.scanDisplayTab,"scan display")
-        
+        """
         
         ## ROI
                 
