@@ -347,7 +347,7 @@ class QScanSelector(qt.QMainWindow):
         
         self.H_0 = [qt.QDoubleSpinBox() for i in range(3)]
         [h.setRange(-20000,20000) for h in self.H_0]
-        [h.setDecimals(2) for h in self.H_0]
+        [h.setDecimals(4) for h in self.H_0]
         self.H_0[0].setValue(1.)
         self.H_0[1].setValue(0.)
         self.H_0[2].setValue(0.)
@@ -356,7 +356,7 @@ class QScanSelector(qt.QMainWindow):
         
         self.H_1 = [qt.QDoubleSpinBox() for i in range(3)]
         [h.setRange(-20000,20000) for h in self.H_1]
-        [h.setDecimals(2) for h in self.H_1]
+        [h.setDecimals(4) for h in self.H_1]
         self.H_1[0].setValue(0.)
         self.H_1[1].setValue(0.)
         self.H_1[2].setValue(1.)

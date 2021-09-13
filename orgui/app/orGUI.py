@@ -319,10 +319,30 @@ class orGUI(qt.QMainWindow):
         aboutAct = helpmenu.addAction("About")
         aboutAct.triggered.connect(self._onShowAbout)
         
+        #hackAct = helpmenu.addAction("Hack")
+        #hackAct.triggered.connect(self.hack_rocking_extraction)
+        
         aboutQtAct = helpmenu.addAction("About Qt")
         aboutQtAct.triggered.connect(lambda : qt.QMessageBox.aboutQt(self))
         
         self.setMenuBar(menu_bar)
+        
+    def hack_rocking_extraction(self):
+        # To delete when not needed anymore!
+        scans = [(j,'ascan_%s' % j) for j in range(1,15)]
+        lar = np.loadtxt("C:/Timo_loc/CH5523/ch5523/CTR/XRR_orgui/ctr_straj.txt").T[0]
+        for no, sc in scans:
+            ddict = {'name' : sc, 'scanno' : no}
+            ddict['event'] = "itemDoubleClicked"
+            ddict['file'] = self.hdffile
+            #ddict['node'] = obj
+            ddict['beamtime'] = 'ch5523'
+            self._onScanChanged(ddict)
+            #lar = np.linspace(0.28, 3.88,181)
+            for l in lar:
+                self.scanSelector.H_0[2].setValue(l)
+                self.integrateROI()
+    
         
     def onShowBragg(self,visible):
         try:
@@ -1078,7 +1098,19 @@ Do you want to continue without mask?""")
                 C_arr /= dc.polarization(factor=dc._polFactor,axis_offset=dc._polAxis)
 
         
-        hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc()
+        hkl_del_gam_s1, hkl_del_gam_s2 = self.getROIloc()
+        
+        nodatapoints = len(self.fscan)
+        #print(hkl_del_gam_1s.shape)
+        
+        if hkl_del_gam_s1.shape[0] == 1:
+            hkl_del_gam_1 = np.zeros((nodatapoints,hkl_del_gam_s1.shape[1]), dtype=np.float64)
+            hkl_del_gam_2 = np.zeros((nodatapoints,hkl_del_gam_s1.shape[1]), dtype=np.float64)
+            hkl_del_gam_1[:] = hkl_del_gam_s1[0]
+            hkl_del_gam_2[:] = hkl_del_gam_s2[0]
+        else:
+            hkl_del_gam_1, hkl_del_gam_2 = hkl_del_gam_s1, hkl_del_gam_s2
+
         
         dataavail = np.logical_or(hkl_del_gam_1[:,-1],hkl_del_gam_2[:,-1])
 
@@ -1372,12 +1404,16 @@ Do you want to continue without mask?""")
             }
             
         if np.any(cpixel1_a > 0.):
+            """
             self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
                                          xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
+            """
             data[self.activescanname]["measurement"][availname1] = datas1
         if np.any(cpixel2_a > 0.):
+            """
             self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
                                          xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
+            """
             data[self.activescanname]["measurement"][availname2] = datas2
             
         self.database.add_nxdict(data)

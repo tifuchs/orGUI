@@ -115,9 +115,9 @@ def openScan(btid, ddict):
         fscan = fscancls(ddict['file'],ddict['scanno'])
     elif btid == 'ch5700' or btid == 'ch5918':
         if 'node' in ddict:
-            fscan = fscancls(ddict['node'],ddict['scanno'])
+            fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False)
         else:
-            fscan = fscancls(ddict['file'],ddict['scanno'])
+            fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False)
     else:
         try:
             fscan = fscancls(ddict['file'], ddict['scanno'])
