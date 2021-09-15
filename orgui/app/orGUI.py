@@ -329,6 +329,7 @@ class orGUI(qt.QMainWindow):
         
     def hack_rocking_extraction(self):
         # To delete when not needed anymore!
+        raise Exception("FOOOO!")
         scans = [(j,'ascan_%s' % j) for j in range(1,15)]
         lar = np.loadtxt("C:/Timo_loc/CH5523/ch5523/CTR/XRR_orgui/ctr_straj.txt").T[0]
         for no, sc in scans:
@@ -955,8 +956,8 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         #mu = self.ubcalc.mu
         #angles = self.ubcalc.angles
         
-        H_1 = np.array([h.value() for h in self.scanSelector.H_1])
-        H_0 = np.array([h.value() for h in self.scanSelector.H_0])
+        #H_1 = np.array([h.value() for h in self.scanSelector.H_1])
+        #H_0 = np.array([h.value() for h in self.scanSelector.H_0])
         
         hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(self.imageno)
 
@@ -1002,19 +1003,84 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         dc = self.ubcalc.detectorCal
         #mu = self.ubcalc.mu
         angles = self.ubcalc.angles
-        if H_0 is None or H_1 is None:
-            H_1 = np.array([h.value() for h in self.scanSelector.H_1])
-            H_0 = np.array([h.value() for h in self.scanSelector.H_0])
         
-        hkl_del_gam_1, hkl_del_gam_2 = angles.anglesIntersectLineEwald(H_0, H_1, mu, om, self.ubcalc.phi,self.ubcalc.chi)
+        """
+                    gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([y]),np.array([x]), mu)
+            #print(self.ubcalc.detectorCal)
+            #print(x,y)
+            #print(self.ubcalc.detectorCal.tth(np.array([y]),np.array([x])))
+            pos = [mu,delta[0],gamma[0],om,self.ubcalc.chi,self.ubcalc.phi]
+            pos = HKLVlieg.crystalAngles(pos,self.ubcalc.n)
+            hkl = np.concatenate((np.array(self.ubcalc.angles.anglesToHkl(*pos)),np.rad2deg([delta[0],gamma[0]])))
+        """
+        #print(self.scanSelector.scanstab.currentIndex())
+        if self.scanSelector.scanstab.currentIndex() == 1:
+            if imageno is None:
+                hkl_del_gam_1 = np.ones((len(self.fscan),6),dtype=np.float64)
+                x = np.full(len(self.fscan),self.scanSelector.xy_static[0].value())
+                y = np.full(len(self.fscan),self.scanSelector.xy_static[1].value())
+                
+                gamma, delta, alpha = self.ubcalc.detectorCal.crystalAnglesPoint(y, x, mu,  self.ubcalc.n)
+                s = np.arange(len(self.fscan))
+                
+                if len(np.asarray(om).shape) == 0:
+                    om = np.full(len(self.fscan),om)
+                
+                if len(np.asarray(alpha).shape) == 0:
+                    alpha = np.full(len(self.fscan),alpha)
+
+                yx1 = np.vstack((y,x)).T
+                yx2 = np.full_like(yx1, -50000)
+                
+                for i in range(len(self.fscan)):
+                    
+                    pos = [alpha[i],delta[i],gamma[i],
+                            om[i],
+                            self.ubcalc.chi,
+                            self.ubcalc.phi]
+                    #pos = np.vstack(pos).T
+                    hkl = np.array(self.ubcalc.angles.anglesToHkl(*pos))
+                    hkl_del_gam_1[i, :3] = hkl
+                hkl_del_gam_1[:, 3] = delta
+                hkl_del_gam_1[:, 4] = gamma
+                hkl_del_gam_1[:, 5] = self.fscan.axis
+                hkl_del_gam_2 = np.full_like(hkl_del_gam_1, -1)
+            else:
+                hkl_del_gam_1 = np.ones(6,dtype=np.float64)
+                x = self.scanSelector.xy_static[0].value()
+                y = self.scanSelector.xy_static[1].value()
+                yx1 = np.zeros((1,2))
+                yx1[0][0] = y
+                yx1[0][1] = x
+                yx2 = np.full_like(yx1, -50000)
+                
+                if len(np.asarray(om).shape) > 0:
+                    om = om[imageno]
+                if len(np.asarray(mu).shape) > 0:
+                    mu = mu[imageno]
+                gamma, delta, alpha = self.ubcalc.detectorCal.crystalAnglesPoint(np.array([y]),np.array([x]), mu,  self.ubcalc.n)
+                pos = [alpha,delta,gamma,om,self.ubcalc.chi,self.ubcalc.phi]
+                hkl_del_gam_1[:3] = np.concatenate(self.ubcalc.angles.anglesToHkl(*pos))
+                hkl_del_gam_1[3] = delta
+                hkl_del_gam_1[4] = gamma
+                hkl_del_gam_1[5] = self.fscan.axis[imageno]
+                hkl_del_gam_2 = np.full_like(hkl_del_gam_1, -1)
         
-        delta1 = hkl_del_gam_1[...,3]
-        delta2 = hkl_del_gam_2[...,3]
-        gam1 = hkl_del_gam_1[...,4]
-        gam2 = hkl_del_gam_2[...,4]
-        
-        yx1 = dc.pixelsCrystalAngles(gam1, delta1, mu, self.ubcalc.n)
-        yx2 = dc.pixelsCrystalAngles(gam2, delta2, mu, self.ubcalc.n)
+        else:
+            if H_0 is None or H_1 is None:
+                H_1 = np.array([h.value() for h in self.scanSelector.H_1])
+                H_0 = np.array([h.value() for h in self.scanSelector.H_0])
+            
+            hkl_del_gam_1, hkl_del_gam_2 = angles.anglesIntersectLineEwald(H_0, H_1, mu, om, self.ubcalc.phi,self.ubcalc.chi)
+            # H, K, L ,delta_1, gamma_1, HKL_Q1[-1]=s
+            
+            delta1 = hkl_del_gam_1[...,3]
+            delta2 = hkl_del_gam_2[...,3]
+            gam1 = hkl_del_gam_1[...,4]
+            gam2 = hkl_del_gam_2[...,4]
+            
+            yx1 = dc.pixelsCrystalAngles(gam1, delta1, mu, self.ubcalc.n)
+            yx2 = dc.pixelsCrystalAngles(gam2, delta2, mu, self.ubcalc.n)
         
         ymask1 = np.logical_and(yx1[...,0] >= 0, yx1[...,0] < dc.detector.shape[0])
         xmask1 = np.logical_and(yx1[...,1] >= 0, yx1[...,1] < dc.detector.shape[1])
@@ -1250,9 +1316,39 @@ Do you want to continue without mask?""")
         croibg2_err_a_masked = croibg2_err_a[rod_mask2]
         
         #name = str(H_1) + "*s+" + str(H_0)
-        
-        name1 = str(H_1) + "*s1+" + str(H_0)
-        name2 = str(H_1) + "*s2+" + str(H_0)
+        if self.scanSelector.scanstab.currentIndex() == 1:
+            x = self.scanSelector.xy_static[0].value()
+            y = self.scanSelector.xy_static[1].value()
+            name1 = "pixloc[%.2f %.2f]" % (x,y)
+            name2 = "pixloc[%.2f %.2f]_2" % (x,y) # does not exist, Just for compatibility
+            traj1 = {
+                "@NX_class": u"NXcollection",
+                "@direction" : u"Fixed pixel coordinates",
+                "s" : hkl_del_gam_1[:,5]
+            }
+            traj2 = {
+                "@NX_class": u"NXcollection",
+                "@direction" : u"Fixed pixel coordinates",
+                "s" : hkl_del_gam_2[:,5]
+            }
+        else:
+            name1 = str(H_1) + "*s1+" + str(H_0)
+            name2 = str(H_1) + "*s2+" + str(H_0)
+            traj1 = {
+                "@NX_class": u"NXcollection",
+                "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
+                "H_1"  : H_1,
+                "H_0" : H_0,
+                "s" : hkl_del_gam_1[:,5]
+            }
+            traj2 = {
+                "@NX_class": u"NXcollection",
+                "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
+                "H_1"  : H_1,
+                "H_0" : H_0,
+                "s" : hkl_del_gam_2[:,5]
+            }
+
         
         defaultS1 = croibg1_a_masked.size > croibg2_a_masked.size
         
@@ -1324,13 +1420,7 @@ Do you want to continue without mask?""")
                 "x" : x_coord1_a,
                 "y"  : y_coord1_a
             },
-            "trajectory" : {
-                "@NX_class": u"NXcollection",
-                "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
-                "H_1"  : H_1,
-                "H_0" : H_0,
-                "s" : hkl_del_gam_1[:,5]
-            },
+            "trajectory" : traj1,
             "@signal" : u"counters/croibg",
             "@axes": u"trajectory/s",
             "@title": self.activescanname + "_" + availname1,
@@ -1370,13 +1460,7 @@ Do you want to continue without mask?""")
                 "x" : x_coord2_a,
                 "y"  : y_coord2_a
             },
-            "trajectory" : {
-                "@NX_class": u"NXcollection",
-                "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
-                "H_1"  : H_1,
-                "H_0" : H_0,
-                "s" : hkl_del_gam_2[:,5]
-            },
+            "trajectory" : traj2,
             "@signal" : u"counters/croibg",
             "@axes": u"trajectory/s",
             "@title": self.activescanname + "_" + availname2,
@@ -1404,16 +1488,16 @@ Do you want to continue without mask?""")
             }
             
         if np.any(cpixel1_a > 0.):
-            """
+            
             self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
                                          xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
-            """
+            
             data[self.activescanname]["measurement"][availname1] = datas1
         if np.any(cpixel2_a > 0.):
-            """
+            
             self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
                                          xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
-            """
+            
             data[self.activescanname]["measurement"][availname2] = datas2
             
         self.database.add_nxdict(data)
@@ -1425,8 +1509,12 @@ Do you want to continue without mask?""")
         #print(eventdict)
         if eventdict['event'] == 'mouseDoubleClicked':
             #newReflection = np.array([1,1,1,self.imageno,eventdict['x'],eventdict['y']])
-            hkl = self.centralPlot.xyHKLConverter(eventdict['x'],eventdict['y'])[:3]
-            self.reflectionSel.addReflection(eventdict,self.imageno,hkl)
+            if self.scanSelector.select_roi_action.isChecked():
+                self.scanSelector.set_xy_static_loc(eventdict['x'], eventdict['y'])
+                self.scanSelector.select_roi_action.setChecked(False)
+            else:
+                hkl = self.centralPlot.xyHKLConverter(eventdict['x'],eventdict['y'])[:3]
+                self.reflectionSel.addReflection(eventdict,self.imageno,hkl)
             
         if eventdict['event'] == 'markerMoved':
             self.reflectionSel.moveReflection(eventdict['label'],[eventdict['x'],eventdict['y']])
@@ -1690,13 +1778,78 @@ class QScanCreator(qt.QDialog):
         
         self.setLayout(layout)
         
+class UncaughtHook(qt.QObject):
+    #_exception_caught = qt.Signal(object)
+ 
+    def __init__(self, *args, **kwargs):
+        super(UncaughtHook, self).__init__(*args, **kwargs)
+
+        # this registers the exception_hook() function as hook with the Python interpreter
+        sys.excepthook = self.exception_hook
+        
+        self.orgui = None
+
+        # connect signal to execute the message box function always on main thread
+        #self._exception_caught.connect(show_exception_box)
+
+    def set_orgui(self,orgui):
+        self.orgui = orgui
+ 
+    def exception_hook(self, exc_type, exc_value, exc_traceback):
+        """Function handling uncaught exceptions.
+        It is triggered each time an uncaught exception occurs. 
+        """
+        if issubclass(exc_type, KeyboardInterrupt):
+            # ignore keyboard interrupt to support console applications
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        else:
+            exc_info = (exc_type, exc_value, exc_traceback)
+            log_msg = '\n'.join([''.join(traceback.format_tb(exc_traceback)),
+                                 '{0}: {1}'.format(exc_type.__name__, exc_value)])
+            print("Uncaught exception:\n {0}".format(log_msg))# exc_info=exc_info)
+
+            # trigger message box show
+            #self._exception_caught.emit(log_msg)
+
+            if qt.QApplication.instance() is not None:
+                if self.orgui is None:
+                    errorbox = qt.QMessageBox(qt.QMessageBox.Critical, 
+                                              "Uncaught Exception",
+                                              "An unexpected error occured. The program will terminate now:\n{0}".format(log_msg),
+                                              qt.QMessageBox.Ok)
+                    errorbox.exec()
+                    sys.exit(1)
+                else:
+                    errorbox = qt.QMessageBox(qt.QMessageBox.Critical, 
+                                              "Uncaught Exception",
+                                              "An unexpected error occured:\n{0}\nDo you want to try to save the data before terminating?".format(log_msg),
+                                               qt.QMessageBox.Save | qt.QMessageBox.Discard)
+                                              
+                    resBtn = errorbox.exec()
+                    
+                    if resBtn == qt.QMessageBox.Save:
+                        try:
+                            self.orgui.database.onSaveDBFile()
+                            
+                        except Exception:
+                            print("Fatal error: Cannot save database:\n%s" % traceback.format_exc())
+                    self.orgui.database.close()
+            else:
+                print("No QApplication instance available.")
+            sys.exit(1)
+        
 def main(configfile):
-	a = qt.QApplication(['orGUI'])
-	mainWindow = orGUI(configfile)
-	mainWindow.show()
-	a.lastWindowClosed.connect(a.quit)
-	return a.exec_()
-	
+
+    a = qt.QApplication(['orGUI'])
+    
+    qt_exception_hook = UncaughtHook()
+    
+    mainWindow = orGUI(configfile)
+    qt_exception_hook.set_orgui(mainWindow)
+    mainWindow.show()
+    #a.lastWindowClosed.connect(a.quit)
+    return a.exec_()
+    
             
 if __name__ == '__main__':
-	main("./config")
+    main("./config")

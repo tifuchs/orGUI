@@ -16,6 +16,7 @@ __version__ = "1.0.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
+import sys
 import numpy as np
 import silx.gui.hdf5
 from silx.gui import icons
@@ -81,7 +82,7 @@ class DataBase(qt.QMainWindow):
         self.view.doubleClicked.connect(self._onNEXUSDoubleClicked)
         self.view.addContextMenuCallback(self.nexus_treeview_callback)
         
-        self.temp_directory = tempfile.TemporaryDirectory()
+        self.temp_directory = tempfile.TemporaryDirectory(dir=os.path.join(os.getcwd()))
         tempfilepath = os.path.join(self.temp_directory.name,"orgui_database.h5")
         self.createNewDBFile(tempfilepath)
         #self.add_nxdict(gauss)
@@ -164,10 +165,14 @@ class DataBase(qt.QMainWindow):
         if obj.ntype is h5py.Group:
             meta = obj.h5py_object.attrs.get('orgui_meta', False)
             if meta and meta == 'roi':
+                action = qt.QAction("rename", menu)
+                action.triggered.connect(lambda:  self.onRenameNode(obj.h5py_object))
+                menu.addAction(action)
                 menu.addSeparator()
                 action = qt.QAction("delete", menu)
                 action.triggered.connect(lambda:  self.delete_node(obj.h5py_object))
                 menu.addAction(action)
+                
             if meta and meta == 'scan':
                 menu.addSeparator()
                 action = qt.QAction("delete", menu)
@@ -267,6 +272,8 @@ class DataBase(qt.QMainWindow):
             self.hdf5model.removeH5pyObject(self.nxfile)
             self.nxfile.close()
             self.nxfile = None
+            if hasattr(self, "temp_directory"):
+                del self.temp_directory
 
         fileattrs = {"@NX_class": u"NXroot",
                      "@creator": u"orGUI version %s" % __version__,
@@ -290,6 +297,8 @@ class DataBase(qt.QMainWindow):
         if self.nxfile is not None:
             self.hdf5model.removeH5pyObject(self.nxfile)
             self.nxfile.close()
+            if hasattr(self, "temp_directory"):
+                del self.temp_directory
         self.nxfile = silx.io.h5py_utils.File(filename,'a')
         self._filepath = filename
         self.hdf5model.insertH5pyObject(self.nxfile)
@@ -314,6 +323,20 @@ class DataBase(qt.QMainWindow):
         self.hdf5model.synchronizeH5pyObject(self.nxfile)
         self.view.expandToDepth(0)
         
+    def onRenameNode(self, obj):
+        basename = obj.name.split("/")[-1]
+        newname, success = qt.QInputDialog.getText(self,"Rename NEXUS node",
+                               "New name:", qt.QLineEdit.EchoMode.Normal,
+                               basename)
+        if success and newname != '':
+            self.rename_node(obj, newname)
+                               
+    def rename_node(self, obj, newname):
+        basename = obj.name.split("/")[-1]
+        objpar = obj.parent
+        objpar.move(basename, newname)
+        self.hdf5model.synchronizeH5pyObject(self.nxfile)
+        self.view.expandToDepth(0)
         
         
     def close(self):
@@ -321,6 +344,8 @@ class DataBase(qt.QMainWindow):
             self.hdf5model.removeH5pyObject(self.nxfile)
             self.nxfile.close()
             self.nxfile = None
+            if hasattr(self, "temp_directory"):
+                del self.temp_directory
         
     
     

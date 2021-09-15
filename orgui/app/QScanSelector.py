@@ -215,51 +215,6 @@ class QScanSelector(qt.QMainWindow):
         
         self.selectedScan = None
         
-        ### SCAN DISPLAY
-        """
-        self.scanDisplayTab = qt.QWidget()
-        self.scanDisplayTabLayout = qt.QVBoxLayout()
-        
-        ## Scan display
-        
-        loadScanGroup = qt.QGroupBox("load scan required to display max/sum")
-        self.loadScanGroupLayout = qt.QVBoxLayout()
-        
-        loadScanGroupButtonlayout = qt.QHBoxLayout()
-        self.loadallButton = qt.QPushButton("load scan")
-        self.loadallButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
-        self.loadallButton.setToolTip("open all images and calculate sum and maximum")
-        #self.loadallButton.clicked.connect(self._onLoadAll)
-
-        
-        #self.showMaxButton = qt.QPushButton("show max")
-        #self.showMaxButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
-        #self.showMaxButton.setToolTip("plot maximum of the scan")
-        #self.showMaxButton.setCheckable(True)
-        #showMaxButton.clicked.connect(self._onLoadAll)
-
-        
-        #self.showSumButton = qt.QPushButton("show sum")
-        #self.showSumButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
-        #self.showSumButton.setToolTip("plot sum of the scan")
-        #self.showSumButton.setCheckable(True)
-        
-        loadScanGroupButtonlayout.addWidget(self.loadallButton)
-        #loadScanGroupButtonlayout.addWidget(self.showMaxButton)
-        #loadScanGroupButtonlayout.addWidget(self.showSumButton)
-        
-        self.loadScanGroupLayout.addLayout(loadScanGroupButtonlayout)
-        
-        
-        
-        loadScanGroup.setLayout(self.loadScanGroupLayout)
-        self.scanDisplayTabLayout.addWidget(loadScanGroup)
-        
-
-        
-        self.scanDisplayTab.setLayout(self.scanDisplayTabLayout)
-        maintab.addTab(self.scanDisplayTab,"scan display")
-        """
         
         ## ROI
                 
@@ -345,6 +300,11 @@ class QScanSelector(qt.QMainWindow):
                 
         roiGroup.setLayout(roiGroupLayout)
         
+
+        
+        
+        # hkl scan
+        
         self.H_0 = [qt.QDoubleSpinBox() for i in range(3)]
         [h.setRange(-20000,20000) for h in self.H_0]
         [h.setDecimals(4) for h in self.H_0]
@@ -362,15 +322,61 @@ class QScanSelector(qt.QMainWindow):
         self.H_1[2].setValue(1.)
         [h.valueChanged.connect(lambda : self.sigROIChanged.emit()) for h in self.H_1]
         
-        directionGroup = qt.QGroupBox("Direction H_1 (hkl)")
+        directionGroup = qt.QGroupBox(u"Direction H₁ (hkl)")
         directionGroupLayout = qt.QHBoxLayout()
         [directionGroupLayout.addWidget(h) for h in self.H_1]
         directionGroup.setLayout(directionGroupLayout)
         
-        locationGroup = qt.QGroupBox("Location vector H_0 (hkl)")
+        locationGroup = qt.QGroupBox(u"Location vector H₀ (hkl)")
         locationGroupLayout = qt.QHBoxLayout()
         [locationGroupLayout.addWidget(h) for h in self.H_0]
         locationGroup.setLayout(locationGroupLayout)
+        
+        
+        hklscanwidget = qt.QWidget()
+        hklscanwidgetlayout = qt.QVBoxLayout()
+        
+        hklscanwidgetlayout.addWidget(qt.QLabel(u"Integrate along:\nH(s) = H₁ 🞄 s + H₀"))
+        hklscanwidgetlayout.addWidget(directionGroup)
+        hklscanwidgetlayout.addWidget(locationGroup)
+        
+        hklscanwidget.setLayout(hklscanwidgetlayout)
+        # static roi scan
+        
+        self.xy_static = [qt.QDoubleSpinBox() for i in range(2)]
+        [h.setRange(-20000,20000) for h in self.xy_static]
+        [h.setDecimals(3) for h in self.xy_static]
+        self.xy_static[0].setValue(10.)
+        self.xy_static[1].setValue(10.)
+        [h.valueChanged.connect(lambda : self.sigROIChanged.emit()) for h in self.xy_static]
+        
+        setroi_btn = qt.QToolButton()
+        self.select_roi_action = qt.QAction(icons.getQIcon("crosshair"), "Select roi location by double clicking", self)
+        self.select_roi_action.setCheckable(True)
+
+        #setroi_btn.setIcon()
+        #setroi_btn.setToolTip("Select roi location by double clicking")
+        setroi_btn.setDefaultAction(self.select_roi_action)
+        
+        
+        
+        
+        static_loc_Group = qt.QGroupBox(u"Static ROI location")
+        static_loc_GroupLayout = qt.QHBoxLayout()
+        static_loc_GroupLayout.addWidget(setroi_btn)
+        [static_loc_GroupLayout.addWidget(h) for h in self.xy_static]
+        static_loc_Group.setLayout(static_loc_GroupLayout)
+        
+        
+        #  roi scan tab
+        
+        self.scanstab = qt.QTabWidget()
+        self.scanstab.addTab(hklscanwidget, "hklscan")
+        self.scanstab.addTab(static_loc_Group, "fixed roi loc")
+        self.scanstab.currentChanged.connect(lambda : self.sigROIChanged.emit())
+
+        
+        # options group
         
         optionsGroup = qt.QGroupBox("Integration options")
         optionsGroupLayout = qt.QGridLayout()
@@ -388,9 +394,7 @@ class QScanSelector(qt.QMainWindow):
         optionsGroup.setLayout(optionsGroupLayout)
         
         self.roiIntegrateTabLayout.addWidget(roiGroup)
-        self.roiIntegrateTabLayout.addWidget(qt.QLabel("Integrate along a line given by:\nH(s) = H_1 * s + H_0"))
-        self.roiIntegrateTabLayout.addWidget(directionGroup)
-        self.roiIntegrateTabLayout.addWidget(locationGroup)
+        self.roiIntegrateTabLayout.addWidget(self.scanstab)
         self.roiIntegrateTabLayout.addWidget(optionsGroup)
         
         self.integrateROIBtn = qt.QPushButton("ROI integrate scan")
@@ -413,6 +417,13 @@ class QScanSelector(qt.QMainWindow):
         
     #def reload_nx_callback(self,obj):
     #    self.hdf5model.synchronizeH5pyObject(obj)
+    
+    def set_xy_static_loc(self, x, y):
+        [h.blockSignals(True) for h in self.xy_static]
+        self.xy_static[0].setValue(x)
+        self.xy_static[1].setValue(y)
+        [h.blockSignals(False) for h in self.xy_static]
+        self.sigROIChanged.emit()
         
     def view_data_callback(self,obj):
         self.dataviewer.setData(obj)
