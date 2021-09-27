@@ -100,7 +100,7 @@ class QScanSelector(qt.QMainWindow):
         openButton = qt.QPushButton(pathSelector)
         openButton.setIcon(icons.getQIcon('document-open'))
         openButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
-        openButton.setToolTip("Choose the NEXUS file")
+        openButton.setToolTip("Choose the NEXUS/SPEC/log file")
         openButton.clicked.connect(self._onSelectFilePath)
         
         scannoSelector = qt.QSplitter(self)
@@ -117,6 +117,11 @@ class QScanSelector(qt.QMainWindow):
         openScanButton.setToolTip("Open scan")
         openScanButton.clicked.connect(self._onLoadScan)
 
+        btidsplit = qt.QSplitter(self)
+        qt.QLabel("Beamtime id:",btidsplit)
+        self.btid = qt.QComboBox(btidsplit)
+        [self.btid.addItem(bt) for bt in backends.beamtimes]
+        
         
         self.slider = qt.QSlider()
         self.slider.setOrientation(qt.Qt.Horizontal)
@@ -127,6 +132,7 @@ class QScanSelector(qt.QMainWindow):
         self.mainLayout.addWidget(maintab)
         self.mainLayout.addWidget(pathSelector)
         self.mainLayout.addWidget(scannoSelector)
+        self.mainLayout.addWidget(btidsplit)
         #self.mainLayout.addWidget(self.slider)
         
         
@@ -458,7 +464,7 @@ class QScanSelector(qt.QMainWindow):
             
         
     def _onSelectFilePath(self):
-        fileTypeDict = {'NEXUS files (*.h5 *.hdf5)': '.h5', "SPEC files (*.spec *.spc)": '.spec','All files (*)': '' }
+        fileTypeDict = {'NEXUS files (*.h5 *.hdf5)': '.h5', "SPEC files (*.spec *.spc)": '.spec', 'log files (*.log)' : '.log','All files (*)': '' }
         fileTypeFilter = ""
         for f in fileTypeDict:
             fileTypeFilter += f + ";;"

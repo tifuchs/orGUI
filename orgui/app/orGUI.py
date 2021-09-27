@@ -766,7 +766,11 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 msg.setStandardButtons(qt.QMessageBox.Cancel)
                 msg.setModal(True)
                 msg.show()
-                self.fscan = backends.openScan(sel_list['beamtime'], sel_list)
+                if 'beamtime' in sel_list:
+                    self.fscan = backends.openScan(sel_list['beamtime'], sel_list)
+                else:
+                    self.fscan = backends.openScan(self.scanSelector.btid.currentText(), sel_list)
+                    
                 self.plotImage()
                 self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
                 msg.hide()
