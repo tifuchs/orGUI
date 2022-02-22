@@ -1295,14 +1295,14 @@ Do you want to continue without mask?""")
         
         if np.any(bgpixel1_a):
             croibg1_a = croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a
-            croibg1_err_a = np.sqrt(croi1_a + (cpixel1_a/bgpixel1_a) * bgroi1_a)
+            croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a)
         else:
             croibg1_a = croi1_a
             croibg1_err_a = np.sqrt(croi1_a)
             
         if np.any(bgpixel2_a):
             croibg2_a = croi2_a - (cpixel2_a/bgpixel2_a) * bgroi2_a
-            croibg2_err_a = np.sqrt(croi2_a + (cpixel2_a/bgpixel2_a) * bgroi2_a)
+            croibg2_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2) * bgroi2_a)
         else:
             croibg2_a = croi2_a
             croibg2_err_a = np.sqrt(croi2_a)
