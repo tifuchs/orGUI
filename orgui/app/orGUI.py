@@ -774,7 +774,11 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 self.plotImage()
                 self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
                 msg.hide()
-                self._onLoadAll()
+                self.images_loaded = False
+                if self.fscan is not None and self.autoLoadAct.isChecked():
+                    self.loadAll()
+                    self.scanSelector.showMaxAct.setChecked(False)
+                    self.scanSelector.showMaxAct.setChecked(True)
             except Exception:
                 msg.hide()
                 qt.QMessageBox.critical(self,"Cannot open scan", "Cannot open scan:\n%s" % traceback.format_exc())
@@ -810,7 +814,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         
     def _onLoadAll(self):
         self.images_loaded = False
-        if self.fscan is not None and self.autoLoadAct.isChecked():
+        if self.fscan is not None:
             self.loadAll()
             self.scanSelector.showMaxAct.setChecked(False)
             self.scanSelector.showMaxAct.setChecked(True)
