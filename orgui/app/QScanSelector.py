@@ -165,6 +165,9 @@ class QScanSelector(qt.QMainWindow):
         self.showSumAct = qt.QAction(resources.getQicon("sum_image2"), "plot sum of the scan")
         self.showSumAct.setCheckable(True)
         
+        self.excludeImageAct = qt.QAction(resources.getQicon("disable-image"), "exclude image from max/sum image")
+        self.excludeImageAct.setCheckable(True)
+        
         self.alphaslider = NamedImageAlphaSlider(self,self.parentmainwindow.centralPlot,self.parentmainwindow.currentAddImageLabel)
         self.alphaslider.setOrientation(qt.Qt.Horizontal)
         self.alphaslider.setEnabled(True)
@@ -190,6 +193,10 @@ class QScanSelector(qt.QMainWindow):
         self.toolbar.addAction(self.showMaxAct)
         self.toolbar.addAction(self.showSumAct)
         self.toolbar.addAction(self.alpha_btn_act)
+        self.toolbar.addSeparator()
+        
+        self.toolbar.addAction(self.excludeImageAct)
+        
         self.toolbar.addSeparator()
         
         self.toolbar.addWidget(imglabel)

@@ -49,6 +49,7 @@ import traceback
 from .QScanSelector import QScanSelector
 from .QReflectionSelector import QReflectionSelector
 from .QUBCalculator import QUBCalculator
+from .ArrayTableDialog import ArrayTableDialog
 from .database import DataBase
 from ..backend.scans import SimulationScan
 from ..backend import backends
@@ -78,7 +79,7 @@ class orGUI(qt.QMainWindow):
         self.h5database = None # must be a h5py file-like, by default not opened to avoid reading issues at beamtimes!
         self.images_loaded = False
         self.resetZoom = True
-        icon = resources.getQicon("sum_image.svg")
+        #icon = resources.getQicon("sum_image.svg")
         self.fscan = None
         self.activescanname = "scan"
         self.numberthreads = int(min(os.cpu_count(), 8)) if os.cpu_count() is not None else 1 
@@ -86,6 +87,10 @@ class orGUI(qt.QMainWindow):
             self.numberthreads = int(os.environ['SLURM_CPUS_ON_NODE'])
         
         self.filedialogdir = os.getcwd()
+        
+        self.excludedImagesDialog = ArrayTableDialog(True, 1)
+        self.excludedImagesDialog.setArrayData(np.array([-1]),editable=True, header= ['image no'])
+        
         
         self.centralPlot = Plot2DHKL(self.newXyHKLConverter(),parent=self)
         self.centralPlot.setDefaultColormap(Colormap(name='jet',normalization='log'))
@@ -103,10 +108,6 @@ class orGUI(qt.QMainWindow):
         self.imagepath = ''
         self.imageno = 0
         
-
-        
-        
-        #self.reflections = np.array([])
     
         ubWidget = qt.QWidget()
         ubLayout = qt.QVBoxLayout()
@@ -133,40 +134,14 @@ class orGUI(qt.QMainWindow):
 
         self.scanSelector.sigImagePathChanged.connect(self._onImagePathChanged)
         self.scanSelector.sigScanChanged.connect(self._onScanChanged)
-        
-        #self.scanSelector.loadallButton.clicked.connect(self._onLoadAll)
+
         self.scanSelector.showMaxAct.toggled.connect(self._onMaxToggled)
         self.scanSelector.showSumAct.toggled.connect(self._onSumToggled)
         
         self.scanSelector.sigROIChanged.connect(self.updateROI)
-        
-        """
-        self.alphaslider = NamedImageAlphaSlider(self,self.centralPlot,self.currentAddImageLabel)
-        self.alphaslider.setOrientation(qt.Qt.Horizontal)
-        self.alphaslider.setEnabled(True)
-        
-        alpha_menu = qt.QMenu()
-        
-        alphasliderwidget = qt.QWidgetAction(alpha_menu)
-        alphasliderwidget.setDefaultWidget(self.alphaslider)
-
-        alpha_menu.addAction(alphasliderwidget)
-        
-        
-        alpha_action = qt.QAction(resources.getQicon("sum_image.svg"),"slider")
-        alpha_action.setMenu(alpha_menu)
-        toolbar.addAction(alpha_action)
-        """
-        #alphasliderwidgetLayout = qt.QHBoxLayout()
-        #alphasliderwidgetLayout.addWidget(qt.QLabel("Transparancy:"))
-        #alphasliderwidgetLayout.addWidget(self.alphaslider)
-        #alphasliderwidget.setLayout(alphasliderwidgetLayout)
-        #act2 = self.scanSelector.toolbar.actions()[1]
-        
-
-        #self.scanSelector.loadScanGroupLayout.addWidget(alphasliderwidget)
-        
         self.scanSelector.sigROIintegrate.connect(self.integrateROI)
+        
+        self.scanSelector.excludeImageAct.toggled.connect(self._onToggleExcludeImage)
         
 
         toolbar = self.scanSelector.getScanToolbar()
@@ -266,6 +241,12 @@ class orGUI(qt.QMainWindow):
         self.autoLoadAct.setCheckable(True)
         self.autoLoadAct.setChecked(True)
         
+        self.showExcludedImagesAct = qt.QAction("Excluded images",self)
+        self.showExcludedImagesAct.setCheckable(True)
+        self.showExcludedImagesAct.toggled.connect(lambda visible : self.excludedImagesDialog.setVisible(visible))
+        
+
+        
         config_menu.addAction(loadConfigAct)
         #config_menu.addAction(loadXtalAct)
         config_menu.addSeparator()
@@ -274,6 +255,7 @@ class orGUI(qt.QMainWindow):
         config_menu.addSeparator()
         config_menu.addAction(cpucountAct)
         config_menu.addAction(self.autoLoadAct)
+        config_menu.addAction(self.showExcludedImagesAct)
         
         view_menu = menu_bar.addMenu("&View")
         showRefReflectionsAct = view_menu.addAction("show reference reflections")
@@ -386,6 +368,20 @@ Do not redistribute!
 "orGUI" and its dependeny "datautils" were developed during the PhD work of Timo Fuchs,
 within the group of Olaf Magnussen. Usage within the group is hereby granted.
 """)
+
+    def _onToggleExcludeImage(self, exclude):
+        currentimgno = self.scanSelector.slider.value()
+        data = self.excludedImagesDialog.getData()
+        imgno_in_excudearray = currentimgno in data
+        
+        if imgno_in_excudearray and exclude:
+            return
+        if not imgno_in_excudearray and exclude:
+            data = np.hstack([data, currentimgno])
+            self.excludedImagesDialog.updateArrayData(data)
+        else:
+            data = data[data != currentimgno]
+            self.excludedImagesDialog.updateArrayData(data)        
 
     def _onSelectCPUcount(self):
         maxavail = os.cpu_count() if os.cpu_count() is not None else 1 
@@ -836,6 +832,8 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor: # speedup only for the file reads 
             futures = {}
             def readfile_max(imgno):
+                if imgno in self.excludedImagesDialog.getData(): # skip if excluded
+                    return imgno
                 image = self.fscan.get_raw_img(imgno) # here speedup during file read
                 with lock:
                     self.allimgsum += image.img
@@ -927,6 +925,9 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             self.reflectionSel.setImage(self.imageno)
             self.updateROI()
             self.updateReflections()
+            self.excludeImageAct.blockSignals(True)
+            self.excludeImageAct.setChecked(key in self.excludedImagesDialog.getData())
+            self.excludeImageAct.blockSignals(False)
                         
         except Exception as e:
             print(traceback.format_exc())
