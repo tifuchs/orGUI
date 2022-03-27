@@ -925,9 +925,9 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             self.reflectionSel.setImage(self.imageno)
             self.updateROI()
             self.updateReflections()
-            self.excludeImageAct.blockSignals(True)
-            self.excludeImageAct.setChecked(key in self.excludedImagesDialog.getData())
-            self.excludeImageAct.blockSignals(False)
+            self.scanSelector.excludeImageAct.blockSignals(True)
+            self.scanSelector.excludeImageAct.setChecked(key in self.excludedImagesDialog.getData())
+            self.scanSelector.excludeImageAct.blockSignals(False)
                         
         except Exception as e:
             print(traceback.format_exc())

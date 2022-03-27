@@ -217,7 +217,7 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
         self.retain_axis = openact
     
     def getData(self, copy=True):
-        return np.squeeze(super().getData(copy))
+        return np.atleast_1d(np.squeeze(super().getData(copy)))
         
     def enableOpenAction(self):
         if not hasattr(self, 'openAct'):
