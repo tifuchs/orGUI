@@ -32,7 +32,7 @@ space using the HESXRD backends of binoculars."""
 
 usage = "orGUI [options] configfile"
 
-defaultconfigfile = os.path.expanduser("~/orgui") 
+defaultconfigfile = os.path.expanduser("~/orgui")
 
 def main():
     parser = ArgumentParser(usage=usage, description=description, epilog=epilog)
@@ -48,12 +48,30 @@ def main():
     
     import silx
     from silx.gui import qt
+    
     if options.opengl:
         silx.config.DEFAULT_PLOT_BACKEND = "opengl"
-    
+
     if os.path.isfile(options.configfile):
-        from orgui.app.orGUI import main
-        return main(options.configfile)
+        app = qt.QApplication(sys.argv)
+        app.setApplicationName("orGUI")
+        from .resources import getSplashScreen
+        pixmap = getSplashScreen()
+        
+        desktopWidget = app.desktop()
+        screenGeometry = desktopWidget.screenGeometry()
+        splashpm = pixmap.scaledToHeight(screenGeometry.height()/3)
+        splash = qt.QSplashScreen(splashpm)
+        splash.show()
+        
+        from orgui.app.orGUI import orGUI, UncaughtHook
+        qt_exception_hook = UncaughtHook()
+        mainWindow = orGUI(options.configfile)
+        qt_exception_hook.set_orgui(mainWindow)
+        splash.finish(mainWindow)
+        
+        mainWindow.show()
+        return app.exec_()
     else:
         raise Exception("%s is no file" % options.configfile)
 
