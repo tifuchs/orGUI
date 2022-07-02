@@ -60,7 +60,7 @@ def main():
         
         desktopWidget = app.desktop()
         screenGeometry = desktopWidget.screenGeometry()
-        splashpm = pixmap.scaledToHeight(screenGeometry.height()/3)
+        splashpm = pixmap.scaledToHeight(screenGeometry.height()/3, qt.Qt.SmoothTransformation)
         splash = qt.QSplashScreen(splashpm)
         splash.show()
         
