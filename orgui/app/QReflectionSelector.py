@@ -173,6 +173,9 @@ class QReflectionSelector(qt.QSplitter):
         
     def setBraggReflections(self, hkls, yx, angles):
         self.__cached_bragg_refl = hkls, yx, angles
+        if self.showBraggReflections:
+            self.clearPlotBraggReflections()
+        self.reflBragg.clear()
         for i, (hkl, yxr, pos) in enumerate(zip(hkls, yx, angles)):
             identifier = 'bragg_'+str(i)
             self.reflBragg[identifier] = HKLReflection(yxr[::-1], hkl,1)
