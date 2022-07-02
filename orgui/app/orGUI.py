@@ -406,10 +406,10 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 dc = self.ubcalc.detectorCal
                 mu = self.ubcalc.mu
                 ub = self.ubcalc.ubCal
+                chi = self.ubcalc.chi
+                phi = self.ubcalc.phi
                 xtal.setEnergy(ub.getEnergy()*1e3)
-               
-                
-                hkls, yx, angles = rn.thscanBragg(xtal,ub,mu,dc,(ommin,ommax))
+                hkls, yx, angles = rn.thscanBragg(xtal,ub,mu,dc,(ommin,ommax), chi=chi, phi=phi)
                 self.reflectionSel.setBraggReflections(hkls, yx, angles)
             except Exception:
                 qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\n%s" % traceback.format_exc())
@@ -427,8 +427,10 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                     dc = self.ubcalc.detectorCal
                     mu = self.ubcalc.mu
                     ub = self.ubcalc.ubCal
+                    chi = self.ubcalc.chi
+                    phi = self.ubcalc.phi
                     xtal.setEnergy(ub.getEnergy()*1e3)
-                    hkls, yx, angles = rn.thscanBragg(xtal,ub,mu,dc,(ommin,ommax))
+                    hkls, yx, angles = rn.thscanBragg(xtal,ub,mu,dc,(ommin,ommax), chi=chi, phi=phi)
                     
                     
                     #self.reflectionSel.setBraggReflections(hkls, yx, angles)
@@ -482,9 +484,11 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         ommax = np.deg2rad(np.amax(self.fscan.omega))
         dc = self.ubcalc.detectorCal
         mu = self.ubcalc.mu
+        chi = self.ubcalc.chi
+        phi = self.ubcalc.phi
         ub = self.ubcalc.ubCal
         xtal.setEnergy(ub.getEnergy()*1e3)
-        hk, xmirror = rn.thscanCTRs(xtal,ub,mu,dc,(ommin,ommax))
+        hk, xmirror = rn.thscanCTRs(xtal,ub,mu,dc,(ommin,ommax), chi=chi, phi=phi)
         xmirror = np.array(xmirror).astype(np.float)
         #making the hk list of arrays into a reasonable string
         hkm = np.concatenate((np.array(hk), xmirror.reshape((1,xmirror.size)).T), axis=1)
