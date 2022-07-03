@@ -1,7 +1,7 @@
 
 #only giving a poni file from pyFAI is allowed in this section for more complex configurations
 [Machine]
-poni = /data/visitor/ch5701/id31/poni/calibration_0001_translated_14mm.poni
+poni = ./P3_100_calib.poni
 # beam energy in keV
 E = 77.0
 # Sample detector distance in m (as in Fit2D)

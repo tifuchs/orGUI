@@ -1,0 +1,12 @@
+# Nota: C-Order, 1 refers to the Y axis, 2 to the X axis 
+# Calibration done at Tue May 28 10:43:21 2019
+poni_version: 2
+Detector: PilatusCdTe2M
+Detector_config: {}
+Distance: 0.712007521423672
+Poni1: 0.28555384966850805
+Poni2: 0.1183365782807103
+Rot1: -0.009002506187588369
+Rot2: 0.001081533380557141
+Rot3: 3.2570495577914936e-11
+Wavelength: 1.5895409922616305e-11
