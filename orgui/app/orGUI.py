@@ -43,6 +43,10 @@ from silx.gui.plot.tools.roi import RegionOfInterestManager
 from silx.gui.plot.tools.roi import RegionOfInterestTableWidget
 from silx.gui.plot.items.roi import RectangleROI, PolygonROI, ArcROI
 
+try:
+    from silx.gui import console
+except:
+    console = False
 
 import traceback
 
@@ -283,6 +287,26 @@ class orGUI(qt.QMainWindow):
         saveBraggAct = view_menu.addAction("save allowed Bragg reflections")
         saveBraggAct.setCheckable(False)
         saveBraggAct.triggered.connect(self.saveBraggRefl)
+        if console:
+            view_menu.addSeparator()
+            
+            custom_banner = f"""orGUI v. {__version__} console 
+Available variables:
+orgui : top level gui
+ub : gui for UB matrix and angle calculations 
+"""
+            
+            self.console_dockwidget = console.IPythonDockWidget(self, {'orgui': self, 'ub': self.ubcalc}, custom_banner, "orGUI console")
+            
+            self.console_dockwidget.setAllowedAreas(qt.Qt.LeftDockWidgetArea | qt.Qt.RightDockWidgetArea | qt.Qt.BottomDockWidgetArea)
+            self.tabifyDockWidget(selectorDock,self.console_dockwidget)
+            #self.addDockWidget(qt.Qt.LeftDockWidgetArea,self.console_dockwidget)
+            self.console_dockwidget.setVisible(False)
+            consoleViewAct = self.console_dockwidget.toggleViewAction()
+            view_menu.addAction(consoleViewAct)
+        
+        
+        ##############################
         
         calcCTRsAvailableAct = qt.QAction("Calculate available CTRs",self)
         calcCTRsAvailableAct.triggered.connect(self._onCalcAvailableCTR)
