@@ -5,7 +5,7 @@
 # This software was developed during the PhD work of Timo Fuchs,
 # within the group of Olaf Magnussen. Usage within the group is hereby granted.
 ###############################################################################
-"""Module descripiton
+"""Module description
 
 """
 __author__ = "Timo Fuchs"
@@ -32,7 +32,7 @@ from silx.gui.plot import items
 from silx.gui.colors import Colormap
 import weakref
 
-from silx import sx
+#from silx import sx
 
 import silx
 from silx.utils.weakref import WeakMethodProxy
@@ -43,9 +43,10 @@ from silx.gui.plot.tools.roi import RegionOfInterestManager
 from silx.gui.plot.tools.roi import RegionOfInterestTableWidget
 from silx.gui.plot.items.roi import RectangleROI, PolygonROI, ArcROI
 
+
 import traceback
 
-
+from . import qutils
 from .QScanSelector import QScanSelector
 from .QReflectionSelector import QReflectionSelector
 from .QUBCalculator import QUBCalculator
@@ -59,13 +60,9 @@ import numpy as np
 from datautils.xrayutils import HKLVlieg, CTRcalc
 from datautils.xrayutils import ReciprocalNavigation as rn
 
-#os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
-
 import sys
-#sys.path.append('/home/fuchstim/repos/datautils/datautils/xrayutils')
 from datautils.xrayutils.id31_tools import BlissScan_EBS, Fastscan, BlissScan
 from datautils.xrayutils.P212_tools import H5Fastsweep
-#from P212_tools import BlissScan_EBS#CrudeThScan, FioFastsweep
 
 QTVERSION = qt.qVersion()
 DEBUG = 0
@@ -332,14 +329,16 @@ class orGUI(qt.QMainWindow):
             self.reflectionSel.setBraggReflectionsVisible(visible)
             self.calcBraggRefl()
         except Exception:
-            qt.QMessageBox.critical(self,"Cannot show show Bragg reflections", "Cannot Cannot show Bragg reflections:\n%s" % traceback.format_exc())
+            qutils.warning_detailed_message(self, "Cannot show show Bragg reflections", "Cannot show Bragg reflections", traceback.format_exc())
+            #qt.QMessageBox.critical(self,"Cannot show show Bragg reflections", "Cannot Cannot show Bragg reflections:\n%s" % traceback.format_exc())
         
     def onShowROI(self,visible):
         self.roivisible = visible
         try:
             self.updateROI()
         except Exception:
-            qt.QMessageBox.critical(self,"Cannot show ROI", "Cannot Cannot show ROI:\n%s" % traceback.format_exc())
+            qutils.warning_detailed_message(self, "Cannot show ROI", "Cannot show ROI", traceback.format_exc())
+            #qt.QMessageBox.critical(self,"Cannot show ROI", "Cannot Cannot show ROI:\n%s" % traceback.format_exc())
             
     def onShowCTRreflections(self,visible):
         self.reflectionsVisible = visible
@@ -347,7 +346,8 @@ class orGUI(qt.QMainWindow):
             try: 
                 hkm = self.calculateAvailableCTR()
             except Exception:
-                qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
+                qutils.warning_detailed_message(self, "Cannot calculate CTR locations", "Cannot calculate CTR locatons", traceback.format_exc())
+                #qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
                 self.showCTRreflAct.setChecked(False)
                 self.reflectionsVisible = False
                 return
@@ -412,7 +412,8 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 hkls, yx, angles = rn.thscanBragg(xtal,ub,mu,dc,(ommin,ommax), chi=chi, phi=phi)
                 self.reflectionSel.setBraggReflections(hkls, yx, angles)
             except Exception:
-                qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\n%s" % traceback.format_exc())
+                qutils.warning_detailed_message(self, "Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections", traceback.format_exc())
+                #qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\n%s" % traceback.format_exc())
         
 
     def saveBraggRefl(self):
@@ -435,7 +436,8 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                     
                     #self.reflectionSel.setBraggReflections(hkls, yx, angles)
                 except Exception:
-                    qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\n%s" % traceback.format_exc())
+                    qutils.warning_detailed_message(self, "Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections", traceback.format_exc())
+                    #qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\n%s" % traceback.format_exc())
                     return
             else:
                 qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\nNo scan loaded.")
@@ -498,7 +500,8 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         try: 
             hkm = self.calculateAvailableCTR()
         except Exception:
-            qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
+            qutils.warning_detailed_message(self, "Cannot calculate CTR locatons", "Cannot calculate CTR locatons", traceback.format_exc())
+            #qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
             return
         sio = StringIO()
         np.savetxt(sio,hkm,fmt="%.3f", delimiter='\t',header="H K detectorRight")
@@ -593,10 +596,11 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             for refl in hklangles:
                 self._onNewReflection(refl)
         except Exception:
-            qt.QMessageBox.critical(self,"Error during loading of reflections","Error during loading of reflections.\n%s" % traceback.format_exc())
+            qutils.warning_detailed_message(self, "Error during loading of reflections","Error during loading of reflections.", traceback.format_exc())
+            #qt.QMessageBox.critical(self,"Error during loading of reflections","Error during loading of reflections.\n%s" % traceback.format_exc())
         
         #print(hkls,angles)
-        
+
     def _onPlotMachineParams(self,paramslist):
         [cp,azimxy,polax] = paramslist
         self.centralPlot.addMarker(cp[0],cp[1],legend="CentralPixel",text="CP",color='yellow',symbol='+')
@@ -616,8 +620,8 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 imageno = self.omegaToImageNo(omega)
             except Exception as e:
                 errormsg = "[hkl, x, y, om]\nnot mirrored: %s\nmirrored: %s" % (notmirrored,mirrored)
-                
-                qt.QMessageBox.warning(self,"Could not find reflection","Didn't find the corresponding reflection on any image.\nError: %s\nShould be at location%s" % (str(e),errormsg))
+                qutils.warning_detailed_message(self, "Could not find reflection","Didn't find the corresponding reflection on any image.\nError: %s\nShould be at location%s" % (str(e),errormsg), traceback.format_exc())
+                #qt.QMessageBox.warning(self,"Could not find reflection","Didn't find the corresponding reflection on any image.\nError: %s\nShould be at location%s" % (str(e),errormsg))
                 return
         eventdict = {'x' : x, 'y': y}
         self.reflectionSel.addReflection(eventdict,imageno,hkl)
@@ -712,10 +716,13 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         if diag.exec() == qt.QDialog.Accepted:
             shape = (diag.shape1.value(), diag.shape2.value())
             self.ubcalc.detectorCal.detector.shape = shape
-            fscan = SimulationScan(shape, diag.omstart.value(),
-                                     diag.omend.value(),
-                                     diag.no.value())
-            self._onScanChanged(fscan)
+            try:
+                fscan = SimulationScan(shape, diag.omstart.value(),
+                                        diag.omend.value(),
+                                        diag.no.value())
+                self._onScanChanged(fscan)
+            except MemoryError:
+                qutils.warning_detailed_message(self, "Can not create simulation scan","Can not create simualtion scan. Memory is insufficient for the scan size. See details for further information.", traceback.format_exc())
         
         
     def _onScanChanged(self,sel_list):
@@ -781,7 +788,8 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                     self.scanSelector.showMaxAct.setChecked(True)
             except Exception:
                 msg.hide()
-                qt.QMessageBox.critical(self,"Cannot open scan", "Cannot open scan:\n%s" % traceback.format_exc())
+                qutils.warning_detailed_message(self, "Cannot open scan", "Cannot open scan" , traceback.format_exc())
+                #qt.QMessageBox.critical(self,"Cannot open scan", "Cannot open scan:\n%s" % traceback.format_exc())
         
                 
             
@@ -1833,12 +1841,13 @@ class UncaughtHook(qt.QObject):
                     errorbox.exec()
                     sys.exit(1)
                 else:
-                    errorbox = qt.QMessageBox(qt.QMessageBox.Critical, 
-                                              "Uncaught Exception",
-                                              "An unexpected error occured:\n{0}\nDo you want to try to save the data before terminating?".format(log_msg),
-                                               qt.QMessageBox.Save | qt.QMessageBox.Discard)
+                    resBtn = qutils.critical_detailed_message(self, "Uncaught Exception", "An unexpected error has occured.\norGUI will terminate now.\nDo you want to try to save the database before terminating?" ,log_msg, qt.QMessageBox.Save | qt.QMessageBox.Discard)
+                    #errorbox = qt.QMessageBox(qt.QMessageBox.Critical, 
+                    #                          "Uncaught Exception",
+                    #                          "An unexpected error occured:\n{0}\nDo you want to try to save the data before terminating?".format(log_msg),
+                    #                           qt.QMessageBox.Save | qt.QMessageBox.Discard)
                                               
-                    resBtn = errorbox.exec()
+                    #resBtn = errorbox.exec()
                     
                     if resBtn == qt.QMessageBox.Save:
                         try:
