@@ -18,16 +18,10 @@ __email__ = "fuchs@physik.uni-kiel.de"
 
 from io import StringIO
 from silx.gui import qt
-
 import pyFAI
-#from pyFAI.gui.dialog import GeometryDialog, DetectorSelectorDialog
-
-#from PyMca5.PyMcaGui import PyMca_Icons as icons
-#from PyMca5.PyMcaGui.io import PyMcaFileDialogs
 import numpy as np
 
 import traceback
-
 from datautils.xrayutils import HKLVlieg, CTRcalc
 from datautils.xrayutils import DetectorCalibration
 from datautils.xrayutils import unitcells
@@ -49,7 +43,6 @@ def blockSignals(qobjects):
         qobject.blockSignals(True)
         yield
         qobject.blockSignals(False)
-
 
 # reflectionhandler must implement the method getReflections
 
@@ -200,7 +193,7 @@ class QUBCalculator(qt.QTabWidget):
         self.n = n
         self.ubCal.setCrystal(self.crystal)
         #self.ubCal.defaultU()
-
+    
     def _onMachineParamsChanged(self,params):
         [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi] = params
         self.mu = mu
@@ -226,7 +219,7 @@ class QUBCalculator(qt.QTabWidget):
         self.detectorCal.setPolarization(polax,polf)
         self.crystal.setEnergy(E*1e3)
         try:
-            gam_p,_ = self.detectorCal.rangedelgam_p
+            gam_p,_ = self.detectorCal.rangegamdel_p
             azimy,azimx = self.detectorCal.pixelsPrimeBeam(gam_p[1]/5, 0 )[0]
             self.sigPlottableMachineParamsChanged.emit([cp,[azimx,azimy],polax])
         except Exception as e:
@@ -784,7 +777,6 @@ class QMachineParameters(qt.QWidget):
         polax = np.deg2rad(self.polaxbox.value())
         polf = self.polfbox.value()
         return [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi]
-        
         
     def _onAnyValueChanged(self):
         self.sigMachineParamsChanged.emit(self.getParameters())
