@@ -308,10 +308,16 @@ ub : gui for UB matrix and angle calculations
         
         ##############################
         
+        editUAct = qt.QAction("Edit orientation matrix",self)
+        editUAct.setCheckable(True)
+        editUAct.toggled.connect(lambda checked: self.ubcalc.ueditDialog.setVisible(checked))
+        self.ubcalc.ueditDialog.sigHide.connect(lambda : editUAct.setChecked(False))
+        
         calcCTRsAvailableAct = qt.QAction("Calculate available CTRs",self)
         calcCTRsAvailableAct.triggered.connect(self._onCalcAvailableCTR)
         rs = menu_bar.addMenu("&Reciprocal space")
         rs.addAction(calcCTRsAvailableAct)
+        rs.addAction(editUAct)
         
         simul = menu_bar.addMenu("&Simulation")
         
@@ -977,7 +983,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         #H_0 = np.array([[1,0,0], [1,1,0]])
         #H_1 = np.array([[0,0,1], [0,0,1]])
         
-        hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(self.imageno, H_0, H_1)
+        hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(self.imageno, H_0, H_1, intersect=True)
         
         mask1 = hkl_del_gam_1[:,-1].nonzero()
         mask2 = hkl_del_gam_2[:,-1].nonzero()
@@ -1038,7 +1044,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 roi.setVisible(False)
             self.centralPlot.removeMarker('main_croi_loc')
         
-    def getROIloc(self, imageno=None, H_0=None, H_1=None):
+    def getROIloc(self, imageno=None, H_0=None, H_1=None, **kwargs):
         if self.fscan is None:
             raise Exception("No scan loaded!")
         
@@ -1059,7 +1065,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             hkl = np.concatenate((np.array(self.ubcalc.angles.anglesToHkl(*pos)),np.rad2deg([delta[0],gamma[0]])))
         """
         #print(self.scanSelector.scanstab.currentIndex())
-        if self.scanSelector.scanstab.currentIndex() == 1:
+        if self.scanSelector.scanstab.currentIndex() == 1 and not kwargs.get('intersect', False):
             if imageno is None:
                 hkl_del_gam_1 = np.ones((len(self.fscan),6),dtype=np.float64)
                 x = np.full(len(self.fscan),self.scanSelector.xy_static[0].value())
@@ -1138,15 +1144,16 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         xy1 = yx1[...,::-1]
         xy2 = yx2[...,::-1]
         
-        xoffset = self.scanSelector.offsetx.value()
-        yoffset = self.scanSelector.offsety.value()
-        
-        if xoffset != 0. or yoffset != 0.:
-            warnings.warn("Nonzero pixel offset selected. Experimental feature! Angles and hkl are incorrect!!!")
-            xy1[..., 0] += xoffset
-            xy2[..., 0] += xoffset
-            xy1[..., 1] += yoffset
-            xy2[..., 1] += yoffset
+        if not kwargs.get('intersect', False):
+            xoffset = self.scanSelector.offsetx.value()
+            yoffset = self.scanSelector.offsety.value()
+            
+            if xoffset != 0. or yoffset != 0.:
+                warnings.warn("Nonzero pixel offset selected. Experimental feature! Angles and hkl are incorrect!!!")
+                xy1[..., 0] += xoffset
+                xy2[..., 0] += xoffset
+                xy1[..., 1] += yoffset
+                xy2[..., 1] += yoffset
         
         return np.concatenate((np.atleast_2d(hkl_del_gam_1), xy1, yxmask1[...,np.newaxis]),axis=-1),\
                np.concatenate((np.atleast_2d(hkl_del_gam_2), xy2, yxmask2[...,np.newaxis]),axis=-1)

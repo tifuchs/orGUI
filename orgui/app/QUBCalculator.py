@@ -31,6 +31,8 @@ import os
 import copy
 from contextlib import contextmanager
 
+from .ArrayTableDialog import ArrayEditWidget
+
 @contextmanager
 def blockSignals(qobjects):
     try:
@@ -143,6 +145,9 @@ class QUBCalculator(qt.QTabWidget):
         self.machineParams.sigMachineParamsChanged.connect(self._onMachineParamsChanged)
         self.machineParams.loadConfigButton.clicked.connect(self._onLoadConfig)
         #self.addTab(self.machineParams,"Machine")
+        
+        self.uedit = QUEdit()
+        self.ueditDialog = QUEditDialog(self.uedit)
         
         self.machineDialog = QMachineParametersDialog(self.machineParams)
         self.xtalDialog = QCrystalParameterDialog(self.crystalparams)
@@ -301,6 +306,7 @@ class QUBCalculator(qt.QTabWidget):
             
             self.ubCal = HKLVlieg.UBCalculator(self.crystal,E)
             self.ubCal.defaultU()
+            self.uedit.setU(self.ubCal.getU())
             self.angles = HKLVlieg.VliegAngles(self.ubCal)
             
             if 'crystal' in lattice:
@@ -363,6 +369,7 @@ class QUBCalculator(qt.QTabWidget):
         
         self.ubCal = HKLVlieg.UBCalculator(self.crystal,E)
         self.ubCal.defaultU()
+        self.uedit.setU(self.ubCal.getU())
         self.polaxis = 0
         self.polfactor = 0
         self.azimuth = 0
@@ -404,7 +411,7 @@ class QUBCalculator(qt.QTabWidget):
         if len(hkls) > 2:
             if self.latnofit.isChecked():
                 self.ubCal.refineU(hkls,angles)
-                print(self.ubCal.getU())
+                #print(self.ubCal.getU())
                 
             if self.latscale.isChecked():
                 if len(hkls) > 3:
@@ -416,10 +423,11 @@ class QUBCalculator(qt.QTabWidget):
                     self.ubCal.refineULattice(hkls,angles,'lat')
                 else:
                     qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 6 reflections to fit lattice and U")
-            print(self.ubCal.getU())
+            #print(self.ubCal.getU())
             self.crystalparams.setValues(self.crystal,self.n)
-        print(self.ubCal.getU())
-        self.Ueditor.setPlainText(str(self.ubCal.getU()))
+        #print(self.ubCal.getU())
+        self.uedit.setU(self.ubCal.getU())
+        #self.Ueditor.setPlainText(str(self.ubCal.getU()))
             
         
         
@@ -625,6 +633,144 @@ class QCrystalParameter(qt.QSplitter):
         except Exception as e:
             qt.QMessageBox.warning(self,"Can not calculate B Matrix","The B Matrix can not be calculated\nError: %s" % str(e))
                 
+
+class QUEdit(qt.QWidget):
+    sigUChanged = qt.pyqtSignal(np.ndarray)
+    
+    def __init__(self,parent=None):
+        qt.QWidget.__init__(self, parent=None)
+        
+        alignGroup = qt.QGroupBox("Align hkl onto xyz")
+        orientationLayout = qt.QGridLayout()
+        
+        self.hkl = []
+        for i, index in enumerate(['H', 'K', 'L']):
+            orientationLayout.addWidget(qt.QLabel("%s:" % index),i,0)
+            milleredit = qt.QDoubleSpinBox()
+            milleredit.setRange(0.001,1000)
+            milleredit.setDecimals(4)
+            orientationLayout.addWidget(milleredit,i,1)
+            milleredit.setValue(1. if i == 2 else 0.)
+            self.hkl.append(milleredit)
+            
+        self.override_angles = qt.QCheckBox("Override angles")
+        orientationLayout.addWidget(self.override_angles, 3, 0, 1, 2)
+            
+        self.angles = []
+        for i, index in enumerate(['alpha', 'chi', 'phi', 'theta']):
+            orientationLayout.addWidget(qt.QLabel("%s:" % index),i,2)
+            edit = qt.QDoubleSpinBox()
+            edit.setRange(-360,360)
+            edit.setDecimals(4)
+            edit.setSuffix(u" °")
+            edit.setValue(0.)
+            orientationLayout.addWidget(edit,i,3)
+            self.angles.append(edit)
+        
+        self.xyz = []
+        for i, index in enumerate(['x', 'y', 'z']):
+            orientationLayout.addWidget(qt.QLabel("%s:" % index),i,4)
+            edit = qt.QDoubleSpinBox()
+            edit.setRange(-1000,1000)
+            edit.setDecimals(4)
+            orientationLayout.addWidget(edit,i,5)
+            edit.setValue(1. if i == 2 else 0.)
+            self.xyz.append(edit)
+            
+        alignGroup.setLayout(orientationLayout)
+        
+        referenceGroup = qt.QGroupBox("Reference frame")
+        referenceLayout = qt.QVBoxLayout()
+        self.alphaFrame = qt.QRadioButton("surface")
+        self.alphaFrame.setChecked(True)
+        self.labFrame = qt.QRadioButton("laboratory")
+        
+        referenceLayout.addWidget(self.alphaFrame)
+        referenceLayout.addWidget(self.labFrame)
+        referenceLayout.addStretch(1)
+        referenceGroup.setLayout(referenceLayout)
+        
+        alignbtnlayout = qt.QVBoxLayout()
+        alignbtnlayout.addWidget(referenceGroup)
+        
+        self.alignBtn = qt.QPushButton("Align")
+        alignbtnlayout.addWidget(self.alignBtn)
+        
+        editLayout = qt.QHBoxLayout()
+        
+        editLayout.addWidget(alignGroup)
+        editLayout.addLayout(alignbtnlayout)
+        
+        mainLayout = qt.QVBoxLayout()
+        mainLayout.addLayout(editLayout)
+        
+        uGroup = qt.QGroupBox("Orientation matrix")
+        self.uview = ArrayEditWidget(True, 1, False)
+        self.uview.model.dataChanged.connect(self.onUChanged)
+        la = qt.QVBoxLayout()
+        la.addWidget(self.uview)
+        uGroup.setLayout(la)
+        mainLayout.addWidget(uGroup)
+        
+        self.setLayout(mainLayout)
+        
+    def setU(self, U):
+        self.uview.setArrayData(U, None, True, True)
+        
+    def getU(self):
+        return self.uview.getData()
+        
+    def onUChanged(self):
+        print("changed")
+        self.sigUChanged.emit(self.getU())
+
+        
+class QUEditDialog(qt.QDialog):
+    sigHide = qt.pyqtSignal()
+
+    def __init__(self,uedit,parent=None):
+        qt.QDialog.__init__(self, parent=None)
+        self.uedit = uedit
+        layout = qt.QVBoxLayout()
+        layout.addWidget(uedit)
+        
+        self.savedU = self.uedit.getU()
+        
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel | qt.QDialogButtonBox.Reset,
+                                      qt.Qt.Horizontal)
+        layout.addWidget(buttons)
+        
+        okbtn = buttons.button(qt.QDialogButtonBox.Ok)
+        cancelbtn = buttons.button(qt.QDialogButtonBox.Cancel)
+        resetbtn = buttons.button(qt.QDialogButtonBox.Reset)
+        
+        okbtn.clicked.connect(self.hide)
+        cancelbtn.clicked.connect(self.onCancel)
+        resetbtn.clicked.connect(self.resetParameters)
+        
+        self.setLayout(layout)
+        
+    def showEvent(self, event):
+        if event.spontaneous():
+            super().showEvent(event)
+        else:
+            self.savedU = self.uedit.getU()
+            super().showEvent(event)
+            
+    def hideEvent(self, event):
+        self.sigHide.emit()
+        super().hideEvent(event)
+            
+    def resetParameters(self):
+        self.uedit.setU(self.savedU)
+        self.uedit.onUChanged()
+            
+    def onCancel(self):
+        self.resetParameters()
+        self.hide()
+    
+        
+
         
 class QMachineParameters(qt.QWidget):
     sigMachineParamsChanged = qt.pyqtSignal(list)

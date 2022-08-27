@@ -34,7 +34,113 @@ import datetime
 import os
 import traceback
 
+from datautils.xrayutils import unitcells
+from datautils.xrayutils import HKLVlieg, CTRcalc
+from datautils.xrayutils import DetectorCalibration
+
 from silx.io.dictdump import dicttonx ,nxtodict
+
+
+class ConfigData(qt.QObject):
+    def __init__(self, config=None):
+        self.detector = DetectorCalibration.Detector2D_SXRD()
+        
+        pass
+    
+    #@classmethod
+    def readConfig(self, filename):
+        config = configparser.ConfigParser()
+        config.read(configfile)
+        
+        machine = config['Machine']
+        lattice = config['Lattice']
+        diffrac = config['Diffractometer']
+            
+        self.azimuth = np.deg2rad(diffrac.getfloat('azimuthal_reference',0))
+        self.polaxis = np.deg2rad(diffrac.getfloat('polarization_axis',90))
+        self.polfactor = diffrac.getfloat('polarization_factor',0)
+            
+        sdd = machine.getfloat('SDD',0.729) #m
+        E =  machine.getfloat('E',78.0) #keV
+        pixelsize = machine.getfloat('pixelsize',172e-6) #m
+        cpx = machine.getfloat('cpx',731)
+        cpy = machine.getfloat('cpy',1587)
+        cp = [cpx,cpy]
+
+        self.mu = np.deg2rad(diffrac.getfloat('mu',0.05))
+        self.chi = np.deg2rad(diffrac.getfloat('chi',0.0))
+        self.phi = np.deg2rad(diffrac.getfloat('phi',0.0))
+            
+
+        a1 = lattice.getfloat('a1',-1)
+        a2 = lattice.getfloat('a2',-1)
+        a3 = lattice.getfloat('a3',-1)
+        alpha1 = lattice.getfloat('alpha1',-1)
+        alpha2 = lattice.getfloat('alpha2',-1)
+        alpha3 = lattice.getfloat('alpha3',-1)
+        self.n = 1 - lattice.getfloat('refractionindex',0.0)
+            
+        lat = np.array([a1,a2,a3])
+            
+        latticeoverride = True
+        latangle = np.array([alpha1,alpha2,alpha3])
+        if np.any(lat < 0.) or np.any(latangle < 0):
+            latticeoverride = False
+            a1 = a2 = a3 = 1.
+            alpha1 = alpha2 = alpha3 = 90.
+            
+        
+        self.crystal = CTRcalc.UnitCell([a1,a2,a3],[alpha1,alpha2,alpha3])
+        self.crystal.addAtom('Pt',[0.,0.,0.],0.1,0.1,1.)
+        self.crystal.setEnergy(E*1e3)
+        
+        self.ubCal = HKLVlieg.UBCalculator(self.crystal,E)
+        self.ubCal.defaultU()
+        self.angles = HKLVlieg.VliegAngles(self.ubCal)
+        
+        if 'crystal' in lattice:
+            idx = self.crystalparams.crystalComboBox.findText(lattice['crystal'],qt.Qt.MatchFixedString)
+            if idx == -1:
+                qt.QMessageBox.warning(self,"Did not find crystal","Can not find crystal <%s> \nException occured during read of configfile %s,\nException:\n%s" % (unitcellsconfigfile,traceback.format_exc()))
+            else:
+                self.crystalparams.crystalComboBox.setCurrentIndex(idx)
+                self.crystalparams.onSwitchCrystal(idx)
+                #self.crystal = self.crystalparams.getCrystal()
+
+        if latticeoverride:
+            print('foo')
+            self.crystal.setLattice([a1,a2,a3],[alpha1,alpha2,alpha3])
+        
+
+        if 'poni' in machine:
+            if machine['poni']:
+                self.detectorCal.load(machine['poni'])
+                self.ubCal.setLambda(self.detectorCal.get_wavelength()*1e10)
+                
+            else:
+                self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
+                self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+                self.detectorCal.detector.shape = (2880,2880) # Perkin 
+                
+        else:
+            self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
+            self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+            self.detectorCal.detector.shape = (2880,2880)
+            
+        self.detectorCal.setAzimuthalReference(self.azimuth)
+        self.detectorCal.setPolarization(self.polaxis,self.polfactor)
+        
+        fit2dCal = self.detectorCal.getFit2D()
+
+        paramlist = [self.ubCal.getEnergy(),self.mu,fit2dCal['directDist']/1e3,
+                     fit2dCal['pixelX']*1e-6,[fit2dCal['centerX'],fit2dCal['centerY']],self.polaxis
+                     ,self.polfactor,self.azimuth,self.chi,self.phi]
+        self.crystalparams.setValues(self.crystal,self.n)
+        self.machineParams.setValues(paramlist)
+        
+        
+    
+    
 
 
 class DataBase(qt.QMainWindow):

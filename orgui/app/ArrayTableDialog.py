@@ -156,7 +156,7 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
     """
     
     
-    def __init__(self, saveact: bool = True, openact: int = -1, parent = None):
+    def __init__(self, saveact: bool = True, openact: int = -1, rowActions=True, parent = None):
         """Creates a new :class:`ArrayEditWidget`. 
         
         If ``openact`` is set, only arrays which have the same size
@@ -207,12 +207,12 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
 
         self.model = ArrayTableHeaderModel(self)
         self.view.setModel(self.model)
-        
-        self.view.deleteRowAction = DeleteRowAction(self.view, self)
-        self.view.addAction(self.view.deleteRowAction)
-        
-        self.view.addRowAction = AddRowAction(self.view, self)
-        self.view.addAction(self.view.addRowAction)
+        if rowActions:
+            self.view.deleteRowAction = DeleteRowAction(self.view, self)
+            self.view.addAction(self.view.deleteRowAction)
+            
+            self.view.addRowAction = AddRowAction(self.view, self)
+            self.view.addAction(self.view.addRowAction)
         
         self.retain_axis = openact
     
