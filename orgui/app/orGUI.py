@@ -1081,7 +1081,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                     alpha = np.full(len(self.fscan),alpha)
 
                 yx1 = np.vstack((y,x)).T
-                yx2 = np.full_like(yx1, -50000)
+                yx2 = np.full_like(yx1, np.inf)
                 
                 for i in range(len(self.fscan)):
                     
@@ -1103,7 +1103,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 yx1 = np.zeros((1,2))
                 yx1[0][0] = y
                 yx1[0][1] = x
-                yx2 = np.full_like(yx1, -50000)
+                yx2 = np.full_like(yx1, np.inf)
                 
                 if len(np.asarray(om).shape) > 0:
                     om = om[imageno]
@@ -1122,7 +1122,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 H_1 = np.array([h.value() for h in self.scanSelector.H_1])
                 H_0 = np.array([h.value() for h in self.scanSelector.H_0])
             
-            hkl_del_gam_1, hkl_del_gam_2 = angles.anglesIntersectLineEwald(H_0, H_1, mu, om, self.ubcalc.phi,self.ubcalc.chi)
+            hkl_del_gam_1, hkl_del_gam_2, Qa_1, Qa_2 = angles.anglesIntersectLineEwald(H_0, H_1, mu, om, self.ubcalc.phi,self.ubcalc.chi, Qalpha=True)
             # H, K, L ,delta_1, gamma_1, HKL_Q1[-1]=s
             
             delta1 = hkl_del_gam_1[...,3]
@@ -1130,8 +1130,18 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             gam1 = hkl_del_gam_1[...,4]
             gam2 = hkl_del_gam_2[...,4]
             
+            Qmin, Qmax = dc.Qrange
+            Qa_1_n = np.linalg.norm(Qa_1, axis=-1)
+            Qa_2_n = np.linalg.norm(Qa_2, axis=-1)
+            
+            
+            mask1 = np.logical_and(Qmin <= Qa_1_n , Qmax >= Qa_1_n)
+            mask2 = np.logical_and(Qmin <= Qa_2_n , Qmax >= Qa_2_n)
+            
             yx1 = dc.pixelsCrystalAngles(gam1, delta1, mu, self.ubcalc.n)
             yx2 = dc.pixelsCrystalAngles(gam2, delta2, mu, self.ubcalc.n)
+            yx1[~mask1] = np.inf
+            yx2[~mask2] = np.inf
         
         ymask1 = np.logical_and(yx1[...,0] >= 0, yx1[...,0] < dc.detector.shape[0])
         xmask1 = np.logical_and(yx1[...,1] >= 0, yx1[...,1] < dc.detector.shape[1])
@@ -1793,16 +1803,16 @@ class QScanCreator(qt.QDialog):
         layout.addWidget(qt.QLabel("Det pixel2:"),4,0)
 
         self.omstart = qt.QDoubleSpinBox()
-        self.omstart.setRange(0,360)
+        self.omstart.setRange(-180,180)
         self.omstart.setDecimals(4)
         self.omstart.setSuffix(u" °")
-        self.omstart.setValue(0)
+        self.omstart.setValue(-90)
         
         self.omend = qt.QDoubleSpinBox()
-        self.omend.setRange(0,360)
+        self.omend.setRange(-180,180)
         self.omend.setDecimals(4)
         self.omend.setSuffix(u" °")
-        self.omend.setValue(180)
+        self.omend.setValue(90)
         
         self.no = qt.QSpinBox()
         self.no.setRange(1,1000000000)
