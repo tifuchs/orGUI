@@ -33,6 +33,8 @@ from contextlib import contextmanager
 
 from .ArrayTableDialog import ArrayEditWidget
 
+from ..backend import udefaults
+
 @contextmanager
 def blockSignals(qobjects):
     try:
@@ -46,11 +48,14 @@ def blockSignals(qobjects):
         yield
         qobject.blockSignals(False)
 
+
+
 # reflectionhandler must implement the method getReflections
 
 class QUBCalculator(qt.QTabWidget):
     sigNewReflection = qt.pyqtSignal(list)
     sigPlottableMachineParamsChanged = qt.pyqtSignal(list)
+    sigReplotRequest = qt.pyqtSignal(bool)
     #sigQueryImageChange = qt.pyqtSignal(int)
     #sigImagePathChanged = qt.pyqtSignal(object)
     #sigImageNoChanged = qt.pyqtSignal(object)
@@ -149,6 +154,10 @@ class QUBCalculator(qt.QTabWidget):
         self.uedit = QUEdit()
         self.ueditDialog = QUEditDialog(self.uedit)
         
+        self.uedit.sigResetRequest.connect(self._onResetU)
+        self.uedit.sigAlignRequest.connect(self._onAlignU)
+        
+
         self.machineDialog = QMachineParametersDialog(self.machineParams)
         self.xtalDialog = QCrystalParameterDialog(self.crystalparams)
         
@@ -159,6 +168,7 @@ class QUBCalculator(qt.QTabWidget):
         else:
             self.toFallbackConfig()
         
+        self.uedit.sigUChanged.connect(self.ubCal.setU)
         """
         
         editorSplitter = qt.QSplitter()
@@ -178,6 +188,7 @@ class QUBCalculator(qt.QTabWidget):
         self.addWidget(editorSplitter)
         """
         
+        
     def calcReflection(self,hkl,mirrorx=False):
         pos = self.angles.anglesZmode(hkl,self.mu,'in',self.chi,self.phi,mirrorx=mirrorx)
         alpha, delta, gamma, omega, chi, phi = HKLVlieg.vacAngles(pos,self.n)
@@ -189,6 +200,20 @@ class QUBCalculator(qt.QTabWidget):
         hkl = [self.Hbox.value(),self.Kbox.value(),self.Lbox.value()]
         self.sigNewReflection.emit(self.calcReflection(hkl))
         
+    def _onResetU(self, func):
+        func(self.ubCal)
+        self.uedit.setU(self.ubCal.getU())
+        self.sigReplotRequest.emit(True)
+
+    def _onAlignU(self, ddict):
+        angles = ddict['angles']  # ['alpha', 'chi', 'phi', 'theta']
+        pos = [angles[0], None, None, angles[3], angles[1], angles[2]]
+        if ddict['frame'] == 'surface':
+            self.ubCal.alignU_alpha(ddict['hkl'], pos, ddict['xyz'])
+        elif ddict['frame'] == 'lab':
+            self.ubCal.alignU_lab(ddict['hkl'], pos, ddict['xyz'])
+        self.uedit.setU(self.ubCal.getU())
+        self.sigReplotRequest.emit(True)
         
     def _onCrystalParamsChanged(self,crystal,n):
         #a,alpha,_,_ = crystal.getLatticeParameters()
@@ -198,6 +223,7 @@ class QUBCalculator(qt.QTabWidget):
         self.n = n
         self.ubCal.setCrystal(self.crystal)
         #self.ubCal.defaultU()
+        self.sigReplotRequest.emit(True)
     
     def _onMachineParamsChanged(self,params):
         [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi] = params
@@ -223,10 +249,16 @@ class QUBCalculator(qt.QTabWidget):
         self.azimuth = azim
         self.detectorCal.setPolarization(polax,polf)
         self.crystal.setEnergy(E*1e3)
+        
+        angles_u = self.uedit.cached_angles
+
+        self.uedit.setAngles(mu, chi, phi, angles_u[-1])
+        
         try:
             gam_p,_ = self.detectorCal.rangegamdel_p
             azimy,azimx = self.detectorCal.pixelsPrimeBeam(gam_p[1]/5, 0 )[0]
             self.sigPlottableMachineParamsChanged.emit([cp,[azimx,azimy],polax])
+            self.sigReplotRequest.emit(True)
         except Exception as e:
             # here is a bug with the init of the detector cal
             print(traceback.format_exc())
@@ -427,6 +459,7 @@ class QUBCalculator(qt.QTabWidget):
             self.crystalparams.setValues(self.crystal,self.n)
         #print(self.ubCal.getU())
         self.uedit.setU(self.ubCal.getU())
+        self.sigReplotRequest.emit(False)
         #self.Ueditor.setPlainText(str(self.ubCal.getU()))
             
         
@@ -636,6 +669,8 @@ class QCrystalParameter(qt.QSplitter):
 
 class QUEdit(qt.QWidget):
     sigUChanged = qt.pyqtSignal(np.ndarray)
+    sigResetRequest = qt.pyqtSignal(object)
+    sigAlignRequest = qt.pyqtSignal(object)
     
     def __init__(self,parent=None):
         qt.QWidget.__init__(self, parent=None)
@@ -647,15 +682,17 @@ class QUEdit(qt.QWidget):
         for i, index in enumerate(['H', 'K', 'L']):
             orientationLayout.addWidget(qt.QLabel("%s:" % index),i,0)
             milleredit = qt.QDoubleSpinBox()
-            milleredit.setRange(0.001,1000)
+            milleredit.setRange(-1000,1000)
             milleredit.setDecimals(4)
             orientationLayout.addWidget(milleredit,i,1)
             milleredit.setValue(1. if i == 2 else 0.)
             self.hkl.append(milleredit)
             
         self.override_angles = qt.QCheckBox("Override angles")
+        self.override_angles.toggled.connect(self._onOverride)
         orientationLayout.addWidget(self.override_angles, 3, 0, 1, 2)
-            
+        
+        self.cached_angles = [0. ,0., 0., 0.] 
         self.angles = []
         for i, index in enumerate(['alpha', 'chi', 'phi', 'theta']):
             orientationLayout.addWidget(qt.QLabel("%s:" % index),i,2)
@@ -664,6 +701,7 @@ class QUEdit(qt.QWidget):
             edit.setDecimals(4)
             edit.setSuffix(u" °")
             edit.setValue(0.)
+            edit.setEnabled(False)
             orientationLayout.addWidget(edit,i,3)
             self.angles.append(edit)
         
@@ -694,7 +732,9 @@ class QUEdit(qt.QWidget):
         alignbtnlayout.addWidget(referenceGroup)
         
         self.alignBtn = qt.QPushButton("Align")
+        self.alignBtn.clicked.connect(self.onAlignU)
         alignbtnlayout.addWidget(self.alignBtn)
+
         
         editLayout = qt.QHBoxLayout()
         
@@ -704,21 +744,89 @@ class QUEdit(qt.QWidget):
         mainLayout = qt.QVBoxLayout()
         mainLayout.addLayout(editLayout)
         
+        bottomLayout = qt.QHBoxLayout()
+        
         uGroup = qt.QGroupBox("Orientation matrix")
         self.uview = ArrayEditWidget(True, 1, False)
         self.uview.model.dataChanged.connect(self.onUChanged)
         la = qt.QVBoxLayout()
         la.addWidget(self.uview)
         uGroup.setLayout(la)
-        mainLayout.addWidget(uGroup)
+        
+        bottomLayout.addWidget(uGroup)
+        
+        defaultGroup = qt.QGroupBox("Default geometries")
+        
+        self.uDefaults = qt.QComboBox()
+        for i, geometry in enumerate(udefaults.u_defaults):
+            self.uDefaults.addItem(geometry, udefaults.u_defaults[geometry])
+            self.uDefaults.setItemData(i, udefaults.u_defaults[geometry].__doc__, qt.Qt.ToolTipRole)
+        udef = qt.QVBoxLayout()
+        udef.addWidget(self.uDefaults)
+        resetUbtn = qt.QPushButton("reset")
+        udef.addWidget(resetUbtn)
+        resetUbtn.clicked.connect(self.onResetU)
+        
+        defaultGroup.setLayout(udef)
+
+        bottomLayout.addWidget(defaultGroup)
+        
+        mainLayout.addLayout(bottomLayout)
         
         self.setLayout(mainLayout)
+        
+    def _onOverride(self, override):
+        if override:
+            for edit, val in zip(self.angles, self.cached_angles):
+                edit.setEnabled(True)
+        else:
+            for i, (edit, val) in enumerate(zip(self.angles, self.cached_angles)):
+                if i == 3:
+                    edit.setValue(-np.rad2deg(val))
+                else:
+                    edit.setValue(np.rad2deg(val))
+                edit.setEnabled(False)
+    
+    def onAlignU(self):
+        hkl = np.array([edit.value() for edit in self.hkl])
+        angles = self.getAngles()
+        xyz = np.array([edit.value() for edit in self.xyz])
+        if self.alphaFrame.isChecked():
+            frame = 'surface'
+        elif self.labFrame.isChecked():
+            frame = 'lab'
+        ddict = {'hkl' : hkl,
+                 'xyz' : xyz,
+                 'angles' : angles,
+                 'frame' : frame}
+        self.sigAlignRequest.emit(ddict)
         
     def setU(self, U):
         self.uview.setArrayData(U, None, True, True)
         
     def getU(self):
         return self.uview.getData()
+        
+    def setAngles(self, alpha, chi, phi, omega):
+        self.cached_angles = [alpha, chi, phi, omega] 
+        if not self.override_angles.isChecked():
+            for i, (edit, val) in enumerate(zip(self.angles, self.cached_angles)):
+                if i == 3:
+                    edit.setValue(-np.rad2deg(val))
+                else:
+                    edit.setValue(np.rad2deg(val))
+                    
+    def getAngles(self):
+        ang = []
+        for i, edit in enumerate(self.angles):
+            if i == 3:
+                ang.append(-np.deg2rad(edit.value()))
+            else:
+                ang.append(np.deg2rad(edit.value()))
+        return np.array(ang)
+    
+    def onResetU(self):
+        self.sigResetRequest.emit(self.uDefaults.currentData())
         
     def onUChanged(self):
         print("changed")

@@ -63,7 +63,9 @@ def main():
         splashpm = pixmap.scaledToHeight(screenGeometry.height()/3, qt.Qt.SmoothTransformation)
         splash = qt.QSplashScreen(splashpm)
         splash.show()
-        
+        splash.showMessage("jit compile libraries", qt.Qt.AlignVCenter | qt.Qt.AlignRight)
+        from datautils.xrayutils import CTRcalc, CTRplotutil
+        splash.showMessage("load orGUI", qt.Qt.AlignVCenter | qt.Qt.AlignRight)
         from orgui.app.orGUI import orGUI, UncaughtHook
         qt_exception_hook = UncaughtHook()
         mainWindow = orGUI(options.configfile)

@@ -196,6 +196,7 @@ class orGUI(qt.QMainWindow):
         self.ubcalc.setReflectionHandler(self.getReflections)
         
         self.ubcalc.sigPlottableMachineParamsChanged.connect(self._onPlotMachineParams)
+        self.ubcalc.sigReplotRequest.connect(self.updatePlotItems)
         self.allimgsum = None
         self.allimgmax = None
 
@@ -353,6 +354,32 @@ ub : gui for UB matrix and angle calculations
                 self.scanSelector.H_0[2].setValue(l)
                 self.integrateROI()
     
+    def updatePlotItems(self, recalculate=True):
+        if self.roivisible:
+            try:
+                self.updateROI()
+            except Exception:
+                pass
+        
+        if self.reflectionsVisible:
+            if recalculate:
+                try: 
+                    hkm = self.calculateAvailableCTR()
+                    hk = np.unique(hkm[:,:2],axis=0)
+                    H_0 = np.hstack((hk, np.zeros((hk.shape[0],1))))
+                    H_1 = np.array([0,0,1])
+                    self.reflectionsToDisplay = H_0, H_1
+                except Exception:
+                    self.showCTRreflAct.setChecked(False)
+                    self.reflectionsVisible = False
+            self.updateReflections()
+
+        if self.reflectionSel.showBraggReflections:
+            try:
+                self.calcBraggRefl()
+            except:
+                pass
+        
         
     def onShowBragg(self,visible):
         try:
@@ -967,6 +994,10 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             self.reflectionSel.setImage(self.imageno)
             self.updateROI()
             self.updateReflections()
+            
+            mu, om = self.getMuOm(self.imageno)
+            self.ubcalc.uedit.setAngles(mu, self.ubcalc.chi, self.ubcalc.phi, om)
+            
             self.scanSelector.excludeImageAct.blockSignals(True)
             self.scanSelector.excludeImageAct.setChecked(key in self.excludedImagesDialog.getData())
             self.scanSelector.excludeImageAct.blockSignals(False)
@@ -974,7 +1005,8 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         except Exception as e:
             print(traceback.format_exc())
             print("no image %s" % e)
-        
+
+
     def updateReflections(self):
         if not self.reflectionsVisible:
             self.centralPlot.removeCurve('all_image_reflections')
