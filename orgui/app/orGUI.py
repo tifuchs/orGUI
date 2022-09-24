@@ -42,6 +42,7 @@ from silx.gui.dialog import ImageFileDialog
 from silx.gui.plot.tools.roi import RegionOfInterestManager
 from silx.gui.plot.tools.roi import RegionOfInterestTableWidget
 from silx.gui.plot.items.roi import RectangleROI, PolygonROI, ArcROI
+from silx.gui.plot.actions import control as control_actions
 
 try:
     from silx.gui import console
@@ -96,6 +97,9 @@ class orGUI(qt.QMainWindow):
         self.centralPlot = Plot2DHKL(self.newXyHKLConverter(),parent=self)
         self.centralPlot.setDefaultColormap(Colormap(name='jet',normalization='log'))
         self.centralPlot.setCallback(self._graphCallback)
+        toolbar = qt.QToolBar()
+        toolbar.addAction(control_actions.OpenGLAction(parent=toolbar, plot=self.centralPlot))
+        self.centralPlot.addToolBar(toolbar)
         
         self.currentImageLabel = None
         self.currentAddImageLabel = None
@@ -121,6 +125,10 @@ class orGUI(qt.QMainWindow):
         
         self.integrdataPlot = silx.gui.plot.Plot1D(self)
         legendwidget = self.integrdataPlot.getLegendsDockWidget()
+        
+        toolbar = qt.QToolBar()
+        toolbar.addAction(control_actions.OpenGLAction(parent=toolbar, plot=self.integrdataPlot))
+        self.integrdataPlot.addToolBar(toolbar)
         
         self.integrdataPlot.addDockWidget(qt.Qt.RightDockWidgetArea,legendwidget)
         legendwidget.show()
