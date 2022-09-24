@@ -221,7 +221,7 @@ class QUBCalculator(qt.QTabWidget):
         
         self.crystal = crystal
         self.n = n
-        self.ubCal.setCrystal(self.crystal)
+        self.ubCal.setLattice(self.crystal)
         #self.ubCal.defaultU()
         self.sigReplotRequest.emit(True)
     
@@ -465,7 +465,7 @@ class QUBCalculator(qt.QTabWidget):
         
         
 class QCrystalParameter(qt.QSplitter):
-    sigCrystalParamsChanged = qt.pyqtSignal(HKLVlieg.Crystal,float)
+    sigCrystalParamsChanged = qt.pyqtSignal(HKLVlieg.Lattice,float)
     def __init__(self,parent=None):
         qt.QSplitter.__init__(self, parent=None)
         self.setOrientation(qt.Qt.Vertical)

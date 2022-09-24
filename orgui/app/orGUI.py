@@ -1023,7 +1023,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         masked_hkl_del_gam = np.vstack((hkl_del_gam_1[mask1],hkl_del_gam_2[mask2]))
         
         self.centralPlot.addCurve(masked_hkl_del_gam[:,-3],masked_hkl_del_gam[:,-2],legend='all_image_reflections',
-                                  linestyle=' ', symbol='.', color='y')
+                                  linestyle=' ', symbol='.', color='y',resetzoom=False)
         
     
         

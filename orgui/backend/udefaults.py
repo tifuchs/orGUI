@@ -16,8 +16,8 @@ def defaultU_GID(ubCalculator):
     """
     # Compute the two reflections' reciprical lattice vectors in the
     # cartesian crystal frame (hc = B @ hkl)
-    h1c = ubCalculator._crystal.getReciprocalVectorCart([0.,0.,1.]).flatten() # for hkl = (0, 0, 1)
-    h2c = ubCalculator._crystal.getReciprocalVectorCart([0.,1.,0.]).flatten() # for hkl = (0, 1, 0)
+    h1c = ubCalculator.lattice.reciprocalVectorCart([0.,0.,1.]).flatten() # for hkl = (0, 0, 1)
+    h2c = ubCalculator.lattice.reciprocalVectorCart([0.,1.,0.]).flatten() # for hkl = (0, 1, 0)
     
     # Calculate the sample rotation matrices
     
@@ -75,8 +75,8 @@ def defaultU_TSD(ubCalculator):
     """
     # Compute the two reflections' reciprical lattice vectors in the
     # cartesian crystal frame (hc = B @ hkl)
-    h1c = ubCalculator._crystal.getReciprocalVectorCart([0.,0.,1.]).flatten() # for hkl = (0, 0, 1)
-    h2c = ubCalculator._crystal.getReciprocalVectorCart([0.,1.,0.]).flatten() # for hkl = (0, 1, 0)
+    h1c = ubCalculator.lattice.reciprocalVectorCart([0.,0.,1.]).flatten() # for hkl = (0, 0, 1)
+    h2c = ubCalculator.lattice.reciprocalVectorCart([0.,1.,0.]).flatten() # for hkl = (0, 1, 0)
     
     # Calculate the sample rotation matrices
     
