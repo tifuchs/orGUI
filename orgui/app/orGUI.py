@@ -67,7 +67,6 @@ from datautils.xrayutils import ReciprocalNavigation as rn
 
 import sys
 from datautils.xrayutils.id31_tools import BlissScan_EBS, Fastscan, BlissScan
-from datautils.xrayutils.P212_tools import H5Fastsweep
 
 QTVERSION = qt.qVersion()
 DEBUG = 0
@@ -195,11 +194,8 @@ class orGUI(qt.QMainWindow):
         ubDock = qt.QDockWidget("Reciprocal space navigation")
         ubDock.setAllowedAreas(qt.Qt.LeftDockWidgetArea | qt.Qt.RightDockWidgetArea | qt.Qt.BottomDockWidgetArea)
         
-        self.reflectionSel = QReflectionSelector(self.centralPlot)
+        self.reflectionSel = QReflectionSelector(self.centralPlot, self.ubcalc)
         self.reflectionSel.sigQueryImageChange.connect(self._onChangeImage)
-        self.reflectionSel.sigQuerySaveReflections.connect(self._onSaveReflections)
-        self.reflectionSel.sigQueryLoadReflections.connect(self._onLoadReflections)
-        
         
         self.ubcalc.setReflectionHandler(self.getReflections)
         
@@ -602,8 +598,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
     def getReflections(self):
         hkls = []
         angles = []
-        for i in self.reflectionSel.reflections:
-            refl = self.reflectionSel.reflections[i]
+        for refl in self.reflectionSel.reflections:
             #print(refl.xy)
             gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([refl.xy[1]]),np.array([refl.xy[0]]),self.ubcalc.mu)
             delta = float(delta); gamma = float(gamma)
@@ -612,59 +607,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             hkls.append(refl.hkl)
             angles.append(pos)
         return np.array(hkls), np.array(angles)
-        
-        
-    def _onSaveReflections(self):
-        
-        fileTypeDict = {'dat Files (*.dat)': '.dat', 'txt Files (*.txt)': '.txt', 'All files (*)': '', }
-        fileTypeFilter = ""
-        for f in fileTypeDict:
-            fileTypeFilter += f + ";;"
-            
-        filename, filetype = qt.QFileDialog.getSaveFileName(self,"Save reflections",
-                                                  self.filedialogdir,
-                                                  fileTypeFilter[:-2])
-        if filename == '':
-            return
-        
-        self.filedialogdir = os.path.splitext(filename)[0]
-        filename += fileTypeDict[filetype]
-        hkls, angles = self.getReflections()
-        if angles.size > 0:
-            angles = np.rad2deg(angles)
-            angles[:,3] *= -1 # om to th
-            hklangles = np.concatenate([hkls,angles],axis=1)
-            np.savetxt(filename,hklangles,header="H K L mu del gam th chi phi",fmt='%.5f')
-        
-        #print(hkls,angles)
-        
-    def _onLoadReflections(self):
-        fileTypeDict = {'dat Files (*.dat)': '.dat', 'txt Files (*.txt)': '.txt', 'All files (*)': '', }
-        fileTypeFilter = ""
-        for f in fileTypeDict:
-            fileTypeFilter += f + ";;"
-            
-        filename, filetype = qt.QFileDialog.getOpenFileName(self,"Open file with reflections",
-                                                  self.filedialogdir,
-                                                  fileTypeFilter[:-2])
-        if filename == '':
-            return
-        self.filedialogdir = os.path.splitext(filename)[0]
-        try:
-            hklangles = np.loadtxt(filename,skiprows=1)
-            hkls, angles = hklangles[:,:3], np.deg2rad(hklangles[:,3:])
-            
-            #self.getReflections()
-            angles = np.rad2deg(angles)
-            angles[:,3] *= -1 # om to th
-            hklangles = np.concatenate([hkls,angles],axis=1)
-            for refl in hklangles:
-                self._onNewReflection(refl)
-        except Exception:
-            qutils.warning_detailed_message(self, "Error during loading of reflections","Error during loading of reflections.", traceback.format_exc())
-            #qt.QMessageBox.critical(self,"Error during loading of reflections","Error during loading of reflections.\n%s" % traceback.format_exc())
-        
-        #print(hkls,angles)
+
 
     def _onPlotMachineParams(self,paramslist):
         [cp,azimxy,polax] = paramslist
@@ -1685,6 +1628,8 @@ Do you want to continue without mask?""")
         
         
 class Plot2DHKL(silx.gui.plot.PlotWindow):
+    sigKeyPressDelete = qt.pyqtSignal()
+
     def __init__(self,xyHKLConverter,parent=None,backend=None):
         self.xyHKLConverter = xyHKLConverter
         
@@ -1730,6 +1675,12 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
                 break
 
         self.sigActiveImageChanged.connect(self.__activeImageChanged)
+        
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == qt.Qt.Key_Delete and not event.isAutoRepeat():
+            self.sigKeyPressDelete.emit()
+        super(Plot2DHKL, self).keyPressEvent(event)
         
     def setXyHKLconverter(self,xyHKLConverter):
         self.xyHKLConverter = xyHKLConverter

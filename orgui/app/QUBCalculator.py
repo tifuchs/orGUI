@@ -95,8 +95,8 @@ class QUBCalculator(qt.QTabWidget):
         umatrixsplitter = qt.QSplitter()
         umatrixsplitter.setOrientation(qt.Qt.Horizontal)
         
-        self.Ueditor = qt.QTextEdit("")
-        umatrixsplitter.addWidget(self.Ueditor)
+        #self.Ueditor = qt.QTextEdit("")
+        #umatrixsplitter.addWidget(self.Ueditor)
         self.calUButton = qt.QPushButton("calculate U")
         self.calUButton.setToolTip("calculate orientation matrix based on the given reflections")
                 
@@ -138,19 +138,13 @@ class QUBCalculator(qt.QTabWidget):
         self.addTab(umatrixwidget,"U Matrix")
         
         self.crystalparams = QCrystalParameter()
-        #self.crystalparams.setValues(self.crystal,self.n)
-        #self.addTab(self.crystalparams,"Crystal")
         
         
         self.crystalparams.sigCrystalParamsChanged.connect(self._onCrystalParamsChanged)
-        
-        #paramsSplitter.setOrientation(qt.Qt.Horizontal)
-        
         self.machineParams = QMachineParameters()
         self.machineParams.sigMachineParamsChanged.connect(self._onMachineParamsChanged)
         self.machineParams.loadConfigButton.clicked.connect(self._onLoadConfig)
-        #self.addTab(self.machineParams,"Machine")
-        
+
         self.uedit = QUEdit()
         self.ueditDialog = QUEditDialog(self.uedit)
         

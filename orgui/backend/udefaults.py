@@ -14,7 +14,7 @@ def defaultU_GID(ubCalculator):
     Alpha tilts this rotation axis. Typically alpha is equal to the angle of incidence.
 
     """
-    # Compute the two reflections' reciprical lattice vectors in the
+    # Compute the two reflections' reciprical vectors in the
     # cartesian crystal frame (hc = B @ hkl)
     h1c = ubCalculator.lattice.reciprocalVectorCart([0.,0.,1.]).flatten() # for hkl = (0, 0, 1)
     h2c = ubCalculator.lattice.reciprocalVectorCart([0.,1.,0.]).flatten() # for hkl = (0, 1, 0)
@@ -73,7 +73,7 @@ def defaultU_TSD(ubCalculator):
     DOI: 10.1021/acs.jpclett.7b00332
 
     """
-    # Compute the two reflections' reciprical lattice vectors in the
+    # Compute the two reflections' reciprical vectors in the
     # cartesian crystal frame (hc = B @ hkl)
     h1c = ubCalculator.lattice.reciprocalVectorCart([0.,0.,1.]).flatten() # for hkl = (0, 0, 1)
     h2c = ubCalculator.lattice.reciprocalVectorCart([0.,1.,0.]).flatten() # for hkl = (0, 1, 0)

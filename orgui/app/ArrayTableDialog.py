@@ -79,6 +79,7 @@ class DeleteRowAction(qt.QAction):
         mask[selected_row] = False
 
         self.arrayTableWidget.updateArrayData(data[mask])
+        self.arrayTableWidget.sigRowsDeleted.emit(selected_row)
         
         
 class AddRowAction(qt.QAction):
@@ -122,6 +123,7 @@ class AddRowAction(qt.QAction):
 
         newdata = np.insert(data, selected_row, np.full(data.shape[-1],self.fill_value) ,0)
         self.arrayTableWidget.updateArrayData(newdata)
+        self.arrayTableWidget.sigRowAdded.emit(selected_row)
         
         
 class ArrayTableHeaderModel(ArrayTableModel.ArrayTableModel):
@@ -154,7 +156,9 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
     saving and loading of the array.
     
     """
-    
+    sigRowAdded = qt.pyqtSignal(int)
+    sigRowsDeleted = qt.pyqtSignal(np.ndarray)
+    sigDataLoaded = qt.pyqtSignal()
     
     def __init__(self, saveact: bool = True, openact: int = -1, rowActions=True, parent = None):
         """Creates a new :class:`ArrayEditWidget`. 
@@ -262,15 +266,18 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
                         raise ValueError("Array must be a 1d array. Is: %s d" % len(self.getData().shape))
                     else:
                         self.updateArrayData(array_data)
+                        self.sigDataLoaded.emit()
                         return True
                 else:
                     if array_data.shape[retain_axis] != self.getData().shape[retain_axis]:
                         raise ValueError("The number of data columns must match. Required: %s, Is: %s" % (self.getData().shape[retain_axis], array_data.shape[retain_axis]))
                     else:
                         self.updateArrayData(array_data)
+                        self.sigDataLoaded.emit()
                         return True
             else:
                 self.updateArrayData(array_data, header=None, labels=None)
+                self.sigDataLoaded.emit()
                 return True
             
         except Exception:
@@ -314,6 +321,7 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
                 self.updateArrayData(data)
             else:
                 self.updateArrayData(data, header=None, labels=None)
+            self.sigDataLoaded.emit()
                 
     def savetxt(self):
         fmt = "%.7g"
