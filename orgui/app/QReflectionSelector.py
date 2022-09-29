@@ -29,6 +29,8 @@ from typing import ClassVar
 import numpy as np
 from datautils.xrayutils import HKLVlieg
 
+from .. import resources
+
 @dataclass
 class HKLReflection:
     xy: np.ndarray
@@ -84,56 +86,7 @@ class QReflectionSelector(qt.QSplitter):
         self.activeReflection = None
         
         self.plot.sigKeyPressDelete.connect(self._onDelete)
-        
-        #self.mainLayout = qt.QVBoxLayout()
-        self.reflectionWidget = qt.QSplitter(self)
-        self.reflectionWidget.setOrientation(qt.Qt.Horizontal)
-        
-        qt.QLabel("No:",self.reflectionWidget)
-        self.markerNo = qt.QSpinBox(self.reflectionWidget)
-        self.markerNo.setRange(0,0)
-        
-        qt.QLabel("H:",self.reflectionWidget)
-        self.Hbox = qt.QDoubleSpinBox(self.reflectionWidget)
-        self.Hbox.setRange(-100,100)
-        self.Hbox.setDecimals(2)
-        
-        qt.QLabel("K:",self.reflectionWidget)
-        self.Kbox = qt.QDoubleSpinBox(self.reflectionWidget)
-        self.Kbox.setRange(-100,100)
-        self.Kbox.setDecimals(2)
-        
-        qt.QLabel("L:",self.reflectionWidget)
-        self.Lbox = qt.QDoubleSpinBox(self.reflectionWidget)
-        self.Lbox.setRange(-100,100)
-        self.Lbox.setDecimals(2)
 
-        self.actionbuttons = qt.QSplitter(self)
-        self.actionbuttons.setOrientation(qt.Qt.Horizontal)
-        
-        applyButton = qt.QPushButton("Apply",self.actionbuttons)
-        #applyButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
-        applyButton.setToolTip("Accept changes")
-        applyButton.clicked.connect(self._onApplyChange)
-        
-        gotoImageButton = qt.QPushButton("goto Image",self.actionbuttons)
-        #applyButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
-        gotoImageButton.setToolTip("diplay image with this reflection")
-        gotoImageButton.clicked.connect(self._onGotoImage)
-        
-        setImageButton = qt.QPushButton("set Image",self.actionbuttons)
-        #applyButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
-        setImageButton.setToolTip("set this image for this reflection")
-        setImageButton.clicked.connect(self._onSetImage)
-        
-        deleteButton = qt.QPushButton("Delete",self.actionbuttons)
-        #applyButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
-        deleteButton.setToolTip("Delete Reflection")
-        deleteButton.clicked.connect(self._onDelete)
-        
-        self.addWidget(self.reflectionWidget)
-        self.addWidget(self.actionbuttons)
-        
         editorTabWidget = qt.QTabWidget()
 
         self.refleditor = ArrayEditWidget(True, 1)
@@ -146,6 +99,21 @@ class QReflectionSelector(qt.QSplitter):
         self.refleditor.sigRowsDeleted.connect(self._onRowsDeleted)
         self.refleditor.view.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.refleditor.view.selectionModel().currentRowChanged.connect(self._onSelectedRowChanged)
+        
+        spacer_widget = qt.QWidget()
+        spacer_widget.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred)
+        self.refleditor.toolbar.addWidget(spacer_widget)
+        
+        self.setImageAct = qt.QAction(resources.getQicon('select-image'), "select Image", self)
+        self.setImageAct.setToolTip("set this image for the chosen reflection")
+        self.setImageAct.triggered.connect(self._onSetImage)
+        self.refleditor.toolbar.addAction(self.setImageAct)
+        
+        self.gotoImageAct = qt.QAction(resources.getQicon('search-image'), "search image",self)
+        self.gotoImageAct.setToolTip("diplay image with the chosen reflection")
+        self.gotoImageAct.triggered.connect(self._onGotoImage)
+        self.refleditor.toolbar.addAction(self.gotoImageAct)
+        
         editorTabWidget.addTab(self.refleditor, "intrinsic coord")
 
         self.refleditor_angles = ArrayEditWidget(True, -1, False)
@@ -207,7 +175,6 @@ class QReflectionSelector(qt.QSplitter):
         if self._showReferenceReflections:
             self.plot.addMarker(*refl.xy,legend=refl.identifier,text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='blue',selectable=True,draggable=True,symbol='.')
         self.reflections.insert(row, refl)
-        self.markerNo.setMaximum(len(self.reflections))
         self.setReflectionActive(refl.identifier)
         
     def _onRowsDeleted(self, rows):
@@ -242,12 +209,8 @@ class QReflectionSelector(qt.QSplitter):
             self.plot.removeMarker(refl.identifier)
             self.plot.addMarker(refl.xy[0],refl.xy[1],legend=refl.identifier,text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='red',selectable=True,draggable=True,symbol='.')
             self.activeReflection = refl.identifier
-            self._setactiveHKLVals(refl.hkl)
-            self.markerNo.setValue(int(refl.identifier.split('_')[-1]))
         else:
             self.activeReflection = refl.identifier
-            self._setactiveHKLVals(refl.hkl)
-            self.markerNo.setValue(int(refl.identifier.split('_')[-1]))
         
     def setBraggReflectionsVisible(self, visible):
         if visible:
@@ -364,10 +327,6 @@ class QReflectionSelector(qt.QSplitter):
             
             self.reflections.append(refl)
             self.nextNo += 1
-        if self.nextNo > 0:
-            self.markerNo.setMaximum(self.nextNo-1)
-        else:
-            self.markerNo.setMaximum(0)
         if self.reflections:
             newactive = self.reflections[0].identifier
             self.setReflectionActive(newactive)
@@ -378,7 +337,6 @@ class QReflectionSelector(qt.QSplitter):
         if self._showReferenceReflections:
             self.plot.addMarker(refl.xy[0],refl.xy[1],legend=refl.identifier,text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='blue',selectable=True,draggable=True,symbol='.')
         self.reflections.append(refl)
-        self.markerNo.setMaximum(self.nextNo)
         self.nextNo += 1
         self.updateEditor()
         self.setReflectionActive(identifier)
@@ -396,17 +354,12 @@ class QReflectionSelector(qt.QSplitter):
             self.plot.removeMarker(identifier)
             self.plot.addMarker(refl.xy[0],refl.xy[1],legend=str(identifier),text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='red',selectable=True,draggable=True,symbol='.')
             self.activeReflection = identifier
-            self._setactiveHKLVals(refl.hkl)
-            self.markerNo.setValue(int(identifier.split('_')[-1]))
         else:
             self.activeReflection = identifier
-            self._setactiveHKLVals(refl.hkl)
-            self.markerNo.setValue(int(identifier.split('_')[-1]))
         selectModel = self.refleditor.view.selectionModel()
         if idx != selectModel.currentIndex().row():
             self.refleditor.view.selectRow(idx)
             self.refleditor_angles.view.selectRow(idx)
-            
     
     def setReflectionInactive(self,identifier):
         if self._showReferenceReflections:
@@ -418,22 +371,6 @@ class QReflectionSelector(qt.QSplitter):
         self.reflections[self.indexReflection(identifier)].xy = xy
         self.updateEditor()
         
-    def _setactiveHKLVals(self,hkl):
-        nanto0 = lambda x : x if not np.isnan(x) else 0 
-        self.Hbox.setValue(nanto0(hkl[0]))
-        self.Kbox.setValue(nanto0(hkl[1]))
-        self.Lbox.setValue(nanto0(hkl[2]))
-        
-    def _onApplyChange(self):
-        if self.activeReflection is not None:
-            hkl = np.empty(3)
-            hkl[0] = self.Hbox.value()
-            hkl[1] = self.Kbox.value()
-            hkl[2] = self.Lbox.value()
-            self.reflections[self.indexReflection(self.activeReflection)].hkl = hkl
-            self.redrawActiveReflection()
-            self.updateEditor()
-            
     def redrawActiveReflection(self):
         if self._showReferenceReflections:
             self.plot.removeMarker(self.activeReflection)
