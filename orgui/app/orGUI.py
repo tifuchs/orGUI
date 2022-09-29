@@ -194,7 +194,7 @@ class orGUI(qt.QMainWindow):
         ubDock = qt.QDockWidget("Reciprocal space navigation")
         ubDock.setAllowedAreas(qt.Qt.LeftDockWidgetArea | qt.Qt.RightDockWidgetArea | qt.Qt.BottomDockWidgetArea)
         
-        self.reflectionSel = QReflectionSelector(self.centralPlot, self.ubcalc)
+        self.reflectionSel = QReflectionSelector(self.centralPlot, self.ubcalc, self)
         self.reflectionSel.sigQueryImageChange.connect(self._onChangeImage)
         
         self.ubcalc.setReflectionHandler(self.getReflections)

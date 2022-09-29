@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar
 
 import numpy as np
+from datautils.xrayutils import HKLVlieg
 
 @dataclass
 class HKLReflection:
@@ -38,7 +39,7 @@ class HKLReflection:
     @classmethod
     def fromStr(cls,string):
         h,k,l,x,y,imageno = string.split()
-        refl = cls([x,y],[h,k,l],imageno)
+        refl = cls([x,y],[h,k,l],int(imageno))
         return refl
     
     @staticmethod
@@ -46,13 +47,13 @@ class HKLReflection:
         reflist = []
         if arr.ndim == 1:
             h,k,l,x,y,imageno = arr
-            refl = HKLReflection([x,y],[h,k,l],imageno, identifier)
+            refl = HKLReflection([x,y],[h,k,l],int(imageno), identifier)
             return refl
         if len(identifier) != len(arr):
             raise ValueError("Mismatch between number of reflections in array and identifiers.")
         for row, ident in zip(arr, identifier):
             h,k,l,x,y,imageno = row
-            reflist.append(HKLReflection([x,y],[h,k,l],imageno, ident))
+            reflist.append(HKLReflection([x,y],[h,k,l],int(imageno), ident))
         return reflist
         
     def __array__(self):
@@ -69,6 +70,7 @@ class QReflectionSelector(qt.QSplitter):
         self.setOrientation(qt.Qt.Vertical)
         self.plot = plot
         self.ubcalc = ubcalc
+        self.orparent = parent
         
         self.reflections = []
         self.reflBragg = []
@@ -132,8 +134,7 @@ class QReflectionSelector(qt.QSplitter):
         self.addWidget(self.reflectionWidget)
         self.addWidget(self.actionbuttons)
         
-        editorSplitter = qt.QSplitter()
-        editorSplitter.setOrientation(qt.Qt.Horizontal)
+        editorTabWidget = qt.QTabWidget()
 
         self.refleditor = ArrayEditWidget(True, 1)
         header = ['H', 'K', 'L', 'x', 'y', 'imageno']
@@ -145,9 +146,16 @@ class QReflectionSelector(qt.QSplitter):
         self.refleditor.sigRowsDeleted.connect(self._onRowsDeleted)
         self.refleditor.view.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.refleditor.view.selectionModel().currentRowChanged.connect(self._onSelectedRowChanged)
-        editorSplitter.addWidget(self.refleditor)
+        editorTabWidget.addTab(self.refleditor, "intrinsic coord")
+
+        self.refleditor_angles = ArrayEditWidget(True, -1, False)
+        header = ['H', 'K', 'L', 'alpha', 'delta', 'gamma', 'omega', 'chi', 'phi']
+        self.refleditor_angles.setArrayData(np.array([]).reshape((-1,9)), editable=False, header=header)
+        self.refleditor_angles.view.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        self.refleditor_angles.view.selectionModel().currentRowChanged.connect(self._onSelectedRowChanged)
+        editorTabWidget.addTab(self.refleditor_angles, "SIXC angles")
         
-        self.addWidget(editorSplitter)
+        self.addWidget(editorTabWidget)
         
         
     def _onDataChanged(self, *dat):
@@ -155,7 +163,7 @@ class QReflectionSelector(qt.QSplitter):
         idx_no = dat[0].row()
         identifier = self.reflections[idx_no].identifier
         if data.ndim > 1:
-            refl = HKLReflection.fromArray(data[row], identifier)
+            refl = HKLReflection.fromArray(data[idx_no], identifier)
         else:
             refl = HKLReflection.fromArray(data, identifier)
         self.reflections[idx_no] = refl
@@ -164,6 +172,18 @@ class QReflectionSelector(qt.QSplitter):
         else:
             self.redrawActiveReflection()
             
+    def anglesReflection(self, refl):
+        if self.orparent.fscan is None:
+            return np.array([np.nan,np.nan,np.nan, np.nan, np.nan, np.nan])
+        print(refl.imageno)
+        mu, om = self.orparent.getMuOm(refl.imageno)
+        
+        gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([refl.xy[1]]),np.array([refl.xy[0]]), mu)
+        pos = [mu,delta[0],gamma[0],om,self.ubcalc.chi,self.ubcalc.phi]
+        pos = HKLVlieg.crystalAngles(pos,self.ubcalc.n)
+        return np.array(pos)
+        
+            
     def _onRowAdded(self, row):
         identifier = 'ref_'+str(self.nextNo)
         if self.refleditor.getData().ndim > 1:
@@ -171,6 +191,18 @@ class QReflectionSelector(qt.QSplitter):
         else:
             refl = HKLReflection.fromArray(self.refleditor.getData(), identifier)
         self.nextNo += 1
+        angles = np.concatenate([refl.hkl,np.rad2deg(self.anglesReflection(refl))])
+        angledata = self.refleditor_angles.getData()
+        if angledata.ndim > 1:
+            angledata = np.insert(angledata, row, angles, axis=0)
+        elif angledata.ndim == 1:
+            if row == 0:
+                angledata = np.vstack([angles, angledata])
+            elif row == 1:
+                angledata = np.vstack([angledata, angles])
+        else:
+            angledata = angles[np.newaxis,:]
+        self.refleditor_angles.updateArrayData(angledata)
         
         if self._showReferenceReflections:
             self.plot.addMarker(*refl.xy,legend=refl.identifier,text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='blue',selectable=True,draggable=True,symbol='.')
@@ -184,6 +216,22 @@ class QReflectionSelector(qt.QSplitter):
             idents.append(self.reflections[r].identifier)
         for ident in idents:
             self.deleteReflection(ident)
+        """
+        print(self.refleditor_angles.getData())
+        angledata = np.atleast_2d(self.refleditor_angles.getData())
+        print(angledata)
+        mask = np.ones(len(angledata),dtype=bool)
+        print(mask)
+        mask[np.array(rows)] = False
+        angledata = angledata[mask]
+        print(angledata)
+        print(angledata.ndim )
+        if angledata.ndim == 1:
+            angledata = angledata[np.newaxis,:]
+        elif angledata.ndim == 0:
+            angledata = np.array([]).reshape((-1,9))
+        self.refleditor_angles.updateArrayData(angledata)
+        """
             
     def _onSelectedRowChanged(self, selected, deselected):
         row = selected.row()
@@ -250,11 +298,18 @@ class QReflectionSelector(qt.QSplitter):
         if self.reflections:
             array = np.vstack(self.reflections)
             self.refleditor.updateArrayData(array)
+            anglearray = []
+            for refl in self.reflections:
+                anglearray.append(np.concatenate([refl.hkl,np.rad2deg(self.anglesReflection(refl))]))
+            anglearray = np.vstack(anglearray)
+            self.refleditor_angles.updateArrayData(anglearray)
         else:
             self.refleditor.updateArrayData(np.array([]).reshape((-1,6)))
+            self.refleditor_angles.updateArrayData(np.array([]).reshape((-1,9)))
         try:
             idx = self.indexReflection(self.activeReflection)
             self.refleditor.view.selectRow(idx)
+            self.refleditor_angles.view.selectRow(idx)
         except:
             if self.reflections:
                 self.setReflectionActive(self.reflections[0].identifier)
@@ -350,6 +405,7 @@ class QReflectionSelector(qt.QSplitter):
         selectModel = self.refleditor.view.selectionModel()
         if idx != selectModel.currentIndex().row():
             self.refleditor.view.selectRow(idx)
+            self.refleditor_angles.view.selectRow(idx)
             
     
     def setReflectionInactive(self,identifier):
@@ -394,7 +450,16 @@ class QReflectionSelector(qt.QSplitter):
             self.updateEditor()
     
     def _onDelete(self):
-        self.deleteReflection(self.activeReflection)
+        try:
+            idx = self.indexReflection(self.activeReflection)
+        except:
+            return
+        refl = self.reflections[idx]
+        btn = qt.QMessageBox.question(self, "Delete reflection?", 
+                                "Do you want to delete the reflection?\n%s" % refl.hkl,
+                                qt.QMessageBox.Yes | qt.QMessageBox.No, qt.QMessageBox.Yes)
+        if btn == qt.QMessageBox.Yes:
+            self.deleteReflection(self.activeReflection)
     
     def deleteReflection(self,identifier):
         try:
