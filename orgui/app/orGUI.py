@@ -264,12 +264,12 @@ class orGUI(qt.QMainWindow):
         config_menu.addAction(self.showExcludedImagesAct)
         
         view_menu = menu_bar.addMenu("&View")
-        showRefReflectionsAct = view_menu.addAction("show reference reflections")
+        showRefReflectionsAct = view_menu.addAction("reference reflections")
         showRefReflectionsAct.setCheckable(True)
         showRefReflectionsAct.setChecked(True)
         showRefReflectionsAct.toggled.connect(lambda checked: self.reflectionSel.setReferenceReflectionsVisible(checked))
         
-        showBraggAct = view_menu.addAction("show allowed Bragg reflections")
+        showBraggAct = view_menu.addAction("allowed Bragg reflections")
         showBraggAct.setCheckable(True)
         showBraggAct.setChecked(False)
         showBraggAct.toggled.connect(self.onShowBragg)
@@ -281,11 +281,16 @@ class orGUI(qt.QMainWindow):
         self.roivisible = False
         #self.scanSelector.showROICheckBox.addAction(showROIAct)
         
-        self.showCTRreflAct = view_menu.addAction("show CTR reflections")
+        self.showCTRreflAct = view_menu.addAction("CTR reflections")
         self.showCTRreflAct.setCheckable(True)
         self.showCTRreflAct.setChecked(False)
         self.showCTRreflAct.toggled.connect(self.onShowCTRreflections)
         self.reflectionsVisible = False
+        
+        self.showMachineParamsAct = view_menu.addAction("machine parameters")
+        self.showMachineParamsAct.setCheckable(True)
+        self.showMachineParamsAct.setChecked(False)
+        self.showMachineParamsAct.toggled.connect(self._onPlotMachineParams)
         
         view_menu.addSeparator()
         
@@ -609,10 +614,20 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         return np.array(hkls), np.array(angles)
 
 
-    def _onPlotMachineParams(self,paramslist):
-        [cp,azimxy,polax] = paramslist
-        self.centralPlot.addMarker(cp[0],cp[1],legend="CentralPixel",text="CP",color='yellow',symbol='+')
-        self.centralPlot.addMarker(azimxy[0],azimxy[1],legend="azimuth",text="Azim",color='yellow',symbol='+')
+    def _onPlotMachineParams(self, enable=None):
+        #[cp,azimxy,polax] = paramslist
+        if enable is None:
+            enable = self.showMachineParamsAct.isChecked()
+        if enable:
+            fit2DCal = self.ubcalc.detectorCal.getFit2D()
+            cp = fit2DCal['centerX'], fit2DCal['centerY']
+            gam_p,_ = self.ubcalc.detectorCal.rangegamdel_p
+            azimy,azimx = self.ubcalc.detectorCal.pixelsPrimeBeam(gam_p[1]/5, 0 )[0]
+            self.centralPlot.addMarker(cp[0],cp[1],legend="CentralPixel",text="CP",color='yellow',symbol='+')
+            self.centralPlot.addMarker(azimx,azimy,legend="azimuth",text="Azim",color='yellow',symbol='+')
+        else:
+            self.centralPlot.removeMarker("CentralPixel")
+            self.centralPlot.removeMarker("azimuth")
 
     def _onNewReflection(self,refl):
         [hkl,x,y,omega] = refl

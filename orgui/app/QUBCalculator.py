@@ -54,7 +54,7 @@ def blockSignals(qobjects):
 
 class QUBCalculator(qt.QTabWidget):
     sigNewReflection = qt.pyqtSignal(list)
-    sigPlottableMachineParamsChanged = qt.pyqtSignal(list)
+    sigPlottableMachineParamsChanged = qt.pyqtSignal()
     sigReplotRequest = qt.pyqtSignal(bool)
     #sigQueryImageChange = qt.pyqtSignal(int)
     #sigImagePathChanged = qt.pyqtSignal(object)
@@ -249,9 +249,7 @@ class QUBCalculator(qt.QTabWidget):
         self.uedit.setAngles(mu, chi, phi, angles_u[-1])
         
         try:
-            gam_p,_ = self.detectorCal.rangegamdel_p
-            azimy,azimx = self.detectorCal.pixelsPrimeBeam(gam_p[1]/5, 0 )[0]
-            self.sigPlottableMachineParamsChanged.emit([cp,[azimx,azimy],polax])
+            self.sigPlottableMachineParamsChanged.emit()
             self.sigReplotRequest.emit(True)
         except Exception as e:
             # here is a bug with the init of the detector cal

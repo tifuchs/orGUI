@@ -60,7 +60,7 @@ setup(name='orgui', version='1.0.0',
       'scipy >= 1.0',
       'matplotlib >= 1.3',
       'fabio >= 0.7',
-      'silx >= 0.9',
+      'silx >= 1.0',
       'pyFAI >= 0.16'],
       classifiers=[
           'Topic :: Scientific/Engineering',
