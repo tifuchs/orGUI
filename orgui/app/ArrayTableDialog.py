@@ -193,6 +193,7 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
         """List of HorizontalSliderWithBrowser widgets."""
 
         self.axesSelector = ArrayTableWidget.AxesSelector(self)
+        self.axesSelector.setVisible(False)
 
         self.view = TableView(self)
         
@@ -205,8 +206,8 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
             self.enableSaveAction()
         
         self.mainLayout.addWidget(self.toolbar)
-        self.mainLayout.addWidget(self.browserContainer)
-        self.mainLayout.addWidget(self.axesSelector)
+        #self.mainLayout.addWidget(self.browserContainer)
+        #self.mainLayout.addWidget(self.axesSelector)
         self.mainLayout.addWidget(self.view)
 
         self.model = ArrayTableHeaderModel(self)

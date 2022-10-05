@@ -113,8 +113,9 @@ class orGUI(qt.QMainWindow):
         self.imageno = 0
         
     
-        ubWidget = qt.QWidget()
-        ubLayout = qt.QVBoxLayout()
+        ubWidget = qt.QSplitter(qt.Qt.Vertical)
+        ubWidget.setChildrenCollapsible(False)
+        #ubLayout = qt.QVBoxLayout()
         self.ubcalc = QUBCalculator(configfile)
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
         
@@ -204,11 +205,11 @@ class orGUI(qt.QMainWindow):
         self.allimgsum = None
         self.allimgmax = None
 
+        ubWidget.addWidget(self.reflectionSel)
+        ubWidget.addWidget(self.ubcalc)
         
-        ubLayout.addWidget(self.ubcalc)
-        ubLayout.addWidget(self.reflectionSel)
         
-        ubWidget.setLayout(ubLayout)
+        #ubWidget.setLayout(ubLayout)
         ubDock.setWidget(ubWidget)
         self.centralPlot.addDockWidget(qt.Qt.RightDockWidgetArea,ubDock)
         
