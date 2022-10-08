@@ -1889,7 +1889,7 @@ class UncaughtHook(qt.QObject):
                     errorbox.exec()
                     sys.exit(1)
                 else:
-                    resBtn = qutils.critical_detailed_message(self, "Uncaught Exception", "An unexpected error has occured.\norGUI will terminate now.\nDo you want to try to save the database before terminating?" ,log_msg, qt.QMessageBox.Save | qt.QMessageBox.Discard)
+                    resBtn = qutils.critical_detailed_message(self.orgui, "Uncaught Exception", "An unexpected error has occured.\norGUI will terminate now.\nDo you want to try to save the database before terminating?" ,log_msg, qt.QMessageBox.Save | qt.QMessageBox.Discard)
                     #errorbox = qt.QMessageBox(qt.QMessageBox.Critical, 
                     #                          "Uncaught Exception",
                     #                          "An unexpected error occured:\n{0}\nDo you want to try to save the data before terminating?".format(log_msg),
@@ -1903,6 +1903,7 @@ class UncaughtHook(qt.QObject):
                             
                         except Exception:
                             print("Fatal error: Cannot save database:\n%s" % traceback.format_exc())
+                            qutils.critical_detailed_message(self.orgui, "Fatal error", "Cannot save database." ,traceback.format_exc())
                     self.orgui.database.close()
             else:
                 print("No QApplication instance available.")

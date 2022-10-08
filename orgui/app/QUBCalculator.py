@@ -34,6 +34,7 @@ from contextlib import contextmanager
 from .ArrayTableDialog import ArrayEditWidget
 
 from ..backend import udefaults
+from .. import resources
 
 @contextmanager
 def blockSignals(qobjects):
@@ -52,7 +53,7 @@ def blockSignals(qobjects):
 
 # reflectionhandler must implement the method getReflections
 
-class QUBCalculator(qt.QTabWidget):
+class QUBCalculator(qt.QSplitter):
     sigNewReflection = qt.pyqtSignal(list)
     sigPlottableMachineParamsChanged = qt.pyqtSignal()
     sigReplotRequest = qt.pyqtSignal(bool)
@@ -60,40 +61,49 @@ class QUBCalculator(qt.QTabWidget):
     #sigImagePathChanged = qt.pyqtSignal(object)
     #sigImageNoChanged = qt.pyqtSignal(object)
     def __init__(self,configfile=None, parent=None):
-        qt.QTabWidget.__init__(self, parent=None)
-        #self.setOrientation(qt.Qt.Vertical)
+        qt.QSplitter.__init__(self, parent=None)
+        self.setOrientation(qt.Qt.Vertical)
         
         self.configdir = os.getcwd()
         #self.mainLayout = qt.QVBoxLayout()
+
+        self.setChildrenCollapsible(False)
         
-        umatrixwidget = qt.QSplitter()
-        umatrixwidget.setOrientation(qt.Qt.Vertical)
-        
-        
-        self.reflectionWidget = qt.QSplitter()
+        self.reflectionWidget = qt.QToolBar()
+        self.reflectionWidget.setFloatable(False)
+        self.reflectionWidget.setMovable(False)
+        #self.reflectionWidget.setChildrenCollapsible(False)
         self.reflectionWidget.setOrientation(qt.Qt.Horizontal)
-        qt.QLabel("H:",self.reflectionWidget)
-        self.Hbox = qt.QDoubleSpinBox(self.reflectionWidget)
+        label = qt.QLabel("H:")
+        self.reflectionWidget.addWidget(label)
+        self.Hbox = qt.QDoubleSpinBox()
         self.Hbox.setRange(-100,100)
-        self.Hbox.setDecimals(2)
-        qt.QLabel("K:",self.reflectionWidget)
-        self.Kbox = qt.QDoubleSpinBox(self.reflectionWidget)
+        self.Hbox.setDecimals(3)
+        self.reflectionWidget.addWidget(self.Hbox)
+        label = qt.QLabel("K:")
+        self.reflectionWidget.addWidget(label)
+        self.Kbox = qt.QDoubleSpinBox()
         self.Kbox.setRange(-100,100)
-        self.Kbox.setDecimals(2)
-        qt.QLabel("L:",self.reflectionWidget)
-        self.Lbox = qt.QDoubleSpinBox(self.reflectionWidget)
+        self.Kbox.setDecimals(3)
+        self.reflectionWidget.addWidget(self.Kbox)
+        label = qt.QLabel("L:")
+        self.reflectionWidget.addWidget(label)
+        self.Lbox = qt.QDoubleSpinBox()
         self.Lbox.setRange(-100,100)
-        self.Lbox.setDecimals(2)
-        estimateButton = qt.QPushButton("calculate",self.reflectionWidget)
+        self.Lbox.setDecimals(3)
+        self.reflectionWidget.addWidget(self.Lbox)
+        searchReflAct = qt.QAction(resources.getQicon('search'), "search reflection", self)
+        self.reflectionWidget.addAction(searchReflAct)
         #applyButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
-        estimateButton.setToolTip("calculate position of the reflection with given HKL")
+        searchReflAct.setToolTip("calculate position of the reflection with given HKL")
         
-        estimateButton.clicked.connect(self._onCalcReflection)
+        searchReflAct.triggered.connect(self._onCalcReflection)
         
-        umatrixwidget.addWidget(self.reflectionWidget)
+        self.addWidget(self.reflectionWidget)
         
         umatrixsplitter = qt.QSplitter()
         umatrixsplitter.setOrientation(qt.Qt.Horizontal)
+        umatrixsplitter.setChildrenCollapsible(False)
         
         #self.Ueditor = qt.QTextEdit("")
         #umatrixsplitter.addWidget(self.Ueditor)
@@ -102,8 +112,9 @@ class QUBCalculator(qt.QTabWidget):
                 
         vertCalUSplitter = qt.QSplitter()
         vertCalUSplitter.setOrientation(qt.Qt.Vertical)
-        
-        fitUbox = qt.QGroupBox("fit options (only available with enough reflections)")
+        vertCalUSplitter.setChildrenCollapsible(False)
+        fitUbox = qt.QGroupBox("fit options")
+        fitUbox.setToolTip("only available with enough reflections")
         
         self.latnofit = qt.QRadioButton("don't fit lattice")
         self.latnofit.setChecked(True)
@@ -128,14 +139,13 @@ class QUBCalculator(qt.QTabWidget):
         
         umatrixsplitter.addWidget(vertCalUSplitter)
         
-        umatrixwidget.addWidget(umatrixsplitter)
+        self.addWidget(umatrixsplitter)
         
 
         
         
         
         self.calUButton.clicked.connect(self._onCalcU)
-        self.addTab(umatrixwidget,"U Matrix")
         
         self.crystalparams = QCrystalParameter()
         
@@ -343,7 +353,6 @@ class QUBCalculator(qt.QTabWidget):
                     #self.crystal = self.crystalparams.getCrystal()
 
             if latticeoverride:
-                print('foo')
                 self.crystal.setLattice([a1,a2,a3],[alpha1,alpha2,alpha3])
             
             self.detectorCal = DetectorCalibration.Detector2D_SXRD()

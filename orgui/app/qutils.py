@@ -25,12 +25,12 @@ def messagebox_detailed_message(parent, title, text, detailed_text, icon, button
     return diag.exec()
 
 def critical_detailed_message(parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok):
-    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Critical, buttons=qt.QMessageBox.Ok)
+    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Critical, buttons=buttons)
     
 def warning_detailed_message(parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok):
-    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Warning, buttons=qt.QMessageBox.Ok)
+    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Warning, buttons=buttons)
 
 def information_detailed_message(parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok):
-    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Information, buttons=qt.QMessageBox.Ok)
+    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Information, buttons=buttons)
 
 

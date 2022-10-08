@@ -71,9 +71,14 @@ def main():
         mainWindow = orGUI(options.configfile)
         qt_exception_hook.set_orgui(mainWindow)
         splash.finish(mainWindow)
-        
+
         mainWindow.show()
-        return app.exec_()
+        current_screen = mainWindow.window().windowHandle().screen()
+        qr = mainWindow.frameGeometry()
+        qr.moveCenter(current_screen.geometry().center())
+        mainWindow.move(qr.topLeft())
+        
+        return app.exec()
     else:
         raise Exception("%s is no file" % options.configfile)
 
