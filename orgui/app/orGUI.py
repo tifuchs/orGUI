@@ -149,6 +149,7 @@ class orGUI(qt.QMainWindow):
         
         self.scanSelector.sigROIChanged.connect(self.updateROI)
         self.scanSelector.sigROIintegrate.connect(self.integrateROI)
+        self.scanSelector.sigSearchHKL.connect(self.onSearchHKLforStaticROI)
         
         self.scanSelector.excludeImageAct.toggled.connect(self._onToggleExcludeImage)
         
@@ -629,6 +630,54 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         else:
             self.centralPlot.removeMarker("CentralPixel")
             self.centralPlot.removeMarker("azimuth")
+            
+    def onSearchHKLforStaticROI(self, hkl):
+        refldict = self.ubcalc.calcReflection(hkl)
+        axisname = self.fscan.axisname
+        dc = self.ubcalc.detectorCal
+        
+        if self.fscan.axisname == 'mu':
+            angle_idx = 0
+            sign = 1.
+        elif self.fscan.axisname == 'th':
+            angle_idx = 3
+            sign = -1.
+        else:
+            qt.QMessageBox.warning(self,"Cannot calculate reflection","Cannot calculate reflection.\n%s is no supported scan axis." % self.fscan.axisname)
+            return 
+        try:
+            imageno1 = self.axisToImageNo(np.rad2deg(refldict['angles_1'][angle_idx]) * sign)
+            refldict['imageno_1'] = imageno1
+        except:
+            imageno1 = None
+        xy = refldict['xy_1']
+        onDetector = (xy[0] >= 0 and xy[0] < dc.detector.shape[1]) and \
+                     (xy[1] >= 0 and xy[1] < dc.detector.shape[0])
+        if onDetector:
+            refldict['selectable_1'] = True
+        else:
+            refldict['selectable_1'] = False
+            
+        try:
+            imageno2 = self.axisToImageNo(np.rad2deg(refldict['angles_2'][angle_idx]) * sign)
+            refldict['imageno_2'] = imageno2
+        except:
+            imageno2 = None
+        xy = refldict['xy_2']
+        onDetector = (xy[0] >= 0 and xy[0] < dc.detector.shape[1]) and \
+                     (xy[1] >= 0 and xy[1] < dc.detector.shape[0])
+        if onDetector:
+            refldict['selectable_2'] = True
+        else:
+            refldict['selectable_2'] = False
+        refl_dialog = QReflectionAnglesDialog(refldict,"Select reflection location", self)
+        if qt.QDialog.Accepted == refl_dialog.exec():
+            for i, cb in enumerate(refl_dialog.checkboxes,1):
+                if cb.isChecked():
+                    xy = refldict['xy_%s' % i]
+                    self.scanSelector.set_xy_static_loc(xy[0], xy[1])
+                    return
+        
 
     def _onNewReflection(self,refldict):
         axisname = self.fscan.axisname

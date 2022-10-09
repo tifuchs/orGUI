@@ -40,6 +40,7 @@ import traceback
 import warnings
 from .. import resources
 from ..backend import backends
+from .QReflectionSelector import QReflectionAnglesDialog
 
 class QScanSelector(qt.QMainWindow):
     sigScanChanged = qt.pyqtSignal(object)
@@ -47,6 +48,7 @@ class QScanSelector(qt.QMainWindow):
     sigImageNoChanged = qt.pyqtSignal(object)
     sigROIChanged = qt.pyqtSignal()
     sigROIintegrate = qt.pyqtSignal()
+    sigSearchHKL = qt.pyqtSignal(list)
     def __init__(self,parentmainwindow , parent=None):
         qt.QMainWindow.__init__(self ,parent=None)
         self.parentmainwindow = parentmainwindow
@@ -399,6 +401,7 @@ class QScanSelector(qt.QMainWindow):
             static_loc_HKLLayout.addWidget(spinbox)
         calc_HKL_roi_btn = qt.QToolButton()
         self.roi_fromHKL_action = qt.QAction(resources.getQicon("search"), "Set ROI position to calculated position of reflection", self)
+        self.roi_fromHKL_action.triggered.connect(self.search_hkl_static_loc)
         calc_HKL_roi_btn.setDefaultAction(self.roi_fromHKL_action)
         static_loc_HKLLayout.addWidget(calc_HKL_roi_btn)
         static_hkl_box.setLayout(static_loc_HKLLayout)
@@ -451,14 +454,6 @@ class QScanSelector(qt.QMainWindow):
         
         
         maintab.addTab(self.roiIntegrateTab,"ROI integration")
-
-
-        
-    #def setImageNo(self,imageno):
-    #    self.slider.setValue(imageno)
-        
-    #def reload_nx_callback(self,obj):
-    #    self.hdf5model.synchronizeH5pyObject(obj)
     
     def set_xy_static_loc(self, x, y):
         [h.blockSignals(True) for h in self.xy_static]
@@ -466,6 +461,10 @@ class QScanSelector(qt.QMainWindow):
         self.xy_static[1].setValue(y)
         [h.blockSignals(False) for h in self.xy_static]
         self.sigROIChanged.emit()
+        
+    def search_hkl_static_loc(self):
+        hkl = [h.value() for h in self.hkl_static]
+        self.sigSearchHKL.emit(hkl)
         
     def view_data_callback(self,obj):
         self.dataviewer.setData(obj)
