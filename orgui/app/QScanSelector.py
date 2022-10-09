@@ -357,11 +357,18 @@ class QScanSelector(qt.QMainWindow):
         # static roi scan
         
         self.xy_static = [qt.QDoubleSpinBox() for i in range(2)]
+        
         [h.setRange(-20000,20000) for h in self.xy_static]
         [h.setDecimals(3) for h in self.xy_static]
         self.xy_static[0].setValue(10.)
         self.xy_static[1].setValue(10.)
         [h.valueChanged.connect(lambda : self.sigROIChanged.emit()) for h in self.xy_static]
+        
+        self.hkl_static = [qt.QDoubleSpinBox() for i in range(3)]
+        [h.setRange(-20000,20000) for h in self.hkl_static]
+        [h.setDecimals(3) for h in self.hkl_static]
+        [h.setValue(0.) for h in self.hkl_static]
+        
         
         setroi_btn = qt.QToolButton()
         self.select_roi_action = qt.QAction(icons.getQIcon("crosshair"), "Select roi location by double clicking", self)
@@ -375,10 +382,32 @@ class QScanSelector(qt.QMainWindow):
         
         
         static_loc_Group = qt.QGroupBox(u"Static ROI location")
+        static_loc_GroupMainVLayout = qt.QVBoxLayout()
+        
+        static_pix_xy_box = qt.QGroupBox(u"Pixel coordinates")
         static_loc_GroupLayout = qt.QHBoxLayout()
         static_loc_GroupLayout.addWidget(setroi_btn)
-        [static_loc_GroupLayout.addWidget(h) for h in self.xy_static]
-        static_loc_Group.setLayout(static_loc_GroupLayout)
+        for spinbox, lbl in zip(self.xy_static, ["x:", "y:"]):
+            static_loc_GroupLayout.addWidget(qt.QLabel(lbl))
+            static_loc_GroupLayout.addWidget(spinbox)
+        static_pix_xy_box.setLayout(static_loc_GroupLayout)
+        
+        static_hkl_box = qt.QGroupBox(u"hkl coordinates")
+        static_loc_HKLLayout = qt.QHBoxLayout()
+        for spinbox, lbl in zip(self.hkl_static, ["H:", "K:", "L:"]):
+            static_loc_HKLLayout.addWidget(qt.QLabel(lbl))
+            static_loc_HKLLayout.addWidget(spinbox)
+        calc_HKL_roi_btn = qt.QToolButton()
+        self.roi_fromHKL_action = qt.QAction(resources.getQicon("search"), "Set ROI position to calculated position of reflection", self)
+        calc_HKL_roi_btn.setDefaultAction(self.roi_fromHKL_action)
+        static_loc_HKLLayout.addWidget(calc_HKL_roi_btn)
+        static_hkl_box.setLayout(static_loc_HKLLayout)
+        
+        
+        static_loc_GroupMainVLayout.addWidget(static_pix_xy_box)
+        static_loc_GroupMainVLayout.addWidget(static_hkl_box)
+        
+        static_loc_Group.setLayout(static_loc_GroupMainVLayout)
         
         
         #  roi scan tab

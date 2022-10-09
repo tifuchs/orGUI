@@ -35,6 +35,7 @@ from .ArrayTableDialog import ArrayEditWidget
 
 from ..backend import udefaults
 from .. import resources
+from . import qutils
 
 @contextmanager
 def blockSignals(qobjects):
@@ -54,15 +55,17 @@ def blockSignals(qobjects):
 # reflectionhandler must implement the method getReflections
 
 class QUBCalculator(qt.QSplitter):
-    sigNewReflection = qt.pyqtSignal(list)
+    sigNewReflection = qt.pyqtSignal(dict)
     sigPlottableMachineParamsChanged = qt.pyqtSignal()
     sigReplotRequest = qt.pyqtSignal(bool)
     #sigQueryImageChange = qt.pyqtSignal(int)
     #sigImagePathChanged = qt.pyqtSignal(object)
     #sigImageNoChanged = qt.pyqtSignal(object)
-    def __init__(self,configfile=None, parent=None):
-        qt.QSplitter.__init__(self, parent=None)
+    def __init__(self,configfile, parent):
+        qt.QSplitter.__init__(self, parent)
         self.setOrientation(qt.Qt.Vertical)
+        
+        self.mainGui = parent
         
         self.configdir = os.getcwd()
         #self.mainLayout = qt.QVBoxLayout()
@@ -193,16 +196,45 @@ class QUBCalculator(qt.QSplitter):
         """
         
         
-    def calcReflection(self,hkl,mirrorx=False):
-        pos = self.angles.anglesZmode(hkl,self.mu,'in',self.chi,self.phi,mirrorx=mirrorx)
-        alpha, delta, gamma, omega, chi, phi = HKLVlieg.vacAngles(pos,self.n)
-        print(np.rad2deg([alpha, delta, gamma, omega, chi, phi]))
-        y,x = self.detectorCal.pixelsSurfacePoint([gamma],[delta],alpha)[0]
-        return [hkl,x,y,omega]
+    def calcReflection(self,hkl, axisname=None):
+        if self.mainGui.fscan is not None:
+            if axisname is None:
+                axisname = self.mainGui.fscan.axisname
+        mu_cryst = HKLVlieg.crystalAngles_singleArray(self.mu,self.n)
+        
+        if axisname == 'th':
+            pos1 = self.angles.anglesZmode(hkl,mu_cryst,'in',self.chi,self.phi,mirrorx=False)
+            pos2 = self.angles.anglesZmode(hkl,mu_cryst,'in',self.chi,self.phi,mirrorx=True)
+        elif axisname == 'mu':
+            pos1 = self.angles.anglesZmode(hkl,mu_cryst,'eq',self.chi,self.phi,mirrorx=False)
+            pos2 = self.angles.anglesZmode(hkl,mu_cryst,'eq',self.chi,self.phi,mirrorx=True)
+        else:
+            raise Exception("No scan axis given or no scan loaded.")
+        alpha1, delta1, gamma1, omega1, chi1, phi1 = HKLVlieg.vacAngles(pos1,self.n)
+        alpha2, delta2, gamma2, omega2, chi2, phi2 = HKLVlieg.vacAngles(pos2,self.n)
+        
+        y1,x1 = self.detectorCal.pixelsSurfaceAngles([gamma1],[delta1],alpha1)[0]
+        y2,x2 = self.detectorCal.pixelsSurfaceAngles([gamma2],[delta2],alpha2)[0]
+        di = {
+           'hkl' : hkl,
+           'xy_1' : [x1,y1],
+           'xy_2' : [x2,y2],
+           'angles_1' : [alpha1, delta1, gamma1, omega1, chi1, phi1],
+           'angles_2' : [alpha2, delta2, gamma2, omega2, chi2, phi2]
+        }
+        return di
+            
         
     def _onCalcReflection(self):
         hkl = [self.Hbox.value(),self.Kbox.value(),self.Lbox.value()]
-        self.sigNewReflection.emit(self.calcReflection(hkl))
+        try:
+            refl = self.calcReflection(hkl)
+        except Exception as e:
+            qutils.warning_detailed_message(self, "Cannot calculate reflection", 
+                                            "Cannot calculate reflection:\n%s" % e,
+                                            traceback.format_exc())
+            return
+        self.sigNewReflection.emit(refl)
         
     def _onResetU(self, func):
         func(self.ubCal)

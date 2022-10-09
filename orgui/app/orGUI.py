@@ -53,7 +53,7 @@ import traceback
 
 from . import qutils
 from .QScanSelector import QScanSelector
-from .QReflectionSelector import QReflectionSelector
+from .QReflectionSelector import QReflectionSelector, QReflectionAnglesDialog
 from .QUBCalculator import QUBCalculator
 from .ArrayTableDialog import ArrayTableDialog
 from .database import DataBase
@@ -116,7 +116,7 @@ class orGUI(qt.QMainWindow):
         ubWidget = qt.QSplitter(qt.Qt.Vertical)
         ubWidget.setChildrenCollapsible(False)
         #ubLayout = qt.QVBoxLayout()
-        self.ubcalc = QUBCalculator(configfile)
+        self.ubcalc = QUBCalculator(configfile, self)
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
         
         
@@ -630,10 +630,55 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             self.centralPlot.removeMarker("CentralPixel")
             self.centralPlot.removeMarker("azimuth")
 
-    def _onNewReflection(self,refl):
-        [hkl,x,y,omega] = refl
-        notmirrored = [hkl,x,y,omega]
+    def _onNewReflection(self,refldict):
+        axisname = self.fscan.axisname
+        dc = self.ubcalc.detectorCal
         
+        if self.fscan.axisname == 'mu':
+            angle_idx = 0
+            sign = 1.
+        elif self.fscan.axisname == 'th':
+            angle_idx = 3
+            sign = -1.
+        else:
+            qt.QMessageBox.warning(self,"Cannot calculate reflection","Cannot calculate reflection.\n%s is no supported scan axis." % self.fscan.axisname)
+            return 
+        try:
+            imageno1 = self.axisToImageNo(np.rad2deg(refldict['angles_1'][angle_idx]) * sign)
+            refldict['imageno_1'] = imageno1
+            xy = refldict['xy_1']
+            onDetector = (xy[0] >= 0 and xy[0] < dc.detector.shape[1]) and \
+                         (xy[1] >= 0 and xy[1] < dc.detector.shape[0])
+            if onDetector:
+                refldict['selectable_1'] = True
+            else:
+                refldict['selectable_1'] = False
+        except:
+            imageno1 = None
+            refldict['selectable_1'] = False
+        try:
+            imageno2 = self.axisToImageNo(np.rad2deg(refldict['angles_2'][angle_idx]) * sign)
+            refldict['imageno_2'] = imageno2
+            xy = refldict['xy_2']
+            onDetector = (xy[0] >= 0 and xy[0] < dc.detector.shape[1]) and \
+                         (xy[1] >= 0 and xy[1] < dc.detector.shape[0])
+            if onDetector:
+                refldict['selectable_2'] = True
+            else:
+                refldict['selectable_2'] = False
+        except:
+            imageno2 = None
+            refldict['selectable_2'] = False
+            
+        refl_dialog = QReflectionAnglesDialog(refldict,"Select reflections to add into list of reference reflections", self)
+        if qt.QDialog.Accepted == refl_dialog.exec():
+            for i, cb in enumerate(refl_dialog.checkboxes,1):
+                if cb.isChecked():
+                    xy = refldict['xy_%s' % i]
+                    eventdict = {'x' : xy[0], 'y': xy[1]}
+                    self.reflectionSel.addReflection(eventdict,refldict['imageno_%s' % i],refldict['hkl'])
+            
+        """
         try:
             imageno = self.omegaToImageNo(omega)
         except:
@@ -649,6 +694,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 return
         eventdict = {'x' : x, 'y': y}
         self.reflectionSel.addReflection(eventdict,imageno,hkl)
+        """
             
     def newXyHKLConverter(self):
         def xyToHKL(x,y):
@@ -734,16 +780,29 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             raise Exception("No Scan selected")
             
     def _onCreateScan(self):
-        diag = QScanCreator()
+        try:
+            mu, om = self.getMuOm(self.imageno)
+        except:
+            mu = self.ubcalc.mu
+            om = 0.
+        th = om*-1.
+        muTh = np.rad2deg([mu,th]) #defaults if fixed 
+        diag = QScanCreator(muTh)
         diag.shape1.setValue(self.ubcalc.detectorCal.detector.shape[0])
         diag.shape2.setValue(self.ubcalc.detectorCal.detector.shape[1])
         if diag.exec() == qt.QDialog.Accepted:
             shape = (diag.shape1.value(), diag.shape2.value())
             self.ubcalc.detectorCal.detector.shape = shape
             try:
+                axis = diag.scanaxis.currentText()
+                if axis == 'theta':
+                    axis = 'th'
+                elif axis == 'mu':
+                    pass
                 fscan = SimulationScan(shape, diag.omstart.value(),
                                         diag.omend.value(),
-                                        diag.no.value())
+                                        diag.no.value(),
+                                        axis, diag.fixedAngle.value())
                 self._onScanChanged(fscan)
             except MemoryError:
                 qutils.warning_detailed_message(self, "Can not create simulation scan","Can not create simualtion scan. Memory is insufficient for the scan size. See details for further information.", traceback.format_exc())
@@ -995,21 +1054,19 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
     
         
     def updateROI(self):
-        if not self.roivisible:
-            for roi in self.rois:
-                roi.setVisible(False)
-            self.roiManager._roisUpdated()
-            self.centralPlot.removeMarker('main_croi_loc')
-            return
-        
         #dc = self.ubcalc.detectorCal
         #mu = self.ubcalc.mu
         #angles = self.ubcalc.angles
         
         #H_1 = np.array([h.value() for h in self.scanSelector.H_1])
         #H_0 = np.array([h.value() for h in self.scanSelector.H_0])
-        
-        hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(self.imageno)
+        try:
+            hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(self.imageno)
+        except:
+            for roi in self.rois:
+                roi.setVisible(False)
+            self.centralPlot.removeMarker('main_croi_loc')
+            return
 
         
         """
@@ -1031,13 +1088,25 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         xmask2 = np.logical_and(yx2[...,1] >= 0, yx2[...,1] < dc.detector.shape[1])
         yxmask2 = np.logical_and(xmask2,ymask2)
         """
-        
+        if not self.roivisible:
+            for roi in self.rois:
+                roi.setVisible(False)
+            self.roiManager._roisUpdated()
+            self.centralPlot.removeMarker('main_croi_loc')
+            
+            
         if hkl_del_gam_1[0,-1] or hkl_del_gam_2[0,-1]:
             if hkl_del_gam_1[0,-1]:
-                self.plotROI(hkl_del_gam_1[0,6:8])
+                if self.roivisible:
+                    self.plotROI(hkl_del_gam_1[0,6:8])
+                for i, spinbox in enumerate(self.scanSelector.hkl_static):
+                    spinbox.setValue(hkl_del_gam_1[0,i])
 
             if hkl_del_gam_2[0,-1]:
-                self.plotROI(hkl_del_gam_2[0,6:8])
+                if self.roivisible:
+                    self.plotROI(hkl_del_gam_2[0,6:8])
+                for i, spinbox in enumerate(self.scanSelector.hkl_static):
+                    spinbox.setValue(hkl_del_gam_1[0,i])
         else:
             for roi in self.rois:
                 roi.setVisible(False)
@@ -1798,16 +1867,26 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
         
 class QScanCreator(qt.QDialog):
     
-    def __init__(self, parent=None):
+    def __init__(self,defaultMuTh, parent=None):
         qt.QDialog.__init__(self, parent)
+        self.defaultMuTh = defaultMuTh
         
         layout = qt.QGridLayout()
         
-        layout.addWidget(qt.QLabel("theta start:"),0,0)
-        layout.addWidget(qt.QLabel("theta end:"),1,0)
-        layout.addWidget(qt.QLabel("no points:"),2,0)
-        layout.addWidget(qt.QLabel("Det pixel1:"),3,0)
-        layout.addWidget(qt.QLabel("Det pixel2:"),4,0)
+        layout.addWidget(qt.QLabel("scan axis:"),0,0)
+        layout.addWidget(qt.QLabel("axis start:"),1,0)
+        layout.addWidget(qt.QLabel("axis end:"),2,0)
+        layout.addWidget(qt.QLabel("no points:"),3,0)
+        self.fixed_label = qt.QLabel("mu (fixed):")
+        layout.addWidget(self.fixed_label,4,0)
+        layout.addWidget(qt.QLabel("Det pixel1:"),5,0)
+        layout.addWidget(qt.QLabel("Det pixel2:"),6,0)
+
+        self.scanaxis = qt.QComboBox()
+        self.scanaxis.addItem("theta")
+        self.scanaxis.addItem("mu")
+        self.scanaxis.setCurrentIndex(0)
+        self.scanaxis.currentIndexChanged.connect(self.onScanAxisChanged)
 
         self.omstart = qt.QDoubleSpinBox()
         self.omstart.setRange(-180,180)
@@ -1825,6 +1904,10 @@ class QScanCreator(qt.QDialog):
         self.no.setRange(1,1000000000)
         self.no.setValue(180)
         
+        self.fixedAngle = qt.QDoubleSpinBox()
+        self.fixedAngle.setRange(-180,180)
+        self.fixedAngle.setValue(self.defaultMuTh[0])
+        
         self.shape1 = qt.QSpinBox()
         self.shape1.setRange(1,1000000000)
         self.shape1.setValue(1)
@@ -1833,19 +1916,36 @@ class QScanCreator(qt.QDialog):
         self.shape2.setRange(1,1000000000)
         self.shape2.setValue(1)
         
-        layout.addWidget(self.omstart,0,1)
-        layout.addWidget(self.omend,1,1)
-        layout.addWidget(self.no,2,1)
-        layout.addWidget(self.shape1,3,1)
-        layout.addWidget(self.shape2,4,1)
+        layout.addWidget(self.scanaxis,0,1)
+        layout.addWidget(self.omstart,1,1)
+        layout.addWidget(self.omend,2,1)
+        layout.addWidget(self.no,3,1)
+        layout.addWidget(self.fixedAngle,4,1)
+        
+        layout.addWidget(self.shape1,5,1)
+        layout.addWidget(self.shape2,6,1)
         
         buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
-        layout.addWidget(buttons,5,0,-1,-1)
+        layout.addWidget(buttons,7,0,-1,-1)
         
         buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.accept)
         buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
         
         self.setLayout(layout)
+        
+    def onScanAxisChanged(self, index):
+        if index == 0:
+            self.omstart.setValue(-90.)
+            self.omend.setValue(90.)
+            self.fixed_label.setText("mu (fixed):")
+            self.fixedAngle.setValue(self.defaultMuTh[0])
+            
+        elif index == 1:
+            self.omstart.setValue(0.)
+            self.omend.setValue(15.)
+            self.fixed_label.setText("theta (fixed):")
+            self.fixedAngle.setValue(self.defaultMuTh[1])
+            
         
 class UncaughtHook(qt.QObject):
     #_exception_caught = qt.Signal(object)

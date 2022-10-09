@@ -27,6 +27,7 @@ class Scan():
         self.th = 0. # or self.mu, depending on scanaxis
         self.omega = 0. # = -1*th
         self.title = "generic_scan"
+        # for mu-scan you must provide a value for omega/theta 
 
     def __len__(self):
         raise NotImplementedError()
@@ -47,7 +48,7 @@ class h5_Image:
 
 class SimulationScan(Scan):
 
-    def __init__(self, detshape, axismin, axismax, points, axis='th'):
+    def __init__(self, detshape, axismin, axismax, points, axis='th', fixed=0.):
         
         self.shape = detshape
         self.axisname = axis
@@ -55,8 +56,11 @@ class SimulationScan(Scan):
         if axis == 'th':
             self.th = self.axis
             self.omega = -1*self.th
+            self.mu = fixed
         elif axis == 'mu':
             self.mu = self.axis
+            self.th = fixed
+            self.omega = -1*self.th
         else:
             raise ValueError("%s is not an implemented scan axis." % axis)
         self.nopoints = points
@@ -70,7 +74,7 @@ class SimulationScan(Scan):
     def get_raw_img(self, i):
         return h5_Image(self.images[i])
         
-    def set_raw_img(self, i, data):
+    def set_raw_img(self, i, data): #for intensity simulation in the future.
         self.images[i] = data
         
         

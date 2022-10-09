@@ -412,3 +412,114 @@ class QReflectionSelector(qt.QSplitter):
                 newactive = self.reflections[0]
                 self.setReflectionActive(newactive.identifier)
         self.updateEditor()
+        
+        
+        
+class QReflectionAnglesDialog(qt.QDialog):
+    """Displays the angles for a reflection. Allows for multiple solutions.
+    
+    """
+    
+    class QSelectableLabel(qt.QLabel):
+        def __init__(self, *args, **kwags):
+            qt.QLabel.__init__(self,*args, **kwags)
+            self.setTextInteractionFlags(qt.Qt.TextSelectableByKeyboard | qt.Qt.TextSelectableByMouse)
+    
+    def __init__(self,reflection, message, parent=None):
+        qt.QDialog.__init__(self, parent=None)
+        
+        layout = qt.QVBoxLayout()
+        
+        layout.addWidget(qt.QLabel(message))
+        
+        layout.addWidget(QReflectionAnglesDialog.QSelectableLabel("Reflection: %s" % reflection['hkl']))
+        
+        reflectionLayout = qt.QGridLayout()
+        
+        available_data = [k.split('_')[0] for k in reflection.keys()]
+        self.header = ""
+        self.idx_dict = {}
+        i = 1
+        if 'xy' in available_data:
+            for lbl in ['x', 'y']:
+                reflectionLayout.addWidget(QReflectionAnglesDialog.QSelectableLabel(lbl), 0, i)
+                self.idx_dict[lbl] = i
+                i += 1
+                self.header += lbl + '\t'
+        if 'angles' in available_data:
+            for lbl in ['mu', 'delta', 'gamma', 'theta', 'chi', 'phi']:
+                reflectionLayout.addWidget(QReflectionAnglesDialog.QSelectableLabel(lbl), 0, i)
+                self.idx_dict[lbl] = i
+                i += 1
+                self.header += lbl + '\t'
+        if 'imageno' in available_data:
+            for lbl in ['imageno']:
+                reflectionLayout.addWidget(QReflectionAnglesDialog.QSelectableLabel(lbl), 0, i)
+                self.idx_dict[lbl] = i
+                i += 1
+                self.header += lbl + '\t'
+        
+        self.checkboxes = []
+        self.datastr = ""
+        number_refl = max([int(k.split('_')[-1]) for k in reflection.keys() if '_' in k])
+        for i in range(1,number_refl+1):
+            box = qt.QCheckBox()
+            reflectionLayout.addWidget(box, i, 0)
+            
+            if not reflection.get('selectable_%s' % i, False):
+                box.setEnabled(False)
+                
+            self.checkboxes.append(box)
+            if 'xy_%s' % i in reflection.keys():
+                xy = reflection['xy_%s' % i]
+                reflectionLayout.addWidget(QReflectionAnglesDialog.QSelectableLabel("%.5f" % xy[0]), i, self.idx_dict['x'])
+                reflectionLayout.addWidget(QReflectionAnglesDialog.QSelectableLabel("%.5f" % xy[1]), i, self.idx_dict['y'])
+                self.datastr += "%.5f\t" % xy[0]
+                self.datastr += "%.5f\t" % xy[1]
+            elif 'xy' in available_data:
+                self.datastr += "\t\t"
+                
+            if 'angles_%s' % i in reflection.keys():
+                angles = np.rad2deg(reflection['angles_%s' % i])
+                angles[3] *= -1. # to theta
+                reflectionLayout.addWidget(QReflectionAnglesDialog.QSelectableLabel("%.5f" % angles[0]), i, self.idx_dict['mu'])
+                reflectionLayout.addWidget(QReflectionAnglesDialog.QSelectableLabel("%.5f" % angles[1]), i, self.idx_dict['delta'])
+                reflectionLayout.addWidget(QReflectionAnglesDialog.QSelectableLabel("%.5f" % angles[2]), i, self.idx_dict['gamma'])
+                reflectionLayout.addWidget(QReflectionAnglesDialog.QSelectableLabel("%.5f" % angles[3]), i, self.idx_dict['theta'])
+                reflectionLayout.addWidget(QReflectionAnglesDialog.QSelectableLabel("%.5f" % angles[4]), i, self.idx_dict['chi'])
+                reflectionLayout.addWidget(QReflectionAnglesDialog.QSelectableLabel("%.5f" % angles[5]), i, self.idx_dict['phi'])
+                for ang in angles:
+                    self.datastr += "%.5f\t" % ang
+            elif 'angles' in available_data:
+                self.datastr += "\t\t\t\t\t\t"
+                
+            if 'imageno_%s' % i in reflection.keys():
+                imageno = reflection['imageno_%s' % i]
+                reflectionLayout.addWidget(QReflectionAnglesDialog.QSelectableLabel("%s" % imageno), i, self.idx_dict['imageno'])
+                self.datastr += "%s" % imageno
+            elif 'imageno' in available_data:
+                self.datastr += "\t"
+            self.datastr += "\n"
+        layout.addLayout(reflectionLayout)
+                
+        
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel,
+                                      qt.Qt.Horizontal)
+        copybutton = buttons.addButton("Copy to clipboad",qt.QDialogButtonBox.HelpRole)
+        copybutton.clicked.connect(self.copy_to_clipboard)
+        
+        layout.addWidget(buttons)
+        
+        okbtn = buttons.button(qt.QDialogButtonBox.Ok)
+        cancelbtn = buttons.button(qt.QDialogButtonBox.Cancel)
+        
+        okbtn.clicked.connect(self.accept)
+        cancelbtn.clicked.connect(self.reject)
+
+        self.setLayout(layout)
+        
+    def copy_to_clipboard(self):
+        app = qt.QApplication.instance()
+        app.clipboard().setText(self.header + "\n" + self.datastr)
+    
+        

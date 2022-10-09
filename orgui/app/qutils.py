@@ -34,3 +34,5 @@ def information_detailed_message(parent, title, text, detailed_text, buttons=qt.
     return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Information, buttons=buttons)
 
 
+
+
