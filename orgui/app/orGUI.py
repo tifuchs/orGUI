@@ -1167,7 +1167,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         
 
         mu, om = self.getMuOm(imageno)
-            
+        mu_cryst = HKLVlieg.crystalAngles_singleArray(mu, self.ubcalc.n)
         dc = self.ubcalc.detectorCal
         #mu = self.ubcalc.mu
         angles = self.ubcalc.angles
@@ -1239,7 +1239,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 H_1 = np.array([h.value() for h in self.scanSelector.H_1])
                 H_0 = np.array([h.value() for h in self.scanSelector.H_0])
             
-            hkl_del_gam_1, hkl_del_gam_2, Qa_1, Qa_2 = angles.anglesIntersectLineEwald(H_0, H_1, mu, om, self.ubcalc.phi,self.ubcalc.chi, Qalpha=True)
+            hkl_del_gam_1, hkl_del_gam_2, Qa_1, Qa_2 = angles.anglesIntersectLineEwald(H_0, H_1, mu_cryst, om, self.ubcalc.phi,self.ubcalc.chi, Qalpha=True)
             # H, K, L ,delta_1, gamma_1, HKL_Q1[-1]=s
             
             delta1 = hkl_del_gam_1[...,3]
