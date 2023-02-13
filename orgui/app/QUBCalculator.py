@@ -175,7 +175,7 @@ class QUBCalculator(qt.QSplitter):
         else:
             self.toFallbackConfig()
         
-        self.uedit.sigUChanged.connect(self.ubCal.setU)
+        self.uedit.sigUChanged.connect(self._onUchanged)
         """
         
         editorSplitter = qt.QSplitter()
@@ -235,6 +235,10 @@ class QUBCalculator(qt.QSplitter):
                                             traceback.format_exc())
             return
         self.sigNewReflection.emit(refl)
+        
+    def _onUchanged(self, U):
+        self.ubCal.setU(U)
+        self.sigReplotRequest.emit(True)
         
     def _onResetU(self, func):
         func(self.ubCal)
@@ -782,6 +786,7 @@ class QUEdit(qt.QWidget):
         uGroup = qt.QGroupBox("Orientation matrix")
         self.uview = ArrayEditWidget(True, 1, False)
         self.uview.model.dataChanged.connect(self.onUChanged)
+        self.uview.sigDataLoaded.connect(self.onUChanged)
         la = qt.QVBoxLayout()
         la.addWidget(self.uview)
         uGroup.setLayout(la)

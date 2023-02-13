@@ -252,7 +252,7 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
         fileTypeFilter = ""
         for f in fileTypeDict:
             fileTypeFilter += f + ";;"
-        print(retain_axis)    
+        #print(retain_axis)    
         filename, filetype = qt.QFileDialog.getOpenFileName(self,"Open file",
                                                   self.filedialogdir,
                                                   fileTypeFilter[:-2])
@@ -345,7 +345,12 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
         self.filedialogdir = os.path.splitext(filename)[0]
 
         if filetype in fileTypeDictSave1D:
-            header = " ".join(self.header) 
+            if self.header is not None:
+                header = " ".join(self.header) 
+            elif isinstance(self.header, str):
+                header = self.header
+            else:
+                header = " "
             fileext = fileTypeDictSave1D[filetype]
             data = self.getData()
             if fileext == "dat":
