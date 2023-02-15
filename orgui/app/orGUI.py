@@ -631,7 +631,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             self.centralPlot.removeMarker("CentralPixel")
             self.centralPlot.removeMarker("azimuth")
             
-    def onSearchHKLforStaticROI(self, hkl):
+    def searchPixelCoordHKL(self, hkl):
         refldict = self.ubcalc.calcReflection(hkl)
         axisname = self.fscan.axisname
         dc = self.ubcalc.detectorCal
@@ -670,6 +670,10 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             refldict['selectable_2'] = True
         else:
             refldict['selectable_2'] = False
+        return refldict
+            
+    def onSearchHKLforStaticROI(self, hkl):
+        refldict = self.searchPixelCoordHKL(hkl)
         refl_dialog = QReflectionAnglesDialog(refldict,"Select reflection location", self)
         if qt.QDialog.Accepted == refl_dialog.exec():
             for i, cb in enumerate(refl_dialog.checkboxes,1):
@@ -677,7 +681,6 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                     xy = refldict['xy_%s' % i]
                     self.scanSelector.set_xy_static_loc(xy[0], xy[1])
                     return
-        
 
     def _onNewReflection(self,refldict):
         axisname = self.fscan.axisname
