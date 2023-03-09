@@ -808,7 +808,13 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             
     def imageNoToOmega(self,imageno):
         if self.fscan is not None:
-            return np.deg2rad(self.fscan.omega[imageno])
+            try:
+                return np.deg2rad(self.fscan.omega[imageno])
+            except:
+                try:
+                    return np.deg2rad(self.fscan.omega)
+                except:
+                    return 0.
         else:
             return 0.
 
