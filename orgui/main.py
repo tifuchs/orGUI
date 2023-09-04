@@ -60,7 +60,7 @@ def main():
         
         desktopWidget = app.desktop()
         screenGeometry = desktopWidget.screenGeometry()
-        splashpm = pixmap.scaledToHeight(screenGeometry.height()/3, qt.Qt.SmoothTransformation)
+        splashpm = pixmap.scaledToHeight(int(screenGeometry.height()/3), qt.Qt.SmoothTransformation)
         splash = qt.QSplashScreen(splashpm)
         splash.show()
         splash.showMessage("jit compile libraries", qt.Qt.AlignVCenter | qt.Qt.AlignRight)
