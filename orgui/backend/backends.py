@@ -111,6 +111,14 @@ def openScan(btid, ddict):
     
     if btid == 'ch5523':
         fscan = fscancls(ddict['file'],ddict['name'])
+        
+        if ddict['name'].startswith('ascan') and 'Pt111_3' in ddict['file']:
+            if fscan.axisname == 'mu':
+                 mu = fscan.mu - 0.055 # misalignment! 
+                 fscan.axis = mu
+                 fscan.mu = mu
+                 print("Correct mu misalignment 0.055 deg,  Pt111_3")
+        
     elif btid == '20190017' or btid == '20200028':
         fscan = fscancls(ddict['file'],ddict['scanno'])
     elif btid == 'ch5700' or btid == 'ch5918':
