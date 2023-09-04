@@ -123,6 +123,11 @@ class QScanSelector(qt.QMainWindow):
         qt.QLabel("Beamtime id:",btidsplit)
         self.btid = qt.QComboBox(btidsplit)
         [self.btid.addItem(bt) for bt in backends.beamtimes]
+        self.btid.setCurrentText("id31_default")
+        
+        self.bt_autodetect_enable = qt.QCheckBox("auto detect", btidsplit)
+        self.bt_autodetect_enable.toggled.connect(lambda s : self.btid.setEnabled(not s))
+        self.bt_autodetect_enable.setChecked(True)
         
         
         self.slider = qt.QSlider()
@@ -471,6 +476,12 @@ class QScanSelector(qt.QMainWindow):
         self.dataviewerDialog.open()
         
     def _onLoadScan(self):
+        if self.bt_autodetect_enable.isChecked():
+            msgbox = qt.QMessageBox(qt.QMessageBox.Warning,'Cannot auto detect backend', 
+                        'Cannot auto detect beamtime id and corresponding backend in minimal mode.\nPlease first deselect the beamtime auto detection and then chose the correct beamtime or default backend.',
+                        qt.QMessageBox.Ok, self)
+            clickedbutton = msgbox.exec()
+            return
         ddict = dict()
         ddict['event'] = "loadScan"
         ddict['file'] = self.pathedit.text()
@@ -619,24 +630,35 @@ class QScanSelector(qt.QMainWindow):
                     nxcls = obj.attrs['NX_class']
 
                 if nxcls == 'NXentry':
-                    try:    
-                        dt = dateparser.parse(obj.h5py_target['start_time'][()])
-                    except Exception as e:
-                        msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open scan', 
-                            'Cannot parse start time of the scan.', qt.QMessageBox.Ok, self)
-                        msgbox.setDetailedText(traceback.format_exc())
-                        clickedbutton = msgbox.exec()
-                        return
-                        
+                    if self.bt_autodetect_enable.isChecked():
+                        try:    
+                            dt = dateparser.parse(obj.h5py_target['start_time'][()])
+                        except Exception as e:
+                            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open scan', 
+                                'Cannot parse start time of the scan.', qt.QMessageBox.Ok, self)
+                            msgbox.setDetailedText(traceback.format_exc())
+                            clickedbutton = msgbox.exec()
+                            return
+                            
+                        try:
+                            btid = backends.getBeamtimeId(dt)
+                            self.btid.setCurrentText(btid)
+                        except Exception as e:
+                            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open scan', 
+                                'Cannot find matching beamtime id to the date %s:\n%s' % (dt,str(e)), qt.QMessageBox.Ok, self)
+                            msgbox.setDetailedText(traceback.format_exc())
+                            clickedbutton = msgbox.exec()
+                            return
+                    else:
+                        btid = self.btid.currentText()
                     try:
-                        btid = backends.getBeamtimeId(dt)
+                        ddict = backends.scannoConverter[btid](obj)
                     except Exception as e:
                         msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open scan', 
-                            'Cannot open scan: %s' % str(e), qt.QMessageBox.Ok, self)
+                            'Cannot parse scan number: %s' % str(e), qt.QMessageBox.Ok, self)
                         msgbox.setDetailedText(traceback.format_exc())
                         clickedbutton = msgbox.exec()
                         return
-                    ddict = backends.scannoConverter[btid](obj)
                     ddict['event'] = "itemDoubleClicked"
                     ddict['file'] = obj.local_filename
                     ddict['node'] = obj

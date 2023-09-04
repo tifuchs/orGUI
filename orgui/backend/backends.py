@@ -59,7 +59,9 @@ scannoConverter = {'ch5523': parseCH5523,
              '20190017': parseP212H5,
              'ch5700': parseID31Bliss,
              '20200028': parseP212H5,
-             'ch5918' : parseID31Bliss
+             'ch5918' : parseID31Bliss,
+             'P212_default' : parseP212H5,
+             'id31_default' : parseID31Bliss
              }
     
     
@@ -69,7 +71,9 @@ beamtimes = {'ch5523': (datetime(2018, 9, 22), datetime(2018, 10, 5)),
              '20190017': (datetime(2019, 12, 8), datetime(2019, 12, 24)),
              'ch5700': (datetime(2020, 11, 10), datetime(2020, 11, 27)),
              '20200028': (datetime(2021, 4, 27), datetime(2021, 5, 10)),
-             'ch5918' : (datetime(2021, 7, 18), datetime(2021, 8, 1))
+             'ch5918' : (datetime(2021, 7, 18), datetime(2021, 8, 1)),
+             'P212_default' : (datetime(1902, 7, 18), datetime(1903, 8, 1)),
+             'id31_default' : (datetime(2021, 8, 2), datetime(2500, 1, 1)) # all data after 2021/8/2 is automatically detected as ID31 data. You can change this behaviour by changing the beamtime dates. 
              }
 
 def localize(dt):
@@ -98,7 +102,9 @@ fscans = {'ch5523': BlissScan,
              '20190017': H5Fastsweep, #probably doesn't work since image names are not saved
              'ch5700': BlissScan_EBS,
              '20200028': H5Fastsweep,
-             'ch5918' : BlissScan_EBS
+             'ch5918' : BlissScan_EBS,
+             'P212_default' : H5Fastsweep,
+             'id31_default' : BlissScan_EBS
              }
 
 
@@ -119,9 +125,9 @@ def openScan(btid, ddict):
                  fscan.mu = mu
                  print("Correct mu misalignment 0.055 deg,  Pt111_3")
         
-    elif btid == '20190017' or btid == '20200028':
+    elif btid == '20190017' or btid == '20200028' or btid == 'P212_default':
         fscan = fscancls(ddict['file'],ddict['scanno'])
-    elif btid == 'ch5700' or btid == 'ch5918':
+    elif btid == 'ch5700' or btid == 'ch5918' or btid == 'id31_default':
         if 'node' in ddict:
             fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False)
         else:
