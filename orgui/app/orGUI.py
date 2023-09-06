@@ -64,6 +64,7 @@ from .. import resources
 import numpy as np
 from datautils.xrayutils import HKLVlieg, CTRcalc
 from datautils.xrayutils import ReciprocalNavigation as rn
+import pyFAI.detectors
 
 import sys
 from datautils.xrayutils.id31_tools import BlissScan_EBS, Fastscan, BlissScan
@@ -192,7 +193,7 @@ class orGUI(qt.QMainWindow):
             self.rois.append(roi)
         
         #self.reflTable.view._model.dataChanged.connect(printmodel)
-        #self.reflTable.setArrayData(np.array([0,0,0,0,10,10],dtype=np.float))
+        #self.reflTable.setArrayData(np.array([0,0,0,0,10,10],dtype=np.float64))
         ubDock = qt.QDockWidget("Reciprocal space navigation")
         ubDock.setAllowedAreas(qt.Qt.LeftDockWidgetArea | qt.Qt.RightDockWidgetArea | qt.Qt.BottomDockWidgetArea)
         
@@ -336,19 +337,20 @@ ub : gui for UB matrix and angle calculations
         createScanAct = simul.addAction("Create dummy scan")
         createScanAct.triggered.connect(self._onCreateScan)
         
+        datamenu = menu_bar.addMenu("Data processing")
+        hackAct = datamenu.addAction("Rocking scan integration")
+        hackAct.triggered.connect(self.hack_rocking_extraction)
+        
         helpmenu = menu_bar.addMenu("&Help")
         aboutAct = helpmenu.addAction("About")
         aboutAct.triggered.connect(self._onShowAbout)
-        
-        #hackAct = helpmenu.addAction("Hack")
-        #hackAct.triggered.connect(self.hack_rocking_extraction)
         
         aboutQtAct = helpmenu.addAction("About Qt")
         aboutQtAct.triggered.connect(lambda : qt.QMessageBox.aboutQt(self))
         
         self.setMenuBar(menu_bar)
         
-    def hack_rocking_extraction(self):
+    def hack_rocking_extraction_old(self):
         # To delete when not needed anymore!
         raise Exception("FOOOO!")
         scans = [(j,'ascan_%s' % j) for j in range(1,15)]
@@ -364,6 +366,80 @@ ub : gui for UB matrix and angle calculations
             for l in lar:
                 self.scanSelector.H_0[2].setValue(l)
                 self.integrateROI()
+                
+    def hack_rocking_extraction(self):
+        
+        # make ROI visible in orgui images
+        self.roivisible = True
+        try:
+            self.updateROI()
+        except Exception:
+            qutils.warning_detailed_message(self, "Cannot show ROI", "Cannot show ROI", traceback.format_exc())
+
+
+        # select static ROI integration instead of hkl scan
+        self.scanSelector.scanstab.setCurrentIndex(1)
+        
+        # open CTR selection dialog
+        diag_rock = QRockingScanCreator()
+        if diag_rock.exec() == qt.QDialog.Accepted:
+            
+            # define integration boundaries
+            l_min = diag_rock.Lmin.value()
+            l_max = diag_rock.Lmax.value()
+            step_width = diag_rock.interval.value()
+            step_nr = round((l_max-l_min)/step_width) + 1
+            
+            #calculate useful ROI size
+            min_coordinates = self.searchPixelCoordHKL([diag_rock.selectedH.value(),diag_rock.selectedK.value(),l_min])
+            max_coordinates = self.searchPixelCoordHKL([diag_rock.selectedH.value(),diag_rock.selectedK.value(),l_max])
+
+            dist_in_pixels = min_coordinates['xy_1'][1] - max_coordinates['xy_1'][1]
+            roi_hlength = np.ceil(dist_in_pixels/step_nr)
+            #print(roi_hlength)
+            
+            # open ROI selection dialog
+            diag_rock_roi = QRockingScanROI(roi_hlength)
+            if diag_rock_roi.exec() == qt.QDialog.Accepted:
+                        
+                # select integration parameters such as ROI size, background
+                self.scanSelector.hsize.setValue(diag_rock_roi.roi_hsize.value())
+                self.scanSelector.vsize.setValue(diag_rock_roi.roi_vsize.value())
+                self.scanSelector.left.setValue(diag_rock_roi.roi_hsize_bg.value())
+                self.scanSelector.right.setValue(diag_rock_roi.roi_vsize_bg.value())
+                self.scanSelector.sigROIChanged.emit()
+        
+                # additional scanSelector options:
+                # background:   orgui.scanSelector.top,     orgui.scanSelector.bottom
+                # offset:       orgui.scanSelector.offsetx, orgui.scanSelector.offsety
+        
+                # set default mask for pilatus 2M CdTe detector
+                det = pyFAI.detector_factory('Pilatus 2m CdTe')
+                mask = det.calc_mask()
+                self.centralPlot.setSelectionMask(mask)
+                
+                # set integration options
+                self.scanSelector.useMaskBox.setChecked(True)
+                self.scanSelector.useSolidAngleBox.setChecked(True)
+                self.scanSelector.usePolarizationBox.setChecked(True)
+        
+                # execute integration
+                for i in np.linspace(l_min, l_max, step_nr):
+                    print('\n execute integration at L = %s' % round(i,1))
+                    coordinates = self.searchPixelCoordHKL([diag_rock.selectedH.value(),diag_rock.selectedK.value(),i])
+                    if diag_rock.whichxy.value() == 1:
+                        xpos = coordinates['xy_1'][0]
+                        ypos = coordinates['xy_1'][1]
+                    else:
+                        xpos = coordinates['xy_2'][0]
+                        ypos = coordinates['xy_2'][1]
+                        
+                    self.scanSelector.set_xy_static_loc(xpos, ypos)
+                    self.scanSelector.sigROIChanged.emit()
+                    self.integrateROI()
+                    
+                # save extracted rocking scan curves into hdf5 file    
+                #self.database.saveDBFile('C:/Users/fschroeter/data_analysis/orgui/test_rocking_extract.h5')
     
     def updatePlotItems(self, recalculate=True):
         if self.roivisible:
@@ -559,7 +635,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         ub = self.ubcalc.ubCal
         xtal.setEnergy(ub.getEnergy()*1e3)
         hk, xmirror = rn.thscanCTRs(xtal,ub,mu,dc,(ommin,ommax), chi=chi, phi=phi)
-        xmirror = np.array(xmirror).astype(np.float)
+        xmirror = np.array(xmirror).astype(np.float64)
         #making the hk list of arrays into a reasonable string
         hkm = np.concatenate((np.array(hk), xmirror.reshape((1,xmirror.size)).T), axis=1)
         return hkm
@@ -808,13 +884,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             
     def imageNoToOmega(self,imageno):
         if self.fscan is not None:
-            try:
-                return np.deg2rad(self.fscan.omega[imageno])
-            except:
-                try:
-                    return np.deg2rad(self.fscan.omega)
-                except:
-                    return 0.
+            return np.deg2rad(self.fscan.omega[imageno])
         else:
             return 0.
 
@@ -2003,6 +2073,118 @@ class QScanCreator(qt.QDialog):
             self.omend.setValue(15.)
             self.fixed_label.setText("theta (fixed):")
             self.fixedAngle.setValue(self.defaultMuTh[1])
+
+class QRockingScanCreator(qt.QDialog):
+    
+    def __init__(self, parent=None):
+        qt.QDialog.__init__(self, parent)
+        
+        layout = qt.QGridLayout()
+        
+        hkl_layout = qt.QGridLayout()
+
+        self.selectedH = qt.QDoubleSpinBox()
+        self.selectedH.setRange(-3,3)
+        self.selectedH.setValue(0)
+
+        self.selectedK = qt.QDoubleSpinBox()
+        self.selectedK.setRange(-3,3)
+        self.selectedK.setValue(0)
+        
+        self.Lmin = qt.QDoubleSpinBox()
+        self.Lmin.setRange(0,20)
+        self.Lmin.setDecimals(1)
+        self.Lmin.setValue(1)
+        
+        self.Lmax = qt.QDoubleSpinBox()
+        self.Lmax.setRange(0,30)
+        self.Lmax.setDecimals(1)
+        self.Lmax.setValue(2)
+        
+        self.interval = qt.QDoubleSpinBox()
+        self.interval.setRange(0,10)
+        self.interval.setDecimals(2)
+        self.interval.setValue(0.1)
+        
+        self.whichxy = qt.QDoubleSpinBox()
+        self.whichxy.setRange(1,2)
+        self.whichxy.setValue(1)
+        
+        
+        layout.addWidget(qt.QLabel("Select H,K,L of the CTR rocking scan"),0,0,1,-1)
+        
+        layout.addWidget(qt.QLabel("H:"),1,0)
+        layout.addWidget(self.selectedH,1,1)
+        layout.addWidget(qt.QLabel("K:"),1,2)
+        layout.addWidget(self.selectedK,1,3)
+        layout.addWidget(qt.QLabel("L min:"),2,0)
+        layout.addWidget(self.Lmin,2,1)
+        layout.addWidget(qt.QLabel("L max:"),2,2)
+        layout.addWidget(self.Lmax,2,3)        
+        
+        layout.addWidget(qt.QLabel("scan interval:"),3,0,1,-1)
+        layout.addWidget(self.interval,3,3)
+        layout.addWidget(qt.QLabel("which xy value?:"),4,0,1,-1)
+        layout.addWidget(self.whichxy,4,3)
+        
+        #layout.addLayout(hkl_layout,1,0)
+        
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
+        layout.addWidget(buttons,5,0,-1,-1)
+        
+        buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.accept)
+        buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
+        
+        self.setLayout(layout)
+        
+
+class QRockingScanROI(qt.QDialog):
+    
+    def __init__(self,roi_l,parent=None):
+        qt.QDialog.__init__(self, parent)
+        
+        layout = qt.QGridLayout()
+        
+        hkl_layout = qt.QGridLayout()
+
+        self.roi_hsize = qt.QDoubleSpinBox()
+        self.roi_hsize.setRange(1,500)
+        self.roi_hsize.setValue(8)
+
+        self.roi_vsize = qt.QDoubleSpinBox()
+        self.roi_vsize.setRange(1,500)
+        self.roi_vsize.setValue(roi_l)
+        
+        self.roi_hsize_bg = qt.QDoubleSpinBox()
+        self.roi_hsize_bg.setRange(0,500)
+        self.roi_hsize_bg.setValue(8)
+        
+        self.roi_vsize_bg = qt.QDoubleSpinBox()
+        self.roi_vsize_bg.setRange(0,500)
+        self.roi_vsize_bg.setValue(8)
+    
+        
+        
+        layout.addWidget(qt.QLabel("ROI parameters"),0,0,1,-1)
+        
+        layout.addWidget(qt.QLabel("h-size:"),1,0)
+        layout.addWidget(self.roi_hsize,1,1)
+        layout.addWidget(qt.QLabel("v-size:"),1,2)
+        layout.addWidget(self.roi_vsize,1,3)
+        layout.addWidget(qt.QLabel("bg h-size:"),2,0)
+        layout.addWidget(self.roi_hsize_bg,2,1)
+        layout.addWidget(qt.QLabel("bg v-size:"),2,2)
+        layout.addWidget(self.roi_vsize_bg,2,3)        
+        
+        
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
+        layout.addWidget(buttons,3,0,-1,-1)
+        
+        buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.accept)
+        buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
+        
+        self.setLayout(layout)
+
             
         
 class UncaughtHook(qt.QObject):
