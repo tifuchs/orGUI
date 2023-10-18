@@ -559,7 +559,7 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
         ub = self.ubcalc.ubCal
         xtal.setEnergy(ub.getEnergy()*1e3)
         hk, xmirror = rn.thscanCTRs(xtal,ub,mu,dc,(ommin,ommax), chi=chi, phi=phi)
-        xmirror = np.array(xmirror).astype(np.float)
+        xmirror = np.array(xmirror).astype(np.float64)
         #making the hk list of arrays into a reasonable string
         hkm = np.concatenate((np.array(hk), xmirror.reshape((1,xmirror.size)).T), axis=1)
         return hkm
