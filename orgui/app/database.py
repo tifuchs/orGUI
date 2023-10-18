@@ -33,6 +33,7 @@ import h5py
 import datetime
 import os
 import traceback
+import time
 
 from datautils.xrayutils import unitcells
 from datautils.xrayutils import HKLVlieg, CTRcalc
@@ -375,6 +376,9 @@ class DataBase(qt.QMainWindow):
         
     def createNewDBFile(self, filename, datadict=None):
         if self.nxfile is not None:
+            while(self.hdf5model.hasPendingOperations()):
+                qt.QApplication.processEvents()
+                time.sleep(0.01)
             self.hdf5model.removeH5pyObject(self.nxfile)
             self.nxfile.close()
             self.nxfile = None
@@ -407,6 +411,9 @@ class DataBase(qt.QMainWindow):
                 del self.temp_directory
         self.nxfile = silx.io.h5py_utils.File(filename,'a')
         self._filepath = filename
+        while(self.hdf5model.hasPendingOperations()):
+            qt.QApplication.processEvents()
+            time.sleep(0.01)
         self.hdf5model.insertH5pyObject(self.nxfile)
         self.view.expandToDepth(0)
 
@@ -414,6 +421,9 @@ class DataBase(qt.QMainWindow):
         if self.nxfile is None:
             raise Exception("No database file open.")
         dicttonx(nxentry, self.nxfile, update_mode='add')
+        while(self.hdf5model.hasPendingOperations()):
+            qt.QApplication.processEvents()
+            time.sleep(0.01)
         self.hdf5model.synchronizeH5pyObject(self.nxfile)
         self.view.expandToDepth(0)
         
@@ -426,6 +436,9 @@ class DataBase(qt.QMainWindow):
         basename = obj.name.split("/")[-1]
         objpar = obj.parent
         del objpar[basename]
+        while(self.hdf5model.hasPendingOperations()):
+            qt.QApplication.processEvents()
+            time.sleep(0.01)
         self.hdf5model.synchronizeH5pyObject(self.nxfile)
         self.view.expandToDepth(0)
         
@@ -441,6 +454,9 @@ class DataBase(qt.QMainWindow):
         basename = obj.name.split("/")[-1]
         objpar = obj.parent
         objpar.move(basename, newname)
+        while(self.hdf5model.hasPendingOperations()):
+            qt.QApplication.processEvents()
+            time.sleep(0.01)
         self.hdf5model.synchronizeH5pyObject(self.nxfile)
         self.view.expandToDepth(0)
         
