@@ -74,6 +74,7 @@ from .ArrayTableDialog import ArrayTableDialog
 from .database import DataBase
 from ..backend.scans import SimulationScan
 from ..backend import backends
+from ..backend import universalScanLoader
 from .. import resources
 
 import numpy as np
@@ -240,7 +241,11 @@ class orGUI(qt.QMainWindow):
         file.addAction(self.scanSelector.closeFileAction)
         file.addSeparator()
         
-        self.loadImagesAct = file.addAction("load scan images")
+        self.folderToScan = file.addAction("Generate scan from images")
+        self.folderToScan.triggered.connect(self._onLoadScanFromImages)
+        file.addSeparator()
+
+        self.loadImagesAct = file.addAction("reload images")
         self.loadImagesAct.triggered.connect(self._onLoadAll)
         
         config_menu =  menu_bar.addMenu("&Config")
@@ -966,6 +971,141 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
             except MemoryError:
                 qutils.warning_detailed_message(self, "Can not create simulation scan","Can not create simualtion scan. Memory is insufficient for the scan size. See details for further information.", traceback.format_exc())
         
+    def _onLoadScanFromImages(self):
+        # generates a scan from a selected folder containing raw detector images
+        
+        # generate file source selection GUI
+
+        # create filter of scan image formats (following code is copied from silx view)
+        extensions = {}
+        for description, ext in silx.io.supported_extensions().items():
+            extensions[description] = " ".join(sorted(list(ext)))
+
+        extensions["NeXus layout from EDF files"] = "*.edf"
+        extensions["NeXus layout from TIFF image files"] = "*.tif *.tiff"
+        extensions["NeXus layout from CBF files"] = "*.cbf"
+        extensions["NeXus layout from MarCCD image files"] = "*.mccd"
+
+        all_supported_extensions = set()
+        for name, exts in extensions.items():
+            exts = exts.split(" ")
+            all_supported_extensions.update(exts)
+        all_supported_extensions = sorted(list(all_supported_extensions))
+
+        filters = []
+        filters.append("All supported files (%s)" % " ".join(all_supported_extensions))
+        for name, extension in extensions.items():
+            filters.append("%s (%s)" % (name, extension))
+        filters.append("All files (*)")
+
+        fileTypeFilter = ""
+        for f in filters:
+            fileTypeFilter += f + ";;"
+
+        # call dialog
+        filename,_ = qt.QFileDialog.getOpenFileName(self,"Open data source",'',fileTypeFilter[:-2])
+
+        # Qt dialog returns '' if cancelled
+        if filename == '':
+            qt.QMessageBox.warning(self,"Error - Open data source","No data source selected")
+            return
+
+        # search files using ImportImagesScan backend
+        importedscan = universalScanLoader.ImportImagesScan(filename)
+        [imagePrefix, found_scanfiles] = importedscan.inpath
+
+        # generate dialog with list of files and frames
+        nrofFilesfound = len(found_scanfiles)
+        messageStr = 'Found ' + str(nrofFilesfound) + ' files in selected directory'
+
+        if importedscan.FramesPerFile > 1:
+
+            if nrofFilesfound == 0:
+                messageStr = 'No images found!!!'
+                fullStr = messageStr
+            elif 0 < nrofFilesfound < 4:
+                messageStr += ':\n'
+                for i in range(nrofFilesfound-1):
+                    messageStr += imagePrefix + found_scanfiles[i] + ': ' + str(importedscan.FramesPerFile) + ' frames' ### mark expected nr when file not actually loaded
+                    if i > 0:
+                        messageStr += ' (expected)'
+                    messageStr += '\n'
+                messageStr += imagePrefix + found_scanfiles[nrofFilesfound-1] + ': ' + str(importedscan.FramesLastFile) + ' frames\n' + str(importedscan.nopoints) + ' frames in total.'
+                fullStr = messageStr
+            else:
+                messageStr += ':\n'
+                for i in range(0,3):
+                    messageStr += imagePrefix + found_scanfiles[i] + ': ' + str(importedscan.FramesPerFile) + ' frames'
+                    if i > 0:
+                        messageStr += ' (expected)'
+                    messageStr += '\n'
+                fullStr = messageStr
+                for i in range(3,nrofFilesfound-1):
+                    fullStr += imagePrefix + found_scanfiles[i] + ': ' + str(importedscan.FramesPerFile) + ' frames (expected) \n'
+
+                messageStr += '...' + '\n' + imagePrefix + found_scanfiles[nrofFilesfound-1] + ': ' + str(importedscan.FramesLastFile) + ' frames\n' + str(importedscan.nopoints) + ' frames in total.'
+                fullStr += imagePrefix + found_scanfiles[nrofFilesfound-1] + ': ' + str(importedscan.FramesLastFile) + ' frames\n' + str(importedscan.nopoints) + ' frames in total.'
+
+
+        else:
+
+            if nrofFilesfound == 0:
+                messageStr = 'No images found!!!'
+                fullStr = messageStr
+            elif 0 < nrofFilesfound < 4:
+                messageStr += ':\n'
+                for i in range(nrofFilesfound-1):
+                    messageStr += imagePrefix + found_scanfiles[i] + '\n'
+                messageStr += imagePrefix + found_scanfiles[nrofFilesfound-1] 
+                fullStr = messageStr
+            else:
+                messageStr += ':\n'
+                for i in range(0,3):
+                    messageStr += imagePrefix + found_scanfiles[i] + '\n'
+                fullStr = messageStr
+                for i in range(3,nrofFilesfound):
+                    fullStr += imagePrefix + found_scanfiles[i] + '\n'
+                messageStr += '...' + '\n' + imagePrefix + found_scanfiles[nrofFilesfound-1]
+                fullStr += '\n' + str(importedscan.nopoints) + ' frames in total.'
+            
+        
+
+        msg0 = qt.QMessageBox(self)
+        msg0.setWindowTitle("Manual scan import")
+        msg0.setText(messageStr)
+        msg0.setDetailedText(fullStr)
+        msg0.exec()
+
+        # angle conversions
+        try:
+            mu, om = self.getMuOm(self.imageno)
+        except:
+            mu = self.ubcalc.mu
+            om = 0.
+        th = om*-1.
+        muTh = np.rad2deg([mu,th]) #defaults if fixed 
+        
+        # open scan creator GUI to let the user insert missing scan angles
+        diag = QImportScanCreator(muTh)        
+        # detector pixel nr and frame nr is adapted from opened image file
+        diag.shape1.setValue(importedscan.shape[0])
+        diag.shape2.setValue(importedscan.shape[1])
+        diag.no.setValue(importedscan.nopoints)
+        
+        if diag.exec() == qt.QDialog.Accepted:
+            shape = (diag.shape1.value(), diag.shape2.value())
+            self.ubcalc.detectorCal.detector.shape = shape
+            try:
+                axis = diag.scanaxis.currentText()
+                if axis == 'theta':
+                    axis = 'th'
+                elif axis == 'mu':
+                    pass
+                # pass inserted angles to scan object
+                importedscan.set_axis(diag.omstart.value(),diag.omend.value(),axis,diag.fixedAngle.value())
+                self._onScanChanged(importedscan)
+            except MemoryError:
+                qutils.warning_detailed_message(self, "Can not create scan","Can not create scan. Memory is insufficient for the scan size. See details for further information.", traceback.format_exc())
         
     def _onScanChanged(self,sel_list):
         self.resetZoom = True
@@ -994,6 +1134,21 @@ within the group of Olaf Magnussen. Usage within the group is hereby granted.
                 self.imageno = 0
                 self.reflectionSel.setImage(self.imageno)
                 #print(self.centralPlot._callback)
+
+        elif isinstance(sel_list,universalScanLoader.ImportImagesScan):
+            self.scanno = 1
+            self.fscan = sel_list
+            self.imageno = 0
+            self.plotImage()
+            self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
+            self.activescanname = "%s-sim %s-%s" % (self.fscan.axisname, np.amin(self.fscan.axis),np.amax(self.fscan.axis))
+
+            self.images_loaded = False
+            if self.fscan is not None and self.autoLoadAct.isChecked():
+                self.loadAll()
+                self.scanSelector.showMaxAct.setChecked(False)
+                self.scanSelector.showMaxAct.setChecked(True)
+
         elif isinstance(sel_list,SimulationScan):
             self.scanno = 1
             self.fscan = sel_list
@@ -2023,7 +2178,95 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
         :return: :class:`Plot1D`
         """
         return self.profile.getProfilePlot()
+
+class QImportScanCreator(qt.QDialog):
+    
+    def __init__(self,defaultMuTh, parent=None):
+        qt.QDialog.__init__(self, parent)
+        self.defaultMuTh = defaultMuTh
         
+        layout = qt.QGridLayout()
+        
+        layout.addWidget(qt.QLabel("scan axis:"),0,0)
+        layout.addWidget(qt.QLabel("axis start:"),1,0)
+        layout.addWidget(qt.QLabel("axis end:"),2,0)
+        self.fixed_label = qt.QLabel("mu (fixed):")
+        layout.addWidget(self.fixed_label,3,0)
+        layout.addWidget(qt.QLabel("no frames:"),5,0)
+        layout.addWidget(qt.QLabel("Det pixel1:"),6,0)
+        layout.addWidget(qt.QLabel("Det pixel2:"),7,0)
+
+        self.scanaxis = qt.QComboBox()
+        self.scanaxis.addItem("theta")
+        self.scanaxis.addItem("mu")
+        self.scanaxis.setCurrentIndex(0)
+        self.scanaxis.currentIndexChanged.connect(self.onScanAxisChanged)
+
+        self.omstart = qt.QDoubleSpinBox()
+        self.omstart.setRange(-180,180)
+        self.omstart.setDecimals(4)
+        self.omstart.setSuffix(u" °")
+        self.omstart.setValue(-90)
+        
+        self.omend = qt.QDoubleSpinBox()
+        self.omend.setRange(-180,180)
+        self.omend.setDecimals(4)
+        self.omend.setSuffix(u" °")
+        self.omend.setValue(90)
+        
+        self.no = qt.QSpinBox()
+        self.no.setReadOnly(True)
+        self.no.setRange(1,1000000000)
+        self.no.setValue(180)
+        
+        self.fixedAngle = qt.QDoubleSpinBox()
+        self.fixedAngle.setRange(-180,180)
+        self.fixedAngle.setValue(self.defaultMuTh[0])
+        
+        self.shape1 = qt.QSpinBox()
+        self.shape1.setReadOnly(True)
+        self.shape1.setRange(1,1000000000)
+        self.shape1.setValue(1)
+        
+        self.shape2 = qt.QSpinBox()
+        self.shape2.setReadOnly(True)
+        #self.shape2.lineEdit().setReadOnly(True)
+        self.shape2.setRange(1,1000000000)
+        self.shape2.setValue(1)
+        
+        layout.addWidget(self.scanaxis,0,1)
+        layout.addWidget(self.omstart,1,1)
+        layout.addWidget(self.omend,2,1)
+        layout.addWidget(self.no,5,1)
+        layout.addWidget(self.fixedAngle,3,1)
+        
+        layout.addWidget(self.shape1,6,1)
+        layout.addWidget(self.shape2,7,1)
+        
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
+        layout.addWidget(buttons,8,0,-1,-1)
+
+        test = qt.QLabel("Parameters determined from loaded scan:")
+        layout.addWidget(test,4,0,1,2)
+        
+        buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.accept)
+        buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
+        
+        self.setLayout(layout)
+        
+    def onScanAxisChanged(self, index):
+        if index == 0:
+            self.omstart.setValue(-90.)
+            self.omend.setValue(90.)
+            self.fixed_label.setText("mu (fixed):")
+            self.fixedAngle.setValue(self.defaultMuTh[0])
+            
+        elif index == 1:
+            self.omstart.setValue(0.)
+            self.omend.setValue(15.)
+            self.fixed_label.setText("theta (fixed):")
+            self.fixedAngle.setValue(self.defaultMuTh[1])
+
 class QScanCreator(qt.QDialog):
     
     def __init__(self,defaultMuTh, parent=None):
