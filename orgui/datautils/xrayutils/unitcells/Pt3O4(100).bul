@@ -1,0 +1,19 @@
+// Pt3O4(100) simple cubic version
+// Muller, Olaf ; Roy, Rustum: Formation and stability of the platinum and rhodium oxides at high oxygen pressures and the structures of Pt3O4, β-PtO2 and RhO2. In: Journal of The Less-Common Metals Bd. 16 (1968), Nr. 2, S. 129–146
+// Nomiyama, Ricardo K. ; Piotrowski, Maurício J. ; Da Silva, Juarez L.F.: Bulk structures of PtO and PtO2 from density functional calculations. In: Physical Review B - Condensed Matter and Materials Physics Bd. 84 (2011), Nr. 10, S. 2–5
+return
+5.5580 5.5580 5.5580 90.0000 90.0000 90.0000
+Pt      0.50000     0.25000   0.00000000  0.4353  0.4353  1.0000
+Pt      0.50000     0.75000   0.00000000  0.4353  0.4353  1.0000
+Pt      0.00000     0.50000   0.75000000  0.4353  0.4353  1.0000
+Pt      0.00000     0.50000   0.25000000  0.4353  0.4353  1.0000
+Pt      0.75000     0.00000   0.50000000  0.4353  0.4353  1.0000
+Pt      0.25000     0.00000   0.50000000  0.4353  0.4353  1.0000
+O       0.75000     0.25000   0.25000000  0.4353  0.4353  1.0000
+O       0.25000     0.25000   0.75000000  0.4353  0.4353  1.0000
+O       0.25000     0.75000   0.25000000  0.4353  0.4353  1.0000
+O       0.75000     0.75000   0.75000000  0.4353  0.4353  1.0000
+O       0.25000     0.75000   0.75000000  0.4353  0.4353  1.0000
+O       0.75000     0.75000   0.25000000  0.4353  0.4353  1.0000
+O       0.25000     0.25000   0.25000000  0.4353  0.4353  1.0000
+O       0.75000     0.25000   0.75000000  0.4353  0.4353  1.0000

@@ -1,0 +1,9 @@
+// PtO(010) tetragonal "PtS" 
+// from McBride, J. R. ; Graham, G. W. ; Peters, C. R. ; Weber, W. H.: Growth and characterization of reactively sputtered thin-film platinum oxides. In: Journal of Applied Physics Bd. 69 (1991), Nr. 3, S. 1596–1604
+// Moore, Walter J. ; Pauling, Linus: The Crystal Structures of the Tetragonal Monoxides of Lead, Tin, Palladium, and Platinum. In: Journal of the American Chemical Society Bd. 63 (1941), Nr. 5, S. 1392–1394
+return
+3.0777 5.3400 3.0777  90.0000 90.0000 90.0000
+O2-     0.00000     0.75000    0.00000 0.4353  0.4353  1.0000
+Pt2+    0.50000     0.50000    0.00000 0.4353  0.4353  1.0000
+O2-     0.00000     0.25000    0.00000 0.4353  0.4353  1.0000
+Pt4+    0.00000     0.00000    -0.50000 0.4353  0.4353  1.0000

@@ -29,8 +29,39 @@ __version__ = "1.0.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
-"""Module descripiton
+import os
+import glob
 
-"""
+_uc_path = os.path.dirname(__file__)
 
-__all__ = ['orGUI','QReflectionSelector','QSpecScanSelector','QUBCalculator','database']
+_files_bulk = glob.glob(os.path.join(_uc_path,"*.bul"))
+_files_surf = glob.glob(os.path.join(_uc_path,"*.sur"))
+_files_xtal = glob.glob(os.path.join(_uc_path,"*.xtal"))
+
+availablebulk = [os.path.splitext(os.path.basename(bf))[0] for bf in _files_bulk]
+availablesur = [os.path.splitext(os.path.basename(bf))[0] for bf in _files_surf]
+availablextal = [os.path.splitext(os.path.basename(bf))[0] for bf in _files_xtal]
+
+BULFILES = dict( (os.path.splitext(os.path.basename(bf))[0].lower(), bf) for bf in _files_bulk)
+SURFILES = dict( (os.path.splitext(os.path.basename(bf))[0].lower(), bf) for bf in _files_surf)
+XTALFILES = dict( (os.path.splitext(os.path.basename(bf))[0].lower(), bf) for bf in _files_xtal)
+
+
+def unitcell(name: str):
+    from .. import CTRcalc
+    name = name.lower()
+    if name in BULFILES:
+        return CTRcalc.UnitCell.fromBULfile(BULFILES[name])
+    elif name in SURFILES:
+        return CTRcalc.UnitCell.fromSURfile(SURFILES[name])
+    else:
+        raise ValueError("Unit cell %s is not available." % name)
+
+
+def crystal(name: str):
+    from .. import CTRcalc
+    name = name.lower()
+    if name in XTALFILES:
+        return CTRcalc.SXRDCrystal.fromFile(XTALFILES[name])
+    else:
+        raise ValueError("Crystal %s is not available." % name)

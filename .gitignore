@@ -8,6 +8,8 @@
 *.so
 *.py[cod]
 __pycache__/
+build/
+orgui.egg-info/
 
 # Packages #
 ############

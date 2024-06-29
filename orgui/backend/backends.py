@@ -75,6 +75,37 @@ beamtimes = {'ch5523': (datetime(2018, 9, 22), datetime(2018, 10, 5)),
              'P212_default' : (datetime(1902, 7, 18), datetime(1903, 8, 1)),
              'id31_default' : (datetime(2021, 8, 2), datetime(2500, 1, 1)) # all data after 2021/8/2 is automatically detected as ID31 data. You can change this behaviour by changing the beamtime dates. 
              }
+# -*- coding: utf-8 -*-
+# /*##########################################################################
+#
+# Copyright (c) 2020-2024 Timo Fuchs
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+#
+# ###########################################################################*/
+__author__ = "Timo Fuchs"
+__copyright__ = "Copyright 2020-2024 Timo Fuchs"
+__license__ = "MIT License"
+__version__ = "1.0.0"
+__maintainer__ = "Timo Fuchs"
+__email__ = "fuchs@physik.uni-kiel.de"
+
 
 def localize(dt):
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
@@ -95,8 +126,8 @@ def getBeamtimeId(dt):
 # add actual backends here, which perform the file reads:
 # They must implement scans.Scan
 
-from datautils.xrayutils.id31_tools import BlissScan_EBS, Fastscan, BlissScan
-from datautils.xrayutils.P212_tools import H5Fastsweep
+from .beamline.id31_tools import BlissScan_EBS, Fastscan, BlissScan
+from .beamline.P212_tools import H5Fastsweep
 
 fscans = {'ch5523': BlissScan,
              '20190017': H5Fastsweep, #probably doesn't work since image names are not saved
