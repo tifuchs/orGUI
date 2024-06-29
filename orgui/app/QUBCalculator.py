@@ -137,6 +137,11 @@ class QUBCalculator(qt.QSplitter):
         
         vertCalUSplitter.addWidget(self.calUButton)
         
+        self.calMiscutButton = qt.QPushButton("calculate miscut")
+        self.calMiscutButton.setToolTip("calculate miscut based on deviation from ideal orientation matrix")
+        
+        vertCalUSplitter.addWidget(self.calMiscutButton)
+        
         
         
         
@@ -149,6 +154,7 @@ class QUBCalculator(qt.QSplitter):
         
         
         self.calUButton.clicked.connect(self._onCalcU)
+        self.calMiscutButton.clicked.connect(self._onCalMiscut)
         
         self.crystalparams = QCrystalParameter()
         
@@ -498,8 +504,19 @@ class QUBCalculator(qt.QSplitter):
         self.uedit.setU(self.ubCal.getU())
         self.sigReplotRequest.emit(False)
         #self.Ueditor.setPlainText(str(self.ubCal.getU()))
-            
         
+    def _onCalMiscut(self):
+        om, chi, phi = self.angles.anglesOrientationAlpha([0,0,1], [0,0,1])
+        chi, phi = float(chi), float(phi)
+        chi_displ = float(np.rad2deg(chi))
+        phi_displ = float(np.rad2deg(phi))
+        btn = qt.QMessageBox.question(self,"Miscut calcuated","The miscut is along\nphi = %.4f\nchi = %.4f\nReset chi and phi to negative these values?" % (phi_displ,chi_displ),qt.QMessageBox.Yes | qt.QMessageBox.No, qt.QMessageBox.No)
+        if btn == qt.QMessageBox.Yes:
+            self.chi = -chi
+            self.phi = -phi
+            angles_u = self.uedit.cached_angles
+            self.uedit.setAngles(angles_u[0], -chi, -phi, angles_u[-1])
+
         
 class QCrystalParameter(qt.QSplitter):
     sigCrystalParamsChanged = qt.pyqtSignal(HKLVlieg.Lattice,float)
@@ -945,7 +962,7 @@ class QMachineParameters(qt.QWidget):
         mainLayout.addWidget(self.loadConfigButton,5,2)
          
         self.Ebox = qt.QDoubleSpinBox()
-        self.Ebox.setRange(0.1,1000)
+        self.Ebox.setRange(0.01,1000)
         self.Ebox.setDecimals(4)
         self.Ebox.setSuffix(u" keV")
         
@@ -955,10 +972,12 @@ class QMachineParameters(qt.QWidget):
         self.SDDbox.setRange(0.001,100)
         self.SDDbox.setDecimals(4)
         self.SDDbox.setSuffix(u" m")
+        self.SDDbox.setSingleStep(0.01)
         mainLayout.addWidget(self.SDDbox,1,1)
         
         self.mubox = qt.QDoubleSpinBox()
         self.mubox.setRange(0,90)
+        self.mubox.setSingleStep(0.01)
         self.mubox.setDecimals(4)
         self.mubox.setSuffix(u" °")
         
@@ -980,6 +999,7 @@ class QMachineParameters(qt.QWidget):
 
         self.polfbox = qt.QDoubleSpinBox()
         self.polfbox.setRange(-1,1)
+        self.polfbox.setSingleStep(0.1)
         self.polfbox.setDecimals(4)
         #self.polfbox.setSuffix(u" °")
         
@@ -1002,6 +1022,7 @@ class QMachineParameters(qt.QWidget):
         
         self.pixsizebox = qt.QDoubleSpinBox()
         self.pixsizebox.setRange(0.000001,10)
+        self.pixsizebox.setSingleStep(0.01)
         self.pixsizebox.setDecimals(5)
         self.pixsizebox.setSuffix(u" mm")
         
