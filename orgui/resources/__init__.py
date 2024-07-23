@@ -35,3 +35,6 @@ def getQicon(name: str):
     
 def getSplashScreen():
     return qt.QPixmap(os.path.join(_iconpath, "logo"))
+    
+def getDiffractometerPath():
+    return os.path.join(_iconpath, "diffractometer_v3.png")

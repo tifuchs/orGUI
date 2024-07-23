@@ -31,9 +31,6 @@ __email__ = "fuchs@physik.uni-kiel.de"
 
 
 import numpy as np
-from PyMca5.PyMcaIO import EdfFile
-from PyMca5.PyMcaIO import PilatusCBF
-from PyMca5.PyMcaIO import specfile
 import scipy.ndimage
 import scipy.interpolate
 import scipy.optimize

@@ -363,9 +363,16 @@ ub : gui for UB matrix and angle calculations
         hackAct.triggered.connect(self.rocking_extraction)
         
         helpmenu = menu_bar.addMenu("&Help")
+        
+        diffractAct = helpmenu.addAction("Diffraction geometry")
+        diffractAct.triggered.connect(self._onShowDiffractionGeometry)
+        
+        helpmenu.addSeparator()
+        
         aboutAct = helpmenu.addAction("About")
         aboutAct.triggered.connect(self._onShowAbout)
         
+
         aboutQtAct = helpmenu.addAction("About Qt")
         aboutQtAct.triggered.connect(lambda : qt.QMessageBox.aboutQt(self))
         
@@ -535,15 +542,30 @@ ub : gui for UB matrix and angle calculations
         self.updateReflections()
         
     def _onShowAbout(self):
-        qt.QMessageBox.about(self, "About orGUI", 
-        """Copyright (c) 2021 Timo Fuchs, Olaf Magnussen all rights reserved
-
-For internal use only. 
-Do not redistribute!
-
-"orGUI" and its dependeny "datautils" were developed during the PhD work of Timo Fuchs,
-within the group of Olaf Magnussen. Usage within the group is hereby granted.
-""")
+        messageStr = """Copyright (c) 2020-2024 Timo Fuchs, published under MIT License
+        <br> <br>
+orGUI: Orientation and Integration with 2D detectors (1.0.0).<br>
+Zenodo. <a href=\"https://doi.org/10.5281/zenodo.12592485\">https://doi.org/10.5281/zenodo.12592485</a> <br> <br> 
+New software updates will be published under <a href=\"https://doi.org/10.5281/zenodo.12592485\">Zenodo</a>.
+<br> <br>
+Help requests can be send via Email to Timo Fuchs. 
+<br> <br>
+"orGUI" was developed during the PhD work of Timo Fuchs,
+within the group of Olaf Magnussen.
+"""
+        msg0 = qt.QMessageBox(self)
+        msg0.setWindowTitle("About orGUI")
+        msg0.setText(messageStr)
+        msg0.setTextInteractionFlags(qt.Qt.TextBrowserInteraction)
+        msg0.setTextFormat(qt.Qt.RichText)
+        msg0.exec()
+        
+    def _onShowDiffractionGeometry(self):
+        if hasattr(self, 'diffractometerdialog'):
+            self.diffractometerdialog.show()
+        else:
+            self.diffractometerdialog = QDiffractometerImageDialog()
+            self.diffractometerdialog.show()
 
     def _onToggleExcludeImage(self, exclude):
         currentimgno = self.scanSelector.slider.value()
@@ -2403,7 +2425,61 @@ class QRockingScanCreator(qt.QDialog):
         buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
         
         self.setLayout(layout)
+
+class QDiffractometerImageDialog(qt.QDialog):
+    def __init__(self, parent=None):
+        qt.QDialog.__init__(self, parent)
+        verticalLayout = qt.QVBoxLayout(self)
+        verticalLayout.setContentsMargins(0, 0, 0, 0)
+        img = AspectRatioPixmapLabel(self)
+        pixmp = qt.QPixmap(resources.getDiffractometerPath())
+        #img.setScaledContents(False)
+        img.setPixmap(pixmp)
         
+        verticalLayout.addWidget(img)
+
+        #reader = qt.QImageReader()
+        #img = reader.read()
+        #view = qt.QGraphicsView(self)
+        #svg = qt.QSvgWidget(self)
+        #svg.load(resources.getDiffractometerPath())
+
+        #verticalLayout.addWidget(svg)
+        self.setLayout(verticalLayout)
+
+class AspectRatioPixmapLabel(qt.QLabel):
+    def __init__(self, parent=None):
+        qt.QLabel.__init__(self, parent)
+        self.setMinimumSize(1,1)
+        self.setScaledContents(False)
+        self.pix = None
+        
+    def setPixmap(self, p):
+        self.pix = p
+        super().setPixmap(self.scaledPixmap())
+        
+    def scaledPixmap(self):
+        return self.pix.scaled(self.size(), qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+
+    def heightForWidth(self, width):
+        if self.pix is None:
+            return self.height()
+        else:
+            return int(( self.pix.height()* width) /self.pix.width())
+
+    def sizeHint(self):
+        app = qt.QApplication.instance()
+        desktopWidget = app.desktop()
+        screenGeometry = desktopWidget.screenGeometry()
+        w = int(screenGeometry.width()/3)
+        w_s = self.width()
+        return qt.QSize( max(w, w_s), self.heightForWidth(w))
+        
+    def resizeEvent(self,e):
+        if self.pix is not None:
+            super().setPixmap(self.scaledPixmap())
+
+
 
 class QRockingScanROI(qt.QDialog):
     
