@@ -807,7 +807,11 @@ within the group of Olaf Magnussen.
         return refldict
             
     def onSearchHKLforStaticROI(self, hkl):
-        refldict = self.searchPixelCoordHKL(hkl)
+        try:
+            refldict = self.searchPixelCoordHKL(hkl)
+        except Exception as e:
+            qutils.warning_detailed_message(self, "Cannot calculate location of reflection", "Cannot calculate position of reflection:\n%s" % e, traceback.format_exc())
+            return
         refl_dialog = QReflectionAnglesDialog(refldict,"Select reflection location", self)
         if qt.QDialog.Accepted == refl_dialog.exec():
             for i, cb in enumerate(refl_dialog.checkboxes,1):
