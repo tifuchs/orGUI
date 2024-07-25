@@ -39,7 +39,7 @@ Documentation
 A detailed documentation is not yet available, but will be provided in a future release.
 
 .. |diffractometer| image:: ./orgui/resources/icons/diffractometer_v3.png
-   :height: 480px
+   :height: 360px
    
 |diffractometer|
 
@@ -53,10 +53,7 @@ For setting the orientation matrix, there are 2 methods available:
 
 1. Expert mode: This is in the menu Reciprocal Space -> Edit orientation matrix. This is more intended to be used if symmetries can be directly observed at specific angle settings and applies more to Transmission Diffraction (e.g. if you see that two Bragg reflections have identical intensities, a reference position can be obtained from that). This is not really extremely useful for Grazing incidence geometry since you have to think about what you are doing.
 
-2. Conventional setting of matrix using reference reflections (Busing & Levy):
-The images and the window "Reciprocal space navigation" is used for that. Double clicking at any position in the image will set a red reference reflection at this specific image. The position of the marker on the image defines the scattering angles and the image number gives the sample rotation angle (i.e. theta) of the reference reflection. You can drag+drop the marker around in the image and the image number can be changed with the two buttons in the top right corner of the "Reciprocal space navigation" window (one button selects the current image for the chosen refllection; with the other you can jump to the image which was previously selected for the reflection). Usually the HKL values are wrong when you add a reflection. This can be overridden in the table in the Reciprocal space navigation window. To calculate the matrix click "calculate U".
-This function also works with only one reference reflection by assuming that the L axis is pointing towards the z/azimuth-direction (Enable View->machine parameters to display a marker at the z-direction). For other geometries you need at least 2 reference reflections.
-So what I ususally do is to search for a nicely visible reflection close to L = 0 (Either a Bragg reflection or a CTR at L = 0 usually work fine.)
+2. Conventional setting of matrix using reference reflections (Busing & Levy): The images and the window "Reciprocal space navigation" is used for that. Double clicking at any position in the image will set a red reference reflection at this specific image. The position of the marker on the image defines the scattering angles and the image number gives the sample rotation angle (i.e. theta) of the reference reflection. You can drag+drop the marker around in the image and the image number can be changed with the two buttons in the top right corner of the "Reciprocal space navigation" window (one button selects the current image for the chosen refllection; with the other you can jump to the image which was previously selected for the reflection). Usually the HKL values are wrong when you add a reflection. This can be overridden in the table in the Reciprocal space navigation window. To calculate the matrix click "calculate U". This function also works with only one reference reflection by assuming that the L axis is pointing towards the z/azimuth-direction (Enable View->machine parameters to display a marker at the z-direction). For other geometries you need at least 2 reference reflections. So what I ususally do is to search for a nicely visible reflection close to L = 0 (Either a Bragg reflection or a CTR at L = 0 usually work fine.)
 
 When the matrix is set correctly, the calculated CTR reflections (Enable View->CTR reflections) should match up with the ones in the data when you change the active image.
 To integrate a stationary scan (i.e. for each image, find the intersection of the CTR with the image and integrate a ROI around it), use hklscan in the ROI integration tab on the left side. To visualize the ROI on the image, enable View-> show ROI. Lorentz correction is not yet automatically applied here! Setting a pixel mask works by using the mask tool at the top of the image view (it is the mask icon).
