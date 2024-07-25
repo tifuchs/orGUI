@@ -43,7 +43,7 @@ A detailed documentation is not yet available, but will be provided in a future 
    
 |diffractometer|
 
-orGUI uses the diffractometer convention by Lohmeier & Vlieg 1993 (`https://doi.org/10.1107/S0021889893004868 <https://doi.org/10.1107/S0021889893004868>`_). However, the phi-circle rotates around the y-axis instead of the z-axis!. The azimuth angle in "machine parameters" rotates the whole diffractometer around the primary beam direction. Also theta = -omega. (Since at ID31 this rotation is right-handed).
+orGUI uses the diffractometer convention by Lohmeier & Vlieg 1993 (`https://doi.org/10.1107/S0021889893004868 <https://doi.org/10.1107/S0021889893004868>`_). However, the phi-circle rotates around the x-axis instead of the z-axis!. The azimuth angle in "machine parameters" rotates the whole diffractometer around the primary beam direction. Also theta = -omega. (Since at ID31 this rotation is right-handed).
 xyz in lab frame is: y along beam direction, z along direction defined by azimuth (when azimuth = 90°, z points upwards), x perpendicular to both. 
 
 
