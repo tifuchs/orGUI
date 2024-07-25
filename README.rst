@@ -15,7 +15,7 @@ Its primary usecase is High Energy Surface X-ray Diffraction (`HESXRD <https://d
 
 Intensity integration is possible along arbitrary directions in reciprocal space (in reciprocal lattice coordinates (*h k l*)). Stationary and rocking scans can be integrated. 
 In addition, the crystal orientation obtained by *orGUI* can be used for further processing with other software such as `binoculars <https://github.com/id03/binoculars>`_, which is described `here <https://doi.org/10.1107/S1600576715009607>`_. 
-Examples for the application of orGUI and binoculars for CTR data analysis is described in the Supporting Information of `this <https://doi.org/10.1002/anie.202304293>`_ paper or the Methods section of `this <https://doi.org/10.1038/s41929-020-0497-y>`_ paper.
+Examples for the application of orGUI and binoculars for CTR data analysis is described in the Supporting Information of `this <https://doi.org/10.1002/anie.202304293>`__ paper or the Methods section of `this <https://doi.org/10.1038/s41929-020-0497-y>`__ paper.
 
 
 Installation

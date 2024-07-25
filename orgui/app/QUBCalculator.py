@@ -413,7 +413,12 @@ class QUBCalculator(qt.QSplitter):
             self.detectorCal = DetectorCalibration.Detector2D_SXRD()
             if 'poni' in machine:
                 if machine['poni']:
-                    self.detectorCal.load(machine['poni'])
+                    if os.path.isabs(machine['poni']):
+                        ponipath = machine['poni']
+                    else:
+                        p = os.path.abspath(configfile)
+                        ponipath = os.path.join(os.path.dirname(p), machine['poni'])
+                    self.detectorCal.load(ponipath)
                     self.ubCal.setLambda(self.detectorCal.get_wavelength()*1e10)
                     
                 else:

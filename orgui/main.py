@@ -29,7 +29,7 @@ __author__ = "Timo Fuchs"
 __copyright__ = "Copyright 2020-2024 Timo Fuchs"
 __credits__ = []
 __license__ = "MIT License"
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
@@ -69,7 +69,7 @@ def main():
     if options.opengl:
         silx.config.DEFAULT_PLOT_BACKEND = "opengl"
 
-    if os.path.isfile(options.configfile):
+    if os.path.isfile(options.configfile) or options.configfile == defaultconfigfile:
         app = qt.QApplication(sys.argv)
         app.setApplicationName("orGUI")
         from .resources import getSplashScreen
