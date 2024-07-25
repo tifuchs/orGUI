@@ -74,7 +74,7 @@ setup(name='orgui', version='1.0.0',
       author="Timo Fuchs",
       author_email="fuchs@physik.uni-kiel.de",
       url='FIXME',
-      license='All rights reserved',
+      license='MIT License',
       install_requires=[
       'numpy >= 1.12',
       'scipy >= 1.0',

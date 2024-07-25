@@ -1,0 +1,73 @@
+[project]
+name = 'orGUI'
+dynamic = ['version',]
+license = {text = "MIT License"}
+requires-python = '>=3.7'
+readme = 'README.rst'
+description = 'orGUI: Orientation and Integration with 2D detectors'
+
+authors = [
+  { name = 'Timo Fuchs', email = 'fuchs@physik.uni-kiel.de' }
+]
+classifiers = [
+    'Development Status :: 5 - Production/Stable',
+    'Environment :: Win32 (MS Windows)',
+	'Environment :: X11 Applications :: Qt',
+    'Intended Audience :: End Users/Desktop',
+    'Intended Audience :: Developers',
+    'Intended Audience :: Science/Research',
+    "License :: OSI Approved :: MIT License",
+    'Operating System :: MacOS :: MacOS X',
+    'Operating System :: Microsoft :: Windows',
+    'Operating System :: POSIX',
+    'Programming Language :: Cython',
+    'Programming Language :: Python',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: Implementation :: CPython',
+    'Topic :: Scientific/Engineering :: Chemistry',
+    'Topic :: Scientific/Engineering :: Physics',
+    'Topic :: Scientific/Engineering :: Visualization',
+    'Topic :: Software Development :: Libraries :: Python Modules'
+]
+
+dependencies = [
+	'numpy >= 1.12',
+	'scipy >= 1.0',
+	'matplotlib >= 1.2',
+	'fabio >= 0.7',
+	'silx >= 1.1',
+	'pyFAI >= 0.19',
+	'pymca >= 5.3',
+	'xraydb >= 4.0',
+	'pytz >= 2022'
+]
+
+[project.optional-dependencies]
+console = ['qtconsole']
+
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+# All the following settings are optional:
+where = ["."]  # ["."] by default
+include = ["orgui*"]  # ["*"] by default
+exclude = ["orgui.datautils.xrayutils.tests*"]  # empty by default
+namespaces = false  # true by default
+
+[project.scripts] #
+orGUI='orgui.main:main'
+
+[tool.setuptools.dynamic]
+version = {attr = "orGUI.__version__"}
+
+[tool.setuptools]
+# ...
+# By default, include-package-data is true in pyproject.toml, so you do
+# NOT have to specify this line.
+include-package-data = false
+
+[tool.setuptools.package-data]
+"orgui.resources.icons" = ['*.svg','*.png']
+"orgui.datautils.xrayutils.unitcells" = ['*.bul', '*.sur', '*.xtal', '*.xpr']
