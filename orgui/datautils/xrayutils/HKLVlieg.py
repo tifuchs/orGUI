@@ -293,7 +293,7 @@ class Lattice(object):
     def alpha(self, alpha):
         self._alpha = np.asarray(alpha)
         self._b, self._beta = Lattice._calcReciprocalLattice(self._a, self._alpha)
-        self.volume = (np.product(self._a) *
+        self.volume = (np.prod(self._a) *
                np.sqrt(1 + 2 * np.cos(self._alpha[0]) * np.cos(self._alpha[1]) * np.cos(self._alpha[2]) -
                np.cos(self._alpha[0]) ** 2 - np.cos(self._alpha[1]) ** 2 - np.cos(self._alpha[2]) ** 2))
         self.uc_area = self._a[0]*self._a[1]*np.sin(self._alpha[2]) #unit cell area
@@ -384,7 +384,7 @@ class Lattice(object):
         
         b = np.empty(3)
         
-        volume = (np.product(a) *
+        volume = (np.prod(a) *
           np.sqrt(1 + 2 * np.cos(alpha[0]) * np.cos(alpha[1]) * np.cos(alpha[2]) -
                np.cos(alpha[0]) ** 2 - np.cos(alpha[1]) ** 2 - np.cos(alpha[2]) ** 2))
         
