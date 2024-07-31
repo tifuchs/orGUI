@@ -11,7 +11,7 @@ orGUI is a software that can be used to determine the orientation of single crys
 from the observation of few reflections on a large, statinary 2D detector. 
 The settings of a 4-circle sample positioning stage as used for surface X-ray diffraction can be calculated. 
 
-Its primary usecase is High Energy Surface X-ray Diffraction (`HESXRD <https://doi.org/10.1126/science.1246834>`_) or Transmission Surface Diffraction. 
+Its primary usecase is High Energy Surface X-ray Diffraction (`HESXRD <https://doi.org/10.1126/science.1246834>`_) or Transmission Surface Diffraction (`TSD <https://doi.org/10.1021/acs.jpclett.7b00332>`_). 
 
 Intensity integration is possible along arbitrary directions in reciprocal space (in reciprocal lattice coordinates (*h k l*)). Stationary and rocking scans can be integrated. 
 In addition, the crystal orientation obtained by *orGUI* can be used for further processing with other software such as `binoculars <https://github.com/id03/binoculars>`_, which is described `here <https://doi.org/10.1107/S1600576715009607>`_. 
@@ -32,6 +32,28 @@ To install orGUI with a minimal set of dependencies, run:
 .. code-block:: bash
 
     pip install orGUI
+	
+Getting started
+---------------
+
+*orGUI* can be started by the shell command `orGUI`. *orGUI* can also be started preconfigured with a configuration file `<configfile>` by typing
+
+.. code-block:: bash
+
+   orGUI <configfile>
+   
+All configuration is accessible in the user interface in the menu `Config->Machine parameters` and `Config->Crystal parameters`. 
+Examples of configuration files are provided with the `source code <https://doi.org/10.5281/zenodo.12592485>`_.
+
+*orGUI* is designed to handle data, which is saved in a `NEXUS <https://doi.org/10.1107/S1600576714027575 >`_ format or a combination of `SPEC <https://certif.com/spec.html>`_ files and separately saved image files. 
+The file browser on the left side of orGUI shows the contents of the NEXUS or SPEC file, which typically contain multiple scans. Double clicking a scan in the file browser will open the specified scan.
+
+Data is typically saved differently (i.e. counter names, image locations, etc.) at different beamlines. Backends for loading scan data currently only exists for ID31 at the ESRF and P21.2 at DESY. 
+Loading data from other beamlines requires writing a new backend, which handles the loading of the scan data. The backends are located in `orgui/backend` of the source directory. 
+Documentation about writing new backends will follow in a future release. Please create an issue on Github or write an Email for help on writing a new backend.
+
+A simplistic backend for loading of bare image data without meta data information is available under `file->Generate scan from images`. 
+
 
 Documentation
 -------------
@@ -43,9 +65,11 @@ A detailed documentation is not yet available, but will be provided in a future 
    
 |diffractometer|
 
-orGUI uses the diffractometer convention by Lohmeier & Vlieg 1993 (`https://doi.org/10.1107/S0021889893004868 <https://doi.org/10.1107/S0021889893004868>`_). However, the phi-circle rotates around the x-axis instead of the z-axis!. The azimuth angle in "machine parameters" rotates the whole diffractometer around the primary beam direction. Also :math:`$\theta = - \omega$`. (Since at ID31 the :math:`$\theta$` rotation is right-handed).
+orGUI uses the diffractometer convention by `Lohmeier & Vlieg 1993 <https://doi.org/10.1107/S0021889893004868>`_. However, the phi-circle rotates around the x-axis instead of the z-axis!. The azimuth angle in "machine parameters" rotates the whole diffractometer around the primary beam direction. Also :math:`$\theta = - \omega$`. (Since at ID31 the :math:`$\theta$` rotation is right-handed).
 xyz in lab frame is: y along beam direction, z along direction defined by azimuth (when azimuth = 90°, z points upwards), x perpendicular to both. 
-
+The detector geometry of orGUI is adapted from the commonly used python package `pyFAI <https://pyfai.readthedocs.io/en/stable/>`_, which enables comprehensive detector geometry calibration.
+It is recommended to determine the position of the X-ray detector from the Debye-Scherrer rings of a X-ray diffraction calibration standard such as CeO2 with the `geometry calibration tools <https://pyfai.readthedocs.io/en/stable/usage/cookbook/calib-gui/index.html>`_ of pyFAI.
+These can be loaded in orGUI
 
 Here is a simplistic description of the usual workflow for crystal truncation rod integration (a more complete manual will follow): 
 
