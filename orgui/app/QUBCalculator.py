@@ -50,7 +50,8 @@ from ..backend import udefaults
 from .. import resources
 from . import qutils
 
-from pyFAI.gui.dialog import GeometryDialog, DetectorSelectorDialog
+from pyFAI.gui.dialog import DetectorSelectorDialog
+from pyFAI.gui.widgets import GeometryTabs
 
 @contextmanager
 def blockSignals(qobjects):
@@ -481,7 +482,6 @@ class QUBCalculator(qt.QSplitter):
                      self.polfactor,self.azimuth,self.chi,self.phi, self.detectorCal]
         self.crystalparams.setValues(self.crystal,self.n)
         self.machineParams.setValues(paramlist)
-        self.machineParams.set_detector(self.detectorCal)
         
         
         
@@ -1124,14 +1124,12 @@ class QMachineParameters(qt.QWidget):
         
         detector_box.setLayout(detector_panel_layout)
         
-        self.geometryDialog = GeometryDialog.GeometryDialog()
-        self.geometryDialog.setWindowFlags(qt.Qt.Widget)
-        self.geometryDialog._buttonBox.hide() # a little bit hacky here... 
-        self.geometryDialog.geometryModel().changed.connect(lambda: print("changed model"))
+        self.geometryTabs = GeometryTabs.GeometryTabs()
+        self.geometryTabs.geometryModel().changed.connect(lambda: print("changed model"))
         
         horizontal_layout.addWidget(detector_box)
         horizontal_layout.addWidget(old_box)
-        horizontal_layout.addWidget(self.geometryDialog)
+        horizontal_layout.addWidget(self.geometryTabs)
         
         self.setLayout(horizontal_layout)
         
@@ -1141,8 +1139,7 @@ class QMachineParameters(qt.QWidget):
             try:
                 az = pyFAI.load(f)
                 #self._detectorDialog.selectDetector(az.detector)
-                self.set_detector(az.detector)
-                model = self.geometryDialog.geometryModel()
+                model = self.geometryTabs.geometryModel()
                 model.lockSignals()
                 model.distance().setValue(az.get_dist())
                 model.poni1().setValue(az.get_poni1())
@@ -1150,14 +1147,16 @@ class QMachineParameters(qt.QWidget):
                 model.rotation1().setValue(az.get_rot1())
                 model.rotation2().setValue(az.get_rot2())
                 model.rotation3().setValue(az.get_rot3())
+                model.wavelength().setValue(az.get_wavelength())
                 model.unlockSignals()
+                self.set_detector(az.detector)
                 self._onAnyValueChanged()
                 
             except Exception:
                 qt.QMessageBox.warning(self,"Cannot load calibration","Cannot load poni file:\n%s" % str(traceback.format_exc()))
         
     def set_detector(self, detector):
-        self.geometryDialog.setDetector(detector)
+        self.geometryTabs.setDetector(detector)
         self._detectorSizeUnit.setVisible(detector is not None)
         if detector is None:
             self._detectorLabel.setStyleSheet("QLabel { color: red }")
@@ -1199,7 +1198,7 @@ class QMachineParameters(qt.QWidget):
         
     def get_SXRD_geometry(self):
         detectorCal = DetectorCalibration.Detector2D_SXRD()
-        model = self.geometryDialog.geometryModel()
+        model = self.geometryTabs.geometryModel()
         dist = model.distance().value()
         poni1 = model.poni1().value()
         poni2 = model.poni2().value()
@@ -1213,7 +1212,7 @@ class QMachineParameters(qt.QWidget):
                           rot1=rot1,
                           rot2=rot2,
                           rot3=rot3,
-                          detector=self._detector,
+                          detector=self.get_detector(),
                           wavelength=wavelength)
         azim = np.deg2rad(self.azimbox.value())
         polax = np.deg2rad(self.polaxbox.value())
@@ -1252,7 +1251,7 @@ class QMachineParameters(qt.QWidget):
             self.polaxbox.setValue(np.rad2deg(polax))
             self.azimbox.setValue(np.rad2deg(azim))
             self.polfbox.setValue(polf)
-        model = self.geometryDialog.geometryModel()
+        model = self.geometryTabs.geometryModel()
         model.lockSignals()
         model.distance().setValue(detCal.dist)
         model.poni1().setValue(detCal.poni1)
@@ -1260,7 +1259,9 @@ class QMachineParameters(qt.QWidget):
         model.rotation1().setValue(detCal.rot1)
         model.rotation2().setValue(detCal.rot2)
         model.rotation3().setValue(detCal.rot3)
+        model.wavelength().setValue(detCal.wavelength)
         model.unlockSignals()
+        self.set_detector(detCal.detector)
         #self._onAnyValueChanged()
         
     def getParameters(self):
