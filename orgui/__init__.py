@@ -29,7 +29,7 @@ __author__ = "Timo Fuchs"
 __copyright__ = "Copyright 2020-2024 Timo Fuchs"
 __credits__ = []
 __license__ = "MIT License"
-__version__ = "1.0.1"
+__version__ = "1.1.0a"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
