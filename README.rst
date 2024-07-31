@@ -45,7 +45,7 @@ Getting started
 All configuration is accessible in the user interface in the menu `Config->Machine parameters` and `Config->Crystal parameters`. 
 Examples of configuration files are provided with the `source code <https://doi.org/10.5281/zenodo.12592485>`_.
 
-*orGUI* is designed to handle data, which is saved in a `NEXUS <https://doi.org/10.1107/S1600576714027575 >`_ format or a combination of `SPEC <https://certif.com/spec.html>`_ files and separately saved image files. 
+*orGUI* is designed to handle data, which is saved in a `NEXUS <https://doi.org/10.1107/S1600576714027575>`_ format or a combination of `SPEC <https://certif.com/spec.html>`_ files and separately saved image files. 
 The file browser on the left side of orGUI shows the contents of the NEXUS or SPEC file, which typically contain multiple scans. Double clicking a scan in the file browser will open the specified scan.
 
 Data is typically saved differently (i.e. counter names, image locations, etc.) at different beamlines. Backends for loading scan data currently only exists for ID31 at the ESRF and P21.2 at DESY. 
@@ -69,7 +69,7 @@ orGUI uses the diffractometer convention by `Lohmeier & Vlieg 1993 <https://doi.
 xyz in lab frame is: y along beam direction, z along direction defined by azimuth (when azimuth = 90°, z points upwards), x perpendicular to both. 
 The detector geometry of orGUI is adapted from the commonly used python package `pyFAI <https://pyfai.readthedocs.io/en/stable/>`_, which enables comprehensive detector geometry calibration.
 It is recommended to determine the position of the X-ray detector from the Debye-Scherrer rings of a X-ray diffraction calibration standard such as CeO2 with the `geometry calibration tools <https://pyfai.readthedocs.io/en/stable/usage/cookbook/calib-gui/index.html>`_ of pyFAI.
-These can be loaded in orGUI
+The resulting `poni` file can currently only be loaded in orGUI by setting the `poni` parameter in the `Machine` section of the orGUI config file to the poni file location. The orGUI config file must then be loaded.
 
 Here is a simplistic description of the usual workflow for crystal truncation rod integration (a more complete manual will follow): 
 
