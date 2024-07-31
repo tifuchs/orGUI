@@ -25,13 +25,13 @@
 __author__ = "Timo Fuchs"
 __copyright__ = "Copyright 2020-2024 Timo Fuchs"
 __license__ = "MIT License"
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
 from io import StringIO
 from silx.gui import qt
-import pyFAI
+import pyFAI, pyFAI.detectors
 import numpy as np
 
 import traceback
@@ -49,6 +49,8 @@ from .ArrayTableDialog import ArrayEditWidget
 from ..backend import udefaults
 from .. import resources
 from . import qutils
+
+from pyFAI.gui.dialog import GeometryDialog, DetectorSelectorDialog
 
 @contextmanager
 def blockSignals(qobjects):
@@ -285,7 +287,7 @@ class QUBCalculator(qt.QSplitter):
         self.sigReplotRequest.emit(True)
     
     def _onMachineParamsChanged(self,params):
-        [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi] = params
+        [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi,detCal] = params
         self.mu = mu
         self.chi = chi
         self.phi = phi
@@ -438,9 +440,10 @@ class QUBCalculator(qt.QSplitter):
 
             paramlist = [self.ubCal.getEnergy(),self.mu,fit2dCal['directDist']/1e3,
                          fit2dCal['pixelX']*1e-6,[fit2dCal['centerX'],fit2dCal['centerY']],self.polaxis
-                         ,self.polfactor,self.azimuth,self.chi,self.phi]
+                         ,self.polfactor,self.azimuth,self.chi,self.phi, self.detectorCal]
             self.crystalparams.setValues(self.crystal,self.n)
             self.machineParams.setValues(paramlist)
+            self.machineParams.set_detector(self.detectorCal.detector)
             return True
             
         except Exception as e:
@@ -475,9 +478,10 @@ class QUBCalculator(qt.QSplitter):
         self.angles = HKLVlieg.VliegAngles(self.ubCal)
         paramlist = [self.ubCal.getEnergy(),self.mu,fit2dCal['directDist']/1e3,
                      fit2dCal['pixelX']*1e-6,[fit2dCal['centerX'],fit2dCal['centerY']],self.polaxis,
-                     self.polfactor,self.azimuth,self.chi,self.phi]
+                     self.polfactor,self.azimuth,self.chi,self.phi, self.detectorCal]
         self.crystalparams.setValues(self.crystal,self.n)
         self.machineParams.setValues(paramlist)
+        self.machineParams.set_detector(self.detectorCal)
         
         
         
@@ -958,7 +962,14 @@ class QMachineParameters(qt.QWidget):
     def __init__(self,parent=None):
         qt.QWidget.__init__(self, parent=None)
         
+        self._detector = None
+        self._detectorDialog = DetectorSelectorDialog.DetectorSelectorDialog(self)
+        
         #[E,mu,sdd,pixsize,cp,chi,phi] = params
+        
+        horizontal_layout = qt.QHBoxLayout(self)        
+        
+        old_box = qt.QGroupBox("Experimental settings", self)
         
         mainLayout = qt.QGridLayout()
         
@@ -1074,10 +1085,157 @@ class QMachineParameters(qt.QWidget):
         self.azimbox.valueChanged.connect(self._onAnyValueChanged)
         self.polfbox.valueChanged.connect(self._onAnyValueChanged)
         
-        self.setLayout(mainLayout)
+        old_box.setLayout(mainLayout)
+        
+        detector_box = qt.QGroupBox("Detector", self)
+        
+        self._selectDetectorBtn = qt.QPushButton("...")
+        self._selectDetectorBtn.clicked.connect(self._onSelectDetector)
+        
+        self._detectorLabel = qt.QLabel("No detector")
+        self._detectorSize = qt.QLabel("")
+        self._detectorPixelSize = qt.QLabel("")
+        self._detectorFileDescription = qt.QLabel("")
+        self._detectorFileDescriptionTitle = qt.QLabel("")
+        self._detectorSizeUnit = qt.QLabel("px")
+        self._detectorSizeUnit.setVisible(False)
+        
+        self._detectorLabel.setStyleSheet("QLabel { color: red }")
+        self._detectorFileDescription.setVisible(False)
+        self._detectorFileDescriptionTitle.setVisible(False)
+        
+        detector_panel_layout = qt.QGridLayout(self)
+        
+        detector_panel_layout.addWidget(qt.QLabel("Name:"),0,0)
+        detector_panel_layout.addWidget(self._detectorLabel,0,1)
+        detector_panel_layout.addWidget(self._selectDetectorBtn, 0, 2)
+        
+        detector_panel_layout.addWidget(qt.QLabel("Size (hxw):"),1,0)
+        detector_panel_layout.addWidget(self._detectorSize, 1, 1)
+        detector_panel_layout.addWidget(self._detectorSizeUnit,1,2)
+        
+        detector_panel_layout.addWidget(qt.QLabel("Pixel Size (hxw):"),2,0)
+        detector_panel_layout.addWidget(self._detectorPixelSize, 2, 1)
+        detector_panel_layout.addWidget(qt.QLabel(u"\u03BCm"), 2, 2)
+
+        detector_panel_layout.addWidget(self._detectorFileDescription, 3, 0)
+        detector_panel_layout.addWidget(self._detectorFileDescriptionTitle, 4, 0)
+        
+        
+        detector_box.setLayout(detector_panel_layout)
+        
+        self.geometryDialog = GeometryDialog.GeometryDialog()
+        self.geometryDialog.setWindowFlags(qt.Qt.Widget)
+        self.geometryDialog._buttonBox.hide() # a little bit hacky here... 
+        self.geometryDialog.geometryModel().changed.connect(lambda: print("changed model"))
+        
+        horizontal_layout.addWidget(detector_box)
+        horizontal_layout.addWidget(old_box)
+        horizontal_layout.addWidget(self.geometryDialog)
+        
+        self.setLayout(horizontal_layout)
+        
+    def _onLoadPoni(self):
+        f,_ = qt.QFileDialog.getOpenFileName(self,"Open PyFAI calibration file","","PyFAI poni file (*.poni), All files (*)")
+        if f != '':
+            try:
+                az = pyFAI.load(f)
+                #self._detectorDialog.selectDetector(az.detector)
+                self.set_detector(az.detector)
+                model = self.geometryDialog.geometryModel()
+                model.lockSignals()
+                model.distance().setValue(az.get_dist())
+                model.poni1().setValue(az.get_poni1())
+                model.poni2().setValue(az.get_poni2())
+                model.rotation1().setValue(az.get_rot1())
+                model.rotation2().setValue(az.get_rot2())
+                model.rotation3().setValue(az.get_rot3())
+                model.unlockSignals()
+                self._onAnyValueChanged()
+                
+            except Exception:
+                qt.QMessageBox.warning(self,"Cannot load calibration","Cannot load poni file:\n%s" % str(traceback.format_exc()))
+        
+    def set_detector(self, detector):
+        self.geometryDialog.setDetector(detector)
+        self._detectorSizeUnit.setVisible(detector is not None)
+        if detector is None:
+            self._detectorLabel.setStyleSheet("QLabel { color: red }")
+            self._detectorLabel.setText("No detector")
+            self._detectorSize.setText("")
+            self._detectorPixelSize.setText("")
+            self._detectorFileDescription.setVisible(False)
+            self._detectorFileDescriptionTitle.setVisible(False)
+        else:
+            self._detectorLabel.setStyleSheet("QLabel { }")
+            self._detectorLabel.setText(detector.name)
+            text = [str(s) for s in detector.max_shape]
+            text = u" × ".join(text)
+            self._detectorSize.setText(text)
+            try:
+                text = ["%0.1f" % (s * 10 ** 6) for s in [detector.pixel1, detector.pixel2]]
+                text = u" × ".join(text)
+            except Exception as e:
+                # Is heterogeneous detectors have pixel size?
+                #_logger.debug(e, exc_info=True)
+                text = "N.A."
+            self._detectorPixelSize.setText(text)
+
+            if detector.HAVE_TAPER or detector.__class__ == pyFAI.detectors.Detector:
+                fileDescription = detector.get_splineFile()
+            elif isinstance(detector, pyFAI.detectors.NexusDetector):
+                fileDescription = detector.filename
+            else:
+                fileDescription = None
+            if fileDescription is not None:
+                fileDescription = fileDescription.strip()
+            if fileDescription == "":
+                fileDescription = None
+
+            self._detectorFileDescription.setVisible(fileDescription is not None)
+            self._detectorFileDescriptionTitle.setVisible(fileDescription is not None)
+            self._detectorFileDescription.setText(fileDescription if fileDescription else "")
+        self._detector = detector
+        
+    def get_SXRD_geometry(self):
+        detectorCal = DetectorCalibration.Detector2D_SXRD()
+        model = self.geometryDialog.geometryModel()
+        dist = model.distance().value()
+        poni1 = model.poni1().value()
+        poni2 = model.poni2().value()
+        rot1 = model.rotation1().value()
+        rot2 = model.rotation2().value()
+        rot3 = model.rotation3().value()
+        wavelength = model.wavelength().value()
+        detectorCal.setPyFAI(dist=dist,
+                          poni1=poni1,
+                          poni2=poni2,
+                          rot1=rot1,
+                          rot2=rot2,
+                          rot3=rot3,
+                          detector=self._detector,
+                          wavelength=wavelength)
+        azim = np.deg2rad(self.azimbox.value())
+        polax = np.deg2rad(self.polaxbox.value())
+        polf = self.polfbox.value()
+        detectorCal.setAzimuthalReference(azim)
+        detectorCal.setPolarization(polax,polf)
+        return detectorCal
+        
+    def get_detector(self):
+        return self._detector
+        
+    def _onSelectDetector(self):
+        detector = self.get_detector()
+        self._detectorDialog.selectDetector(detector)
+        if self._detectorDialog.exec():
+            newdetector = self._detectorDialog.selectedDetector()
+            self.set_detector(newdetector)
+            self._onAnyValueChanged()
+            
         
     def setValues(self,params):
-        [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi] = params
+        [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi, detCal] = params
         signList = [self.Ebox, self.SDDbox, self.mubox,
                     self.chibox, self.cpXbox, self.cpYbox,
                     self.pixsizebox, self.phibox, self.polaxbox,
@@ -1094,7 +1252,16 @@ class QMachineParameters(qt.QWidget):
             self.polaxbox.setValue(np.rad2deg(polax))
             self.azimbox.setValue(np.rad2deg(azim))
             self.polfbox.setValue(polf)
-        self._onAnyValueChanged()
+        model = self.geometryDialog.geometryModel()
+        model.lockSignals()
+        model.distance().setValue(detCal.dist)
+        model.poni1().setValue(detCal.poni1)
+        model.poni2().setValue(detCal.poni2)
+        model.rotation1().setValue(detCal.rot1)
+        model.rotation2().setValue(detCal.rot2)
+        model.rotation3().setValue(detCal.rot3)
+        model.unlockSignals()
+        #self._onAnyValueChanged()
         
     def getParameters(self):
         E = self.Ebox.value()
@@ -1107,7 +1274,8 @@ class QMachineParameters(qt.QWidget):
         azim = np.deg2rad(self.azimbox.value())
         polax = np.deg2rad(self.polaxbox.value())
         polf = self.polfbox.value()
-        return [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi]
+        detCal = self.get_SXRD_geometry()
+        return [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi, detCal]
         
     def _onAnyValueChanged(self):
         self.sigMachineParamsChanged.emit(self.getParameters())
@@ -1123,7 +1291,7 @@ class QMachineParametersDialog(qt.QDialog):
         layout = qt.QVBoxLayout()
         layout.addWidget(machineparams)
         
-        self.savedParams = self.machineparams.getParameters()
+        self.savedParams = None
         
         buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel | qt.QDialogButtonBox.Reset,
                                       qt.Qt.Horizontal)
