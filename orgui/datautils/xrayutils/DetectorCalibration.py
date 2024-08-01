@@ -208,10 +208,16 @@ class Detector2D_SXRD(geometry.Geometry):
         self._deltaChi = copy.copy(deltaChi)
         self._cached_array = {}
         
+    def getAzimuthalReference(self):
+        return self._deltaChi
+        
     def setPolarization(self,angle,factor):
         self._polAxis = angle
         self._polFactor = factor
         self._cached_array = {}
+        
+    def getPolarization(self):
+        return self._polAxis, self._polFactor
         
     def primBeamAngles(self,shape=None):
         """gives angles in laboratory reference frame.

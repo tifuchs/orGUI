@@ -66,6 +66,11 @@ def blockSignals(qobjects):
         yield
         qobject.blockSignals(False)
 
+@contextmanager
+def disconnectTemporarily(signal, reciever):
+    signal.disconnect(reciever)
+    yield
+    signal.connect(reciever)
 
 
 # reflectionhandler must implement the method getReflections
@@ -288,33 +293,24 @@ class QUBCalculator(qt.QSplitter):
         self.sigReplotRequest.emit(True)
     
     def _onMachineParamsChanged(self,params):
-        [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi,detCal] = params
-        self.mu = mu
-        self.chi = chi
-        self.phi = phi
-        self.ubCal.setEnergy(E)
-        fit2DCal = self.detectorCal.getFit2D()
-        fit2DCal['centerX'] = cp[0]
-        fit2DCal['centerY'] = cp[1]
-        fit2DCal['directDist'] = sdd*1e3
-        f2d = [fit2DCal['directDist'],
-               fit2DCal['centerX'],
-               fit2DCal['centerY'],
-               fit2DCal['tilt'],
-               fit2DCal['tiltPlanRotation'],
-               pixsize*1e6,
-               pixsize*1e6,
-               fit2DCal['splineFile']]
-        self.detectorCal.setFit2D(*f2d)
-        self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+        diffrac = params['diffractometer']
+        self.mu = diffrac['mu']
+        self.chi = diffrac['chi']
+        self.phi = diffrac['phi']
+        self.ubCal.setEnergy(params['source']['E'])
+        detCal = params['SXRD_geometry']
+        self.detectorCal.set_config(detCal.get_config())
+        
+        azim = detCal.getAzimuthalReference()
+        polax, polf = detCal.getPolarization()
         self.detectorCal.setAzimuthalReference(azim)
         self.azimuth = azim
         self.detectorCal.setPolarization(polax,polf)
-        self.crystal.setEnergy(E*1e3)
+        self.crystal.setEnergy(params['source']['E']*1e3)
         
         angles_u = self.uedit.cached_angles
 
-        self.uedit.setAngles(mu, chi, phi, angles_u[-1])
+        self.uedit.setAngles(self.mu, self.chi, self.phi, angles_u[-1])
         
         try:
             self.sigPlottableMachineParamsChanged.emit()
@@ -357,9 +353,9 @@ class QUBCalculator(qt.QSplitter):
             lattice = config['Lattice']
             diffrac = config['Diffractometer']
             
-            self.azimuth = np.deg2rad(diffrac.getfloat('azimuthal_reference',0))
-            self.polaxis = np.deg2rad(diffrac.getfloat('polarization_axis',0))
-            self.polfactor = diffrac.getfloat('polarization_factor',0)
+            azimuth = np.deg2rad(diffrac.getfloat('azimuthal_reference',0))
+            polaxis = np.deg2rad(diffrac.getfloat('polarization_axis',0))
+            polfactor = diffrac.getfloat('polarization_factor',0)
             
             sdd = machine.getfloat('SDD',0.729) #m
             E =  machine.getfloat('E',78.0) #keV
@@ -434,17 +430,24 @@ class QUBCalculator(qt.QSplitter):
                 self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
                 self.detectorCal.detector.shape = (2880,2880)
                 
-            self.detectorCal.setAzimuthalReference(self.azimuth)
-            self.detectorCal.setPolarization(self.polaxis,self.polfactor)
+            self.detectorCal.setAzimuthalReference(azimuth)
+            self.detectorCal.setPolarization(polaxis,polfactor)
             
-            fit2dCal = self.detectorCal.getFit2D()
+            #fit2dCal = self.detectorCal.getFit2D()
+            settings = {'diffractometer' : {
+                    'mu' : self.mu,
+                    'phi' : self.phi,
+                    'chi' : self.chi
+                },
+                'source' :  {
+                    'E' : E
+                },
+                'SXRD_geometry' : self.detectorCal
+            }
 
-            paramlist = [self.ubCal.getEnergy(),self.mu,fit2dCal['directDist']/1e3,
-                         fit2dCal['pixelX']*1e-6,[fit2dCal['centerX'],fit2dCal['centerY']],self.polaxis
-                         ,self.polfactor,self.azimuth,self.chi,self.phi, self.detectorCal]
             self.crystalparams.setValues(self.crystal,self.n)
-            self.machineParams.setValues(paramlist)
-            self.machineParams.set_detector(self.detectorCal.detector)
+            self.machineParams.setValues(settings)
+            #self.machineParams.set_detector(self.detectorCal.detector)
             return True
             
         except Exception as e:
@@ -474,14 +477,22 @@ class QUBCalculator(qt.QSplitter):
         self.detectorCal.detector = pyFAI.detector_factory("Pilatus2m")
         self.detectorCal.setFit2D(sdd*1e3,cp[0],cp[1],pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
         self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
-        
-        fit2dCal = self.detectorCal.getFit2D()
+        self.detectorCal.setAzimuthalReference(np.deg2rad(90.))
+        self.detectorCal.setPolarization(0.,0.)
+
         self.angles = HKLVlieg.VliegAngles(self.ubCal)
-        paramlist = [self.ubCal.getEnergy(),self.mu,fit2dCal['directDist']/1e3,
-                     fit2dCal['pixelX']*1e-6,[fit2dCal['centerX'],fit2dCal['centerY']],self.polaxis,
-                     self.polfactor,self.azimuth,self.chi,self.phi, self.detectorCal]
+        settings = {'diffractometer' : {
+                'mu' : self.mu,
+                'phi' : self.phi,
+                'chi' : self.chi
+            },
+            'source' :  {
+                'E' : E
+            },
+            'SXRD_geometry' : self.detectorCal
+        }
         self.crystalparams.setValues(self.crystal,self.n)
-        self.machineParams.setValues(paramlist)
+        self.machineParams.setValues(settings)
         
         
         
@@ -958,7 +969,7 @@ class QUEditDialog(qt.QDialog):
 
         
 class QMachineParameters(qt.QWidget):
-    sigMachineParamsChanged = qt.pyqtSignal(list)
+    sigMachineParamsChanged = qt.pyqtSignal(dict)
     def __init__(self,parent=None):
         qt.QWidget.__init__(self, parent=None)
         
@@ -967,42 +978,46 @@ class QMachineParameters(qt.QWidget):
         
         #[E,mu,sdd,pixsize,cp,chi,phi] = params
         
-        horizontal_layout = qt.QHBoxLayout(self)        
+        vertical_layout = qt.QVBoxLayout(self)        
         
-        old_box = qt.QGroupBox("Experimental settings", self)
+        diffractometer_box = qt.QGroupBox("Diffractometer settings", self)
+        source_box = qt.QGroupBox("Source settings", self)
         
-        mainLayout = qt.QGridLayout()
+        sourceLayout = qt.QGridLayout()
+        sourceLayout.addWidget(qt.QLabel("Energy:"),0,0)
+        sourceLayout.addWidget(qt.QLabel("Wavelength:"),1,0)
         
-        mainLayout.addWidget(qt.QLabel("Energy:"),0,0)
-        mainLayout.addWidget(qt.QLabel("SDD:"),1,0)
-        mainLayout.addWidget(qt.QLabel("mu:"),2,0)
-        mainLayout.addWidget(qt.QLabel("chi:"),3,0)
-        mainLayout.addWidget(qt.QLabel("azimuth:"),4,0)
-        mainLayout.addWidget(qt.QLabel("Pol factor:"),5,0)
-        
-        mainLayout.addWidget(qt.QLabel("Centr X:"),0,2)
-        mainLayout.addWidget(qt.QLabel("Centr Y:"),1,2)
-        mainLayout.addWidget(qt.QLabel("pixel size:"),2,2)
-        mainLayout.addWidget(qt.QLabel("phi:"),3,2)
-        mainLayout.addWidget(qt.QLabel("polarization axis:"),4,2)
-        
-        self.loadConfigButton = qt.QPushButton("load config",self) 
-        self.loadConfigButton.setToolTip("load machine and crystal configuration from configfile,\naccepts poni file from pyFAI")
-        mainLayout.addWidget(self.loadConfigButton,5,2)
-         
         self.Ebox = qt.QDoubleSpinBox()
         self.Ebox.setRange(0.01,1000)
         self.Ebox.setDecimals(4)
         self.Ebox.setSuffix(u" keV")
         
-        mainLayout.addWidget(self.Ebox,0,1)
+        sourceLayout.addWidget(self.Ebox,0,1)
         
-        self.SDDbox = qt.QDoubleSpinBox()
-        self.SDDbox.setRange(0.001,100)
-        self.SDDbox.setDecimals(4)
-        self.SDDbox.setSuffix(u" m")
-        self.SDDbox.setSingleStep(0.01)
-        mainLayout.addWidget(self.SDDbox,1,1)
+        self.wavelengthBox = qt.QDoubleSpinBox()
+        self.wavelengthBox.setRange(0.001,1000)
+        self.wavelengthBox.setDecimals(4)
+        self.wavelengthBox.setSuffix(u" \u212B")
+        
+        sourceLayout.addWidget(self.wavelengthBox,1,1)
+        
+        source_box.setLayout(sourceLayout)
+        
+        mainLayout = qt.QGridLayout()
+        
+        diffractometerLayout = qt.QGridLayout()
+        
+        
+        #diffractometerLayout.addWidget(qt.QLabel("SDD:"),1,0)
+        diffractometerLayout.addWidget(qt.QLabel("mu:"),0,0)
+        diffractometerLayout.addWidget(qt.QLabel("chi:"),1,0)
+        diffractometerLayout.addWidget(qt.QLabel("phi:"),2,0)
+        diffractometerLayout.addWidget(qt.QLabel("azimuth:"),3,0)
+        diffractometerLayout.addWidget(qt.QLabel("Pol factor:"),4,0)
+        
+        
+        diffractometerLayout.addWidget(qt.QLabel("polarization axis:"),5,0)
+        
         
         self.mubox = qt.QDoubleSpinBox()
         self.mubox.setRange(0,90)
@@ -1010,21 +1025,30 @@ class QMachineParameters(qt.QWidget):
         self.mubox.setDecimals(4)
         self.mubox.setSuffix(u" °")
         
-        mainLayout.addWidget(self.mubox,2,1)
+        diffractometerLayout.addWidget(self.mubox,0,1)
         
         self.chibox = qt.QDoubleSpinBox()
         self.chibox.setRange(0,90)
         self.chibox.setDecimals(4)
         self.chibox.setSuffix(u" °")
         
-        mainLayout.addWidget(self.chibox,3,1)
+        diffractometerLayout.addWidget(self.chibox,1,1)
+        
+        self.phibox = qt.QDoubleSpinBox()
+        self.phibox.setRange(0,90)
+        self.phibox.setDecimals(4)
+        self.phibox.setSuffix(u" °")
+        
+        diffractometerLayout.addWidget(self.phibox,2,1)
+        
+        
         
         self.azimbox = qt.QDoubleSpinBox()
         self.azimbox.setRange(0,360)
         self.azimbox.setDecimals(4)
         self.azimbox.setSuffix(u" °")
         
-        mainLayout.addWidget(self.azimbox,4,1)        
+        diffractometerLayout.addWidget(self.azimbox,3,1)        
 
         self.polfbox = qt.QDoubleSpinBox()
         self.polfbox.setRange(-1,1)
@@ -1032,60 +1056,28 @@ class QMachineParameters(qt.QWidget):
         self.polfbox.setDecimals(4)
         #self.polfbox.setSuffix(u" °")
         
-        mainLayout.addWidget(self.polfbox,5,1)
-        
-        
-        self.cpXbox = qt.QDoubleSpinBox()
-        self.cpXbox.setRange(-100000,100000)
-        self.cpXbox.setDecimals(4)
-        #self.cpXbox.setSuffix(u" keV")
-        
-        mainLayout.addWidget(self.cpXbox,0,3)
-        
-        self.cpYbox = qt.QDoubleSpinBox()
-        self.cpYbox.setRange(-100000,100000)
-        self.cpYbox.setDecimals(4)
-        #self.cpYbox.setSuffix(u" m")
-        
-        mainLayout.addWidget(self.cpYbox,1,3)
-        
-        self.pixsizebox = qt.QDoubleSpinBox()
-        self.pixsizebox.setRange(0.000001,10)
-        self.pixsizebox.setSingleStep(0.01)
-        self.pixsizebox.setDecimals(5)
-        self.pixsizebox.setSuffix(u" mm")
-        
-        mainLayout.addWidget(self.pixsizebox,2,3)
-        
-        self.phibox = qt.QDoubleSpinBox()
-        self.phibox.setRange(0,90)
-        self.phibox.setDecimals(4)
-        self.phibox.setSuffix(u" °")
-        
-        mainLayout.addWidget(self.phibox,3,3)
+        diffractometerLayout.addWidget(self.polfbox,4,1)
         
         self.polaxbox = qt.QDoubleSpinBox()
         self.polaxbox.setRange(0,360)
         self.polaxbox.setDecimals(4)
         self.polaxbox.setSuffix(u" °")
         
-        mainLayout.addWidget(self.polaxbox,4,3)
+        diffractometerLayout.addWidget(self.polaxbox,5,1)
         
         #self.setValues(params)
         
-        self.Ebox.valueChanged.connect(self._onAnyValueChanged)
+        self.Ebox.valueChanged.connect(lambda val: self._onSourceChanged({'E' : val}) )
+        self.wavelengthBox.valueChanged.connect(lambda val: self._onSourceChanged({'wavelength' : val}) )
+        
         self.mubox.valueChanged.connect(self._onAnyValueChanged)
-        self.SDDbox.valueChanged.connect(self._onAnyValueChanged)
-        self.cpXbox.valueChanged.connect(self._onAnyValueChanged)
-        self.cpYbox.valueChanged.connect(self._onAnyValueChanged)
         self.chibox.valueChanged.connect(self._onAnyValueChanged)
         self.phibox.valueChanged.connect(self._onAnyValueChanged)
-        self.pixsizebox.valueChanged.connect(self._onAnyValueChanged)
         self.polaxbox.valueChanged.connect(self._onAnyValueChanged)
         self.azimbox.valueChanged.connect(self._onAnyValueChanged)
         self.polfbox.valueChanged.connect(self._onAnyValueChanged)
         
-        old_box.setLayout(mainLayout)
+        diffractometer_box.setLayout(diffractometerLayout)
         
         detector_box = qt.QGroupBox("Detector", self)
         
@@ -1125,13 +1117,28 @@ class QMachineParameters(qt.QWidget):
         detector_box.setLayout(detector_panel_layout)
         
         self.geometryTabs = GeometryTabs.GeometryTabs()
-        self.geometryTabs.geometryModel().changed.connect(lambda: print("changed model"))
+        self.geometryTabs.geometryModel().changed.connect(self._onAnyValueChanged)
         
-        horizontal_layout.addWidget(detector_box)
-        horizontal_layout.addWidget(old_box)
-        horizontal_layout.addWidget(self.geometryTabs)
+        mainLayout.addWidget(detector_box, 0,0)
+        mainLayout.addWidget(diffractometer_box, 1, 0)
+        mainLayout.addWidget(source_box, 0, 1)
+        mainLayout.addWidget(self.geometryTabs, 1, 1)
         
-        self.setLayout(horizontal_layout)
+        
+        vertical_layout.addLayout(mainLayout)
+        
+        horizonal_buttons_layout = qt.QHBoxLayout()
+        self.loadConfigButton = qt.QPushButton("load config",self) 
+        self.loadConfigButton.setToolTip("load machine and crystal configuration from configfile,\naccepts poni file from pyFAI")
+        horizonal_buttons_layout.addWidget(self.loadConfigButton)
+        
+        self.loadPoniButton = qt.QPushButton("load poni",self) 
+        self.loadPoniButton.clicked.connect(self._onLoadPoni)
+        horizonal_buttons_layout.addWidget(self.loadPoniButton)
+        
+        vertical_layout.addLayout(horizonal_buttons_layout)
+        
+        self.setLayout(vertical_layout)
         
     def _onLoadPoni(self):
         f,_ = qt.QFileDialog.getOpenFileName(self,"Open PyFAI calibration file","","PyFAI poni file (*.poni), All files (*)")
@@ -1139,6 +1146,7 @@ class QMachineParameters(qt.QWidget):
             try:
                 az = pyFAI.load(f)
                 #self._detectorDialog.selectDetector(az.detector)
+                self.set_Xray_source({'wavelength' : az.get_wavelength()*1e10})
                 model = self.geometryTabs.geometryModel()
                 model.lockSignals()
                 model.distance().setValue(az.get_dist())
@@ -1147,16 +1155,40 @@ class QMachineParameters(qt.QWidget):
                 model.rotation1().setValue(az.get_rot1())
                 model.rotation2().setValue(az.get_rot2())
                 model.rotation3().setValue(az.get_rot3())
-                model.wavelength().setValue(az.get_wavelength())
+                #model.wavelength().setValue(az.get_wavelength())
                 model.unlockSignals()
                 self.set_detector(az.detector)
                 self._onAnyValueChanged()
                 
             except Exception:
                 qt.QMessageBox.warning(self,"Cannot load calibration","Cannot load poni file:\n%s" % str(traceback.format_exc()))
+    
+    def set_Xray_source(self, source_config):
+        if 'E' in source_config:
+            E = source_config['E'] # keV
+            wavelength = 12.398419843320026 / E # Angstrom
+        elif 'wavelength' in source_config:
+            wavelength = source_config['wavelength'] # Angstrom
+            E = 12.398419843320026 / wavelength # keV
+        else:
+            raise ValueError("misformed X-ray source settings: requries either E or wavelength, is: %s" % source_config)
         
+        with blockSignals([self.Ebox, self.wavelengthBox]):
+            self.Ebox.setValue(E)
+            self.wavelengthBox.setValue(wavelength)
+        model = self.geometryTabs.geometryModel()
+        with disconnectTemporarily(self.geometryTabs.geometryModel().changed, self._onAnyValueChanged):
+            model.wavelength().setValue(wavelength*1e-10)
+        
+    
+    def _onSourceChanged(self, source_config):
+        self.set_Xray_source(source_config)
+        self._onAnyValueChanged()
+
+
     def set_detector(self, detector):
-        self.geometryTabs.setDetector(detector)
+        with disconnectTemporarily(self.geometryTabs.geometryModel().changed, self._onAnyValueChanged):
+            self.geometryTabs.setDetector(detector)
         self._detectorSizeUnit.setVisible(detector is not None)
         if detector is None:
             self._detectorLabel.setStyleSheet("QLabel { color: red }")
@@ -1234,51 +1266,56 @@ class QMachineParameters(qt.QWidget):
             
         
     def setValues(self,params):
-        [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi, detCal] = params
-        signList = [self.Ebox, self.SDDbox, self.mubox,
-                    self.chibox, self.cpXbox, self.cpYbox,
-                    self.pixsizebox, self.phibox, self.polaxbox,
+        signList = [self.mubox, self.chibox,
+                     self.phibox, self.polaxbox,
                     self.azimbox, self.polfbox]
+                    
+        self.set_Xray_source(params['source'])
+        detCal = params['SXRD_geometry']
+        diffrac = params['diffractometer']
+                    
         with blockSignals(signList):
-            self.Ebox.setValue(E)
-            self.SDDbox.setValue(sdd)
-            self.mubox.setValue(np.rad2deg(mu))
-            self.chibox.setValue(np.rad2deg(chi))
-            self.cpXbox.setValue(cp[0])
-            self.cpYbox.setValue(cp[1])
-            self.pixsizebox.setValue(pixsize*1e3)
-            self.phibox.setValue(np.rad2deg(phi))
+            self.mubox.setValue(np.rad2deg(diffrac['mu']))
+            self.chibox.setValue(np.rad2deg(diffrac['chi']))
+            self.phibox.setValue(np.rad2deg(diffrac['phi']))
+            self.azimbox.setValue(np.rad2deg(detCal.getAzimuthalReference()))
+            polax, polfac = detCal.getPolarization()
             self.polaxbox.setValue(np.rad2deg(polax))
-            self.azimbox.setValue(np.rad2deg(azim))
-            self.polfbox.setValue(polf)
+            self.polfbox.setValue(polfac)
         model = self.geometryTabs.geometryModel()
-        model.lockSignals()
-        model.distance().setValue(detCal.dist)
-        model.poni1().setValue(detCal.poni1)
-        model.poni2().setValue(detCal.poni2)
-        model.rotation1().setValue(detCal.rot1)
-        model.rotation2().setValue(detCal.rot2)
-        model.rotation3().setValue(detCal.rot3)
-        model.wavelength().setValue(detCal.wavelength)
-        model.unlockSignals()
+        with disconnectTemporarily(self.geometryTabs.geometryModel().changed, self._onAnyValueChanged):
+            with model.lockContext():
+                model.distance().setValue(detCal.dist)
+                model.poni1().setValue(detCal.poni1)
+                model.poni2().setValue(detCal.poni2)
+                model.rotation1().setValue(detCal.rot1)
+                model.rotation2().setValue(detCal.rot2)
+                model.rotation3().setValue(detCal.rot3)
+                model.wavelength().setValue(detCal.wavelength)
+
+
         self.set_detector(detCal.detector)
         #self._onAnyValueChanged()
         
     def getParameters(self):
         E = self.Ebox.value()
         mu = np.deg2rad(self.mubox.value())
-        sdd = self.SDDbox.value()
-        pixsize = self.pixsizebox.value()*1e-3
-        cp = [self.cpXbox.value(),self.cpYbox.value()]
         chi = np.deg2rad(self.chibox.value())
         phi = np.deg2rad(self.phibox.value())
-        azim = np.deg2rad(self.azimbox.value())
-        polax = np.deg2rad(self.polaxbox.value())
-        polf = self.polfbox.value()
-        detCal = self.get_SXRD_geometry()
-        return [E,mu,sdd,pixsize,cp,polax,polf,azim,chi,phi, detCal]
+        settings = {'diffractometer' : {
+                'mu' : mu,
+                'phi' : phi,
+                'chi' : chi
+            },
+            'source' :  {
+                'E' : E
+            },
+            'SXRD_geometry' : self.get_SXRD_geometry()
+        }
+        return settings
         
     def _onAnyValueChanged(self):
+        print("Val changed")
         self.sigMachineParamsChanged.emit(self.getParameters())
         
         
