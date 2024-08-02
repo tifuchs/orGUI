@@ -31,6 +31,7 @@ __email__ = "fuchs@physik.uni-kiel.de"
 
 from io import StringIO
 from silx.gui import qt
+from silx.gui import icons
 import pyFAI, pyFAI.detectors
 import numpy as np
 
@@ -42,6 +43,7 @@ import warnings
 import configparser
 import os
 import copy
+from enum import Enum, auto
 from contextlib import contextmanager
 
 from .ArrayTableDialog import ArrayEditWidget
@@ -71,6 +73,11 @@ def disconnectTemporarily(signal, reciever):
     signal.disconnect(reciever)
     yield
     signal.connect(reciever)
+    
+class LatIndex(Enum):
+    A1 = auto()
+    A2 = auto()
+    A3 = auto()
 
 
 # reflectionhandler must implement the method getReflections
@@ -551,11 +558,61 @@ class QUBCalculator(qt.QSplitter):
             self.uedit.setAngles(angles_u[0], -chi, -phi, angles_u[-1])
 
         
-class QCrystalParameter(qt.QSplitter):
+class QCrystalParameter(qt.QWidget):
     sigCrystalParamsChanged = qt.pyqtSignal(HKLVlieg.Lattice,float)
     def __init__(self,parent=None):
-        qt.QSplitter.__init__(self, parent=None)
-        self.setOrientation(qt.Qt.Vertical)
+        qt.QWidget.__init__(self, parent=None)
+        
+        mainLayout = qt.QVBoxLayout()
+        
+        self.toolbar = qt.QToolBar("Crystal parameter tools")
+        self.toolbar.setMovable(False)
+        self.toolbar.setFloatable(False)
+        
+        
+        self.loadxtalAct = qt.QAction(icons.getQIcon('document-open'), "Load bulk file")
+        self.toolbar.addAction(self.loadxtalAct)
+        toolbarbtn = self.toolbar.widgetForAction(self.loadxtalAct)
+        toolbarbtn.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
+        self.loadxtalAct.triggered.connect(self.onLoadXtal)
+        
+        spacer_widget = qt.QWidget()
+        spacer_widget.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred)
+        self.toolbar.addWidget(spacer_widget)
+        
+        self.latticelinkgrp = qt.QActionGroup(self)
+        self.latticelinkgrp.setExclusive(True)
+        self.notLinkedAct = self.latticelinkgrp.addAction(resources.getQicon("lattice-no-link"), "scale a1, a2, a3 individually")
+        self.horizLinkedAct = self.latticelinkgrp.addAction(resources.getQicon("lattice-horizontal-link"), "scale a1, a2 with a common factor")
+        self.allLinkedAct = self.latticelinkgrp.addAction(resources.getQicon("lattice-all-link"), "scale a1, a2, a3 with a common factor")
+        
+        self.notLinkedAct.setCheckable(True)
+        self.horizLinkedAct.setCheckable(True)
+        self.allLinkedAct.setCheckable(True)
+
+        self.link_menu = qt.QMenu()
+        self.link_menu.addAction(self.notLinkedAct)
+        self.link_menu.addAction(self.horizLinkedAct)
+        self.link_menu.addAction(self.allLinkedAct)
+        
+        self.link_btn = qt.QToolButton()
+        self.link_btn.setIcon(resources.getQicon("alpha"))
+        self.link_btn.setToolTip("Set linking of lattice parameters")
+        self.link_btn.setPopupMode(qt.QToolButton.InstantPopup)
+        self.link_btn.setMenu(self.link_menu)
+        
+        self.notLinkedAct.triggered.connect(self._onLinkLatticeChanged)
+        self.horizLinkedAct.triggered.connect(self._onLinkLatticeChanged)
+        self.allLinkedAct.triggered.connect(self._onLinkLatticeChanged)
+        
+        self.notLinkedAct.trigger()
+        
+        self.toolbar.addWidget(self.link_btn)
+        
+        
+        #crystalParamsLayout.addWidget(loadxtalbtn,1,1)
+        
+        
         
         latticeParamsGroup = qt.QGroupBox("Lattice parameters")
         latticeParamsLayout = qt.QGridLayout()
@@ -650,28 +707,67 @@ class QCrystalParameter(qt.QSplitter):
         for uc in unitcells.availablebulk:
             self.crystalComboBox.addItem(uc, uc)
             
-        loadxtalbtn = qt.QPushButton("Load bulk file")
-        crystalParamsLayout.addWidget(loadxtalbtn,1,1)
-        loadxtalbtn.clicked.connect(self.onLoadXtal)
         
         self.crystalComboBox.activated.connect(self.onSwitchCrystal)
         
         
         crystalParamsGroup.setLayout(crystalParamsLayout)
         
-        self.addWidget(crystalParamsGroup)
-        self.addWidget(latticeParamsGroup)
-        self.addWidget(refractionindexGroup)
+        mainLayout.addWidget(self.toolbar)
+        mainLayout.addWidget(crystalParamsGroup)
+        mainLayout.addWidget(latticeParamsGroup)
+        mainLayout.addWidget(refractionindexGroup)
+        self.setLayout(mainLayout)
         
         
-        
-        self.a1box.valueChanged.connect(self._onAnyValueChanged)
-        self.a2box.valueChanged.connect(self._onAnyValueChanged)
-        self.a3box.valueChanged.connect(self._onAnyValueChanged)
+        self.a1box.valueChanged.connect(lambda : self._onLatticeParamsChanged(LatIndex.A1))
+        self.a2box.valueChanged.connect(lambda : self._onLatticeParamsChanged(LatIndex.A2))
+        self.a3box.valueChanged.connect(lambda : self._onLatticeParamsChanged(LatIndex.A3))
         self.alpha1box.valueChanged.connect(self._onAnyValueChanged)
         self.alpha2box.valueChanged.connect(self._onAnyValueChanged)
         self.alpha3box.valueChanged.connect(self._onAnyValueChanged)
         self.refractionIndexBox.valueChanged.connect(self._onAnyValueChanged)
+        
+    def _onLinkLatticeChanged(self, checked):
+        self.link_btn.setIcon(self.latticelinkgrp.checkedAction().icon())
+        
+    def _onLatticeParamsChanged(self, which):
+        act = self.latticelinkgrp.checkedAction()
+        if act is self.notLinkedAct:
+            self._onAnyValueChanged()
+            return
+        elif act is self.horizLinkedAct:
+            if which == LatIndex.A1:
+                ratio = self.a1box.value() / self._uc.a[0]
+                with blockSignals([self.a2box]):
+                    self.a2box.setValue(self._uc.a[1] * ratio)
+            elif which == LatIndex.A2:
+                ratio = self.a2box.value() / self._uc.a[1]
+                with blockSignals([self.a1box]):
+                    self.a1box.setValue(self._uc.a[0] * ratio)
+            self._onAnyValueChanged()
+            return
+        elif act is self.allLinkedAct:
+            if which == LatIndex.A1:
+                ratio = self.a1box.value() / self._uc.a[0]
+                with blockSignals([self.a2box, self.a3box]):
+                    self.a2box.setValue(self._uc.a[1] * ratio)
+                    self.a3box.setValue(self._uc.a[2] * ratio)
+            elif which == LatIndex.A2:
+                ratio = self.a2box.value() / self._uc.a[1]
+                with blockSignals([self.a1box, self.a3box]):
+                    self.a1box.setValue(self._uc.a[0] * ratio)
+                    self.a3box.setValue(self._uc.a[2] * ratio)
+            elif which == LatIndex.A3:
+                ratio = self.a3box.value() / self._uc.a[2]
+                with blockSignals([self.a1box, self.a2box]):
+                    self.a1box.setValue(self._uc.a[0] * ratio)
+                    self.a2box.setValue(self._uc.a[1] * ratio)
+            self._onAnyValueChanged()
+            return
+        else:
+            raise ValueError("Invalid lattice parameter changed: %s" % which)
+        
     
     def onLoadXtal(self):
         fileTypeDict = {'bulk files (*.bul)': '.bul', 'Crystal Files (*.xtal)': '.txt', 'All files (*)': '', }

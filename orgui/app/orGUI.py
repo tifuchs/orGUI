@@ -26,7 +26,7 @@ __author__ = "Timo Fuchs"
 __credits__ = ['Finn Schroeter']
 __copyright__ = "Copyright 2020-2024 Timo Fuchs"
 __license__ = "MIT License"
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
