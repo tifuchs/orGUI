@@ -978,7 +978,7 @@ class QMachineParameters(qt.QWidget):
         
         #[E,mu,sdd,pixsize,cp,chi,phi] = params
         
-        vertical_layout = qt.QVBoxLayout(self)        
+        vertical_layout = qt.QVBoxLayout()        
         
         diffractometer_box = qt.QGroupBox("Diffractometer settings", self)
         source_box = qt.QGroupBox("Source settings", self)
@@ -1096,7 +1096,7 @@ class QMachineParameters(qt.QWidget):
         self._detectorFileDescription.setVisible(False)
         self._detectorFileDescriptionTitle.setVisible(False)
         
-        detector_panel_layout = qt.QGridLayout(self)
+        detector_panel_layout = qt.QGridLayout()
         
         detector_panel_layout.addWidget(qt.QLabel("Name:"),0,0)
         detector_panel_layout.addWidget(self._detectorLabel,0,1)
@@ -1315,7 +1315,6 @@ class QMachineParameters(qt.QWidget):
         return settings
         
     def _onAnyValueChanged(self):
-        print("Val changed")
         self.sigMachineParamsChanged.emit(self.getParameters())
         
         
