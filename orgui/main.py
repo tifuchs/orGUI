@@ -29,7 +29,7 @@ __author__ = "Timo Fuchs"
 __copyright__ = "Copyright 2020-2024 Timo Fuchs"
 __credits__ = []
 __license__ = "MIT License"
-__version__ = "1.0.1"
+from . import __version__
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
@@ -68,24 +68,30 @@ def main():
     
     if options.opengl:
         silx.config.DEFAULT_PLOT_BACKEND = "opengl"
-
+    
     if os.path.isfile(options.configfile) or options.configfile == defaultconfigfile:
         app = qt.QApplication(sys.argv)
         app.setApplicationName("orGUI")
         from .resources import getSplashScreen
-        pixmap = getSplashScreen()
-        
+        pixmap = getSplashScreen(__version__)
         desktopWidget = app.desktop()
         screenGeometry = desktopWidget.screenGeometry()
         splashpm = pixmap.scaledToHeight(int(screenGeometry.height()/3), qt.Qt.SmoothTransformation)
         splash = qt.QSplashScreen(splashpm)
         splash.show()
-        splash.showMessage("jit compile libraries", qt.Qt.AlignVCenter | qt.Qt.AlignRight)
+        configfile = options.configfile
+        if options.configfile == defaultconfigfile and not os.path.isfile(options.configfile):
+            configfile = None
+        
+        splash.showMessage("jit compile libraries, this may take a while on first start...", qt.Qt.AlignLeft | qt.Qt.AlignBottom)
         from .datautils.xrayutils import CTRcalc, CTRplotutil
-        splash.showMessage("load orGUI", qt.Qt.AlignVCenter | qt.Qt.AlignRight)
+        splash.showMessage("load orGUI libraries", qt.Qt.AlignLeft | qt.Qt.AlignBottom)
+        splash.raise_()
         from orgui.app.orGUI import orGUI, UncaughtHook
+        splash.showMessage("starting orGUI", qt.Qt.AlignLeft | qt.Qt.AlignBottom)
+        splash.raise_()
         qt_exception_hook = UncaughtHook()
-        mainWindow = orGUI(options.configfile)
+        mainWindow = orGUI(configfile)
         qt_exception_hook.set_orgui(mainWindow)
         splash.finish(mainWindow)
 
