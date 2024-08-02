@@ -868,24 +868,6 @@ within the group of Olaf Magnussen.
                     eventdict = {'x' : xy[0], 'y': xy[1]}
                     self.reflectionSel.addReflection(eventdict,refldict['imageno_%s' % i],refldict['hkl'])
             
-        """
-        try:
-            imageno = self.omegaToImageNo(omega)
-        except:
-            warnings.warn("Not xmirrored: Didn't find the corresponding image")
-            [hkl,x,y,omega] = self.ubcalc.calcReflection(hkl,True)
-            mirrored = [hkl,x,y,omega]
-            try:
-                imageno = self.omegaToImageNo(omega)
-            except Exception as e:
-                errormsg = "[hkl, x, y, om]\nnot mirrored: %s\nmirrored: %s" % (notmirrored,mirrored)
-                qutils.warning_detailed_message(self, "Could not find reflection","Didn't find the corresponding reflection on any image.\nError: %s\nShould be at location%s" % (str(e),errormsg), traceback.format_exc())
-                #qt.QMessageBox.warning(self,"Could not find reflection","Didn't find the corresponding reflection on any image.\nError: %s\nShould be at location%s" % (str(e),errormsg))
-                return
-        eventdict = {'x' : x, 'y': y}
-        self.reflectionSel.addReflection(eventdict,imageno,hkl)
-        """
-            
     def newXyHKLConverter(self):
         def xyToHKL(x,y):
             #print("xytoHKL:")
@@ -978,11 +960,8 @@ within the group of Olaf Magnussen.
         th = om*-1.
         muTh = np.rad2deg([mu,th]) #defaults if fixed 
         diag = QScanCreator(muTh)
-        diag.shape1.setValue(self.ubcalc.detectorCal.detector.shape[0])
-        diag.shape2.setValue(self.ubcalc.detectorCal.detector.shape[1])
         if diag.exec() == qt.QDialog.Accepted:
-            shape = (diag.shape1.value(), diag.shape2.value())
-            self.ubcalc.detectorCal.detector.shape = shape
+            shape = self.ubcalc.detectorCal.detector.shape
             try:
                 axis = diag.scanaxis.currentText()
                 if axis == 'theta':
@@ -1038,6 +1017,17 @@ within the group of Olaf Magnussen.
 
         # search files using ImportImagesScan backend
         importedscan = universalScanLoader.ImportImagesScan(filename)
+        
+        if importedscan.shape != self.ubcalc.detectorCal.detector.shape:
+            qt.QMessageBox.critical(self,
+                                    "Detector data mismatch",
+                                    "The selected image data shape does not match to the detector data shape:\n"\
+                                    "Detector Size %sx%s\n"\
+                                    "Data size %sx%s\n"\
+                                    "Please first adjust the detector configuration to load this data" % 
+                                    (*self.ubcalc.detectorCal.detector.shape, *importedscan.shape))
+            return
+        
         [imagePrefix, found_scanfiles] = importedscan.inpath
 
         # generate dialog with list of files and frames
@@ -1114,13 +1104,9 @@ within the group of Olaf Magnussen.
         # open scan creator GUI to let the user insert missing scan angles
         diag = QImportScanCreator(muTh)        
         # detector pixel nr and frame nr is adapted from opened image file
-        diag.shape1.setValue(importedscan.shape[0])
-        diag.shape2.setValue(importedscan.shape[1])
         diag.no.setValue(importedscan.nopoints)
         
         if diag.exec() == qt.QDialog.Accepted:
-            shape = (diag.shape1.value(), diag.shape2.value())
-            self.ubcalc.detectorCal.detector.shape = shape
             try:
                 axis = diag.scanaxis.currentText()
                 if axis == 'theta':
@@ -2219,8 +2205,6 @@ class QImportScanCreator(qt.QDialog):
         self.fixed_label = qt.QLabel("mu (fixed):")
         layout.addWidget(self.fixed_label,3,0)
         layout.addWidget(qt.QLabel("no frames:"),5,0)
-        layout.addWidget(qt.QLabel("Det pixel1:"),6,0)
-        layout.addWidget(qt.QLabel("Det pixel2:"),7,0)
 
         self.scanaxis = qt.QComboBox()
         self.scanaxis.addItem("theta")
@@ -2249,28 +2233,15 @@ class QImportScanCreator(qt.QDialog):
         self.fixedAngle.setRange(-180,180)
         self.fixedAngle.setValue(self.defaultMuTh[0])
         
-        self.shape1 = qt.QSpinBox()
-        self.shape1.setReadOnly(True)
-        self.shape1.setRange(1,1000000000)
-        self.shape1.setValue(1)
-        
-        self.shape2 = qt.QSpinBox()
-        self.shape2.setReadOnly(True)
-        #self.shape2.lineEdit().setReadOnly(True)
-        self.shape2.setRange(1,1000000000)
-        self.shape2.setValue(1)
-        
         layout.addWidget(self.scanaxis,0,1)
         layout.addWidget(self.omstart,1,1)
         layout.addWidget(self.omend,2,1)
         layout.addWidget(self.no,5,1)
         layout.addWidget(self.fixedAngle,3,1)
         
-        layout.addWidget(self.shape1,6,1)
-        layout.addWidget(self.shape2,7,1)
         
         buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
-        layout.addWidget(buttons,8,0,-1,-1)
+        layout.addWidget(buttons,6,0,-1,-1)
 
         test = qt.QLabel("Parameters determined from loaded scan:")
         layout.addWidget(test,4,0,1,2)
@@ -2307,8 +2278,6 @@ class QScanCreator(qt.QDialog):
         layout.addWidget(qt.QLabel("no points:"),3,0)
         self.fixed_label = qt.QLabel("mu (fixed):")
         layout.addWidget(self.fixed_label,4,0)
-        layout.addWidget(qt.QLabel("Det pixel1:"),5,0)
-        layout.addWidget(qt.QLabel("Det pixel2:"),6,0)
 
         self.scanaxis = qt.QComboBox()
         self.scanaxis.addItem("theta")
@@ -2336,25 +2305,14 @@ class QScanCreator(qt.QDialog):
         self.fixedAngle.setRange(-180,180)
         self.fixedAngle.setValue(self.defaultMuTh[0])
         
-        self.shape1 = qt.QSpinBox()
-        self.shape1.setRange(1,1000000000)
-        self.shape1.setValue(1)
-        
-        self.shape2 = qt.QSpinBox()
-        self.shape2.setRange(1,1000000000)
-        self.shape2.setValue(1)
-        
         layout.addWidget(self.scanaxis,0,1)
         layout.addWidget(self.omstart,1,1)
         layout.addWidget(self.omend,2,1)
         layout.addWidget(self.no,3,1)
         layout.addWidget(self.fixedAngle,4,1)
         
-        layout.addWidget(self.shape1,5,1)
-        layout.addWidget(self.shape2,6,1)
-        
         buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
-        layout.addWidget(buttons,7,0,-1,-1)
+        layout.addWidget(buttons,5,0,-1,-1)
         
         buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.accept)
         buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
