@@ -2,8 +2,8 @@
 Changelog
 *********
 
-1.1.0a (2024-08-03)
-###################
+1.1.0 (2024-08-03)
+##################
 
 This is a release, that reworks the configuration widgets. 
 It is aimed to correctly show all configuration options in the GUI, which were previously only available through the config file.
@@ -17,11 +17,13 @@ Changed
 =======
 
 * Rework of machine parameter widget: (4bc83799e082c7ef8178e017b24c373dc0bec97c)
+
   * Uses pyFAI DetectorSelectorDialog for detector selection 
   * Uses pyFAI geometry widget to display detector geometry as in pyFAI or Fit2D.
   * Add button to directly load poni file.
   
 * Crystal parameters widget:
+
   * Add button to link lattice parameters upon editing. (51f21be749ab7d16d7ae2ae883b5edd40489ecda)
   
 * Detector size can now only be changed explicitly in machine parameter widget. (24bdffa41e2c61f3f57dc61cb2ccd11298daa4f7) 
@@ -68,24 +70,29 @@ Fixed
 
 * First public release on Zenodo with the DOI `https://doi.org/10.5281/zenodo.12592486 <https://doi.org/10.5281/zenodo.12592486>`_.
 * Added MIT License
-* Merged with `datautils`:
-  * Backends:
-    * datautils.xrayutils.id31_tools :raw-html:`&rarr;` orgui.backend.beamline.id31_tools
-    * datautils.xrayutils.P212_tools :raw-html:`&rarr;` orgui.backend.beamline.P212_tools
-    * datautils.xrayutils.ID31DiffractLinTilt :raw-html:`&rarr;` orgui.backend.beamline.ID31DiffractLinTilt
-    * datautils.xrayutils.fio_reader :raw-html:`&rarr;` orgui.backend.beamline.fio_reader
-  * Physics / Diffraction caculations:
-    * datautils.util :raw-html:`&rarr;` orgui.datautils.util
-    * datautils.xrayutils.unitcells :raw-html:`&rarr;` orgui.datautils.xrayutils.unitcells (and .bul files therein)
-    * datautils.xrayutils.test :raw-html:`&rarr;` orgui.datautils.xrayutils.test (and datautils test code therein)
-	* datautils.xrayutils.CTRcalc :raw-html:`&rarr;` orgui.datautils.xrayutils.CTRcalc
-	* datautils.xrayutils._CTRcalc_accel :raw-html:`&rarr;` orgui.datautils.xrayutils._CTRcalc_accel
-	* datautils.xrayutils.CTRopt :raw-html:`&rarr;` orgui.datautils.xrayutils.CTRopt
-	* datautils.xrayutils.CTRplotutil :raw-html:`&rarr;` orgui.datautils.xrayutils.CTRplotutil
-	* datautils.xrayutils.DetectorCalibration :raw-html:`&rarr;` orgui.datautils.xrayutils.DetectorCalibration
-	* datautils.xrayutils.element_data :raw-html:`&rarr;` orgui.datautils.xrayutils.element_data
-	* datautils.xrayutils.HKLVlieg :raw-html:`&rarr;` orgui.datautils.xrayutils.HKLVlieg
-	* datautils.xrayutils.ReciprocalNavigation :raw-html:`&rarr;` orgui.datautils.xrayutils.ReciprocalNavigation
+* Merged with `datautils`
+
+  * Backends
+
+    * datautils.xrayutils.id31_tools -> orgui.backend.beamline.id31_tools
+    * datautils.xrayutils.P212_tools -> orgui.backend.beamline.P212_tools
+    * datautils.xrayutils.ID31DiffractLinTilt -> orgui.backend.beamline.ID31DiffractLinTilt
+    * datautils.xrayutils.fio_reader -> orgui.backend.beamline.fio_reader
+
+  * Physics / Diffraction caculations
+
+    * datautils.util -> orgui.datautils.util
+    * datautils.xrayutils.unitcells -> orgui.datautils.xrayutils.unitcells (and .bul files therein)
+    * datautils.xrayutils.test -> orgui.datautils.xrayutils.test (and datautils test code therein)
+    * datautils.xrayutils.CTRcalc -> orgui.datautils.xrayutils.CTRcalc
+    * datautils.xrayutils._CTRcalc_accel -> orgui.datautils.xrayutils._CTRcalc_accel
+    * datautils.xrayutils.CTRopt -> orgui.datautils.xrayutils.CTRopt
+    * datautils.xrayutils.CTRplotutil -> orgui.datautils.xrayutils.CTRplotutil
+    * datautils.xrayutils.DetectorCalibration -> orgui.datautils.xrayutils.DetectorCalibration
+    * datautils.xrayutils.element_data -> orgui.datautils.xrayutils.element_data
+    * datautils.xrayutils.HKLVlieg -> orgui.datautils.xrayutils.HKLVlieg
+    * datautils.xrayutils.ReciprocalNavigation -> orgui.datautils.xrayutils.ReciprocalNavigation
+
 * *orGUI* is now a standalone package, that has only publicly available dependencies.
 
 0.9-alpha (2024-06-29)
