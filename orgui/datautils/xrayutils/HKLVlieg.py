@@ -141,14 +141,23 @@ def crystalAngles_singleArray(angle,refraction_index):
     if isinstance(angle,np.ndarray):
         sign = np.sign(angle)
         mask = sign > 0.
-        angle[mask] = np.arccos(np.cos(angle[mask]) / refraction_index)
+        #with warnings.catch_warnings(record=True) as w:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            angle[mask] = np.arccos(np.cos(angle[mask]) / refraction_index)
+        #if w:
+        #    print(w)
         angle[np.isnan(angle)] = 0.
         #angle *= sign
     else:
         sign = np.sign(angle)
         if sign < 0.:
             return angle
-        angle = np.arccos(np.cos(angle) / refraction_index)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            angle = np.arccos(np.cos(angle) / refraction_index)
+        #if w:
+        #    print(w)
         if np.isnan(angle):
             angle = 0.
     return angle

@@ -41,14 +41,14 @@ class ImportImagesScan():
         self.filename = imgpath
 
         self.inpath = self.find_files()
+        with fabio.open(self.inpath[0] + self.inpath[1][0]) as fabf:
+            img_data = fabf.data
+            self.FramesPerFile = fabf.nframes
+        self.shape = (img_data.shape[0], img_data.shape[1])
 
-        img_data = fabio.open(self.inpath[0] + self.inpath[1][0])
-        self.shape = (img_data.data.shape[0], img_data.data.shape[1])
-
-        self.FramesPerFile = img_data.nframes
         if self.FramesPerFile > 1:
-            last_file = fabio.open(self.inpath[0] + self.inpath[1][-1])
-            self.FramesLastFile = last_file.nframes
+            with fabio.open(self.inpath[0] + self.inpath[1][-1]) as last_file:
+                self.FramesLastFile = last_file.nframes
         else:
             self.FramesLastFile = self.FramesPerFile
 
@@ -94,12 +94,11 @@ class ImportImagesScan():
         if self.FramesPerFile > 1:
             index = i // self.FramesPerFile
             frame = i % self.FramesPerFile
-            img_data = fabio.open(self.inpath[0] + self.inpath[1][index]).get_frame(frame)
+            with fabio.open(self.inpath[0] + self.inpath[1][index]) as fabf:
+                img_data = fabf.get_frame(frame).data
         else:
-            img_data = fabio.open(self.inpath[0] + self.inpath[1][i])
-
-        return h5_Image(img_data.data)
+            with fabio.open(self.inpath[0] + self.inpath[1][i]) as fabf:
+                img_data = fabf.data
+        return h5_Image(img_data)
         
-    def set_raw_img(self, i, data): #for intensity simulation in the future.
-        self.images[i] = data
         

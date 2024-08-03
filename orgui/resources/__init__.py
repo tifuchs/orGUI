@@ -33,8 +33,17 @@ def getQicon(name: str):
 
     return qt.QIcon(os.path.join(_iconpath, name))
     
-def getSplashScreen():
-    return qt.QPixmap(os.path.join(_iconpath, "logo"))
+def getSplashScreen(version_number=None):
+    pixmap = qt.QPixmap(os.path.join(_iconpath, "logo"))
+    if version_number is None:
+        return pixmap
+    else:
+        painter = qt.QPainter(pixmap)
+        font = qt.QFont()
+        font.setPixelSize(30)
+        painter.setFont(font)
+        painter.drawText(720, 313, "version %s" % version_number)
+        return pixmap 
     
 def getDiffractometerPath():
     return os.path.join(_iconpath, "diffractometer_v3.png")
