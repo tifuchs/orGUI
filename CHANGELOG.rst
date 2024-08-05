@@ -2,16 +2,25 @@
 Changelog
 *********
 
-1.1.0 (2024-08-03)
+1.1.0 (2024-08-05)
 ##################
 
 This is a release, that reworks the configuration widgets. 
 It is aimed to correctly show all configuration options in the GUI, which were previously only available through the config file.
 
+orGUI now also has a proper logo.
+
 Added
 =====
 
+* Config files in example folder to illustrate the multitude of config options
+* logo and application icon
 * This CHANGELOG
+* Enable optional loading of atomic coordinates and lattice from `ASE <https://wiki.fysik.dtu.dk/ase/>`_ supported files. These include:
+  
+  * Cif files
+  * VASP / CONTCAR files
+  * many more ... see `files supported by ASE <https://wiki.fysik.dtu.dk/ase/ase/io/io.html>`_
 
 Changed
 =======
@@ -25,6 +34,7 @@ Changed
 * Crystal parameters widget:
 
   * Add button to link lattice parameters upon editing. (51f21be749ab7d16d7ae2ae883b5edd40489ecda)
+  * Add button to show the coordinates of atoms in the unit cell
   
 * Detector size can now only be changed explicitly in machine parameter widget. (24bdffa41e2c61f3f57dc61cb2ccd11298daa4f7) 
   
@@ -36,6 +46,7 @@ Fixed
 * Removed unnecessary config warning upon startup, if no config file was provided with the start. (c36c05ea421239da28bf49d4adff7f0654f40f90)
 * Fix QLayout double assignment warning. (8950c9edd8841891f0f9ba15999345865d3419f3)
 * Explicitly close file handles in universal scan loader after data was read (0a9f5d8e8828bdc0523a2cd9673d04b45c634bd7) 
+* loading of xtal and bulk files from relative file path
   
 
 1.0.1 (2024-07-29)
