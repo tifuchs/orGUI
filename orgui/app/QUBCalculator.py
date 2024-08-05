@@ -1178,6 +1178,11 @@ class QMachineParameters(qt.QWidget):
         detector_box = qt.QGroupBox("Detector", self)
         
         self._selectDetectorBtn = qt.QPushButton("...")
+        width = self._selectDetectorBtn.fontMetrics().boundingRect("  ...  ").width() + 7
+        height = self._selectDetectorBtn.fontMetrics().boundingRect("  M  ").height() + 7
+        self._selectDetectorBtn.setMaximumWidth(width)
+        self._selectDetectorBtn.setMaximumHeight(height)
+        
         self._selectDetectorBtn.clicked.connect(self._onSelectDetector)
         
         self._detectorLabel = qt.QLabel("No detector")
@@ -1212,13 +1217,20 @@ class QMachineParameters(qt.QWidget):
         
         detector_box.setLayout(detector_panel_layout)
         
+        geometry_box = qt.QGroupBox("Detector Geometry", self)
+        geometry_box_layout = qt.QVBoxLayout()
+        
+       
         self.geometryTabs = GeometryTabs.GeometryTabs()
         self.geometryTabs.geometryModel().changed.connect(self._onAnyValueChanged)
+        geometry_box_layout.addWidget(self.geometryTabs)
+        geometry_box.setLayout(geometry_box_layout)
+        
         
         mainLayout.addWidget(detector_box, 0,0)
         mainLayout.addWidget(diffractometer_box, 1, 0)
         mainLayout.addWidget(source_box, 0, 1)
-        mainLayout.addWidget(self.geometryTabs, 1, 1)
+        mainLayout.addWidget(geometry_box, 1, 1)
         
         
         vertical_layout.addLayout(mainLayout)
