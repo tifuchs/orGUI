@@ -1,0 +1,53 @@
+
+#only giving a poni file from pyFAI is allowed in this section for more complex configurations
+[Machine]
+poni = ./poni_files/P3_100_calib.poni
+
+# By setting a poni file, all follwing settings in the Machine section will be overritten by the poni file:
+# beam energy in keV
+E = 77.0
+# Sample detector distance in m (as in Fit2D)
+SDD = 0.78
+#pixelsize in m
+pixelsize = 172e-6
+# detector size (pixel)
+sizex = 1475
+sizey = 1679
+# central pixel (prim beam position)
+cpx = 731.0
+cpy = 1587.856
+
+
+[Lattice]
+# You can provide a xtal file with the coordinates of the atoms. Bragg reflections and available CTRs will be calculated based on the unit cell structure factor. 
+# Only the bulk unit cell of a xtal will be used for the calculations.
+# Maybe will add "superstructure" functionality in the future based on the xtal files.
+crystal = ./crystal_files/Pt100_with_surface_model.xtal
+# More examples of .bul files are in orgui/datautils/xrayutils/unitcells and are permamently installed.
+# These can be accessed by their name instead. i.e. crystal = Pt100
+
+# usually known as delta (n = 1 - delta), has only minor effect
+refractionindex = 1.1415e-06
+
+# direct lattice (in Angstrom and degrees)
+# This will override the settings in the .bul file, but the relative atomic coordinates will be preserved. 
+# This is only optional, you can comment it out
+#a1 = 3.9242 
+#a2 = 3.9242
+#a3 = 3.9242 
+#alpha1 = 90.0
+#alpha2 = 90.0
+#alpha3 = 90.0
+
+[Diffractometer]
+# Rotates the defractometer around the y-axis (around beam direaction) (deg)
+azimuthal_reference = 90
+# polarization direction (deg)
+polarization_axis = 0
+polarization_factor = 1
+
+# angle of incidence = alpha (deg)
+mu = 0.1
+
+chi = 0
+phi = 0

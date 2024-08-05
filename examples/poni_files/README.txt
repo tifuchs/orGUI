@@ -1,0 +1,1 @@
+poni files can be generated with pyFAI (https://pyfai.readthedocs.io/en/stable/)
