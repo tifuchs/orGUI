@@ -2700,7 +2700,8 @@ class UnitCell(Lattice):
                     raise IOError("Cannot read file %s." % filename)
             else:
                 atoms = ase.io.read(f + ext)
-            
+            if not atoms.cell:
+                raise IOError("File %s contains no valid crystal lattice parameters" % filename)
             uc = UnitCell(atoms.cell.lengths(), atoms.cell.angles())
             coord = atoms.get_scaled_positions()
             symb = atoms.get_chemical_symbols()

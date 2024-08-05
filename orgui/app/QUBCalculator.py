@@ -34,6 +34,12 @@ from silx.gui import qt
 from silx.gui import icons
 import pyFAI, pyFAI.detectors
 import numpy as np
+try:
+    import ase.io
+    HAS_ASE = True
+except ImportError:
+    HAS_ASE = False
+    
 
 import traceback
 from ..datautils.xrayutils import HKLVlieg, CTRcalc
@@ -370,10 +376,15 @@ class QUBCalculator(qt.QSplitter):
             cpx = machine.getfloat('cpx',731)
             cpy = machine.getfloat('cpy',1587)
             cp = [cpx,cpy]
+            det_sizex =  machine.getfloat('sizex',3000)
+            det_sizey =  machine.getfloat('sizey',3000)
+            det_shape = (det_sizey, det_sizex)
             
             self.mu = np.deg2rad(diffrac.getfloat('mu',0.05))
             self.chi = np.deg2rad(diffrac.getfloat('chi',0.0))
             self.phi = np.deg2rad(diffrac.getfloat('phi',0.0))
+            
+            
             
 
             a1 = lattice.getfloat('a1',-1)
@@ -407,7 +418,15 @@ class QUBCalculator(qt.QSplitter):
             if 'crystal' in lattice:
                 idx = self.crystalparams.crystalComboBox.findText(lattice['crystal'],qt.Qt.MatchFixedString)
                 if idx == -1:
-                    qt.QMessageBox.warning(self,"Did not find crystal","Can not find crystal <%s> \nException occured during read of configfile %s,\nException:\n%s" % (unitcellsconfigfile,traceback.format_exc()))
+                    try:
+                        if os.path.isabs(lattice['crystal']):
+                            xtalpath = lattice['crystal']
+                        else:
+                            p = os.path.abspath(configfile)
+                            xtalpath = os.path.join(os.path.dirname(p), lattice['crystal'])
+                        self.crystalparams.loadUnitCell(xtalpath)
+                    except Exception:
+                        qt.QMessageBox.warning(self,"Did not find crystal","Can not find crystal <%s> \nException occured during read of configfile %s,\nException:\n%s" % (lattice['crystal'],traceback.format_exc()))
                 else:
                     self.crystalparams.crystalComboBox.setCurrentIndex(idx)
                     self.crystalparams.onSwitchCrystal(idx)
@@ -430,12 +449,14 @@ class QUBCalculator(qt.QSplitter):
                 else:
                     self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
                     self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
-                    self.detectorCal.detector.shape = (2880,2880) # Perkin 
+                    self.detectorCal.detector.shape = det_shape # Perkin 
+                    self.detectorCal.detector.max_shape = det_shape # Perkin det_shape
                     
             else:
                 self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
                 self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
-                self.detectorCal.detector.shape = (2880,2880)
+                self.detectorCal.detector.shape = det_shape
+                self.detectorCal.detector.max_shape = det_shape
                 
             self.detectorCal.setAzimuthalReference(azimuth)
             self.detectorCal.setPolarization(polaxis,polfactor)
@@ -570,11 +591,17 @@ class QCrystalParameter(qt.QWidget):
         self.toolbar.setFloatable(False)
         
         
-        self.loadxtalAct = qt.QAction(icons.getQIcon('document-open'), "Load bulk file")
+        self.loadxtalAct = qt.QAction(icons.getQIcon('document-open'), "Load unit cell")
         self.toolbar.addAction(self.loadxtalAct)
         toolbarbtn = self.toolbar.widgetForAction(self.loadxtalAct)
         toolbarbtn.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
         self.loadxtalAct.triggered.connect(self.onLoadXtal)
+        
+        self.showxtalAct = qt.QAction(resources.getQicon("lattice-view"), "show unit cell")
+        self.toolbar.addAction(self.showxtalAct)
+        toolbarbtn_2 = self.toolbar.widgetForAction(self.showxtalAct)
+        toolbarbtn_2.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
+        self.showxtalAct.triggered.connect(self.onShowXtal)
         
         spacer_widget = qt.QWidget()
         spacer_widget.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred)
@@ -730,6 +757,13 @@ class QCrystalParameter(qt.QWidget):
         
     def _onLinkLatticeChanged(self, checked):
         self.link_btn.setIcon(self.latticelinkgrp.checkedAction().icon())
+
+    def onShowXtal(self):
+        repr_xtal = str(self.getCrystal())
+        qutils.information_detailed_message(self, 
+                                            "Unit cell parameters", 
+                                            "Show the detailed text to display the coordinates of the atoms in the chosen unit cell.",
+                                            repr_xtal)
         
     def _onLatticeParamsChanged(self, which):
         act = self.latticelinkgrp.checkedAction()
@@ -767,10 +801,30 @@ class QCrystalParameter(qt.QWidget):
             return
         else:
             raise ValueError("Invalid lattice parameter changed: %s" % which)
+            
+    def loadUnitCell(self, filename):
+        ext = os.path.splitext(filename)[1]
+        if ext in ['.xtal', '.h5', '.xpr']:
+            xtal = CTRcalc.SXRDCrystal.fromFile(filename)
+            uc_bulk = xtal['bulk']
+        else:
+            uc_bulk = CTRcalc.UnitCell.fromFile(filename)
+        uc_name = os.path.splitext(os.path.basename(filename) )[0]
+        self.crystalComboBox.addItem(uc_name, uc_bulk)
+        idx = self.crystalComboBox.findText(uc_name)
+        self.crystalComboBox.setCurrentIndex(idx)
+        self.onSwitchCrystal(idx)
         
-    
     def onLoadXtal(self):
-        fileTypeDict = {'bulk files (*.bul)': '.bul', 'Crystal Files (*.xtal)': '.txt', 'All files (*)': '', }
+        fileTypeDict = {'ANA ROD files (*.bul *.sur)': '.bul', 'Crystal Files (*.xtal *.xpr)': '.xtal .xpr'}
+        if HAS_ASE:
+            fmt = ase.io.formats.ioformats
+            r_ext = list(filter(lambda d : fmt[d].can_read, fmt))
+            r_ext = [ '.' + r for r in r_ext]
+            ase_extensions = ' '.join(r_ext)
+            fileTypeDict['ASE supported files (*.cif *.vasp *.xyz *.abinit-in *.abinit-out *.espresso-in *.espresso-out *.mol *)'] = ase_extensions
+        fileTypeDict['All files (*)'] = ''
+
         fileTypeFilter = ""
         for f in fileTypeDict:
             fileTypeFilter += f + ";;"
@@ -783,22 +837,11 @@ class QCrystalParameter(qt.QWidget):
         
         self.filedialogdir = os.path.splitext(filename)[0]
         #filename += fileTypeDict[filetype]
-        
-        if filetype == 'bulk files (*.bul)':
-            try:
-                uc_bulk = CTRcalc.UnitCell.fromBULfile(filename)
-            except Exception:
-                qt.QMessageBox.critical(self,"Cannot open xtal", "Cannot open:\n%s" % traceback.format_exc())
-                return
-        else:
-            qt.QMessageBox.critical(self,"Cannot open xtal", "File extension not understood")
+        try:
+            self.loadUnitCell(filename)
+        except Exception:
+            qt.QMessageBox.critical(self,"Cannot open unit cell file", "Cannot open:\n%s" % traceback.format_exc())
             return
-            
-        uc_name = os.path.splitext(os.path.basename(filename) )[0]
-        self.crystalComboBox.addItem(uc_name, uc_bulk)
-        idx = self.crystalComboBox.findText(uc_name)
-        self.crystalComboBox.setCurrentIndex(idx)
-        self.onSwitchCrystal(idx)
         
     def onSwitchCrystal(self, index):
         selectiondata = self.crystalComboBox.itemData(index)
