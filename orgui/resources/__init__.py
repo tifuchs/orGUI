@@ -42,7 +42,7 @@ def getSplashScreen(version_number=None):
         font = qt.QFont()
         font.setPixelSize(30)
         painter.setFont(font)
-        painter.drawText(720, 313, "version %s" % version_number)
+        painter.drawText(720, 403, "version %s" % version_number)
         return pixmap 
     
 def getDiffractometerPath():

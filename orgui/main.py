@@ -72,6 +72,8 @@ def main():
     if os.path.isfile(options.configfile) or options.configfile == defaultconfigfile:
         app = qt.QApplication(sys.argv)
         app.setApplicationName("orGUI")
+        from .resources import getQicon
+        app.setWindowIcon(getQicon("orguiicon"))
         from .resources import getSplashScreen
         pixmap = getSplashScreen(__version__)
         desktopWidget = app.desktop()

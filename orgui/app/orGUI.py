@@ -26,7 +26,7 @@ __author__ = "Timo Fuchs"
 __credits__ = ['Finn Schroeter']
 __copyright__ = "Copyright 2020-2024 Timo Fuchs"
 __license__ = "MIT License"
-__version__ = "1.1.0"
+from .. import __version__
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
@@ -95,6 +95,7 @@ silx.config.DEFAULT_PLOT_SYMBOL = '.'
 class orGUI(qt.QMainWindow):
     def __init__(self,configfile,parent=None):
         qt.QMainWindow.__init__(self, parent)
+        #self.setWindowIcon(resources.getQicon("orguiicon"))
         self.h5database = None # must be a h5py file-like, by default not opened to avoid reading issues at beamtimes!
         self.images_loaded = False
         self.resetZoom = True
@@ -542,23 +543,25 @@ ub : gui for UB matrix and angle calculations
         self.updateReflections()
         
     def _onShowAbout(self):
-        messageStr = """Copyright (c) 2020-2024 Timo Fuchs, published under MIT License
-        <br> <br>
-orGUI: Orientation and Integration with 2D detectors (1.0.0).<br>
-Zenodo. <a href=\"https://doi.org/10.5281/zenodo.12592485\">https://doi.org/10.5281/zenodo.12592485</a> <br> <br> 
-New software updates will be published under <a href=\"https://doi.org/10.5281/zenodo.12592485\">Zenodo</a>.
-<br> <br>
-Help requests can be send via Email to Timo Fuchs. 
-<br> <br>
-"orGUI" was developed during the PhD work of Timo Fuchs,
-within the group of Olaf Magnussen.
-"""
-        msg0 = qt.QMessageBox(self)
-        msg0.setWindowTitle("About orGUI")
-        msg0.setText(messageStr)
-        msg0.setTextInteractionFlags(qt.Qt.TextBrowserInteraction)
-        msg0.setTextFormat(qt.Qt.RichText)
-        msg0.exec()
+        dial = AboutDialog(self, __version__)
+        dial.exec()
+#        messageStr = """Copyright (c) 2020-2024 Timo Fuchs, published under MIT License
+#        <br> <br>
+#orGUI: Orientation and Integration with 2D detectors (1.0.0).<br>
+#Zenodo. <a href=\"https://doi.org/10.5281/zenodo.12592485\">https://doi.org/10.5281/zenodo.12592485</a> <br> <br> 
+#New software updates will be published under <a href=\"https://doi.org/10.5281/zenodo.12592485\">Zenodo</a>.
+#<br> <br>
+#Help requests can be send via Email to Timo Fuchs. 
+#<br> <br>
+#"orGUI" was developed during the PhD work of Timo Fuchs,
+#within the group of Olaf Magnussen.
+#"""
+#        msg0 = qt.QMessageBox(self)
+#        msg0.setWindowTitle("About orGUI")
+#        msg0.setText(messageStr)
+#        msg0.setTextInteractionFlags(qt.Qt.TextBrowserInteraction)
+#        msg0.setTextFormat(qt.Qt.RichText)
+#        msg0.exec()
         
     def _onShowDiffractionGeometry(self):
         if hasattr(self, 'diffractometerdialog'):
@@ -2440,6 +2443,45 @@ class AspectRatioPixmapLabel(qt.QLabel):
     def resizeEvent(self,e):
         if self.pix is not None:
             super().setPixmap(self.scaledPixmap())
+            
+class AboutDialog(qt.QDialog):
+    def __init__(self,version, msg='' ,parent=None):
+        qt.QDialog.__init__(self, parent)
+        layout = qt.QVBoxLayout()
+        self.setWindowTitle("About orGUI")
+        
+        pixmap = resources.getSplashScreen(str(version))
+        self.logo = qt.QLabel()
+        desktopWidget = qt.QApplication.instance().desktop()
+        screenGeometry = desktopWidget.screenGeometry()
+        splashpm = pixmap.scaledToHeight(int(screenGeometry.height()/5), qt.Qt.SmoothTransformation)
+        self.logo.setPixmap(splashpm)
+        
+        messageStr = "orGUI version %s" % version
+        messageStr += msg
+        messageStr += """<br> <br>
+Copyright (c) 2020-2024 Timo Fuchs, published under MIT License
+<br> <br>
+orGUI: Orientation and Integration with 2D detectors.<br>
+Zenodo. <a href=\"https://doi.org/10.5281/zenodo.12592485\">https://doi.org/10.5281/zenodo.12592485</a> <br> <br> 
+New software updates will be published under <a href=\"https://doi.org/10.5281/zenodo.12592485\">Zenodo</a>.
+<br> <br>
+Help requests can be send via Email to Timo Fuchs. 
+<br> <br>
+"orGUI" was developed during the PhD work of Timo Fuchs,<br>
+within the group of Olaf Magnussen.
+""" 
+        self.label = qt.QLabel()
+        self.label.setText(messageStr)
+        self.label.setTextInteractionFlags(qt.Qt.TextBrowserInteraction)
+        self.label.setTextFormat(qt.Qt.RichText)
+        
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok)
+        buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.accept)
+        layout.addWidget(self.logo)
+        layout.addWidget(self.label)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
 
 
 
