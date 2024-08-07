@@ -445,7 +445,7 @@ class QUBCalculator(qt.QSplitter):
                         ponipath = os.path.join(os.path.dirname(p), machine['poni'])
                     self.detectorCal.load(ponipath)
                     self.ubCal.setLambda(self.detectorCal.get_wavelength()*1e10)
-                    
+                    self.crystal.setEnergy(self.detectorCal.get_energy()*1e3)
                 else:
                     self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
                     self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
@@ -468,7 +468,7 @@ class QUBCalculator(qt.QSplitter):
                     'chi' : self.chi
                 },
                 'source' :  {
-                    'E' : E
+                    'E' : self.detectorCal.get_energy()
                 },
                 'SXRD_geometry' : self.detectorCal
             }
@@ -515,7 +515,7 @@ class QUBCalculator(qt.QSplitter):
                 'chi' : self.chi
             },
             'source' :  {
-                'E' : E
+                'E' : self.detectorCal.get_energy()
             },
             'SXRD_geometry' : self.detectorCal
         }
