@@ -2,6 +2,16 @@
 Changelog
 *********
 
+1.1.1 (2024-08-06)
+##################
+
+Version that fixes a critical bug in the config file reading when a poni file is given.
+
+Fixed
+=====
+
+* Energy set from poni file if provided in config file (434fae447351f626c280ab3f5c4b94dd4124b813)
+
 1.1.0 (2024-08-05)
 ##################
 
