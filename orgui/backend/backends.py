@@ -37,48 +37,15 @@ import pytz
 
 # --- parse h5node name and return the scan number and name ---
 
-def parseCH5523(obj):
-    ddict = dict() 
-    scanname = obj.local_name
-    scanno = int(scanname.split('_')[-1])
-    ddict['scanno'] = scanno
-    ddict['name'] = obj.local_name.strip('/')
-    return ddict
-
-def parseP212H5(obj):
-    ddict = dict() 
-    scanname = obj.basename
-    scanno, subscanno = scanname.split('.')
-    ddict['scanno'] = int(scanno)
-    ddict['name'] = obj.local_name
-    return ddict
-    
-def parseID31Bliss(obj):
-    ddict = dict() 
-    scanname = obj.local_name
-    scansuffix = scanname.split('_')[-1]
-    scanname_nosuffix = '_'.join(scanname.split('_')[:-1])
-    scanno, subscanno = scansuffix.split('.')
-    ddict['scanno'] = int(scanno)
-    ddict['name'] = obj.local_name
-    return ddict
-    
-# orgui will search for these counters in the Scan object and copy them into the database, if available
-auxillary_counters = ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch']
-    
-# assign the name parser to the beamtime identifiers:
-             
-scannoConverter = {'ch5523': parseCH5523,
-             '20190017': parseP212H5,
-             'ch5700': parseID31Bliss,
-             '20200028': parseP212H5,
-             'ch5918' : parseID31Bliss,
-             'P212_default' : parseP212H5,
-             'id31_default' : parseID31Bliss
-             }
-    
     
 # --- dates of the beamtimes. Used to identify the beamtimes from the files ---
+
+# This enables the beamtime auto detect functionality.
+# However, you can always override this setting by unchecking 
+# the box in the lower left corner in the gui and manually selecting
+# a backend
+
+default_beamtime = 'id31_default' 
 
 beamtimes = {'ch5523': (datetime(2018, 9, 22), datetime(2018, 10, 5)),
              '20190017': (datetime(2019, 12, 8), datetime(2019, 12, 24)),
@@ -86,10 +53,9 @@ beamtimes = {'ch5523': (datetime(2018, 9, 22), datetime(2018, 10, 5)),
              '20200028': (datetime(2021, 4, 27), datetime(2021, 5, 10)),
              'ch5918' : (datetime(2021, 7, 18), datetime(2021, 8, 1)),
              'P212_default' : (datetime(1902, 7, 18), datetime(1903, 8, 1)),
-             'id31_default' : (datetime(2021, 8, 2), datetime(2500, 1, 1)) # all data after 2021/8/2 is automatically detected as ID31 data. You can change this behaviour by changing the beamtime dates. 
+             '20230930' : (datetime(2024, 7, 16), datetime(2024, 7, 25))#,
+             #'id31_default' : (datetime(2024, 8, 2), datetime(2500, 1, 1)) # all data not found in this list automatically detected as ID31 data.
              }
-
-
 
 def localize(dt):
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
@@ -104,13 +70,14 @@ def getBeamtimeId(dt):
         if localize(start) <= localize(dt) <= localize(end):
             return bt
     else:
-        raise Exception("Didn't find matching beamtime for date %s" % dt.ctime())
+        return default_beamtime
+        #raise Exception("Didn't find matching beamtime for date %s" % dt.ctime())
  
             
 # add actual backends here, which perform the file reads:
 # They must implement scans.Scan
 
-from .beamline.id31_tools import BlissScan_EBS, Fastscan, BlissScan
+from .beamline.id31_tools import BlissScan_EBS, BlissScan
 from .beamline.P212_tools import H5Fastsweep
 
 fscans = {'ch5523': BlissScan,

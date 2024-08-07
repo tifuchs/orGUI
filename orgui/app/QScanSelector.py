@@ -134,7 +134,7 @@ class QScanSelector(qt.QMainWindow):
         btidsplit = qt.QSplitter(self)
         qt.QLabel("Beamtime id:",btidsplit)
         self.btid = qt.QComboBox(btidsplit)
-        [self.btid.addItem(bt) for bt in backends.beamtimes]
+        [self.btid.addItem(bt) for bt in backends.fscans]
         self.btid.setCurrentText("id31_default")
         
         self.bt_autodetect_enable = qt.QCheckBox("auto detect", btidsplit)
@@ -647,7 +647,7 @@ class QScanSelector(qt.QMainWindow):
                             dt = dateparser.parse(obj.h5py_target['start_time'][()])
                         except Exception as e:
                             msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open scan', 
-                                'Cannot parse start time of the scan.', qt.QMessageBox.Ok, self)
+                                'Cannot parse start time of the scan. Please manually select the beamtime id', qt.QMessageBox.Ok, self)
                             msgbox.setDetailedText(traceback.format_exc())
                             clickedbutton = msgbox.exec()
                             return
@@ -664,7 +664,7 @@ class QScanSelector(qt.QMainWindow):
                     else:
                         btid = self.btid.currentText()
                     try:
-                        ddict = backends.scannoConverter[btid](obj)
+                        ddict = backends[btid].parse_h5_node(obj)
                     except Exception as e:
                         msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open scan', 
                             'Cannot parse scan number: %s' % str(e), qt.QMessageBox.Ok, self)
