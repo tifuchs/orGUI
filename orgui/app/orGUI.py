@@ -1020,6 +1020,13 @@ ub : gui for UB matrix and angle calculations
 
         # search files using ImportImagesScan backend
         importedscan = universalScanLoader.ImportImagesScan(filename)
+
+        if importedscan.inpath == None:
+            qt.QMessageBox.critical(self,
+                                    "Images could not be imported",
+                                    "The selected data source is not suitable\n"\
+                                    "It is necessary to select a file containing raw detector image(s)!")
+            return
         
         if importedscan.shape != self.ubcalc.detectorCal.detector.shape:
             qt.QMessageBox.critical(self,

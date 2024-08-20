@@ -71,12 +71,14 @@ class ImportImagesScan():
         filenames = ''.join(os.listdir(selected_directory))
 
         found_scanfiles = re_str.findall(filenames) #list of found filenames (suffix only)
-        suffix = re_str.findall(self.filename)[0]
-        imagePrefix = self.filename.removesuffix(suffix)
-
         #found_scannrs = [e[1:-4] for e in found_scanfiles] #only the scan numbers, eg. 00015
-
-        return [imagePrefix,found_scanfiles]
+        if re_str.findall(self.filename) == []:
+            print('Could not load images')
+            return
+        else:
+            suffix = re_str.findall(self.filename)[0]
+            imagePrefix = self.filename.removesuffix(suffix)
+            return [imagePrefix,found_scanfiles]
 
     def set_axis(self,axismin,axismax,axis,fixedAxisValue):
         self.axis = np.linspace(axismin,axismax,self.nopoints)
