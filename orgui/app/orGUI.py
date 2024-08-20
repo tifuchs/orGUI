@@ -427,7 +427,7 @@ ub : gui for UB matrix and angle calculations
                     break
                 else:
                     return
-            dist_in_pixels = min_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1] - max_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1]
+            dist_in_pixels = np.abs(min_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1] - max_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1])
             roi_hlength = np.ceil(dist_in_pixels/step_nr)
             
             # open ROI selection dialog
