@@ -41,6 +41,10 @@ class ImportImagesScan():
         self.filename = imgpath
 
         self.inpath = self.find_files()
+
+        if self.inpath == None:
+            return
+
         with fabio.open(self.inpath[0] + self.inpath[1][0]) as fabf:
             img_data = fabf.data
             self.FramesPerFile = fabf.nframes
