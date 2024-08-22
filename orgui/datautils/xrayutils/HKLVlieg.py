@@ -1234,6 +1234,69 @@ class VliegAngles():
         xyz_alpha = self.coordinatesAlpha(xyz_rel, omega, phi, chi)
         return ((ALPHA @ xyz_alpha.T).T).reshape(shape)
         
+    def transform_coordinates(self, xyz_rel, origin_frame,
+                              target_frame, **angles):
+        if origin_frame == target_frame:
+            return xyz_rel
+        order = ['lab', 'alpha', 'omega', 'chi', 'phi', 'crystal']
+        calc_functions = [calcALPHA, calcOMEGA, calcCHI, calcPHI]
+        if origin_frame not in order:
+            raise ValueError("Origin reference frame %s does not exist, can be one of %s" % (origin_frame,order))
+            
+        if target_frame not in order:
+            raise ValueError("Target reference frame %s does not exist, can be one of %s" % (target_frame,order))
+        
+        idx_origin = order.index(origin_frame)
+        idx_target = order.index(target_frame)
+        
+        xyz_rel = np.atleast_2d(np.asarray(xyz_rel))
+        shape = xyz_rel.shape
+        
+        invert_mat = idx_origin < idx_target
+        if invert_mat:
+            idx = idx_origin
+            current_xyz = xyz_rel.T
+            while idx < idx_target:
+                angle_name = order[idx + 1]
+                if angle_name == 'crystal':
+                    R = self._ubCalculator.lattice.R_mat
+                    U = self._ubCalculator.getU()
+                    UR_inv = LA.inv(U @ R)
+                    current_xyz = UR_inv @ current_xyz
+                    idx += 1
+                else:
+                    try:
+                        val = angles[angle_name]
+                    except Exception:
+                        raise ValueError("The transformation %s -> %s requires diffractometer angle %s" 
+                                         % (origin_frame, target_frame, angle_name))
+                    rot_matrix = calc_functions[idx](val)
+                    current_xyz = LA.inv(rot_matrix) @ current_xyz
+                    idx += 1
+            return (current_xyz.T).reshape(shape)
+        else:
+            idx = idx_origin
+            current_xyz = xyz_rel.T
+            while idx > idx_target:
+                angle_name = order[idx]
+                if angle_name == 'crystal':
+                    R = self._ubCalculator.lattice.R_mat
+                    U = self._ubCalculator.getU()
+                    UR = U @ R
+                    current_xyz = UR @ current_xyz
+                    idx -= 1
+                else:
+                    try:
+                        val = angles[angle_name]
+                    except Exception:
+                        raise ValueError("The transformation %s -> %s requires diffractometer angle %s" 
+                                         % (origin_frame, target_frame, angle_name))
+                    rot_matrix = calc_functions[idx - 1](val)
+                    current_xyz = rot_matrix @ current_xyz
+                    idx -= 1
+            return (current_xyz.T).reshape(shape)
+        
+        
     def anglesOrientationAlpha(self, xyz_rel, xyz_direction):
         xyz_rel = np.atleast_2d(np.asarray(xyz_rel))
         xyz_direction = np.atleast_2d(np.asarray(xyz_direction))
