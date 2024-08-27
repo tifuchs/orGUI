@@ -353,6 +353,9 @@ class BlissScan_EBS(Fastscan):
             self.axisname = 'time'
             self.th = self.positioners['th']
             self.mu = self.positioners['mu']
+
+        if 'potv' in data_1['measurement']:
+            self.potv = data_1['measurement']['potv'][:self.nopoints]
             
         if 'srcur' in data_1['measurement']:
             self.srcur = data_1['measurement']['srcur'][:self.nopoints]

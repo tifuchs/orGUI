@@ -64,7 +64,7 @@ def parseID31Bliss(obj):
     return ddict
     
 # orgui will search for these counters in the Scan object and copy them into the database, if available
-auxillary_counters = ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch']
+auxillary_counters = ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch', 'potv']
     
 # assign the name parser to the beamtime identifiers:
              
