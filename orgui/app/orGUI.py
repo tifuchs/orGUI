@@ -362,6 +362,9 @@ ub : gui for UB matrix and angle calculations
         datamenu = menu_bar.addMenu("Data processing")
         hackAct = datamenu.addAction("Rocking scan integration")
         hackAct.triggered.connect(self.rocking_extraction)
+
+        hackAct2 = datamenu.addAction("Rocking scan integration (beta)")
+        hackAct2.triggered.connect(self.rocking_extraction_beta)
         
         helpmenu = menu_bar.addMenu("&Help")
         
@@ -379,6 +382,523 @@ ub : gui for UB matrix and angle calculations
         
         self.setMenuBar(menu_bar)
 
+    def rocking_extraction_beta(self):
+        if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
+            qt.QMessageBox.warning(self, "No scan loaded", "Cannot integrate scan: No scan loaded.")
+            return
+
+        # make ROI visible in orgui images
+        self.roivisible = True
+        try:
+            self.updateROI()
+        except Exception:
+            qutils.warning_detailed_message(self, "Cannot show ROI", "Cannot show ROI", traceback.format_exc())
+            return
+
+
+        # select static ROI integration instead of hkl scan
+        self.scanSelector.scanstab.setCurrentIndex(1)
+        
+        # open CTR selection dialog
+        diag_rock = QRockingScanCreator()
+        if diag_rock.exec() == qt.QDialog.Accepted:
+            
+            # define integration boundaries
+            l_min = diag_rock.Lmin.value()
+            l_max = diag_rock.Lmax.value()
+            step_width = diag_rock.interval.value()
+            step_nr = round((l_max-l_min)/step_width) + 1
+            
+            #calculate useful ROI size
+            try:
+                min_coordinates = self.searchPixelCoordHKL([diag_rock.selectedH.value(),diag_rock.selectedK.value(),l_min])
+                max_coordinates = self.searchPixelCoordHKL([diag_rock.selectedH.value(),diag_rock.selectedK.value(),l_max])
+            except Exception:
+                qutils.warning_detailed_message(self, "Cannot calculate coordiantes", "Cannot calculate pixel coordinates. See details!", traceback.format_exc())
+                return
+            refl_dialog = QReflectionAnglesDialog(min_coordinates,"Select the correct intersection with Ewald sphere", self)
+            for no_show in range(3):
+                if qt.QDialog.Accepted == refl_dialog.exec():
+                    for i, cb in enumerate(refl_dialog.checkboxes):
+                        if cb.isChecked():
+                            which_Ewald_intersect = i
+                            break
+                    else:
+                        qt.QMessageBox.warning(self, "No reflection selected", "Select a reflection on the rod you want to integrate.")
+                        continue
+                    break
+                else:
+                    return
+            dist_in_pixels = np.abs(min_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1] - max_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1])
+            roi_hlength = np.ceil(dist_in_pixels/step_nr)
+            
+            # open ROI selection dialog
+            diag_rock_roi = QRockingScanROI(roi_hlength)
+            if diag_rock_roi.exec() == qt.QDialog.Accepted:
+                        
+                # select integration parameters such as ROI size, background
+                self.scanSelector.hsize.setValue(diag_rock_roi.roi_hsize.value())
+                self.scanSelector.vsize.setValue(diag_rock_roi.roi_vsize.value())
+                self.scanSelector.left.setValue(diag_rock_roi.roi_hsize_bg.value())
+                self.scanSelector.right.setValue(diag_rock_roi.roi_vsize_bg.value())
+                self.scanSelector.sigROIChanged.emit()
+
+                roi_x_list = np.empty(step_nr,dtype=np.float64)
+                roi_y_list = np.empty(step_nr,dtype=np.float64)
+
+
+                #generate list of ROI coordinates
+                for no, i in enumerate(np.linspace(l_min, l_max, step_nr)):
+                    coordinates = self.searchPixelCoordHKL([diag_rock.selectedH.value(),diag_rock.selectedK.value(),i])
+                    xpos = coordinates['xy_%s' % int(which_Ewald_intersect+1)][0]
+                    ypos = coordinates['xy_%s' % int(which_Ewald_intersect+1)][1]
+                    roi_x_list[no] = xpos
+                    roi_y_list[no] = ypos
+
+                self.scanSelector.set_xy_static_loc(roi_x_list[0], roi_y_list[0])
+                self.scanSelector.sigROIChanged.emit()
+
+
+                self.integrate_beta(roi_x_list,roi_y_list)
+
+                    
+                qt.QMessageBox.information(self, "Rocking scan integrated", "Rocking scan was successfully integrated.")
+                print(roi_x_list)
+                print(roi_y_list)
+
+    def integrate_beta(self,rxlist,rylist):
+        import time
+        try:
+            image = self.fscan.get_raw_img(0)
+        except Exception as e:
+            print("no images found! %s" % e)
+            return
+        if self.database.nxfile is None:
+            print("No database available")
+            return
+        dc = self.ubcalc.detectorCal
+        #mu = self.ubcalc.mu
+        angles = self.ubcalc.angles
+
+        H_1 = np.array([h.value() for h in self.scanSelector.H_1])
+        H_0 = np.array([h.value() for h in self.scanSelector.H_0])
+        
+        imgmask = None
+        
+        if self.scanSelector.useMaskBox.isChecked():
+            if self.centralPlot.getMaskToolsDockWidget().getSelectionMask() is None:
+                btn = qt.QMessageBox.question(self,"No mask available","""No mask was selected with the masking tool.
+    Do you want to continue without mask?""")
+                if btn != qt.QMessageBox.Yes:
+                    return
+            else:
+                imgmask = self.centralPlot.getMaskToolsDockWidget().getSelectionMask() > 0.
+        
+        corr = self.scanSelector.useSolidAngleBox.isChecked() or\
+            self.scanSelector.usePolarizationBox.isChecked()
+        
+        if corr:
+            C_arr = np.ones(dc.detector.shape,dtype=np.float64)
+            if self.scanSelector.useSolidAngleBox.isChecked():
+                C_arr /= dc.solidAngleArray()
+            if self.scanSelector.usePolarizationBox.isChecked():
+                C_arr /= dc.polarization(factor=dc._polFactor,axis_offset=dc._polAxis)
+
+        
+        def get_roi_hkl():
+            hkl_del_gam_s1, hkl_del_gam_s2 = self.getROIloc()
+            
+            nodatapoints = len(self.fscan)
+            
+            if hkl_del_gam_s1.shape[0] == 1:
+                hkl_del_gam_1 = np.zeros((nodatapoints,hkl_del_gam_s1.shape[1]), dtype=np.float64)
+                hkl_del_gam_2 = np.zeros((nodatapoints,hkl_del_gam_s1.shape[1]), dtype=np.float64)
+                hkl_del_gam_1[:] = hkl_del_gam_s1[0]
+                hkl_del_gam_2[:] = hkl_del_gam_s2[0]
+            else:
+                hkl_del_gam_1, hkl_del_gam_2 = hkl_del_gam_s1, hkl_del_gam_s2
+
+            return hkl_del_gam_1, hkl_del_gam_2
+
+
+        def fill_counters(image,pixelavail,hkldelgam_i):
+            if hkldelgam_i[-1]:
+                key = self.intkey(hkldelgam_i[6:8])
+                bkgkey = self.bkgkeys(hkldelgam_i[6:8])
+                
+                cimg = image[key[::-1]]
+                
+                # !!!!!!!!!! add mask here  !!!!!!!!!
+                croi = np.nansum(cimg)
+                cpixel = np.nansum(pixelavail[key[::-1]])
+                bgroi = 0.
+                bgpixel = 0.
+                for bg in bkgkey:
+                    bgimg = image[bg[::-1]]
+                    bgroi += np.nansum(bgimg)
+                    bgpixel += np.nansum(pixelavail[bg[::-1]])
+            else:
+                croi = np.nan
+                cpixel = np.nan
+                bgroi = np.nan
+                bgpixel = np.nan
+
+            return (croi, cpixel, bgroi, bgpixel)
+        
+        hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl() # needed to initialize integration 
+
+        # initialize 1d np arrays for storing roi integration counters for all images
+        dataavail = np.logical_or(hkl_del_gam_1[:,-1],hkl_del_gam_2[:,-1])
+        croi1_a = np.zeros_like(dataavail,dtype=np.float64)
+        cpixel1_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgroi1_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgpixel1_a = np.zeros_like(dataavail,dtype=np.float64)
+
+        croi2_a = np.zeros_like(dataavail,dtype=np.float64)
+        cpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgroi2_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
+
+        # initialize 2d np array to store roi integration counters together for all images/ROIs
+        croi1_all = np.zeros((dataavail.shape) + (len(rxlist),))
+        cpixel1_all = np.zeros((dataavail.shape) + (len(rxlist),))
+        bgroi1_all = np.zeros((dataavail.shape) + (len(rxlist),))
+        bgpixel1_all = np.zeros((dataavail.shape) + (len(rxlist),))
+        croi2_all = np.zeros((dataavail.shape) + (len(rxlist),))
+        cpixel2_all = np.zeros((dataavail.shape) + (len(rxlist),))
+        bgroi2_all = np.zeros((dataavail.shape) + (len(rxlist),))
+        bgpixel2_all = np.zeros((dataavail.shape) + (len(rxlist),))
+        
+        progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
+        progress.setWindowModality(qt.Qt.WindowModal)
+
+
+        def sumImage(i):
+            if not dataavail[i]:
+                return (np.nan, np.nan, np.nan, np.nan), (np.nan, np.nan, np.nan, np.nan) # has to be adapted because return shape changed
+            else:
+                t1 = time.time()
+                image = self.fscan.get_raw_img(i).img.astype(np.float64)
+                t2 = time.time()
+                print('get_raw_img took ' + str(t2-t1) + ' seconds.')
+                
+                if imgmask is not None:
+                    image[imgmask] = np.nan
+                    pixelavail = (~imgmask).astype(np.float64)
+                else:
+                    pixelavail = np.ones_like(image)
+                if corr:
+                    image *= C_arr
+
+                # todo: numpy instead of lists
+                all_counters1 = np.zeros((len(rxlist),) + (4,))
+                all_counters2 = np.zeros((len(rxlist),) + (4,))
+
+                hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
+
+                for crnr in range(len(rxlist)):
+
+                    # set ROI (if it needs to be moved)
+                    t1 = time.time()
+
+                    current_roi_x = hkl_del_gam_1[0][6]
+                    current_roi_y = hkl_del_gam_1[0][7]
+                    
+                    if not current_roi_x == np.round(rxlist[crnr],3): # and current_roi_y == rylist[crnr]: #compare to current roi position
+                        self.scanSelector.set_xy_static_loc(rxlist[crnr], rylist[crnr])
+                        self.scanSelector.sigROIChanged.emit()
+                        print('move roi')
+
+                    t2 = time.time()
+                    print('setting roi in gui took ' + str(t2-t1) + ' seconds.')
+
+                    # get roi
+
+                    t1 = time.time()
+                    hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
+                    t2 = time.time()
+                    print('get_roi_hkl took ' + str(t2-t1) + ' seconds.')
+
+                    # fill counters
+
+                    t1 = time.time()
+                    counters1 = fill_counters(image,pixelavail,hkl_del_gam_1[i,:])
+                    counters2 = fill_counters(image,pixelavail,hkl_del_gam_2[i,:])
+
+                    all_counters1[crnr] = counters1
+                    all_counters2[crnr] = counters2
+
+                    t2 = time.time()
+                    print('filling the counters took ' + str(t2-t1) + ' seconds.')
+ 
+                return all_counters1, all_counters2
+            
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor: # speedup only for the file reads 
+            futures = {}
+            for i in range(len(self.fscan)):
+                futures[executor.submit(sumImage, i)] = i
+            
+            for f in concurrent.futures.as_completed(futures): # iteration over jobs
+                try:
+                    for j in range(len(f.result()[1])): # iteration over ROIs
+                        (croi1, cpixel1, bgroi1, bgpixel1), (croi2, cpixel2, bgroi2, bgpixel2) = f.result()[0][j], f.result()[1][j] # this can be rewritten with less indices
+                        i = futures[f]
+                        croi1_all[i][j] = croi1
+                        cpixel1_all[i][j] = cpixel1
+                        bgroi1_all[i][j] = bgroi1
+                        bgpixel1_all[i][j] = bgpixel1
+                        croi2_all[i][j] = croi2
+                        cpixel2_all[i][j] = cpixel2
+                        bgroi2_all[i][j] = bgroi2
+                        bgpixel2_all[i][j] = bgpixel2
+                    progress.setValue(futures[f])
+                except concurrent.futures.CancelledError:
+                    pass
+                except Exception as e:
+                    print("Cannot read image:\n%s" % traceback.format_exc())
+
+                if progress.wasCanceled():
+                    [f.cancel() for f in futures]
+                    break
+            
+
+        progress.setValue(len(self.fscan))
+
+        #plot and save data in database
+
+        for d in range(croi1_all.shape[1]):
+
+            croi1_a = croi1_all[...,d]
+            cpixel1_a = cpixel1_all[...,d]
+            bgroi1_a = bgroi1_all[...,d]
+            bgpixel1_a = bgpixel1_all[...,d]
+            croi2_a = croi2_all[...,d]
+            cpixel2_a = cpixel2_all[...,d]
+            bgroi2_a = bgroi2_all[...,d]
+            bgpixel2_a = bgpixel2_all[...,d]
+            
+        
+            if np.any(bgpixel1_a):
+                croibg1_a = croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a
+                croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a)
+            else:
+                croibg1_a = croi1_a
+                croibg1_err_a = np.sqrt(croi1_a)
+                
+            if np.any(bgpixel2_a):
+                croibg2_a = croi2_a - (cpixel2_a/bgpixel2_a) * bgroi2_a
+                croibg2_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2) * bgroi2_a)
+            else:
+                croibg2_a = croi2_a
+                croibg2_err_a = np.sqrt(croi2_a)
+
+            rod_mask1 = np.isfinite(croibg1_a)
+            rod_mask2 = np.isfinite(croibg2_a)
+            
+            s1_masked = hkl_del_gam_1[:,5][rod_mask1]
+            s2_masked = hkl_del_gam_2[:,5][rod_mask2]
+            
+            croibg1_a_masked = croibg1_a[rod_mask1]
+            croibg2_a_masked = croibg2_a[rod_mask2]
+            
+            croibg1_err_a_masked = croibg1_err_a[rod_mask1]
+            croibg2_err_a_masked = croibg2_err_a[rod_mask2]
+
+            # save data
+            
+            #name = str(H_1) + "*s+" + str(H_0)
+            #if self.scanSelector.scanstab.currentIndex() == 1:
+            x = rxlist[d] #rxlist
+            y = rylist[d] #rylist
+            name1 = "pixloc[%.2f %.2f]" % (x,y)
+            name2 = "pixloc[%.2f %.2f]_2" % (x,y) # does not exist, Just for compatibility
+            traj1 = {
+                "@NX_class": u"NXcollection",
+                "@direction" : u"Fixed pixel coordinates",
+                "s" : hkl_del_gam_1[:,5]
+            }
+            traj2 = {
+                "@NX_class": u"NXcollection",
+                "@direction" : u"Fixed pixel coordinates",
+                "s" : hkl_del_gam_2[:,5]
+                }
+            '''
+            else:
+                name1 = str(H_1) + "*s1+" + str(H_0)
+                name2 = str(H_1) + "*s2+" + str(H_0)
+                traj1 = {
+                    "@NX_class": u"NXcollection",
+                    "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
+                    "H_1"  : H_1,
+                    "H_0" : H_0,
+                    "s" : hkl_del_gam_1[:,5]
+                }
+                traj2 = {
+                    "@NX_class": u"NXcollection",
+                    "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
+                    "H_1"  : H_1,
+                    "H_0" : H_0,
+                    "s" : hkl_del_gam_2[:,5]
+                }
+            '''
+            
+            defaultS1 = croibg1_a_masked.size > croibg2_a_masked.size
+            
+            if hasattr(self.fscan, "title"):
+                title = str(self.fscan.title)
+            else:
+                title = u"%s-scan" % self.fscan.axisname
+            
+            mu, om = self.getMuOm()
+            if len(np.asarray(om).shape) == 0:
+                om = np.full_like(mu,om)
+            if len(np.asarray(mu).shape) == 0:
+                mu = np.full_like(om,mu)
+            
+            suffix = ''
+            i = 0
+
+            while(self.activescanname + "/measurement/" + name1 + suffix in self.database.nxfile):
+                suffix = "_%s" % i
+                i += 1
+            availname1 = name1 + suffix
+            
+            suffix = ''
+            i = 0
+            while(self.activescanname + "/measurement/" + name2 + suffix in self.database.nxfile):
+                suffix = "_%s" % i
+                i += 1
+            
+            availname2 = name2 + suffix
+                                                
+            auxcounters = {"@NX_class": u"NXcollection"}
+            for auxname in backends.auxillary_counters:
+                if hasattr(self.fscan, auxname):
+                    cntr = getattr(self.fscan, auxname)
+                    if cntr is not None:
+                        auxcounters[auxname] = cntr
+                        
+
+            x_coord1_a = hkl_del_gam_1[:,6]
+            y_coord1_a = hkl_del_gam_1[:,7]
+            x_coord2_a = hkl_del_gam_2[:,6]
+            y_coord2_a = hkl_del_gam_2[:,7]
+                        
+            datas1 = {
+                "@NX_class": u"NXdata",
+                "sixc_angles": {
+                    "@NX_class": u"NXpositioner",
+                    "alpha" : np.rad2deg(mu),
+                    "omega" :  np.rad2deg(om),
+                    "theta" :  np.rad2deg(-1*om),
+                    "delta" : np.rad2deg(hkl_del_gam_1[:,3]),
+                    "gamma" :  np.rad2deg(hkl_del_gam_1[:,4]),
+                    "chi" :  np.rad2deg(self.ubcalc.chi),
+                    "phi" :  np.rad2deg(self.ubcalc.phi),
+                    "@unit" : u"deg"
+                },
+                "hkl": {
+                    "@NX_class": u"NXcollection",
+                    "h" :  hkl_del_gam_1[:,0],
+                    "k" :  hkl_del_gam_1[:,1],
+                    "l" : hkl_del_gam_1[:,2]
+                },
+                "counters":{
+                    "@NX_class": u"NXdetector",
+                    "croibg"  : croibg1_a,
+                    "croibg_errors" :  croibg1_err_a,
+                    "croi" :  croi1_a,
+                    "bgroi"  : bgroi1_a,
+                    "croi_pix"  : cpixel1_a,
+                    "bgroi_pix" : bgpixel1_a
+                },
+                "pixelcoord": {
+                    "@NX_class": u"NXdetector",
+                    "x" : x_coord1_a,
+                    "y"  : y_coord1_a
+                },
+                "trajectory" : traj1,
+                "@signal" : u"counters/croibg",
+                "@axes": u"trajectory/s",
+                "@title": self.activescanname + "_" + availname1,
+                "@orgui_meta": u"roi"
+            }
+            
+            datas2 = {
+                "@NX_class": u"NXdata",
+                "sixc_angles": {
+                    "@NX_class": u"NXpositioner",
+                    "alpha" : np.rad2deg(mu),
+                    "omega" :  np.rad2deg(om),
+                    "theta" :  np.rad2deg(-1*om),
+                    "delta" : np.rad2deg(hkl_del_gam_2[:,3]),
+                    "gamma" :  np.rad2deg(hkl_del_gam_2[:,4]),
+                    "chi" :  np.rad2deg(self.ubcalc.chi),
+                    "phi" :  np.rad2deg(self.ubcalc.phi),
+                    "@unit" : u"deg"
+                },
+                "hkl": {
+                    "@NX_class": u"NXcollection",
+                    "h" :  hkl_del_gam_2[:,0],
+                    "k" :  hkl_del_gam_2[:,1],
+                    "l" : hkl_del_gam_2[:,2]
+                },
+                "counters":{
+                    "@NX_class": u"NXdetector",
+                    "croibg"  : croibg2_a,
+                    "croibg_errors" :  croibg2_err_a,
+                    "croi" :  croi2_a,
+                    "bgroi"  : bgroi2_a,
+                    "croi_pix"  : cpixel2_a,
+                    "bgroi_pix" : bgpixel2_a
+                },
+                "pixelcoord": {
+                    "@NX_class": u"NXdetector",
+                    "x" : x_coord2_a,
+                    "y"  : y_coord2_a
+                },
+                "trajectory" : traj2,
+                "@signal" : u"counters/croibg",
+                "@axes": u"trajectory/s",
+                "@title": self.activescanname + "_" + availname2,
+                "@orgui_meta": u"roi"
+            }
+                
+            data = {self.activescanname:{
+                        "instrument": {
+                            "@NX_class": u"NXinstrument",
+                            "positioners": {
+                                "@NX_class": u"NXcollection",
+                                self.fscan.axisname: self.fscan.axis
+                            }
+                        },
+                        "auxillary" : auxcounters,
+                        "measurement": {
+                            "@NX_class": u"NXentry",
+                            "@default": availname1 if defaultS1 else availname2,
+                        },
+                        "title":u"%s" % title,
+                        "@NX_class": u"NXentry",
+                        "@default": u"measurement/%s" % (availname1 if defaultS1 else availname2),
+                        "@orgui_meta": u"scan"
+                    }
+                }
+                
+            if np.any(cpixel1_a > 0.):
+                
+                self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
+                                                xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
+                
+                data[self.activescanname]["measurement"][availname1] = datas1
+            if np.any(cpixel2_a > 0.):
+                
+                self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
+                                                xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
+                
+                data[self.activescanname]["measurement"][availname2] = datas2
+            
+        self.database.add_nxdict(data)
                 
     def rocking_extraction(self):
         if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
@@ -2353,7 +2873,7 @@ class QRockingScanCreator(qt.QDialog):
 
         self.selectedH = qt.QDoubleSpinBox()
         self.selectedH.setRange(-3,3)
-        self.selectedH.setValue(0)
+        self.selectedH.setValue(1)
 
         self.selectedK = qt.QDoubleSpinBox()
         self.selectedK.setRange(-3,3)
@@ -2367,7 +2887,7 @@ class QRockingScanCreator(qt.QDialog):
         self.Lmax = qt.QDoubleSpinBox()
         self.Lmax.setRange(0,30)
         self.Lmax.setDecimals(1)
-        self.Lmax.setValue(2)
+        self.Lmax.setValue(1)
         
         self.interval = qt.QDoubleSpinBox()
         self.interval.setRange(0,10)
