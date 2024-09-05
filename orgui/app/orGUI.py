@@ -483,7 +483,8 @@ ub : gui for UB matrix and angle calculations
                     # set ROI
                     self.scanSelector.set_xy_static_loc(xpos, ypos)
                     self.scanSelector.sigROIChanged.emit()
-                    print('move roi')
+                    print('move roi to: x:' + str(np.round(xpos,3)) + ', y: ' + str(np.round(ypos)) 
+                          + ', or in reciprocal coordinates: H:' + str(diag_rock.selectedH.value()) + ', K: ' + str(diag_rock.selectedK.value()) + ', L: ' + str(np.round(i,3)) + '\n')
 
                     # save ROI position and parameters
                     hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
@@ -501,8 +502,6 @@ ub : gui for UB matrix and angle calculations
                 self.integrate_beta(roi_x_list,roi_y_list,roi_parameters1,roi_parameters2)
                     
                 qt.QMessageBox.information(self, "Rocking scan integrated", "Rocking scan was successfully integrated.")
-                print(roi_x_list)
-                print(roi_y_list)
 
     def integrate_beta(self,rxlist,rylist,all_roi_hkl1,all_roi_hkl2):
         import time
@@ -600,10 +599,7 @@ ub : gui for UB matrix and angle calculations
             if not dataavail[i]:
                 return (np.nan, np.nan, np.nan, np.nan), (np.nan, np.nan, np.nan, np.nan) # has to be adapted because return shape changed
             else:
-                t1 = time.time()
                 image = self.fscan.get_raw_img(i).img.astype(np.float64)
-                t2 = time.time()
-                print('get_raw_img took ' + str(t2-t1) + ' seconds.')
                 
                 if imgmask is not None:
                     image[imgmask] = np.nan
@@ -621,8 +617,7 @@ ub : gui for UB matrix and angle calculations
 
                 for crnr in range(len(rxlist)):
 
-                    # set ROI (if it needs to be moved)
-                    #t1 = time.time()
+                    # set ROI (moved to rocking-function)
 
                     #current_roi_x = hkl_del_gam_1[0][6]
                     #current_roi_y = hkl_del_gam_1[0][7]
@@ -635,29 +630,23 @@ ub : gui for UB matrix and angle calculations
                     #    self.scanSelector.sigROIChanged.emit()
                     #    print('move roi')
 
-                    #t2 = time.time()
-                    #print('setting roi in gui took ' + str(t2-t1) + ' seconds.')
-
                     # get roi
 
-                    #t1 = time.time()
                     #hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
                     hkl_del_gam_1 = all_roi_hkl1[crnr]
                     hkl_del_gam_2 = all_roi_hkl1[crnr]
-                    #t2 = time.time()
-                    #print('get_roi_hkl took ' + str(t2-t1) + ' seconds.')
 
                     # fill counters
 
-                    t1 = time.time()
+                    #t1 = time.time()
                     counters1 = fill_counters(image,pixelavail,hkl_del_gam_1[i,:])
                     counters2 = fill_counters(image,pixelavail,hkl_del_gam_2[i,:])
 
                     all_counters1[crnr] = counters1
                     all_counters2[crnr] = counters2
 
-                    t2 = time.time()
-                    print('filling the counters took ' + str(t2-t1) + ' seconds.')
+                    #t2 = time.time()
+                    #print('filling the counters took ' + str(t2-t1) + ' seconds.')
  
                 return all_counters1, all_counters2
             
@@ -689,7 +678,6 @@ ub : gui for UB matrix and angle calculations
                 if progress.wasCanceled():
                     [f.cancel() for f in futures]
                     break
-            
 
         progress.setValue(len(self.fscan))
 
@@ -922,14 +910,17 @@ ub : gui for UB matrix and angle calculations
                                                 xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
                 
                 data[self.activescanname]["measurement"][availname1] = datas1
-            if np.any(cpixel2_a > 0.):
-                
-                self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
-                                                xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
-                
-                data[self.activescanname]["measurement"][availname2] = datas2
+
+            self.database.add_nxdict(data)
+
+            #if np.any(cpixel2_a > 0.): # an additional plot is created
+            #    
+            #    self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
+            #                                    xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
+            #    
+            #    data[self.activescanname]["measurement"][availname2] = datas2
             
-        self.database.add_nxdict(data)
+        
                 
     def rocking_extraction(self):
         if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
