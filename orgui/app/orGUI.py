@@ -383,6 +383,23 @@ ub : gui for UB matrix and angle calculations
         self.setMenuBar(menu_bar)
 
     def rocking_extraction_beta(self):
+
+        def get_roi_hkl():
+            hkl_del_gam_s1, hkl_del_gam_s2 = self.getROIloc()
+            
+            nodatapoints = len(self.fscan)
+            
+            if hkl_del_gam_s1.shape[0] == 1:
+                hkl_del_gam_1 = np.zeros((nodatapoints,hkl_del_gam_s1.shape[1]), dtype=np.float64)
+                hkl_del_gam_2 = np.zeros((nodatapoints,hkl_del_gam_s1.shape[1]), dtype=np.float64)
+                hkl_del_gam_1[:] = hkl_del_gam_s1[0]
+                hkl_del_gam_2[:] = hkl_del_gam_s2[0]
+            else:
+                hkl_del_gam_1, hkl_del_gam_2 = hkl_del_gam_s1, hkl_del_gam_s2
+
+            return hkl_del_gam_1, hkl_del_gam_2
+
+
         if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
             qt.QMessageBox.warning(self, "No scan loaded", "Cannot integrate scan: No scan loaded.")
             return
@@ -446,27 +463,48 @@ ub : gui for UB matrix and angle calculations
                 roi_x_list = np.empty(step_nr,dtype=np.float64)
                 roi_y_list = np.empty(step_nr,dtype=np.float64)
 
+                hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
+                dataavail = np.logical_or(hkl_del_gam_1[:,-1],hkl_del_gam_2[:,-1])
 
-                #generate list of ROI coordinates
+                roi_parameters1 = np.empty(((step_nr,) + dataavail.shape + (9,)))
+                roi_parameters2 = np.empty(((step_nr,) + dataavail.shape + (9,)))
+
+
+                #generate list of ROI coordinates and reciprocal space information
+
                 for no, i in enumerate(np.linspace(l_min, l_max, step_nr)):
+
+                    # calculate ROI coordinates
                     coordinates = self.searchPixelCoordHKL([diag_rock.selectedH.value(),diag_rock.selectedK.value(),i])
                     xpos = coordinates['xy_%s' % int(which_Ewald_intersect+1)][0]
                     ypos = coordinates['xy_%s' % int(which_Ewald_intersect+1)][1]
+
+
+                    # set ROI
+                    self.scanSelector.set_xy_static_loc(xpos, ypos)
+                    self.scanSelector.sigROIChanged.emit()
+                    print('move roi')
+
+                    # save ROI position and parameters
+                    hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
+
                     roi_x_list[no] = xpos
                     roi_y_list[no] = ypos
 
-                self.scanSelector.set_xy_static_loc(roi_x_list[0], roi_y_list[0])
-                self.scanSelector.sigROIChanged.emit()
+                    roi_parameters1[no] = hkl_del_gam_1
+                    roi_parameters2[no] = hkl_del_gam_2
 
+                # gui ROI movement
+                #self.scanSelector.set_xy_static_loc(roi_x_list[0], roi_y_list[0])
+                #self.scanSelector.sigROIChanged.emit()
 
-                self.integrate_beta(roi_x_list,roi_y_list)
-
+                self.integrate_beta(roi_x_list,roi_y_list,roi_parameters1,roi_parameters2)
                     
                 qt.QMessageBox.information(self, "Rocking scan integrated", "Rocking scan was successfully integrated.")
                 print(roi_x_list)
                 print(roi_y_list)
 
-    def integrate_beta(self,rxlist,rylist):
+    def integrate_beta(self,rxlist,rylist,all_roi_hkl1,all_roi_hkl2):
         import time
         try:
             image = self.fscan.get_raw_img(0)
@@ -504,22 +542,6 @@ ub : gui for UB matrix and angle calculations
             if self.scanSelector.usePolarizationBox.isChecked():
                 C_arr /= dc.polarization(factor=dc._polFactor,axis_offset=dc._polAxis)
 
-        
-        def get_roi_hkl():
-            hkl_del_gam_s1, hkl_del_gam_s2 = self.getROIloc()
-            
-            nodatapoints = len(self.fscan)
-            
-            if hkl_del_gam_s1.shape[0] == 1:
-                hkl_del_gam_1 = np.zeros((nodatapoints,hkl_del_gam_s1.shape[1]), dtype=np.float64)
-                hkl_del_gam_2 = np.zeros((nodatapoints,hkl_del_gam_s1.shape[1]), dtype=np.float64)
-                hkl_del_gam_1[:] = hkl_del_gam_s1[0]
-                hkl_del_gam_2[:] = hkl_del_gam_s2[0]
-            else:
-                hkl_del_gam_1, hkl_del_gam_2 = hkl_del_gam_s1, hkl_del_gam_s2
-
-            return hkl_del_gam_1, hkl_del_gam_2
-
 
         def fill_counters(image,pixelavail,hkldelgam_i):
             if hkldelgam_i[-1]:
@@ -545,7 +567,8 @@ ub : gui for UB matrix and angle calculations
 
             return (croi, cpixel, bgroi, bgpixel)
         
-        hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl() # needed to initialize integration 
+        hkl_del_gam_1 = all_roi_hkl1[0] # needed to initialize integration 
+        hkl_del_gam_2 = all_roi_hkl2[0]
 
         # initialize 1d np arrays for storing roi integration counters for all images
         dataavail = np.logical_or(hkl_del_gam_1[:,-1],hkl_del_gam_2[:,-1])
@@ -594,30 +617,35 @@ ub : gui for UB matrix and angle calculations
                 all_counters1 = np.zeros((len(rxlist),) + (4,))
                 all_counters2 = np.zeros((len(rxlist),) + (4,))
 
-                hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
+                #hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
 
                 for crnr in range(len(rxlist)):
 
                     # set ROI (if it needs to be moved)
-                    t1 = time.time()
+                    #t1 = time.time()
 
-                    current_roi_x = hkl_del_gam_1[0][6]
-                    current_roi_y = hkl_del_gam_1[0][7]
+                    #current_roi_x = hkl_del_gam_1[0][6]
+                    #current_roi_y = hkl_del_gam_1[0][7]
+
+                    #current_roi_x = all_roi_hkl1[0][0][6]
+                    #current_roi_y = all_roi_hkl2[0][0][7]
                     
-                    if not current_roi_x == np.round(rxlist[crnr],3): # and current_roi_y == rylist[crnr]: #compare to current roi position
-                        self.scanSelector.set_xy_static_loc(rxlist[crnr], rylist[crnr])
-                        self.scanSelector.sigROIChanged.emit()
-                        print('move roi')
+                    #if not current_roi_x == np.round(rxlist[crnr],3): # and current_roi_y == rylist[crnr]: #compare to current roi position
+                    #    self.scanSelector.set_xy_static_loc(rxlist[crnr], rylist[crnr])
+                    #    self.scanSelector.sigROIChanged.emit()
+                    #    print('move roi')
 
-                    t2 = time.time()
-                    print('setting roi in gui took ' + str(t2-t1) + ' seconds.')
+                    #t2 = time.time()
+                    #print('setting roi in gui took ' + str(t2-t1) + ' seconds.')
 
                     # get roi
 
-                    t1 = time.time()
-                    hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
-                    t2 = time.time()
-                    print('get_roi_hkl took ' + str(t2-t1) + ' seconds.')
+                    #t1 = time.time()
+                    #hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
+                    hkl_del_gam_1 = all_roi_hkl1[crnr]
+                    hkl_del_gam_2 = all_roi_hkl1[crnr]
+                    #t2 = time.time()
+                    #print('get_roi_hkl took ' + str(t2-t1) + ' seconds.')
 
                     # fill counters
 
@@ -668,6 +696,9 @@ ub : gui for UB matrix and angle calculations
         #plot and save data in database
 
         for d in range(croi1_all.shape[1]):
+
+            hkl_del_gam_1 = all_roi_hkl1[d]
+            hkl_del_gam_2 = all_roi_hkl2[d]
 
             croi1_a = croi1_all[...,d]
             cpixel1_a = cpixel1_all[...,d]
