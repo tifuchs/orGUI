@@ -2477,7 +2477,7 @@ class UnitCell(Lattice):
 
         for i,params in enumerate(self.basis):
             
-            radius = cov_radii_array[atomic_number(self.names[i])-1]*2
+            radius = cov_radii_array[atomic_number(self.names[i])-1][2]*2
             #elcolor_c = keyargs.get('color')
             #if elcolor_c is None:
             #    elcolor_c = elements.rgb(int(params[0]))
