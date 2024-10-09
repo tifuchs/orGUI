@@ -76,8 +76,7 @@ def main():
         app.setWindowIcon(getQicon("orguiicon"))
         from .resources import getSplashScreen
         pixmap = getSplashScreen(__version__)
-        desktopWidget = app.desktop()
-        screenGeometry = desktopWidget.screenGeometry()
+        screenGeometry = app.primaryScreen().availableGeometry()
         splashpm = pixmap.scaledToHeight(int(screenGeometry.height()/3), qt.Qt.SmoothTransformation)
         splash = qt.QSplashScreen(splashpm)
         splash.show()

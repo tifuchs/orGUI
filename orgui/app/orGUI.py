@@ -2441,8 +2441,7 @@ class AspectRatioPixmapLabel(qt.QLabel):
 
     def sizeHint(self):
         app = qt.QApplication.instance()
-        desktopWidget = app.desktop()
-        screenGeometry = desktopWidget.screenGeometry()
+        screenGeometry = app.primaryScreen().availableGeometry()
         w = int(screenGeometry.width()/3)
         w_s = self.width()
         return qt.QSize( max(w, w_s), self.heightForWidth(w))
@@ -2459,8 +2458,8 @@ class AboutDialog(qt.QDialog):
         
         pixmap = resources.getSplashScreen(str(version))
         self.logo = qt.QLabel()
-        desktopWidget = qt.QApplication.instance().desktop()
-        screenGeometry = desktopWidget.screenGeometry()
+        app = qt.QApplication.instance()
+        screenGeometry = app.primaryScreen().availableGeometry()
         splashpm = pixmap.scaledToHeight(int(screenGeometry.height()/5), qt.Qt.SmoothTransformation)
         self.logo.setPixmap(splashpm)
         
