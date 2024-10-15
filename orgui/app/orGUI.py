@@ -504,7 +504,6 @@ ub : gui for UB matrix and angle calculations
                 qt.QMessageBox.information(self, "Rocking scan integrated", "Rocking scan was successfully integrated.")
 
     def integrate_beta(self,rxlist,rylist,all_roi_hkl1,all_roi_hkl2):
-        import time
         try:
             image = self.fscan.get_raw_img(0)
         except Exception as e:
@@ -514,11 +513,6 @@ ub : gui for UB matrix and angle calculations
             print("No database available")
             return
         dc = self.ubcalc.detectorCal
-        #mu = self.ubcalc.mu
-        angles = self.ubcalc.angles
-
-        H_1 = np.array([h.value() for h in self.scanSelector.H_1])
-        H_0 = np.array([h.value() for h in self.scanSelector.H_0])
         
         imgmask = None
         
@@ -609,44 +603,23 @@ ub : gui for UB matrix and angle calculations
                 if corr:
                     image *= C_arr
 
-                # todo: numpy instead of lists
                 all_counters1 = np.zeros((len(rxlist),) + (4,))
                 all_counters2 = np.zeros((len(rxlist),) + (4,))
-
-                #hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
 
                 for crnr in range(len(rxlist)):
 
                     # set ROI (moved to rocking-function)
 
-                    #current_roi_x = hkl_del_gam_1[0][6]
-                    #current_roi_y = hkl_del_gam_1[0][7]
-
-                    #current_roi_x = all_roi_hkl1[0][0][6]
-                    #current_roi_y = all_roi_hkl2[0][0][7]
-                    
-                    #if not current_roi_x == np.round(rxlist[crnr],3): # and current_roi_y == rylist[crnr]: #compare to current roi position
-                    #    self.scanSelector.set_xy_static_loc(rxlist[crnr], rylist[crnr])
-                    #    self.scanSelector.sigROIChanged.emit()
-                    #    print('move roi')
-
                     # get roi
-
-                    #hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
                     hkl_del_gam_1 = all_roi_hkl1[crnr]
-                    hkl_del_gam_2 = all_roi_hkl1[crnr]
+                    hkl_del_gam_2 = all_roi_hkl2[crnr]
 
                     # fill counters
-
-                    #t1 = time.time()
                     counters1 = fill_counters(image,pixelavail,hkl_del_gam_1[i,:])
                     counters2 = fill_counters(image,pixelavail,hkl_del_gam_2[i,:])
 
                     all_counters1[crnr] = counters1
                     all_counters2[crnr] = counters2
-
-                    #t2 = time.time()
-                    #print('filling the counters took ' + str(t2-t1) + ' seconds.')
  
                 return all_counters1, all_counters2
             
@@ -682,7 +655,6 @@ ub : gui for UB matrix and angle calculations
         progress.setValue(len(self.fscan))
 
         #plot and save data in database
-
         for d in range(croi1_all.shape[1]):
 
             hkl_del_gam_1 = all_roi_hkl1[d]
@@ -726,8 +698,6 @@ ub : gui for UB matrix and angle calculations
 
             # save data
             
-            #name = str(H_1) + "*s+" + str(H_0)
-            #if self.scanSelector.scanstab.currentIndex() == 1:
             x = rxlist[d] #rxlist
             y = rylist[d] #rylist
             name1 = "pixloc[%.2f %.2f]" % (x,y)
@@ -742,25 +712,6 @@ ub : gui for UB matrix and angle calculations
                 "@direction" : u"Fixed pixel coordinates",
                 "s" : hkl_del_gam_2[:,5]
                 }
-            '''
-            else:
-                name1 = str(H_1) + "*s1+" + str(H_0)
-                name2 = str(H_1) + "*s2+" + str(H_0)
-                traj1 = {
-                    "@NX_class": u"NXcollection",
-                    "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
-                    "H_1"  : H_1,
-                    "H_0" : H_0,
-                    "s" : hkl_del_gam_1[:,5]
-                }
-                traj2 = {
-                    "@NX_class": u"NXcollection",
-                    "@direction" : u"Intergrated along H_1*s + H_0 in reciprocal space",
-                    "H_1"  : H_1,
-                    "H_0" : H_0,
-                    "s" : hkl_del_gam_2[:,5]
-                }
-            '''
             
             defaultS1 = croibg1_a_masked.size > croibg2_a_masked.size
             
@@ -911,15 +862,14 @@ ub : gui for UB matrix and angle calculations
                 
                 data[self.activescanname]["measurement"][availname1] = datas1
 
-            self.database.add_nxdict(data)
+            if np.any(cpixel2_a > 0.): # an additional plot is created
+                
+                self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
+                                                xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
+                
+                data[self.activescanname]["measurement"][availname2] = datas2
 
-            #if np.any(cpixel2_a > 0.): # an additional plot is created
-            #    
-            #    self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
-            #                                    xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
-            #    
-            #    data[self.activescanname]["measurement"][availname2] = datas2
-            
+        self.database.add_nxdict(data)
         
                 
     def rocking_extraction(self):
