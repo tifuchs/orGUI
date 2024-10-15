@@ -360,11 +360,8 @@ ub : gui for UB matrix and angle calculations
         createScanAct.triggered.connect(self._onCreateScan)
         
         datamenu = menu_bar.addMenu("Data processing")
-        hackAct = datamenu.addAction("Rocking scan integration")
-        hackAct.triggered.connect(self.rocking_extraction)
-
-        hackAct2 = datamenu.addAction("Rocking scan integration (beta)")
-        hackAct2.triggered.connect(self.rocking_extraction_beta)
+        roscanAct = datamenu.addAction("Rocking scan integration")
+        roscanAct.triggered.connect(self.rocking_extraction)
         
         helpmenu = menu_bar.addMenu("&Help")
         
@@ -499,11 +496,11 @@ ub : gui for UB matrix and angle calculations
                 #self.scanSelector.set_xy_static_loc(roi_x_list[0], roi_y_list[0])
                 #self.scanSelector.sigROIChanged.emit()
 
-                self.integrate_beta(roi_x_list,roi_y_list,roi_parameters1,roi_parameters2)
+                self.rocking_integrate(roi_x_list,roi_y_list,roi_parameters1,roi_parameters2)
                     
                 qt.QMessageBox.information(self, "Rocking scan integrated", "Rocking scan was successfully integrated.")
 
-    def integrate_beta(self,rxlist,rylist,all_roi_hkl1,all_roi_hkl2):
+    def rocking_integrate(self,rxlist,rylist,all_roi_hkl1,all_roi_hkl2):
         try:
             image = self.fscan.get_raw_img(0)
         except Exception as e:
@@ -872,107 +869,6 @@ ub : gui for UB matrix and angle calculations
         self.database.add_nxdict(data)
         
                 
-    def rocking_extraction(self):
-        if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
-            qt.QMessageBox.warning(self, "No scan loaded", "Cannot integrate scan: No scan loaded.")
-            return
-
-        # make ROI visible in orgui images
-        self.roivisible = True
-        try:
-            self.updateROI()
-        except Exception:
-            qutils.warning_detailed_message(self, "Cannot show ROI", "Cannot show ROI", traceback.format_exc())
-            return
-
-
-        # select static ROI integration instead of hkl scan
-        self.scanSelector.scanstab.setCurrentIndex(1)
-        
-        # open CTR selection dialog
-        diag_rock = QRockingScanCreator()
-        if diag_rock.exec() == qt.QDialog.Accepted:
-            
-            # define integration boundaries
-            l_min = diag_rock.Lmin.value()
-            l_max = diag_rock.Lmax.value()
-            step_width = diag_rock.interval.value()
-            step_nr = round((l_max-l_min)/step_width) + 1
-            
-            #calculate useful ROI size
-            try:
-                min_coordinates = self.searchPixelCoordHKL([diag_rock.selectedH.value(),diag_rock.selectedK.value(),l_min])
-                max_coordinates = self.searchPixelCoordHKL([diag_rock.selectedH.value(),diag_rock.selectedK.value(),l_max])
-            except Exception:
-                qutils.warning_detailed_message(self, "Cannot calculate coordiantes", "Cannot calculate pixel coordinates. See details!", traceback.format_exc())
-                return
-            refl_dialog = QReflectionAnglesDialog(min_coordinates,"Select the correct intersection with Ewald sphere", self)
-            for no_show in range(3):
-                if qt.QDialog.Accepted == refl_dialog.exec():
-                    for i, cb in enumerate(refl_dialog.checkboxes):
-                        if cb.isChecked():
-                            which_Ewald_intersect = i
-                            break
-                    else:
-                        qt.QMessageBox.warning(self, "No reflection selected", "Select a reflection on the rod you want to integrate.")
-                        continue
-                    break
-                else:
-                    return
-            dist_in_pixels = np.abs(min_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1] - max_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1])
-            roi_hlength = np.ceil(dist_in_pixels/step_nr)
-            
-            # open ROI selection dialog
-            diag_rock_roi = QRockingScanROI(roi_hlength)
-            if diag_rock_roi.exec() == qt.QDialog.Accepted:
-                        
-                # select integration parameters such as ROI size, background
-                self.scanSelector.hsize.setValue(diag_rock_roi.roi_hsize.value())
-                self.scanSelector.vsize.setValue(diag_rock_roi.roi_vsize.value())
-                self.scanSelector.left.setValue(diag_rock_roi.roi_hsize_bg.value())
-                self.scanSelector.right.setValue(diag_rock_roi.roi_vsize_bg.value())
-                self.scanSelector.sigROIChanged.emit()
-        
-                # additional scanSelector options:
-                # background:   orgui.scanSelector.top,     orgui.scanSelector.bottom
-                # offset:       orgui.scanSelector.offsetx, orgui.scanSelector.offsety
-        
-                # set default mask for pilatus 2M CdTe detector
-                #det = pyFAI.detector_factory('Pilatus 2m CdTe')
-                #mask = det.calc_mask()
-                #self.centralPlot.setSelectionMask(mask) # don't do this, as more sophisticated masks will be overwritten!
-                
-                # set integration options
-                #self.scanSelector.useMaskBox.setChecked(True)
-                #self.scanSelector.useSolidAngleBox.setChecked(True)
-                #self.scanSelector.usePolarizationBox.setChecked(True)
-
-                progress = qt.QProgressDialog("Integrating rocking scan at ROI position","abort",0,step_nr,self)
-                progress.setWindowModality(qt.Qt.WindowModal)
-                
-                for no, i in enumerate(np.linspace(l_min, l_max, step_nr)):
-                    print('\n execute integration at L = %s' % round(i,2))
-                    progress.setLabelText("Integrating rocking scan at ROI position L = %s" % round(i,6))
-                    progress.setValue(no)
-                    if progress.wasCanceled():
-                        qt.QMessageBox.warning(self, "Rocking scan aborted", "Rocking scan was aborted.")
-                        progress.setValue(step_nr)
-                        return
-                    coordinates = self.searchPixelCoordHKL([diag_rock.selectedH.value(),diag_rock.selectedK.value(),i])
-                    xpos = coordinates['xy_%s' % int(which_Ewald_intersect+1)][0]
-                    ypos = coordinates['xy_%s' % int(which_Ewald_intersect+1)][1]
-                        
-                    self.scanSelector.set_xy_static_loc(xpos, ypos)
-                    self.scanSelector.sigROIChanged.emit()
-                    self.integrateROI()
-                    
-                qt.QMessageBox.information(self, "Rocking scan integrated", "Rocking scan was successfully integrated.")
-                progress.setValue(step_nr)
-
-        
-                # save extracted rocking scan curves into hdf5 file    
-                #self.database.saveDBFile('C:/Users/fschroeter/data_analysis/orgui/test_rocking_extract.h5')
-    
     def updatePlotItems(self, recalculate=True):
         if self.roivisible:
             try:
