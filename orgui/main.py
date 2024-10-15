@@ -52,6 +52,9 @@ usage = "orGUI [options] configfile"
 defaultconfigfile = os.path.expanduser("~/orgui")
 
 def main():
+
+    os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
     parser = ArgumentParser(usage=usage, description=description, epilog=epilog)
     parser.add_argument("configfile", metavar="FILE", 
                         help="configuration file, will use ~/orgui otherwise", 
