@@ -60,7 +60,7 @@ namespaces = true
 orGUI='orgui.main:main'
 
 [tool.setuptools.dynamic]
-version = {attr = "orGUI.__version__"}
+version = {attr = "orgui.__version__"}
 
 [tool.setuptools]
 include-package-data = false
