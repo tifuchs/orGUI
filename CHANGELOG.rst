@@ -2,6 +2,26 @@
 Changelog
 *********
 
+1.1.2 (2024-11-03)
+##################
+
+Bugfix version that fixes a bug that prevents installing orGUI on certain systems. Full install target advertised on pypi is now available. More minor bug fixes, see Fixed list.
+
+Added
+=====
+
+* pyproject.toml - add full target (37df17dc815700f0c4893d7df5f5921f5c9bb90f)
+
+Fixed
+=====
+
+* pyproject.toml - change directory name of version path to fix a bug blocking installation on case sensitive UNIX systems (f06fe9ce36d25f51c1b837ec5db3ff17614df45e)
+* Qt - replace deprecated .desktop() API for screen size determination (8ae7c187de44b0f3704a06a57968bb1213776348)
+* Changes to ensure compatibility with the new Kiel diffraction setup (d532920b94aad0b00706fe20a319079a5381d51e)
+* Improved error handling of 'Generate scan from images' function (13a7615ecb9f80421a7ef34d934a9e437e01f05e, c8e530c5eca27d6a193ee472c45d67a2068ee828)
+* legacy id31 backend: Add 'potv' counter for fast potential measurement to backend (ead0c8061f029aec9d8565bdb3099dd59ccfc49e)
+* plot3d, pos_cart_all: correct lookup of atom radius, bugfix in translate argument (88ddb0e40449ebe6f1127091eb419bbac1dfd73f, 888cdd92e51ff9c69c995dc10e72f1131cfe527b)
+
 1.1.1 (2024-08-06)
 ##################
 
