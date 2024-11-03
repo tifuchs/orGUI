@@ -45,6 +45,7 @@ dependencies = [
 console = ['qtconsole']
 speedup = ['numba']
 extendedfilesupport = ['ase']
+full = ['qtconsole', 'ase', 'numba']
 
 [build-system]
 requires = ["setuptools >= 61.0"]
