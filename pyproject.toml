@@ -7,7 +7,7 @@ readme = 'README.rst'
 description = 'orGUI: Orientation and Integration with 2D detectors'
 
 authors = [
-  { name = 'Timo Fuchs', email = 'fuchs@physik.uni-kiel.de' }
+  { name = 'Timo Fuchs', email = 'tfuchs@cornell.edu' }
 ]
 classifiers = [
     'Development Status :: 5 - Production/Stable',
