@@ -51,8 +51,11 @@ import traceback
 
 import warnings
 from .. import resources
-from ..backend import backends
+from ..backend import backends, scans
+from . import qutils
 from .QReflectionSelector import QReflectionAnglesDialog
+import runpy
+
 
 class QScanSelector(qt.QMainWindow):
     sigScanChanged = qt.pyqtSignal(object)
@@ -79,6 +82,8 @@ class QScanSelector(qt.QMainWindow):
         self.closeFileAction = qt.QAction(icons.getQIcon('close'),"Close file",self)
         self.closeFileAction.triggered.connect(self._onCloseFile)
         
+        self.loadBackendAction = qt.QAction("Load backend file",self)
+        self.loadBackendAction.triggered.connect(self._onLoadBackend)
         
         self.hdfTreeView = silx.gui.hdf5.Hdf5TreeView(self)
         self.hdfTreeView.setSortingEnabled(True)
@@ -132,10 +137,17 @@ class QScanSelector(qt.QMainWindow):
         openScanButton.clicked.connect(self._onLoadScan)
 
         btidsplit = qt.QSplitter(self)
-        qt.QLabel("Beamtime id:",btidsplit)
+        qt.QLabel("Backend:",btidsplit)
         self.btid = qt.QComboBox(btidsplit)
-        [self.btid.addItem(bt) for bt in backends.beamtimes]
+        [self.btid.addItem(bt) for bt in backends.fscans]
         self.btid.setCurrentText("id31_default")
+        
+        self._selectBackendBtn = qt.QPushButton("...", btidsplit)
+        width = self._selectBackendBtn.fontMetrics().boundingRect("  ...  ").width() + 7
+        height = self._selectBackendBtn.fontMetrics().boundingRect("  M  ").height() + 7
+        self._selectBackendBtn.setMaximumWidth(width)
+        self._selectBackendBtn.setMaximumHeight(height)
+        self._selectBackendBtn.clicked.connect(self.loadBackendAction.trigger)
         
         self.bt_autodetect_enable = qt.QCheckBox("auto detect", btidsplit)
         self.bt_autodetect_enable.toggled.connect(lambda s : self.btid.setEnabled(not s))
@@ -500,6 +512,43 @@ class QScanSelector(qt.QMainWindow):
         ddict['scanno'] = self.scannoBox.value()
         self.sigScanChanged.emit(ddict)
         
+    def _onLoadBackend(self):
+        fileTypeDict = {'Python backend files (*.py)': '.py', 'All files (*)': '' }
+        fileTypeFilter = ""
+        for f in fileTypeDict:
+            fileTypeFilter += f + ";;"
+        filename, filetype = qt.QFileDialog.getOpenFileName(self,"Open Backend file",
+                                                  self.parentmainwindow.filedialogdir,
+                                                  fileTypeFilter[:-2])
+        if filename == '':
+            return
+        self.parentmainwindow.filedialogdir = os.path.splitext(filename)[0]
+        
+        try:
+            self.loadBackendFile(filename)
+        except:
+            qutils.warning_detailed_message(self, "Cannot load backend", "Cannot load backend", traceback.format_exc())
+
+    def loadBackendFile(self, filename):
+        backend_file = runpy.run_path(filename)
+        found_backends = []
+        for e in backend_file:
+            try:
+                if issubclass(backend_file[e], scans.Scan) and backend_file[e] != scans.Scan:
+                    found_backends.append((e, backend_file[e]))
+            except:
+                pass
+                #traceback.print_exc()
+        if not found_backends:
+            raise ValueError("Found no backend in file %s" % filename)
+        if len(found_backends) > 1:
+            raise ValueError("Found more than one Scan class in backend file %s. Only one is permitted" % filename)
+        name, scancls = found_backends[0]
+        self.btid.addItem(name)
+        backends.fscans[name] = scancls
+        self.btid.setCurrentText(name)
+        self.bt_autodetect_enable.setChecked(False)
+        
     def _onOpenFile(self):
         fileTypeDict = {'NEXUS files (*.h5 *.hdf5)': '.h5', "SPEC files (*.spec *.spc)": '.spec', 'All files (*)': '' }
         fileTypeFilter = ""
@@ -647,7 +696,7 @@ class QScanSelector(qt.QMainWindow):
                             dt = dateparser.parse(obj.h5py_target['start_time'][()])
                         except Exception as e:
                             msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open scan', 
-                                'Cannot parse start time of the scan.', qt.QMessageBox.Ok, self)
+                                'Cannot parse start time of the scan. Please manually select the beamtime id', qt.QMessageBox.Ok, self)
                             msgbox.setDetailedText(traceback.format_exc())
                             clickedbutton = msgbox.exec()
                             return
@@ -664,7 +713,7 @@ class QScanSelector(qt.QMainWindow):
                     else:
                         btid = self.btid.currentText()
                     try:
-                        ddict = backends.scannoConverter[btid](obj)
+                        ddict = backends.fscans[btid].parse_h5_node(obj)
                     except Exception as e:
                         msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open scan', 
                             'Cannot parse scan number: %s' % str(e), qt.QMessageBox.Ok, self)

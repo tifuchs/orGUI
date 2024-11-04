@@ -45,9 +45,11 @@ import os
 import re
 from datetime import datetime
 from .fio_reader import FioFile
-#from fio_reader import FioFile
+
 import silx.io
 from silx.io import dictdump
+
+from ..scans import Scan
 
 # not in use!!!
 class P3_Image:
@@ -104,7 +106,7 @@ class PE_Image:
             #    self.img += 72.2
         self.img = np.fliplr(self.img.T)
 
-class H5Fastsweep(object):
+class H5Fastsweep(Scan):
     def __init__(self, hdffilepath_orNode=None, scanno=None):
     
 
@@ -186,8 +188,27 @@ class H5Fastsweep(object):
         self.nopoints = self.th.size
         self.axisname = 'th'
         self.axis = getattr(self,self.axisname)
-   
-
+    
+    @property
+    def auxillary_counters(self):
+        """Optional: provide a list of counters or motor names, that should 
+        be copied into the orGUI data base for further processing.
+        
+        e.g. return ['exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch']
+        
+        after each integration, orGUI will search for these counter names in the Scan
+        object and copy the entries into the database.
+        """
+        return [] 
+    
+    @classmethod
+    def parse_h5_node(cls, obj):
+        ddict = dict() 
+        scanname = obj.basename
+        scanno, subscanno = scanname.split('.')
+        ddict['scanno'] = int(scanno)
+        ddict['name'] = obj.local_name
+        return ddict
         
     def set_th_offset(self,offset):
         self.th += offset

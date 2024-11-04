@@ -1846,7 +1846,7 @@ Do you want to continue without mask?""")
         availname2 = name2 + suffix
                                          
         auxcounters = {"@NX_class": u"NXcollection"}
-        for auxname in backends.auxillary_counters:
+        for auxname in self.fscan.auxillary_counters:
             if hasattr(self.fscan, auxname):
                 cntr = getattr(self.fscan, auxname)
                 if cntr is not None:
