@@ -427,7 +427,7 @@ ub : gui for UB matrix and angle calculations
                     break
                 else:
                     return
-            dist_in_pixels = min_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1] - max_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1]
+            dist_in_pixels = np.abs(min_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1] - max_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1])
             roi_hlength = np.ceil(dist_in_pixels/step_nr)
             
             # open ROI selection dialog
@@ -1020,6 +1020,13 @@ ub : gui for UB matrix and angle calculations
 
         # search files using ImportImagesScan backend
         importedscan = universalScanLoader.ImportImagesScan(filename)
+
+        if importedscan.inpath == None:
+            qt.QMessageBox.critical(self,
+                                    "Images could not be imported",
+                                    "The selected data source is not suitable\n"\
+                                    "It is necessary to select a file containing raw detector image(s)!")
+            return
         
         if importedscan.shape != self.ubcalc.detectorCal.detector.shape:
             qt.QMessageBox.critical(self,
@@ -2434,8 +2441,7 @@ class AspectRatioPixmapLabel(qt.QLabel):
 
     def sizeHint(self):
         app = qt.QApplication.instance()
-        desktopWidget = app.desktop()
-        screenGeometry = desktopWidget.screenGeometry()
+        screenGeometry = app.primaryScreen().availableGeometry()
         w = int(screenGeometry.width()/3)
         w_s = self.width()
         return qt.QSize( max(w, w_s), self.heightForWidth(w))
@@ -2452,8 +2458,8 @@ class AboutDialog(qt.QDialog):
         
         pixmap = resources.getSplashScreen(str(version))
         self.logo = qt.QLabel()
-        desktopWidget = qt.QApplication.instance().desktop()
-        screenGeometry = desktopWidget.screenGeometry()
+        app = qt.QApplication.instance()
+        screenGeometry = app.primaryScreen().availableGeometry()
         splashpm = pixmap.scaledToHeight(int(screenGeometry.height()/5), qt.Qt.SmoothTransformation)
         self.logo.setPixmap(splashpm)
         

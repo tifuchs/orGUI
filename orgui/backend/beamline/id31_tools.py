@@ -329,6 +329,11 @@ class BlissScan_EBS(Fastscan):
                 self.th = data_1['measurement']['th_trig'][:self.nopoints] + data_1['measurement']['th_delta'][:self.nopoints] / 2
             self.axisname = 'th'
             self.mu = self.positioners['mu']
+
+        elif 'uth' in data_1['measurement']:
+            self.th = data_1['measurement']['uth'][:self.nopoints]
+            self.axisname = 'th'
+            self.mu = self.positioners['mu'] *-1
             
         elif 'mu' in data_1['measurement']:
             self.mu = data_1['measurement']['mu'][:self.nopoints]
@@ -349,6 +354,9 @@ class BlissScan_EBS(Fastscan):
             self.axisname = 'time'
             self.th = self.positioners['th']
             self.mu = self.positioners['mu']
+
+        if 'potv' in data_1['measurement']:
+            self.potv = data_1['measurement']['potv'][:self.nopoints]
             
         if 'srcur' in data_1['measurement']:
             self.srcur = data_1['measurement']['srcur'][:self.nopoints]

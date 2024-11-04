@@ -7,7 +7,7 @@ readme = 'README.rst'
 description = 'orGUI: Orientation and Integration with 2D detectors'
 
 authors = [
-  { name = 'Timo Fuchs', email = 'fuchs@physik.uni-kiel.de' }
+  { name = 'Timo Fuchs', email = 'tfuchs@cornell.edu' }
 ]
 classifiers = [
     'Development Status :: 5 - Production/Stable',
@@ -45,6 +45,7 @@ dependencies = [
 console = ['qtconsole']
 speedup = ['numba']
 extendedfilesupport = ['ase']
+full = ['qtconsole', 'ase', 'numba']
 
 [build-system]
 requires = ["setuptools >= 61.0"]
@@ -60,7 +61,7 @@ namespaces = true
 orGUI='orgui.main:main'
 
 [tool.setuptools.dynamic]
-version = {attr = "orGUI.__version__"}
+version = {attr = "orgui.__version__"}
 
 [tool.setuptools]
 include-package-data = false
