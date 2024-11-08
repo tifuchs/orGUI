@@ -379,7 +379,7 @@ ub : gui for UB matrix and angle calculations
         
         self.setMenuBar(menu_bar)
 
-    def rocking_extraction_beta(self):
+    def rocking_extraction(self):
 
         def get_roi_hkl():
             hkl_del_gam_s1, hkl_del_gam_s2 = self.getROIloc()
