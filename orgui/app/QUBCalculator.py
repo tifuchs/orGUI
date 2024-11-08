@@ -54,7 +54,7 @@ from contextlib import contextmanager
 
 from .ArrayTableDialog import ArrayEditWidget
 
-from ..backend import udefaults
+from ..backend import udefaults, backends
 from .. import resources
 from . import qutils
 
@@ -475,6 +475,22 @@ class QUBCalculator(qt.QSplitter):
 
             self.crystalparams.setValues(self.crystal,self.n)
             self.machineParams.setValues(settings)
+            
+            if 'backend' in config:
+                if 'file' in config['backend']:
+                    if os.path.isabs(config['backend']['file']):
+                        backendpath = config['backend']['file']
+                    else:
+                        p = os.path.abspath(configfile)
+                        backendpath = os.path.join(os.path.dirname(p), config['backend']['file'])
+                    self.mainGui.scanSelector.loadBackendFile(backendpath)
+                elif 'beamtime' in config['backend']:
+                    beamtime = config['backend']['beamtime']
+                    if beamtime in backends.fscans:
+                        self.mainGui.scanSelector.btid.setCurrentText(beamtime)
+                        self.mainGui.scanSelector.bt_autodetect_enable.setChecked(False)
+                    else:
+                        raise ValueError("Cannot find beamtime %s in the list of available backends" % beamtime)
             #self.machineParams.set_detector(self.detectorCal.detector)
             return True
             
