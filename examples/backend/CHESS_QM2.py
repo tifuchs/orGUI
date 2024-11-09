@@ -64,7 +64,6 @@ class P3_Image:
 class QM2_backend_2024(Scan):
     def __init__(self, hdffilepath_orNode=None, scanno=None):
         data = None
-        
         if hdffilepath_orNode is None:
             return
         self.hdffilepath_orNode=hdffilepath_orNode
@@ -106,6 +105,8 @@ class QM2_backend_2024(Scan):
 
             data = f[self.scanname]
             
+        self.name = "%s.1" % scanno
+        self.title = data['title'][()]
         
         positioners_section = data['instrument']['positioners']
         measurement_section = data['measurement']

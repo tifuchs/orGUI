@@ -1597,7 +1597,8 @@ ub : gui for UB matrix and angle calculations
                 msg.hide()
                 qutils.warning_detailed_message(self, "Cannot open scan", "Cannot open scan" , traceback.format_exc())
                 #qt.QMessageBox.critical(self,"Cannot open scan", "Cannot open scan:\n%s" % traceback.format_exc())
-        
+        if hasattr(self.fscan, 'name'):
+            self.activescanname = self.fscan.name
                 
             
             
