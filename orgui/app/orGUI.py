@@ -500,6 +500,112 @@ ub : gui for UB matrix and angle calculations
                     
                 qt.QMessageBox.information(self, "Rocking scan integrated", "Rocking scan was successfully integrated.")
 
+    def rocking_extraction2(self):
+
+        def get_roi_hkl():
+            hkl_del_gam_s1, hkl_del_gam_s2 = self.getROIloc()
+            
+            nodatapoints = len(self.fscan)
+            
+            if hkl_del_gam_s1.shape[0] == 1:
+                hkl_del_gam_1 = np.zeros((nodatapoints,hkl_del_gam_s1.shape[1]), dtype=np.float64)
+                hkl_del_gam_2 = np.zeros((nodatapoints,hkl_del_gam_s1.shape[1]), dtype=np.float64)
+                hkl_del_gam_1[:] = hkl_del_gam_s1[0]
+                hkl_del_gam_2[:] = hkl_del_gam_s2[0]
+            else:
+                hkl_del_gam_1, hkl_del_gam_2 = hkl_del_gam_s1, hkl_del_gam_s2
+
+            return hkl_del_gam_1, hkl_del_gam_2
+
+
+        if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
+            qt.QMessageBox.warning(self, "No scan loaded", "Cannot integrate scan: No scan loaded.")
+            return
+
+        # make ROI visible in orgui images
+        self.roivisible = True
+        try:
+            self.updateROI()
+        except Exception:
+            qutils.warning_detailed_message(self, "Cannot show ROI", "Cannot show ROI", traceback.format_exc())
+            return
+
+        # define integration boundaries
+        l_min = self.scanSelector.hkl_static1[2].value()
+        l_max = self.scanSelector.roscanMaxL.value()
+        step_width = self.scanSelector.roscanDeltaL.value()
+        step_nr = round((l_max-l_min)/step_width) + 1
+        
+        #calculate useful ROI size
+        try:
+            min_coordinates = self.searchPixelCoordHKL([self.scanSelector.hkl_static1[0].value(),self.scanSelector.hkl_static1[1].value(),l_min])
+            max_coordinates = self.searchPixelCoordHKL([self.scanSelector.hkl_static1[0].value(),self.scanSelector.hkl_static1[1].value(),l_max])
+        except Exception:
+            qutils.warning_detailed_message(self, "Cannot calculate coordiantes", "Cannot calculate pixel coordinates. See details!", traceback.format_exc())
+            return
+        refl_dialog = QReflectionAnglesDialog(min_coordinates,"Select the correct intersection with Ewald sphere", self)
+        for no_show in range(3):
+            if qt.QDialog.Accepted == refl_dialog.exec():
+                for i, cb in enumerate(refl_dialog.checkboxes):
+                    if cb.isChecked():
+                        which_Ewald_intersect = i
+                        break
+                else:
+                    qt.QMessageBox.warning(self, "No reflection selected", "Select a reflection on the rod you want to integrate.")
+                    continue
+                break
+            else:
+                return
+        dist_in_pixels = np.abs(min_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1] - max_coordinates['xy_%s' % int(which_Ewald_intersect+1)][1])
+        roi_hlength = np.ceil(dist_in_pixels/step_nr)
+        
+        if self.scanSelector.autoROIVsize.isChecked() == True:
+            self.scanSelector.vsize.setValue(roi_hlength)
+            self.scanSelector.sigROIChanged.emit()
+
+        roi_x_list = np.empty(step_nr,dtype=np.float64)
+        roi_y_list = np.empty(step_nr,dtype=np.float64)
+
+        hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
+        dataavail = np.logical_or(hkl_del_gam_1[:,-1],hkl_del_gam_2[:,-1])
+
+        roi_parameters1 = np.empty(((step_nr,) + dataavail.shape + (9,)))
+        roi_parameters2 = np.empty(((step_nr,) + dataavail.shape + (9,)))
+
+
+        #generate list of ROI coordinates and reciprocal space information
+
+        for no, i in enumerate(np.linspace(l_min, l_max, step_nr)):
+
+            # calculate ROI coordinates
+            coordinates = self.searchPixelCoordHKL([self.scanSelector.hkl_static1[0].value(),self.scanSelector.hkl_static1[1].value(),i])
+            xpos = coordinates['xy_%s' % int(which_Ewald_intersect+1)][0]
+            ypos = coordinates['xy_%s' % int(which_Ewald_intersect+1)][1]
+
+
+            # set ROI
+            self.scanSelector.set_xy_static_loc(xpos, ypos)
+            self.scanSelector.sigROIChanged.emit()
+            print('move roi to: x:' + str(np.round(xpos,3)) + ', y: ' + str(np.round(ypos)) 
+                    + ', or in reciprocal coordinates: H:' + str(self.scanSelector.hkl_static1[0].value()) + ', K: ' + str(self.scanSelector.hkl_static1[1].value()) + ', L: ' + str(np.round(i,3)) + '\n')
+
+            # save ROI position and parameters
+            hkl_del_gam_1, hkl_del_gam_2 = get_roi_hkl()
+
+            roi_x_list[no] = xpos
+            roi_y_list[no] = ypos
+
+            roi_parameters1[no] = hkl_del_gam_1
+            roi_parameters2[no] = hkl_del_gam_2
+
+        # gui ROI movement
+        #self.scanSelector.set_xy_static_loc(roi_x_list[0], roi_y_list[0])
+        #self.scanSelector.sigROIChanged.emit()
+
+        self.rocking_integrate(roi_x_list,roi_y_list,roi_parameters1,roi_parameters2)
+            
+        qt.QMessageBox.information(self, "Rocking scan integrated", "Rocking scan was successfully integrated.")
+
     def rocking_integrate(self,rxlist,rylist,all_roi_hkl1,all_roi_hkl2):
         try:
             image = self.fscan.get_raw_img(0)
@@ -1209,7 +1315,7 @@ ub : gui for UB matrix and angle calculations
                 if cb.isChecked():
                     xy = refldict['xy_%s' % i]
                     self.scanSelector.set_xy_static_loc(xy[0], xy[1])
-                    return
+                    return     
 
     def _onNewReflection(self,refldict):
         axisname = self.fscan.axisname
@@ -1793,7 +1899,6 @@ ub : gui for UB matrix and angle calculations
             self.centralPlot.removeMarker('main_croi_loc')
             return
 
-        
         """
         hkl_del_gam_1, hkl_del_gam_2 = angles.anglesIntersectLineEwald(H_0, H_1, mu,self.imageNoToOmega(self.imageno),self.ubcalc.phi,self.ubcalc.chi)
         
@@ -1857,8 +1962,7 @@ ub : gui for UB matrix and angle calculations
             pos = HKLVlieg.crystalAngles(pos,self.ubcalc.n)
             hkl = np.concatenate((np.array(self.ubcalc.angles.anglesToHkl(*pos)),np.rad2deg([delta[0],gamma[0]])))
         """
-        #print(self.scanSelector.scanstab.currentIndex())
-        if self.scanSelector.scanstab.currentIndex() == 1 and not kwargs.get('intersect', False):
+        if (self.scanSelector.scanstab.currentIndex() == 1 or self.scanSelector.scanstab.currentIndex() == 2) and not kwargs.get('intersect', False):
             if imageno is None:
                 hkl_del_gam_1 = np.ones((len(self.fscan),6),dtype=np.float64)
                 x = np.full(len(self.fscan),self.scanSelector.xy_static[0].value())
@@ -1982,6 +2086,11 @@ ub : gui for UB matrix and angle calculations
         self.centralPlot.addMarker(loc[0],loc[1],legend='main_croi_loc')
         
     def integrateROI(self):
+
+        if self.scanSelector.scanstab.currentIndex() == 2:
+            self.rocking_extraction2()
+            return
+            
         try:
             image = self.fscan.get_raw_img(0)
         except Exception as e:

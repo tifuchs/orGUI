@@ -408,10 +408,7 @@ class QScanSelector(qt.QMainWindow):
         #setroi_btn.setIcon()
         #setroi_btn.setToolTip("Select roi location by double clicking")
         setroi_btn.setDefaultAction(self.select_roi_action)
-        
-        
-        
-        
+
         static_loc_Group = qt.QGroupBox(u"Static ROI location")
         static_loc_GroupMainVLayout = qt.QVBoxLayout()
         
@@ -440,6 +437,60 @@ class QScanSelector(qt.QMainWindow):
         static_loc_GroupMainVLayout.addWidget(static_hkl_box)
         
         static_loc_Group.setLayout(static_loc_GroupMainVLayout)
+
+
+
+        # rocking scan
+        
+        self.hkl_static1 = [qt.QDoubleSpinBox() for i in range(3)]
+        [h.setRange(-20000,20000) for h in self.hkl_static1]
+        [h.setDecimals(3) for h in self.hkl_static1]
+        [h.setValue(0.) for h in self.hkl_static1]
+        self.hkl_static1[0].setValue(1.) # default H
+        self.hkl_static1[2].setValue(1.) # default L
+
+        self.roscanMaxL = qt.QDoubleSpinBox()
+        self.roscanMaxL.setRange(-20000,20000)
+        self.roscanMaxL.setDecimals(3)
+        self.roscanMaxL.setValue(2.)
+
+        self.roscanDeltaL = qt.QDoubleSpinBox()
+        self.roscanDeltaL.setRange(-20000,20000)
+        self.roscanDeltaL.setDecimals(3)
+        self.roscanDeltaL.setValue(0.1)
+
+        rocking_integration_group = qt.QGroupBox(u"Integration coordinates")
+        rocking_integration_groupMainVLayout = qt.QVBoxLayout()
+        
+        rocking_integration_group_hkl_box = qt.QGroupBox(u"hkl start")
+        rocking_integration_group_loc_HKLLayout = qt.QHBoxLayout()
+        for pinbox, lbll in zip(self.hkl_static1, ["H:", "K:", "L:"]):
+            rocking_integration_group_loc_HKLLayout.addWidget(qt.QLabel(lbll))
+            rocking_integration_group_loc_HKLLayout.addWidget(pinbox)
+        calc_HKL_roi_btn2 = qt.QToolButton()
+        self.roi_fromHKL_action2 = qt.QAction(resources.getQicon("search"), "Set ROI position to calculated position of reflection", self)
+        self.roi_fromHKL_action2.triggered.connect(self.search_hkl_static_loc)
+        calc_HKL_roi_btn2.setDefaultAction(self.roi_fromHKL_action2)
+        rocking_integration_group_loc_HKLLayout.addWidget(calc_HKL_roi_btn2)
+        rocking_integration_group_hkl_box.setLayout(rocking_integration_group_loc_HKLLayout)
+        
+        rocking_integration_group_step_box = qt.QGroupBox(u"hkl step")
+        rocking_integration_group_step_Layout = qt.QHBoxLayout()
+        rocking_integration_group_step_Layout.addWidget(qt.QLabel(u"L max"))
+        rocking_integration_group_step_Layout.addWidget(self.roscanMaxL)
+
+        rocking_integration_group_step_Layout.addWidget(qt.QLabel(u"delta L"))
+        rocking_integration_group_step_Layout.addWidget(self.roscanDeltaL)
+        self.autoROIVsize = qt.QCheckBox("auto ROI-v size")
+        rocking_integration_group_step_Layout.addWidget(self.autoROIVsize)
+
+        rocking_integration_group_step_box.setLayout(rocking_integration_group_step_Layout)
+        
+        #rocking_integration_groupMainVLayout.addWidget(rocking_integration_group_xy_box)
+        rocking_integration_groupMainVLayout.addWidget(rocking_integration_group_hkl_box)
+        rocking_integration_groupMainVLayout.addWidget(rocking_integration_group_step_box)
+        
+        rocking_integration_group.setLayout(rocking_integration_groupMainVLayout)
         
         
         #  roi scan tab
@@ -447,6 +498,7 @@ class QScanSelector(qt.QMainWindow):
         self.scanstab = qt.QTabWidget()
         self.scanstab.addTab(hklscanwidget, "hklscan")
         self.scanstab.addTab(static_loc_Group, "fixed roi loc")
+        self.scanstab.addTab(rocking_integration_group, "rocking scan integration")
         self.scanstab.currentChanged.connect(lambda : self.sigROIChanged.emit())
 
         
@@ -492,8 +544,12 @@ class QScanSelector(qt.QMainWindow):
         self.sigROIChanged.emit()
         
     def search_hkl_static_loc(self):
-        hkl = [h.value() for h in self.hkl_static]
-        self.sigSearchHKL.emit(hkl)
+        if self.scanstab.currentIndex() == 2:
+            hkl = [h.value() for h in self.hkl_static1]
+            self.sigSearchHKL.emit(hkl)    
+        else:
+            hkl = [h.value() for h in self.hkl_static]
+            self.sigSearchHKL.emit(hkl)        
         
     def view_data_callback(self,obj):
         self.dataviewer.setData(obj)
