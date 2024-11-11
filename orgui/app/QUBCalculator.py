@@ -34,6 +34,7 @@ from silx.gui import qt
 from silx.gui import icons
 import pyFAI, pyFAI.detectors
 import numpy as np
+from scipy.spatial import transform
 try:
     import ase.io
     HAS_ASE = True
@@ -54,7 +55,7 @@ from contextlib import contextmanager
 
 from .ArrayTableDialog import ArrayEditWidget
 
-from ..backend import udefaults
+from ..backend import udefaults, backends
 from .. import resources
 from . import qutils
 
@@ -475,6 +476,22 @@ class QUBCalculator(qt.QSplitter):
 
             self.crystalparams.setValues(self.crystal,self.n)
             self.machineParams.setValues(settings)
+            
+            if 'backend' in config:
+                if 'file' in config['backend']:
+                    if os.path.isabs(config['backend']['file']):
+                        backendpath = config['backend']['file']
+                    else:
+                        p = os.path.abspath(configfile)
+                        backendpath = os.path.join(os.path.dirname(p), config['backend']['file'])
+                    self.mainGui.scanSelector.loadBackendFile(backendpath)
+                elif 'beamtime' in config['backend']:
+                    beamtime = config['backend']['beamtime']
+                    if beamtime in backends.fscans:
+                        self.mainGui.scanSelector.btid.setCurrentText(beamtime)
+                        self.mainGui.scanSelector.bt_autodetect_enable.setChecked(False)
+                    else:
+                        raise ValueError("Cannot find beamtime %s in the list of available backends" % beamtime)
             #self.machineParams.set_detector(self.detectorCal.detector)
             return True
             
@@ -967,8 +984,8 @@ class QUEdit(qt.QWidget):
         editLayout.addWidget(alignGroup)
         editLayout.addLayout(alignbtnlayout)
         
-        mainLayout = qt.QVBoxLayout()
-        mainLayout.addLayout(editLayout)
+        
+        
         
         bottomLayout = qt.QHBoxLayout()
         
@@ -998,6 +1015,25 @@ class QUEdit(qt.QWidget):
 
         bottomLayout.addWidget(defaultGroup)
         
+        rotateUGroup = qt.QGroupBox("Manual rotate U")
+        rotateUlayout = qt.QHBoxLayout()
+        
+        self.euler_xyz = []
+        for i, index in enumerate(['x', 'y', 'z']):
+            rotateUlayout.addWidget(qt.QLabel("%s:" % index))
+            edit = qt.QDoubleSpinBox()
+            edit.setRange(-360,360)
+            edit.setDecimals(5)
+            edit.setSingleStep(0.01)
+            rotateUlayout.addWidget(edit)
+            edit.setValue(0)
+            edit.valueChanged.connect(self.onEulerChanged)
+            self.euler_xyz.append(edit)
+        rotateUGroup.setLayout(rotateUlayout)
+        
+        mainLayout = qt.QVBoxLayout()
+        mainLayout.addLayout(editLayout)
+        mainLayout.addWidget(rotateUGroup)
         mainLayout.addLayout(bottomLayout)
         
         self.setLayout(mainLayout)
@@ -1028,8 +1064,18 @@ class QUEdit(qt.QWidget):
                  'frame' : frame}
         self.sigAlignRequest.emit(ddict)
         
+    def onEulerChanged(self):
+        xyz_angles = np.deg2rad(np.array([edit.value() for edit in self.euler_xyz]))
+        newU = transform.Rotation.from_euler("xyz", xyz_angles).as_matrix()
+        self.setU(newU)
+        self.onUChanged()
+        
     def setU(self, U):
-        self.uview.setArrayData(U, None, True, True)
+        with blockSignals(self.euler_xyz):
+            self.uview.setArrayData(U, None, True, True)
+            new_euler_xyz_val = np.rad2deg(transform.Rotation.from_matrix(U).as_euler('xyz'))
+            [edit.setValue(v) for edit, v in zip(self.euler_xyz, new_euler_xyz_val)]
+        
         
     def getU(self):
         return self.uview.getData()

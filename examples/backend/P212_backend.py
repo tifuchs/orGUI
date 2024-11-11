@@ -121,7 +121,8 @@ class P212_backend_2024(Scan):
             self.scanname = '.'.join((scanno_s,subscanno))
 
             data = dictdump.h5todict(f,self.scanname) # here is the actual loading 
-            
+        self.name = self.scanname
+        self.title = data['title'][()]
         # find available cameras
         
         possibleCameras = ['Pilatus', 'Varex_1', 'Varex_2', 'Varex_3', 'Varex_4']

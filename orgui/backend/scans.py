@@ -73,6 +73,10 @@ class Scan(ABC):
         self.omega = -self.th # = -1*th
         self.title = "generic_scan"
         # for mu-scan you must provide a value for omega/theta
+        
+        # optional: provide a unique identifier, which is used as key in h5 database to identify 
+        # the dataset
+        # self.name = "identifier"
     
     @property
     def auxillary_counters(self):
