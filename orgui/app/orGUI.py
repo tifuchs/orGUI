@@ -757,6 +757,14 @@ ub : gui for UB matrix and angle calculations
 
         progress.setValue(len(self.fscan))
 
+
+        numberOfPlots = len(rxlist)
+        maxAmountOfPlots = 30
+        plotOnlyNth = (numberOfPlots // maxAmountOfPlots) + 1
+
+        #print('Number of integration curves: ' + str(numberOfPlots))
+        #print('We can plot every ' + str(plotOnlyNth) + '-th curve.' )
+
         #plot and save data in database
         for d in range(croi1_all.shape[1]):
 
@@ -957,20 +965,20 @@ ub : gui for UB matrix and angle calculations
                         "@orgui_meta": u"scan"
                     }
                 }
-                
-            if np.any(cpixel1_a > 0.):
-                
-                self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
-                                                xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
-                
-                data[self.activescanname]["measurement"][availname1] = datas1
+            if d % plotOnlyNth == 0:
+                if np.any(cpixel1_a > 0.):
+                    
+                    self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
+                                                    xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
+                    
+                    data[self.activescanname]["measurement"][availname1] = datas1
 
-            if np.any(cpixel2_a > 0.): # an additional plot is created
-                
-                self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
-                                                xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
-                
-                data[self.activescanname]["measurement"][availname2] = datas2
+                if np.any(cpixel2_a > 0.): # an additional plot is created
+                    
+                    self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
+                                                    xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg2_err_a_masked)
+                    
+                    data[self.activescanname]["measurement"][availname2] = datas2
 
         self.database.add_nxdict(data)
         
@@ -1315,7 +1323,7 @@ ub : gui for UB matrix and angle calculations
                 if cb.isChecked():
                     xy = refldict['xy_%s' % i]
                     self.scanSelector.set_xy_static_loc(xy[0], xy[1])
-                    return     
+                    return      
 
     def _onNewReflection(self,refldict):
         axisname = self.fscan.axisname
