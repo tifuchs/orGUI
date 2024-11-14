@@ -462,7 +462,7 @@ class QScanSelector(qt.QMainWindow):
         rocking_integration_group = qt.QGroupBox(u"Integration coordinates")
         rocking_integration_groupMainVLayout = qt.QVBoxLayout()
         
-        rocking_integration_group_hkl_box = qt.QGroupBox(u"hkl start")
+        rocking_integration_group_hkl_box = qt.QGroupBox(u"Reciprocal start coordinates")
         rocking_integration_group_loc_HKLLayout = qt.QHBoxLayout()
         for pinbox, lbll in zip(self.hkl_static1, ["H:", "K:", "L:"]):
             rocking_integration_group_loc_HKLLayout.addWidget(qt.QLabel(lbll))
@@ -474,19 +474,18 @@ class QScanSelector(qt.QMainWindow):
         rocking_integration_group_loc_HKLLayout.addWidget(calc_HKL_roi_btn2)
         rocking_integration_group_hkl_box.setLayout(rocking_integration_group_loc_HKLLayout)
         
-        rocking_integration_group_step_box = qt.QGroupBox(u"hkl step")
+        rocking_integration_group_step_box = qt.QGroupBox(u"Integration path")
         rocking_integration_group_step_Layout = qt.QHBoxLayout()
         rocking_integration_group_step_Layout.addWidget(qt.QLabel(u"L max"))
         rocking_integration_group_step_Layout.addWidget(self.roscanMaxL)
 
-        rocking_integration_group_step_Layout.addWidget(qt.QLabel(u"delta L"))
+        rocking_integration_group_step_Layout.addWidget(qt.QLabel(u"L step"))
         rocking_integration_group_step_Layout.addWidget(self.roscanDeltaL)
-        self.autoROIVsize = qt.QCheckBox("auto ROI-v size")
+        self.autoROIVsize = qt.QCheckBox("auto ROI-v")
         rocking_integration_group_step_Layout.addWidget(self.autoROIVsize)
 
         rocking_integration_group_step_box.setLayout(rocking_integration_group_step_Layout)
         
-        #rocking_integration_groupMainVLayout.addWidget(rocking_integration_group_xy_box)
         rocking_integration_groupMainVLayout.addWidget(rocking_integration_group_hkl_box)
         rocking_integration_groupMainVLayout.addWidget(rocking_integration_group_step_box)
         
