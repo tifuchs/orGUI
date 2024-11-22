@@ -71,6 +71,7 @@ from .QScanSelector import QScanSelector
 from .QReflectionSelector import QReflectionSelector, QReflectionAnglesDialog
 from .QUBCalculator import QUBCalculator
 from .ArrayTableDialog import ArrayTableDialog
+from .bgroi import RectangleBgROI
 from .database import DataBase
 from ..backend.scans import SimulationScan
 from ..backend import backends
@@ -193,22 +194,24 @@ class orGUI(qt.QMainWindow):
         
         #roi order: left, top, right, bottom,  croi
         self.rois = []
-        for i in range(5):
-            
-            roi = RectangleROI()
-            roi.setGeometry(origin=(0, 0), size=(0, 0))
-            if i == 4:
-                roi.setColor('red') # center color
-            else:
-                roi.setColor('pink') # bg color
-
-                #roi.setEditable(False)
-            roi.setLineWidth(2)
-            roi.setLineStyle('-')
-            roi.setVisible(True)
-
-            self.roiManager.addRoi(roi,useManagerColor=False)
-            self.rois.append(roi)
+        
+        self.roiS1 = RectangleBgROI()
+        self.roiS1.setLineWidth(2)
+        self.roiS1.setLineStyle('-')
+        self.roiS1.setBgStyle('pink', '-', 2.)
+        self.roiS1.setVisible(True)
+        self.roiS1.setGeometry(origin=(0, 0), size=(0, 0))
+        # S1 is also fixed roi, editing enabled when static ROI:
+        self.roiS1.sigEditingFinished.connect(self._onStaticROIedited)
+        
+        self.roiS2 = RectangleBgROI()
+        self.roiS2.setLineWidth(2)
+        self.roiS2.setLineStyle('-')
+        self.roiS2.setBgStyle('pink', '-', 2.)
+        self.roiS2.setVisible(True)
+        self.roiS2.setGeometry(origin=(0, 0), size=(0, 0))
+        self.roiManager.addRoi(self.roiS1,useManagerColor=False)
+        self.roiManager.addRoi(self.roiS2,useManagerColor=False)
         
         #self.reflTable.view._model.dataChanged.connect(printmodel)
         #self.reflTable.setArrayData(np.array([0,0,0,0,10,10],dtype=np.float64))
@@ -1201,6 +1204,18 @@ ub : gui for UB matrix and angle calculations
                     xy = refldict['xy_%s' % i]
                     self.scanSelector.set_xy_static_loc(xy[0], xy[1])
                     return      
+    
+    def _onStaticROIedited(self):
+        xy = self.roiS1.getCenter()
+        hsize, vsize = np.round(self.roiS1.getSize())
+        self.scanSelector.hsize.blockSignals(True)
+        self.scanSelector.vsize.blockSignals(True)
+        self.scanSelector.hsize.setValue(hsize)
+        self.scanSelector.vsize.setValue(vsize)
+        self.scanSelector.hsize.blockSignals(False)
+        self.scanSelector.vsize.blockSignals(False)
+        self.scanSelector.set_xy_static_loc(xy[0], xy[1])
+        
 
     def _onNewReflection(self,refldict):
         axisname = self.fscan.axisname
@@ -1734,7 +1749,7 @@ ub : gui for UB matrix and angle calculations
             self.resetZoom = False
             self.imageno = key
             self.reflectionSel.setImage(self.imageno)
-            self.updateROI()
+            self.updateROI(image_changed=True)
             self.updateReflections()
             
             mu, om = self.getMuOm(self.imageno)
@@ -1769,64 +1784,91 @@ ub : gui for UB matrix and angle calculations
         
     
         
-    def updateROI(self):
-        #dc = self.ubcalc.detectorCal
-        #mu = self.ubcalc.mu
-        #angles = self.ubcalc.angles
-        
-        #H_1 = np.array([h.value() for h in self.scanSelector.H_1])
-        #H_0 = np.array([h.value() for h in self.scanSelector.H_0])
-        try:
-            hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(self.imageno)
-        except:
-            for roi in self.rois:
-                roi.setVisible(False)
-            self.centralPlot.removeMarker('main_croi_loc')
-            return
-
-        """
-        hkl_del_gam_1, hkl_del_gam_2 = angles.anglesIntersectLineEwald(H_0, H_1, mu,self.imageNoToOmega(self.imageno),self.ubcalc.phi,self.ubcalc.chi)
-        
-        delta1 = hkl_del_gam_1[...,3]
-        delta2 = hkl_del_gam_2[...,3]
-        gam1 = hkl_del_gam_1[...,4]
-        gam2 = hkl_del_gam_2[...,4]
-        
-        yx1 = dc.pixelsSurfaceAngles(gam1, delta1, mu)
-        yx2 = dc.pixelsSurfaceAngles(gam2, delta2, mu)
-        
-        ymask1 = np.logical_and(yx1[...,0] >= 0, yx1[...,0] < dc.detector.shape[0])
-        xmask1 = np.logical_and(yx1[...,1] >= 0, yx1[...,1] < dc.detector.shape[1])
-        yxmask1 = np.logical_and(xmask1,ymask1)
-    
-        ymask2 = np.logical_and(yx2[...,0] >= 0, yx2[...,0] < dc.detector.shape[0])
-        xmask2 = np.logical_and(yx2[...,1] >= 0, yx2[...,1] < dc.detector.shape[1])
-        yxmask2 = np.logical_and(xmask2,ymask2)
-        """
+    def updateROI(self, **kwargs):
         if not self.roivisible:
-            for roi in self.rois:
-                roi.setVisible(False)
+            #for roi in self.rois:
+            self.roiS1.setVisible(False)
+            self.roiS2.setVisible(False)
             self.roiManager._roisUpdated()
-            self.centralPlot.removeMarker('main_croi_loc')
-            
-            
-        if hkl_del_gam_1[0,-1] or hkl_del_gam_2[0,-1]:
+            #self.centralPlot.removeMarker('main_croi_loc')
+        
+        current_mode = self.scanSelector.scanstab.currentIndex()
+        if (current_mode == 0 or current_mode == 1):
+            try:
+                hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(self.imageno)
+            except:
+                #for roi in self.rois:
+                #    roi.setVisible(False)
+                self.roiS1.setVisible(False)
+                self.roiS2.setVisible(False)
+                #self.centralPlot.removeMarker('main_croi_loc')
+                return
+
+
             if hkl_del_gam_1[0,-1]:
                 if self.roivisible:
-                    self.plotROI(hkl_del_gam_1[0,6:8])
+                    self.plotROI(hkl_del_gam_1[0,6:8], self.roiS1)
                 for i, spinbox in enumerate(self.scanSelector.hkl_static):
                     spinbox.setValue(hkl_del_gam_1[0,i])
+            else:
+                self.roiS1.setVisible(False)
 
             if hkl_del_gam_2[0,-1]:
                 if self.roivisible:
-                    self.plotROI(hkl_del_gam_2[0,6:8])
+                    self.plotROI(hkl_del_gam_2[0,6:8], self.roiS2)
                 for i, spinbox in enumerate(self.scanSelector.hkl_static):
                     spinbox.setValue(hkl_del_gam_1[0,i])
-        else:
-            for roi in self.rois:
-                roi.setVisible(False)
-            self.centralPlot.removeMarker('main_croi_loc')
-        
+            else:
+                self.roiS2.setVisible(False)
+                
+            if current_mode == 1:
+                self.roiS1.setEditable(True)
+            else:
+                self.roiS1.setEditable(False)
+                
+            self.roiManager._roisUpdated()
+
+                #self.centralPlot.removeMarker('main_croi_loc')
+            
+    """
+    def getStaticROIloc(self, xy, imageno=None, H_0=None, H_1=None, **kwargs):
+        if self.fscan is None:
+            raise Exception("No scan loaded!")
+        mu, om = self.getMuOm(imageno)
+        #mu_cryst = HKLVlieg.crystalAngles_singleArray(mu, self.ubcalc.n)
+        dc = self.ubcalc.detectorCal
+        angles = self.ubcalc.angles
+        if imageno is None:
+            hkl_del_gam_1 = np.ones((len(self.fscan),6),dtype=np.float64)
+            x = np.full(len(self.fscan),xy[0])
+            y = np.full(len(self.fscan),xy[1])
+            
+            gamma, delta, alpha = self.ubcalc.detectorCal.crystalAnglesPoint(y, x, mu,  self.ubcalc.n)
+            s = np.arange(len(self.fscan))
+            
+            if len(np.asarray(om).shape) == 0:
+                om = np.full(len(self.fscan),om)
+            
+            if len(np.asarray(alpha).shape) == 0:
+                alpha = np.full(len(self.fscan),alpha)
+
+            yx1 = np.vstack((y,x)).T
+            yx2 = np.full_like(yx1, np.inf)
+            
+            #for i in range(len(self.fscan)):
+                
+                pos = [alpha[i],delta[i],gamma[i],
+                        om[i],
+                        self.ubcalc.chi,
+                        self.ubcalc.phi]
+                #pos = np.vstack(pos).T
+                hkl = np.array(self.ubcalc.angles.anglesToHkl(*pos)
+                hkl_del_gam_1[i, :3] = hkl
+            hkl_del_gam_1[:, 3] = delta
+            hkl_del_gam_1[:, 4] = gamma
+            hkl_del_gam_1[:, 5] = self.fscan.axis
+            hkl_del_gam_2 = np.full_like(hkl_del_gam_1, -1)
+    """        
     def getROIloc(self, imageno=None, H_0=None, H_1=None, **kwargs):
         if self.fscan is None:
             raise Exception("No scan loaded!")
@@ -1837,16 +1879,7 @@ ub : gui for UB matrix and angle calculations
         dc = self.ubcalc.detectorCal
         #mu = self.ubcalc.mu
         angles = self.ubcalc.angles
-        
-        """
-                    gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([y]),np.array([x]), mu)
-            #print(self.ubcalc.detectorCal)
-            #print(x,y)
-            #print(self.ubcalc.detectorCal.tth(np.array([y]),np.array([x])))
-            pos = [mu,delta[0],gamma[0],om,self.ubcalc.chi,self.ubcalc.phi]
-            pos = HKLVlieg.crystalAngles(pos,self.ubcalc.n)
-            hkl = np.concatenate((np.array(self.ubcalc.angles.anglesToHkl(*pos)),np.rad2deg([delta[0],gamma[0]])))
-        """
+
         if (self.scanSelector.scanstab.currentIndex() == 1 or self.scanSelector.scanstab.currentIndex() == 2) and not kwargs.get('intersect', False):
             if imageno is None:
                 hkl_del_gam_1 = np.ones((len(self.fscan),6),dtype=np.float64)
@@ -1950,25 +1983,24 @@ ub : gui for UB matrix and angle calculations
         return np.concatenate((np.atleast_2d(hkl_del_gam_1), xy1, yxmask1[...,np.newaxis]),axis=-1),\
                np.concatenate((np.atleast_2d(hkl_del_gam_2), xy2, yxmask2[...,np.newaxis]),axis=-1)
 
-    def plotROI(self, loc):
+    def plotROI(self, loc, roi):
 
         key = self.intkey(loc)
-        bkgkey = self.bkgkeys(loc)
-        for roi in self.rois:
-           roi.setVisible(True)
+        leftkey, rightkey, topkey, bottomkey = self.bkgkeys(loc)
         
         #print([(roi, roi.isEditable()) for roi in self.rois])
         
         #croi:
-        self.rois[4].setGeometry(origin=(key[0].start, key[1].start), size=(key[0].stop - key[0].start, key[1].stop - key[1].start))
-        #self.rois[4].setVisible(True)
-        for i,k in enumerate(bkgkey,0):
-            self.rois[i].setGeometry(origin=(k[0].start, k[1].start), size=( k[0].stop - k[0].start, k[1].stop - k[1].start))
-
-        self.roiManager._roisUpdated()
-        
-        #print([str(r) for r in self.roiManager.getRois()])
-        self.centralPlot.addMarker(loc[0],loc[1],legend='main_croi_loc')
+        origin =(key[0].start, key[1].start)
+        size = (key[0].stop - key[0].start, key[1].stop - key[1].start)
+        #leftkey, rightkey, topkey, bottomkey
+        left = leftkey[0].stop - leftkey[0].start
+        right = rightkey[0].stop - rightkey[0].start
+        top = topkey[1].stop - topkey[1].start
+        bottom = bottomkey[1].stop - bottomkey[1].start
+        roi.setGeometry(origin=origin, size=size, left=left, right=right, top=top, bottom=bottom)
+        roi.setVisible(True)
+        #self.roiManager._roisUpdated()
         
     def integrateROI(self):
 
@@ -2366,9 +2398,13 @@ Do you want to continue without mask?""")
                 self.reflectionSel.addReflection(eventdict,self.imageno,hkl)
             
         if eventdict['event'] == 'markerMoved':
+            if eventdict['label'].startswith('__'):
+                return
             self.reflectionSel.moveReflection(eventdict['label'],[eventdict['x'],eventdict['y']])
             self.reflectionSel.setReflectionActive(eventdict['label'])
         if eventdict['event'] == 'markerClicked':
+            if eventdict['label'].startswith('__'):
+                return
             self.reflectionSel.setReflectionActive(eventdict['label'])
         
     def intkey(self, coords):
