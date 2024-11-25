@@ -958,27 +958,59 @@ class VliegAngles():
 
     
     def anglesToHkl(self,alpha,delta,gamma,omega,chi,phi):
+        alpha = np.asarray(alpha)
         delta = np.asarray(delta)
         gamma = np.asarray(gamma)
-        assert delta.shape == gamma.shape
+        omega = np.asarray(omega)
+        chi = np.asarray(chi)
+        phi = np.asarray(phi)
+        ang = [alpha,delta,gamma,omega,chi,phi]
         
-        [_, _, _, OMEGA, CHI, PHI] = createVliegMatrices([None,None,None,omega,chi,phi])
+        shape = max([a.shape for a in ang])
+        
+        #[_, _, _, OMEGA, CHI, PHI] = createVliegMatrices([None,None,None,omega,chi,phi])
         #hkl = np.empty((*shape,3))
         K = self._ubCalculator.getK()
         UBi = np.linalg.inv(self._ubCalculator.getUB())
-
-        OMEGAi = OMEGA.T
-        CHIi = CHI.T
-        PHIi = PHI.T
-
+        
         Qalp = self.QAlpha(alpha,delta,gamma)
-        shape = Qalp.shape
-        Qalp = np.ascontiguousarray(Qalp.reshape((-1,3)).T)
-        #calculate UBi * PHIi * CHIi * OMEGAi * Q_alpha 
+        Qalp = np.ascontiguousarray(Qalp.reshape((-1,3)))
+        
+        #now UBi * PHIi * CHIi * OMEGAi * Q_alpha 
+        
+        #calculate PHIi @ CHIi @ OMEGAi
+        sinphi = np.sin(phi.flatten()); cosphi = np.cos(phi.flatten())
+        sinchi = np.sin(chi.flatten()); coschi = np.cos(chi.flatten())
+        sinomega = np.sin(omega.flatten()); cosomega = np.cos(omega.flatten())
+        
+        if phi.size > 1 or chi.size > 1 or omega.size > 1:
+            # this will be expensive, could optimize here in the future
+            PCO = np.empty((np.prod(shape), 3, 3), dtype=np.float64)
+            PCO[:,0,0] = coschi*cosomega
+            PCO[:,0,1] = -sinomega*coschi
+            PCO[:,0,2] = -sinchi
+            PCO[:,1,0] = sinchi*sinphi*cosomega + sinomega*cosphi
+            PCO[:,1,1] = -sinchi*sinomega*sinphi + cosomega*cosphi
+            PCO[:,1,2] = sinphi*coschi
+            PCO[:,2,0] = sinchi*cosomega*cosphi - sinomega*sinphi
+            PCO[:,2,1] = -sinchi*sinomega*cosphi - sinphi*cosomega
+            PCO[:,2,2] = coschi*cosphi
+        else:
+            PCO = np.empty((3, 3), dtype=np.float64)
+            PCO[0,0] = coschi*cosomega
+            PCO[0,1] = -sinomega*coschi
+            PCO[0,2] = -sinchi
+            PCO[1,0] = sinchi*sinphi*cosomega + sinomega*cosphi
+            PCO[1,1] = -sinchi*sinomega*sinphi + cosomega*cosphi
+            PCO[1,2] = sinphi*coschi
+            PCO[2,0] = sinchi*cosomega*cosphi - sinomega*sinphi
+            PCO[2,1] = -sinchi*sinomega*cosphi - sinphi*cosomega
+            PCO[2,2] = coschi*cosphi
 
-        hkl = (UBi @ PHIi @ CHIi @ OMEGAi) @ Qalp
+        #calculate UBi * PHIi * CHIi * OMEGAi * Q_alpha 
+        hkl = np.einsum('...ij,...j->...i', (UBi @ PCO), Qalp)
         #hkl = np.matmul(UBi,np.matmul(PHIi,np.matmul(CHIi,np.matmul(OMEGAi,DEL_GAM_minALP.T)))).T.reshape((*shape,3))
-        hkl = hkl.T.reshape(shape)
+        hkl = hkl.reshape((*shape,3))
         return hkl[...,0], hkl[...,1], hkl[...,2] # h k l
 
     # only for single points
@@ -1001,10 +1033,14 @@ class VliegAngles():
     def QAlpha(self,alpha,delta,gamma):
         delta = np.asarray(delta)
         gamma = np.asarray(gamma)
-        shape = delta.shape
-        assert delta.shape == gamma.shape
+        alpha = np.asarray(alpha)
+        shape = max(delta.shape, gamma.shape, alpha.shape)
+        for ang, name in zip([alpha,delta,gamma], ['alpha','delta','gamma']):
+            if ang.shape != shape:
+                if not( ang.size == 1 or ang.shape[0] == shape[0]):
+                    raise ValueError("Shape %s of %s is incompatible with max shape %s" % (name, ang.shape, shape))
+
         Qxyz = np.empty((*shape,3),dtype=np.float64)
-        
         cosgam = np.cos(gamma) 
         Qxyz[...,0] = - np.sin(-delta)*cosgam
         Qxyz[...,1] = np.cos(-delta)*cosgam - np.cos(alpha)
