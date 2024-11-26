@@ -639,7 +639,7 @@ class QScanSelector(qt.QMainWindow):
         self.sigROIChanged.emit()
             
     def search_intersect_pos(self):
-        hkl = [h.value() for h in self.hkl_static1]
+        hkl = [h.value() for h in self.ro_H_0]
         try:
             refldict = self.parentmainwindow.searchPixelCoordHKL(hkl)
         except Exception as e:
