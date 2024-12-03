@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # /*##########################################################################
 #
-# Copyright (c) 2020-2024 Timo Fuchs
+# Copyright (c) 2020-2024 Timo Fuchs, Finn Schroeter
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -23,9 +23,9 @@
 #
 # ###########################################################################*/
 __author__ = "Timo Fuchs"
-__copyright__ = "Copyright 2020-2024 Timo Fuchs"
+__copyright__ = "Copyright 2020-2024 Timo Fuchs, Finn Schroeter"
 __license__ = "MIT License"
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
