@@ -54,6 +54,7 @@ from .. import resources
 from ..backend import backends, scans
 from . import qutils
 from .QReflectionSelector import QReflectionAnglesDialog
+from .QHKLDialog import HKLDialog
 import runpy
 
 
@@ -408,10 +409,7 @@ class QScanSelector(qt.QMainWindow):
         #setroi_btn.setIcon()
         #setroi_btn.setToolTip("Select roi location by double clicking")
         setroi_btn.setDefaultAction(self.select_roi_action)
-        
-        
-        
-        
+
         static_loc_Group = qt.QGroupBox(u"Static ROI location")
         static_loc_GroupMainVLayout = qt.QVBoxLayout()
         
@@ -440,13 +438,135 @@ class QScanSelector(qt.QMainWindow):
         static_loc_GroupMainVLayout.addWidget(static_hkl_box)
         
         static_loc_Group.setLayout(static_loc_GroupMainVLayout)
+
+
+
+        # rocking scan
+        
+        rocking_integration_group = qt.QGroupBox("Rocking scan integration")
+        
+        self._selectH_0_btn = qt.QPushButton("sel H_0")
+        #width = self._selectH_0_btn.fontMetrics().boundingRect("  ...  ").width() + 7
+        height = self._selectH_0_btn.fontMetrics().boundingRect("  M  ").height() + 7
+        #self._selectH_0_btn.setMaximumWidth(width)
+        self._selectH_0_btn.setMaximumHeight(height)
         
         
+        self._selectH_1_btn = qt.QPushButton("sel H_1")
+        #width = self._selectH_1_btn.fontMetrics().boundingRect("  ...  ").width() + 7
+        height = self._selectH_1_btn.fontMetrics().boundingRect("  M  ").height() + 7
+        #self._selectH_1_btn.setMaximumWidth(width)
+        self._selectH_1_btn.setMaximumHeight(height)
+        
+        
+        self._H_0_label = qt.QLabel("")
+        self._H_1_label = qt.QLabel("")
+
+        
+        ro_panel_layout = qt.QGridLayout()
+        ro_panel_layout.addWidget(qt.QLabel(u"Rocking points along H(s) = H₁ 🞄 s + H₀"),0,0, 1, -1)
+        
+        ro_panel_layout.addWidget(qt.QLabel("Start H_0:"),1,0)
+        ro_panel_layout.addWidget(self._H_0_label,1, 1, 1, 2)
+        ro_panel_layout.addWidget(self._selectH_0_btn, 1, 3)
+        
+        ro_panel_layout.addWidget(qt.QLabel("Direction H_1:"),2,0)
+        ro_panel_layout.addWidget(self._H_1_label, 2, 1, 1, 2)
+        ro_panel_layout.addWidget(self._selectH_1_btn,2,3)
+        
+        self._H_max_label = qt.QLabel("")
+        self.roscanMaxS = qt.QDoubleSpinBox()
+        self.roscanMaxS.setRange(-20000,20000)
+        self.roscanMaxS.setDecimals(3)
+        self.roscanMaxS.setValue(6.)
+        self.roscanMaxS.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.roscanDeltaS = qt.QDoubleSpinBox()
+        self.roscanDeltaS.setRange(0.00000001,20000)
+        self.roscanDeltaS.setDecimals(5)
+        self.roscanDeltaS.setValue(0.1)
+        self.roscanDeltaS.setSingleStep(0.1)
+        self.roscanDeltaS.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        
+        maxSlayout = qt.QHBoxLayout()
+        maxSlayout.addWidget(qt.QLabel("Max S:"))
+        maxSlayout.addWidget(self.roscanMaxS)
+        #ro_panel_layout.addWidget(qt.QLabel("Max S:"),4,0)
+        #ro_panel_layout.addWidget(self.roscanMaxS, 4, 1)
+        #ro_panel_layout.addLayout(maxSlayout,4,0, 1, 2)
+        
+        #delSlayout = qt.QHBoxLayout()
+        maxSlayout.addWidget(qt.QLabel("ΔS:"))
+        maxSlayout.addWidget(self.roscanDeltaS)
+        ro_panel_layout.addLayout(maxSlayout,4,0, 1, -1)
+        #ro_panel_layout.addWidget(qt.QLabel("ΔS:"),4,2)
+        #ro_panel_layout.addWidget(self.roscanDeltaS,4,3)
+
+        self.intersectgrp = qt.QActionGroup(self)
+        self.intersectgrp.setExclusive(True)
+        self.intersS1Act = self.intersectgrp.addAction(resources.getQicon("intersect_s1"), "use Ewald intersect s1")
+        self.intersS2Act = self.intersectgrp.addAction(resources.getQicon("intersect_s2"), "use Ewald intersect s2")
+        self.intersS1Act.setCheckable(True)
+        self.intersS2Act.setCheckable(True)
+
+        self.intersect_menu = qt.QMenu()
+        self.intersect_menu.addAction(self.intersS1Act)
+        self.intersect_menu.addAction(self.intersS2Act)
+        
+        self.intersect_btn = qt.QToolButton()
+        self.intersect_btn.setIcon(resources.getQicon("alpha"))
+        self.intersect_btn.setToolTip("Set the intersect point with Ewald sphere")
+        self.intersect_btn.setPopupMode(qt.QToolButton.InstantPopup)
+        self.intersect_btn.setMenu(self.intersect_menu)
+        
+        self.intersect_label = qt.QLabel("")
+        self.intersS1Act.triggered.connect(self._onIntersectChanged)
+        self.intersS2Act.triggered.connect(self._onIntersectChanged)
+        self.intersS1Act.trigger()
+        
+        calc_HKL_roi_btn2 = qt.QToolButton()
+        self.roi_fromHKL_action2 = qt.QAction(resources.getQicon("search"), "Search and select correct intersect poisition", self)
+        self.roi_fromHKL_action2.triggered.connect(self.search_intersect_pos)
+        calc_HKL_roi_btn2.setDefaultAction(self.roi_fromHKL_action2)
+        
+        
+        ro_panel_layout.addWidget(qt.QLabel("Intersect:"), 3, 0)
+        #ro_panel_layout.addWidget(qt.QLabel("Max S:"),3,0)
+        ro_panel_layout.addWidget(self.intersect_label, 3, 1)
+        ro_panel_layout.addWidget(self.intersect_btn,3,2)
+        ro_panel_layout.addWidget(calc_HKL_roi_btn2,3,3)
+        
+        self.autoSize_label = qt.QLabel("")
+        self.autoROIHsize = qt.QCheckBox("auto h")
+        self.autoROIVsize = qt.QCheckBox("auto v")
+        
+        self.autoROIVsize.toggled.connect(lambda : self.sigROIChanged.emit())
+        self.autoROIHsize.toggled.connect(lambda : self.sigROIChanged.emit())
+        
+        ro_panel_layout.addWidget(qt.QLabel("ROI size (hxv):"), 5, 0)
+        ro_panel_layout.addWidget(self.autoSize_label,5,1)
+        ro_panel_layout.addWidget(self.autoROIHsize,5,2)
+        ro_panel_layout.addWidget(self.autoROIVsize,5,3)
+        
+        rocking_integration_group.setLayout(ro_panel_layout)
+        
+        self.ro_H_0_dialog = HKLDialog("Select H_0: the rocking integration start HKL value", "Start HKL", self)
+        self.ro_H_0 = self.ro_H_0_dialog.hkl_editors
+        self.ro_H_0_dialog.sigHKLchanged.connect(self._on_ro_H_0_changed)
+        self._selectH_0_btn.clicked.connect(self.ro_H_0_dialog.exec)
+        self.ro_H_0_dialog.set_hkl([1.,0.,0.])
+        
+        self.ro_H_1_dialog = HKLDialog("Select H_1: the rocking integration direction", "Direction HKL", self)
+        self.ro_H_1 = self.ro_H_1_dialog.hkl_editors
+        self.ro_H_1_dialog.sigHKLchanged.connect(self._on_ro_H_1_changed)
+        self._selectH_1_btn.clicked.connect(self.ro_H_1_dialog.exec)
+        self.ro_H_1_dialog.set_hkl([0.,0.,1.])
+
         #  roi scan tab
         
         self.scanstab = qt.QTabWidget()
         self.scanstab.addTab(hklscanwidget, "hklscan")
         self.scanstab.addTab(static_loc_Group, "fixed roi loc")
+        self.scanstab.addTab(rocking_integration_group, "rocking scan integration")
         self.scanstab.currentChanged.connect(lambda : self.sigROIChanged.emit())
 
         
@@ -483,6 +603,16 @@ class QScanSelector(qt.QMainWindow):
         
         
         maintab.addTab(self.roiIntegrateTab,"ROI integration")
+        
+    def _on_ro_H_0_changed(self, hkl):
+        label = "H: %s K: %s L: %s" % tuple(hkl)
+        self._H_0_label.setText(label)
+        self.sigROIChanged.emit()
+    
+    def _on_ro_H_1_changed(self, hkl):
+        label = "H: %s K: %s L: %s" % tuple(hkl)
+        self._H_1_label.setText(label)
+        self.sigROIChanged.emit()
     
     def set_xy_static_loc(self, x, y):
         [h.blockSignals(True) for h in self.xy_static]
@@ -492,9 +622,37 @@ class QScanSelector(qt.QMainWindow):
         self.sigROIChanged.emit()
         
     def search_hkl_static_loc(self):
-        hkl = [h.value() for h in self.hkl_static]
-        self.sigSearchHKL.emit(hkl)
-        
+        if self.scanstab.currentIndex() == 2:
+            hkl = [h.value() for h in self.hkl_static1]
+            self.sigSearchHKL.emit(hkl)    
+        else:
+            hkl = [h.value() for h in self.hkl_static]
+            self.sigSearchHKL.emit(hkl)
+
+    def _onIntersectChanged(self, checked):
+        self.intersect_btn.setIcon(self.intersectgrp.checkedAction().icon())
+        if self.intersS1Act.isChecked():
+            self.intersect_label.setText("s_1")
+        elif self.intersS2Act.isChecked():
+            self.intersect_label.setText("s_2")
+        else:
+            self.intersect_label.setText("error")
+        self.sigROIChanged.emit()
+            
+    def search_intersect_pos(self):
+        hkl = [h.value() for h in self.ro_H_0]
+        try:
+            refldict = self.parentmainwindow.searchPixelCoordHKL(hkl)
+        except Exception as e:
+            qutils.warning_detailed_message(self, "Cannot calculate location of reflection", "Cannot calculate position of reflection:\n%s" % e, traceback.format_exc())
+            return
+        refl_dialog = QReflectionAnglesDialog(refldict,"Select reflection with desired intersect", self)
+        if qt.QDialog.Accepted == refl_dialog.exec():
+            for i, (cb, act) in enumerate(zip(refl_dialog.checkboxes, [self.intersS1Act, self.intersS2Act]),1):
+                if cb.isChecked():
+                    act.trigger()
+                    return
+                    
     def view_data_callback(self,obj):
         self.dataviewer.setData(obj)
         self.dataviewerDialog.open()

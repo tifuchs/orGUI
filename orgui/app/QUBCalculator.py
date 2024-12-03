@@ -242,7 +242,10 @@ class QUBCalculator(qt.QSplitter):
             if axisname is None:
                 axisname = self.mainGui.fscan.axisname
         mu_cryst = HKLVlieg.crystalAngles_singleArray(self.mu,self.n)
-        
+        hkl = np.asarray(hkl)
+        if len(hkl.shape) > 1:
+            hkl = hkl.T # for anglesZmode, is a bit inconsistent
+            
         if axisname == 'th':
             pos1 = self.angles.anglesZmode(hkl,mu_cryst,'in',self.chi,self.phi,mirrorx=False)
             pos2 = self.angles.anglesZmode(hkl,mu_cryst,'in',self.chi,self.phi,mirrorx=True)
@@ -251,17 +254,27 @@ class QUBCalculator(qt.QSplitter):
             pos2 = self.angles.anglesZmode(hkl,mu_cryst,'eq',self.chi,self.phi,mirrorx=True)
         else:
             raise Exception("No scan axis given or no scan loaded.")
-        alpha1, delta1, gamma1, omega1, chi1, phi1 = HKLVlieg.vacAngles(pos1,self.n)
-        alpha2, delta2, gamma2, omega2, chi2, phi2 = HKLVlieg.vacAngles(pos2,self.n)
+
+        pos1_refr = HKLVlieg.vacAngles(pos1,self.n)
+        pos2_refr = HKLVlieg.vacAngles(pos2,self.n)
         
-        y1,x1 = self.detectorCal.pixelsSurfaceAngles([gamma1],[delta1],alpha1)[0]
-        y2,x2 = self.detectorCal.pixelsSurfaceAngles([gamma2],[delta2],alpha2)[0]
+        if len(hkl.shape) > 1:
+            alpha1, delta1, gamma1, omega1, chi1, phi1 = pos1_refr.T
+            alpha2, delta2, gamma2, omega2, chi2, phi2 = pos2_refr.T
+            hkl = hkl.T
+        else:
+            alpha1, delta1, gamma1, omega1, chi1, phi1 = pos1_refr
+            alpha2, delta2, gamma2, omega2, chi2, phi2 = pos2_refr
+        
+        xy1 = self.detectorCal.pixelsSurfaceAngles(gamma1,delta1,alpha1)[:,::-1]
+        xy2 = self.detectorCal.pixelsSurfaceAngles(gamma2,delta2,alpha2)[:,::-1]
+        
         di = {
            'hkl' : hkl,
-           'xy_1' : [x1,y1],
-           'xy_2' : [x2,y2],
-           'angles_1' : [alpha1, delta1, gamma1, omega1, chi1, phi1],
-           'angles_2' : [alpha2, delta2, gamma2, omega2, chi2, phi2]
+           'xy_1' : np.squeeze(xy1),
+           'xy_2' : np.squeeze(xy2),
+           'angles_1' : pos1_refr,
+           'angles_2' : pos2_refr
         }
         return di
             
