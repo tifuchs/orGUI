@@ -25,7 +25,7 @@
 __author__ = "Timo Fuchs"
 __copyright__ = "Copyright 2020-2024 Timo Fuchs"
 __license__ = "MIT License"
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
@@ -43,6 +43,7 @@ from silx.io import dictdump
 import silx.io
 
 from .ID31DiffractLinTilt import ID31DiffractLinTilt
+from ..scans import Scan
 
 
 class P3_Image:
@@ -122,7 +123,7 @@ class PE_Image:
     
 
 # currently only set up for th scans in TOMO session, cbf fileformat
-class Fastscan(object):
+class Fastscan(Scan):
     def __init__(self,fastscan_specfile, scanno):
         id31_fastscan_spec = specfile.Specfile(fastscan_specfile)
         scan = id31_fastscan_spec[scanno-1]
@@ -430,7 +431,31 @@ class BlissScan_EBS(Fastscan):
             self.omega = -1*self.th
             
         self.axis = getattr(self,self.axisname)
-            
+    
+    @classmethod
+    def parse_h5_node(cls, obj):
+        ddict = dict() 
+        scanname = obj.local_name
+        scansuffix = scanname.split('_')[-1]
+        scanname_nosuffix = '_'.join(scanname.split('_')[:-1])
+        scanno, subscanno = scansuffix.split('.')
+        ddict['scanno'] = int(scanno)
+        ddict['name'] = obj.local_name
+        return ddict
+        
+    @property
+    def auxillary_counters(self):
+        """Optional: provide a list of counters or motor names, that should 
+        be copied into the orGUI data base for further processing.
+        
+        e.g. return ['exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch']
+        
+        after each integration, orGUI will search for these counter names in the Scan
+        object and copy the entries into the database.
+        """
+        return ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch'] 
+        
+ 
     # returns single default image!
     def get_raw_img(self,img):
         if not hasattr(self, 'p3'):
@@ -618,8 +643,26 @@ class BlissScan(Fastscan):
                 if os.path.isdir(imgfolder):
                     self.set_image_folder(imgfolder)
                     
-
-            
+    @classmethod
+    def parse_h5_node(cls, obj):
+        ddict = dict() 
+        scanname = obj.local_name
+        scanno = int(scanname.split('_')[-1])
+        ddict['scanno'] = scanno
+        ddict['name'] = obj.local_name.strip('/')
+        return ddict
+        
+    @property
+    def auxillary_counters(self):
+        """Optional: provide a list of counters or motor names, that should 
+        be copied into the orGUI data base for further processing.
+        
+        e.g. return ['exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch']
+        
+        after each integration, orGUI will search for these counter names in the Scan
+        object and copy the entries into the database.
+        """
+        return ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch'] 
 
     def set_image_folder(self,path_to_folder):
         #self.filenames = [None]*len(self.th)

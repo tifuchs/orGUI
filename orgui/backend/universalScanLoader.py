@@ -107,4 +107,11 @@ class ImportImagesScan():
                 img_data = fabf.data
         return h5_Image(img_data)
         
-        
+    @classmethod
+    def parse_h5_node(cls, obj):
+        ddict = dict()
+        return ddict
+
+    @property
+    def auxillary_counters(self):
+        return [] 

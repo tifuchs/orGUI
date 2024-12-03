@@ -958,27 +958,59 @@ class VliegAngles():
 
     
     def anglesToHkl(self,alpha,delta,gamma,omega,chi,phi):
+        alpha = np.asarray(alpha)
         delta = np.asarray(delta)
         gamma = np.asarray(gamma)
-        assert delta.shape == gamma.shape
+        omega = np.asarray(omega)
+        chi = np.asarray(chi)
+        phi = np.asarray(phi)
+        ang = [alpha,delta,gamma,omega,chi,phi]
         
-        [_, _, _, OMEGA, CHI, PHI] = createVliegMatrices([None,None,None,omega,chi,phi])
+        shape = max([a.shape for a in ang])
+        
+        #[_, _, _, OMEGA, CHI, PHI] = createVliegMatrices([None,None,None,omega,chi,phi])
         #hkl = np.empty((*shape,3))
         K = self._ubCalculator.getK()
         UBi = np.linalg.inv(self._ubCalculator.getUB())
-
-        OMEGAi = OMEGA.T
-        CHIi = CHI.T
-        PHIi = PHI.T
-
+        
         Qalp = self.QAlpha(alpha,delta,gamma)
-        shape = Qalp.shape
-        Qalp = np.ascontiguousarray(Qalp.reshape((-1,3)).T)
-        #calculate UBi * PHIi * CHIi * OMEGAi * Q_alpha 
+        Qalp = np.ascontiguousarray(Qalp.reshape((-1,3)))
+        
+        #now UBi * PHIi * CHIi * OMEGAi * Q_alpha 
+        
+        #calculate PHIi @ CHIi @ OMEGAi
+        sinphi = np.sin(phi.flatten()); cosphi = np.cos(phi.flatten())
+        sinchi = np.sin(chi.flatten()); coschi = np.cos(chi.flatten())
+        sinomega = np.sin(omega.flatten()); cosomega = np.cos(omega.flatten())
+        
+        if phi.size > 1 or chi.size > 1 or omega.size > 1:
+            # this will be expensive, could optimize here in the future
+            PCO = np.empty((np.prod(shape), 3, 3), dtype=np.float64)
+            PCO[:,0,0] = coschi*cosomega
+            PCO[:,0,1] = -sinomega*coschi
+            PCO[:,0,2] = -sinchi
+            PCO[:,1,0] = sinchi*sinphi*cosomega + sinomega*cosphi
+            PCO[:,1,1] = -sinchi*sinomega*sinphi + cosomega*cosphi
+            PCO[:,1,2] = sinphi*coschi
+            PCO[:,2,0] = sinchi*cosomega*cosphi - sinomega*sinphi
+            PCO[:,2,1] = -sinchi*sinomega*cosphi - sinphi*cosomega
+            PCO[:,2,2] = coschi*cosphi
+        else:
+            PCO = np.empty((3, 3), dtype=np.float64)
+            PCO[0,0] = coschi*cosomega
+            PCO[0,1] = -sinomega*coschi
+            PCO[0,2] = -sinchi
+            PCO[1,0] = sinchi*sinphi*cosomega + sinomega*cosphi
+            PCO[1,1] = -sinchi*sinomega*sinphi + cosomega*cosphi
+            PCO[1,2] = sinphi*coschi
+            PCO[2,0] = sinchi*cosomega*cosphi - sinomega*sinphi
+            PCO[2,1] = -sinchi*sinomega*cosphi - sinphi*cosomega
+            PCO[2,2] = coschi*cosphi
 
-        hkl = (UBi @ PHIi @ CHIi @ OMEGAi) @ Qalp
+        #calculate UBi * PHIi * CHIi * OMEGAi * Q_alpha 
+        hkl = np.einsum('...ij,...j->...i', (UBi @ PCO), Qalp)
         #hkl = np.matmul(UBi,np.matmul(PHIi,np.matmul(CHIi,np.matmul(OMEGAi,DEL_GAM_minALP.T)))).T.reshape((*shape,3))
-        hkl = hkl.T.reshape(shape)
+        hkl = hkl.reshape((*shape,3))
         return hkl[...,0], hkl[...,1], hkl[...,2] # h k l
 
     # only for single points
@@ -1001,10 +1033,14 @@ class VliegAngles():
     def QAlpha(self,alpha,delta,gamma):
         delta = np.asarray(delta)
         gamma = np.asarray(gamma)
-        shape = delta.shape
-        assert delta.shape == gamma.shape
+        alpha = np.asarray(alpha)
+        shape = max(delta.shape, gamma.shape, alpha.shape)
+        for ang, name in zip([alpha,delta,gamma], ['alpha','delta','gamma']):
+            if ang.shape != shape:
+                if not( ang.size == 1 or ang.shape[0] == shape[0]):
+                    raise ValueError("Shape %s of %s is incompatible with max shape %s" % (name, ang.shape, shape))
+
         Qxyz = np.empty((*shape,3),dtype=np.float64)
-        
         cosgam = np.cos(gamma) 
         Qxyz[...,0] = - np.sin(-delta)*cosgam
         Qxyz[...,1] = np.cos(-delta)*cosgam - np.cos(alpha)
@@ -1233,6 +1269,69 @@ class VliegAngles():
         ALPHA = calcALPHA(alpha)
         xyz_alpha = self.coordinatesAlpha(xyz_rel, omega, phi, chi)
         return ((ALPHA @ xyz_alpha.T).T).reshape(shape)
+        
+    def transform_coordinates(self, xyz_rel, origin_frame,
+                              target_frame, **angles):
+        if origin_frame == target_frame:
+            return xyz_rel
+        order = ['lab', 'alpha', 'omega', 'chi', 'phi', 'crystal']
+        calc_functions = [calcALPHA, calcOMEGA, calcCHI, calcPHI]
+        if origin_frame not in order:
+            raise ValueError("Origin reference frame %s does not exist, can be one of %s" % (origin_frame,order))
+            
+        if target_frame not in order:
+            raise ValueError("Target reference frame %s does not exist, can be one of %s" % (target_frame,order))
+        
+        idx_origin = order.index(origin_frame)
+        idx_target = order.index(target_frame)
+        
+        xyz_rel = np.atleast_2d(np.asarray(xyz_rel))
+        shape = xyz_rel.shape
+        
+        invert_mat = idx_origin < idx_target
+        if invert_mat:
+            idx = idx_origin
+            current_xyz = xyz_rel.T
+            while idx < idx_target:
+                angle_name = order[idx + 1]
+                if angle_name == 'crystal':
+                    R = self._ubCalculator.lattice.R_mat
+                    U = self._ubCalculator.getU()
+                    UR_inv = LA.inv(U @ R)
+                    current_xyz = UR_inv @ current_xyz
+                    idx += 1
+                else:
+                    try:
+                        val = angles[angle_name]
+                    except Exception:
+                        raise ValueError("The transformation %s -> %s requires diffractometer angle %s" 
+                                         % (origin_frame, target_frame, angle_name))
+                    rot_matrix = calc_functions[idx](val)
+                    current_xyz = LA.inv(rot_matrix) @ current_xyz
+                    idx += 1
+            return (current_xyz.T).reshape(shape)
+        else:
+            idx = idx_origin
+            current_xyz = xyz_rel.T
+            while idx > idx_target:
+                angle_name = order[idx]
+                if angle_name == 'crystal':
+                    R = self._ubCalculator.lattice.R_mat
+                    U = self._ubCalculator.getU()
+                    UR = U @ R
+                    current_xyz = UR @ current_xyz
+                    idx -= 1
+                else:
+                    try:
+                        val = angles[angle_name]
+                    except Exception:
+                        raise ValueError("The transformation %s -> %s requires diffractometer angle %s" 
+                                         % (origin_frame, target_frame, angle_name))
+                    rot_matrix = calc_functions[idx - 1](val)
+                    current_xyz = rot_matrix @ current_xyz
+                    idx -= 1
+            return (current_xyz.T).reshape(shape)
+        
         
     def anglesOrientationAlpha(self, xyz_rel, xyz_direction):
         xyz_rel = np.atleast_2d(np.asarray(xyz_rel))

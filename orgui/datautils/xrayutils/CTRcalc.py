@@ -2496,7 +2496,7 @@ class UnitCell(Lattice):
                 for yno in range(1,abs(ucy)+1):
                     for zno in range(1,abs(ucz)+1):
                         if len(translate.shape) > 1: 
-                            x_t, y_t, z_t = np.array([x,y,z]) + translate[:,-1].A1
+                            x_t, y_t, z_t = np.array([x,y,z]) + translate[:,-1].flatten()
                             positions[no] = np.array([x_t + signx*(xno-1),y_t + signy*(yno-1),z_t + signz*(zno-1)])
                         else:
                             positions[no] = np.array([x + signx*(xno-1),y + signy*(yno-1),z+ signz*(zno-1)]) + translate
@@ -2538,7 +2538,7 @@ class UnitCell(Lattice):
                 for yno in range(1,abs(ucy)+1):
                     for zno in range(1,abs(ucz)+1):
                         if len(translate.shape) > 1: 
-                            x_t, y_t, z_t = np.array([x,y,z]) + translate[:,-1].A1
+                            x_t, y_t, z_t = np.array([x,y,z]) + translate[:,-1].flatten()
                             positions[no] = np.array([x_t + signx*(xno-1),y_t + signy*(yno-1),z_t + signz*(zno-1)])
                         else:
                             positions[no] = np.array([x + signx*(xno-1),y + signy*(yno-1),z+ signz*(zno-1)]) + translate
