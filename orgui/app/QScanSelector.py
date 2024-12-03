@@ -619,15 +619,21 @@ class QScanSelector(qt.QMainWindow):
         self._H_1_label.setText(label)
         self.sigROIChanged.emit()
 
-    #def __h5FileLoaded(self, loadedH5, filename):
-    #    return
+    def __h5FileLoaded(self, loadedH5, filename):
+        return
 
 
     def __h5FileRemoved(self, removedH5):
-        removedH5.close()
+        try:
+            removedH5.close()
+        except:
+            pass # some supported files are not open 
 
     def __h5FileSynchonized(self, removedH5, loadedH5):
-        removedH5.close()
+        try:
+            removedH5.close()
+        except:
+            pass # some supported files are not open 
 
     def set_xy_static_loc(self, x, y):
         [h.blockSignals(True) for h in self.xy_static]
