@@ -2,6 +2,40 @@
 Changelog
 *********
 
+1.2.0 (2024-12-03)
+##################
+
+Release that adds 3 major improvements: 
+
+#. Rocking scan integration is now properly supported with fast calculation speed and visulalization of the ROIs
+#. Backends can now be loaded as standalone python file. No reinstalling of orGUI is required to add new backends.
+#. hdf5 file handling has been improved to enable reloading of changed hdf5 files 
+
+In addition, there are many more smaller improvements and changes. See the detailed changelog. 
+
+
+Added
+=====
+
+* New backend style. Backends are now a standalone python file, which include a class that inherits scans.Scan. Only changing this single file is sufficient to add new backends (080642ca0d81e362dbff0fd1ff029df872cac6df, 9f1bfc83c14ffdbff9f51b5cd529059fddbfbb7e)
+* add DESY P21.2 backend (080642ca0d81e362dbff0fd1ff029df872cac6df)
+* add CHESS QM2 backend (1a21fbb19128a1924d8337b3d2a20ea262a56b29)  
+* enable loading backends from config file (5c9f9c80ba0da4204c099aad8373d6450c8f95ef)
+* U matrix editing: add manual Euler rotation adjustment (570a83ad34215d9a4e265388251a1810622890fd)
+* Add batch processing example (001313244543b8988b9180813089dacf67ee506b)
+* anglesToHKL is now fully numpy parallel (09776674ea491e49db76c5ce5c825528d3907971)
+* NewROI class RectangleBgROI, that handles center and background ROIs (5a5efeb3d7d53ba7849fbe6d945e8efc33fb7b2c)
+* Visulalization of rocking scan ROIs (829e328edc195ec9d93fc9e10ab21c58a25ea4c5)
+* add PyOpenGL to optional dependencies (d3eeb1885f052ff94bcffe1915d4a8659ff99b31)
+
+Changed
+=======
+* add new rocking scan integration method, that avoids duplicated file reads and leads to massive speedup. (77600563a309618fd57985c34765958e4d66b6ef)
+* rocking scan integration now accessible in ROI integration panel (a629c91463b70ae0be7714039330105fd30a3d76)
+* Reworked refreshing of hdf5 files (0451171a9dd2cdb9713e8a46fe4bc42494f320c5)
+* HDF5_USE_FILE_LOCKING can now explicitly be set by user (a5f836050dbb31c1e1cb023a5ddc1530d5dc8d2f) 
+
+
 1.1.2 (2024-11-03)
 ##################
 
