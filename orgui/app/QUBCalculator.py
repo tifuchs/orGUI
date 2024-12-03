@@ -417,7 +417,7 @@ class QUBCalculator(qt.QSplitter):
                 latticeoverride = False
                 a1 = a2 = a3 = 1.
                 alpha1 = alpha2 = alpha3 = 90.
-                print("Fallback lattice vectors")
+                #print("Fallback lattice vectors")
                 
             
             self.crystal = CTRcalc.UnitCell([a1,a2,a3],[alpha1,alpha2,alpha3])

@@ -52,6 +52,9 @@ usage = "orGUI [options] configfile"
 defaultconfigfile = os.path.expanduser("~/orgui")
 
 def main():
+
+    
+
     parser = ArgumentParser(usage=usage, description=description, epilog=epilog)
     parser.add_argument("configfile", metavar="FILE", 
                         help="configuration file, will use ~/orgui otherwise", 
@@ -60,8 +63,29 @@ def main():
                         action="store_true",
                         default=False,
                         help="Enable OpenGL rendering (else matplotlib is used)")
+    group = parser.add_argument_group('HDF5 file locking', "Sets HDF5_USE_FILE_LOCKING variable. "
+                        "Setting to False can resolve some file read issues "
+                        "but can also cause file corruption! "
+                        "This will not override a manually set environment variable. ")
+    locking_parser = group.add_mutually_exclusive_group(required=False)
+    locking_parser.add_argument('--hdflocking', '-l', dest='locking', action='store_true', help="HDF5_USE_FILE_LOCKING=True (default)")
+    locking_parser.add_argument('--no-hdflocking', '-nl', dest='locking', action='store_false', help="HDF5_USE_FILE_LOCKING=False")
+    parser.set_defaults(locking=True)
 
     options = parser.parse_args()
+    
+    if "HDF5_USE_FILE_LOCKING" not in os.environ:
+        if options.locking:
+            os.environ["HDF5_USE_FILE_LOCKING"] = "TRUE"
+        else:
+            os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+    if str(os.environ["HDF5_USE_FILE_LOCKING"]).lower() in ['y', 'true', '1', 'yes']:
+        print("HDF5_USE_FILE_LOCKING=%s" % os.environ["HDF5_USE_FILE_LOCKING"])
+        print("Save hdf5 mode, if you encounter hdf5 file read issues, try starting orGUI with the option -nl")
+    else:
+        print("HDF5_USE_FILE_LOCKING=%s" % os.environ["HDF5_USE_FILE_LOCKING"])
+        print("No hdf5 locking. This is potentially dangerous and can cause file corruption. Especially if orGUI crashes.")
+    
     
     import silx
     from silx.gui import qt

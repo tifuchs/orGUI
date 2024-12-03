@@ -93,6 +93,11 @@ class QScanSelector(qt.QMainWindow):
         self.hdfTreeView.setModel(self.hdf5model)
         self.hdfTreeView.setExpandsOnDoubleClick(False)
         self.hdf5model.setFileMoveEnabled(True)
+
+        #self.hdf5model.sigH5pyObjectLoaded.connect(self.__h5FileLoaded)
+        self.hdf5model.sigH5pyObjectRemoved.connect(self.__h5FileRemoved)
+        self.hdf5model.sigH5pyObjectSynchronized.connect(self.__h5FileSynchonized)
+
         self.__treeModelSorted = silx.gui.hdf5.NexusSortFilterProxyModel(self.hdfTreeView)
         self.__treeModelSorted.setSourceModel(self.hdf5model)
         self.__treeModelSorted.sort(0, qt.Qt.AscendingOrder)
@@ -409,7 +414,7 @@ class QScanSelector(qt.QMainWindow):
         #setroi_btn.setIcon()
         #setroi_btn.setToolTip("Select roi location by double clicking")
         setroi_btn.setDefaultAction(self.select_roi_action)
-
+        
         static_loc_Group = qt.QGroupBox(u"Static ROI location")
         static_loc_GroupMainVLayout = qt.QVBoxLayout()
         
@@ -613,7 +618,23 @@ class QScanSelector(qt.QMainWindow):
         label = "H: %s K: %s L: %s" % tuple(hkl)
         self._H_1_label.setText(label)
         self.sigROIChanged.emit()
-    
+
+    def __h5FileLoaded(self, loadedH5, filename):
+        return
+
+
+    def __h5FileRemoved(self, removedH5):
+        try:
+            removedH5.close()
+        except:
+            pass # some supported files are not open 
+
+    def __h5FileSynchonized(self, removedH5, loadedH5):
+        try:
+            removedH5.close()
+        except:
+            pass # some supported files are not open 
+
     def set_xy_static_loc(self, x, y):
         [h.blockSignals(True) for h in self.xy_static]
         self.xy_static[0].setValue(x)
@@ -755,7 +776,7 @@ class QScanSelector(qt.QMainWindow):
             menu = event.menu()
             action = qt.QAction("Refresh", menu)
             action.triggered.connect(lambda:  self.hdf5model.synchronizeH5pyObject(obj))
-            menu.addAction(action)
+            #menu.addAction(action)
             #if obj.ntype is h5py.Dataset:
             action = qt.QAction("display data", menu)
             action.triggered.connect(lambda:  self.view_data_callback(obj))
@@ -766,17 +787,124 @@ class QScanSelector(qt.QMainWindow):
                 menu.addAction(action)
             
      
-    def _onRefreshFile(self):
+    def _onRefreshFileOld(self):
         objects = list(self.hdfTreeView.selectedH5Nodes())
         if len(objects) > 0:
             obj = objects[0]
             self.hdf5model.synchronizeH5pyObject(obj)
+
+
+
+    def __getRelativePath(self, model, rootIndex, index):
+        """Returns a relative path from an index to his rootIndex.
+
+        If the path is empty the index is also the rootIndex.
+        """
+        path = ""
+        while index.isValid():
+            if index == rootIndex:
+                return path
+            name = model.data(index)
+            if path == "":
+                path = name
+            else:
+                path = name + "/" + path
+            index = index.parent()
+
+        # index is not a children of rootIndex
+        raise ValueError("index is not a children of the rootIndex")
+
+
+    def _onRefreshFile(self):
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+
+        selection = self.hdfTreeView.selectionModel()
+        indexes = selection.selectedIndexes()
+        if indexes == []:
+            qt.QApplication.restoreOverrideCursor()
+            qt.QMessageBox.warning(self, "No file selected", "Cannot refresh file: No file selected.")
+            return
+
+
+        model = self.hdfTreeView.model()
+        selectedItems = []
+        h5files = []
+        while len(indexes) > 0:
+            index = indexes.pop(0)
+            if index.column() != 0:
+                continue
+            rootIndex = index
+            # Reach the root of the tree
+            while rootIndex.parent().isValid():
+                rootIndex = rootIndex.parent()
+            rootRow = rootIndex.row()
+            relativePath = self.__getRelativePath(model, rootIndex, index)
+            selectedItems.append((rootRow, relativePath))
+
+            h5 = model.data(
+                rootIndex, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE
+            )
+
+            item = model.data(
+                rootIndex, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_ITEM_ROLE
+            )
+            
+            h5files.append((h5, item._openedPath)) 
+
+        model = self.hdfTreeView.findHdf5TreeModel()
+        model.clear()
+        '''
+        import gc
+        for obj in gc.get_objects():   # Browse through ALL objects
+            if isinstance(obj, Hdf5TreeModel):
+                try:
+                    obj.close()
+                except:
+                    pass # Was already closed
+
+            elif isinstance(obj, silx.gui.hdf5.Hdf5TreeView):
+                try:
+                    obj.close()
+                except:
+                    pass # Was already closed
+        '''
+
+        self.createTreeView()
+
+        maintab = self.mainwidget.findChildren(qt.QTabWidget)[0]
+        maintab.removeTab(0)
+        maintab.insertTab(0,self.hdfTreeView,"NEXUS")
+        maintab.setCurrentIndex(0)
         
+        modelnew = self.hdfTreeView.findHdf5TreeModel()
+        for h5, filename in h5files:
+            modelnew.insertFile(filename, 0)
         
-        #if 'NX_class' in obj.ntype.attrs:
-        #    if obj.ntype.attrs['NX_class'] == 'NX_':
-              
-    
+        #self.__expandNodesFromPaths(self.hdfTreeView, index, paths)
+        #self.hdf5model.appendFile(filename)
+        qt.QApplication.restoreOverrideCursor()
+
+    def createTreeView(self):
+        self.hdfTreeView = silx.gui.hdf5.Hdf5TreeView(self)
+        self.hdfTreeView.setSortingEnabled(True)
+        self.hdfTreeView.addContextMenuCallback(self.nexus_treeview_callback)
+        self.hdf5model = Hdf5TreeModel(self.hdfTreeView,ownFiles=True)
+        self.hdfTreeView.setModel(self.hdf5model)
+        self.hdfTreeView.setExpandsOnDoubleClick(False)
+        self.hdf5model.setFileMoveEnabled(True)
+
+        self.hdf5model.sigH5pyObjectLoaded.connect(self.__h5FileLoaded)
+        self.hdf5model.sigH5pyObjectRemoved.connect(self.__h5FileRemoved)
+        self.hdf5model.sigH5pyObjectSynchronized.connect(self.__h5FileSynchonized)
+
+        self.__treeModelSorted = silx.gui.hdf5.NexusSortFilterProxyModel(self.hdfTreeView)
+        self.__treeModelSorted.setSourceModel(self.hdf5model)
+        self.__treeModelSorted.sort(0, qt.Qt.AscendingOrder)
+        self.__treeModelSorted.setSortCaseSensitivity(qt.Qt.CaseInsensitive)
+
+        self.hdfTreeView.setModel(self.__treeModelSorted)
+        
+        self.hdfTreeView.doubleClicked.connect(self._onNEXUSDoubleClicked)
     
     def getScanToolbar(self):
         return self.toolbar
