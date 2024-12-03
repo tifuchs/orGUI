@@ -447,11 +447,18 @@ ub : gui for UB matrix and angle calculations
         step_nr = xy.shape[0]
         if step_nr == 0:
             return {'center' : [], 'vsize' : vsize, 'hsize': hsize}
-        
-        if autoROIVsize:
-            dist_in_pixels = np.abs(xy[0][1] - xy[-1][1])
-            roi_vlength = np.ceil(dist_in_pixels/step_nr)
-            vsize = int(roi_vlength)
+        if step_nr > 1:
+            if autoROIVsize:
+                #dist_in_pixels = np.abs(xy[0][1] - xy[-1][1])
+                dist_in_pixels = np.median(np.abs(np.diff(xy[:,1])))
+                #roi_vlength = np.ceil(dist_in_pixels/step_nr)
+                vsize = int(np.ceil(dist_in_pixels))
+                
+            if autoROIHsize:
+                #dist_in_pixels = np.abs(xy[0][1] - xy[-1][1])
+                dist_in_pixels = np.median(np.abs(np.diff(xy[:,0])))
+                #roi_vlength = np.ceil(dist_in_pixels/step_nr)
+                hsize = int(np.ceil(dist_in_pixels))
 
         detvsize, dethsize = self.ubcalc.detectorCal.detector.shape
         
