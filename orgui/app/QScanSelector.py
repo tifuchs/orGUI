@@ -479,6 +479,7 @@ class QScanSelector(qt.QMainWindow):
 
     
     #def __h5FileLoaded(self, loadedH5, filename):
+    #    return
 
 
     def __h5FileRemoved(self, removedH5):
@@ -563,7 +564,7 @@ class QScanSelector(qt.QMainWindow):
             menu = event.menu()
             action = qt.QAction("Refresh", menu)
             action.triggered.connect(lambda:  self.hdf5model.synchronizeH5pyObject(obj))
-            menu.addAction(action)
+            #menu.addAction(action)
             #if obj.ntype is h5py.Dataset:
             action = qt.QAction("display data", menu)
             action.triggered.connect(lambda:  self.view_data_callback(obj))
@@ -574,74 +575,14 @@ class QScanSelector(qt.QMainWindow):
                 menu.addAction(action)
             
      
-### rework of file refresh action
-### the following code is adapted from silx view to correctly refresh the hdf5 tree
+    def _onRefreshFileOld(self):
+        objects = list(self.hdfTreeView.selectedH5Nodes())
+        if len(objects) > 0:
+            obj = objects[0]
+            self.hdf5model.synchronizeH5pyObject(obj)
 
-    def _onRefreshFile(self):
-        """Refresh all selected items"""
-        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
 
-        selection = self.hdfTreeView.selectionModel()
-        indexes = selection.selectedIndexes()
-        selectedItems = []
-        model = self.hdfTreeView.model()
-        h5files = []
-        while len(indexes) > 0:
-            index = indexes.pop(0)
-            if index.column() != 0:
-                continue
-            rootIndex = index
-            # Reach the root of the tree
-            while rootIndex.parent().isValid():
-                rootIndex = rootIndex.parent()
-            rootRow = rootIndex.row()
-            relativePath = self.__getRelativePath(model, rootIndex, index)
-            selectedItems.append((rootRow, relativePath))
-            h5 = model.data(
-                rootIndex, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE
-            )
-            item = model.data(
-                rootIndex, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_ITEM_ROLE
-            )
-            h5files.append((h5, item._openedPath))
 
-            
-        model = self.hdfTreeView.findHdf5TreeModel()
-        for h5, filename in h5files:
-            self.__synchronizeH5pyObject(h5, filename)
-
-        model = self.hdfTreeView.model()
-        itemSelection = qt.QItemSelection()
-        
-        for rootRow, relativePath in selectedItems:
-            rootIndex = model.index(rootRow, 0, qt.QModelIndex())
-            index = self.__indexFromPath(model, rootIndex, relativePath)
-            if index is None:
-                continue
-            indexEnd = model.index(index.row(), model.columnCount() - 1, index.parent())
-            itemSelection.select(index, indexEnd)
-        selection.select(itemSelection, qt.QItemSelectionModel.ClearAndSelect)
-
-        qt.QApplication.restoreOverrideCursor()
-
-    def __synchronizeH5pyObject(self, h5, filename=None):
-        model = self.hdfTreeView.findHdf5TreeModel()
-        # This is buggy right now while h5py do not allow to close a file
-        # while references are still used.
-        # FIXME: The architecture have to be reworked to support this feature.
-        # model.synchronizeH5pyObject(h5)
-
-        if filename is None:
-            filename = f"{h5.file.filename}::{h5.name}"
-        row = model.h5pyObjectRow(h5)
-        index = self.hdfTreeView.model().index(row, 0, qt.QModelIndex())
-        paths = self.__getPathFromExpandedNodes(self.hdfTreeView, index)
-        model.removeH5pyObject(h5)
-        model.insertFile(filename, row)
-        index = self.hdfTreeView.model().index(row, 0, qt.QModelIndex())
-        self.__expandNodesFromPaths(self.hdfTreeView, index, paths)
-        
-        
     def __getRelativePath(self, model, rootIndex, index):
         """Returns a relative path from an index to his rootIndex.
 
@@ -660,57 +601,99 @@ class QScanSelector(qt.QMainWindow):
 
         # index is not a children of rootIndex
         raise ValueError("index is not a children of the rootIndex")
-              
-    
-    def __getPathFromExpandedNodes(self, view, rootIndex):
-        """Return relative path from the root index of the extended nodes"""
-        model = view.model()
-        rootPath = None
-        paths = []
-        indexes = [rootIndex]
-        while len(indexes):
+
+
+    def _onRefreshFile(self):
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+
+        selection = self.hdfTreeView.selectionModel()
+        indexes = selection.selectedIndexes()
+        if indexes == []:
+            qt.QApplication.restoreOverrideCursor()
+            qt.QMessageBox.warning(self, "No file selected", "Cannot refresh file: No file selected.")
+            return
+
+
+        model = self.hdfTreeView.model()
+        selectedItems = []
+        h5files = []
+        while len(indexes) > 0:
             index = indexes.pop(0)
-            if not view.isExpanded(index):
+            if index.column() != 0:
                 continue
+            rootIndex = index
+            # Reach the root of the tree
+            while rootIndex.parent().isValid():
+                rootIndex = rootIndex.parent()
+            rootRow = rootIndex.row()
+            relativePath = self.__getRelativePath(model, rootIndex, index)
+            selectedItems.append((rootRow, relativePath))
 
-            node = model.data(index, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_ITEM_ROLE)
-            path = node._getCanonicalName()
-            if rootPath is None:
-                rootPath = path
-            path = path[len(rootPath) :]
-            paths.append(path)
+            h5 = model.data(
+                rootIndex, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE
+            )
 
-            for child in range(model.rowCount(index)):
-                childIndex = model.index(child, 0, index)
-                indexes.append(childIndex)
-        return paths
-    
+            item = model.data(
+                rootIndex, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_ITEM_ROLE
+            )
+            
+            h5files.append((h5, item._openedPath)) 
 
-    def __indexFromPath(self, model, rootIndex, path):
-        elements = path.split("/")
-        if elements[0] == "":
-            elements.pop(0)
-        index = rootIndex
-        while len(elements) != 0:
-            element = elements.pop(0)
-            found = False
-            for child in range(model.rowCount(index)):
-                childIndex = model.index(child, 0, index)
-                name = model.data(childIndex)
-                if element == name:
-                    index = childIndex
-                    found = True
-                    break
-            if not found:
-                return None
-        return index
+        model = self.hdfTreeView.findHdf5TreeModel()
+        model.clear()
+        '''
+        import gc
+        for obj in gc.get_objects():   # Browse through ALL objects
+            if isinstance(obj, Hdf5TreeModel):
+                try:
+                    obj.close()
+                except:
+                    pass # Was already closed
 
-    def __expandNodesFromPaths(self, view, rootIndex, paths):
-        model = view.model()
-        for path in paths:
-            index = self.__indexFromPath(model, rootIndex, path)
-            if index is not None:
-                view.setExpanded(index, True)
+            elif isinstance(obj, silx.gui.hdf5.Hdf5TreeView):
+                try:
+                    obj.close()
+                except:
+                    pass # Was already closed
+        '''
+
+        self.createTreeView()
+
+        maintab = self.mainwidget.findChildren(qt.QTabWidget)[0]
+        maintab.removeTab(0)
+        maintab.insertTab(0,self.hdfTreeView,"NEXUS")
+        maintab.setCurrentIndex(0)
+        
+        modelnew = self.hdfTreeView.findHdf5TreeModel()
+        for h5, filename in h5files:
+            modelnew.insertFile(filename, 0)
+        
+        #self.__expandNodesFromPaths(self.hdfTreeView, index, paths)
+        #self.hdf5model.appendFile(filename)
+        qt.QApplication.restoreOverrideCursor()
+
+    def createTreeView(self):
+        self.hdfTreeView = silx.gui.hdf5.Hdf5TreeView(self)
+        self.hdfTreeView.setSortingEnabled(True)
+        self.hdfTreeView.addContextMenuCallback(self.nexus_treeview_callback)
+        self.hdf5model = Hdf5TreeModel(self.hdfTreeView,ownFiles=True)
+        self.hdfTreeView.setModel(self.hdf5model)
+        self.hdfTreeView.setExpandsOnDoubleClick(False)
+        self.hdf5model.setFileMoveEnabled(True)
+
+        self.hdf5model.sigH5pyObjectLoaded.connect(self.__h5FileLoaded)
+        self.hdf5model.sigH5pyObjectRemoved.connect(self.__h5FileRemoved)
+        self.hdf5model.sigH5pyObjectSynchronized.connect(self.__h5FileSynchonized)
+
+        self.__treeModelSorted = silx.gui.hdf5.NexusSortFilterProxyModel(self.hdfTreeView)
+        self.__treeModelSorted.setSourceModel(self.hdf5model)
+        self.__treeModelSorted.sort(0, qt.Qt.AscendingOrder)
+        self.__treeModelSorted.setSortCaseSensitivity(qt.Qt.CaseInsensitive)
+
+        self.hdfTreeView.setModel(self.__treeModelSorted)
+        
+        self.hdfTreeView.doubleClicked.connect(self._onNEXUSDoubleClicked)
+              
     
     def getScanToolbar(self):
         return self.toolbar
