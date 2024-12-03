@@ -45,7 +45,7 @@ dependencies = [
 console = ['qtconsole']
 speedup = ['numba']
 extendedfilesupport = ['ase']
-full = ['qtconsole', 'ase', 'numba']
+full = ['qtconsole', 'ase', 'numba' , 'PyOpenGL']
 
 [build-system]
 requires = ["setuptools >= 61.0"]
