@@ -1491,7 +1491,7 @@ ub : gui for UB matrix and angle calculations
             self.imageno = 0
             self.plotImage()
             self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
-            self.activescanname = "%s-sim %s-%s" % (self.fscan.axisname, np.amin(self.fscan.axis),np.amax(self.fscan.axis))
+            self.activescanname = "%s-rawImport %s-%s" % (self.fscan.axisname, np.amin(self.fscan.axis),np.amax(self.fscan.axis))
 
             self.images_loaded = False
             if self.fscan is not None and self.autoLoadAct.isChecked():

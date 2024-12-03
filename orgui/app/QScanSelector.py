@@ -484,6 +484,7 @@ class QScanSelector(qt.QMainWindow):
         self.roscanDeltaS.setRange(0.00000001,20000)
         self.roscanDeltaS.setDecimals(5)
         self.roscanDeltaS.setValue(0.1)
+        self.roscanDeltaS.setSingleStep(0.1)
         self.roscanDeltaS.valueChanged.connect(lambda : self.sigROIChanged.emit())
         
         maxSlayout = qt.QHBoxLayout()
