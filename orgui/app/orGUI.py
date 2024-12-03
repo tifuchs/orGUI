@@ -422,6 +422,8 @@ ub : gui for UB matrix and angle calculations
             refldict['xy_1'][..., 0] += xoffset
             refldict['xy_2'][..., 1] += yoffset
             refldict['xy_2'][..., 1] += yoffset
+        refldict['H_0'] = H_0
+        refldict['H_1'] = H_1
         return refldict
         
     def intkeys_rocking(self, refldict, **kwargs):
@@ -518,6 +520,8 @@ ub : gui for UB matrix and angle calculations
             intersect = 1 # default
         mask = refldict['mask_%s' % intersect]
         xy = refldict['xy_%s' % intersect][mask]
+        
+        refldict['angles'] = refldict['angles_%s' % intersect][mask]
         
         roi_keys = self.intbkgkeys_rocking(refldict)
         hkl_del_gam = self.getStaticROIparams(xy)
@@ -688,12 +692,30 @@ ub : gui for UB matrix and angle calculations
             # save data
             
             x, y = xylist[d] 
-            name1 = "pixloc[%.2f %.2f]" % (x,y)
+            name1 = "rocking_%.5fs_[%.2f %.2f %.2f]_H0_[%.2f %.2f %.2f]_H1" % (refldict['s'][d], *refldict['H_0'], *refldict['H_1'])
+            
+            alpha1, delta1, gamma1, omega1, chi1, phi1 = refldict['angles'][d]
+            sixc_angles_hkl = {
+                    "@NX_class": u"NXpositioner",
+                    "alpha" : np.rad2deg(alpha1),
+                    "omega" :  np.rad2deg(omega1),
+                    "theta" :  np.rad2deg(-1*omega1),
+                    "delta" : np.rad2deg(delta1),
+                    "gamma" :  np.rad2deg(gamma1),
+                    "chi" :  np.rad2deg(chi1),
+                    "phi" :  np.rad2deg(phi1),
+                    "@unit" : u"deg"
+            }
             
             traj1 = {
+                "@direction" : u"Rocking scan at fixed pixel location along H_1*s + H_0 in reciprocal space",
                 "@NX_class": u"NXcollection",
-                "@direction" : u"Fixed pixel coordinates",
-                "s" : hkl_del_gam_1[:,5]
+                "axis" : hkl_del_gam_1[:,5],
+                "s" : refldict['s'][d], 
+                "H_1" : refldict['H_1'],
+                "H_0" : refldict['H_0'],
+                "HKL" : refldict['H_1']*refldict['s'][d] + refldict['H_0'],
+                "HKL_sixc_angles" : sixc_angles_hkl
             }
             
             if hasattr(self.fscan, "title"):
@@ -762,7 +784,7 @@ ub : gui for UB matrix and angle calculations
                 },
                 "trajectory" : traj1,
                 "@signal" : u"counters/croibg",
-                "@axes": u"trajectory/s",
+                "@axes": u"trajectory/axis",
                 "@title": self.activescanname + "_" + availname1,
                 "@orgui_meta": u"roi"
             }
