@@ -61,6 +61,7 @@ from .CTRutil import (special_elementcolors, ParameterType, Parameter,
                      estimateDispersionCompound)
 
 from .CTRuc import WaterModel, UnitCell
+from .CTRfilm import EpitaxyInterface
 
 class SXRDCrystal(object):
 
@@ -758,6 +759,8 @@ class SXRDCrystal(object):
                 uc = UnitCell.fromStr(strio.read())
             elif classname == 'WaterModel':
                 uc = WaterModel.fromStr(strio.read())
+            elif classname == 'EpitaxyInterface':
+                uc = EpitaxyInterface.fromStr(strio.read())
             else:
                 raise NotImplementedError("class name not understood: %s" % classname)
             uc.name = name

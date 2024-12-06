@@ -814,11 +814,11 @@ class WaterModel(Lattice):
 
 class UnitCell(Lattice):
     
-    parameterOrder = "Name   x/frac     y/frac     z/frac     iDW     oDW      occup"
+    parameterOrder = "Name   x/frac     y/frac     z/frac     iDW     oDW      occup    layerIdx"
     
     parameterLookup = {'x' : 1, 'y' : 2, 'z' : 3,
                        'iDW' : 4, 'oDW' : 5,
-                       'occ' : 6}
+                       'occ' : 6, 'layer' : 7}
     
     parameterLookup_inv = dict(map(reversed, parameterLookup.items()))
     
@@ -887,8 +887,10 @@ class UnitCell(Lattice):
     def parametersFromDict(self, d, override_values=True):
         for p in self.parameters:
             self.parameters[p] = []
-            
-        self.basis_0[:] = d['basis_0'].astype(np.float64)
+        basis_0 = d['basis_0'].astype(np.float64)
+        if basis_0.shape[1] == 7: # add layer parameter
+            basis_0 = np.insert(basis_0, basis_0.shape[1], 0, axis=1)
+        self.basis_0[:] = basis_0
         self.dw_increase_constraint = d['dw_increase_constraint'].astype(np.bool_)
         for p in self.parameters:
             for dkey in sorted(d[p].keys()):
@@ -967,7 +969,7 @@ class UnitCell(Lattice):
             self._special_formfactors_present = False
             return False
     
-    def addAtom(self,element_or_param, xyz_rel=None, iDW=None, oDW=None, occu=None):
+    def addAtom(self,element_or_param, xyz_rel=None, iDW=None, oDW=None, occu=None, layer=0):
         if xyz_rel is not None:
             if not isinstance(element_or_param, str):
                 raise ValueError("You must provide a atom symbol. Got: %s" % element_or_param)
@@ -977,7 +979,8 @@ class UnitCell(Lattice):
                                    *xyz_rel,
                                    iDW,
                                    oDW,
-                                   occu],dtype=np.float64)
+                                   occu,
+                                   layer],dtype=np.float64)
             self.names.append(element_or_param) 
         else:
             if not isinstance(element_or_param[0], str):
@@ -1000,7 +1003,7 @@ class UnitCell(Lattice):
         self._test_special_formfactors()
         return
     
-    def insertAtom(self,index,element_or_param, xyz_rel=None, iDW=None, oDW=None, occu=None):
+    def insertAtom(self,index,element_or_param, xyz_rel=None, iDW=None, oDW=None, occu=None, layer=0):
         if xyz_rel is not None:
             if not isinstance(element_or_param, str):
                 raise ValueError("You must provide a atom symbol. Got: %s" % element_or_param)
@@ -1010,7 +1013,8 @@ class UnitCell(Lattice):
                                    *xyz_rel,
                                    iDW,
                                    oDW,
-                                   occu],dtype=np.float64)
+                                   occu,
+                                   layer],dtype=np.float64)
             self.names.insert(element_or_param,index) 
         else:
             if not isinstance(element_or_param[0], str):
@@ -1047,6 +1051,33 @@ class UnitCell(Lattice):
                 newfp.append((tuple(idxarray),parindex))
         self.fitparameters = newfp
         """
+    def split_in_layers(self):
+        layer_numbers = np.sort(np.unique(self.basis[:, 7]))
+        layers = OrderedDict()
+        if not hasattr(self, 'f'):
+            self.setEnergy(10000.) # populate f with some values to enable in-place modification
+        for l in layer_numbers:
+            where = (self.basis[:, 7] == l).nonzero()[0]
+            idx_low = where[0]
+            idx_high = where[-1] + 1
+            uc = UnitCell(self.a, np.rad2deg(self.alpha), name=self.name + "_layer%s" % l)
+            uc.basis = self.basis[idx_low:idx_high]
+            if self.errors:
+                uc.errors = self.errors[idx_low:idx_high]
+            uc.names = self.names[idx_low:idx_high]
+            uc.basis_0 = self.basis_0[idx_low:idx_high]
+            uc.dw_increase_constraint = self.dw_increase_constraint[idx_low:idx_high]
+            uc._test_special_formfactors()
+            uc.f = self.f[idx_low:idx_high]
+            uc.refRealTransform = self.refRealTransform
+            uc.refHKLTransform = self.refHKLTransform
+            layers[l] = uc
+        return layers
+    
+    @property    
+    def layers(self):
+        return np.sort(np.unique(self.basis[:, 7]))
+    
     # in eV
     def setEnergy(self,E):
         """
@@ -1562,7 +1593,12 @@ class UnitCell(Lattice):
         return rho/self.uc_area
     
     def lookupScatteringFactors(self,E):
-        self.f = np.empty((self.basis.shape[0],13),dtype=np.float64)
+        if hasattr(self, 'f'):
+            if self.f.shape != (self.basis.shape[0],13):
+                self.f = np.empty((self.basis.shape[0],13),dtype=np.float64)
+        else:
+            self.f = np.empty((self.basis.shape[0],13),dtype=np.float64)
+        
         for i,name in enumerate(self.names):
             if name in UnitCell.special_formfactors:
                 self.f[i,:11] = 0.
@@ -1726,9 +1762,9 @@ class UnitCell(Lattice):
             l = []
             for t in zip(param,err):
                 [l.append(ti) for ti in t]
-            return "%s  (%.5f +- %.5f)  (%.5f +- %.5f)  (%.5f +- %.5f)  (%.4f +- %.4f)  (%.4f +- %.4f)  (%.4f +- %.4f)" % (name,*l)
+            return "%s  (%.5f +- %.5f)  (%.5f +- %.5f)  (%.5f +- %.5f)  (%.4f +- %.4f)  (%.4f +- %.4f)  (%.4f +- %.4f) (%.0f +- %.0f)" % (name,*l)
         else:
-            return "%s     %.5f     %.5f     %.5f  %.4f  %.4f  %.4f" % (name,*param)
+            return "%s     %.5f     %.5f     %.5f  %.4f  %.4f  %.4f %.0f" % (name,*param)
         
     def domainsToStr(self):
         s = ""
@@ -1864,15 +1900,25 @@ class UnitCell(Lattice):
         if len(basis) >= 2:
             basis = np.vstack(basis)
             if basis.shape[1] == 7:
-                uc.basis = basis
-                uc.basis_0 = np.copy(uc.basis)
-                uc.names = names
-                uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
-                uc._test_special_formfactors()
-                return uc
+                basis = np.insert(basis, basis.shape[1], 0, axis=1) #layer number
+            elif basis.shape[1] == 8:
+                pass # all good, layer parameter provided
             else:
                 raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
-        elif basis[0].size == 7:
+            uc.basis = basis
+            uc.basis_0 = np.copy(uc.basis)
+            uc.names = names
+            uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
+            uc._test_special_formfactors()
+            return uc
+
+        elif len(basis) == 1: 
+            if basis[0].size == 7:
+                basis[0] = np.concatenate((basis[0], [0]))
+            elif basis.shape[1] == 8:
+                pass # all good, layer parameter provided
+            else:
+                raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
             uc.basis = np.array([basis])
             uc.dw_increase_constraint = np.ones(basis.shape[0],dtype=np.bool_)
             uc.names = names
@@ -1880,7 +1926,7 @@ class UnitCell(Lattice):
             uc._test_special_formfactors()
             return uc
         else:
-            raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
+            return uc # no atoms
     
     @classmethod
     def fromStr(cls, string):
@@ -1975,21 +2021,34 @@ class UnitCell(Lattice):
         uc.coherentDomainMatrix = domainmatrix
         uc.coherentDomainOccupancy = domainoccu
         uc.statistics = statistics
-        uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
-        if len(basis.shape) >= 2:
+        #uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
+        if len(basis) >= 2:
             basis = np.vstack(basis)
             if basis.shape[1] == 7:
-                uc.basis = basis
+                basis = np.insert(basis, basis.shape[1], 0, axis=1) #layer number
                 if xprfile:
-                    uc.errors = errors
-                uc.names = names
-                uc.basis_0 = np.copy(uc.basis)
-                uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
-                uc._test_special_formfactors()
-                return uc
+                    errors = np.insert(errors, errors.shape[1], np.nan, axis=1)
+            elif basis.shape[1] == 8:
+                pass # all good, layer parameter provided
             else:
                 raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
-        elif basis[0].size == 7:
+            if xprfile:
+                uc.errors = errors
+            uc.names = names
+            uc.basis = basis
+            uc.basis_0 = np.copy(uc.basis)
+            uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
+            uc._test_special_formfactors()
+            return uc
+        elif len(basis) == 1: 
+            if basis[0].size == 7:
+                basis[0] = np.concatenate((basis[0], [0]))
+                if xprfile:
+                    errors[0] = np.concatenate((errors[0], [np.nan]))
+            elif basis.shape[1] == 8:
+                pass # all good, layer parameter provided
+            else:
+                raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
             uc.basis = np.array([basis])
             if xprfile:
                 uc.errors = np.array([errors])
@@ -2035,22 +2094,53 @@ class UnitCell(Lattice):
         uc = cls(latticeparams[:3],latticeparams[3:])
         uc.coherentDomainMatrix = domainmatrix
         uc.coherentDomainOccupancy = domainoccu
-        if len(basis.shape) >= 2:
-            basis = np.vstack(basis)
-            if basis.shape[1] == 7:
+        if len(basis) >= 2:
+            if basis.shape[1] < 7:
                 for i,b in enumerate(basis):
                     uc.addAtom(names[i],b[1:4],DW,DW,1)
                 uc._test_special_formfactors()
                 return uc
+            elif basis.shape[1] == 7:
+                basis = np.insert(basis, basis.shape[1], 0, axis=1) #layer number
+                uc.basis = basis
+                uc.names = names
+                uc.basis_0 = np.copy(uc.basis)
+                uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
+                uc._test_special_formfactors()
+                return uc
+            elif basis.shape[1] == 8:
+                uc.basis = basis
+                uc.names = names
+                uc.basis_0 = np.copy(uc.basis)
+                uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
+                uc._test_special_formfactors()
+                return uc
             else:
                 raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
-        elif basis[0].size == 7:
-            uc.basis = np.array([basis]).astype(np.float64)
-            for i,b in enumerate(basis):
-                uc.addAtom(names[i],b[1:4],DW,DW,1)
-            uc._test_special_formfactors()
-            return uc
+        elif len(basis) == 1:
+            if basis.shape[1] < 7:
+                uc.addAtom(names[0],basis[0][1:4],DW,DW,1)
+                uc._test_special_formfactors()
+                return uc
+            elif basis.shape[1] == 7:
+                basis = np.insert(basis, basis.shape[1], 0, axis=1) #layer number
+                uc.basis = basis
+                uc.names = names
+                uc.basis_0 = np.copy(uc.basis)
+                uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
+                uc._test_special_formfactors()
+                return uc
+            elif basis.shape[1] == 8:
+                uc.basis = basis
+                uc.names = names
+                uc.basis_0 = np.copy(uc.basis)
+                uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
+                uc._test_special_formfactors()
+                return uc
+            else:
+                raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
+
         else:
-            raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
+            return uc
    
 
