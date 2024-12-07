@@ -25,7 +25,7 @@
 __author__ = "Timo Fuchs"
 __copyright__ = "Copyright 2020-2024 Timo Fuchs"
 __license__ = "MIT License"
-__version__ = "1.0.0"
+__version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
@@ -345,41 +345,13 @@ class SXRDCrystal(object):
 
         return par
         
-        #addRelParameter(self,indexarray,factors
-    """
-    def addRelFitParameter(self,parameter,limits=(-np.inf,np.inf),prior=None,name=None):
-        if name is None:
-            name = "relpar_id%s" % self.numberPars
-        
-        for uc_identifier in parameter:
-            indexarray, factors = parameter[uc_identifier]
-            self[uc_identifier].addRelParameter(indexarray,factors,limits,prior=prior,name=name)
-            self.fitparameters.append(ParameterId(name, limits, prior))
-        self.numberPars += 1
-        #self.fitp_limits.append(limits)
-        #self.fitp_values = np.append(self.fitp_values,np.nan)
-        #self.fitp_prior.append(prior)
-        return name
-    """
-    
+
     def getSurfaceBasis(self):
         return np.concatenate([uc.basis for uc in self if isinstance(uc,UnitCell)])
         
     def getSurfaceDWConstraintEnable(self):
         return np.concatenate([uc.dw_increase_constraint for uc in self if isinstance(uc,UnitCell)])
-    """
-    def applyParameters(self):
-        for [index0,indexneg,value] in self.weightparameters:
-            self.weights[index0] = value
-            if indexneg is not None:
-                self.weights[indexneg] = 1. - value
-                
-    def restoreUCWeights(self):
-        for i, [index0,indexneg,value] in enumerate(self.weightparameters):
-            value = self.weights[index0]
-            self.weightparameters[i][2] = value
-    """
-    
+
     def fitparameterList(self, verbosity=2):
         s = "## Parameters\n"
         for ucn in self.getUcNames():

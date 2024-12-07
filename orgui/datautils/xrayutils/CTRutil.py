@@ -18,6 +18,7 @@ import enum
 import copy
 import errno
 import glob
+from abc import ABC
 
 from .element_data import cov_radii_array, rgb_array
 
@@ -87,6 +88,322 @@ class Parameter:
         for p in ['indices_t', 'factors_t']:
             d.pop(p, None)
         return d
+        
+class LinearFitFunctions(ABC):
+    parameterOrder = ""
+    parameterLookup = {}
+    parameterLookup_inv = dict(map(reversed, parameterLookup.items()))
+    
+    def __init__(self):
+        self.basis = np.array([])
+        self.parameters = {
+            'absolute' : [],
+            'relative' : []
+        }
+        self.basis_0 = np.array([])
+        self._basis_parvalues = None
+        self.errors = None
+        self._errors_parvalues = None
+        
+    def parametersToDict(self):
+        d = dict()
+        d['basis_0'] = self.basis_0
+        for p in self.parameters:
+            d[p] = dict()
+            for i, param in enumerate(self.parameters[p]):
+                d[p]["%s_%s" % (i,param.name)] = param.asdict()
+        return d
+    
+    def clearParameters(self):
+        for p in self.parameters:
+            self.parameters[p] = []
+        self._basis_parvalues = None
+        self._errors_parvalues = None
+    
+    def parametersFromDict(self, d, override_values=True):
+        for p in self.parameters:
+            self.parameters[p] = []
+            
+        self.basis_0 = d['basis_0'].astype(np.float64)
+        for p in self.parameters:
+            for dkey in sorted(d[p].keys()):
+                self.parameters[p].append(Parameter(**d[p][dkey]))
+
+        if override_values:
+            try:
+                self.updateFromParameters()
+            except Exception as e:
+                warnings.warn("Can not apply fit parameter values to this %s: %s" % (self.__class__.__name__,e)) 
+        else:
+            warnings.warn("Basis values not updated from Parameter values. This can cause a mismatch between basis and fitparameter values!")
+
+    def updateFromParameters(self):
+        """Update basis from the values stored in the Parameters 
+        """
+        no_errors = False
+        self.basis = np.copy(self.basis_0)
+        self.errors = np.full_like(self.basis,np.nan)
+        for par in self.parameters['absolute']:
+            if par.value is not None:
+                self.basis[par.indices] = par.value
+            else:
+                raise ValueError("Can not set basis values from parameters. Value of Parameter %s is None." % par.name)
+            if par.error is not None:
+                self.errors[par.indices] = par.error
+            else:
+                no_errors = True
+        for val, par in zip(x_r,self.parameters['relative']):
+            if par.value is not None:
+                self.basis[par.indices] += par.factors*par.value
+            else:
+                raise ValueError("Can not set basis values from parameters. Value of Parameter %s is None." % par.name)
+            if par.error is not None:
+                self.errors[par.indices] = np.nan_to_num(self.errors[par.indices],nan=0.0)
+                self.errors[par.indices] += par.factors*par.error
+            else:
+                no_errors = True
+
+        self._basis_parvalues = np.copy(self.basis)
+        if not no_errors:
+            self._errors_parvalues = np.copy(self.errors)
+        
+    def addFitParameter(self,indexarray,limits=(-np.inf,np.inf),**keyargs):
+        par = indexarray
+        try:
+            parindexes = np.array([p if isinstance(p, (np.integer,int)) else self.parameterLookup[p] for p in np.atleast_1d(par)],dtype=np.intp)
+        except Exception as e:
+            raise ValueError("Invalid parameter name %s., Parameters for class %s are %s" % (par, self.__class__.__name__, list(self.parameterLookup.keys()))) from e
+
+        if 'name' in keyargs:
+            name = keyargs['name']
+        else:
+            parameternames = tuple([self.parameterLookup_inv[n] for n in parindexes])
+            name = self.name + " " + " ".join([p for p in parameternames])
+        
+        if name in self.fitparnames:
+            raise ValueError("Absolute fit parameter %s already exists." % name)
+        
+        indexarray = parindexes
+        try:
+            curr_val = self.basis[indexarray]
+        except IndexError as e:
+            raise ValueError("Invalid parameter indices.") from e
+        
+        if not limits[0] <= np.mean(curr_val) <= limits[1]:
+            raise ValueError("start parameter is not within limits! Is not: %s <= %s <= %s" % (limits[0],np.mean(self.basis[indexarray]), limits[1]))
+        prior = keyargs.get('prior', None)
+        keyargs['name'] = name
+        keyargs['prior'] = prior
+        
+        par = Parameter(name,indexarray, ParameterType.ABSOLUTE, limits, prior, keyargs)
+        self.parameters['absolute'].append(par)
+        return par
+    
+    def addRelParameter(self,indexarray,factors,limits=(-np.inf,np.inf),**keyargs):
+        par = indexarray
+        try:
+            parindexes = np.array([p if isinstance(p, (np.integer,int)) else self.parameterLookup[p] for p in np.atleast_1d(par)],dtype=np.intp)
+        except Exception as e:
+            raise ValueError("Invalid parameter name %s., Parameters for class %s are %s" % (par, self.__class__.__name__, list(self.parameterLookup.keys()))) from e
+        
+        if 'name' in keyargs:
+            name = keyargs['name']
+        else:
+            parameternames = tuple([self.parameterLookup_inv[n] + '_r' for n in parindexes])
+            name = self.name + " " + " ".join([p for p in parameternames])
+        
+        if name in self.fitparnames:
+            raise ValueError("Relative fit parameter %s already exists." % name)
+        
+        prior = keyargs.get('prior', None)
+        keyargs['name'] = name
+        keyargs['prior'] = prior
+        
+        factors = np.atleast_1d(factors)
+        try:
+            curr_val = self.basis[parindexes]
+        except IndexError as e:
+            raise ValueError("Invalid parameter indices.") from e
+        
+        if curr_val.shape != factors.shape:
+            raise ValueError("Number of basis parameters does not match number of factors.")
+
+        par = Parameter(name,parindexes, ParameterType.RELATIVE, limits, prior, keyargs, factors)
+        self.parameters['relative'].append(par)
+        return par
+        
+    def getInitialParameters(self, force_recalculate=False):
+        x0, _, _ = self.getStartParamAndLimits(force_recalculate)
+        return x0         
+        
+    def getStartParamAndLimits(self, force_recalculate=False):
+        #if self.basis_0 is None:
+        #    self.basis_0 = np.copy(self.basis)
+        try: 
+            mismatch = not np.allclose(self._basis_parvalues, self.basis, equal_nan=True)
+        except Exception:
+            mismatch = True
+        recalculate = force_recalculate or mismatch
+        abspar = self.parameters['absolute']
+        relpar = self.parameters['relative']
+        
+        x0 = []
+        lower = []
+        upper = []
+        for par in abspar:
+            if recalculate or par.value is None:
+                x0.append(np.mean(self.basis[par.indices]))
+            else:
+                x0.append(par.value) 
+            lower.append(par.limits[0])
+            upper.append(par.limits[1])
+        
+        for par in relpar:
+            if recalculate or par.value is None:    
+                x0.append(np.mean( (self.basis[par.indices] - self.basis_0[par.indices]) / par.factors))
+            else:
+                x0.append(par.value) 
+            lower.append(par.limits[0])
+            upper.append(par.limits[1])
+        
+        return np.array(x0), np.array(lower), np.array(upper)
+
+    def fitparameterList(self,verbosity=3):
+        if verbosity > 1:
+            outstr = "{}".format("# Direct fit parameters:\n")
+        else:
+            outstr = ""
+            
+        if len(self.parameters['absolute']) > 0:
+            outstr += "{:10} {:20} {:10} {:10}".format("Id","parameters","Value","Limits")
+            
+            for par in self.parameters['absolute']:
+                outstr += "\n" + self.fitparToStr(par)
+        elif verbosity > 2:
+            outstr += "# No direct fit parameters"
+        
+        outstr += "\n{}".format("# Relative fit parameters:\n")
+        
+        if len(self.parameters['relative']) > 0:
+            
+            outstr += "{:10} {:20} {:10} {:10} {:10}".format("Id","parameters","Value","Factors","Limits")
+            
+            for par in self.parameters['relative']:
+                outstr += "\n" + self.fitparToStr(par)
+        elif verbosity > 2:
+            outstr += "# No rel. parameters"
+        
+        return outstr
+    
+    def fitparToStr(self, par):
+        if self.basis_0 is None:
+            basis_0 = np.copy(self.basis)
+        else:
+            basis_0 = self.basis_0
+
+        if par.kind & ParameterType.ABSOLUTE: 
+            val = np.mean(self.basis[par.indices])
+            parameternames = tuple([self.parameterLookup_inv[n] for n in par.indices])
+            return "{:10} {:15} {:20} {:10} {:10}".format(par.name,str(parameternames),val,str(par.limits))
+        elif par.kind & ParameterType.RELATIVE:
+            val = np.mean( (self.basis[par.indices] - basis_0[par.indices]) / par.factors)
+            parameternames = tuple([self.parameterLookup_inv[n] + '_r' for n in par.indices])
+
+
+            return "{:10} {:20} {:10} {:10} {:10}".format(par.name,str(parameternames),val, str(par.factors) ,str(par.limits))
+        else:
+            raise ValueError("Unvalid parameter type %s for class %s" % (par.kind, self.__class__.__name__))
+
+    def setFitParameters(self,x):
+        x_0 = x[:len(self.parameters['absolute'])]
+        x_r = x[len(self.parameters['absolute']):]
+        self.basis[:] = self.basis_0
+        for val, par in zip(x_0,self.parameters['absolute']):
+            self.basis[par.indices] = val
+            par.value = val
+        for val, par in zip(x_r,self.parameters['relative']):
+            self.basis[par.indices] += par.factors*val
+            par.value = val
+        self._basis_parvalues = np.copy(self.basis)
+        
+    def setLimits(self, lim):
+        x_0 = lim[:len(self.parameters['absolute'])]
+        x_r = lim[len(self.parameters['absolute']):]
+        for val, par in zip(x_0,self.parameters['absolute']):
+            if val[0] > val[1]:
+                raise ValueError("Upper fit bound must be larger than the lower bound.")
+            par.limits = (val[0],val[1])
+        for val, par in zip(x_r,self.parameters['relative']):
+            if val[0] > val[1]:
+                raise ValueError("Upper fit bound must be larger than the lower bound.")
+            par.limits = (val[0],val[1])
+            
+    def setFitErrors(self,errors):
+        self.errors = np.full_like(self.basis,np.nan)
+        err_0 = errors[:len(self.parameters['absolute'])]
+        err_r = errors[len(self.parameters['absolute']):]
+        for val, par in zip(err_0,self.parameters['absolute']):
+            self.errors[par.indices] = val
+            par.error = val
+        for val, par in zip(err_r,self.parameters['relative']):
+            self.errors[par.indices] = np.nan_to_num(self.errors[par.indices],nan=0.0)
+            self.errors[par.indices] += par.factors*val
+            par.error = val
+        self._errors_parvalues = np.copy(self.errors)
+
+    def getFitErrors(self):
+        if self.errors is None: 
+            raise ValueError("No errors have been set.")
+        try: 
+            mismatch = not np.allclose(self._errors_parvalues, self.errors, equal_nan=True)
+        except Exception:
+            mismatch = True
+        abspar = self.parameters['absolute']
+        relpar = self.parameters['relative']
+        err0 = []
+        for par in abspar:
+            if mismatch:
+                err0.append(np.mean(self.errors[par.indices]))
+            else:
+                err0.append(par.error)
+                
+        for par in relpar:
+            if mismatch:
+                err0.append(np.mean( self.errors[par.indices]  / np.abs(par.factors)))
+            else:
+                err0.append(par.error)
+        
+        err0 = np.array(err0)
+        if np.any(~np.isfinite(err0)):
+            raise ValueError("Some errors are non-finite or not set.")
+        return err0
+        
+    def parameter_list(self):
+        return self.parameters['absolute'] + self.parameters['relative']
+        
+    @property
+    def fitparnames(self):
+        #pars = [self.fitparToStr(i,True) for i in range(len(self.fitparameters))] + [self.fitparToStr(i + len(self.fitparameters),True) for i in range(len(self.relfitparam))]
+        pars = []
+        for p_kind in self.parameters:
+            pars += [p.name for p in self.parameters[p_kind]]
+        return pars
+    
+    @property
+    def priors(self):
+        priorlist = []
+        pars = []
+        for p_kind in self.parameters:
+            pars += [p for p in self.parameters[p_kind]]
+        for par in pars:
+            if par.prior is None:
+                if tuple(par.limits) == (-np.inf,np.inf):
+                    raise Exception(f"Infinite range given as prior for parameter {par.name}. You must provide an explicit prior.")
+                else:
+                    priorlist.append(tuple(par.limits)) #has to be converted to correct distribution in CTROptimizer
+            else:
+                priorlist.append(par.prior) # real prior distribution
+        return priorlist
         
         
 def _ensure_contiguous(*arrays, testOnly=False, astype=None):

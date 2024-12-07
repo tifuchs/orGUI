@@ -61,14 +61,17 @@ from .element_data import cov_radii_array, rgb_array
 from .CTRutil import (special_elementcolors, ParameterType, Parameter,
                      _ensure_contiguous, next_skip_comment, DWtoDisorder,
                      readWaasmaier, readDispersion, atomic_number,
-                     estimateDispersionCompound)
+                     estimateDispersionCompound, LinearFitFunctions)
 
 from .CTRuc import UnitCell, HAS_NUMBA_ACCEL
 
-class EpitaxyInterface():
+
+
+
+class EpitaxyInterface(LinearFitFunctions):
     parameterOrder = "Width/cells Skew/cells"
     
-    parameterLookup = {'W' : 1, 'S' : 2}
+    parameterLookup = {'W' : 0, 'S' : 1}
     
     avail_types = ['skellam']
     
@@ -76,47 +79,24 @@ class EpitaxyInterface():
     
     def __init__(self,uc_top, uc_bottom, type='skellam' ,**kwargs):
         """
+        sigma_calc : automatic selection of number of unitcells for calculation of interface
+                     this will shift the location of the interface.
+        fixed_ucs : create interface with fixed number of unitcells. Location of interface
+                    will only change if skew != 0
+                    total number of uc will be fixed_ucs*2 +1
         
-        uc_layers_top and uc_layers_bottom must be a list of UnitCell.
-        Each UnitCell in uc_layers_top must have the same lattice constants
-        and may be used to describe different layers in the unit cell. 
-        Inteface cells are created taking into account the layers.
 
         
         """
-        
+        super(EpitaxyInterface,self).__init__()
         self.type = type
         self.sigma_calc = kwargs.get('sigma_calc', 4)
+        self.fixed_ucs = kwargs.get('fixed_ucs', False)
         self.set_ucs(uc_top, uc_bottom, **kwargs)
-
-        #if isinstance(uc_layers_top, UnitCell):
-        #    self.uc_layers_top = [uc_layers_top]
-        #    self.uc_layers_bottom = [uc_layers_bottom]
-        #else:
-        #    self.uc_layers_top = uc_layers_top
-        #    self.uc_layers_bottom = uc_layers_bottom
-        #if len(self.uc_layers_top) != len(self.uc_layers_bottom):
-        #    raise ValueError("Number of top and bottom layers must be equal.")
-        #a_top = self.uc_layers_top[0].a
-        #a_bot = self.uc_layers_bottom[0].a
-        #for uc in self.uc_layers_top:
-        #    if np.any(uc.a != a_top):
-        #        raise ValueError("Lattice constants of top layers must be equal.")
-        #for uc in self.uc_layers_bottom:
-        #    if np.any(uc.a != a_bot):
-        #        raise ValueError("Lattice constants of bottom layers must be equal.")
-
         self.basis = np.array([0., 0.])
         self._basis_created = np.array([np.nan, np.nan])
-        self.parameters = {
-            'absolute' : [],
-            'relative' : []
-        }
-        
         self.basis_0 = np.array([0., 0.])
-        self._basis_parvalues = None
         self.errors = None
-        self._errors_parvalues = None
         if 'name' in kwargs:
             self.name = kwargs['name']
         else:
@@ -181,6 +161,7 @@ class EpitaxyInterface():
         self.E = E
         self.uc_top.setEnergy(E)
         self.uc_bottom.setEnergy(E)
+        
             
     @property
     def loc_absolute(self):
@@ -194,12 +175,36 @@ class EpitaxyInterface():
             self.createInterfaceCells()
         H = (self.top_layers[-1].coherentDomainMatrix[-1][2,3] +1)*self.top_layers[-1].a[2]
         return H
+    
+    @property
+    def pos_absolute(self):
+        if np.any(self._basis_created != self.basis):
+            self.createInterfaceCells()
+        H = self.top_layers[0].coherentDomainMatrix[0][2,3]*self.top_layers[0].a[2]
+        return H
+    
+    @pos_absolute.setter
+    def pos_absolute(self, pos):
+        for l in self.top_layers:
+            l.pos_absolute = pos
+        for l in self.bottom_layers:
+            l.pos_absolute = pos
+            
+    
+    @property
+    def end_layer_number(self):
+        return self.top_layers[-1].basis[0,7]
+        
         
     def createInterfaceCells(self):
         n_layers = len(self.uc_top.layers)
         sigma = self.basis[0] * n_layers
-        skew = self.basis[1] / sigma #(len(self.top_layers))**2
-        
+        if abs(self.basis[1]) > 1:
+            raise ValueError("skew must be between -1 and 1.")
+        if abs(self.basis[1]) == 1.:
+            skew = (self.basis[1] - np.sign(self.basis[1]) * 1e-6) / sigma
+        else:
+            skew = self.basis[1] / sigma #(len(self.top_layers))**2
         
         if self.type == 'skellam':
             if abs(sigma * skew) > 1:
@@ -210,9 +215,11 @@ class EpitaxyInterface():
             loc = mu1 - mu2
             loc_int = int(round(loc/n_layers,0))*n_layers
             
-            
-            uc_number = (int(np.ceil((self.sigma_calc*sigma) / n_layers)) + 1) * n_layers
-            uc_number = int(uc_number)
+            if self.fixed_ucs:
+                uc_number = self.fixed_ucs
+            else:
+                uc_number = (int(np.ceil((self.sigma_calc*sigma) / n_layers)) + 1) * n_layers
+                uc_number = int(uc_number)
             unitcells = np.arange(-uc_number, uc_number) + loc_int
             assert unitcells.size % len(self.top_layers) == 0
             
@@ -290,7 +297,126 @@ class EpitaxyInterface():
             rho += uc_t.zDensity_G(z,h,k)
             rho += uc_b.zDensity_G(z,h,k)
         return rho
+
+    def addFitParameter(self,indexarray,limits=(-np.inf,np.inf),**kwarg):
+        """to assign multiple unitcells with the same fitparameter, provide list of
+        unitcell names as kwarg `unitcell`   
+        """
+        if len(np.array(indexarray).shape) < 2:
+            return super().addFitParameter(self,indexarray,limits,**kwarg)
+        if 'unitcell' not in kwarg:
+            raise ValueError("Missing unit cell name. Provide unit cell name as kwarg \'unitcell\'")
+        if isinstance(kwarg['unitcell'], list):
+            fp = []
+            for ucn in kwarg['unitcell']:
+                fp.append(self[ucn].addFitParameter(indexarray,limits,**kwarg))
+            return fp
+        else:
+            return self[kwarg['unitcell']].addFitParameter(indexarray,limits,**kwarg)
+
+    def addRelParameter(self,indexarray,factors,limits=(-np.inf,np.inf),**kwarg):
+        """to assign multiple unitcells with the same fitparameter, provide list of
+        unitcell names as kwarg `unitcell`   
+        """
+        if len(np.array(indexarray).shape) < 2:
+            return super().addRelParameter(self,indexarray,factors,limits,**kwarg)
+        if 'unitcell' not in kwarg:
+            raise ValueError("Missing unit cell name. Provide unit cell name as kwarg \'unitcell\'")
+        if isinstance(kwarg['unitcell'], list):
+            fp = []
+            for ucn in kwarg['unitcell']:
+                fp.append(self[ucn].addRelParameter(indexarray,factors,limits,**kwarg))
+            return fp
+        else:
+            return self[kwarg['unitcell']].addRelParameter(indexarray,factors,limits,**kwarg)
+
         
+    def getStartParamAndLimits(self, force_recalculate=False):
+        #if self.basis_0 is None:
+        #    self.basis_0 = np.copy(self.basis)
+        x0, lower, upper = super().getStartParamAndLimits(force_recalculate) # absolute and relative
+        top_x0, top_lower, top_upper = self.uc_top.getStartParamAndLimits(force_recalculate)
+        bottom_x0, bottom_lower, bottom_upper = self.uc_bottom.getStartParamAndLimits(force_recalculate)
+        return (np.concatenate([x0, top_x0, bottom_x0]),
+               np.concatenate([lower, top_lower, bottom_lower]),
+               np.concatenate([upper, top_upper, bottom_upper]))
+    
+    def setFitParameters(self,x):
+        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+        fp_top_no = len(self.uc_top.fitparnames)
+        fp_bottom_no = len(self.uc_bottom.fitparnames)
+        super().setFitParameters(x[:abs_rel_no])
+        self.uc_top.setFitParameters(x[abs_rel_no: abs_rel_no+fp_top_no])
+        self.uc_bottom.setFitParameters(x[abs_rel_no+fp_top_no: abs_rel_no+fp_top_no+fp_bottom_no])
+        
+    def setLimits(self,lim):
+        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+        fp_top_no = len(self.uc_top.fitparnames)
+        fp_bottom_no = len(self.uc_bottom.fitparnames)
+        super().setLimits(lim[:abs_rel_no])
+        self.uc_top.setLimits(lim[abs_rel_no: abs_rel_no+fp_top_no])
+        self.uc_bottom.setLimits(lim[abs_rel_no+fp_top_no: abs_rel_no+fp_top_no+fp_bottom_no])
+        
+    def setFitErrors(self,errors):
+        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+        fp_top_no = len(self.uc_top.fitparnames)
+        fp_bottom_no = len(self.uc_bottom.fitparnames)
+        super().setFitErrors(errors[:abs_rel_no])
+        self.uc_top.setFitErrors(errors[abs_rel_no: abs_rel_no+fp_top_no])
+        self.uc_bottom.setFitErrors(errors[abs_rel_no+fp_top_no: abs_rel_no+fp_top_no+fp_bottom_no])
+        
+    def getFitErrors(self):
+        err = super().getFitErrors()
+        err_t = self.uc_top.getFitErrors()
+        err_b = self.uc_bottom.getFitErrors()
+        return np.concatenate([err, err_t, err_b])
+        
+    @property
+    def fitparnames(self):
+        return super().fitparnames + self.uc_top.fitparnames + self.uc_bottom.fitparnames
+
+    @property
+    def priors(self):
+        return super().priors + self.uc_top.priors + self.uc_bottom.priors
+        
+    def parametersToDict(self):
+        d = super().parametersToDict()
+        d['unitcells'] = {}
+        d['unitcells']['top'] = self.uc_top.parametersToDict()
+        d['unitcells']['bottom'] = self.uc_bottom.parametersToDict()
+        return d
+    
+    def clearParameters(self):
+        super().clearParameters()
+        self.uc_top.clearParameters()
+        self.uc_bottom.clearParameters()
+    
+    def parametersFromDict(self, d, override_values=True):
+        self.uc_top.parametersFromDict(d['unitcells']['top'])
+        self.uc_bottom.parametersFromDict(d['unitcells']['bottom'])
+        super().parametersFromDict(d)
+        
+    def updateFromParameters(self):
+        """Update basis from the values stored in the Parameters 
+        """
+        self.uc_top.updateFromParameters()
+        self.uc_bottom.updateFromParameters()
+        super().updateFromParameters()
+
+    def __getitem__(self,uc_name_or_index):
+        if isinstance(uc_name_or_index,str):
+            if uc_name_or_index.lower() in ['top', 't', 'upper', self.uc_top.name]:
+                return self.uc_top
+            elif uc_name_or_index.lower() in ['bottom', 'b', 'lower', self.uc_bottom.name]:
+                return self.uc_bottom
+            else:
+                raise KeyError("No unit cell %s in EpitaxyInterface %s" % (uc_name_or_index, self.name))
+        else:
+            raise ValueError("must be str, not {}".format(type(uc_name_or_index)) )
+            
+    def parameter_list(self):
+        return super().parameter_list() + self.uc_top.parameter_list() + self.uc_bottom.parameter_list()
+       
     @classmethod
     def fromStr(cls, string):
         xprfile = False
