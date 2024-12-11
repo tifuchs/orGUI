@@ -61,13 +61,24 @@ from .CTRutil import (special_elementcolors, ParameterType, Parameter,
                      estimateDispersionCompound)
 
 from .CTRuc import WaterModel, UnitCell
-from .CTRfilm import EpitaxyInterface
+from .CTRfilm import EpitaxyInterface, Film
 
 class SXRDCrystal(object):
 
     def __init__(self,uc_bulk,*uc_surface,**keyargs):
         self.uc_bulk = uc_bulk
         self.uc_surface_list = list(uc_surface)
+        self.enable_uc_stacking = keyargs.get('enable_stacking', False)
+        if not self.enable_uc_stacking:
+            for uc in self.uc_surface_list:
+                if isinstance(uc, (Film, EpitaxyInterface) ):
+                    self.enable_uc_stacking = True
+                    break
+        
+        self.uc_stacking = keyargs.get('stacking', np.arange(len(self.uc_surface_list))[::-1])
+        order = np.argsort(self.uc_stacking)
+        self.uc_surface_list_ordered = np.array(self.uc_surface_list)[order]
+        self.uc_stacking_ordered = self.uc_stacking[order]
         self.domains = [[(np.identity(3,dtype=np.float64),1)] for i in self.uc_surface_list]
         self.atten = keyargs.get('atten', 0.01)
         self.specularRes = keyargs.get('spec_res', 0.0)
@@ -179,9 +190,36 @@ class SXRDCrystal(object):
             F += weight*uc.F_uc(harray,karray,Larray)
         return F
     
+    def apply_stacking(self):
+        self.enable_uc_stacking = True
+        hnew = 0.
+        i = 0
+        layer_number_new = -1
+        locnew = 0
+        for l in np.unique(self.uc_stacking_ordered):
+            h = hnew
+            layer_number = layer_number_new
+            loc = locnew
+            while(self.uc_stacking_ordered[i] == l):
+                uc = self.uc_surface_list_ordered[i]
+                if isinstance(uc, Film):
+                    uc.set_below(loc, h)
+                uc.start_layer_number = layer_number
+                uc.pos_absolute = h
+                hnew = uc.height_absolute
+                locnew = uc.loc_absolute
+                layer_number_new = uc.end_layer_number
+                i += 1
+                if i == len(self.uc_stacking_ordered):
+                    return
+                
+    
     def F(self,harray,karray,Larray):
         F = self.uc_bulk.F_bulk(harray,karray,Larray,self.atten)
         hkl = np.vstack((harray,karray,Larray))
+        if self.enable_uc_stacking:
+            self.apply_stacking()
+
         for uc, weight, domains in zip(self.uc_surface_list,self.weights,self.domains):
             for matrix, occup in domains:
                 hkl_n = np.dot(matrix,hkl)
@@ -664,6 +702,8 @@ class SXRDCrystal(object):
         
         
     def zDensity_G(self,z,h,k):
+        if self.enable_uc_stacking:
+            self.apply_stacking()
         rho = self.uc_bulk.zDensity_G_asbulk(z,h,k)
         for uc,w in zip(self.uc_surface_list,self.weights):
             rho += uc.zDensity_G(z,h,k)*w
@@ -672,7 +712,7 @@ class SXRDCrystal(object):
         
     def toRODStr(self):
         s = "E = %.5f keV\n" % (self.uc_bulk._E*1e-3)
-        for i,(w,uc) in enumerate(zip(self.weights,self.uc_surface_list)):
+        for i,w,uc in zip(self.uc_stacking, self.weights,self.uc_surface_list):
             s += "# %s %s\n" % (uc.__class__.__name__ ,uc.name)
             s += "%04i %.5f\n" % (i,w)
             s += uc.toRODStr() + "\n"
@@ -682,10 +722,10 @@ class SXRDCrystal(object):
     
     def toStr(self,showErrors=True):
         s = "E = %.5f keV\n" % (self.uc_bulk._E*1e-3)
-        for i,(w,uc) in enumerate(zip(self.weights,self.uc_surface_list)):
+        for i ,(no,w,uc) in enumerate(zip(self.uc_stacking,self.weights,self.uc_surface_list)):
             s += "# %s %s\n" % (uc.__class__.__name__ ,uc.name)
             if showErrors and self.werrors is not None:
-                s += "%04i occupancy = %.5f +- %.5f\n" % (i,w,self.werrors[i])
+                s += "%04i occupancy = %.5f +- %.5f\n" % (no,w,self.werrors[i])
             else:
                 s += "%04i occupancy = %.5f\n" % (i,w)
             s += uc.toStr() + "\n"
@@ -698,6 +738,7 @@ class SXRDCrystal(object):
         weights = []
         werrors = []
         uc_suface = []
+        uc_stacking = []
         
         strio = util.StringIO(string)
         Estr = next_skip_comment(strio).split('=')[1].split('keV')[0]
@@ -717,6 +758,7 @@ class SXRDCrystal(object):
             classname,name = line1.split(maxsplit=1)
             name = name.strip()
             line2 = next_skip_comment(strio).split()
+            uc_stacking.append(int(line2[0]))
             if '+-' in line2:
                 errors = True
                 weights.append(float(line2[line2.index('+-')-1]))
@@ -733,6 +775,8 @@ class SXRDCrystal(object):
                 uc = WaterModel.fromStr(strio.read())
             elif classname == 'EpitaxyInterface':
                 uc = EpitaxyInterface.fromStr(strio.read())
+            elif classname == 'Film':
+                uc = Film.fromStr(strio.read())
             else:
                 raise NotImplementedError("class name not understood: %s" % classname)
             uc.name = name
@@ -742,10 +786,12 @@ class SXRDCrystal(object):
         next_skip_comment(bulkstrio)
         uc_bulk = UnitCell.fromStr(bulkstrio.read())
         uc_bulk.setEnergy(E)
-        xtal = SXRDCrystal(uc_bulk,*uc_suface,atten=atten)
+        uc_stacking = np.array(uc_stacking)
+        xtal = SXRDCrystal(uc_bulk,*uc_suface,atten=atten,stacking=uc_stacking)
         xtal.weights = np.array(weights)
         xtal.weights_0 = np.copy(weights)
         xtal.werrors = np.array(werrors) if errors else None
+        xtal.setGlobalReferenceUnitCell(xtal['bulk'])
         return xtal
         
     def __getitem__(self,uc_name_or_index):
@@ -795,6 +841,9 @@ class SXRDCrystal(object):
             
     def getUcNames(self):
         return [uc.name for uc in self.uc_surface_list] + ['bulk']
+        
+    def _ipython_key_completions_(self):
+        return self.getUcNames()
 
     def toFile(self,filename):
         with open(filename,'w') as f:

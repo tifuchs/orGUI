@@ -106,8 +106,8 @@ class WaterModel(Lattice, LinearFitFunctions):
         
         !!! This has to be checked !!!
         """
-        self.refRealTransform = self.R_mat_inv @ rotMatrix @ uc.R_mat 
-        self.refHKLTransform = self.B_mat_inv @ rotMatrix @ uc.B_mat
+        self.refRealTransform[:] = self.R_mat_inv @ rotMatrix @ uc.R_mat 
+        self.refHKLTransform[:] = self.B_mat_inv @ rotMatrix @ uc.B_mat
 
     def F_uc(self,h,k,l):
         mask = np.logical_and(np.isclose(h,0), np.isclose(k,0))
@@ -536,7 +536,7 @@ class UnitCell(Lattice):
             'absolute' : [],
             'relative' : []
         }
-        
+        self.layer_behaviour = keyargs.get('layer_behaviour', 'ignore')
         self.basis_0 = np.array([])
         self._basis_parvalues = None
         self.errors = None
@@ -635,8 +635,8 @@ class UnitCell(Lattice):
         
         !!! This has to be checked !!!
         """
-        self.refRealTransform = self.R_mat_inv @ rotMatrix @ uc.R_mat 
-        self.refHKLTransform = self.B_mat_inv @ rotMatrix @ uc.B_mat
+        self.refRealTransform[:] = self.R_mat_inv @ rotMatrix @ uc.R_mat 
+        self.refHKLTransform[:] = self.B_mat_inv @ rotMatrix @ uc.B_mat
         
     def _test_special_formfactors(self):
         for name in self.names:
@@ -729,11 +729,12 @@ class UnitCell(Lattice):
                 newfp.append((tuple(idxarray),parindex))
         self.fitparameters = newfp
         """
-    def split_in_layers(self):
+    def split_in_layers(self, ordered=True):
         layer_numbers = np.sort(np.unique(self.basis[:, 7]))
         layers = OrderedDict()
         if not hasattr(self, 'f'):
             self.setEnergy(10000.) # populate f with some values to enable in-place modification
+        
         for l in layer_numbers:
             where = (self.basis[:, 7] == l).nonzero()[0]
             idx_low = where[0]
@@ -750,6 +751,22 @@ class UnitCell(Lattice):
             uc.refRealTransform = self.refRealTransform
             uc.refHKLTransform = self.refHKLTransform
             layers[l] = uc
+        if len(layer_numbers) == 1:
+            return layers
+
+        if ordered:
+            avg_height = []
+            uc_nms = []
+            for uc_l in layers:
+                avg_height.append(np.mean(layers[uc_l].basis[:,3]))
+                uc_nms.append(uc_l)
+            avg_height = np.array(avg_height)
+
+            sort_uc = np.argsort(avg_height)
+            uc_nms = np.array(uc_nms)[sort_uc]
+            
+            layers = OrderedDict([(n, layers[n]) for n in uc_nms])
+
         return layers
     
     @property    
@@ -775,6 +792,19 @@ class UnitCell(Lattice):
         current_pos = self.pos_absolute
         for mat in self.coherentDomainMatrix:
             mat[2,3] += (pos - current_pos) / self.a[2]
+
+    @property
+    def loc_absolute(self):
+        return self.pos_absolute
+
+    @property    
+    def start_layer_number(self): # not implemented
+        return -1.
+        
+    @start_layer_number.setter
+    def start_layer_number(self, ln):
+        if self.layer_behaviour == 'select':
+            pass
     
     # in eV
     def setEnergy(self,E):
@@ -1650,8 +1680,23 @@ class UnitCell(Lattice):
             errors = []
             indices = []
             statistics = dict()
+            layerpos = dict()
+            layer_behaviour = 'ignore'
             for l in f:
                 line = l.rsplit('//')[0]
+                if l.startswith('layerpos:'):
+                    if '=' in line:
+                        try:
+                            splitted = [n.split(',') for n in l[len('layerpos:'):].split('=')]
+                            splitted = [item for sublist in splitted for item in sublist]
+                            for i in range(0,len(splitted),2):
+                                layerpos[float(splitted[i].strip())] = float(splitted[i+1])
+                        except Exception:
+                            print("Cannot read layerpos string: %s" % l)
+                    continue
+                if l.startswith('layerbehaviour:'):
+                    layer_behaviour = l[len('layerpos:'):].strip()
+                    continue
                 line = line.split()
                 if line:
                     if 'Name' in line or '=' in line: # parameter or statistics line
@@ -1719,6 +1764,8 @@ class UnitCell(Lattice):
         uc.coherentDomainMatrix = domainmatrix
         uc.coherentDomainOccupancy = domainoccu
         uc.statistics = statistics
+        uc.layerpos = layerpos
+        uc.layer_behaviour = layer_behaviour
         #uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
         if len(basis) >= 2:
             basis = np.vstack(basis)
