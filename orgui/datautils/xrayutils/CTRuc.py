@@ -900,7 +900,7 @@ class UnitCell(Lattice):
         try:
             curr_val = self.basis[(atoms, parindexes)]
         except IndexError as e:
-            raise ValueError("Invalid parameter indices.") from e
+            raise ValueError("UnitCell %s: Invalid parameter indices (%s, %s) ." % (self.name, atoms, parindexes)) from e
         
         if curr_val.shape != factors.shape:
             raise ValueError("Number of basis parameters does not match number of factors.")

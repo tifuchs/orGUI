@@ -308,7 +308,7 @@ class EpitaxyInterface(LinearFitFunctions):
         unitcell names as kwarg `unitcell`   
         """
         if len(np.array(indexarray).shape) < 2:
-            return super().addFitParameter(self,indexarray,limits,**kwarg)
+            return super().addFitParameter(indexarray,limits,**kwarg)
         if 'unitcell' not in kwarg:
             raise ValueError("Missing unit cell name. Provide unit cell name as kwarg \'unitcell\'")
         if isinstance(kwarg['unitcell'], list):
@@ -718,7 +718,7 @@ class Film(LinearFitFunctions):
         unitcell names as kwarg `unitcell`   
         """
         if len(np.array(indexarray).shape) < 2:
-            return super().addFitParameter(self,indexarray,limits,**kwarg)
+            return super().addFitParameter(indexarray,limits,**kwarg)
 
         return self.unitcell.addFitParameter(indexarray,limits,**kwarg)
 

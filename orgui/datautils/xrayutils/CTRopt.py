@@ -311,6 +311,8 @@ class CTROptAngleCorrection(CTROptimizer):
         if self.dw_zconstraints:
             constr = self.get_inequalconstraints()
             self.nic = constr.size
+        self.fitparnames = self.xtal.fitparnames
+        self.priors = self.xtal.priors
 
             
     def get_inequalconstraints(self):
@@ -592,7 +594,35 @@ class CTROptAngleCorrection(CTROptimizer):
         
         return stat
     
+                    
+    def set_archi_result(self, archi):
+        islandid = int(np.argmin([f[0] for f in archi.get_champions_f()]))
+        minisland = archi[islandid]
+        pop_min = minisland.get_population()
+        
+        res = pop_min.champion_x
+        chi2_res = pop_min.champion_f
+        
+        stat = self.statistics(res)
     
+        popsize = archi[0].get_population().get_f().shape[0]
+
+        params = { name: np.empty((len(archi), popsize))  for name in self.fitparnames}
+        params['chisqr'] = np.empty((len(archi), popsize))
+        #params['logpdf'] = np.empty((len(archi), popsize))
+
+        for i, isl in enumerate(archi):
+            pop = isl.get_population()
+            for j, p in enumerate(self.fitparnames):
+                params[p][i] = pop.get_x()[:, j]
+            params['chisqr'][i] = pop.get_f()[:,0]
+            #params['logpdf'][i] = stats.chi2.logpdf(pop.get_f()[:,0],self._cached_flat_data[0].size - len(self.fitparnames)) # correct???
+        
+        cov = stat.pop('covariance',np.array([])) # cannot save it as netcdf!
+        
+        import arviz as az
+        fittrace = az.from_dict(params, attrs=stat)
+        return fittrace
     
     """
     def defaultCTRplotsettings(self):
