@@ -154,6 +154,10 @@ class Detector2D_SXRD(geometry.Geometry):
             return dat
         t1 = dat.shape[0] % dim1
         t2 = dat.shape[1] % dim2
+        if t1 == 0:
+            t1 = None
+        if t2 == 0:
+            t2 = None
         dat_binned = binning(dat[:-t1, :-t2], (dim1, dim2))
         return dat_binned
 
