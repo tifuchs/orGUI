@@ -357,6 +357,9 @@ class BlissScan_EBS(Fastscan):
 
         if 'potv' in data_1['measurement']:
             self.potv = data_1['measurement']['potv'][:self.nopoints]
+
+        if 'scaled_potv2f' in data_1['measurement']:
+            self.scaled_potv2f = data_1['measurement']['scaled_potv2f'][:self.nopoints]
             
         if 'srcur' in data_1['measurement']:
             self.srcur = data_1['measurement']['srcur'][:self.nopoints]
@@ -453,7 +456,7 @@ class BlissScan_EBS(Fastscan):
         after each integration, orGUI will search for these counter names in the Scan
         object and copy the entries into the database.
         """
-        return ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch'] 
+        return ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch','scaled_potv2f'] 
         
  
     # returns single default image!
