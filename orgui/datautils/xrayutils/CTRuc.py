@@ -537,6 +537,7 @@ class UnitCell(Lattice):
             'relative' : []
         }
         self.layer_behaviour = keyargs.get('layer_behaviour', 'ignore')
+        self.layerpos = {0.0 : 0.0}
         self.basis_0 = np.array([])
         self._basis_parvalues = None
         self.errors = None
@@ -676,6 +677,8 @@ class UnitCell(Lattice):
             self.basis_0 = np.vstack([self.basis_0,parameters])
         else:
             self.basis_0 = np.array([parameters])
+        if float(layer) not in self.layerpos:
+            self.layerpos[float(layer)] = 0.0 # default to 0.
         self.errors = None
         self.dw_increase_constraint = np.insert(self.dw_increase_constraint, len(self.dw_increase_constraint), True)
         self._test_special_formfactors()
@@ -710,6 +713,8 @@ class UnitCell(Lattice):
             self.basis_0 = np.insert(self.basis_0,index,parameters,axis=0)
         else:
             self.basis_0 = np.array([parameters])
+        if float(layer) not in self.layerpos:
+            self.layerpos[float(layer)] = 0.0 # default to 0.
         self.dw_increase_constraint = np.insert(self.dw_increase_constraint, index, True)
         self.errors = None
         self._test_special_formfactors()
@@ -741,7 +746,7 @@ class UnitCell(Lattice):
             idx_high = where[-1] + 1
             uc = UnitCell(self.a, np.rad2deg(self.alpha), name=self.name + "_layer%s" % l)
             uc.basis = self.basis[idx_low:idx_high]
-            if self.errors:
+            if self.errors is not None:
                 uc.errors = self.errors[idx_low:idx_high]
             uc.names = self.names[idx_low:idx_high]
             uc.basis_0 = self.basis_0[idx_low:idx_high]
@@ -1510,6 +1515,11 @@ class UnitCell(Lattice):
         st = ""
         for i in range(len(self.names)):
             st += str(i).zfill(2) + "  " + self.atomToStr(i) + "\n"
+        st += "layerpos: "
+        for p in self.layerpos:
+            st += "%s = %s, " % (p,self.layerpos[p])
+        st = st[:-2] # remove last ', '
+        st += "\nlayer_behaviour: %s\n" % self.layer_behaviour 
         return st
     
     def parameterStrRod(self):
@@ -1695,7 +1705,7 @@ class UnitCell(Lattice):
                             print("Cannot read layerpos string: %s" % l)
                     continue
                 if l.startswith('layerbehaviour:'):
-                    layer_behaviour = l[len('layerpos:'):].strip()
+                    layer_behaviour = l[len('layerbehaviour:'):].strip()
                     continue
                 line = line.split()
                 if line:
