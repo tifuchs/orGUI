@@ -1341,7 +1341,7 @@ class UnitCell(Lattice):
                 self.f[i,11:] = readDispersion(name,E)
         return
     
-    def plot3d(self,ucx=1,ucy=1,ucz=1,dwon=False,occuon=False,figure=None,translate=np.array([0.,0.,0.]), **keyargs):
+    def plot3d(self,ucx=1,ucy=1,ucz=1,dwon=False,occuon=False,figure=None,translate=np.array([0.,0.,0.]), domain=0, **keyargs):
         try:
             from mayavi import mlab
         except ImportError:
@@ -1366,7 +1366,10 @@ class UnitCell(Lattice):
         resolution = keyargs.get('resolution')
         if resolution is None:
             resolution = 25
-
+        
+        mat = self.coherentDomainMatrix[domain]
+        domainmatrix = self.R_mat_inv @ mat[:,:-1] @ self.R_mat
+        
         for i,params in enumerate(self.basis):
             
             radius = cov_radii_array[atomic_number(self.names[i])-1][2]*2
@@ -1395,7 +1398,8 @@ class UnitCell(Lattice):
                         if random.random() > occup:
                             positions[no] = np.nan
                         no += 1
-            position_cart = self.RealspaceMatrix @ positions.T
+            position_cart = self.R_mat @ (domainmatrix @ positions.T + mat[:,-1])
+            #position_cart = self.RealspaceMatrix @ positions.T
             if len(translate.shape) > 1:
                 position_cart = np.asarray(translate[:,:-1] @ position_cart)
 
@@ -1414,11 +1418,14 @@ class UnitCell(Lattice):
         return figure
     
     
-    def pos_cart_all(self,ucx=1,ucy=1,ucz=1,translate=np.array([0.,0.,0.])):
+    def pos_cart_all(self,ucx=1,ucy=1,ucz=1,translate=np.array([0.,0.,0.]), domain=0):
         dt = np.dtype([('name', 'U6'),('x', np.float64), ('y', np.float64), ('z', np.float64)])
         xyz_array = np.empty(np.abs(ucx*ucy*ucz)*len(self.names),dtype=dt)
         position_cart = []
         names = []
+        mat = self.coherentDomainMatrix[domain]
+        domainmatrix = self.R_mat_inv @ mat[:,:-1] @ self.R_mat
+        
         for i,params in enumerate(self.basis):
             x,y,z = params[1:4]
             positions = np.empty((np.abs(ucx*ucy*ucz),3))
@@ -1435,7 +1442,7 @@ class UnitCell(Lattice):
                         else:
                             positions[no] = np.array([x + signx*(xno-1),y + signy*(yno-1),z+ signz*(zno-1)]) + translate
                         no += 1
-            positions_c = self.RealspaceMatrix @ positions.T
+            positions_c = self.R_mat @ (domainmatrix @ positions.T + mat[:,-1])
             
             if len(translate.shape) > 1:
                 positions_c = np.asarray(translate[:,:-1] @ positions_c)
@@ -1450,21 +1457,24 @@ class UnitCell(Lattice):
         return xyz_array
 
     
-    def pos_cart(self,atomNo):
-        return self.RealspaceMatrix @ self.basis[atomNo][1:4].T
+    def pos_cart(self,atomNo, domain=0):
+        mat = self.coherentDomainMatrix[domain]
+        domainmatrix = self.R_mat_inv @ mat[:,:-1] @ self.R_mat
+        xyz_rel = domainmatrix @ self.basis[i][1:4] + mat[:,-1]
+        return self.R_mat @ xyz_rel
         
-    def pos_cart_error(self,atomNo):
-        xyz = self.pos_cart(atomNo)
+    def pos_cart_error(self,atomNo, domain=0):
+        xyz = self.pos_cart(atomNo, domain)
         realMatrix = self.RealspaceMatrix**2
         error_zeros = np.nan_to_num(self.errors,0)
         xyz_error = np.sqrt(realMatrix @ (error_zeros[atomNo][1:4]**2).T)
         return xyz, xyz_error
         
         
-    def distanceVectorAtom(self,atomNo1,atomNo2):
-        return self.pos_cart(atomNo1) - self.pos_cart(atomNo2)
+    def distanceVectorAtom(self,atomNo1,atomNo2, domain=0):
+        return self.pos_cart(atomNo1, domain) - self.pos_cart(atomNo2, domain)
     
-    def bondingLength(self,xyz_atom):
+    def bondingLength(self,xyz_atom, domain=0):
         pos_atom_cart = self.RealspaceMatrix @ xyz_atom.T
         blength = np.empty(self.basis.shape[0],dtype=np.float64)
         for i, params in enumerate(self.basis):
