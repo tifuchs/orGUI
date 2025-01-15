@@ -1694,50 +1694,55 @@ class UnitCell(Lattice):
             layer_behaviour = 'ignore'
             for l in f:
                 line = l.rsplit('//')[0]
-                if l.startswith('layerpos:'):
+                if line.startswith('layerpos:'):
                     if '=' in line:
                         try:
-                            splitted = [n.split(',') for n in l[len('layerpos:'):].split('=')]
+                            splitted = [n.split(',') for n in line[len('layerpos:'):].split('=')]
                             splitted = [item for sublist in splitted for item in sublist]
                             for i in range(0,len(splitted),2):
                                 layerpos[float(splitted[i].strip())] = float(splitted[i+1])
                         except Exception:
                             print("Cannot read layerpos string: %s" % l)
                     continue
-                if l.startswith('layerbehaviour:'):
-                    layer_behaviour = l[len('layerbehaviour:'):].strip()
+                if line.startswith('layerbehaviour:'):
+                    layer_behaviour = line[len('layerbehaviour:'):].strip()
+                    continue
+                if line.startswith('layer_behaviour:'):
+                    layer_behaviour = line[len('layer_behaviour:'):].strip()
                     continue
                 line = line.split()
-                if line:
-                    if 'Name' in line or '=' in line: # parameter or statistics line
-                        if '=' in line:
-                            try:
-                                splitted = [n.split(',') for n in l.split('=')]
-                                splitted = [item for sublist in splitted for item in sublist]
-                                for i in range(0,len(splitted),2):
-                                    statistics[splitted[i].strip()] = float(splitted[i+1])
-                            except Exception:
-                                print("Cannot read statistics string: %s" % l)
-                        continue
-                    if '+-' in line:
-                        xprfile = True
-                        indices.append(int(line[0]))
-                        names.append(line[1])
-                        params = re.findall(r'\(([^)]+)',l)
-                        params_array = np.array([np.array(p.split('+-'),dtype=np.float64) for p in params]).T
-                        basis.append(np.concatenate(([int(line[0])], params_array[0] )))
-                        errors.append(np.concatenate(([int(line[0])], params_array[1] )))
-                    else:
-                        if line[0].isnumeric():
-                            
-                            names.append(line[1])
-                            basis.append(np.concatenate(([int(line[0])], np.array(line[2:],dtype=np.float64) )))
+                try:
+                    if line:
+                        if 'Name' in line or '=' in line: # parameter or statistics line
+                            if '=' in line:
+                                try:
+                                    splitted = [n.split(',') for n in line.split('=')]
+                                    splitted = [item for sublist in splitted for item in sublist]
+                                    for i in range(0,len(splitted),2):
+                                        statistics[splitted[i].strip()] = float(splitted[i+1])
+                                except Exception:
+                                    print("Cannot read statistics string: %s" % l)
+                            continue
+                        if '+-' in line:
+                            xprfile = True
                             indices.append(int(line[0]))
+                            names.append(line[1])
+                            params = re.findall(r'\(([^)]+)',line)
+                            params_array = np.array([np.array(p.split('+-'),dtype=np.float64) for p in params]).T
+                            basis.append(np.concatenate(([int(line[0])], params_array[0] )))
+                            errors.append(np.concatenate(([int(line[0])], params_array[1] )))
                         else:
-                            names.append(line[0])
-                            indices.append(np.nan)
-                            basis.append(np.concatenate(([np.nan], np.array(line[1:],dtype=np.float64) )))
-            
+                            if line[0].isnumeric():
+                                
+                                names.append(line[1])
+                                basis.append(np.concatenate(([int(line[0])], np.array(line[2:],dtype=np.float64) )))
+                                indices.append(int(line[0]))
+                            else:
+                                names.append(line[0])
+                                indices.append(np.nan)
+                                basis.append(np.concatenate(([np.nan], np.array(line[1:],dtype=np.float64) )))
+                except Exception as e:
+                    raise IOError("Cannot read line \"%s\" describing atom parameters of UnitCell" % line) from e
             basis_save = np.vstack(basis).astype(np.float64)
             basis = np.empty_like(basis_save)
             
