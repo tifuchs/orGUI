@@ -38,6 +38,7 @@ from .ArrayTableDialog import ArrayEditWidget
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import ClassVar
+import copy
 
 import numpy as np
 from ..datautils.xrayutils import HKLVlieg
@@ -305,7 +306,7 @@ class QReflectionSelector(qt.QSplitter):
             else:
                 self.setReflections([])
         except Exception:
-            qt.QMessageBox.critical(self,"Cannot read reflections", "Cannot read reeflections %s" % traceback.format_exc())
+            qt.QMessageBox.critical(self,"Cannot read reflections", "Cannot read reflections %s" % traceback.format_exc())
             return
             
     def clearPlotRefReflections(self):
@@ -326,7 +327,7 @@ class QReflectionSelector(qt.QSplitter):
         
             
     def redrawRefReflections(self):
-        self.setReflections(self.reflections)
+        self.setReflections(copy.deepcopy(self.reflections))
         
     def setReflections(self,refls):
         self.clearPlotRefReflections()
