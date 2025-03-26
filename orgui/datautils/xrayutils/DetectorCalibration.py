@@ -430,12 +430,12 @@ class Detector2D_SXRD(geometry.Geometry):
             edge_1_x = np.arange(self.detector.shape[0])
             edge_1_y = np.zeros(self.detector.shape[0])
             edge_2_x = edge_1_x
-            edge_2_y = np.full(self.detector.shape[0], self.detector.shape[1])
-            edge_3_x = np.arange(self.detector.shape[1])
-            edge_3_y = np.zeros(self.detector.shape[1])
-            edge_4_x = edge_3_x
-            edge_4_y = np.full(self.detector.shape[1], self.detector.shape[0])
-            
+            edge_2_y = np.full(self.detector.shape[0], self.detector.shape[1] -1)
+            edge_3_x = np.zeros(self.detector.shape[1]) 
+            edge_3_y = np.arange(self.detector.shape[1])
+            edge_4_x = np.full(self.detector.shape[1], self.detector.shape[0]-1)
+            edge_4_y = edge_3_y
+            #                   left edge right edge top edge  bottom edge
             xx = np.concatenate([edge_1_x, edge_2_x, edge_3_x, edge_4_x])
             yy = np.concatenate([edge_1_y, edge_2_y, edge_3_y, edge_4_y])
             Q = self.qFunction(xx,yy) / 10.

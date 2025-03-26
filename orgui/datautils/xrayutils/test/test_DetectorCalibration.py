@@ -56,6 +56,7 @@ class TestRWDetector2D_SXRD(unittest.TestCase):
         self.sxrddet.rot2 = -np.pi/20
         self.sxrddet.rot3 = 0
         self.sxrddet.dist = 1.5
+        self.sxrddet.set_energy(15.)
         self.sxrddet.setAzimuthalReference(np.deg2rad(90.))
         self.sxrddet.setPolarization(np.deg2rad(90.), 0.75)
 
@@ -116,6 +117,7 @@ class TestAnglePixelConversion(unittest.TestCase):
         self.sxrddet.rot2 = -np.pi/20
         self.sxrddet.rot3 = 0
         self.sxrddet.dist = 1.5
+        self.sxrddet.set_energy(15.)
         self.sxrddet.setAzimuthalReference(np.deg2rad(90.))
         self.sxrddet.setPolarization(np.deg2rad(90.), 0.75)
         
@@ -152,6 +154,19 @@ class TestAnglePixelConversion(unittest.TestCase):
         if max_rel_diff > abserr:
             warnings.warn("too large error: %.5f approx det corners, %s" % (max_rel_diff, msg))
         #self.assertLessEqual(max_rel_diff, abserr, "too large error approx det corners, %s" % msg)
+    
+    def assertQrangeValid(self):
+        Q = self.sxrddet.qArray() / 10.
+        Qmin = np.amin(Q)
+        Qmax = np.amax(Q)
+        Qmin_fast , Qmax_fast = self.sxrddet.Qrange
+        f2d_cal = self.sxrddet.getFit2D()
+        # beam on detector ?
+        if 0 <= f2d_cal['centerX'] <= self.sxrddet.detector.shape[1] and 0 <= f2d_cal['centerY'] <= self.sxrddet.detector.shape[0]:
+            Qmin = 0.
+        
+        self.assertTrue(np.allclose(Qmin, Qmin_fast, 1e-5))
+        self.assertTrue(np.allclose(Qmax, Qmax_fast, 1e-5))
 
     def test_poni1(self):
         for p1 in np.linspace(-3,3,5):
@@ -160,6 +175,7 @@ class TestAnglePixelConversion(unittest.TestCase):
             self.assertPixelErrorSurfaceAnglesLessThan(msg=msg)
             self.assertPixelErrorTthChiLessThan(msg=msg)
             self.assertGamDelRangeErrorLessThan(msg=msg)
+            self.assertQrangeValid()
         self.sxrddet.poni1 = 0.1
     
     def test_poni2(self):
@@ -169,6 +185,7 @@ class TestAnglePixelConversion(unittest.TestCase):
             self.assertPixelErrorSurfaceAnglesLessThan(msg=msg)
             self.assertPixelErrorTthChiLessThan(msg=msg)
             self.assertGamDelRangeErrorLessThan(msg=msg)
+            self.assertQrangeValid()
         self.sxrddet.poni2 = 0.1
     
     def test_rot1(self):
@@ -178,6 +195,7 @@ class TestAnglePixelConversion(unittest.TestCase):
             self.assertPixelErrorSurfaceAnglesLessThan(msg=msg)
             self.assertPixelErrorTthChiLessThan(msg=msg)
             self.assertGamDelRangeErrorLessThan(msg=msg)
+            self.assertQrangeValid()
         self.sxrddet.rot1 = np.pi/20
     
     def test_rot2(self):
@@ -187,6 +205,7 @@ class TestAnglePixelConversion(unittest.TestCase):
             self.assertPixelErrorSurfaceAnglesLessThan(msg=msg)
             self.assertPixelErrorTthChiLessThan(msg=msg)
             self.assertGamDelRangeErrorLessThan(msg=msg)
+            self.assertQrangeValid()
         self.sxrddet.rot2 = -np.pi/20
         
     def test_rot3(self):
@@ -196,6 +215,7 @@ class TestAnglePixelConversion(unittest.TestCase):
             self.assertPixelErrorSurfaceAnglesLessThan(msg=msg)
             self.assertPixelErrorTthChiLessThan(msg=msg)
             self.assertGamDelRangeErrorLessThan(msg=msg)
+            self.assertQrangeValid()
         self.sxrddet.rot3 = 0
         
     def test_dist(self):
@@ -205,7 +225,11 @@ class TestAnglePixelConversion(unittest.TestCase):
             self.assertPixelErrorSurfaceAnglesLessThan(msg=msg)
             self.assertPixelErrorTthChiLessThan(msg=msg)
             self.assertGamDelRangeErrorLessThan(msg=msg)
+            self.assertQrangeValid()
         self.sxrddet.dist = 1.5
+        
+
+        
         
 """
 def test_del_gam_range():
