@@ -666,6 +666,57 @@ ub : gui for UB matrix and angle calculations
 
         #print('Number of integration curves: ' + str(numberOfPlots))
         #print('We can plot every ' + str(plotOnlyNth) + '-th curve.' )
+        
+        ro_name = "rocking_[%.2f %.2f %.2f]_H0_[%.2f %.2f %.2f]_H1" % (*refldict['H_0'], *refldict['H_1'])
+        suffix = ''
+        i = 0
+        while(self.activescanname + "/measurement/" + ro_name + suffix in self.database.nxfile):
+            suffix = "_%s" % i
+            i += 1
+        ro_name = ro_name + suffix
+        
+        auxcounters = {"@NX_class": u"NXcollection"}
+        for auxname in self.fscan.auxillary_counters:
+            if hasattr(self.fscan, auxname):
+                cntr = getattr(self.fscan, auxname)
+                if cntr is not None:
+                    auxcounters[auxname] = cntr
+            
+        if hasattr(self.fscan, "title"):
+            title = str(self.fscan.title)
+        else:
+            title = u"%s-scan" % self.fscan.axisname
+        
+        mu, om = self.getMuOm()
+        if len(np.asarray(om).shape) == 0:
+            om = np.full_like(mu,om)
+        if len(np.asarray(mu).shape) == 0:
+            mu = np.full_like(om,mu)
+                    
+        data = {self.activescanname:{
+                    "instrument": {
+                        "@NX_class": u"NXinstrument",
+                        "positioners": {
+                            "@NX_class": u"NXcollection",
+                            self.fscan.axisname: self.fscan.axis
+                        }
+                    },
+                    "auxillary" : auxcounters,
+                    "measurement": {
+                        "@NX_class": u"NXentry",
+                        "@default": ro_name ,
+                        ro_name : {
+                            "@NX_class": u"NXentry",
+                            "@default": None,
+                            "@orgui_meta": u"rocking"
+                        }
+                    },
+                    "title":u"%s" % title,
+                    "@NX_class": u"NXentry",
+                    "@default": u"measurement/%s" % ro_name,
+                    "@orgui_meta": u"scan"
+                }
+            }
 
         #plot and save data in database
         for d in range(croi1_all.shape[1]):
@@ -699,7 +750,7 @@ ub : gui for UB matrix and angle calculations
             # save data
             
             x, y = xylist[d] 
-            name1 = "rocking_%.5fs_[%.2f %.2f %.2f]_H0_[%.2f %.2f %.2f]_H1" % (refldict['s'][d], *refldict['H_0'], *refldict['H_1'])
+            name1 = "rocking_%.5fs_[%.2f %.2f %.2f]" % (refldict['s'][d], *(refldict['H_1']*refldict['s'][d] + refldict['H_0']))
             
             alpha1, delta1, gamma1, omega1, chi1, phi1 = refldict['angles'][d]
             sixc_angles_hkl = {
@@ -725,33 +776,14 @@ ub : gui for UB matrix and angle calculations
                 "HKL_sixc_angles" : sixc_angles_hkl
             }
             
-            if hasattr(self.fscan, "title"):
-                title = str(self.fscan.title)
-            else:
-                title = u"%s-scan" % self.fscan.axisname
-            
-            mu, om = self.getMuOm()
-            if len(np.asarray(om).shape) == 0:
-                om = np.full_like(mu,om)
-            if len(np.asarray(mu).shape) == 0:
-                mu = np.full_like(om,mu)
-            
             suffix = ''
             i = 0
 
-            while(self.activescanname + "/measurement/" + name1 + suffix in self.database.nxfile):
+            while(self.activescanname + "/measurement/" + ro_name + "/" + name1 + suffix in self.database.nxfile):
                 suffix = "_%s" % i
                 i += 1
+                
             availname1 = name1 + suffix
-
-                                                
-            auxcounters = {"@NX_class": u"NXcollection"}
-            for auxname in self.fscan.auxillary_counters:
-                if hasattr(self.fscan, auxname):
-                    cntr = getattr(self.fscan, auxname)
-                    if cntr is not None:
-                        auxcounters[auxname] = cntr
-                        
 
             x_coord1_a = xylist[:,0]
             y_coord1_a = xylist[:,1]
@@ -796,34 +828,15 @@ ub : gui for UB matrix and angle calculations
                 "@orgui_meta": u"roi"
             }
                 
-            data = {self.activescanname:{
-                        "instrument": {
-                            "@NX_class": u"NXinstrument",
-                            "positioners": {
-                                "@NX_class": u"NXcollection",
-                                self.fscan.axisname: self.fscan.axis
-                            }
-                        },
-                        "auxillary" : auxcounters,
-                        "measurement": {
-                            "@NX_class": u"NXentry",
-                            "@default": availname1 ,
-                        },
-                        "title":u"%s" % title,
-                        "@NX_class": u"NXentry",
-                        "@default": u"measurement/%s" % availname1,
-                        "@orgui_meta": u"scan"
-                    }
-                }
-                
+            data[self.activescanname]["measurement"][ro_name]["@default"] = availname1
             if np.any(cpixel1_a > 0.):
-                data[self.activescanname]["measurement"][availname1] = datas1
+                data[self.activescanname]["measurement"][ro_name][availname1] = datas1
                 if d % plotOnlyNth == 0:
                     self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
                                                     xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
                     
                     
-            self.database.add_nxdict(data)
+        self.database.add_nxdict(data)
         
                 
     def updatePlotItems(self, recalculate=True):
