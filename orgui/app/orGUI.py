@@ -70,6 +70,7 @@ from . import qutils
 from .QScanSelector import QScanSelector
 from .QReflectionSelector import QReflectionSelector, QReflectionAnglesDialog
 from .QUBCalculator import QUBCalculator
+from .peak1Dintegr import RockingPeakIntegrator
 from .ArrayTableDialog import ArrayTableDialog
 from .bgroi import RectangleBgROI
 from .database import DataBase
@@ -160,6 +161,9 @@ class orGUI(qt.QMainWindow):
         
         self.integrdataPlot.addDockWidget(qt.Qt.RightDockWidgetArea,dbdockwidget)
         
+        self.roPkIntegrTab = RockingPeakIntegrator(self.database)
+        
+        
 
         self.scanSelector.sigImageNoChanged.connect(self._onSliderValueChanged)
 
@@ -183,6 +187,7 @@ class orGUI(qt.QMainWindow):
         
         maincentralwidget.addTab(self.centralPlot,"Scan Image browser")
         maincentralwidget.addTab(self.integrdataPlot,"ROI integrated data")
+        maincentralwidget.addTab(self.roPkIntegrTab, "Rocking scan integrate")
         
         self.setCentralWidget(maincentralwidget)
         
@@ -707,8 +712,13 @@ ub : gui for UB matrix and angle calculations
                         "@default": ro_name ,
                         ro_name : {
                             "@NX_class": u"NXentry",
-                            "@default": None,
-                            "@orgui_meta": u"rocking"
+                            "@default": "rois",
+                            "@orgui_meta": u"rocking",
+                            "rois" : {
+                                "@NX_class": u"NXcollection",
+                                "@default": None,
+                                "@orgui_meta": u"roi rocking",
+                            }
                         }
                     },
                     "title":u"%s" % title,
@@ -825,12 +835,12 @@ ub : gui for UB matrix and angle calculations
                 "@signal" : u"counters/croibg",
                 "@axes": u"trajectory/axis",
                 "@title": self.activescanname + "_" + availname1,
-                "@orgui_meta": u"roi"
+                "@orgui_meta": u"roi rocking"
             }
                 
-            data[self.activescanname]["measurement"][ro_name]["@default"] = availname1
+            data[self.activescanname]["measurement"][ro_name]["rois"]["@default"] = availname1
             if np.any(cpixel1_a > 0.):
-                data[self.activescanname]["measurement"][ro_name][availname1] = datas1
+                data[self.activescanname]["measurement"][ro_name]["rois"][availname1] = datas1
                 if d % plotOnlyNth == 0:
                     self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
                                                     xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)

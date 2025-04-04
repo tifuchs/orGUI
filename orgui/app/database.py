@@ -35,7 +35,6 @@ import silx.gui.hdf5
 from silx.gui import icons
 from silx.gui.data import DataViewerFrame
 from silx.gui.hdf5.Hdf5TreeModel import Hdf5TreeModel
-from silx.gui.data import DataViewerFrame
 from silx.gui import qt
 import tempfile
 import silx.io.h5py_utils
@@ -158,6 +157,8 @@ class ConfigData(qt.QObject):
 
 
 class DataBase(qt.QMainWindow):
+    
+    sigChangeRockingScan = qt.Signal(object)
     
     def __init__(self, plot, parent=None):
         qt.QMainWindow.__init__(self, parent)
@@ -284,7 +285,11 @@ class DataBase(qt.QMainWindow):
         
         if obj.ntype is h5py.Group:
             meta = obj.h5py_object.attrs.get('orgui_meta', False)
-            if meta and meta == 'roi':
+            if meta and 'roi' in meta:
+                if 'rocking' in meta:
+                    action = qt.QAction("Show in rocking integration", menu)
+                    action.triggered.connect(lambda:  self.onShowRoIntegrate(obj))
+                    menu.addAction(action)
                 action = qt.QAction("rename", menu)
                 action.triggered.connect(lambda:  self.onRenameNode(obj.h5py_object))
                 menu.addAction(action)
@@ -293,11 +298,25 @@ class DataBase(qt.QMainWindow):
                 action.triggered.connect(lambda:  self.delete_node(obj.h5py_object))
                 menu.addAction(action)
                 
-            if meta and meta == 'scan':
+            elif meta and 'rocking' in meta:
+                action = qt.QAction("Show in rocking integration", menu)
+                action.triggered.connect(lambda: self.onShowRoIntegrate(obj))
+                menu.addAction(action)
+                action = qt.QAction("rename", menu)
+                action.triggered.connect(lambda:  self.onRenameNode(obj.h5py_object))
+                menu.addAction(action)
+                menu.addSeparator()
+                action = qt.QAction("delete", menu)
+                action.triggered.connect(lambda:  self.delete_node(obj.h5py_object))
+                menu.addAction(action)
+                
+            if meta and 'scan' in meta:
                 menu.addSeparator()
                 action = qt.QAction("delete", menu)
                 action.triggered.connect(lambda:  self.onDeleteScan(obj.h5py_object))
                 menu.addAction(action)
+                
+
             
         """    
         if obj.ntype is h5py.File:
@@ -316,8 +335,6 @@ class DataBase(qt.QMainWindow):
         except Exception as e:
             traceback.print_exc()
             print("Cannot plot data: %s" % e)
-    
-        
         
     def view_data_callback(self,obj):
         self.dataviewer.setData(obj)
@@ -430,10 +447,10 @@ class DataBase(qt.QMainWindow):
         self.hdf5model.insertH5pyObject(self.nxfile)
         self.view.expandToDepth(0)
 
-    def add_nxdict(self, nxentry):
+    def add_nxdict(self, nxentry, update_mode='add', h5path='/'):
         if self.nxfile is None:
             raise Exception("No database file open.")
-        dicttonx(nxentry, self.nxfile, update_mode='add')
+        dicttonx(nxentry, self.nxfile, h5path=h5path, update_mode='add')
         while(self.hdf5model.hasPendingOperations()):
             qt.QApplication.processEvents()
             time.sleep(0.01)
@@ -444,6 +461,24 @@ class DataBase(qt.QMainWindow):
         btn = qt.QMessageBox.question(self,"Delete scan?","Are you sure that you want to delete %s from the orgui database?" % obj.name.split("/")[-1])
         if btn == qt.QMessageBox.Yes:
             self.delete_node(obj)
+            
+    def onShowRoIntegrate(self, obj):
+        meta = obj.h5py_object.attrs.get('orgui_meta', False)
+        h5_obj = obj.h5py_object
+        while(h5_obj.name != '/'): # search for rocking scan group
+            meta = h5_obj.attrs.get('orgui_meta', False)
+            if meta and meta == 'rocking':
+                break
+            h5_obj = h5_obj.parent
+        else:
+            msgbox = qt.QMessageBox(qt.QMessageBox.Critical, 'Invalid rocking scan', 
+            'Not a rocking scan: %s.' % (dir_name),
+            qt.QMessageBox.Ok, self)
+            clickedbutton = msgbox.exec()
+            return # invalid dataset
+        
+        dir_name = h5_obj.name
+        self.sigChangeRockingScan.emit(dir_name)
         
     def delete_node(self, obj):
         basename = obj.name.split("/")[-1]

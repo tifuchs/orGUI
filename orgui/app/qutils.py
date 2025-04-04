@@ -61,7 +61,7 @@ class DataRangeSlider(qt.QWidget):
 
     def __init__(self, parent=None, data=None, unit=None):
         qt.QWidget.__init__(self, parent)
-        self._data = np.array([])
+        self._data = None
 
         # Use the font size as the icon size to avoid to create bigger buttons
         fontMetric = self.fontMetrics()
@@ -164,18 +164,26 @@ class DataRangeSlider(qt.QWidget):
 
     def _firstClicked(self):
         """Select first/lowest frame number"""
+        if self._data is None:
+            return
         self.setIndex(self.getRange()[0])
 
     def _previousClicked(self):
         """Select previous frame number"""
+        if self._data is None:
+            return
         self.setIndex(self.getIndex() - 1)
 
     def _nextClicked(self):
         """Select next frame number"""
+        if self._data is None:
+            return
         self.setIndex(self.getIndex() + 1)
 
     def _lastClicked(self):
         """Select last/highest frame number"""
+        if self._data is None:
+            return
         self.setIndex(self.getRange()[1] -1)
 
     def _textChangedSlot(self):
