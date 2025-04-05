@@ -83,6 +83,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.database = database
         
         self._currentRoInfo = {}
+        self._idx = 0
         
         dbdockwidget = qt.QDockWidget("Integrated data")
         
@@ -120,6 +121,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             mask=False,
             fit=True
         )
+        
         toolbar = qt.QToolBar()
         toolbar.addAction(control_actions.OpenGLAction(parent=toolbar, plot=self.plotROIselect))
         self.plotROIselect.addToolBar(toolbar)
@@ -127,6 +129,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.curveSlider = qutils.DataRangeSlider()
         
         self.roiwidget = CurvesROIWidget(self, "ROIs", self.plotROIselect)
+        
+        #self.roiwidget.sigROISignal
         
         #self.plotROIselect.removeToolBar(self.plotROIselect.toolBar())
         #self.plotROIselect.addToolBar(qt.Qt.LeftToolBarArea ,self.plotROIselect.toolBar())
@@ -136,13 +140,53 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.layout = qt.QVBoxLayout()
         self.mainwidget = qt.QWidget()
         
+
+        
+        self.zoomslider = qt.QSlider()
+        self.zoomslider.setOrientation(qt.Qt.Horizontal)
+        self.zoomslider.setEnabled(True)
+        self.zoomslider.setMinimum(0)
+        self.zoomslider.setMaximum(100)
+        self.zoomslider.setValue(10)
+        
+        self.zoom_menu = qt.QMenu()
+        
+        self.zoomwidget = qt.QWidgetAction(self.zoom_menu)
+        self.zoomwidget.setDefaultWidget(self.zoomslider)
+
+        self.zoom_menu.addAction(self.zoomwidget)
+        
+        #self.alpha_btn = qt.QToolButton(resources.getQicon("sum_image.png"),"slider")
+        self.zoom_btn = qt.QToolButton()
+        self.zoom_btn.setIcon(resources.getQicon("search"))
+        self.zoom_btn.setToolTip("set automatic zoom factor")
+        self.zoom_btn.setPopupMode(qt.QToolButton.InstantPopup)
+        self.zoom_btn.setMenu(self.zoom_menu)
+        
+        plotselecttools_bar = qt.QHBoxLayout()
+        plotselecttools_bar.addWidget(self.curveSlider)
+        plotselecttools_bar.addWidget(self.zoom_btn)
+        self.autozoom_checkbox = qt.QCheckBox("auto zoom")
+        self.autozoom_checkbox.setChecked(True)
+        plotselecttools_bar.addWidget(self.autozoom_checkbox)
+        
         _plotlayout = qt.QVBoxLayout()
         _plotlayout.addWidget(self.plotROIselect)
-        _plotlayout.addWidget(self.curveSlider)
+        _plotlayout.addLayout(plotselecttools_bar)
         
         self.layout.addLayout(_plotlayout, 2)
         #self.layout.addWidget(self.curveSlider, 1)
         self.layout.addWidget(self.roiwidget, 1)
+        
+
+        
+        #self.zoom_btn_act = qt.QWidgetAction(self)
+        #self.zoom_btn_act.setDefaultWidget(self.zoom_btn)
+        
+
+        #self.toolbar.addAction(self.showMaxAct)
+        #self.toolbar.addAction(self.showSumAct)
+        #self.toolbar.addAction(self.alpha_btn_act)
         
         
         
@@ -164,6 +208,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
         
         self.database.sigChangeRockingScan.connect(self.onChangeRockingScan)
         
+        self.zoomslider.valueChanged.connect(self.resetXZoomScaled)
+        
         self.dbside.addToolBar(toolbar)
         
         #self.curveSlider.setAxis(np.arange(100) / 10., "deg")
@@ -177,9 +223,14 @@ class RockingPeakIntegrator(qt.QMainWindow):
             self.database.add_nxdict(roi1D_info, update_mode='modify', h5path=ro_info['name'] + '/integration')
         
         self._currentRoInfo = ro_info
+        self._idx = 0
 
         self.curveSlider.setAxis(self._currentRoInfo['s'], "s")
         self.curveSlider.setIndex(0)
+        self.plotRoCurve(0)
+        self.plotROIselect.resetZoom()
+        if self.autozoom_checkbox.isChecked():
+            self.resetXZoomScaled(self.zoomslider.value())
 
 
     #ddict = {
@@ -194,40 +245,204 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.plotRoCurve(ddict['idx'])
         
     def get_ro_curve(self, idx):
-        spath = self._currentRoInfo['scanpath'][idx]
-        sc_h5 = self.database.nxfile[spath]
-        cnters = sc_h5["counters"]
+        name = self._currentRoInfo['name']
+        h5_obj = self.database.nxfile[name]
+        cnters = h5_obj["rois"]
         curve = {
             'axisname' : self._currentRoInfo['axisname'],
             'axis' : self._currentRoInfo['axis'],
-            'croibg' : cnters['croibg'][()],
-            'croibg_errors' : cnters['croibg_errors'][()]
+            'croibg' : cnters['croibg'][idx][()],
+            'croibg_errors' : cnters['croibg_errors'][idx][()]
         }
         return curve
         
     def plotRoCurve(self, idx):
         ro_curve = self.get_ro_curve(idx)
-        
         s = self._currentRoInfo['s'][idx]
         hkl = self._currentRoInfo['H_1'] * s + self._currentRoInfo['H_0']
         title = "Rocking scan at s = %s, HKL = [%.2f %.2f %.2f]" % (s, *hkl)
         
         self.plotROIselect.clear()
         
-        self.plotROIselect.addCurve(ro_curve['axis'], ro_curve['croibg'], legend=title, 
+        lbl = self.plotROIselect.addCurve(ro_curve['axis'], ro_curve['croibg'], legend=title, 
                            xlabel="%s / deg" % self._currentRoInfo['axisname'], 
                            ylabel='center ROI background subtracted / cnts', 
-                           yerror=ro_curve['croibg_errors'])
+                           yerror=ro_curve['croibg_errors'], resetzoom=False)
         
+        self.plotROIselect.setActiveCurve(lbl)
+        self._idx = idx
+                           
+        self.roiwidget.roiTable.clear()
+        
+        roi_dict = self.get_roi1D_info(idx)
+        
+        minfrom = np.inf
+        maxto = -np.inf
+        for key in roi_dict:
+            if key.startswith('sig'):
+                roi_d = roi_dict[key]
+                roi = ROI(key, fromdata=roi_d['from'], todata=roi_d['to'], type_=str(roi_d['type']))
+                minfrom = min(minfrom, roi_d['from'])
+                maxto = max(maxto, roi_d['to'])
+                self.roiwidget.roiTable.addRoi(roi)
+            elif key.startswith('bg'): # color?
+                roi_d = roi_dict[key]
+                roi = ROI(key, fromdata=roi_d['from'], todata=roi_d['to'], type_=str(roi_d['type']))
+                minfrom = min(minfrom, roi_d['from'])
+                maxto = max(maxto, roi_d['to'])
+                self.roiwidget.roiTable.addRoi(roi)
+        
+        # toDo: set from GUI
+        if self.autozoom_checkbox.isChecked():
+            self.resetXZoomScaled(self.zoomslider.value())
+    
+    def resetXZoomScaled(self, value):
+        try:
+            roi_dict = self.get_roi1D_info(self._idx)
+            minfrom = np.inf
+            maxto = -np.inf
+            for key in roi_dict:
+                if key.startswith('sig'):
+                    roi_d = roi_dict[key]
+                    minfrom = min(minfrom, roi_d['from'])
+                    maxto = max(maxto, roi_d['to'])
+                elif key.startswith('bg'): # color?
+                    roi_d = roi_dict[key]
+                    minfrom = min(minfrom, roi_d['from'])
+                    maxto = max(maxto, roi_d['to'])
+            if np.all(np.isfinite([minfrom, maxto])):
+                add_rnge = (maxto - minfrom) * ((value**1.5)/100)
+                self.plotROIselect.setGraphXLimits(minfrom - add_rnge, maxto + add_rnge)
+        except Exception as e:
+            print("Cannot zoom:" , e)
+            # can fail, add better error handling later!
+        
+                
+                
     
     def get_roi1D_info(self, idx):
         name = self._currentRoInfo['name']
-        sname = self._currentRoInfo['scans'][idx]
-        roipath = name + "/integration/" + sname
-        roi_dict = nxtodict(self.database.nxfile, path=roipath)
-        return roi_dict
+        h5_obj = self.database.nxfile[name]['integration']
+        
+        roi1Ddict = {}
+        for k in h5_obj:
+            if k.startswith('sig') or k.startswith('bg') :
+                roi1Ddict[k] = {
+                    'name' : k,
+                    'from' : h5_obj[k]['from'][idx][()],
+                    'to' : h5_obj[k]['to'][idx][()],
+                    'type' : 'signal',
+                    'fixed' : h5_obj[k]['fixed'][idx][()]
+                }
+        return roi1Ddict
 
     def estimate_roi1D_info(self, ro_info):
+        # ToDo make settings available from GUI 
+        
+        # estimate peak pos
+        axis_pk_pos = [] 
+        axis_pk_pos_idx = [] 
+
+        sc_h5 = self.database.nxfile[ro_info['name']]['rois']
+        if ro_info['axisname'] == 'mu':
+            pk_pos_exact = sc_h5['alpha_pk'][()]
+        elif ro_info['axisname'] == 'th':
+            pk_pos_exact = sc_h5['theta_pk'][()]
+        elif ro_info['axisname'] == 'chi':
+            pk_pos_exact = sc_h5['chi_pk'][()]
+        elif ro_info['axisname'] == 'phi':
+            pk_pos_exact = sc_h5['phi_pk'][()]
+        else:
+            raise ValueError("Cannot estimate peak position: unknown scan axis %s" % ro_info['axisname'])
+        #idx_pk = np.argmin(np.abs(sc_h5['axis'][()] - pk_pos_exact), axis=1)
+
+        # ToDo make settings available from GUI 
+        sig_width = 0.1 # deg
+        bg_1 = -0.2 , -0.1
+        bg_2 = 0.1 , 0.2
+        
+        roi1Ddict = {
+            "@NX_class": u"NXcollection",
+            "@info" : u"ROI information for the rocking scan integration",
+            "peakpos" : pk_pos_exact,
+            'sig_1' : {
+                    "@NX_class": u"NXcollection",
+                    'from' :  pk_pos_exact - 0.5*sig_width,
+                    'to' : pk_pos_exact + 0.5*sig_width,
+                    'fixed' : np.zeros_like(pk_pos_exact, dtype=bool)
+                },
+            'bg_1' : {
+                    "@NX_class": u"NXcollection",
+                    'from' :  pk_pos_exact + bg_1[0],
+                    'to' : pk_pos_exact + bg_1[1],
+                    'fixed' : np.zeros_like(pk_pos_exact, dtype=bool)
+                },
+            'bg_2' : {
+                    "@NX_class": u"NXcollection",
+                    'from' :  pk_pos_exact + bg_2[0],
+                    'to' : pk_pos_exact + bg_2[1],
+                    'fixed' : np.zeros_like(pk_pos_exact, dtype=bool)
+                }
+        }
+        
+        return roi1Ddict
+        
+        
+        
+    #def set_
+        
+    def onChangeRockingScan(self, name):
+        try:
+            self.set_roscan(name)
+        except Exception as e:
+            msgbox = qt.QMessageBox(qt.QMessageBox.Critical, 'Invalid rocking scan info', 
+            'Invalid or missig rocking scan info: %s.\n%s' % (name, e),
+            qt.QMessageBox.Ok, self)
+            msgbox.setDetailedText(traceback.format_exc())
+            clickedbutton = msgbox.exec()
+            return
+        
+        
+    def get_rocking_scan_info(self, name):
+        if name not in self.database.nxfile:
+            raise ValueError("scan %s is not in the database" % name)
+        
+        h5_obj = self.database.nxfile[name]
+        if 'orgui_meta' not in h5_obj.attrs or h5_obj.attrs['orgui_meta'] != 'rocking':
+            raise ValueError("scan %s is not a valid rocking scan" % name)
+
+        
+        scangroup = h5_obj.parent.parent
+        positioners = scangroup['instrument/positioners']
+        if len(positioners) > 1:
+            raise NotImplementedError("Multiple positioner changes are not yet implemented")
+        
+        axisname = list(positioners.keys())[0]
+        axis = positioners[axisname][()]
+        
+        H_1 = h5_obj["rois"]['H_1'][()]
+        H_0 = h5_obj["rois"]['H_0'][()]
+        
+        if not ( np.allclose(H_1.T[0], H_1.T[0][0]) and np.allclose(H_1.T[1], H_1.T[1][0]) and np.allclose(H_1.T[2], H_1.T[2][0]) ):
+            raise ValueError("Rocking scan H_1 mismatch: Are these multiple scans?")
+        
+        if not ( np.allclose(H_0.T[0], H_0.T[0][0]) and np.allclose(H_0.T[1], H_0.T[1][0]) and np.allclose(H_0.T[2], H_0.T[2][0])):
+            raise ValueError("Rocking scan H_0 mismatch: Are these multiple scans?")
+        
+        s_array = h5_obj["rois"]['s'][()]
+        
+        ddict = {
+            'name' : name,
+            'axisname' : axisname,
+            'axis' : axis,
+            's' : s_array,
+            'H_0' : H_0[0],
+            'H_1' : H_1[0]
+        }
+        return ddict
+    
+    
+    def __estimate_roi1D_info_old_manygroups(self, ro_info):
         # ToDo make settings available from GUI 
         
         # estimate peak pos
@@ -287,22 +502,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         return roi1Ddict
         
         
-        
-    #def set_
-        
-    def onChangeRockingScan(self, name):
-        try:
-            self.set_roscan(name)
-        except Exception as e:
-            msgbox = qt.QMessageBox(qt.QMessageBox.Critical, 'Invalid rocking scan info', 
-            'Invalid or missig rocking scan info: %s.\n%s' % (name, e),
-            qt.QMessageBox.Ok, self)
-            msgbox.setDetailedText(traceback.format_exc())
-            clickedbutton = msgbox.exec()
-            return
-        
-        
-    def get_rocking_scan_info(self, name):
+    def __get_rocking_scan_info_old_manygroups(self, name):
         if name not in self.database.nxfile:
             raise ValueError("scan %s is not in the database" % name)
         

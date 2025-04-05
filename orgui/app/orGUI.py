@@ -844,9 +844,142 @@ ub : gui for UB matrix and angle calculations
                 if d % plotOnlyNth == 0:
                     self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
                                                     xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
+
+        
+        
+        # lets keep legacy data structure for now
+            
+        data_2d_structured = {self.activescanname:{
+                    "instrument": {
+                        "@NX_class": u"NXinstrument",
+                        "positioners": {
+                            "@NX_class": u"NXcollection",
+                            self.fscan.axisname: self.fscan.axis
+                        }
+                    },
+                    "auxillary" : auxcounters,
+                    "measurement": {
+                        "@NX_class": u"NXentry",
+                        "@default": ro_name ,
+                        ro_name : {
+                            "@NX_class": u"NXentry",
+                            "@default": "rois",
+                            "@orgui_meta": u"rocking"
+                        }
+                    },
+                    "title":u"%s" % title,
+                    "@NX_class": u"NXentry",
+                    "@default": u"measurement/%s" % ro_name,
+                    "@orgui_meta": u"scan"
+                }
+            }
+        alpha = []; theta = []; delta = []; gamma = []; chi = []; phi = []; omega = []; 
+        alpha_pk = []; theta_pk = []; delta_pk = []; gamma_pk = []; chi_pk = []; phi_pk = []; omega_pk = []; 
+        x = []; y = []; h = []; k = []; l = []; 
+        croibg = []; croibg_errors = []; croi = []; bgroi = []; croi_pix = []; bgroi_pix = []; 
+        axis = []; s = []; H_0 = []; H_1 = []; HKL = []
+        
+        #from IPython import embed; embed()
+
+        for sc in data[self.activescanname]["measurement"][ro_name]["rois"]:
+            if sc.startswith('@'):
+                continue
+            try:
+                dsc = data[self.activescanname]["measurement"][ro_name]["rois"][sc]
+                
+                
+                
+                # 2D arrays
+                alpha.append(dsc["sixc_angles"]["alpha"])
+                theta.append(dsc["sixc_angles"]["theta"])
+                delta.append(dsc["sixc_angles"]["delta"])
+                gamma.append(dsc["sixc_angles"]["gamma"])
+                chi.append(dsc["sixc_angles"]["chi"])
+                phi.append(dsc["sixc_angles"]["phi"])
+                omega.append(dsc["sixc_angles"]["omega"])
+                
+                # 2D arrays
+                h.append(dsc["hkl"]["h"])
+                k.append(dsc["hkl"]["k"])
+                l.append(dsc["hkl"]["l"])
+                
+                # 2D arrays
+                croibg.append(dsc["counters"]["croibg"])
+                croibg_errors.append(dsc["counters"]["croibg_errors"])
+                croi.append(dsc["counters"]["croi"])
+                bgroi.append(dsc["counters"]["bgroi"])
+                croi_pix.append(dsc["counters"]["croi_pix"])
+                bgroi_pix.append(dsc["counters"]["bgroi_pix"])
+                
+                # 2D arrays
+                x.append(dsc["pixelcoord"]["x"])
+                y.append(dsc["pixelcoord"]["y"])
+                
+                axis.append(dsc["trajectory"]["axis"])
+                s.append(dsc["trajectory"]["s"]) # 1D array
+                H_1.append(dsc["trajectory"]["H_1"])
+                H_0.append(dsc["trajectory"]["H_0"])
+                HKL.append(dsc["trajectory"]["HKL"])
+                
+                # 1d Array
+                alpha_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["alpha"])
+                theta_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["theta"])
+                delta_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["delta"])
+                gamma_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["gamma"])
+                chi_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["chi"])
+                phi_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["phi"])
+                omega_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["omega"])
+            except Exception as e:
+                from IPython import embed; embed()
+                sys.exit(0)
+
+        
+        rois = {
+                "@NX_class": u"NXcollection",
+                "@default": "croibg",
+                "@orgui_meta": u"roi rocking",
+                "alpha" : np.vstack(alpha),
+                "theta" : np.vstack(theta),
+                "delta" : np.vstack(delta),
+                "gamma" : np.vstack(gamma),
+                "chi" : np.vstack(chi),
+                "phi" : np.vstack(phi),
+                "omega" : np.vstack(omega),
+                "h" : np.vstack(h),
+                "k" : np.vstack(k),
+                "l" : np.vstack(l),
+                "croibg" : np.vstack(croibg),
+                "croibg_errors" : np.vstack(croibg_errors),
+                "croi" : np.vstack(croi),
+                "bgroi" : np.vstack(bgroi),
+                "croi_pix" : np.vstack(croi_pix),
+                "bgroi_pix" : np.vstack(bgroi_pix),
+                "x" : np.vstack(x),
+                "y" : np.vstack(y),
+                "axis" : np.vstack(axis),
+                "H_1" : np.vstack(H_1),
+                "H_0" : np.vstack(H_0),
+                "HKL_pk" : np.vstack(HKL),
+                "s" : np.array(s),
+                "alpha_pk" : np.array(alpha_pk),
+                "theta_pk" : np.array(theta_pk),
+                "delta_pk" : np.array(delta_pk),
+                "gamma_pk" : np.array(gamma_pk),
+                "chi_pk" : np.array(chi_pk),
+                "phi_pk" : np.array(phi_pk),
+                "omega_pk" : np.array(omega_pk)
+            }
+        scsize = np.array(s).shape[0]
+        for t in rois:
+            if t.startswith('@'):
+                continue
+            if rois[t].shape[0] != scsize:
+                from IPython import embed; embed()
+                sys.exit(0)
+            
+        data_2d_structured[self.activescanname]["measurement"][ro_name]["rois"] = rois
                     
-                    
-        self.database.add_nxdict(data)
+        self.database.add_nxdict(data_2d_structured)
         
                 
     def updatePlotItems(self, recalculate=True):
