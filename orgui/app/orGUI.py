@@ -659,10 +659,10 @@ ub : gui for UB matrix and angle calculations
 
         progress.setValue(len(self.fscan))
 
-
-        numberOfPlots = xylist.shape[0]
+        currentPlotCount = len(self.integrdataPlot.getAllCurves())
+        numberOfNewPlots = xylist.shape[0]
         maxAmountOfPlots = 30
-        plotOnlyNth = (numberOfPlots // maxAmountOfPlots) + 1
+        plotOnlyNth = (numberOfNewPlots // max((maxAmountOfPlots-currentPlotCount),1)) + 1
 
         #print('Number of integration curves: ' + str(numberOfPlots))
         #print('We can plot every ' + str(plotOnlyNth) + '-th curve.' )
@@ -1488,7 +1488,7 @@ ub : gui for UB matrix and angle calculations
         
     def _onScanChanged(self,sel_list):
         self.resetZoom = True
-        print(sel_list)
+        #print(sel_list)
         self.activescanname = "scan"
         if isinstance(sel_list,list): 
             self.sel_list = sel_list
