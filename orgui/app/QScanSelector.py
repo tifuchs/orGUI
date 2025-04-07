@@ -685,10 +685,42 @@ class QScanSelector(qt.QMainWindow):
                         qt.QMessageBox.Ok, self)
             clickedbutton = msgbox.exec()
             return
+        
+        # initialize dict to return scan information
         ddict = dict()
         ddict['event'] = "loadScan"
+
+        # must contain scan filepath
         ddict['file'] = self.pathedit.text()
+
+        # additional information
         ddict['scanno'] = self.scannoBox.value()
+        ddict['name'] = os.path.splitext(os.path.basename(self.pathedit.text()))[0] + '.' + str(self.scannoBox.value())
+        ddict['beamtime'] = self.btid.currentText()
+
+        # fill dict with information from active h5 node - if it matches loaded scan
+        nodes = list(self.hdfTreeView.selectedH5Nodes())
+        if not nodes == []:
+            obj = nodes[0]
+            
+            if obj.local_filename == self.pathedit.text() and obj.basename[0] == self.scannoBox.value():
+                ddict['node'] = obj
+
+                # beamtime auto detect
+                dt = dateparser.parse(obj.h5py_target['start_time'][()])
+                btid = backends.getBeamtimeId(dt)
+                ddict['beamtime'] = btid
+
+                # set detected beamtime in GUI
+                if btid in [self.btid.itemText(i) for i in range(self.btid.count())]:
+                    self.btid.setCurrentIndex(self.btid.findText(btid))
+
+                # update name to match scheme from _onNEXUSDoubleClicked function
+                ddict2 = backends.fscans[btid].parse_h5_node(obj)
+                ddict['name'] = ddict2['name']
+            else:
+                print('active node does not match selected file')
+
         self.sigScanChanged.emit(ddict)
         
     def _onLoadBackend(self):
