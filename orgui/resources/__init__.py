@@ -47,3 +47,6 @@ def getSplashScreen(version_number=None):
     
 def getDiffractometerPath():
     return os.path.join(_iconpath, "diffractometer_v3.png")
+    
+def getPath(name):
+    return os.path.join(_iconpath, name)

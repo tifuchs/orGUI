@@ -2941,7 +2941,7 @@ class QDiffractometerImageDialog(qt.QDialog):
         qt.QDialog.__init__(self, parent)
         verticalLayout = qt.QVBoxLayout(self)
         verticalLayout.setContentsMargins(0, 0, 0, 0)
-        img = AspectRatioPixmapLabel(self)
+        img = qutils.AspectRatioPixmapLabel(self)
         pixmp = qt.QPixmap(resources.getDiffractometerPath())
         #img.setScaledContents(False)
         img.setPixmap(pixmp)
@@ -2957,36 +2957,7 @@ class QDiffractometerImageDialog(qt.QDialog):
         #verticalLayout.addWidget(svg)
         self.setLayout(verticalLayout)
 
-class AspectRatioPixmapLabel(qt.QLabel):
-    def __init__(self, parent=None):
-        qt.QLabel.__init__(self, parent)
-        self.setMinimumSize(1,1)
-        self.setScaledContents(False)
-        self.pix = None
-        
-    def setPixmap(self, p):
-        self.pix = p
-        super().setPixmap(self.scaledPixmap())
-        
-    def scaledPixmap(self):
-        return self.pix.scaled(self.size(), qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
 
-    def heightForWidth(self, width):
-        if self.pix is None:
-            return self.height()
-        else:
-            return int(( self.pix.height()* width) /self.pix.width())
-
-    def sizeHint(self):
-        app = qt.QApplication.instance()
-        screenGeometry = app.primaryScreen().availableGeometry()
-        w = int(screenGeometry.width()/3)
-        w_s = self.width()
-        return qt.QSize( max(w, w_s), self.heightForWidth(w))
-        
-    def resizeEvent(self,e):
-        if self.pix is not None:
-            super().setPixmap(self.scaledPixmap())
             
 class AboutDialog(qt.QDialog):
     def __init__(self,version, msg='' ,parent=None):

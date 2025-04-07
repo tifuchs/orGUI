@@ -67,6 +67,8 @@ import numpy as np
 from ..datautils.xrayutils import HKLVlieg, CTRcalc
 from ..datautils.xrayutils import ReciprocalNavigation as rn
 
+from functools import partial
+
 from silx.io.dictdump import dicttonx ,nxtodict
 
 import sys
@@ -81,6 +83,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
     def __init__(self, database, parent=None):
         qt.QMainWindow.__init__(self, parent)
         self.database = database
+        fontMetric = self.fontMetrics()
+        iconSize = qt.QSize(fontMetric.height(), fontMetric.height())
         
         self._currentRoInfo = {}
         self._idx = 0
@@ -88,6 +92,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
         dbdockwidget = qt.QDockWidget("Integrated data")
         
         self.dbside = qt.QMainWindow()
+        
+        self._addRoiDialog = ROICreatorDialog(np.array([0,0]), "unknown")
+        self._addAllRoiDialog =  IntegrationEstimator(np.array([0,0]), "unknown")
+        
+        self.integrationCorrection = IntegrationCorrectionsDialog()
         
         
         self.dbview = silx.gui.hdf5.Hdf5TreeView()
@@ -129,6 +138,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.curveSlider = qutils.DataRangeSlider()
         
         self.roiwidget = CurvesROIWidget(self, "ROIs", self.plotROIselect)
+        self.roiwidget.roiTable.clear()
         
         #self.roiwidget.sigROISignal
         
@@ -176,7 +186,98 @@ class RockingPeakIntegrator(qt.QMainWindow):
         
         self.layout.addLayout(_plotlayout, 2)
         #self.layout.addWidget(self.curveSlider, 1)
-        self.layout.addWidget(self.roiwidget, 1)
+        
+        
+        # ROIS
+        
+        bottom_layout = qt.QHBoxLayout()
+        bottom_layout.addWidget(self.roiwidget)
+        
+        roi_edit_layout = qt.QVBoxLayout()
+        
+        anchorROIsGroup = qt.QGroupBox("Anchor ROIs")
+        anchorROIsGroupLayout = qt.QHBoxLayout()
+        
+        self.anchorROIButton = qt.QPushButton()
+        self.anchorROIButton.setIcon(resources.getQicon("anchor-ROI"))
+        self.anchorROIButton.setIconSize(iconSize)
+        self.anchorROIButton.setCheckable(True)
+        
+        self.anchorROIButton.toggled.connect(self.onAnchorBtnToggled)
+        
+        
+        self.previousROIButton = qt.QPushButton()
+        self.previousROIButton.setIcon(icons.getQIcon("previous"))
+        self.previousROIButton.setIconSize(iconSize)
+        self.nextROIButton = qt.QPushButton()
+        self.nextROIButton.setIcon(icons.getQIcon("next"))
+        self.nextROIButton.setIconSize(iconSize)
+        
+        anchorROIsGroupLayout.addWidget(self.anchorROIButton)
+        anchorROIsGroupLayout.addStretch()
+        anchorROIsGroupLayout.addWidget(self.previousROIButton)
+        anchorROIsGroupLayout.addWidget(self.nextROIButton)
+        
+        anchorROIsGroup.setLayout(anchorROIsGroupLayout)
+        
+        roi_edit_layout.addWidget(anchorROIsGroup)
+        
+        modifyROIsGroup = qt.QGroupBox("Modify ROIs")
+        modifyROIsGroupLayout = qt.QHBoxLayout()
+        
+        self.addAllROIButton = qt.QPushButton("Add All")
+        self.addAllROIButton.clicked.connect(self.onAddAllROI)
+        
+        #self.estimateROIButton.setIcon(icons.getQIcon("previous"))
+        #self.estimateROIButton.setIconSize(iconSize)
+        
+        self.addROIButton = qt.QPushButton("Add")
+        self.addROIButton.clicked.connect(self.onAddROI)
+        #self.addROIButton.setIcon(icons.getQIcon("previous"))
+        #self.addROIButton.setIconSize(iconSize)
+        
+        self.deleteROIButton = qt.QPushButton("Delete")
+        self.deleteROIButton.clicked.connect(self.onDeleteROI)
+        #self.deleteROIButton.setIcon(icons.getQIcon("previous"))
+        #self.deleteROIButton.setIconSize(iconSize)
+        self.deleteAllROIButton = qt.QPushButton("Delete All")
+        self.deleteAllROIButton.clicked.connect(self.onDeleteAllROI)
+        
+        
+        modifyROIsGroupLayout.addWidget(self.addAllROIButton)
+        modifyROIsGroupLayout.addWidget(self.addROIButton)
+        modifyROIsGroupLayout.addWidget(self.deleteROIButton)
+        modifyROIsGroupLayout.addWidget(self.deleteAllROIButton)
+        
+        modifyROIsGroup.setLayout(modifyROIsGroupLayout)
+        
+        roi_edit_layout.addWidget(modifyROIsGroup)
+        
+        integrateOptionsGroup = qt.QGroupBox("Integrate options")
+        integrateOptionsGroupLayout = qt.QHBoxLayout()
+        
+        self.lorentzButton = qt.QCheckBox("Lorentz")
+        self.footprintButton = qt.QCheckBox("footprint")
+        self.footprintOptionsButton = qt.QPushButton("options")
+        self.footprintOptionsButton.clicked.connect(self.integrationCorrection.exec)
+        
+        
+        integrateOptionsGroupLayout.addWidget(self.lorentzButton)
+        integrateOptionsGroupLayout.addWidget(self.footprintButton)
+        integrateOptionsGroupLayout.addWidget(self.footprintOptionsButton)
+        
+        integrateOptionsGroup.setLayout(integrateOptionsGroupLayout)
+        
+        roi_edit_layout.addWidget(integrateOptionsGroup)
+        
+        self.integrateButton = qt.QPushButton("integrate")
+        
+        roi_edit_layout.addWidget(self.integrateButton)
+        
+        bottom_layout.addLayout(roi_edit_layout)
+        
+        
+        self.layout.addLayout(bottom_layout, 1)
         
 
         
@@ -215,12 +316,14 @@ class RockingPeakIntegrator(qt.QMainWindow):
         #self.curveSlider.setAxis(np.arange(100) / 10., "deg")
         
         self.curveSlider.sigValueChanged.connect(self.onSliderValueChanged)
+        self.roiwidget.sigROISignal.connect(lambda d: print(d))
+
         
     def set_roscan(self, name):
         ro_info = self.get_rocking_scan_info(name)
-        if ro_info['name'] + '/integration' not in self.database.nxfile:
-            roi1D_info = self.estimate_roi1D_info(ro_info)
-            self.database.add_nxdict(roi1D_info, update_mode='modify', h5path=ro_info['name'] + '/integration')
+        #if ro_info['name'] + '/integration' not in self.database.nxfile:
+        #    roi1D_info = self.estimate_roi1D_info(ro_info)
+        #    self.database.add_nxdict(roi1D_info, update_mode='modify', h5path=ro_info['name'] + '/integration')
         
         self._currentRoInfo = ro_info
         self._idx = 0
@@ -244,6 +347,20 @@ class RockingPeakIntegrator(qt.QMainWindow):
     def onSliderValueChanged(self, ddict):
         self.plotRoCurve(ddict['idx'])
         
+    def onRoiChanged(self, roi):
+        #roi_dict = self.get_roi1D_info(self._idx)
+        new_roi_dict = self.roiwidget.roiTable.roidict[roi].toDict()
+        if self._currentRoInfo:
+            #from IPython import embed; embed()
+            if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
+                h5grp = self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+                if roi in h5grp:
+                    h5grp[roi]['anchor'][self._idx] = True
+                    h5grp[roi]['from'][self._idx] = new_roi_dict['from']
+                    h5grp[roi]['to'][self._idx] = new_roi_dict['to']
+        with qt.QSignalBlocker(self.anchorROIButton):
+            self.anchorROIButton.setChecked(True)
+        
     def get_ro_curve(self, idx):
         name = self._currentRoInfo['name']
         h5_obj = self.database.nxfile[name]
@@ -255,6 +372,135 @@ class RockingPeakIntegrator(qt.QMainWindow):
             'croibg_errors' : cnters['croibg_errors'][idx][()]
         }
         return curve
+        
+    def onAnchorBtnToggled(self, state):
+        if self._currentRoInfo:
+            if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
+                h5grp = self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+                for k in h5grp:
+                    if k.startswith('sig') or k.startswith('bg'):
+                        h5grp[k]['anchor'][self._idx] = state
+                    
+        print(state)
+        
+        
+    def onAddAllROI(self):
+        if self._currentRoInfo:
+            try:
+                self._addAllRoiDialog.set_axis(self._currentRoInfo['axis'], self._currentRoInfo['axisname'])
+                if self._addAllRoiDialog.exec() == qt.QDialog.Accepted:
+                    roidict = self._addAllRoiDialog.get_ranges()
+                    
+                    if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
+                        del self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+                        
+                    ro_info = self.get_rocking_scan_info(self._currentRoInfo['name'])
+                    sc_h5 = self.database.nxfile[ro_info['name']]['rois']
+                    if ro_info['axisname'] == 'mu':
+                        pk_pos_exact = sc_h5['alpha_pk'][()]
+                    elif ro_info['axisname'] == 'th':
+                        pk_pos_exact = sc_h5['theta_pk'][()]
+                    elif ro_info['axisname'] == 'chi':
+                        pk_pos_exact = sc_h5['chi_pk'][()]
+                    elif ro_info['axisname'] == 'phi':
+                        pk_pos_exact = sc_h5['phi_pk'][()]
+                    else:
+                        raise ValueError("Cannot estimate peak position: unknown scan axis %s" % ro_info['axisname'])
+                
+                        
+                    roi1Ddict = {
+                        "@NX_class": u"NXcollection",
+                        "@info" : u"ROI information for the rocking scan integration",
+                        "peakpos" : pk_pos_exact,
+                        'sig_1' : {
+                                "@NX_class": u"NXcollection",
+                                'from' :  pk_pos_exact + roidict['sig_1']['from'],
+                                'to' : pk_pos_exact + roidict['sig_1']['to'],
+                                'anchor' : np.zeros_like(pk_pos_exact, dtype=bool)
+                            },
+                        'bg_1' : {
+                                "@NX_class": u"NXcollection",
+                                'from' :  pk_pos_exact + roidict['bg_1']['from'],
+                                'to' : pk_pos_exact + roidict['bg_1']['to'],
+                                'anchor' : np.zeros_like(pk_pos_exact, dtype=bool)
+                            },
+                        'bg_2' : {
+                                "@NX_class": u"NXcollection",
+                                'from' :  pk_pos_exact + roidict['bg_2']['from'],
+                                'to' : pk_pos_exact + roidict['bg_2']['to'],
+                                'anchor' : np.zeros_like(pk_pos_exact, dtype=bool)
+                            }
+                    }
+                    
+                    self.database.add_nxdict(roi1Ddict, update_mode='modify', h5path=ro_info['name'] + '/integration')
+                    self.plotRoCurve(self._idx)
+            except Exception as e:
+                qutils.warning_detailed_message(self, "Cannot add ROI", "Cannot add ROI: %s" % e, traceback.format_exc())
+        
+    def onAddROI(self):
+        if self._currentRoInfo:
+            try:
+                self._addRoiDialog.set_axis(self._currentRoInfo['axis'], self._currentRoInfo['axisname'])
+                if self._addRoiDialog.exec() == qt.QDialog.Accepted:
+                    roidict = self._addRoiDialog.get_roi()
+                    ro_info = self.get_rocking_scan_info(self._currentRoInfo['name'])
+                    sc_h5 = self.database.nxfile[ro_info['name']]['rois']
+                    if ro_info['axisname'] == 'mu':
+                        pk_pos_exact = sc_h5['alpha_pk'][()]
+                    elif ro_info['axisname'] == 'th':
+                        pk_pos_exact = sc_h5['theta_pk'][()]
+                    elif ro_info['axisname'] == 'chi':
+                        pk_pos_exact = sc_h5['chi_pk'][()]
+                    elif ro_info['axisname'] == 'phi':
+                        pk_pos_exact = sc_h5['phi_pk'][()]
+                    else:
+                        raise ValueError("Cannot estimate peak position: unknown scan axis %s" % ro_info['axisname'])
+                
+                    roi_dict = self.get_roi1D_info(self._idx) # check existing ROIS
+                    
+                    prefix = 'sig' if roidict['signal'] else 'bg'
+                    no = 0
+                    for k in roi_dict:
+                        if k.startswith(prefix):
+                            no = max(no, int(k.split('_')[1]))
+                            
+                    no += 1
+                            
+                    roi1Ddict = {
+                        "@NX_class": u"NXcollection",
+                        "@info" : u"ROI information for the rocking scan integration",
+                        "peakpos" : pk_pos_exact,
+                        '%s_%s' % (prefix, no) : {
+                                "@NX_class": u"NXcollection",
+                                'from' :  pk_pos_exact + roidict['from'],
+                                'to' : pk_pos_exact + roidict['to'],
+                                'anchor' : np.zeros_like(pk_pos_exact, dtype=bool)
+                        }
+                    }
+                    self.database.add_nxdict(roi1Ddict, update_mode='modify', h5path=ro_info['name'] + '/integration')
+                    self.plotRoCurve(self._idx)
+            except Exception as e:
+                qutils.warning_detailed_message(self, "Cannot add ROI", "Cannot add ROI: %s" % e, traceback.format_exc())
+    
+    def onDeleteROI(self):
+        if self._currentRoInfo:
+            roi_name = self.roiwidget.currentRoi.getName()
+            if qt.QMessageBox.Yes == qt.QMessageBox.question(self, "Delete ROI", "Are you sure you want to delete ROI %s?" % roi_name):
+                if self._currentRoInfo['name'] + '/integration/' + roi_name in self.database.nxfile:
+                    del self.database.nxfile[self._currentRoInfo['name'] + '/integration/' + roi_name]
+                    self.plotRoCurve(self._idx)
+                else:
+                    qutils.warning_detailed_message(self, "Cannot delete ROI", "Cannot delete ROI: no such ROI in database", "")
+    
+    def onDeleteAllROI(self):
+        if self._currentRoInfo:
+            if qt.QMessageBox.Yes == qt.QMessageBox.question(self, "Delete All ROIs", "Are you sure you want to delete all ROIs?"):
+                if self._currentRoInfo['name'] + '/integration/'in self.database.nxfile:
+                    del self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+                    self.plotRoCurve(self._idx)
+                else:
+                    qutils.warning_detailed_message(self, "Cannot delete ROIs", "Cannot delete ROI: no ROIs in database", "")            
+            
         
     def plotRoCurve(self, idx):
         ro_curve = self.get_ro_curve(idx)
@@ -275,7 +521,15 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.roiwidget.roiTable.clear()
         
         roi_dict = self.get_roi1D_info(idx)
-        
+        with qt.QSignalBlocker(self.anchorROIButton):
+            for k in roi_dict:
+                dk = roi_dict[k]
+                if dk['anchor']:
+                    self.anchorROIButton.setChecked(True)
+                    break
+            else:
+                self.anchorROIButton.setChecked(False)
+            
         minfrom = np.inf
         maxto = -np.inf
         for key in roi_dict:
@@ -285,16 +539,19 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 minfrom = min(minfrom, roi_d['from'])
                 maxto = max(maxto, roi_d['to'])
                 self.roiwidget.roiTable.addRoi(roi)
+                roi.sigChanged.connect(partial(self.onRoiChanged, key))
             elif key.startswith('bg'): # color?
                 roi_d = roi_dict[key]
                 roi = ROI(key, fromdata=roi_d['from'], todata=roi_d['to'], type_=str(roi_d['type']))
                 minfrom = min(minfrom, roi_d['from'])
                 maxto = max(maxto, roi_d['to'])
                 self.roiwidget.roiTable.addRoi(roi)
+                roi.sigChanged.connect(partial(self.onRoiChanged, key))
         
         # toDo: set from GUI
         if self.autozoom_checkbox.isChecked():
-            self.resetXZoomScaled(self.zoomslider.value())
+            if np.all(np.isfinite([minfrom, maxto])):
+                self.resetXZoomScaled(self.zoomslider.value())
     
     def resetXZoomScaled(self, value):
         try:
@@ -314,7 +571,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 add_rnge = (maxto - minfrom) * ((value**1.5)/100)
                 self.plotROIselect.setGraphXLimits(minfrom - add_rnge, maxto + add_rnge)
         except Exception as e:
-            print("Cannot zoom:" , e)
+            pass
+            #print("Cannot zoom:" , e)
             # can fail, add better error handling later!
         
                 
@@ -322,70 +580,73 @@ class RockingPeakIntegrator(qt.QMainWindow):
     
     def get_roi1D_info(self, idx):
         name = self._currentRoInfo['name']
-        h5_obj = self.database.nxfile[name]['integration']
-        
-        roi1Ddict = {}
-        for k in h5_obj:
-            if k.startswith('sig') or k.startswith('bg') :
-                roi1Ddict[k] = {
-                    'name' : k,
-                    'from' : h5_obj[k]['from'][idx][()],
-                    'to' : h5_obj[k]['to'][idx][()],
-                    'type' : 'signal',
-                    'fixed' : h5_obj[k]['fixed'][idx][()]
-                }
-        return roi1Ddict
-
-    def estimate_roi1D_info(self, ro_info):
-        # ToDo make settings available from GUI 
-        
-        # estimate peak pos
-        axis_pk_pos = [] 
-        axis_pk_pos_idx = [] 
-
-        sc_h5 = self.database.nxfile[ro_info['name']]['rois']
-        if ro_info['axisname'] == 'mu':
-            pk_pos_exact = sc_h5['alpha_pk'][()]
-        elif ro_info['axisname'] == 'th':
-            pk_pos_exact = sc_h5['theta_pk'][()]
-        elif ro_info['axisname'] == 'chi':
-            pk_pos_exact = sc_h5['chi_pk'][()]
-        elif ro_info['axisname'] == 'phi':
-            pk_pos_exact = sc_h5['phi_pk'][()]
+        if 'integration' in self.database.nxfile[name]:
+            h5_obj = self.database.nxfile[name]['integration']
+            
+            roi1Ddict = {}
+            for k in h5_obj:
+                if k.startswith('sig') or k.startswith('bg') :
+                    roi1Ddict[k] = {
+                        'name' : k,
+                        'from' : h5_obj[k]['from'][idx][()],
+                        'to' : h5_obj[k]['to'][idx][()],
+                        'type' : 'signal',
+                        'anchor' : h5_obj[k]['anchor'][idx][()]
+                    }
         else:
-            raise ValueError("Cannot estimate peak position: unknown scan axis %s" % ro_info['axisname'])
-        #idx_pk = np.argmin(np.abs(sc_h5['axis'][()] - pk_pos_exact), axis=1)
-
-        # ToDo make settings available from GUI 
-        sig_width = 0.1 # deg
-        bg_1 = -0.2 , -0.1
-        bg_2 = 0.1 , 0.2
-        
-        roi1Ddict = {
-            "@NX_class": u"NXcollection",
-            "@info" : u"ROI information for the rocking scan integration",
-            "peakpos" : pk_pos_exact,
-            'sig_1' : {
-                    "@NX_class": u"NXcollection",
-                    'from' :  pk_pos_exact - 0.5*sig_width,
-                    'to' : pk_pos_exact + 0.5*sig_width,
-                    'fixed' : np.zeros_like(pk_pos_exact, dtype=bool)
-                },
-            'bg_1' : {
-                    "@NX_class": u"NXcollection",
-                    'from' :  pk_pos_exact + bg_1[0],
-                    'to' : pk_pos_exact + bg_1[1],
-                    'fixed' : np.zeros_like(pk_pos_exact, dtype=bool)
-                },
-            'bg_2' : {
-                    "@NX_class": u"NXcollection",
-                    'from' :  pk_pos_exact + bg_2[0],
-                    'to' : pk_pos_exact + bg_2[1],
-                    'fixed' : np.zeros_like(pk_pos_exact, dtype=bool)
-                }
-        }
-        
+            roi1Ddict = {}
         return roi1Ddict
+
+    #def estimate_roi1D_info(self, ro_info):
+    #    # ToDo make settings available from GUI 
+    #    
+    #    # estimate peak pos
+    #    axis_pk_pos = [] 
+    #    axis_pk_pos_idx = [] 
+    #
+    #    sc_h5 = self.database.nxfile[ro_info['name']]['rois']
+    #    if ro_info['axisname'] == 'mu':
+    #        pk_pos_exact = sc_h5['alpha_pk'][()]
+    #    elif ro_info['axisname'] == 'th':
+    #        pk_pos_exact = sc_h5['theta_pk'][()]
+    #    elif ro_info['axisname'] == 'chi':
+    #        pk_pos_exact = sc_h5['chi_pk'][()]
+    #    elif ro_info['axisname'] == 'phi':
+    #        pk_pos_exact = sc_h5['phi_pk'][()]
+    #    else:
+    #        raise ValueError("Cannot estimate peak position: unknown scan axis %s" % ro_info['axisname'])
+    #    #idx_pk = np.argmin(np.abs(sc_h5['axis'][()] - pk_pos_exact), axis=1)
+    #
+    #    # ToDo make settings available from GUI 
+    #    sig_width = 0.1 # deg
+    #    bg_1 = -0.2 , -0.1
+    #    bg_2 = 0.1 , 0.2
+    #    
+    #    roi1Ddict = {
+    #        "@NX_class": u"NXcollection",
+    #        "@info" : u"ROI information for the rocking scan integration",
+    #        "peakpos" : pk_pos_exact,
+    #        'sig_1' : {
+    #                "@NX_class": u"NXcollection",
+    #                'from' :  pk_pos_exact - 0.5*sig_width,
+    #                'to' : pk_pos_exact + 0.5*sig_width,
+    #                'fixed' : np.zeros_like(pk_pos_exact, dtype=bool)
+    #            },
+    #        'bg_1' : {
+    #                "@NX_class": u"NXcollection",
+    #                'from' :  pk_pos_exact + bg_1[0],
+    #                'to' : pk_pos_exact + bg_1[1],
+    #                'fixed' : np.zeros_like(pk_pos_exact, dtype=bool)
+    #            },
+    #        'bg_2' : {
+    #                "@NX_class": u"NXcollection",
+    #                'from' :  pk_pos_exact + bg_2[0],
+    #                'to' : pk_pos_exact + bg_2[1],
+    #                'fixed' : np.zeros_like(pk_pos_exact, dtype=bool)
+    #            }
+    #    }
+    #    
+    #    return roi1Ddict
         
         
         
@@ -442,120 +703,266 @@ class RockingPeakIntegrator(qt.QMainWindow):
         return ddict
     
     
-    def __estimate_roi1D_info_old_manygroups(self, ro_info):
-        # ToDo make settings available from GUI 
+class IntegrationCorrectionsDialog(qt.QDialog):
+    def __init__(self, parent=None):
+        qt.QDialog.__init__(self, parent)
+        verticalLayout = qt.QVBoxLayout(self)
+        verticalLayout.setContentsMargins(0, 0, 0, 0)
+        img = qutils.AspectRatioPixmapLabel(self)
+        pixmp = qt.QPixmap(resources.getPath("incident_corrections.png"))
+        img.setPixmap(pixmp)
         
-        # estimate peak pos
-        axis_pk_pos = [] 
-        axis_pk_pos_idx = [] 
-        for sc in ro_info['scanpath']:
-            sc_h5 = self.database.nxfile[sc]
-            sixc_angles_pk = sc_h5['trajectory/HKL_sixc_angles']
-            if ro_info['axisname'] == 'mu':
-                pk_pos_exact = sixc_angles_pk['alpha'][()]
-            elif ro_info['axisname'] == 'th':
-                pk_pos_exact = sixc_angles_pk['theta'][()]
-            else:
-                raise ValueError("Cannot estimate peak position: unknown scan axis %s" % ro_info['axisname'])
-            idx_pk = np.argmin(np.abs(ro_info['axis'] - pk_pos_exact))
-            
-            axis_pk_pos.append(pk_pos_exact)
-            axis_pk_pos_idx.append(idx_pk)
+        verticalLayout.addWidget(img)
+        
+        layout = qt.QGridLayout()
+        
+        self._L_save = 5
+        self._beam_save = 20
+        
+        layout.addWidget(qt.QLabel("Sample size L:"),0, 0)
 
-        axis_pk_pos = np.array(axis_pk_pos)
-        axis_pk_pos_idx = np.array(axis_pk_pos_idx)
+        self.L = qt.QDoubleSpinBox()
+        self.L.setRange(0.00001, 1000000)
+        self.L.setDecimals(4)
+        self.L.setSuffix(u" mm")
+        self.L.setValue(5)
+        layout.addWidget(self.L, 0,1)
         
-        # ToDo make settings available from GUI 
-        sig_width = 0.1 # deg
-        bg_1 = -0.2 , -0.1
-        bg_2 = 0.1 , 0.2
+        layout.addWidget(qt.QLabel("beam size (FWHM):"),1, 0)
+        self.beam = qt.QDoubleSpinBox()
+        self.beam.setRange(0.000001, 1000000)
+        self.beam.setDecimals(4)
+        self.beam.setSuffix(u" microns")
+        self.beam.setValue(20)
+        layout.addWidget(self.beam, 1,1)
         
-        roi1Ddict = {}
-        for i, sc in enumerate(ro_info['scans']):
-            roi1Ddict[sc] = {
-                "@NX_class": u"NXcollection",
-                "@info" : u"ROI information for the rocking scan integration",
-                "peak_position" : axis_pk_pos[i]
-            }
-            roi1Ddict[sc]['sigROI_1'] = {
-                'name' : 'sigROI_1',
-                'from' : axis_pk_pos[i] - 0.5*sig_width,
-                'to' : axis_pk_pos[i] + 0.5*sig_width,
-                'type' : 'signal',
-                "@NX_class": u"NXcollection"
-            }
-            roi1Ddict[sc]['bgROI_1'] = {
-                'name' : 'bgROI_1',
-                'from' : axis_pk_pos[i] + bg_1[0],
-                'to' : axis_pk_pos[i] + bg_1[1],
-                'type' : 'signal',
-                "@NX_class": u"NXcollection"
-            }
-            roi1Ddict[sc]['bgROI_2'] = {
-                'name' : 'bgROI_2',
-                'from' : axis_pk_pos[i] + bg_2[0],
-                'to' : axis_pk_pos[i] + bg_2[1],
-                'type' : 'signal',
-                "@NX_class": u"NXcollection"
-            }
+
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
+        layout.addWidget(buttons,2,0,1,-1)
         
-        return roi1Ddict
+        buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.onOk)
+        buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.onCancel)
+        
+        verticalLayout.addLayout(layout)
+        
+        self.setLayout(verticalLayout)
+        
+    def onOk(self):
+        self._L_save = self.L.value()
+        self._beam_save = self.beam.value()
+        self.accept()
+        
+    def onCancel(self):
+        self.L.setValue(self._L_save)
+        self.beam.setValue(self._beam_save)
+        self.reject()
+        
+
+
+class IntegrationEstimator(qt.QDialog):
+
+    
+    def __init__(self,axis, axisname, parent=None):
+        qt.QDialog.__init__(self, parent)
+        
+        layout = qt.QGridLayout()
+        
+        self._scan_label = qt.QLabel("%s-scan: from %s to %s\nroi ranges will be set relative to calculated peak position" % (axisname, axis[0], axis[-1]))
+        layout.addWidget(self._scan_label,0,0, 1, -1)
+        layout.addWidget(qt.QLabel("center roi:"),1, 0)
+        layout.addWidget(qt.QLabel("from (rel):"),1, 1)
+        layout.addWidget(qt.QLabel("to (rel):"),1, 3)
+        
+        layout.addWidget(qt.QLabel("bg roi 1:"),2,0)
+        layout.addWidget(qt.QLabel("from (rel):"),2, 1)
+        layout.addWidget(qt.QLabel("to (rel):"),2, 3)
+        
+        layout.addWidget(qt.QLabel("bg roi 2:"),3,0)
+        layout.addWidget(qt.QLabel("from (rel):"),3, 1)
+        layout.addWidget(qt.QLabel("to (rel):"),3, 3)
+
+        self.croi_from = qt.QDoubleSpinBox()
+        self.croi_from.setRange(-1000000, 1000000)
+        self.croi_from.setDecimals(4)
+        self.croi_from.setSuffix(u" °")
+        self.croi_from.setValue(-0.1)
+        layout.addWidget(self.croi_from, 1,2)
+        
+        self.croi_to = qt.QDoubleSpinBox()
+        self.croi_to.setRange(-1000000, 1000000)
+        self.croi_to.setDecimals(4)
+        self.croi_to.setSuffix(u" °")
+        self.croi_to.setValue(0.1)
+        layout.addWidget(self.croi_to, 1,4)
+        
+        self.bgroi1_from = qt.QDoubleSpinBox()
+        self.bgroi1_from.setRange(-1000000, 1000000)
+        self.bgroi1_from.setDecimals(4)
+        self.bgroi1_from.setSuffix(u" °")
+        self.bgroi1_from.setValue(-0.3)
+        layout.addWidget(self.bgroi1_from, 2,2)
+        
+        self.bgroi1_to = qt.QDoubleSpinBox()
+        self.bgroi1_to.setRange(-1000000, 1000000)
+        self.bgroi1_to.setDecimals(4)
+        self.bgroi1_to.setSuffix(u" °")
+        self.bgroi1_to.setValue(-0.12)
+        layout.addWidget(self.bgroi1_to, 2,4)
+        
+        self.bgroi2_from = qt.QDoubleSpinBox()
+        self.bgroi2_from.setRange(-1000000, 1000000)
+        self.bgroi2_from.setDecimals(4)
+        self.bgroi2_from.setSuffix(u" °")
+        self.bgroi2_from.setValue(0.12)
+        layout.addWidget(self.bgroi2_from, 3,2)
+        
+        self.bgroi2_to = qt.QDoubleSpinBox()
+        self.bgroi2_to.setRange(-1000000, 1000000)
+        self.bgroi2_to.setDecimals(4)
+        self.bgroi2_to.setSuffix(u" °")
+        self.bgroi2_to.setValue(0.3)
+        layout.addWidget(self.bgroi2_to, 3,4)
         
         
-    def __get_rocking_scan_info_old_manygroups(self, name):
-        if name not in self.database.nxfile:
-            raise ValueError("scan %s is not in the database" % name)
+        layout.addWidget(qt.QLabel("Attention: This will reset and override all existing ROIs!"),4,0, 1, -1)
         
-        h5_obj = self.database.nxfile[name]
-        if 'orgui_meta' not in h5_obj.attrs or h5_obj.attrs['orgui_meta'] != 'rocking':
-            raise ValueError("scan %s is not a valid rocking scan" % name)
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
+        layout.addWidget(buttons,5,0, 1,-1)
         
-        scans = np.array(list(h5_obj["rois"].keys()))
+        buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.onOk)
+        buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
         
-        scangroup = h5_obj.parent.parent
-        positioners = scangroup['instrument/positioners']
-        if len(positioners) > 1:
-            raise NotImplementedError("Multiple positioner changes are not yet implemented")
+        self.setLayout(layout)
         
-        axisname = list(positioners.keys())[0]
-        axis = positioners[axisname][()]
+    def set_axis(self,axis, axisname):
+        self._scan_label.setText("%s-scan: from %s to %s, roi ranges will be set relative to calculated peak position" % (axisname, axis[0], axis[-1]))
         
-        H_1 = h5_obj["rois"][scans[0]]['trajectory/H_1'][()]
-        H_0 = h5_obj["rois"][scans[0]]['trajectory/H_0'][()]
+    def _verify_ranges(self):
+        if self.croi_from.value() > self.croi_to.value():
+            raise ValueError("Invalid input of center roi: from %s > to %s" % (self.croi_from.value(),self.croi_to.value()) )
+        if self.bgroi1_from.value() > self.bgroi1_to.value():
+            raise ValueError("Invalid input of bg roi 1: from %s > to %s" % (self.bgroi1_from.value(),self.bgroi1_to.value()) )
+        if self.bgroi2_from.value() > self.bgroi2_to.value():
+            raise ValueError("Invalid input of bg roi 2: from %s > to %s" % (self.bgroi2_from.value(),self.bgroi2_to.value()) )
+        return True
         
-        s_array = []
-        for sc in scans:
-            s = h5_obj["rois"][sc]['trajectory/s'][()]
-            s_array.append(s)
-            if not np.all(np.isclose(h5_obj["rois"][sc]['trajectory/H_1'][()], H_1)):
-                raise ValueError("Rocking scan H_1 mismatch: is: %s, expected: %s. Are these multiple scans?" % 
-                    (h5_obj["rois"][sc]['trajectory/H_1'][()], H_1) )
-            if not np.all(np.isclose(h5_obj["rois"][sc]['trajectory/H_0'][()], H_0)):
-                raise ValueError("Rocking scan H_0 mismatch: is: %s, expected: %s. Are these multiple scans?" % 
-                    (h5_obj["rois"][sc]['trajectory/H_0'][()], H_0) )
-        
-        s_array = np.array(s_array)
-        order = np.argsort(s_array)
-        
-        scans = scans[order]
-        s_array = s_array[order]
-        
-        fullscanspath = []
-        for sc in scans:
-            fullscanspath.append(name + "/rois/" + sc)
-        
+    def get_ranges(self):
+        self._verify_ranges()
         ddict = {
-            'name' : name,
-            'axisname' : axisname,
-            'axis' : axis,
-            'scans' : scans,
-            'scanpath' : fullscanspath,
-            's' : s_array,
-            'H_0' : H_0,
-            'H_1' : H_1
+            'sig_1' : {
+                'name' : 'sig_1',
+                'from' : self.croi_from.value(),
+                'to' : self.croi_to.value()
+            },
+            'bg_1' : {
+                'name' : 'bg_1',
+                'from' : self.bgroi1_from.value(),
+                'to' : self.bgroi1_to.value()
+            },
+            'bg_2' : {
+                'name' : 'bg_2',
+                'from' : self.bgroi2_from.value(),
+                'to' : self.bgroi2_to.value()
+            }
         }
         return ddict
         
+        
+    def onOk(self):
+        try:
+            self._verify_ranges()
+        except Exception as e:
+            qt.QMessageBox.warning(self, "Invalid input", str(e))
+            return
+        self.accept()
+        
+        
+class ROICreatorDialog(qt.QDialog):
+
+    
+    def __init__(self,axis, axisname, parent=None):
+        qt.QDialog.__init__(self, parent)
+        
+        layout = qt.QGridLayout()
+        
+        self._scan_label = qt.QLabel("%s-scan: from %s to %s, roi ranges will be set relative to calculated peak position" % (axisname, axis[0], axis[-1]))
+        layout.addWidget(self._scan_label,0,0, 1, -1)
+        
+        
+        
+        layout.addWidget(qt.QLabel("roi:"),1, 0)
+        layout.addWidget(qt.QLabel("from (rel):"),1, 1)
+        layout.addWidget(qt.QLabel("to (rel):"),1, 3)
+
+        self.roi_from = qt.QDoubleSpinBox()
+        self.roi_from.setRange(-1000000, 1000000)
+        self.roi_from.setDecimals(4)
+        self.roi_from.setSuffix(u" °")
+        self.roi_from.setValue(-0.1)
+        layout.addWidget(self.roi_from, 1,2)
+        
+        self.roi_to = qt.QDoubleSpinBox()
+        self.roi_to.setRange(-1000000, 1000000)
+        self.roi_to.setDecimals(4)
+        self.roi_to.setSuffix(u" °")
+        self.roi_to.setValue(0.1)
+        layout.addWidget(self.roi_to, 1,4)
+        
+        checkboxlayout = qt.QHBoxLayout()
+        
+        
+        self.signalCheckbox = qt.QCheckBox("Signal")
+        self.backgroundCheckbox = qt.QCheckBox("Background")
+        
+        self.btngroup = qt.QButtonGroup()
+        self.btngroup.addButton(self.signalCheckbox)
+        self.btngroup.addButton(self.backgroundCheckbox)
+        self.btngroup.setExclusive(True)
+        
+        self.signalCheckbox.setChecked(True)
+        
+        checkboxlayout.addWidget(qt.QLabel("ROI type:"))
+        checkboxlayout.addWidget(self.signalCheckbox)
+        checkboxlayout.addWidget(self.backgroundCheckbox)
+        
+        layout.addLayout(checkboxlayout, 2, 0, 1, -1)
+        
+        
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
+        layout.addWidget(buttons,3,0,1,-1)
+        
+        buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.onOk)
+        buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
+        
+        self.setLayout(layout)
+        
+    def set_axis(self,axis, axisname):
+        self._scan_label.setText("%s-scan: from %s to %s, roi ranges will be set relative to calculated peak position" % (axisname, axis[0], axis[-1]))
+        
+    def _verify_ranges(self):
+        if self.roi_from.value() > self.roi_to.value():
+            raise ValueError("Invalid input of roi: from %s > to %s" % (self.roi_from.value(),self.roi_to.value()) )
+        return True
+        
+    def get_roi(self):
+        self._verify_ranges()
+        signal = self.signalCheckbox.isChecked()
+        
+        ddict = {
+            'from' : self.roi_from.value(),
+            'to' : self.roi_to.value(),
+            'signal' : signal
+        }
+        return ddict
+        
+        
+    def onOk(self):
+        try:
+            self._verify_ranges()
+        except Exception as e:
+            qt.QMessageBox.warning(self, "Invalid input", str(e))
+            return
+        self.accept()
         
 class CurvesROIWidget(qt.QWidget):
     """
@@ -604,16 +1011,6 @@ class CurvesROIWidget(qt.QWidget):
         layout = qt.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-
-        #widgetAllCheckbox = qt.QWidget(parent=self)
-        #self._showAllCheckBox = qt.QCheckBox("show all ROI", parent=widgetAllCheckbox)
-        #widgetAllCheckbox.setLayout(qt.QHBoxLayout())
-        #spacer = qt.QWidget(parent=widgetAllCheckbox)
-        #spacer.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
-        #widgetAllCheckbox.layout().addWidget(spacer)
-        #widgetAllCheckbox.layout().addWidget(self._showAllCheckBox)
-        #layout.addWidget(widgetAllCheckbox)
-
         self.roiTable = ROITable(self, plot=plot)
         rheight = self.roiTable.horizontalHeader().sizeHint().height()
         self.roiTable.setMinimumHeight(4 * rheight)
@@ -622,53 +1019,6 @@ class CurvesROIWidget(qt.QWidget):
         #self._showAllCheckBox.toggled.connect(self.roiTable.showAllMarkers)
         self.roiTable.showAllMarkers(True)
 
-        hbox = qt.QWidget(self)
-        hboxlayout = qt.QHBoxLayout(hbox)
-        hboxlayout.setContentsMargins(0, 0, 0, 0)
-        hboxlayout.setSpacing(0)
-
-        hboxlayout.addStretch(0)
-
-        self.addButton = qt.QPushButton(hbox)
-        self.addButton.setText("Add ROI")
-        self.addButton.setToolTip("Create a new ROI")
-        self.delButton = qt.QPushButton(hbox)
-        self.delButton.setText("Delete ROI")
-        self.addButton.setToolTip("Remove the selected ROI")
-        self.resetButton = qt.QPushButton(hbox)
-        self.resetButton.setText("Reset")
-        self.addButton.setToolTip(
-            "Clear all created ROIs. We only let the " "default ROI"
-        )
-
-        hboxlayout.addWidget(self.addButton)
-        hboxlayout.addWidget(self.delButton)
-        hboxlayout.addWidget(self.resetButton)
-
-        hboxlayout.addStretch(0)
-
-        self.loadButton = qt.QPushButton(hbox)
-        self.loadButton.setText("Load")
-        self.loadButton.setToolTip("Load ROIs from a .ini file")
-        self.saveButton = qt.QPushButton(hbox)
-        self.saveButton.setText("Save")
-        self.loadButton.setToolTip("Save ROIs to a .ini file")
-        hboxlayout.addWidget(self.loadButton)
-        hboxlayout.addWidget(self.saveButton)
-        layout.setStretchFactor(self.roiTable, 1)
-        layout.setStretchFactor(hbox, 0)
-
-        layout.addWidget(hbox)
-
-        # Signal / Slot connections
-        self.addButton.clicked.connect(self._add)
-        self.delButton.clicked.connect(self._del)
-        self.resetButton.clicked.connect(self._reset)
-
-        self.loadButton.clicked.connect(self._load)
-        self.saveButton.clicked.connect(self._save)
-
-        self.roiTable.activeROIChanged.connect(self._emitCurrentROISignal)
 
         self._isConnected = False  # True if connected to plot signals
         self._isInit = False
@@ -921,6 +1271,7 @@ class CurvesROIWidget(qt.QWidget):
             self.__lastSigROISignal = ddict
             self.sigROISignal.emit(ddict)
 
+            
     @property
     def currentRoi(self):
         return self.roiTable.activeRoi

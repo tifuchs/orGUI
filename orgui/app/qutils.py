@@ -49,7 +49,36 @@ def information_detailed_message(parent, title, text, detailed_text, buttons=qt.
     return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Information, buttons=buttons)
 
 
+class AspectRatioPixmapLabel(qt.QLabel):
+    def __init__(self, parent=None):
+        qt.QLabel.__init__(self, parent)
+        self.setMinimumSize(1,1)
+        self.setScaledContents(False)
+        self.pix = None
+        
+    def setPixmap(self, p):
+        self.pix = p
+        super().setPixmap(self.scaledPixmap())
+        
+    def scaledPixmap(self):
+        return self.pix.scaled(self.size(), qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
 
+    def heightForWidth(self, width):
+        if self.pix is None:
+            return self.height()
+        else:
+            return int(( self.pix.height()* width) /self.pix.width())
+
+    def sizeHint(self):
+        app = qt.QApplication.instance()
+        screenGeometry = app.primaryScreen().availableGeometry()
+        w = int(screenGeometry.width()/3)
+        w_s = self.width()
+        return qt.QSize( max(w, w_s), self.heightForWidth(w))
+        
+    def resizeEvent(self,e):
+        if self.pix is not None:
+            super().setPixmap(self.scaledPixmap())
 
 
 class DataRangeSlider(qt.QWidget):
