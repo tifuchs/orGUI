@@ -64,12 +64,13 @@ from .database import DataBase
 from .. import resources
 
 import numpy as np
+from scipy import special
 from ..datautils.xrayutils import HKLVlieg, CTRcalc
 from ..datautils.xrayutils import ReciprocalNavigation as rn
 
 from functools import partial
 
-from silx.io.dictdump import dicttonx ,nxtodict
+from silx.io.dictdump import dicttonx ,nxtodict, h5todict
 
 import sys
 
@@ -209,11 +210,17 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.previousROIButton = qt.QPushButton()
         self.previousROIButton.setIcon(icons.getQIcon("previous"))
         self.previousROIButton.setIconSize(iconSize)
+        self.previousROIButton.clicked.connect(self.onToPreviousAnchor)
         self.nextROIButton = qt.QPushButton()
         self.nextROIButton.setIcon(icons.getQIcon("next"))
         self.nextROIButton.setIconSize(iconSize)
+        self.nextROIButton.clicked.connect(self.onToNextAnchor)
+        
+        self.fitAnchorsButton = qt.QPushButton("Fit between anchors")
+        self.fitAnchorsButton.clicked.connect(self.fit_anchors_along_rod)
         
         anchorROIsGroupLayout.addWidget(self.anchorROIButton)
+        anchorROIsGroupLayout.addWidget(self.fitAnchorsButton)
         anchorROIsGroupLayout.addStretch()
         anchorROIsGroupLayout.addWidget(self.previousROIButton)
         anchorROIsGroupLayout.addWidget(self.nextROIButton)
@@ -271,6 +278,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         roi_edit_layout.addWidget(integrateOptionsGroup)
         
         self.integrateButton = qt.QPushButton("integrate")
+        self.integrateButton.clicked.connect(self.integrate)
         
         roi_edit_layout.addWidget(self.integrateButton)
         
@@ -344,6 +352,346 @@ class RockingPeakIntegrator(qt.QMainWindow):
     #        "value" : self._data[idx],
     #        "id": id(self),
     #    }
+    
+    def onToNextAnchor(self):
+        if self._currentRoInfo and self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
+            roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
+            anchors_all = []
+            for roikey in roi_info:
+                if roikey.startswith('sig') or roikey.startswith('bg'):
+                    rdict = roi_info[roikey]
+                    anchors = np.nonzero(rdict['anchor'])[0]
+                    anchors_all.append(anchors)
+            anchors_all = np.sort(np.unique(np.concatenate(anchors_all)))
+            
+            anchors_next = anchors_all[anchors_all > self._idx]
+            if anchors_next.size > 0:
+                self.plotRoCurve(anchors_next[0])
+            
+    def onToPreviousAnchor(self):
+        if self._currentRoInfo and self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
+            roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
+            anchors_all = []
+            for roikey in roi_info:
+                if roikey.startswith('sig') or roikey.startswith('bg'):
+                    rdict = roi_info[roikey]
+                    anchors = np.nonzero(rdict['anchor'])[0]
+                    anchors_all.append(anchors)
+            anchors_all = np.sort(np.unique(np.concatenate(anchors_all)))
+            
+            anchors_prev = anchors_all[anchors_all < self._idx]
+            if anchors_prev.size > 0:
+                self.plotRoCurve(anchors_prev[-1])
+        
+    
+    
+    #def get_anchors(self):
+        
+    
+    def fit_anchors_along_rod(self):
+        if self._currentRoInfo and self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
+            roih5grp = self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+            roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
+            pk_pos_exact = roi_info["peakpos"]
+            axis = self._currentRoInfo['axis']
+            for roikey in roi_info:
+                if roikey.startswith('sig') or roikey.startswith('bg'):
+                    rdict = roi_info[roikey]
+                    anchors = np.nonzero(rdict['anchor'])[0]
+                    if anchors.size == 0:
+                        continue
+                    from_ar_anchors = rdict['from'][anchors] - pk_pos_exact[anchors]
+                    to_ar_anchors = rdict['to'][anchors] - pk_pos_exact[anchors]
+                    
+                    from_ar = np.zeros(rdict['from'].size)
+                    to_ar = np.zeros(rdict['to'].size)
+                    
+                    # constant to first anchor 
+                    idx_prev = 0
+                    from_ar[:anchors[idx_prev]] = pk_pos_exact[:anchors[idx_prev]] + from_ar_anchors[idx_prev]
+                    to_ar[:anchors[idx_prev]] = pk_pos_exact[:anchors[idx_prev]] + to_ar_anchors[idx_prev]
+                    if anchors.size > 0:
+                        for idx in range(1,anchors.size):
+                            slope = (from_ar_anchors[idx] - from_ar_anchors[idx_prev]) / ( axis[anchors[idx]] - axis[anchors[idx_prev]] )
+                            from_tmp = slope * (axis[anchors[idx_prev]: anchors[idx]] - axis[anchors[idx_prev]] ) 
+                            from_ar[anchors[idx_prev]: anchors[idx]] = (from_tmp + from_ar_anchors[idx_prev]) + pk_pos_exact[anchors[idx_prev]: anchors[idx]]
+                            
+                            slope = (to_ar_anchors[idx] - to_ar_anchors[idx_prev]) / ( axis[anchors[idx]] - axis[anchors[idx_prev]] )
+                            to_tmp = slope * (axis[anchors[idx_prev]: anchors[idx]] - axis[anchors[idx_prev]] ) 
+                            to_ar[anchors[idx_prev]: anchors[idx]] = (to_tmp + to_ar_anchors[idx_prev]) + pk_pos_exact[anchors[idx_prev]: anchors[idx]]
+                            
+                            idx_prev = idx
+                    
+                    #constant from last anchor
+                    from_ar[anchors[idx_prev]:] = pk_pos_exact[anchors[idx_prev]:] + from_ar_anchors[idx_prev]
+                    to_ar[anchors[idx_prev]:] = pk_pos_exact[anchors[idx_prev]:] + to_ar_anchors[idx_prev]
+                    
+                    roih5grp[roikey]['from'][:] = from_ar
+                    roih5grp[roikey]['to'][:] = to_ar
+            self.plotRoCurve(self._idx)
+        
+    
+    def integrate(self):
+        if not self._currentRoInfo:
+            return
+        curves = self.get_all_ro_curves()
+        name = self._currentRoInfo['name']
+        h5_obj = self.database.nxfile[name]
+        cnters = h5_obj["rois"]
+        
+        s_array = cnters['s'][()]
+        alpha = np.deg2rad(cnters['alpha'][()])
+        #alpha_pk = cnters['alpha_pk'][()]
+        delta = np.deg2rad(cnters['delta'][()])
+        gamma = np.deg2rad(cnters['gamma'][()])
+        
+        axis = curves['axis']
+        if self.lorentzButton.isChecked():
+            if curves['axisname'] == 'mu':
+                C_Lor = 1/np.sin(2*alpha)
+                C_rod = np.cos(gamma)
+            elif curves['axisname'] == 'th':
+                C_Lor = 1 /(np.sin(delta) * np.cos(alpha) * np.cos(gamma))
+                C_rod = np.cos(gamma)
+            else:
+                raise NotImplementedError()
+        else:
+            C_Lor = 1.
+            C_rod = 1.
+        
+        if self.footprintButton.isChecked():
+            
+            def total_flux_sample(alpha_i, L, sigma):
+                arg = ((L * np.sin(alpha_i)) / (np.sqrt(2) * sigma)) * 0.5
+                return (1 / 2) * (special.erf(arg) - special.erf(-arg))
+                
+            L = self.integrationCorrection.L.value() * 1e-3 # sample size (mm)
+            beamsize = self.integrationCorrection.beam.value() * 1e-6 # FWHM (mum)
+            
+            sigma_beam = beamsize / (2*np.sqrt(2 * np.log(2)))
+            
+            C_flux_on_sample = total_flux_sample(alpha, L, sigma_beam)
+            
+            C_illum_area = (np.sqrt(2 * np.pi)* sigma_beam * C_flux_on_sample) / (L * np.sin(alpha))
+            
+        else:
+            C_flux_on_sample = 1.
+            C_illum_area = 1.
+            
+            
+        
+            
+
+        roih5grp = self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+        roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
+        
+        int_data = {}
+        for roikey in roi_info:
+            if roikey.startswith('sig') or roikey.startswith('bg'):
+                int_data[roikey] = {
+                    'cnts' : [],
+                    'cnts_errors' : [],
+                    'raw_cnts' : [],
+                    'raw_cnts_errors' : [],
+                    'int_interval' : [],
+                    'C_Lor' : [],
+                    'C_rod' : [],
+                    'C_flux_on_sample' : [],
+                    'C_illum_area' : []
+                }
+                
+        deltaaxis = np.gradient(axis)
+        
+        progress = qt.QProgressDialog("Integrating rocking scans","abort",0,s_array.size,self)
+        progress.setWindowModality(qt.Qt.WindowModal)
+        
+        for i, s in enumerate(s_array):
+            croibg = curves['croibg'][i]
+            croibg_errors = curves['croibg_errors'][i]
+            
+            for roikey in int_data:
+                roi = roi_info[roikey]
+                idx_from = np.argmin(np.abs(axis - roi['from'][i]))
+                idx_to = np.argmin(np.abs(axis - roi['to'][i]))
+                int_interval = abs(axis[idx_to] - axis[idx_from])
+                int_data[roikey]['int_interval'].append(int_interval)
+                
+                cnts = croibg[idx_from:idx_to]
+                cnts_errors = croibg_errors[idx_from:idx_to]
+                
+                C_corr = np.ones(cnts.size,dtype=float)
+                if self.lorentzButton.isChecked():
+                    int_data[roikey]['C_Lor'].append( np.mean(C_Lor[i][idx_from:idx_to]) )
+                    int_data[roikey]['C_rod'].append( np.mean(C_rod[i][idx_from:idx_to]) )
+                
+                if self.footprintButton.isChecked():
+                    int_data[roikey]['C_flux_on_sample'].append( np.mean(C_flux_on_sample[i][idx_from:idx_to]) )
+                    int_data[roikey]['C_illum_area'].append( np.mean(C_illum_area[i][idx_from:idx_to]) )
+                    C_corr *= C_flux_on_sample[i][idx_from:idx_to] * C_illum_area[i][idx_from:idx_to]
+                    
+                I_raw = np.trapz(cnts, axis[idx_from:idx_to])
+                I_corr = np.trapz(cnts / C_corr , axis[idx_from:idx_to])
+                
+                I_raw_error = np.sum(cnts_errors * deltaaxis[idx_from:idx_to])
+                I_corr_error = np.sum((cnts_errors / C_corr) * deltaaxis[idx_from:idx_to])
+                
+                int_data[roikey]['raw_cnts'].append(I_raw)
+                int_data[roikey]['raw_cnts_errors'].append(I_raw_error)
+                
+                int_data[roikey]['cnts'].append(I_corr)
+                int_data[roikey]['cnts_errors'].append(I_corr_error)
+            
+            progress.setValue(i)
+            if progress.wasCanceled():
+                break
+        progress.setValue(s_array.size)
+        
+        for roikey in int_data:
+            for d in list(int_data[roikey].keys()):
+                int_data[roikey][d] = np.array(int_data[roikey][d])
+        
+        # signals:
+        
+        croi = np.zeros(s_array.size,dtype=float)
+        croi_errors = np.zeros(s_array.size,dtype=float)
+        raw_croi = np.zeros(s_array.size,dtype=float)
+        raw_croi_errors = np.zeros(s_array.size,dtype=float)
+        sig_interval = np.zeros(s_array.size,dtype=float)
+        C_Lorentz = np.zeros(s_array.size,dtype=float)
+        C_rod_intersect = np.zeros(s_array.size,dtype=float)
+        
+        for roikey in int_data:
+            if roikey.startswith('sig'):
+                sig_interval += int_data[roikey]['int_interval']
+                
+        for roikey in int_data:
+            if roikey.startswith('sig'):
+                croi += int_data[roikey]['cnts']
+                croi_errors += int_data[roikey]['cnts_errors']**2
+                raw_croi += int_data[roikey]['raw_cnts']
+                raw_croi_errors += int_data[roikey]['raw_cnts_errors']**2
+                if self.lorentzButton.isChecked():
+                    C_Lorentz += int_data[roikey]['C_Lor'] * (int_data[roikey]['int_interval'] / sig_interval)
+                    C_rod_intersect += int_data[roikey]['C_rod'] * (int_data[roikey]['int_interval'] / sig_interval)
+        
+        raw_croi_errors = np.sqrt(raw_croi_errors)
+        croi_errors = np.sqrt(croi_errors)
+        
+        
+        bgroi = np.zeros(s_array.size,dtype=float)
+        bgroi_errors = np.zeros(s_array.size,dtype=float)
+        raw_bgroi = np.zeros(s_array.size,dtype=float)
+        raw_bgroi_errors = np.zeros(s_array.size,dtype=float)
+        bg_interval = np.zeros(s_array.size,dtype=float)
+        
+        for roikey in int_data:
+            if roikey.startswith('bg'):
+                bg_interval += int_data[roikey]['int_interval']
+                
+        for roikey in int_data:
+            if roikey.startswith('bg'):
+                ratio = (sig_interval / bg_interval) * (int_data[roikey]['int_interval'] / bg_interval)
+                bgroi += int_data[roikey]['cnts'] * ratio
+                bgroi_errors += (int_data[roikey]['cnts_errors'] * ratio)**2 # should improve error propagation here!
+                raw_bgroi += int_data[roikey]['raw_cnts'] * ratio
+                raw_bgroi_errors += (int_data[roikey]['raw_cnts_errors'] * ratio)**2
+        
+        raw_bgroi_errors = np.sqrt(raw_croi_errors)
+        bgroi_errors = np.sqrt(croi_errors)
+        
+        croibg = croi - bgroi # already normalized bg
+        croibg_errors = np.sqrt(croi_errors**2 + bgroi_errors**2)
+                
+        raw_croibg = raw_croi - raw_bgroi # already normalized bg
+        raw_croibg_errors = np.sqrt(raw_croi_errors**2 + raw_bgroi_errors**2)
+        
+        if self.lorentzButton.isChecked():
+            F2_hkl = croibg / (C_Lorentz * C_rod_intersect)
+            F2_hkl_errors = raw_croibg_errors / (C_Lorentz * C_rod_intersect)
+        
+        
+        int_data["@NX_class"] = u"NXdetector"
+        
+        H_1 = cnters['H_1'][0][()]
+        H_0 = cnters['H_0'][0][()]
+
+        traj1 = {
+            "@NX_class": u"NXcollection",
+            "@direction" : u" Integrated rocking scan along H_1*s + H_0 in reciprocal space",
+            "H_1"  : H_1,
+            "H_0" : H_0,
+            "s" : s_array
+        }
+
+        suffix = ''
+        i = 0
+        name1 = str(H_1) + "*s1+" + str(H_0)
+        while(self._currentRoInfo['name'] + "/measurement/" + name1 + suffix in self.database.nxfile):
+            suffix = "_%s" % i
+            i += 1
+        availname1 = name1 + suffix
+                    
+        datas1 = {
+            "@NX_class": u"NXdata",
+            "sixc_angles": {
+                "@NX_class": u"NXpositioner",
+                "alpha" : cnters['alpha_pk'][()],
+                "omega" :  cnters['omega_pk'][()],
+                "theta" :  cnters['theta_pk'][()],
+                "delta" : cnters['delta_pk'][()],
+                "gamma" :  cnters['gamma_pk'][()],
+                "chi" :  cnters['chi_pk'][()],
+                "phi" :  cnters['phi_pk'][()],
+                "@unit" : u"deg"
+            },
+            "hkl": {
+                "@NX_class": u"NXcollection",
+                "h" :  cnters['HKL_pk'][:, 0][()],
+                "k" :  cnters['HKL_pk'][:, 1][()],
+                "l" : cnters['HKL_pk'][:, 2][()]
+            },
+            "counters":{
+                "@NX_class": u"NXdetector",
+                "croibg"  : croibg,
+                "croibg_errors" :  croibg_errors,
+                "croi" :  croi,
+                "croi_errors" :  croi_errors,
+                "bgroi"  : bgroi,
+                "bgroi_errors"  : bgroi_errors,
+                "raw_croibg"  : raw_croibg,
+                "raw_croibg_errors" :  raw_croibg_errors,
+                "raw_croi" :  raw_croi,
+                "raw_croi_errors" :  raw_croi_errors,
+                "raw_bgroi"  : raw_bgroi,
+                "raw_bgroi_errors"  : raw_bgroi_errors,
+                "integrated": int_data
+            },
+            "pixelcoord": {
+                "@NX_class": u"NXdetector",
+                "x" : cnters['x'][:, 0][()],
+                "y"  : cnters['x'][:, 1][()]
+            },
+            "trajectory" : traj1,
+            "@signal" : u"counters/croibg",
+            "@axes": u"trajectory/s",
+            "@title": self._currentRoInfo['name'] + "_" + availname1,
+            "@orgui_meta": u"roi"
+        }
+        
+        measurement =  {
+            "@NX_class": u"NXentry",
+            "@default": availname1 ,
+            availname1 : datas1
+        }
+        
+        if self.lorentzButton.isChecked():
+            measurement[availname1]['counters']['F2_hkl'] = F2_hkl
+            measurement[availname1]['counters']['F2_hkl_errors'] = F2_hkl_errors
+            measurement[availname1]['@signal'] = u"counters/F2_hkl"
+
+        self.database.add_nxdict(measurement, update_mode='modify', h5path=self._currentRoInfo['name'] + "/measurement")
+        
+    
     def onSliderValueChanged(self, ddict):
         self.plotRoCurve(ddict['idx'])
         
@@ -370,6 +718,18 @@ class RockingPeakIntegrator(qt.QMainWindow):
             'axis' : self._currentRoInfo['axis'],
             'croibg' : cnters['croibg'][idx][()],
             'croibg_errors' : cnters['croibg_errors'][idx][()]
+        }
+        return curve
+        
+    def get_all_ro_curves(self):
+        name = self._currentRoInfo['name']
+        h5_obj = self.database.nxfile[name]
+        cnters = h5_obj["rois"]
+        curve = {
+            'axisname' : self._currentRoInfo['axisname'],
+            'axis' : self._currentRoInfo['axis'],
+            'croibg' : cnters['croibg'][()],
+            'croibg_errors' : cnters['croibg_errors'][()]
         }
         return curve
         
