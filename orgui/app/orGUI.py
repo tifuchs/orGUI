@@ -30,7 +30,7 @@ from .. import __version__
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
-
+import gc
 import sys
 import os
 from silx.gui import qt
@@ -79,6 +79,13 @@ from ..backend import backends
 from ..backend import universalScanLoader
 from .. import resources
 
+try:
+    from . import _roi_sum_accel
+    HAS_ACCEL = True
+except:
+    print(traceback.format_exc())
+    HAS_ACCEL = False
+
 import numpy as np
 from ..datautils.xrayutils import HKLVlieg, CTRcalc
 from ..datautils.xrayutils import ReciprocalNavigation as rn
@@ -106,7 +113,7 @@ class orGUI(qt.QMainWindow):
         #icon = resources.getQicon("sum_image.svg")
         self.fscan = None
         self.activescanname = "scan"
-        self.numberthreads = int(min(os.cpu_count(), 8)) if os.cpu_count() is not None else 1 
+        self.numberthreads = int(min(os.cpu_count(), 16)) if os.cpu_count() is not None else 1 
         if 'SLURM_CPUS_ON_NODE' in os.environ:
             self.numberthreads = int(os.environ['SLURM_CPUS_ON_NODE'])
         
@@ -608,34 +615,59 @@ ub : gui for UB matrix and angle calculations
         
         progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
-
-
-        def sumImage(i):
-            image = self.fscan.get_raw_img(i).img.astype(np.float64)
+        
+        if HAS_ACCEL:
             if imgmask is not None:
-                image[imgmask] = np.nan
-                pixelavail = (~imgmask).astype(np.float64)
+                mask = np.ascontiguousarray(imgmask, dtype=bool)
             else:
-                pixelavail = np.ones_like(image)
-            if corr:
-                image *= C_arr
+                mask = np.zeros(image.img.shape, dtype=bool)
+                
+            C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
+                
+            roi_lists_numba = []
+            for roiname in ['center', 'left', 'right', 'top', 'bottom']:
+                roi_list = [] 
+                for r in rois[roiname]:
+                    roi_list.append(np.array([[r[0].start , r[0].stop], [r[1].start , r[1].stop]]))
+                roi_list = np.ascontiguousarray(np.stack(roi_list), dtype=np.int64)
+                roi_lists_numba.append(roi_list)
+                
+            def sumImage(i):
+                image = np.ascontiguousarray(self.fscan.get_raw_img(i).img, dtype=np.float64) # unlocks gil during file read
 
-            all_counters1 = np.zeros((xylist.shape[0],) + (4,))
+                all_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,)) # need gil for python object creation
+                _roi_sum_accel.processImage(image, mask, C_arr, *roi_lists_numba, all_counters) # numba nopython and nogil mode
+                return all_counters
+            
+        else:
+            
 
-            for crnr in range(xylist.shape[0]):
+            def sumImage(i):
+                image = self.fscan.get_raw_img(i).img.astype(np.float64)
+                if imgmask is not None:
+                    image[imgmask] = np.nan
+                    pixelavail = (~imgmask).astype(np.float64)
+                else:
+                    pixelavail = np.ones_like(image)
+                if corr:
+                    image *= C_arr
 
-                # set ROI (moved to rocking-function)
+                all_counters1 = np.zeros((xylist.shape[0],) + (4,))
 
-                # get roi
-                key = rois['center'][crnr]
-                bgkey = [rois['left'][crnr], rois['right'][crnr], rois['top'][crnr], rois['bottom'][crnr]]
-                # fill counters
-                counters1 = fill_counters(image,pixelavail,key, bgkey)
+                for crnr in range(xylist.shape[0]):
 
-                all_counters1[crnr] = counters1
+                    # set ROI (moved to rocking-function)
+
+                    # get roi
+                    key = rois['center'][crnr]
+                    bgkey = [rois['left'][crnr], rois['right'][crnr], rois['top'][crnr], rois['bottom'][crnr]]
+                    # fill counters
+                    counters1 = fill_counters(image,pixelavail,key, bgkey)
+
+                    all_counters1[crnr] = counters1
 
 
-            return all_counters1
+                return all_counters1
             
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor: # speedup only for the file reads 
@@ -643,6 +675,7 @@ ub : gui for UB matrix and angle calculations
             for i in range(len(self.fscan)):
                 futures[executor.submit(sumImage, i)] = i
             
+            status = "no error"
             for f in concurrent.futures.as_completed(futures): # iteration over jobs
                 try:
                     for j in range(len(f.result())): # iteration over ROIs
@@ -653,17 +686,25 @@ ub : gui for UB matrix and angle calculations
                         bgroi1_all[i][j] = bgroi1
                         bgpixel1_all[i][j] = bgpixel1
                     progress.setValue(futures[f])
+                    del f
                 except concurrent.futures.CancelledError:
-                    pass
+                    del f
                 except Exception as e:
                     print("Cannot read image:\n%s" % traceback.format_exc())
-
-                if progress.wasCanceled():
+                    print("Cancel to avoid memory leak")
                     [f.cancel() for f in futures]
+                    status = 'error'
+                    del f
+                if progress.wasCanceled():
+                    status = 'error'
+                    [f.cancel() for f in futures]
+                    
                     break
+                #gc.collect()
 
         progress.setValue(len(self.fscan))
-
+        if status == 'error':
+            return
 
         numberOfPlots = xylist.shape[0]
         maxAmountOfPlots = 30
