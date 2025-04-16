@@ -621,8 +621,10 @@ ub : gui for UB matrix and angle calculations
                 mask = np.ascontiguousarray(imgmask, dtype=bool)
             else:
                 mask = np.zeros(image.img.shape, dtype=bool)
-                
-            C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
+            if corr:
+                C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
+            else:
+                C_arr = np.ones(image.img.shape, dtype=bool)
                 
             roi_lists_numba = []
             for roiname in ['center', 'left', 'right', 'top', 'bottom']:
