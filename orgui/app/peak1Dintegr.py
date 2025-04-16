@@ -877,6 +877,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
         
         self.plotROIselect.setActiveCurve(lbl)
         self._idx = idx
+        
+        with qt.QSignalBlocker(self.curveSlider):
+            self.curveSlider.setIndex(idx)
                            
         self.roiwidget.roiTable.clear()
         
