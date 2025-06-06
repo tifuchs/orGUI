@@ -51,11 +51,12 @@ from silx.gui.plot import items
 
 import silx
 from silx.gui.plot.Profile import ProfileToolBar
-from silx.gui.dialog import ImageFileDialog
+from silx.gui.dialog import ImageFileDialog, DataFileDialog
 from silx.gui.plot.actions import control as control_actions
 from silx.gui.hdf5.Hdf5TreeModel import Hdf5TreeModel
 #from silx.gui.widgets.TableWidget import TableWidget
-from silx.gui.plot.CurvesROIWidget import ROITable, ROI
+from silx.gui.plot.CurvesROIWidget import ROITable, ROI, _FloatItem, _RoiMarkerHandler
+from silx.utils.weakref import WeakMethodProxy
 
 import traceback
 
@@ -86,7 +87,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.database = database
         fontMetric = self.fontMetrics()
         iconSize = qt.QSize(fontMetric.height(), fontMetric.height())
-        
+        self.filedialogdir = '.'
         self._currentRoInfo = {}
         self._idx = 0
         
@@ -199,12 +200,23 @@ class RockingPeakIntegrator(qt.QMainWindow):
         anchorROIsGroup = qt.QGroupBox("Anchor ROIs")
         anchorROIsGroupLayout = qt.QHBoxLayout()
         
-        self.anchorROIButton = qt.QPushButton()
-        self.anchorROIButton.setIcon(resources.getQicon("anchor-ROI"))
-        self.anchorROIButton.setIconSize(iconSize)
-        self.anchorROIButton.setCheckable(True)
+        #self.anchorROIButton = qt.QPushButton()
+        #self.anchorROIButton.setIcon(resources.getQicon("anchor-ROI"))
+        #self.anchorROIButton.setIconSize(iconSize)
+        #self.anchorROIButton.setCheckable(True)
+        #
+        #self.anchorROIButton.toggled.connect(self.onAnchorBtnToggled)
         
-        self.anchorROIButton.toggled.connect(self.onAnchorBtnToggled)
+        self.anchorLoadRoiBtn = qt.QPushButton()
+        self.anchorLoadRoiBtn.setIcon(icons.getQIcon("document-open"))
+        self.anchorLoadRoiBtn.setIconSize(iconSize)
+        self.anchorLoadRoiBtn.clicked.connect(self.onAnchorLoadRoi)
+        
+        
+        self.anchorSaveRoiBtn = qt.QPushButton()
+        self.anchorSaveRoiBtn.setIcon(icons.getQIcon("document-save"))
+        self.anchorSaveRoiBtn.setIconSize(iconSize)
+        self.anchorSaveRoiBtn.clicked.connect(self.onAnchorSaveRoi)
         
         
         self.previousROIButton = qt.QPushButton()
@@ -219,9 +231,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.fitAnchorsButton = qt.QPushButton("Fit between anchors")
         self.fitAnchorsButton.clicked.connect(self.fit_anchors_along_rod)
         
-        anchorROIsGroupLayout.addWidget(self.anchorROIButton)
+        #anchorROIsGroupLayout.addWidget(self.anchorROIButton)
         anchorROIsGroupLayout.addWidget(self.fitAnchorsButton)
         anchorROIsGroupLayout.addStretch()
+        anchorROIsGroupLayout.addWidget(self.anchorLoadRoiBtn)
+        anchorROIsGroupLayout.addWidget(self.anchorSaveRoiBtn)
         anchorROIsGroupLayout.addWidget(self.previousROIButton)
         anchorROIsGroupLayout.addWidget(self.nextROIButton)
         
@@ -324,7 +338,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         #self.curveSlider.setAxis(np.arange(100) / 10., "deg")
         
         self.curveSlider.sigValueChanged.connect(self.onSliderValueChanged)
-        self.roiwidget.sigROISignal.connect(lambda d: print(d))
+        #self.roiwidget.sigROISignal.connect(lambda d: print(d))
 
         
     def set_roscan(self, name):
@@ -342,7 +356,226 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.plotROIselect.resetZoom()
         if self.autozoom_checkbox.isChecked():
             self.resetXZoomScaled(self.zoomslider.value())
+            
+    def onAnchorSaveRoi(self):
+        if self._currentRoInfo and 'name' in self._currentRoInfo:
+            if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
+                if self._currentRoInfo['name'] + '/integration/peakpos' not in self.database.nxfile:
+                    qt.QMessageBox.warning(self,'Cannot save roi locations', 'Cannot save ROI locations:\nNo ROI information availabe')
+                    return
+            else:
+                qt.QMessageBox.warning(self,'Cannot save roi locations', 'Cannot save ROI locations:\nNo ROI information availabe')
+                return
+        else:
+            qt.QMessageBox.warning(self,'Cannot save roi locations', 'Cannot save ROI locations:\nNo ROI information availabe')
+            return
+            
 
+        fileTypeDictSave1D = {"Plain ascii file (*.dat)" : "dat", "CSV file (*.csv)" : "csv",  "NumPy format (*.npy)" : "ndarray"}
+        
+        fileTypeDictSPEC = {'SPEC file (*.spec)': 'spec'}
+        
+        fileTypeDict = {**fileTypeDictSave1D, **fileTypeDictSPEC}
+        
+        fileTypeFilter = ""
+        for f in fileTypeDict:
+            fileTypeFilter += f + ";;"
+
+        filename, filetype = qt.QFileDialog.getSaveFileName(self,"Save ROI to file",
+                                                  self.filedialogdir,
+                                                  fileTypeFilter[:-2])
+        if filename == '':
+            return
+        self.filedialogdir = os.path.splitext(filename)[0]
+        
+        if filetype in fileTypeDictSave1D:
+            fileext = fileTypeDictSave1D[filetype]
+            try:
+                self.saveROI(filename, fileext)
+            except Exception as e:
+                qutils.critical_detailed_message(self, 'Cannot save ROIs','Cannot save ROI locations: %s' % e, traceback.format_exc())
+                
+    def saveROI(self, filename, fileext="dat"):
+        
+        roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
+        
+        fmt = "%.7g"
+        csvdelim=";"
+            
+        data = []
+        header = []
+        
+        header.append("peakpos")
+        data.append(roi_info["peakpos"])
+        
+        for k in list(roi_info.keys()):
+            if k.startswith('sig') or k.startswith('bg'):
+                header.append(k + '_from')
+                data.append(roi_info[k]["from"])
+                header.append(k + '_to')
+                data.append(roi_info[k]["to"])
+                header.append(k + '_anchor')
+                data.append(roi_info[k]["anchor"].astype(float))
+        
+        data = np.vstack(data).T
+        header = " ".join(header) 
+        
+        if fileext == "dat":
+            np.savetxt(filename, data, header=header, fmt=fmt)
+        elif fileext == "csv":
+            np.savetxt(filename, data, header=header, fmt=fmt, delimiter=csvdelim)
+        elif fileext == "ndarray":
+            np.save(filename, data)
+        else:
+            raise Exception("No supported file type %s" % fileext)
+        
+        
+    
+    #def onAnchorLoadRoi(self):
+        #datasetDialog = DataFileDialog.DataFileDialog(self)
+        #datasetDialog.setFilterMode(DataFileDialog.DataFileDialog.FilterMode.ExistingDataset)
+        #
+        #def customFilter(obj):
+        #    print(obj.basename)
+        #    return True
+        #    
+        #    if "NX_class" in obj.attrs:
+        #        if 'orgui_meta' in obj.attrs and obj.attrs['orgui_meta'] == 'rocking':
+        #            if 'integration' in obj:
+        #                return True
+        #    return False
+        #
+        #if datasetDialog.exec():
+        #    print(datasetDialog.selectedUrl())
+            
+    def onAnchorLoadRoi(self):
+        if self._currentRoInfo:
+            fileTypeDictSave1D = {"Plain ascii file (*.dat)" : "dat", "CSV file (*.csv)" : "csv"}
+            
+            fileTypeDictSPEC = {'SPEC file (*.spec)': 'spec'}
+            
+            fileTypeDict = {**fileTypeDictSave1D, **fileTypeDictSPEC}
+            
+            fileTypeFilter = ""
+            for f in fileTypeDict:
+                fileTypeFilter += f + ";;"
+
+            filename, filetype = qt.QFileDialog.getOpenFileName(self,"Load ROI from file",
+                                                      self.filedialogdir,
+                                                      fileTypeFilter[:-2])
+            if filename == '':
+                return
+            self.filedialogdir = os.path.splitext(filename)[0]
+            
+            try:
+                roi_info = self.loadROIinfo(filename)
+            except Exception as e:
+                qutils.critical_detailed_message(self, 'Cannot load ROIs','Cannot load ROI locations: %s' % e, traceback.format_exc())
+                return
+                
+            try:
+                self.setROIinfo(roi_info)
+            except Exception as e:
+                qutils.critical_detailed_message(self, 'Cannot load ROIs','Cannot apply ROI locations to rocking scan: %s' % e, traceback.format_exc())
+                return
+        
+    def setROIinfo(self, roi_info, interpolate=True, pktol=0.1):
+        if self._currentRoInfo:
+            ro_info = self.get_rocking_scan_info(self._currentRoInfo['name'])
+            sc_h5 = self.database.nxfile[ro_info['name']]['rois']
+            if ro_info['axisname'] == 'mu':
+                pk_pos_exact = sc_h5['alpha_pk'][()]
+            elif ro_info['axisname'] == 'th':
+                pk_pos_exact = sc_h5['theta_pk'][()]
+            elif ro_info['axisname'] == 'chi':
+                pk_pos_exact = sc_h5['chi_pk'][()]
+            elif ro_info['axisname'] == 'phi':
+                pk_pos_exact = sc_h5['phi_pk'][()]
+            else:
+                raise ValueError("Cannot estimate peak position: unknown scan axis %s" % ro_info['axisname'])
+            
+            def _set_roi_info(roi_info):
+                if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
+                    del self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+                
+                for k in roi_info:
+                    if k.startswith(('sig', 'bg')):
+                        roi_info[k]["@NX_class"] = u"NXcollection"
+                        roi_info[k]['from'] = roi_info[k]['from'].astype(np.float64)
+                        roi_info[k]['to'] = roi_info[k]['to'].astype(np.float64)
+                        roi_info[k]['anchor'] = roi_info[k]['anchor'].astype(bool)
+                        
+                roi_info["peakpos"] = roi_info["peakpos"].astype(np.float64)
+                roi_info["@NX_class"] = u"NXcollection"
+                roi_info["@info"] = u"ROI information for the rocking scan integration"
+                
+                self.database.add_nxdict(roi_info, update_mode='modify', h5path=ro_info['name'] + '/integration')
+                self.plotRoCurve(self._idx)
+                
+            pk_pos = roi_info["peakpos"]
+            
+            if pk_pos.size != pk_pos_exact.size:
+                if not interpolate:
+                    raise ValueError('Scan length mismatch: requires interpolation is: %s, supplied roi_info: %s' % (pk_pos_exact.size, pk_pos.size))
+            elif not np.all(np.isclose(pk_pos, pk_pos_exact)):
+                if not interpolate:
+                    raise ValueError('Peak position mismatch: requires interpolation')
+            else:
+                _set_roi_info(roi_info)
+                return
+                
+            
+            if np.abs(np.amax(pk_pos) - np.amax(pk_pos_exact)) >= pktol:
+                raise ValueError('peak position mismatch tolerance exceeded at max')
+            
+            if np.abs(np.amin(pk_pos) - np.amin(pk_pos_exact)) >= pktol:
+                raise ValueError('peak position mismatch tolerance exceeded at min')
+            
+            roi_info_interp = dict()
+            
+            roi_info_interp["peakpos"] = pk_pos_exact
+            for k in roi_info:
+                if k.startswith(('sig', 'bg')):
+                    roi_info_interp[k] = dict()
+                    interfrom = interp1d(roi_info["peakpos"],roi_info[k]['from'],fill_value="extrapolate")
+                    roi_info_interp[k]['from'] = interfrom(pk_pos_exact)
+                    
+                    interto = interp1d(roi_info["peakpos"],roi_info[k]['to'],fill_value="extrapolate")
+                    roi_info_interp[k]['to'] = interto(pk_pos_exact)
+                    
+                    interanchor = interp1d(roi_info["peakpos"],roi_info[k]['anchor'], kind='nearest',fill_value="extrapolate")
+                    roi_info_interp[k]['anchor'] = interanchor(pk_pos_exact).astype(bool)
+            
+            _set_roi_info(roi_info_interp)
+            
+            
+    def loadROIinfo(self, filename):
+        fname, fileext = os.path.splitext(filename)
+        if fileext == ".dat":
+            data = np.genfromtxt(filename, names=True)
+            roi_names = []
+            for k in data.dtype.names:
+                if k.startswith(('sig', 'bg')):
+                    k_sp = k.split('_')
+                    no = int(k_sp[1])
+                    rname = k_sp[0] + '_' + k_sp[1]
+                    if rname not in roi_names:
+                        roi_names.append(rname)
+            
+            roi_info = dict()
+            roi_info["peakpos"] = data["peakpos"]
+            for k in roi_names:
+                roi_info[k] = dict()
+                roi_info[k]['from'] = data[k + '_from']
+                roi_info[k]['to'] = data[k + '_to']
+                roi_info[k]['anchor'] = data[k + '_anchor'].astype(bool)
+        else:
+            raise Exception("Not supported file type %s" % fileext)
+        return roi_info
+            
+            
+        
+            
 
     #ddict = {
     #        "event": "indexChanged",
@@ -511,8 +744,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
             
             for roikey in int_data:
                 roi = roi_info[roikey]
+                
                 idx_from = np.argmin(np.abs(axis - roi['from'][i]))
                 idx_to = np.argmin(np.abs(axis - roi['to'][i]))
+                if idx_from > idx_to:
+                    idx_from, idx_to = idx_to, idx_from
                 int_interval = abs(axis[idx_to] - axis[idx_from])
                 int_data[roikey]['int_interval'].append(int_interval)
                 
@@ -697,17 +933,34 @@ class RockingPeakIntegrator(qt.QMainWindow):
         
     def onRoiChanged(self, roi):
         #roi_dict = self.get_roi1D_info(self._idx)
-        new_roi_dict = self.roiwidget.roiTable.roidict[roi].toDict()
+        roi_t = self.roiwidget.roiTable.roidict[roi]
+        new_roi_dict = roi_t.toDict()
         if self._currentRoInfo:
             #from IPython import embed; embed()
             if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
                 h5grp = self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
                 if roi in h5grp:
-                    h5grp[roi]['anchor'][self._idx] = True
-                    h5grp[roi]['from'][self._idx] = new_roi_dict['from']
-                    h5grp[roi]['to'][self._idx] = new_roi_dict['to']
-        with qt.QSignalBlocker(self.anchorROIButton):
-            self.anchorROIButton.setChecked(True)
+                    if h5grp[roi]['from'][self._idx] != new_roi_dict['from'] or h5grp[roi]['to'][self._idx] != new_roi_dict['to']:
+                        h5grp[roi]['from'][self._idx] = new_roi_dict['from']
+                        h5grp[roi]['to'][self._idx] = new_roi_dict['to']
+                        h5grp[roi]['anchor'][self._idx] = True
+                        self.roiwidget.roiTable.isModelSetting = True
+                        roi_t.setAnchor(True)
+                        self.roiwidget.roiTable._updateRoiInfo(roi_t.getID())
+                        self.roiwidget.roiTable.isModelSetting = False
+                        #print('set true: %s -> %s' % (h5grp[roi]['anchor'][self._idx], roi_t.isAnchor()))
+                    else:
+                        if h5grp[roi]['anchor'][self._idx] != roi_t.isAnchor(): # toggled anchor 
+                            #print('toggled: %s -> %s' % (h5grp[roi]['anchor'][self._idx], roi_t.isAnchor()))
+                            h5grp[roi]['anchor'][self._idx] = roi_t.isAnchor()
+                    #else:
+                    #    print('New Anchor set: True')
+                    #    h5grp[roi]['anchor'][self._idx] = True
+                    #    roi_t.setAnchor(True)
+                        #roi_t.anchor_updating = False
+                    
+        #with qt.QSignalBlocker(self.anchorROIButton):
+        #    self.anchorROIButton.setChecked(True)
         
     def get_ro_curve(self, idx):
         name = self._currentRoInfo['name']
@@ -733,15 +986,15 @@ class RockingPeakIntegrator(qt.QMainWindow):
         }
         return curve
         
-    def onAnchorBtnToggled(self, state):
-        if self._currentRoInfo:
-            if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
-                h5grp = self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
-                for k in h5grp:
-                    if k.startswith('sig') or k.startswith('bg'):
-                        h5grp[k]['anchor'][self._idx] = state
-                    
-        print(state)
+    #def onAnchorBtnToggled(self, state):
+    #    if self._currentRoInfo:
+    #        if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
+    #            h5grp = self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+    #            for k in h5grp:
+    #                if k.startswith('sig') or k.startswith('bg'):
+    #                    h5grp[k]['anchor'][self._idx] = state
+    #                
+    #    print(state)
         
         
     def onAddAllROI(self):
@@ -867,8 +1120,13 @@ class RockingPeakIntegrator(qt.QMainWindow):
         s = self._currentRoInfo['s'][idx]
         hkl = self._currentRoInfo['H_1'] * s + self._currentRoInfo['H_0']
         title = "Rocking scan at s = %s, HKL = [%.2f %.2f %.2f]" % (s, *hkl)
+        #print('before table clear')
+        self.roiwidget.roiTable.clear()
+        #print('after table clear')
         
+        #print('before plot clear')
         self.plotROIselect.clear()
+        #print('after plot clear')
         
         lbl = self.plotROIselect.addCurve(ro_curve['axis'], ro_curve['croibg'], legend=title, 
                            xlabel="%s / deg" % self._currentRoInfo['axisname'], 
@@ -880,36 +1138,43 @@ class RockingPeakIntegrator(qt.QMainWindow):
         
         with qt.QSignalBlocker(self.curveSlider):
             self.curveSlider.setIndex(idx)
-                           
-        self.roiwidget.roiTable.clear()
+
         
         roi_dict = self.get_roi1D_info(idx)
-        with qt.QSignalBlocker(self.anchorROIButton):
-            for k in roi_dict:
-                dk = roi_dict[k]
-                if dk['anchor']:
-                    self.anchorROIButton.setChecked(True)
-                    break
-            else:
-                self.anchorROIButton.setChecked(False)
+        #with qt.QSignalBlocker(self.anchorROIButton):
+        #    for k in roi_dict:
+        #        dk = roi_dict[k]
+        #        if dk['anchor']:
+        #            self.anchorROIButton.setChecked(True)
+        #            break
+        #    else:
+        #        self.anchorROIButton.setChecked(False)
             
         minfrom = np.inf
         maxto = -np.inf
         for key in roi_dict:
             if key.startswith('sig'):
                 roi_d = roi_dict[key]
-                roi = ROI(key, fromdata=roi_d['from'], todata=roi_d['to'], type_=str(roi_d['type']))
+                roi = AnchorROI(key, fromdata=roi_d['from'], todata=roi_d['to'], type_=str(roi_d['type']), anchor=roi_d['anchor'])
                 minfrom = min(minfrom, roi_d['from'])
                 maxto = max(maxto, roi_d['to'])
+                self.roiwidget.roiTable.isModelSetting = True # workaround for a signal loop, which resets anchor status to False
+                # took me 2 days to concede, do not try to fix this bug. Workaround is enough
                 self.roiwidget.roiTable.addRoi(roi)
+                self.roiwidget.roiTable._updateRoiInfo(roi.getID())
                 roi.sigChanged.connect(partial(self.onRoiChanged, key))
+                self.roiwidget.roiTable.isModelSetting = False
             elif key.startswith('bg'): # color?
                 roi_d = roi_dict[key]
-                roi = ROI(key, fromdata=roi_d['from'], todata=roi_d['to'], type_=str(roi_d['type']))
+                roi = AnchorROI(key, fromdata=roi_d['from'], todata=roi_d['to'], type_=str(roi_d['type']), anchor=roi_d['anchor'])
                 minfrom = min(minfrom, roi_d['from'])
                 maxto = max(maxto, roi_d['to'])
+                self.roiwidget.roiTable.isModelSetting = True # workaround for a signal loop, which resets anchor status to False
+                # took me 2 days to concede, do not try to fix this bug. Workaround is enough
                 self.roiwidget.roiTable.addRoi(roi)
+                self.roiwidget.roiTable._updateRoiInfo(roi.getID())
                 roi.sigChanged.connect(partial(self.onRoiChanged, key))
+                self.roiwidget.roiTable.isModelSetting = False
         
         # toDo: set from GUI
         if self.autozoom_checkbox.isChecked():
@@ -1327,6 +1592,273 @@ class ROICreatorDialog(qt.QDialog):
             return
         self.accept()
         
+        
+class AnchorROI(ROI):
+    
+    #sigAnchorChanged = qt.Signal()
+    
+    def __init__(self, name, fromdata=None, todata=None, type_=None, anchor=False):
+        ROI.__init__(self, name, fromdata, todata, type_)
+        self._anchor = bool(anchor)
+        self.anchor_updating = False
+    
+    def isAnchor(self):
+        return self._anchor
+        
+    def setAnchor(self, anchor):
+        #print(self.getName(), self._anchor, anchor)
+        if self._anchor != bool(anchor):
+            self._anchor = bool(anchor)
+            self.sigChanged.emit()
+        
+        
+    def toDict(self):
+        """
+
+        :return: dict containing the roi parameters
+        """
+        ddict = super().toDict()
+        ddict['anchor'] = self.isAnchor()
+        return ddict
+
+    @staticmethod
+    def _fromDict(dic):
+        assert "name" in dic
+        roi = AnchorROI(name=dic["name"])
+        roi._extraInfo = {}
+        for key in dic:
+            if key == "from":
+                roi.setFrom(dic["from"])
+            elif key == "to":
+                roi.setTo(dic["to"])
+            elif key == "type":
+                roi.setType(dic["type"])
+            elif key == "anchor":
+                roi.setAnchor(dic["anchor"])
+            else:
+                roi._extraInfo[key] = dic[key]
+        return roi
+        
+        
+
+        
+        
+        
+class SelectableROITable(ROITable):
+    COLUMNS_INDEX = dict(
+        [
+            ("Anchor", 0),
+            ("ID", 1),
+            ("ROI", 2),
+            ("Type", 3),
+            ("From", 4),
+            ("To", 5),
+            ("Raw Counts", 6),
+            ("Net Counts", 7),
+            ("Raw Area", 8),
+            ("Net Area", 9)
+        ]
+    )
+    
+    COLUMNS = list(COLUMNS_INDEX.keys())
+    
+    
+    
+    def __init__(self, parent=None, plot=None, rois=None):
+        super().__init__(parent, plot, rois)
+        self.isModelSetting = False
+    
+    def _updateRoiInfo(self, roiID):
+        if self._userIsEditingRoi is True:
+            return
+        if roiID not in self._roiDict:
+            return
+        super()._updateRoiInfo(roiID)
+        
+        roi = self._roiDict[roiID]
+        itemID = self._getItem(name="ID", roi=roi, row=None)
+        
+        itemAnchor = self._getItem(name="Anchor", row=itemID.row(), roi=roi)
+        #print('update roi info: ', roi.getName(), roi.isAnchor())
+        self.setAnchorState(roiID, roi.isAnchor())
+            
+    def setAnchorState(self, roiID , anchor):
+        if roiID not in self._roiDict:
+            return
+        roi = self._roiDict[roiID]
+        itemID = self._getItem(name="ID", roi=roi, row=None)
+        
+            
+        itemAnchor = self._getItem(name="Anchor", row=itemID.row(), roi=roi)
+        #with qt.QSignalBlocker(self):
+        if anchor:
+            itemAnchor.setCheckState(qt.Qt.Checked)
+        else:
+            itemAnchor.setCheckState(qt.Qt.Unchecked)
+    
+    def addRoi(self, roi):
+        """
+
+        :param :class:`ROI` roi: roi to add to the table
+        """
+        assert isinstance(roi, AnchorROI)
+        self._getItem(name="ID", row=None, roi=roi)
+        self._roiDict[roi.getID()] = roi
+        self._markersHandler.add(roi, _ColorRoiMarkerHandler(roi, self.plot))
+        self._updateRoiInfo(roi.getID())
+        callback = partial(WeakMethodProxy(self._updateRoiInfo), roi.getID())
+        roi.sigChanged.connect(callback)
+        # set it as the active one
+        self.setActiveRoi(roi)
+        
+        
+    def setRois(self, rois, order=None):
+        """Set the ROIs by providing a dictionary of ROI information.
+
+        The dictionary keys are the ROI names.
+        Each value is a sub-dictionary of ROI info with the following fields:
+
+        - ``"from"``: x coordinate of the left limit, as a float
+        - ``"to"``: x coordinate of the right limit, as a float
+        - ``"type"``: type of ROI, as a string (e.g "channels", "energy")
+
+
+        :param roidict: Dictionary of ROIs
+        :param str order: Field used for ordering the ROIs.
+             One of "from", "to", "type".
+             None (default) for no ordering, or same order as specified
+             in parameter ``rois`` if provided as a dict.
+        """
+        assert order in [None, "from", "to", "type"]
+        self.clear()
+
+        # backward compatibility since 0.10.0
+        if isinstance(rois, dict):
+            for roiName, roi in rois.items():
+                if isinstance(roi, AnchorROI):
+                    _roi = roi
+                else:
+                    roi["name"] = roiName
+                    _roi = AnchorROI._fromDict(roi)
+                self.addRoi(_roi)
+        else:
+            for roi in rois:
+                assert isinstance(roi, AnchorROI)
+                self.addRoi(roi)
+        self._updateMarkers()
+    
+    def load(self, filename):
+        """
+        Load ROI widget information from a file storing a dict of ROI.
+
+        :param str filename: The file from which to load ROI
+        """
+        roisDict = dictdump.load(filename)
+        rois = []
+
+        # Remove rawcounts and netcounts from ROIs
+        for roiDict in roisDict["ROI"]["roidict"].values():
+            roiDict.pop("rawcounts", None)
+            roiDict.pop("netcounts", None)
+            rois.append(AnchorROI._fromDict(roiDict))
+
+        self.setRois(rois)
+        
+        
+    def _getItem(self, name, row, roi):
+        if row:
+            item = self.item(row, self.COLUMNS_INDEX[name])
+        else:
+            item = None
+        if item:
+            return item
+        else:
+            if name == "ID":
+                assert roi
+                if roi.getID() in self._roiToItems:
+                    return self._roiToItems[roi.getID()]
+                else:
+                    # create a new row
+                    row = self.rowCount()
+                    self.setRowCount(self.rowCount() + 1)
+                    item = qt.QTableWidgetItem(
+                        str(roi.getID()), type=qt.QTableWidgetItem.Type
+                    )
+                    self._roiToItems[roi.getID()] = item
+            elif name == "ROI":
+                item = qt.QTableWidgetItem(
+                    roi.getName() if roi else "", type=qt.QTableWidgetItem.Type
+                )
+                if roi.getName().upper() in ("ICR", "DEFAULT"):
+                    item.setFlags(qt.Qt.ItemIsSelectable | qt.Qt.ItemIsEnabled)
+                else:
+                    item.setFlags(
+                        qt.Qt.ItemIsSelectable
+                        | qt.Qt.ItemIsEnabled
+                        | qt.Qt.ItemIsEditable
+                    )
+            elif name == "Type":
+                item = qt.QTableWidgetItem(type=qt.QTableWidgetItem.Type)
+                item.setFlags(qt.Qt.ItemIsSelectable | qt.Qt.ItemIsEnabled)
+            elif name in ("To", "From"):
+                item = _FloatItem()
+                if roi.getName().upper() in ("ICR", "DEFAULT"):
+                    item.setFlags(qt.Qt.ItemIsSelectable | qt.Qt.ItemIsEnabled)
+                else:
+                    item.setFlags(
+                        qt.Qt.ItemIsSelectable
+                        | qt.Qt.ItemIsEnabled
+                        | qt.Qt.ItemIsEditable
+                    )
+            elif name in ("Raw Counts", "Net Counts", "Raw Area", "Net Area"):
+                item = _FloatItem()
+                item.setFlags(qt.Qt.ItemIsSelectable | qt.Qt.ItemIsEnabled)
+            elif name == "Anchor":
+                item = qt.QTableWidgetItem(type=qt.QTableWidgetItem.Type)
+                if roi.getName().upper() in ("ICR", "DEFAULT"):
+                    item.setFlags(qt.Qt.ItemIsSelectable | qt.Qt.ItemIsEnabled)
+                else:
+                    item.setFlags(
+                        qt.Qt.ItemIsSelectable
+                        | qt.Qt.ItemIsEnabled
+                        | qt.Qt.ItemIsUserCheckable
+                    )
+                    item.setIcon(resources.getQicon("anchor-ROI"))
+                    item.setCheckState(qt.Qt.Unchecked)
+            else:
+                raise ValueError("item type not recognized")
+
+            self.setItem(row, self.COLUMNS_INDEX[name], item)
+            return item
+            
+    def _itemChanged(self, item):
+        def getRoi():
+            IDItem = self.item(item.row(), self.COLUMNS_INDEX["ID"])
+            assert IDItem
+            id = int(IDItem.text())
+            assert id in self._roiDict
+            roi = self._roiDict[id]
+            return roi
+
+        def signalChanged(roi):
+            if self.activeRoi and roi.getID() == self.activeRoi.getID():
+                self.activeROIChanged.emit()
+        
+        super()._itemChanged(item)
+
+        
+        self._userIsEditingRoi = True
+        if not self.isModelSetting:
+            if item.column() == self.COLUMNS_INDEX["Anchor"]:
+                roi = getRoi()
+                anchor = item.checkState() == qt.Qt.Checked
+                if anchor != roi.isAnchor():
+                    #print('anchor changed:', getRoi().getName() ,getRoi().getID())
+                    roi.setAnchor(anchor)
+
+        self._userIsEditingRoi = False
+    
+        
 class CurvesROIWidget(qt.QWidget):
     """
     Widget displaying a table of ROI information.
@@ -1374,7 +1906,7 @@ class CurvesROIWidget(qt.QWidget):
         layout = qt.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        self.roiTable = ROITable(self, plot=plot)
+        self.roiTable = SelectableROITable(self, plot=plot)
         rheight = self.roiTable.horizontalHeader().sizeHint().height()
         self.roiTable.setMinimumHeight(4 * rheight)
         layout.addWidget(self.roiTable)
@@ -1438,7 +1970,7 @@ class CurvesROIWidget(qt.QWidget):
                     newroi = "newroi %d" % i
                 return newroi
 
-        roi = ROI(name=getNextRoiName())
+        roi = AnchorROI(name=getNextRoiName())
 
         if roi.getName() == "ICR":
             roi.setType("Default")
@@ -1639,6 +2171,17 @@ class CurvesROIWidget(qt.QWidget):
     def currentRoi(self):
         return self.roiTable.activeRoi
 
-
+class _ColorRoiMarkerHandler(_RoiMarkerHandler):
+    
+    def __init__(self, roi, plot):
+        super().__init__(roi, plot)
+        if roi.getName().startswith('sig'):
+            self._color = 'red'
+        elif roi.getName().startswith('bg'):
+            self._color = 'blue'
+        else:
+            self._color = 'black'
+        
+    
 
 
