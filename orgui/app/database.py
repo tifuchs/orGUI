@@ -50,6 +50,7 @@ import time
 from ..datautils.xrayutils import unitcells
 from ..datautils.xrayutils import HKLVlieg, CTRcalc
 from ..datautils.xrayutils import DetectorCalibration
+from .. import resources
 
 from silx.io.dictdump import dicttonx ,nxtodict
 
@@ -212,6 +213,11 @@ class DataBase(qt.QMainWindow):
         
         toolbar = qt.QToolBar("Database toolbar",self)
         
+        
+        
+        newDatabaseAct = toolbar.addAction(resources.getQicon("document-nx-new"),"Create new orgui database")
+        newDatabaseAct.triggered.connect(self.onNewDatabase)
+        
         loadDatabaseAct = toolbar.addAction(icons.getQIcon("document-open"),"Open orgui database")
         loadDatabaseAct.triggered.connect(self.onOpenDatabase)
         
@@ -356,6 +362,20 @@ class DataBase(qt.QMainWindow):
         #filename += fileTypeDict[filetype]
         self.saveNewDBFile(filename)
         
+    def onNewDatabase(self):
+        fileTypeDict = {'NEXUS Files (*.h5)': '.h5', 'All files (*)': '' }
+        fileTypeFilter = ""
+        for f in fileTypeDict:
+            fileTypeFilter += f + ";;"
+            
+        filename, filetype = qt.QFileDialog.getSaveFileName(self,"Select database location",
+                                                  self.filedialogdir,
+                                                  fileTypeFilter[:-2])
+        if filename == '':
+            return
+        self.filedialogdir = os.path.splitext(filename)[0]
+        self.createNewDBFile(filename)
+
     def onSaveDBFile(self):
         fileTypeDict = {'NEXUS Files (*.h5)': '.h5', 'All files (*)': '' }
         fileTypeFilter = ""
@@ -395,7 +415,6 @@ class DataBase(qt.QMainWindow):
             msgbox.setDetailedText(traceback.format_exc())
             clickedbutton = msgbox.exec()
         
-        
     def saveNewDBFile(self, filename):
         alldata = nxtodict(self.nxfile)
         self.createNewDBFile(filename, alldata)
@@ -406,14 +425,7 @@ class DataBase(qt.QMainWindow):
         
     def createNewDBFile(self, filename, datadict=None):
         if self.nxfile is not None:
-            while(self.hdf5model.hasPendingOperations()):
-                qt.QApplication.processEvents()
-                time.sleep(0.01)
-            self.hdf5model.removeH5pyObject(self.nxfile)
-            self.nxfile.close()
-            self.nxfile = None
-            if hasattr(self, "temp_directory"):
-                del self.temp_directory
+            self.close()
 
         fileattrs = {"@NX_class": u"NXroot",
                      "@creator": u"orGUI version %s" % __version__,
@@ -435,10 +447,7 @@ class DataBase(qt.QMainWindow):
         
     def openDBFile(self, filename):
         if self.nxfile is not None:
-            self.hdf5model.removeH5pyObject(self.nxfile)
-            self.nxfile.close()
-            if hasattr(self, "temp_directory"):
-                del self.temp_directory
+            self.close()
         self.nxfile = silx.io.h5py_utils.File(filename,'a')
         self._filepath = filename
         while(self.hdf5model.hasPendingOperations()):
@@ -511,8 +520,24 @@ class DataBase(qt.QMainWindow):
         
     def close(self):
         if self.nxfile is not None:
+            timer = 1
+            while(self.hdf5model.hasPendingOperations() and timer < 6000):
+                time.sleep(0.01)
+                timer += 1
+            if timer == 6000:
+                raise Exception('Timeout on hdf5 model operation, This is probably a bug, or a very long writing operation occurs, please report if this is a long writing opertion')
             self.hdf5model.removeH5pyObject(self.nxfile)
-            self.nxfile.close()
+            timer = 1
+            while(self.hdf5model.hasPendingOperations() and timer < 6000):
+                time.sleep(0.01)
+                timer += 1
+            if timer == 6000:
+                raise Exception('Timeout on hdf5 model operation, This is probably a bug, or a very long writing operation occurs, please report if this is a long writing opertion')
+            try:
+                self.nxfile.close()
+            except RuntimeError:
+                traceback.print_exc()
+                print('Closing of database file failed. The database file might be corrupted!')
             self.nxfile = None
             if hasattr(self, "temp_directory"):
                 del self.temp_directory
