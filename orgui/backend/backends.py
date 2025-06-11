@@ -53,7 +53,8 @@ beamtimes = {'ch5523': (datetime(2018, 9, 22), datetime(2018, 10, 5)),
              '20200028': (datetime(2021, 4, 27), datetime(2021, 5, 10)),
              'ch5918' : (datetime(2021, 7, 18), datetime(2021, 8, 1)),
              'P212_default' : (datetime(1902, 7, 18), datetime(1903, 8, 1)),
-             '20230930' : (datetime(2024, 7, 16), datetime(2024, 7, 25))#,
+             '20230930' : (datetime(2024, 7, 16), datetime(2024, 7, 25)),
+             'ch7149' : (datetime(2025, 2, 17), datetime(2025, 2, 25))#,
              #'id31_default' : (datetime(2024, 8, 2), datetime(2500, 1, 1)) # all data not found in this list automatically detected as ID31 data.
              }
 
@@ -86,6 +87,7 @@ fscans = {'ch5523': BlissScan,
              '20200028': H5Fastsweep,
              'ch5918' : BlissScan_EBS,
              'P212_default' : H5Fastsweep,
+             'ch7149' : BlissScan_EBS,
              'id31_default' : BlissScan_EBS
              }
 
@@ -106,6 +108,12 @@ def openScan(btid, ddict):
                  fscan.axis = mu
                  fscan.mu = mu
                  print("Correct mu misalignment 0.055 deg,  Pt111_3")
+
+    elif btid == 'ch7149':
+        if 'node' in ddict:
+            fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False, muoffset=-0.544424)
+        else:
+            fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=-0.544424)
         
     elif btid == '20190017' or btid == '20200028' or btid == 'P212_default':
         fscan = fscancls(ddict['file'],ddict['scanno'])

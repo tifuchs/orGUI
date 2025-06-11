@@ -665,7 +665,7 @@ class BlissScan(Fastscan):
         after each integration, orGUI will search for these counter names in the Scan
         object and copy the entries into the database.
         """
-        return ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch'] 
+        return ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch','scaled_potv2f'] 
 
     def set_image_folder(self,path_to_folder):
         #self.filenames = [None]*len(self.th)
