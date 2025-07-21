@@ -241,7 +241,18 @@ class QUBCalculator(qt.QSplitter):
         if self.mainGui.fscan is not None:
             if axisname is None:
                 axisname = self.mainGui.fscan.axisname
-        mu_cryst = HKLVlieg.crystalAngles_singleArray(self.mu,self.n)
+            mu, om = self.mainGui.getMuOm()
+        else:
+            mu = self.mu; om = 0.0
+        angle_factors = np.unique((om+np.pi) // (2*np.pi)) # possible angle offset factors
+        angle_factors = np.sort(angle_factors)[::-1]  # prefer solutions close to offset factor of 0, first positive elements
+        srt = np.argsort(np.abs(angle_factors))
+        angle_factors = angle_factors[srt] # prefer solutions close to offset factor of 0
+        
+        ommax = np.amax(om)
+        ommin = np.amin(om)
+        
+        mu_cryst = HKLVlieg.crystalAngles_singleArray(mu,self.n)
         hkl = np.asarray(hkl)
         if len(hkl.shape) > 1:
             hkl = hkl.T # for anglesZmode, is a bit inconsistent
@@ -253,18 +264,78 @@ class QUBCalculator(qt.QSplitter):
             pos1 = self.angles.anglesZmode(hkl,mu_cryst,'eq',self.chi,self.phi,mirrorx=False)
             pos2 = self.angles.anglesZmode(hkl,mu_cryst,'eq',self.chi,self.phi,mirrorx=True)
         else:
-            raise Exception("No scan axis given or no scan loaded.")
+            raise ValueError("No scan axis given or no scan loaded.")
 
         pos1_refr = HKLVlieg.vacAngles(pos1,self.n)
         pos2_refr = HKLVlieg.vacAngles(pos2,self.n)
         
+        def _adjust_omega_array(omega, ommin, ommax, angle_factors):
+            """ Original function, numpy parralelized with AI:
+            It finds a 'best guess' for the om range used by the experiment
+            The order of the tested angle_factors determines the priority.
+            I.e. it should usually start (highest priority) with zero and increase.
+            
+            minfactor = 0
+            metric = np.inf
+            for factor in angle_factors:
+                if ommin <= omega1 + factor*np.pi <= ommax:
+                    omega1 = omega1 + factor*np.pi
+                    break
+                else:
+                    fmetric = min( abs(omega1 + factor*np.pi  - ommin) , abs(omega1 + factor*np.pi  - ommax))
+                    if fmetric < metric:
+                        minfactor = factor
+                        metric = fmetric
+            else:
+                omega1 = omega1 + minfactor*np.pi
+            """
+            omega = np.atleast_1d(omega)
+            angle_factors = np.atleast_1d(angle_factors)
+
+            
+            # Compute all candidate shifts: shape = (N, M)
+            # N = len(omega), M = len(angle_factors)
+            candidates = omega[:, None] + angle_factors[None, :] * 2 *np.pi
+
+            # Determine which candidates lie within [ommin, ommax]
+            inside = (candidates >= ommin) & (candidates <= ommax)
+
+            # For each ω₁, find the first factor that yields an “inside” result
+            first_inside_idx = np.argmax(inside, axis=1)
+            has_inside = inside.any(axis=1)
+
+            # Compute distance to the nearest bound for all candidates
+            dist_to_min = np.abs(candidates - ommin)
+            dist_to_max = np.abs(candidates - ommax)
+            nearest_dist = np.minimum(dist_to_min, dist_to_max)
+
+            # For those with no “inside” candidate, pick the factor with minimal distance
+            closest_idx = np.argmin(nearest_dist, axis=1)
+
+            # Choose per-row index: first_inside_idx if in‐range exists, else closest_idx
+            choice_idx = np.where(has_inside, first_inside_idx, closest_idx)
+
+            # Extract the adjusted ω₁ values
+            adjusted = candidates[np.arange(omega.shape[0]), choice_idx]
+            return adjusted
+
         if len(hkl.shape) > 1:
             alpha1, delta1, gamma1, omega1, chi1, phi1 = pos1_refr.T
             alpha2, delta2, gamma2, omega2, chi2, phi2 = pos2_refr.T
             hkl = hkl.T
+            omega1 = _adjust_omega_array(omega1, ommin, ommax, angle_factors)
+            omega2 = _adjust_omega_array(omega2, ommin, ommax, angle_factors)
+            pos1_refr.T[3] = omega1
+            pos2_refr.T[3] = omega2
+            
         else:
             alpha1, delta1, gamma1, omega1, chi1, phi1 = pos1_refr
             alpha2, delta2, gamma2, omega2, chi2, phi2 = pos2_refr
+            omega1 = float(np.squeeze(_adjust_omega_array(omega1, ommin, ommax, angle_factors)))
+            omega2 = float(np.squeeze(_adjust_omega_array(omega2, ommin, ommax, angle_factors)))
+            pos1_refr[3] = omega1
+            pos2_refr[3] = omega2
+                
         
         xy1 = self.detectorCal.pixelsSurfaceAngles(gamma1,delta1,alpha1)[:,::-1]
         xy2 = self.detectorCal.pixelsSurfaceAngles(gamma2,delta2,alpha2)[:,::-1]
