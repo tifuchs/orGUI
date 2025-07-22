@@ -113,10 +113,10 @@ class QM2_backend_2024(Scan):
         
 
         # motor conversion table:
-        motor_names =     ['phi2', 'chi', 'th']
-        sixc_equivalent = ['omega',   'chi', 'alpha']
-        sixc_sign =       [     -1,       1,      1]
-        sxic_offset =     [      0,    -270,      0]
+        motor_names =     ['phi2', 'chi', 'th', 'phi']
+        sixc_equivalent = ['omega',   'chi', 'alpha', 'omega']
+        sixc_sign =       [     -1,       1,      1,  1.]
+        sxic_offset =     [      0,    -270,      0,   0]
         
         
         scanned_motors = {}
@@ -137,7 +137,7 @@ class QM2_backend_2024(Scan):
                 
         
         if 'Time' in measurement_section:
-            self.time = np.cumsum(measurement_section['Time'][()])
+            self.time = measurement_section['Time'][()]
         else:
             self.time = np.cumsum(measurement_section['Seconds'][()]) # this is just an approximation
 
@@ -173,25 +173,42 @@ class QM2_backend_2024(Scan):
                 except:
                     pass
         
-        # search for scan folder
+        # search for scan folder in raw6M
         
         foldername_scan = self.filename + ("_%03i" % scanno)
         root = os.path.join(self.filepath, 'raw6M', self.filename)
-        
-        subfolders = [f.path for f in os.scandir(root) if f.is_dir()]
-        sssfolders = []
-        for sf in subfolders:
-            for ssf in os.scandir(sf):
-                if ssf.is_dir():
-                    sssfolders.extend([f.path for f in os.scandir(ssf) if f.is_dir()])
-        
-        for sssf in sssfolders:
-            directory, fname = os.path.split(sssf)
-            if fname == foldername_scan:
-                break
+
+        if os.path.isdir(root):
+            #from IPython import embed; embed()
+            subfolders = [f.path for f in os.scandir(root) if f.is_dir()]
+            sssfolders = []
+            for sf in subfolders:
+                for ssf in os.scandir(sf):
+                    if ssf.is_dir():
+                        sssfolders.extend([f.path for f in os.scandir(ssf) if f.is_dir()])
+            
+            for sssf in sssfolders:
+                directory, fname = os.path.split(sssf)
+                if fname == foldername_scan:
+                    break
+            else: # search in tiff folder instead
+                root_tiff = os.path.join(self.filepath, 'tiffs')
+                subfolders = [f.path for f in os.scandir(root_tiff) if f.is_dir()]
+                for sssf in subfolders:
+                    directory, fname = os.path.split(sssf)
+                    if fname == foldername_scan:
+                        break
+                else:
+                    raise ValueError("Cannot find image folder '%s' for scan number %s" % (foldername_scan, scanno))
         else:
-            from IPython import embed; embed()
-            raise ValueError("Cannot find image folder '%s' for scan number %s" % (foldername_scan, scanno))
+            root_tiff = os.path.join(self.filepath, 'tiffs')
+            subfolders = [f.path for f in os.scandir(root_tiff) if f.is_dir()]
+            for sssf in subfolders:
+                directory, fname = os.path.split(sssf)
+                if fname == foldername_scan:
+                    break
+            else:
+                raise ValueError("Cannot find image folder '%s' for scan number %s" % (foldername_scan, scanno))
         #from IPython import embed; embed()
         self.imagefolder = os.path.abspath(sssf)
         self.image_prefix = self.filename + ("_PIL10_%03i_" % scanno)
@@ -209,7 +226,7 @@ class QM2_backend_2024(Scan):
         after each integration, orGUI will search for these counter names in the Scan
         object and copy the entries into the database.
         """
-        return ['diode', 'ic1', 'ic2'] 
+        return ['diode', 'ic1', 'ic2', 'emon', 'nemon', 'pemon'] 
     
     @classmethod
     def parse_h5_node(cls, obj):

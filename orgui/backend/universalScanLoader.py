@@ -82,6 +82,14 @@ class ImportImagesScan():
         else:
             suffix = re_str.findall(self.filename)[0]
             imagePrefix = self.filename.removesuffix(suffix)
+            try:
+                found_scanfiles_no_suffix = [s.split('.')[0] for s in found_scanfiles]
+                found_scanfiles_numbers = [s.split('_')[1] for s in found_scanfiles_no_suffix]
+                numbers = np.array([int(s) for s in found_scanfiles_numbers])
+                sort_msk = np.argsort(numbers)
+                found_scanfiles = list(np.array(found_scanfiles)[sort_msk])
+            except Exception as e:
+                print('Error while sorting images: Images may be not in order: %s' % e)
             return [imagePrefix,found_scanfiles]
 
     def set_axis(self,axismin,axismax,axis,fixedAxisValue):

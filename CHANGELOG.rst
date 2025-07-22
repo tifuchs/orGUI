@@ -2,6 +2,62 @@
 Changelog
 *********
 
+1.3.0 (2025-07-21)
+##################
+
+This is a feature release with major improvements and bugfixes (> 40 commits), while still preserving mostly backward compatibility.
+One potential incompatibility is the file format of saved rocking scans, which had to be changed for more efficient saving of the data (see the Changed section).
+
+* Simplisitic rocking scan integration feature is now available. Conventional rocking scans ($\phi$- or $\omega$-scans) and reflectivity rocking scans are supported. 
+
+  * New tab in main GUI called `Rocking scan integrate`:
+
+    * Select rocking scan in database, which was previously ROI integrated, right click and select `show as rocking scan` to display the data in the new tab.
+    * 1D ROIs can be added in the `Modify ROIs` area. These are set relative to the calculated position of the reflection. They are shown in the graph as vertical lines.
+    * ROI positons can be modified by drag+drop. ROIs which are selected as `anchor` are fixed when using the `Fit between anchors` feature.
+    * `Fit between anchors` linearly interpolates between ROI anchor positions
+    * Lorentz and footprint corections can be applied. 
+    * Saving/Loading of ROI locations
+
+  This process is very manual at the moment, but will be improved in the future.
+
+* Image integration is now thread-parallel and jit compiled while releasing the gil in numba nopython nogil mode, leading to a speedup of up to 10x (depending on available thread count). 
+
+* Refactored CTR calculation code, which is now split internally into the following modules:
+
+  * CTRcalc: Main entry point for the CTR calculation, the end user should only use this top level API. API should be completely backward compatible.
+
+    * CTRutil: reading of constants (form factors etc.), Fit functionality such as FitMixins, Parameter class, ...
+    * CTRuc: fundamental structure factor calculation of simple unit cells and water models
+    * CTRfilm: Code to construct coherent thin films on a substrate. Includes interfacial models such as Skellam interfacial roughness
+    
+Added
+=====
+
+* Add CTRfilm.InterfaceEpitaxy with Skellam distr, Refactor CTRcalc (e2be0c43cc7ee613a516cf09e7fedd50ce6853f4)
+* CTR: add layer idx to UnitCell, split_to_layers function, EpitaxyInterface now uses splitted UnitCells, add EpitaxyInteface.toStr and fromStr (dff4a411ae81b8033adc02214a671fade2552978)
+* add fit code to EpitaxyInterface using common LinearFitFunctions mixin class (08a3637f19020f9c0ceeff22d25f8ed571731ac6)
+* Add Film class, stacking of layers in SXRDcrystal, F and eDensity of test examples correct (50dc46c6a736502051a1c230d6956ab1b9814446)
+* DataBase: add button to create new empty database (13000fd5c06fc5ada9cb8157ca18c0ae44ed2eff)
+* run roi rocking integration thread parallel using nogil and nopython mode of numba jit: speedup of factor 10 with many rois (dbdd016606f167f15d8f2907dd8e2ddbe56350af)
+* add ROI modification layout, adding, deleting, modify, area correnctions dialog (2da8586fa731f482704d319a649e7832e374908)
+
+Changed
+=======
+
+* add QM2 backend for loading files in tiff folder, change phi name (47a862fefa2948381680b5b50444e76d7d0b9ae4)
+* [CTRuc] pos_cart, plot3d, pos_cart_all now are calculated taking into account the domain transformations (7758dc8757bc2cda5040bec03befa8319c8924f2)
+* [rocking_int] save each rocking scan in its own hdf5 path in database (224398a5b94451b58d5b883368433fc6de4407ea)
+* save rocking curves and integration ranges in 2d arrays for speedup, add auto zoom (540377951d4980c0fb18b776039cb9246c72702c)
+
+Fixed
+=====
+
+* UniversalScanLoader: sort images according to suffix number (4a2785a4fe9135ec808bd7b2f3a742557df7f21b)
+* [CTRuc] fix loading of xpr file with errors, save layerpos and layerbehaviour in xtal, xpr file
+* [DetCal] Bugfix: calculation of detector Q range fixed (702bb3191ba0c1047f26461be5b8344c3c3dc93f)
+* [QUBcalculator] calcRefection adjusts angle range to data angle range in fscan (6771ba4802495e344010d725f1f25c1916048b1f)
+
 1.2.0 (2024-12-03)
 ##################
 

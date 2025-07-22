@@ -30,7 +30,7 @@ from .. import __version__
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
-
+import gc
 import sys
 import os
 from silx.gui import qt
@@ -70,6 +70,7 @@ from . import qutils
 from .QScanSelector import QScanSelector
 from .QReflectionSelector import QReflectionSelector, QReflectionAnglesDialog
 from .QUBCalculator import QUBCalculator
+from .peak1Dintegr import RockingPeakIntegrator
 from .ArrayTableDialog import ArrayTableDialog
 from .bgroi import RectangleBgROI
 from .database import DataBase
@@ -77,6 +78,13 @@ from ..backend.scans import SimulationScan
 from ..backend import backends
 from ..backend import universalScanLoader
 from .. import resources
+
+try:
+    from . import _roi_sum_accel
+    HAS_ACCEL = True
+except:
+    print(traceback.format_exc())
+    HAS_ACCEL = False
 
 import numpy as np
 from ..datautils.xrayutils import HKLVlieg, CTRcalc
@@ -105,7 +113,7 @@ class orGUI(qt.QMainWindow):
         #icon = resources.getQicon("sum_image.svg")
         self.fscan = None
         self.activescanname = "scan"
-        self.numberthreads = int(min(os.cpu_count(), 8)) if os.cpu_count() is not None else 1 
+        self.numberthreads = int(min(os.cpu_count(), 16)) if os.cpu_count() is not None else 1 
         if 'SLURM_CPUS_ON_NODE' in os.environ:
             self.numberthreads = int(os.environ['SLURM_CPUS_ON_NODE'])
         
@@ -160,6 +168,9 @@ class orGUI(qt.QMainWindow):
         
         self.integrdataPlot.addDockWidget(qt.Qt.RightDockWidgetArea,dbdockwidget)
         
+        self.roPkIntegrTab = RockingPeakIntegrator(self.database)
+        
+        
 
         self.scanSelector.sigImageNoChanged.connect(self._onSliderValueChanged)
 
@@ -183,6 +194,7 @@ class orGUI(qt.QMainWindow):
         
         maincentralwidget.addTab(self.centralPlot,"Scan Image browser")
         maincentralwidget.addTab(self.integrdataPlot,"ROI integrated data")
+        maincentralwidget.addTab(self.roPkIntegrTab, "Rocking scan integrate")
         
         self.setCentralWidget(maincentralwidget)
         
@@ -603,34 +615,61 @@ ub : gui for UB matrix and angle calculations
         
         progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
-
-
-        def sumImage(i):
-            image = self.fscan.get_raw_img(i).img.astype(np.float64)
+        
+        if HAS_ACCEL:
             if imgmask is not None:
-                image[imgmask] = np.nan
-                pixelavail = (~imgmask).astype(np.float64)
+                mask = np.ascontiguousarray(imgmask, dtype=bool)
             else:
-                pixelavail = np.ones_like(image)
+                mask = np.zeros(image.img.shape, dtype=bool)
             if corr:
-                image *= C_arr
+                C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
+            else:
+                C_arr = np.ones(image.img.shape, dtype=bool)
+                
+            roi_lists_numba = []
+            for roiname in ['center', 'left', 'right', 'top', 'bottom']:
+                roi_list = [] 
+                for r in rois[roiname]:
+                    roi_list.append(np.array([[r[0].start , r[0].stop], [r[1].start , r[1].stop]]))
+                roi_list = np.ascontiguousarray(np.stack(roi_list), dtype=np.int64)
+                roi_lists_numba.append(roi_list)
+                
+            def sumImage(i):
+                image = np.ascontiguousarray(self.fscan.get_raw_img(i).img, dtype=np.float64) # unlocks gil during file read
 
-            all_counters1 = np.zeros((xylist.shape[0],) + (4,))
+                all_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,)) # need gil for python object creation
+                _roi_sum_accel.processImage(image, mask, C_arr, *roi_lists_numba, all_counters) # numba nopython and nogil mode
+                return all_counters
+            
+        else:
+            
 
-            for crnr in range(xylist.shape[0]):
+            def sumImage(i):
+                image = self.fscan.get_raw_img(i).img.astype(np.float64)
+                if imgmask is not None:
+                    image[imgmask] = np.nan
+                    pixelavail = (~imgmask).astype(np.float64)
+                else:
+                    pixelavail = np.ones_like(image)
+                if corr:
+                    image *= C_arr
 
-                # set ROI (moved to rocking-function)
+                all_counters1 = np.zeros((xylist.shape[0],) + (4,))
 
-                # get roi
-                key = rois['center'][crnr]
-                bgkey = [rois['left'][crnr], rois['right'][crnr], rois['top'][crnr], rois['bottom'][crnr]]
-                # fill counters
-                counters1 = fill_counters(image,pixelavail,key, bgkey)
+                for crnr in range(xylist.shape[0]):
 
-                all_counters1[crnr] = counters1
+                    # set ROI (moved to rocking-function)
+
+                    # get roi
+                    key = rois['center'][crnr]
+                    bgkey = [rois['left'][crnr], rois['right'][crnr], rois['top'][crnr], rois['bottom'][crnr]]
+                    # fill counters
+                    counters1 = fill_counters(image,pixelavail,key, bgkey)
+
+                    all_counters1[crnr] = counters1
 
 
-            return all_counters1
+                return all_counters1
             
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor: # speedup only for the file reads 
@@ -638,6 +677,7 @@ ub : gui for UB matrix and angle calculations
             for i in range(len(self.fscan)):
                 futures[executor.submit(sumImage, i)] = i
             
+            status = "no error"
             for f in concurrent.futures.as_completed(futures): # iteration over jobs
                 try:
                     for j in range(len(f.result())): # iteration over ROIs
@@ -648,16 +688,25 @@ ub : gui for UB matrix and angle calculations
                         bgroi1_all[i][j] = bgroi1
                         bgpixel1_all[i][j] = bgpixel1
                     progress.setValue(futures[f])
+                    del f
                 except concurrent.futures.CancelledError:
-                    pass
+                    del f
                 except Exception as e:
                     print("Cannot read image:\n%s" % traceback.format_exc())
-
-                if progress.wasCanceled():
+                    print("Cancel to avoid memory leak")
                     [f.cancel() for f in futures]
+                    status = 'error'
+                    del f
+                if progress.wasCanceled():
+                    status = 'error'
+                    [f.cancel() for f in futures]
+                    
                     break
+                #gc.collect()
 
         progress.setValue(len(self.fscan))
+        if status == 'error':
+            return
 
         currentPlotCount = len(self.integrdataPlot.getAllCurves())
         numberOfNewPlots = xylist.shape[0]
@@ -666,6 +715,62 @@ ub : gui for UB matrix and angle calculations
 
         #print('Number of integration curves: ' + str(numberOfPlots))
         #print('We can plot every ' + str(plotOnlyNth) + '-th curve.' )
+        
+        ro_name = "rocking_[%.2f %.2f %.2f]_H0_[%.2f %.2f %.2f]_H1" % (*refldict['H_0'], *refldict['H_1'])
+        suffix = ''
+        i = 0
+        while(self.activescanname + "/measurement/" + ro_name + suffix in self.database.nxfile):
+            suffix = "_%s" % i
+            i += 1
+        ro_name = ro_name + suffix
+        
+        auxcounters = {"@NX_class": u"NXcollection"}
+        for auxname in self.fscan.auxillary_counters:
+            if hasattr(self.fscan, auxname):
+                cntr = getattr(self.fscan, auxname)
+                if cntr is not None:
+                    auxcounters[auxname] = cntr
+            
+        if hasattr(self.fscan, "title"):
+            title = str(self.fscan.title)
+        else:
+            title = u"%s-scan" % self.fscan.axisname
+        
+        mu, om = self.getMuOm()
+        if len(np.asarray(om).shape) == 0:
+            om = np.full_like(mu,om)
+        if len(np.asarray(mu).shape) == 0:
+            mu = np.full_like(om,mu)
+                    
+        data = {self.activescanname:{
+                    "instrument": {
+                        "@NX_class": u"NXinstrument",
+                        "positioners": {
+                            "@NX_class": u"NXcollection",
+                            self.fscan.axisname: self.fscan.axis
+                        }
+                    },
+                    "auxillary" : auxcounters,
+                    "measurement": {
+                        "@NX_class": u"NXentry",
+                        "@default": ro_name ,
+                        ro_name : {
+                            "@NX_class": u"NXentry",
+                            "@default": "rois",
+                            "@orgui_meta": u"rocking",
+                            "rois" : {
+                                "@NX_class": u"NXcollection",
+                                "@default": None,
+                                "@orgui_meta": u"roi rocking",
+                            }
+                        }
+                    },
+                    "title":u"%s" % title,
+                    "@NX_class": u"NXentry",
+                    "@default": u"measurement/%s" % ro_name,
+                    "@orgui_meta": u"scan"
+                }
+            }
 
         #plot and save data in database
         for d in range(croi1_all.shape[1]):
@@ -699,7 +804,7 @@ ub : gui for UB matrix and angle calculations
             # save data
             
             x, y = xylist[d] 
-            name1 = "rocking_%.5fs_[%.2f %.2f %.2f]_H0_[%.2f %.2f %.2f]_H1" % (refldict['s'][d], *refldict['H_0'], *refldict['H_1'])
+            name1 = "rocking_%.5fs_[%.2f %.2f %.2f]" % (refldict['s'][d], *(refldict['H_1']*refldict['s'][d] + refldict['H_0']))
             
             alpha1, delta1, gamma1, omega1, chi1, phi1 = refldict['angles'][d]
             sixc_angles_hkl = {
@@ -725,33 +830,14 @@ ub : gui for UB matrix and angle calculations
                 "HKL_sixc_angles" : sixc_angles_hkl
             }
             
-            if hasattr(self.fscan, "title"):
-                title = str(self.fscan.title)
-            else:
-                title = u"%s-scan" % self.fscan.axisname
-            
-            mu, om = self.getMuOm()
-            if len(np.asarray(om).shape) == 0:
-                om = np.full_like(mu,om)
-            if len(np.asarray(mu).shape) == 0:
-                mu = np.full_like(om,mu)
-            
             suffix = ''
             i = 0
 
-            while(self.activescanname + "/measurement/" + name1 + suffix in self.database.nxfile):
+            while(self.activescanname + "/measurement/" + ro_name + "/" + name1 + suffix in self.database.nxfile):
                 suffix = "_%s" % i
                 i += 1
+                
             availname1 = name1 + suffix
-
-                                                
-            auxcounters = {"@NX_class": u"NXcollection"}
-            for auxname in self.fscan.auxillary_counters:
-                if hasattr(self.fscan, auxname):
-                    cntr = getattr(self.fscan, auxname)
-                    if cntr is not None:
-                        auxcounters[auxname] = cntr
-                        
 
             x_coord1_a = xylist[:,0]
             y_coord1_a = xylist[:,1]
@@ -793,37 +879,151 @@ ub : gui for UB matrix and angle calculations
                 "@signal" : u"counters/croibg",
                 "@axes": u"trajectory/axis",
                 "@title": self.activescanname + "_" + availname1,
-                "@orgui_meta": u"roi"
+                "@orgui_meta": u"roi rocking"
             }
                 
-            data = {self.activescanname:{
-                        "instrument": {
-                            "@NX_class": u"NXinstrument",
-                            "positioners": {
-                                "@NX_class": u"NXcollection",
-                                self.fscan.axisname: self.fscan.axis
-                            }
-                        },
-                        "auxillary" : auxcounters,
-                        "measurement": {
-                            "@NX_class": u"NXentry",
-                            "@default": availname1 ,
-                        },
-                        "title":u"%s" % title,
-                        "@NX_class": u"NXentry",
-                        "@default": u"measurement/%s" % availname1,
-                        "@orgui_meta": u"scan"
-                    }
-                }
-                
+            data[self.activescanname]["measurement"][ro_name]["rois"]["@default"] = availname1
             if np.any(cpixel1_a > 0.):
-                data[self.activescanname]["measurement"][availname1] = datas1
+                data[self.activescanname]["measurement"][ro_name]["rois"][availname1] = datas1
                 if d % plotOnlyNth == 0:
                     self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
                                                     xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
+
+        
+        
+        # lets keep legacy data structure for now
+            
+        data_2d_structured = {self.activescanname:{
+                    "instrument": {
+                        "@NX_class": u"NXinstrument",
+                        "positioners": {
+                            "@NX_class": u"NXcollection",
+                            self.fscan.axisname: self.fscan.axis
+                        }
+                    },
+                    "auxillary" : auxcounters,
+                    "measurement": {
+                        "@NX_class": u"NXentry",
+                        "@default": ro_name ,
+                        ro_name : {
+                            "@NX_class": u"NXentry",
+                            "@default": "rois",
+                            "@orgui_meta": u"rocking"
+                        }
+                    },
+                    "title":u"%s" % title,
+                    "@NX_class": u"NXentry",
+                    "@default": u"measurement/%s" % ro_name,
+                    "@orgui_meta": u"scan"
+                }
+            }
+        alpha = []; theta = []; delta = []; gamma = []; chi = []; phi = []; omega = []; 
+        alpha_pk = []; theta_pk = []; delta_pk = []; gamma_pk = []; chi_pk = []; phi_pk = []; omega_pk = []; 
+        x = []; y = []; h = []; k = []; l = []; 
+        croibg = []; croibg_errors = []; croi = []; bgroi = []; croi_pix = []; bgroi_pix = []; 
+        axis = []; s = []; H_0 = []; H_1 = []; HKL = []
+        
+        #from IPython import embed; embed()
+
+        for sc in data[self.activescanname]["measurement"][ro_name]["rois"]:
+            if sc.startswith('@'):
+                continue
+            try:
+                dsc = data[self.activescanname]["measurement"][ro_name]["rois"][sc]
+                
+                
+                
+                # 2D arrays
+                alpha.append(dsc["sixc_angles"]["alpha"])
+                theta.append(dsc["sixc_angles"]["theta"])
+                delta.append(dsc["sixc_angles"]["delta"])
+                gamma.append(dsc["sixc_angles"]["gamma"])
+                chi.append(dsc["sixc_angles"]["chi"])
+                phi.append(dsc["sixc_angles"]["phi"])
+                omega.append(dsc["sixc_angles"]["omega"])
+                
+                # 2D arrays
+                h.append(dsc["hkl"]["h"])
+                k.append(dsc["hkl"]["k"])
+                l.append(dsc["hkl"]["l"])
+                
+                # 2D arrays
+                croibg.append(dsc["counters"]["croibg"])
+                croibg_errors.append(dsc["counters"]["croibg_errors"])
+                croi.append(dsc["counters"]["croi"])
+                bgroi.append(dsc["counters"]["bgroi"])
+                croi_pix.append(dsc["counters"]["croi_pix"])
+                bgroi_pix.append(dsc["counters"]["bgroi_pix"])
+                
+                # 2D arrays
+                x.append(dsc["pixelcoord"]["x"])
+                y.append(dsc["pixelcoord"]["y"])
+                
+                axis.append(dsc["trajectory"]["axis"])
+                s.append(dsc["trajectory"]["s"]) # 1D array
+                H_1.append(dsc["trajectory"]["H_1"])
+                H_0.append(dsc["trajectory"]["H_0"])
+                HKL.append(dsc["trajectory"]["HKL"])
+                
+                # 1d Array
+                alpha_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["alpha"])
+                theta_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["theta"])
+                delta_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["delta"])
+                gamma_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["gamma"])
+                chi_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["chi"])
+                phi_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["phi"])
+                omega_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["omega"])
+            except Exception as e:
+                from IPython import embed; embed()
+                sys.exit(0)
+
+        
+        rois = {
+                "@NX_class": u"NXcollection",
+                "@default": "croibg",
+                "@orgui_meta": u"roi rocking",
+                "alpha" : np.vstack(alpha),
+                "theta" : np.vstack(theta),
+                "delta" : np.vstack(delta),
+                "gamma" : np.vstack(gamma),
+                "chi" : np.vstack(chi),
+                "phi" : np.vstack(phi),
+                "omega" : np.vstack(omega),
+                "h" : np.vstack(h),
+                "k" : np.vstack(k),
+                "l" : np.vstack(l),
+                "croibg" : np.vstack(croibg),
+                "croibg_errors" : np.vstack(croibg_errors),
+                "croi" : np.vstack(croi),
+                "bgroi" : np.vstack(bgroi),
+                "croi_pix" : np.vstack(croi_pix),
+                "bgroi_pix" : np.vstack(bgroi_pix),
+                "x" : np.vstack(x),
+                "y" : np.vstack(y),
+                "axis" : np.vstack(axis),
+                "H_1" : np.vstack(H_1),
+                "H_0" : np.vstack(H_0),
+                "HKL_pk" : np.vstack(HKL),
+                "s" : np.array(s),
+                "alpha_pk" : np.array(alpha_pk),
+                "theta_pk" : np.array(theta_pk),
+                "delta_pk" : np.array(delta_pk),
+                "gamma_pk" : np.array(gamma_pk),
+                "chi_pk" : np.array(chi_pk),
+                "phi_pk" : np.array(phi_pk),
+                "omega_pk" : np.array(omega_pk)
+            }
+        scsize = np.array(s).shape[0]
+        for t in rois:
+            if t.startswith('@'):
+                continue
+            if rois[t].shape[0] != scsize:
+                from IPython import embed; embed()
+                sys.exit(0)
+            
+        data_2d_structured[self.activescanname]["measurement"][ro_name]["rois"] = rois
                     
-                    
-            self.database.add_nxdict(data)
+        self.database.add_nxdict(data_2d_structured)
         
                 
     def updatePlotItems(self, recalculate=True):
@@ -2785,7 +2985,7 @@ class QDiffractometerImageDialog(qt.QDialog):
         qt.QDialog.__init__(self, parent)
         verticalLayout = qt.QVBoxLayout(self)
         verticalLayout.setContentsMargins(0, 0, 0, 0)
-        img = AspectRatioPixmapLabel(self)
+        img = qutils.AspectRatioPixmapLabel(self)
         pixmp = qt.QPixmap(resources.getDiffractometerPath())
         #img.setScaledContents(False)
         img.setPixmap(pixmp)
@@ -2801,36 +3001,7 @@ class QDiffractometerImageDialog(qt.QDialog):
         #verticalLayout.addWidget(svg)
         self.setLayout(verticalLayout)
 
-class AspectRatioPixmapLabel(qt.QLabel):
-    def __init__(self, parent=None):
-        qt.QLabel.__init__(self, parent)
-        self.setMinimumSize(1,1)
-        self.setScaledContents(False)
-        self.pix = None
-        
-    def setPixmap(self, p):
-        self.pix = p
-        super().setPixmap(self.scaledPixmap())
-        
-    def scaledPixmap(self):
-        return self.pix.scaled(self.size(), qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
 
-    def heightForWidth(self, width):
-        if self.pix is None:
-            return self.height()
-        else:
-            return int(( self.pix.height()* width) /self.pix.width())
-
-    def sizeHint(self):
-        app = qt.QApplication.instance()
-        screenGeometry = app.primaryScreen().availableGeometry()
-        w = int(screenGeometry.width()/3)
-        w_s = self.width()
-        return qt.QSize( max(w, w_s), self.heightForWidth(w))
-        
-    def resizeEvent(self,e):
-        if self.pix is not None:
-            super().setPixmap(self.scaledPixmap())
             
 class AboutDialog(qt.QDialog):
     def __init__(self,version, msg='' ,parent=None):
