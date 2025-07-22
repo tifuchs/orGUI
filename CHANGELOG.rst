@@ -31,6 +31,9 @@ One potential incompatibility is the file format of saved rocking scans, which h
     * CTRuc: fundamental structure factor calculation of simple unit cells and water models
     * CTRfilm: Code to construct coherent thin films on a substrate. Includes interfacial models such as Skellam interfacial roughness
     
+Thanks to Finn for the rocking extraction script, changing the default scan name, fixing the reflections view bug and the maintenance of the ID31 backend.
+
+
 Added
 =====
 
@@ -41,6 +44,9 @@ Added
 * DataBase: add button to create new empty database (13000fd5c06fc5ada9cb8157ca18c0ae44ed2eff)
 * run roi rocking integration thread parallel using nogil and nopython mode of numba jit: speedup of factor 10 with many rois (dbdd016606f167f15d8f2907dd8e2ddbe56350af)
 * add ROI modification layout, adding, deleting, modify, area correnctions dialog (2da8586fa731f482704d319a649e7832e374908)
+* Add script to perform rocking scan extractions (cfc307d719de4eabced3d3a0f54003b1aa3b5505, Thanks Finn!)
+* id31_tools.py - include new fast potential data in aux counters (e7203b87ff877031b852370eeb9e9749832cf792, Thanks Finn!)
+
 
 Changed
 =======
@@ -49,6 +55,7 @@ Changed
 * [CTRuc] pos_cart, plot3d, pos_cart_all now are calculated taking into account the domain transformations (7758dc8757bc2cda5040bec03befa8319c8924f2)
 * [rocking_int] save each rocking scan in its own hdf5 path in database (224398a5b94451b58d5b883368433fc6de4407ea)
 * save rocking curves and integration ranges in 2d arrays for speedup, add auto zoom (540377951d4980c0fb18b776039cb9246c72702c)
+* Manually loaded scans always have default 'scan' name (309f5672b553f8c4088b24f41afde66c3f4a8faf, Thanks Finn) 
 
 Fixed
 =====
@@ -57,6 +64,9 @@ Fixed
 * [CTRuc] fix loading of xpr file with errors, save layerpos and layerbehaviour in xtal, xpr file
 * [DetCal] Bugfix: calculation of detector Q range fixed (702bb3191ba0c1047f26461be5b8344c3c3dc93f)
 * [QUBcalculator] calcRefection adjusts angle range to data angle range in fscan (6771ba4802495e344010d725f1f25c1916048b1f)
+* [DetCal] Bugfix of detector binning if number of pixels is divisible (c2737f827d79e463cb94a851582c5c6e1199c9ba)
+* QReflectionSelector.py - fix bug that deletes list of set reflections when toggling 'view - reference reflections' option (9260ed549c1d45dc65b25c61ed8a1031285017e7, Thanks Finn!)
+
 
 1.2.0 (2024-12-03)
 ##################

@@ -1,8 +1,8 @@
 [project]
 name = 'orGUI'
 dynamic = ['version',]
-license = {text = "MIT License"}
-requires-python = '>=3.7'
+license = "MIT"
+requires-python = '>=3.8'
 readme = 'README.rst'
 description = 'orGUI: Orientation and Integration with 2D detectors'
 
@@ -16,7 +16,6 @@ classifiers = [
     'Intended Audience :: End Users/Desktop',
     'Intended Audience :: Developers',
     'Intended Audience :: Science/Research',
-    "License :: OSI Approved :: MIT License",
     'Operating System :: MacOS :: MacOS X',
     'Operating System :: Microsoft :: Windows',
     'Operating System :: POSIX',

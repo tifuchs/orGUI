@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # /*##########################################################################
 #
-# Copyright (c) 2020-2024 Timo Fuchs
+# Copyright (c) 2020-2025 Timo Fuchs
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,13 @@
 # THE SOFTWARE.
 #
 # ###########################################################################*/
+__author__ = "Timo Fuchs"
+__copyright__ = "Copyright 2020-2025 Timo Fuchs"
+__license__ = "MIT License"
+__version__ = "1.3.0"
+__maintainer__ = "Timo Fuchs"
+__email__ = "tfuchs@cornell.edu"
+
 import os
 import glob
 

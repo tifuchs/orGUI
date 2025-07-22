@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # /*##########################################################################
 #
-# Copyright (c) 2020-2024 Timo Fuchs
+# Copyright (c) 2020-2025 Timo Fuchs
 # 
 # class CurvesROIWidget:
 # Copyright (c) 2004-2024 European Synchrotron Radiation Facility

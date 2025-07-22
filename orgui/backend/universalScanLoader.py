@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # /*##########################################################################
 #
-# Copyright (c) 2024 Finn Schroeter
+# Copyright (c) 2024-2025 Finn Schroeter
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -24,9 +24,9 @@
 # ###########################################################################*/
 __author__ = "Finn Schroeter"
 __credits__ = ['Finn Schroeter']
-__copyright__ = "Copyright 2024 Finn Schroeter"
+__copyright__ = "Copyright 2024-2025 Finn Schroeter"
 __license__ = "MIT License"
-__version__ = "1.0.0"
+__version__ = "1.3.0"
 
 import re
 import os
