@@ -541,6 +541,8 @@ ub : gui for UB matrix and angle calculations
         xy = refldict['xy_%s' % intersect][mask]
         
         refldict['angles'] = refldict['angles_%s' % intersect][mask]
+        refldict['s_masked'] = refldict['s'][mask]
+        refldict['hkl_masked'] = refldict['hkl'][mask]
         
         roi_keys = self.intbkgkeys_rocking(refldict)
         hkl_del_gam = self.getStaticROIparams(xy)
@@ -804,7 +806,7 @@ ub : gui for UB matrix and angle calculations
             # save data
             
             x, y = xylist[d] 
-            name1 = "rocking_%.5fs_[%.2f %.2f %.2f]" % (refldict['s'][d], *(refldict['H_1']*refldict['s'][d] + refldict['H_0']))
+            name1 = "rocking_%.5fs_[%.2f %.2f %.2f]" % (refldict['s_masked'][d], *(refldict['H_1']*refldict['s_masked'][d] + refldict['H_0']))
             
             alpha1, delta1, gamma1, omega1, chi1, phi1 = refldict['angles'][d]
             sixc_angles_hkl = {
@@ -823,10 +825,10 @@ ub : gui for UB matrix and angle calculations
                 "@direction" : u"Rocking scan at fixed pixel location along H_1*s + H_0 in reciprocal space",
                 "@NX_class": u"NXcollection",
                 "axis" : hkl_del_gam_1[:,5],
-                "s" : refldict['s'][d], 
+                "s" : refldict['s_masked'][d], 
                 "H_1" : refldict['H_1'],
                 "H_0" : refldict['H_0'],
-                "HKL" : refldict['H_1']*refldict['s'][d] + refldict['H_0'],
+                "HKL" : refldict['H_1']*refldict['s_masked'][d] + refldict['H_0'],
                 "HKL_sixc_angles" : sixc_angles_hkl
             }
             
