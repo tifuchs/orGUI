@@ -149,12 +149,22 @@ class orGUI(qt.QMainWindow):
         self.ubcalc = QUBCalculator(configfile, self)
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
         
-        
+
+        self.resetIntegrPlotCurves = qt.QAction("Reset plot",self)
+        self.resetIntegrPlotCurves.triggered.connect(self._removeAllIntegrPlotCurves)
+
+        self.resetIntegrPlotCurveSet = qt.QAction("Remove curves",self)
+        self.resetIntegrPlotCurveSet.triggered.connect(self._removeIntegrPlotCurveSet)
         
         maincentralwidget = qt.QTabWidget()
         
         self.integrdataPlot = silx.gui.plot.Plot1D(self)
         legendwidget = self.integrdataPlot.getLegendsDockWidget()
+
+        plotRemovalBar = qt.QToolBar()
+        plotRemovalBar.addAction(self.resetIntegrPlotCurves)
+        plotRemovalBar.addAction(self.resetIntegrPlotCurveSet)
+        self.integrdataPlot.addToolBar(plotRemovalBar)
         
         toolbar = qt.QToolBar()
         toolbar.addAction(control_actions.OpenGLAction(parent=toolbar, plot=self.integrdataPlot))
@@ -393,6 +403,33 @@ ub : gui for UB matrix and angle calculations
         aboutQtAct.triggered.connect(lambda : qt.QMessageBox.aboutQt(self))
         
         self.setMenuBar(menu_bar)
+
+    def _removeAllIntegrPlotCurves(self):
+        curveList = self.integrdataPlot.getAllCurves(just_legend=True)
+        for i in curveList:
+            self.integrdataPlot.removeCurve(i)
+
+    def _removeIntegrPlotCurveSet(self):
+        curveList = self.integrdataPlot.getAllCurves(just_legend=True)
+        d = QPlotDeleteWindow(curveList)
+        if d.exec() == qt.QDialog.Accepted:
+            if d.action == 'delete':
+                try:
+                    for i,j in enumerate(d.boxes):
+                        if j.isChecked() == True:
+                            self.integrdataPlot.removeCurve(curveList[i])
+                            self.integrdataPlot.getLegendsDockWidget().updateLegends()
+                except MemoryError:
+                    qutils.warning_detailed_message(self, "Error","Can not delete selected plots.", traceback.format_exc())
+            elif d.action == 'hide':
+                try:
+                    for i,j in enumerate(d.boxes):
+                        if j.isChecked() == True:
+                            self.integrdataPlot.getCurve(curveList[i]).setVisible(False)
+                            self.integrdataPlot.getLegendsDockWidget().updateLegends()
+                except MemoryError:
+                    qutils.warning_detailed_message(self, "Error","Can not delete selected plots.", traceback.format_exc())
+        
 
     def get_rocking_coordinates(self, H_0=None, H_1=None, maxValue=None,step_width=None, **kwargs):
         # going back to the more universal integration along H_0 + s*H_1 positions 
@@ -2912,6 +2949,48 @@ class QImportScanCreator(qt.QDialog):
             self.omend.setValue(15.)
             self.fixed_label.setText("theta (fixed):")
             self.fixedAngle.setValue(self.defaultMuTh[1])
+        
+        
+class QPlotDeleteWindow(qt.QDialog):
+    
+    def __init__(self,curveList, parent=None):
+        qt.QDialog.__init__(self, parent)
+        self.curves = curveList
+        self.action = None
+        
+        layout = qt.QGridLayout()
+        self.boxes = []
+        d = 0
+
+        for i,j in enumerate(self.curves):
+            d += 1
+            self.boxes.append(qt.QCheckBox())
+            layout.addWidget(qt.QLabel(j),i,0,1,1)
+            layout.addWidget(self.boxes[i],i,1,1,1)
+
+        self.buttons = qt.QDialogButtonBox()
+        self.buttons.addButton('Delete curves',self.buttons.ActionRole)
+        self.buttons.addButton('Hide curves',self.buttons.ActionRole)
+        self.buttons.addButton(qt.QDialogButtonBox.Cancel)
+
+        layout.addWidget(self.buttons,d,0,-1,-1)
+
+        self.buttons.buttons()[1].clicked.connect(self.deleteClicked)
+        self.buttons.buttons()[2].clicked.connect(self.hideClicked)
+        self.buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
+
+        self.setLayout(layout)
+
+    def deleteClicked(self):
+        self.action = 'delete'
+        self.accept()
+    
+    def hideClicked(self):
+        self.action = 'hide'
+        self.accept()
+        
+
+
 
 class QScanCreator(qt.QDialog):
     
