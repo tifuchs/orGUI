@@ -143,9 +143,10 @@ class orGUI(qt.QMainWindow):
         self.imageno = 0
         
     
-        ubWidget = qt.QSplitter(qt.Qt.Vertical)
-        ubWidget.setChildrenCollapsible(False)
-        #ubLayout = qt.QVBoxLayout()
+        #ubWidget = qt.QSplitter(qt.Qt.Vertical)
+        #ubWidget.setChildrenCollapsible(False)
+        ubLayout = qt.QVBoxLayout()
+        ubWidget = qt.QWidget()
         self.ubcalc = QUBCalculator(configfile, self)
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
         
@@ -252,12 +253,13 @@ class orGUI(qt.QMainWindow):
         self.ubcalc.sigReplotRequest.connect(self.updatePlotItems)
         self.allimgsum = None
         self.allimgmax = None
-
-        ubWidget.addWidget(self.reflectionSel)
-        ubWidget.addWidget(self.ubcalc)
+        self.reflectionSel.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Expanding)
+        ubLayout.addWidget(self.reflectionSel)
+        self.ubcalc.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Maximum)
+        ubLayout.addWidget(self.ubcalc)
         
         
-        #ubWidget.setLayout(ubLayout)
+        ubWidget.setLayout(ubLayout)
         ubDock.setWidget(ubWidget)
         self.centralPlot.addDockWidget(qt.Qt.RightDockWidgetArea,ubDock)
         
