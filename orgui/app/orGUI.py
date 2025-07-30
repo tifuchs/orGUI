@@ -583,12 +583,14 @@ ub : gui for UB matrix and angle calculations
         
         roi_keys = self.intbkgkeys_rocking(refldict)
         hkl_del_gam = self.getStaticROIparams(xy)
+        
+        ro_name = "rocking_[%.2f %.2f %.2f]_H0_[%.2f %.2f %.2f]_H1" % (*refldict['H_0'], *refldict['H_1'])
 
-        self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict)
+        self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
             
 
 
-    def rocking_integrate(self,xylist, rois, hkl_del_gam, refldict):
+    def rocking_integrate(self,xylist, rois, hkl_del_gam, refldict, name):
         try:
             image = self.fscan.get_raw_img(0)
         except Exception as e:
@@ -755,13 +757,12 @@ ub : gui for UB matrix and angle calculations
         #print('Number of integration curves: ' + str(numberOfPlots))
         #print('We can plot every ' + str(plotOnlyNth) + '-th curve.' )
         
-        ro_name = "rocking_[%.2f %.2f %.2f]_H0_[%.2f %.2f %.2f]_H1" % (*refldict['H_0'], *refldict['H_1'])
         suffix = ''
         i = 0
-        while(self.activescanname + "/measurement/" + ro_name + suffix in self.database.nxfile):
+        while(self.activescanname + "/measurement/" + name + suffix in self.database.nxfile):
             suffix = "_%s" % i
             i += 1
-        ro_name = ro_name + suffix
+        name = name + suffix
         
         auxcounters = {"@NX_class": u"NXcollection"}
         for auxname in self.fscan.auxillary_counters:
@@ -781,7 +782,7 @@ ub : gui for UB matrix and angle calculations
         if len(np.asarray(mu).shape) == 0:
             mu = np.full_like(om,mu)
                     
-        data = {self.activescanname:{
+        data = {self.activescanname:{ # legacy, to be removed!
                     "instrument": {
                         "@NX_class": u"NXinstrument",
                         "positioners": {
@@ -792,8 +793,8 @@ ub : gui for UB matrix and angle calculations
                     "auxillary" : auxcounters,
                     "measurement": {
                         "@NX_class": u"NXentry",
-                        "@default": ro_name ,
-                        ro_name : {
+                        "@default": name ,
+                            name : {
                             "@NX_class": u"NXentry",
                             "@default": "rois",
                             "@orgui_meta": u"rocking",
@@ -806,7 +807,7 @@ ub : gui for UB matrix and angle calculations
                     },
                     "title":u"%s" % title,
                     "@NX_class": u"NXentry",
-                    "@default": u"measurement/%s" % ro_name,
+                    "@default": u"measurement/%s" % name,
                     "@orgui_meta": u"scan"
                 }
             }
@@ -833,7 +834,7 @@ ub : gui for UB matrix and angle calculations
             rod_mask1 = np.isfinite(croibg1_a)
 
             
-            s1_masked = hkl_del_gam_1[:,5][rod_mask1]
+            axis_masked = hkl_del_gam_1[:,5][rod_mask1]
             
             croibg1_a_masked = croibg1_a[rod_mask1]
 
@@ -843,7 +844,7 @@ ub : gui for UB matrix and angle calculations
             # save data
             
             x, y = xylist[d] 
-            name1 = "rocking_%.5fs_[%.2f %.2f %.2f]" % (refldict['s_masked'][d], *(refldict['H_1']*refldict['s_masked'][d] + refldict['H_0']))
+            name1 = "rocking_%s" % (d)
             
             alpha1, delta1, gamma1, omega1, chi1, phi1 = refldict['angles'][d]
             sixc_angles_hkl = {
@@ -857,22 +858,24 @@ ub : gui for UB matrix and angle calculations
                     "phi" :  np.rad2deg(phi1),
                     "@unit" : u"deg"
             }
-            
             traj1 = {
-                "@direction" : u"Rocking scan at fixed pixel location along H_1*s + H_0 in reciprocal space",
+                #"@direction" : u"Rocking scan at fixed pixel location along H_1*s + H_0 in reciprocal space",
                 "@NX_class": u"NXcollection",
                 "axis" : hkl_del_gam_1[:,5],
-                "s" : refldict['s_masked'][d], 
-                "H_1" : refldict['H_1'],
-                "H_0" : refldict['H_0'],
-                "HKL" : refldict['H_1']*refldict['s_masked'][d] + refldict['H_0'],
                 "HKL_sixc_angles" : sixc_angles_hkl
             }
+            # determine the type of rocking scan: 
+            if 's_masked' in refldict: # H_1 * s H_0 -like rocking scan (CTR scan)
+                traj1["s"] = refldict['s_masked'][d]
+                traj1["H_1"] = refldict['H_1']
+                traj1["H_0"] = refldict['H_0']
+                traj1["HKL_pk"] = refldict['H_1']*refldict['s_masked'][d] + refldict['H_0']
+
             
             suffix = ''
             i = 0
 
-            while(self.activescanname + "/measurement/" + ro_name + "/" + name1 + suffix in self.database.nxfile):
+            while(self.activescanname + "/measurement/" + name + "/" + name1 + suffix in self.database.nxfile):
                 suffix = "_%s" % i
                 i += 1
                 
@@ -921,12 +924,12 @@ ub : gui for UB matrix and angle calculations
                 "@orgui_meta": u"roi rocking"
             }
                 
-            data[self.activescanname]["measurement"][ro_name]["rois"]["@default"] = availname1
+            data[self.activescanname]["measurement"][name]["rois"]["@default"] = availname1
             if np.any(cpixel1_a > 0.):
-                data[self.activescanname]["measurement"][ro_name]["rois"][availname1] = datas1
+                data[self.activescanname]["measurement"][name]["rois"][availname1] = datas1
                 if d % plotOnlyNth == 0:
-                    self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
-                                                    xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
+                    self.integrdataPlot.addCurve(axis_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
+                                                    xlabel="trajectory/%s" % self.fscan.axisname, ylabel="counters/croibg", yerror=croibg1_err_a_masked)
 
         
         
@@ -943,8 +946,8 @@ ub : gui for UB matrix and angle calculations
                     "auxillary" : auxcounters,
                     "measurement": {
                         "@NX_class": u"NXentry",
-                        "@default": ro_name ,
-                        ro_name : {
+                        "@default": name ,
+                        name : {
                             "@NX_class": u"NXentry",
                             "@default": "rois",
                             "@orgui_meta": u"rocking"
@@ -952,7 +955,7 @@ ub : gui for UB matrix and angle calculations
                     },
                     "title":u"%s" % title,
                     "@NX_class": u"NXentry",
-                    "@default": u"measurement/%s" % ro_name,
+                    "@default": u"measurement/%s" % name,
                     "@orgui_meta": u"scan"
                 }
             }
@@ -960,15 +963,20 @@ ub : gui for UB matrix and angle calculations
         alpha_pk = []; theta_pk = []; delta_pk = []; gamma_pk = []; chi_pk = []; phi_pk = []; omega_pk = []; 
         x = []; y = []; h = []; k = []; l = []; 
         croibg = []; croibg_errors = []; croi = []; bgroi = []; croi_pix = []; bgroi_pix = []; 
-        axis = []; s = []; H_0 = []; H_1 = []; HKL = []
+        axis = []; s = []; H_0 = []; H_1 = []; HKL_pk = []
         
         #from IPython import embed; embed()
+        
+        optional_labels = {
+            's' : s, 'H_1' : H_1, 'H_0' : H_0, 'HKL_pk' : HKL_pk
+        }
+        
 
-        for sc in data[self.activescanname]["measurement"][ro_name]["rois"]:
+        for sc in data[self.activescanname]["measurement"][name]["rois"]:
             if sc.startswith('@'):
                 continue
             try:
-                dsc = data[self.activescanname]["measurement"][ro_name]["rois"][sc]
+                dsc = data[self.activescanname]["measurement"][name]["rois"][sc]
                 
                 
                 
@@ -999,10 +1007,10 @@ ub : gui for UB matrix and angle calculations
                 y.append(dsc["pixelcoord"]["y"])
                 
                 axis.append(dsc["trajectory"]["axis"])
-                s.append(dsc["trajectory"]["s"]) # 1D array
-                H_1.append(dsc["trajectory"]["H_1"])
-                H_0.append(dsc["trajectory"]["H_0"])
-                HKL.append(dsc["trajectory"]["HKL"])
+                
+                for lbl in optional_labels:
+                    if lbl in dsc["trajectory"]:
+                        optional_labels[lbl].append(dsc["trajectory"][lbl])
                 
                 # 1d Array
                 alpha_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["alpha"])
@@ -1040,10 +1048,6 @@ ub : gui for UB matrix and angle calculations
                 "x" : np.vstack(x),
                 "y" : np.vstack(y),
                 "axis" : np.vstack(axis),
-                "H_1" : np.vstack(H_1),
-                "H_0" : np.vstack(H_0),
-                "HKL_pk" : np.vstack(HKL),
-                "s" : np.array(s),
                 "alpha_pk" : np.array(alpha_pk),
                 "theta_pk" : np.array(theta_pk),
                 "delta_pk" : np.array(delta_pk),
@@ -1052,7 +1056,11 @@ ub : gui for UB matrix and angle calculations
                 "phi_pk" : np.array(phi_pk),
                 "omega_pk" : np.array(omega_pk)
             }
-        scsize = np.array(s).shape[0]
+        for lbl in optional_labels:
+            if optional_labels[lbl]:
+                rois[lbl] = np.squeeze(np.vstack(optional_labels[lbl]))
+            
+        scsize = np.array(alpha_pk).shape[0]
         for t in rois:
             if t.startswith('@'):
                 continue
@@ -1060,7 +1068,7 @@ ub : gui for UB matrix and angle calculations
                 from IPython import embed; embed()
                 sys.exit(0)
             
-        data_2d_structured[self.activescanname]["measurement"][ro_name]["rois"] = rois
+        data_2d_structured[self.activescanname]["measurement"][name]["rois"] = rois
                     
         self.database.add_nxdict(data_2d_structured)
         
