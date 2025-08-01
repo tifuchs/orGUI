@@ -44,6 +44,8 @@ import numpy as np
 from ..datautils.xrayutils import HKLVlieg
 
 from .. import resources
+from . import qutils
+from . import imagePeakFinder
 
 @dataclass
 class HKLReflection:
@@ -75,18 +77,21 @@ class HKLReflection:
     def __array__(self):
         return np.concatenate([self.hkl,self.xy,[self.imageno]])
 
-class QReflectionSelector(qt.QSplitter):
+class QReflectionSelector(qt.QWidget):
     sigQueryImageChange = qt.pyqtSignal(int)
     sigQuerySaveReflections = qt.pyqtSignal()
     sigQueryLoadReflections = qt.pyqtSignal()
+    sigQueryCenterPlot = qt.pyqtSignal(object)
     #sigImagePathChanged = qt.pyqtSignal(object)
     #sigImageNoChanged = qt.pyqtSignal(object)
     def __init__(self,plot, ubcalc, parent=None):
-        qt.QSplitter.__init__(self, parent=None)
-        self.setOrientation(qt.Qt.Vertical)
+        qt.QWidget.__init__(self, parent=None)
+        layout = qt.QVBoxLayout()
+        #self.setOrientation(qt.Qt.Vertical)
         self.plot = plot
         self.ubcalc = ubcalc
         self.orparent = parent
+        self.pkImgDiag = PeakImgRangeDialog([0, 360], 'NoAxis')
         
         self.reflections = []
         self.reflBragg = []
@@ -113,21 +118,7 @@ class QReflectionSelector(qt.QSplitter):
         self.refleditor.sigRowsDeleted.connect(self._onRowsDeleted)
         self.refleditor.view.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.refleditor.view.selectionModel().currentRowChanged.connect(self._onSelectedRowChanged)
-        
-        spacer_widget = qt.QWidget()
-        spacer_widget.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred)
-        self.refleditor.toolbar.addWidget(spacer_widget)
-        
-        self.setImageAct = qt.QAction(resources.getQicon('select-image'), "select Image", self)
-        self.setImageAct.setToolTip("set this image for the chosen reflection")
-        self.setImageAct.triggered.connect(self._onSetImage)
-        self.refleditor.toolbar.addAction(self.setImageAct)
-        
-        self.gotoImageAct = qt.QAction(resources.getQicon('search-image'), "search image",self)
-        self.gotoImageAct.setToolTip("diplay image with the chosen reflection")
-        self.gotoImageAct.triggered.connect(self._onGotoImage)
-        self.refleditor.toolbar.addAction(self.gotoImageAct)
-        
+
         editorTabWidget.addTab(self.refleditor, "intrinsic coord")
 
         self.refleditor_angles = ArrayEditWidget(True, -1, False)
@@ -137,7 +128,133 @@ class QReflectionSelector(qt.QSplitter):
         self.refleditor_angles.view.selectionModel().currentRowChanged.connect(self._onSelectedRowChanged)
         editorTabWidget.addTab(self.refleditor_angles, "SIXC angles")
         
-        self.addWidget(editorTabWidget)
+        layout.addWidget(editorTabWidget)
+        #self.addWidget(editorTabWidget)
+        
+        self.controlToolbar = qt.QToolBar()
+        self.controlToolbar.setMovable(False)
+        self.controlToolbar.setOrientation(qt.Qt.Horizontal)
+        
+        spacer_widget = qt.QWidget()
+        spacer_widget.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred)
+        
+        self.setImageAct = qt.QAction(resources.getQicon('select-image'), "select Image", self)
+        self.setImageAct.setToolTip("set this image for the chosen reflection")
+        self.setImageAct.triggered.connect(self._onSetImage)
+        
+        self.gotoImageAct = qt.QAction(resources.getQicon('search-image'), "search image",self)
+        self.gotoImageAct.setToolTip("diplay image with the chosen reflection")
+        self.gotoImageAct.triggered.connect(self._onGotoImage)
+        
+        self.peakSearchInImage = qt.QAction(resources.getQicon('search-peak'), "2D peak search",self) 
+        self.peakSearchInImage.setToolTip("perform peak search in the image")
+        self.peakSearchInImage.triggered.connect(self._onSinglePeakSearch)
+        
+        self.addBraggReflAct = qt.QAction( "add Bragg reflection",self) 
+        self.addBraggReflAct.setToolTip("add the next Bragg reflection, which improves the U matrix the most")
+        self.addBraggReflAct.triggered.connect(self._onAddBraggReflection)
+        
+        self.controlToolbar.addAction(self.gotoImageAct)
+        self.controlToolbar.addSeparator()
+        self.controlToolbar.addAction(self.setImageAct)
+        self.controlToolbar.addAction(self.peakSearchInImage)
+        self.controlToolbar.addWidget(spacer_widget)
+        self.controlToolbar.addAction(self.addBraggReflAct)
+        
+        
+        layout.addWidget(self.controlToolbar)
+        
+        self.setLayout(layout)
+        
+    def _onSinglePeakSearch(self):
+        
+        if self.activeReflection is not None:
+            try:
+                refl = self.reflections[self.indexReflection(self.activeReflection)]
+                if self.orparent.fscan is not None:
+                    self.pkImgDiag.set_axis(self.orparent.fscan.axis, self.orparent.fscan.axisname)
+                    if self.pkImgDiag.exec() == qt.QDialog.Accepted:
+                        roidict = self.pkImgDiag.get_roi()
+                        #mu, om = self.orparent.getMuOm(refl.imageno)
+                        axis = self.orparent.fscan.axis
+                        ax_min = roidict['from'] + axis[refl.imageno]
+                        ax_max = roidict['to'] + axis[refl.imageno]
+                        xy_start = refl.xy
+                        com_d = self.searchPeak(xy_start, 
+                                                roidict['vsize'], 
+                                                roidict['hsize'],
+                                                [ax_min, ax_max])
+                        ax_min = roidict['from_2'] + com_d['axis_com']
+                        ax_max = roidict['to_2'] + com_d['axis_com']                                     
+                        xy_start = com_d['xy']
+                        com_d = self.searchPeak(xy_start, 
+                                                roidict['vsize_2'], 
+                                                roidict['hsize_2'],
+                                                [ax_min, ax_max])
+                        
+                        refl.xy = com_d['xy']
+                        refl.imageno = np.argmin(np.abs(axis - com_d['axis_com']))
+                        self.updateEditor()
+                        self.sigQueryImageChange.emit(refl.imageno)
+                        
+            except Exception as e:
+                qutils.warning_detailed_message(self, "Error","Cannot calculte peak position:\n%s" % e, traceback.format_exc())
+        
+    def searchPeak(self, xy_start, vsize, hsize, ax_range):
+        kwargs = {
+            'excluded_images' : self.orparent.excludedImagesDialog.getData(),
+            'max_workers' : self.orparent.numberthreads
+        }
+        if self.orparent.centralPlot.getMaskToolsDockWidget().getSelectionMask() is not None:
+            kwargs['mask'] = self.orparent.centralPlot.getMaskToolsDockWidget().getSelectionMask() > 0.0
+        com_d = imagePeakFinder.find_COM_Image(xy_start, 
+                                                vsize, 
+                                                hsize,
+                                                self.orparent.fscan,
+                                                ax_range,
+                                                **kwargs)
+        return com_d
+                                                
+        
+        
+        
+    def _onAddBraggReflection(self):
+        if not self.reflBragg:
+            qutils.warning_detailed_message(self, "Error","No Bragg reflection positions calculated.\nUse view->show Bragg reflectioins to calculate them", '')
+            return
+        
+        # Bragg reflections not in reflection list 
+        refl_new = []
+        refl_hkl_current = np.vstack([r.hkl for r in self.reflections])
+        
+        for refl in self.reflBragg:
+            for cref in self.reflections:
+                if np.allclose(refl.hkl, cref.hkl):
+                    break
+            else:
+                refl_new.append(refl)
+                
+        refl_new_hkl_Bragg = np.vstack([r.hkl for r in refl_new])
+        
+        Q_current = self.orparent.ubcalc.ubCal.lattice.getB() @ refl_hkl_current.T
+        Q_candidates = self.orparent.ubcalc.ubCal.lattice.getB() @ refl_new_hkl_Bragg.T
+        
+        refl_new_norm = []
+        
+        for Qc in Q_candidates.T:
+            norm = np.linalg.norm(Q_current.T - Qc, axis=1)
+            refl_new_norm.append(np.sum(norm))
+            
+        refl_new_norm = np.array(refl_new_norm)
+        order = np.argsort(refl_new_norm)[::-1]
+        
+        selected_refl = refl_new[order[0]]
+        
+        
+        dd = {'x' : selected_refl.xy[0], 'y' : selected_refl.xy[1]}
+        self.addReflection(dd,selected_refl.imageno,hkl=selected_refl.hkl)
+        self.sigQueryImageChange.emit(selected_refl.imageno)
+        self.sigQueryCenterPlot.emit(selected_refl.xy)
         
         
     def _onDataChanged(self, *dat):
@@ -241,7 +358,21 @@ class QReflectionSelector(qt.QSplitter):
         self.reflBragg.clear()
         for i, (hkl, yxr, pos) in enumerate(zip(hkls, yx, angles)):
             identifier = 'bragg_'+str(i)
-            self.reflBragg.append(HKLReflection(yxr[::-1], hkl,1, identifier))
+            if self.orparent.fscan.axisname == 'mu':
+                angle_idx = 0
+                sign = 1.
+            elif self.orparent.fscan.axisname == 'th':
+                angle_idx = 3
+                sign = -1.
+            else:
+                qt.QMessageBox.warning(self,"Cannot calculate reflection","Cannot calculate reflection.\n%s is no supported scan axis." % self.orparent.fscan.axisname)
+                return 
+            try:
+                imageno1 = self.orparent.axisToImageNo(np.rad2deg(pos[angle_idx]) * sign)
+            except Exception as e:
+                qutils.warning_detailed_message(self, "Error","Cannot calculate axis position:\n%s" % e, traceback.format_exc())
+
+            self.reflBragg.append(HKLReflection(yxr[::-1], hkl, imageno1, identifier))
         if self.showBraggReflections:
             self.redrawBraggReflections()
         else:
@@ -394,6 +525,7 @@ class QReflectionSelector(qt.QSplitter):
     def _onGotoImage(self):
         if self.activeReflection is not None:
             self.sigQueryImageChange.emit(self.reflections[self.indexReflection(self.activeReflection)].imageno)
+            self.sigQueryCenterPlot.emit(self.reflections[self.indexReflection(self.activeReflection)].xy)
             
     def _onSetImage(self):
         if self.activeReflection is not None:
@@ -426,6 +558,8 @@ class QReflectionSelector(qt.QSplitter):
                 newactive = self.reflections[0]
                 self.setReflectionActive(newactive.identifier)
         self.updateEditor()
+        
+        
         
         
         
@@ -537,3 +671,133 @@ class QReflectionAnglesDialog(qt.QDialog):
         app.clipboard().setText(self.header + "\n" + self.datastr)
     
         
+class PeakImgRangeDialog(qt.QDialog):
+
+    
+    def __init__(self,axis, axisname, parent=None):
+        qt.QDialog.__init__(self, parent)
+        
+        layout = qt.QGridLayout()
+        
+        self._scan_label = qt.QLabel("%s-scan: from %s to %s, max image will be calculated relative to set peak position" % (axisname, axis[0], axis[-1]))
+        layout.addWidget(self._scan_label,0,0, 1, -1)
+        
+        layout.addWidget(qt.QLabel("1st pass (rough alignment):"),1,0, 1, -1)
+        
+        layout.addWidget(qt.QLabel("max img range:"),2, 0)
+        layout.addWidget(qt.QLabel("from (rel):"),2, 1)
+        layout.addWidget(qt.QLabel("to (rel):"),2, 3)
+
+        self.roi_from = qt.QDoubleSpinBox()
+        self.roi_from.setRange(-1000000, 1000000)
+        self.roi_from.setDecimals(2)
+        self.roi_from.setSuffix(u" °")
+        self.roi_from.setValue(-2.0)
+        layout.addWidget(self.roi_from, 2,2)
+        
+        self.roi_to = qt.QDoubleSpinBox()
+        self.roi_to.setRange(-1000000, 1000000)
+        self.roi_to.setDecimals(2)
+        self.roi_to.setSuffix(u" °")
+        self.roi_to.setValue(2.0)
+        layout.addWidget(self.roi_to, 2,4)
+        
+        
+        layout.addWidget(qt.QLabel("ROI size:"),3, 0)
+        layout.addWidget(qt.QLabel("size v:"),3, 1)
+        layout.addWidget(qt.QLabel("size h:"),3, 3)
+
+        self.vsize = qt.QSpinBox()
+        self.vsize.setRange(1, 1000000)
+        self.vsize.setSuffix(u" pix")
+        self.vsize.setValue(100)
+        layout.addWidget(self.vsize, 3,2)
+        
+        self.hsize = qt.QSpinBox()
+        self.hsize.setRange(1, 1000000)
+        self.hsize.setSuffix(u" pix")
+        self.hsize.setValue(100)
+        layout.addWidget(self.hsize, 3,4)
+        
+        
+        
+        layout.addWidget(qt.QLabel("2nd pass (fine alignment):"),4,0, 1, -1)
+        
+        layout.addWidget(qt.QLabel("max img range:"),5, 0)
+        layout.addWidget(qt.QLabel("from (rel):"),5, 1)
+        layout.addWidget(qt.QLabel("to (rel):"),5, 3)
+
+        self.roi_from_2 = qt.QDoubleSpinBox()
+        self.roi_from_2.setRange(-1000000, 1000000)
+        self.roi_from_2.setDecimals(2)
+        self.roi_from_2.setSuffix(u" °")
+        self.roi_from_2.setValue(-1.0)
+        layout.addWidget(self.roi_from_2, 5,2)
+        
+        self.roi_to_2 = qt.QDoubleSpinBox()
+        self.roi_to_2.setRange(-1000000, 1000000)
+        self.roi_to_2.setDecimals(2)
+        self.roi_to_2.setSuffix(u" °")
+        self.roi_to_2.setValue(1.0)
+        layout.addWidget(self.roi_to_2, 5,4)
+        
+        
+        layout.addWidget(qt.QLabel("ROI size:"),6, 0)
+        layout.addWidget(qt.QLabel("size v:"),6, 1)
+        layout.addWidget(qt.QLabel("size h:"),6, 3)
+
+        self.vsize_2 = qt.QSpinBox()
+        self.vsize_2.setRange(1, 1000000)
+        self.vsize_2.setSuffix(u" pix")
+        self.vsize_2.setValue(60)
+        layout.addWidget(self.vsize_2, 6,2)
+        
+        self.hsize_2 = qt.QSpinBox()
+        self.hsize_2.setRange(1, 1000000)
+        self.hsize_2.setSuffix(u" pix")
+        self.hsize_2.setValue(60)
+        layout.addWidget(self.hsize_2, 6,4)
+        
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
+        layout.addWidget(buttons,7,0,1,-1)
+        
+        buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.onOk)
+        buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
+        
+        self.setLayout(layout)
+        
+    def set_axis(self,axis, axisname):
+        self._scan_label.setText("%s-scan: from %s to %s, max image will be calculated relative to set peak position" % (axisname, axis[0], axis[-1]))
+        
+    def _verify_ranges(self):
+        if self.roi_from.value() > self.roi_to.value():
+            raise ValueError("Invalid input of max img range: from %s > to %s" % (self.roi_from.value(),self.roi_to.value()) )
+        if self.roi_from_2.value() > self.roi_to_2.value():
+            raise ValueError("Invalid input of max img range: from %s > to %s" % (self.roi_from.value(),self.roi_to.value()) )
+        return True
+        
+    def get_roi(self):
+        self._verify_ranges()
+        ddict = {
+            'from' : self.roi_from.value(),
+            'to' : self.roi_to.value(),
+            'vsize' : self.vsize.value(),
+            'hsize' : self.hsize.value(),
+            'from_2' : self.roi_from_2.value(),
+            'to_2' : self.roi_to_2.value(),
+            'vsize_2' : self.vsize_2.value(),
+            'hsize_2' : self.hsize_2.value()
+        }
+        return ddict
+        
+        
+    def onOk(self):
+        try:
+            self._verify_ranges()
+        except Exception as e:
+            qt.QMessageBox.warning(self, "Invalid input", str(e))
+            return
+        self.accept()
+        
+        
+      

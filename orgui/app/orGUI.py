@@ -246,6 +246,7 @@ class orGUI(qt.QMainWindow):
         
         self.reflectionSel = QReflectionSelector(self.centralPlot, self.ubcalc, self)
         self.reflectionSel.sigQueryImageChange.connect(self._onChangeImage)
+        self.reflectionSel.sigQueryCenterPlot.connect(self._onCenterGraph)
         
         self.ubcalc.setReflectionHandler(self.getReflections)
         
@@ -2728,6 +2729,24 @@ Do you want to continue without mask?""")
         topkey = (croi[0], slice(int(np.clip(croi[1].start - top, 0, detvsize)), croi[1].start))
         bottomkey = (croi[0], slice(croi[1].stop, int(np.clip(croi[1].stop + bottom,0,detvsize)) ))
         return leftkey, rightkey, topkey, bottomkey
+        
+    def _onCenterGraph(self, xy):
+        #img = self.centralPlot.getImage()
+        #shape = img.shape if img is not None else (100,100)
+        
+        x1, x2 = self.centralPlot.getXAxis().getLimits()
+        x_center = (x1+x2)/2
+        x1_new = x1 - x_center + xy[0]
+        x2_new = x2 - x_center + xy[0]
+        self.centralPlot.getXAxis().setLimits(x1_new, x2_new)
+        
+        y1, y2 = self.centralPlot.getYAxis().getLimits()
+        y_center = (y1+y2)/2
+        y1_new = y1 - y_center + xy[1]
+        y2_new = y2 - y_center + xy[1]
+        self.centralPlot.getYAxis().setLimits(y1_new, y2_new)
+        
+        
         
     def closeEvent(self,event):
         self.database.close()
