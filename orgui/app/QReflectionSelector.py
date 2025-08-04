@@ -34,6 +34,7 @@ import traceback
 import os
 from io import StringIO
 from silx.gui import qt
+from silx.gui import icons
 from .ArrayTableDialog import ArrayEditWidget
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -92,6 +93,7 @@ class QReflectionSelector(qt.QWidget):
         self.ubcalc = ubcalc
         self.orparent = parent
         self.pkImgDiag = PeakImgRangeDialog([0, 360], 'NoAxis')
+        self.peakReflDialog = PeakReflDialog(self)
         
         self.reflections = []
         self.reflBragg = []
@@ -217,13 +219,12 @@ class QReflectionSelector(qt.QWidget):
                                                 
         
         
-        
-    def _onAddBraggReflection(self):
+    def getBraggCandidates(self, recalculate=False):
+        if recalculate:
+            self.orparent.calcBraggRefl()
         if not self.reflBragg:
-            qutils.warning_detailed_message(self, "Error","No Bragg reflection positions calculated.\nUse view->show Bragg reflectioins to calculate them", '')
-            return
+            raise ValueError("No Bragg reflections calculated or available")
         
-        # Bragg reflections not in reflection list 
         refl_new = []
         refl_hkl_current = np.vstack([r.hkl for r in self.reflections])
         
@@ -248,13 +249,20 @@ class QReflectionSelector(qt.QWidget):
         refl_new_norm = np.array(refl_new_norm)
         order = np.argsort(refl_new_norm)[::-1]
         
-        selected_refl = refl_new[order[0]]
+        ordered_refl = []
+        for o in order:
+            ordered_refl.append(refl_new[o])
+        return ordered_refl
         
-        
-        dd = {'x' : selected_refl.xy[0], 'y' : selected_refl.xy[1]}
-        self.addReflection(dd,selected_refl.imageno,hkl=selected_refl.hkl)
-        self.sigQueryImageChange.emit(selected_refl.imageno)
-        self.sigQueryCenterPlot.emit(selected_refl.xy)
+    def _onAddBraggReflection(self):
+        if self.peakReflDialog.isVisible():
+            self.peakReflDialog.activateWindow()
+            return
+        if not self.reflBragg:
+            qutils.warning_detailed_message(self, "Error","No Bragg reflection positions calculated.\nUse view->show Bragg reflectioins to calculate them", '')
+            return
+        self.peakReflDialog.set_candidates(self.getBraggCandidates())
+        self.peakReflDialog.show()
         
         
     def _onDataChanged(self, *dat):
@@ -485,6 +493,7 @@ class QReflectionSelector(qt.QWidget):
         self.nextNo += 1
         self.updateEditor()
         self.setReflectionActive(identifier)
+        return refl
 
         
     def indexReflection(self, identifier):
@@ -669,7 +678,198 @@ class QReflectionAnglesDialog(qt.QDialog):
     def copy_to_clipboard(self):
         app = qt.QApplication.instance()
         app.clipboard().setText(self.header + "\n" + self.datastr)
+        
+        
+        
+class PeakReflDialog(qt.QDialog):
+
     
+    def __init__(self, refl_selector):
+        qt.QDialog.__init__(self, refl_selector)
+        self.refl_selector = refl_selector
+        self.candidate_reflections = []
+        self.currentRefl = None
+        self.idx = 0
+        
+        layout = qt.QVBoxLayout()
+        
+        toplayout = qt.QHBoxLayout()
+        hkl = np.array([np.nan, np.nan, np.nan])
+        self._hkl_label = qt.QLabel("New reflection: %s (%s/%s)" % (hkl, 0,0))
+        toplayout.addWidget(self._hkl_label)
+        
+        
+        self.refreshBtn = qt.QPushButton()
+        self.refreshBtn.setIcon(icons.getQIcon('view-refresh'))
+        self.refreshBtn.setToolTip("Refresh and reorder Bragg reflection list")
+        self.refreshBtn.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
+        self.refreshBtn.clicked.connect(self._onRefreshBragg)
+        toplayout.addWidget(self.refreshBtn)
+        
+        self.gotoImageBtn = qt.QPushButton("search image")
+        self.gotoImageBtn.setIcon(resources.getQicon('search-image'))
+        self.gotoImageBtn.setToolTip("diplay image with the chosen reflection")
+        self.gotoImageBtn.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
+        self.gotoImageBtn.clicked.connect(self._onGotoImage)
+        toplayout.addWidget(self.gotoImageBtn)
+        
+        self.next_btn = qt.QPushButton('next')
+        self.next_btn.setIcon(icons.getQIcon('next'))
+        self.next_btn.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
+        self.next_btn.setToolTip("Goto next Bragg reflection")
+        self.next_btn.clicked.connect(self._onNextBragg)
+        toplayout.addWidget(self.next_btn)
+        
+        self.prev_btn = qt.QPushButton('previous')
+        self.prev_btn.setIcon(icons.getQIcon('previous'))
+        self.prev_btn.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
+        self.prev_btn.setToolTip("Goto previous Bragg reflection")
+        self.prev_btn.clicked.connect(self._onPrevBragg)
+        toplayout.addWidget(self.prev_btn)
+        
+        layout.addLayout(toplayout)
+        
+        editlayout = qt.QHBoxLayout()
+        
+        editlayout.addWidget(qt.QLabel("Edit reflection: "))
+        
+        self.setImageBtn = qt.QPushButton("select Image")
+        self.setImageBtn.setIcon(resources.getQicon('select-image'))
+        self.setImageBtn.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
+        self.setImageBtn.setToolTip("set this image for the chosen reflection")
+        self.setImageBtn.clicked.connect(self._onSelectImg)
+        editlayout.addWidget(self.setImageBtn)
+        
+        self.peakSearchBtn = qt.QPushButton("2D peak search")
+        self.peakSearchBtn.setIcon(resources.getQicon('search-peak'))
+        self.peakSearchBtn.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
+        self.peakSearchBtn.setToolTip("perform peak search in the image")
+        self.peakSearchBtn.clicked.connect(self._onPeakSearch)
+        editlayout.addWidget(self.peakSearchBtn)
+        
+        editlayout.addWidget(qt.QLabel("Accept reflection:"))
+        
+
+        self.acceptReflBtn = qt.QPushButton('Add reflection')
+        self.acceptReflBtn.setIcon(icons.getQIcon('selected'))
+        self.acceptReflBtn.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
+        self.acceptReflBtn.setToolTip("add reflection to the list of reference reflections")
+        self.acceptReflBtn.clicked.connect(self._onAcceptRefl)
+        editlayout.addWidget(self.acceptReflBtn)
+        
+        layout.addLayout(editlayout)
+        
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
+        
+        buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.onOk)
+        buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.onCancel)
+        
+        layout.addWidget(buttons)
+        
+        self.setLayout(layout)
+        
+    def _onGotoImage(self):
+        if self.currentRefl is not None:
+            try:
+                self.refl_selector.setReflectionActive(self.currentRefl.identifier)
+                self.refl_selector.sigQueryImageChange.emit(self.currentRefl.imageno)
+                self.refl_selector.sigQueryCenterPlot.emit(self.currentRefl.xy)
+            except Exception as e:
+                print("Cannot goto reflection %s: %s" % (self.currentRefl, e))
+                
+        
+    def _onNextBragg(self):
+        if self.currentRefl is not None and self.candidate_reflections:
+            if self.idx < len(self.candidate_reflections)-1:
+                self.set_current_candidate(self.idx + 1)
+            else:
+                qt.QMessageBox.warning(self, "Max Bragg reflections reached", "The maximum of available Bragg reflections has been reached.")
+    
+    def _onPrevBragg(self):
+        if self.currentRefl is not None and self.candidate_reflections:
+            if self.idx > 0:
+                self.set_current_candidate(self.idx - 1)
+            else:
+                qt.QMessageBox.warning(self, "Min Bragg reflections reached", "The lowest of available Bragg reflections has been reached.")
+
+    def _onSelectImg(self):
+        if self.currentRefl is not None and self.candidate_reflections:
+            try:
+                self.refl_selector.setReflectionActive(self.currentRefl.identifier)
+                self.refl_selector._onSetImage()
+            except Exception as e:
+                qutils.warning_detailed_message(self, "Error","Cannot select image number:\n%s" % e, traceback.format_exc())
+        
+    def _onRefreshBragg(self):
+        try:
+            refl_list = self.refl_selector.getBraggCandidates(True)
+            self.set_candidates(refl_list)
+        except Exception as e:
+            qutils.warning_detailed_message(self, "Error","Cannot refresh Bragg reflections:\n%s" % e, traceback.format_exc())
+            
+    def _onPeakSearch(self):
+        if self.currentRefl is not None and self.candidate_reflections:
+            try:
+                self.refl_selector.setReflectionActive(self.currentRefl.identifier)
+                self.refl_selector._onSinglePeakSearch()
+            except Exception as e:
+                qutils.warning_detailed_message(self, "Error","Cannot perform peak search:\n%s" % e, traceback.format_exc())
+        
+    def _onAcceptRefl(self):
+        if self.currentRefl is not None and self.candidate_reflections:
+            del self.candidate_reflections[self.idx]
+            self.currentRefl = None
+            if self.idx < len(self.candidate_reflections) -1:
+                self.set_current_candidate(self.idx)
+            elif self.candidate_reflections:
+                self.set_current_candidate(self.idx-1)
+            else:
+                self.idx = 0
+                hkl = np.array([np.nan, np.nan, np.nan])
+                self._hkl_label.setText("New reflection: %s (%s/%s)" % (hkl, 0,0))
+                
+        
+    def set_current_candidate(self, idx):
+        refl = self.candidate_reflections[idx]
+        if self.currentRefl is not None:
+            try:
+                self.refl_selector.deleteReflection(self.currentRefl.identifier)
+            except Exception as e:
+                print("Cannot remove reflection %s: %s" % (self.currentRefl, e))
+        dd = {'x' : refl.xy[0], 'y' : refl.xy[1]}
+        refl = self.refl_selector.addReflection(dd,refl.imageno,hkl=refl.hkl)
+        self.candidate_reflections[idx] = refl
+        self.currentRefl = refl
+        self.idx = idx
+        self._hkl_label.setText("New reflection: %s (%s/%s)" % (refl.hkl, idx+1, len(self.candidate_reflections)))
+        self.refl_selector.sigQueryImageChange.emit(refl.imageno)
+        self.refl_selector.sigQueryCenterPlot.emit(refl.xy)
+        
+        
+    def set_candidates(self,refl_list):
+        if refl_list:
+            self.candidate_reflections = copy.deepcopy(refl_list)
+            self.set_current_candidate(0)
+        else:
+            if self.currentRefl is not None:
+                try:
+                    self.refl_selector.deleteReflection(self.currentRefl.identifier)
+                except Exception as e:
+                    print("Cannot remove reflection %s: %s" % (self.currentRefl, e))
+            self.idx = 0
+            self.currentRefl = None
+            self.candidate_reflections = []
+            hkl = np.array([np.nan, np.nan, np.nan])
+            self._hkl_label.setText("New reflection: %s (%s/%s)" % (hkl, 0,0))
+            
+        
+    def onOk(self):
+        self.set_candidates([])
+        self.accept()
+
+    def onCancel(self):
+        self.set_candidates([])
+        self.reject()
         
 class PeakImgRangeDialog(qt.QDialog):
 

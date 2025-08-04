@@ -1108,7 +1108,8 @@ ub : gui for UB matrix and angle calculations
     def onShowBragg(self,visible):
         try:
             self.reflectionSel.setBraggReflectionsVisible(visible)
-            self.calcBraggRefl()
+            if visible:
+                self.calcBraggRefl()
         except Exception:
             qutils.warning_detailed_message(self, "Cannot show show Bragg reflections", "Cannot show Bragg reflections", traceback.format_exc())
             #qt.QMessageBox.critical(self,"Cannot show show Bragg reflections", "Cannot Cannot show Bragg reflections:\n%s" % traceback.format_exc())
@@ -1194,7 +1195,7 @@ ub : gui for UB matrix and angle calculations
         
         
     def calcBraggRefl(self):
-        if self.fscan is not None and self.reflectionSel.showBraggReflections:
+        if self.fscan is not None:
             if self.fscan.axisname != 'th':
                 raise NotImplementedError("Calculation of available Bragg reflections is not implemented for %s - scans" % self.fscan.axisname)
             try:
