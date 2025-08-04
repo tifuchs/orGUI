@@ -817,6 +817,8 @@ ub : gui for UB matrix and angle calculations
 
         #plot and save data in database
         for d in range(croi1_all.shape[1]):
+            roi_d = rois['center'][d]
+            roisize = (roi_d[0].stop - roi_d[0].start) * (roi_d[1].stop - roi_d[1].start)
 
             hkl_del_gam_1 = hkl_del_gam[d]
 
@@ -827,11 +829,11 @@ ub : gui for UB matrix and angle calculations
             
         
             if np.any(bgpixel1_a):
-                croibg1_a = croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a
-                croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a)
+                croibg1_a = ( croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a ) * (roisize / cpixel1_a)
+                croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * (roisize / cpixel1_a)
             else:
-                croibg1_a = croi1_a
-                croibg1_err_a = np.sqrt(croi1_a)
+                croibg1_a = croi1_a * (roisize / cpixel1_a)
+                croibg1_err_a = np.sqrt(croi1_a) * (roisize / cpixel1_a)
                 
 
             rod_mask1 = np.isfinite(croibg1_a)
@@ -2291,6 +2293,10 @@ ub : gui for UB matrix and angle calculations
         H_1 = np.array([h.value() for h in self.scanSelector.H_1])
         H_0 = np.array([h.value() for h in self.scanSelector.H_0])
         
+        vsize = int(self.scanSelector.vsize.value())
+        hsize = int(self.scanSelector.hsize.value())
+        roi_size = vsize*hsize
+        
         imgmask = None
         
         if self.scanSelector.useMaskBox.isChecked():
@@ -2439,18 +2445,18 @@ Do you want to continue without mask?""")
         progress.setValue(len(self.fscan))
         
         if np.any(bgpixel1_a):
-            croibg1_a = croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a
-            croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a)
+            croibg1_a = ( croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a ) * ( roi_size / cpixel1_a)
+            croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size / cpixel1_a)
         else:
-            croibg1_a = croi1_a
-            croibg1_err_a = np.sqrt(croi1_a)
+            croibg1_a = croi1_a * ( roi_size / cpixel1_a)
+            croibg1_err_a = np.sqrt(croi1_a) * ( roi_size / cpixel1_a)
             
         if np.any(bgpixel2_a):
-            croibg2_a = croi2_a - (cpixel2_a/bgpixel2_a) * bgroi2_a
-            croibg2_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2) * bgroi2_a)
+            croibg2_a = ( croi2_a - (cpixel2_a/bgpixel2_a) * bgroi2_a ) * ( roi_size / cpixel2_a)
+            croibg2_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2) * bgroi2_a) * ( roi_size / cpixel2_a)
         else:
-            croibg2_a = croi2_a
-            croibg2_err_a = np.sqrt(croi2_a)
+            croibg2_a = croi2_a * ( roi_size / cpixel2_a)
+            croibg2_err_a = np.sqrt(croi2_a) * ( roi_size / cpixel2_a)
 
         rod_mask1 = np.isfinite(croibg1_a)
         rod_mask2 = np.isfinite(croibg2_a)
