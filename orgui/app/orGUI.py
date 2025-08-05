@@ -668,7 +668,7 @@ ub : gui for UB matrix and angle calculations
             if corr:
                 C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
             else:
-                C_arr = np.ones(image.img.shape, dtype=bool)
+                C_arr = np.ones(image.img.shape, dtype=np.float64)
                 
             roi_lists_numba = []
             for roiname in ['center', 'left', 'right', 'top', 'bottom']:

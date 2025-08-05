@@ -518,8 +518,12 @@ class DataBase(qt.QMainWindow):
     def close(self):
         if self.nxfile is not None:
             timer = 1
+            if self.hdf5model.hasPendingOperations():
+                qt.QApplication.processEvents()
             while(self.hdf5model.hasPendingOperations() and timer < 6000):
                 time.sleep(0.01)
+                if not( timer % 1000):
+                    qt.QApplication.processEvents()
                 timer += 1
             if timer == 6000:
                 raise Exception('Timeout on hdf5 model operation, This is probably a bug, or a very long writing operation occurs, please report if this is a long writing opertion')
@@ -527,6 +531,8 @@ class DataBase(qt.QMainWindow):
             timer = 1
             while(self.hdf5model.hasPendingOperations() and timer < 6000):
                 time.sleep(0.01)
+                if not( timer % 1000):
+                    qt.QApplication.processEvents()
                 timer += 1
             if timer == 6000:
                 raise Exception('Timeout on hdf5 model operation, This is probably a bug, or a very long writing operation occurs, please report if this is a long writing opertion')
