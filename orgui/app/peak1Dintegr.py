@@ -835,8 +835,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
         raw_bgroi_errors = np.sqrt(raw_croi_errors)
         bgroi_errors = np.sqrt(croi_errors)
         
-        croibg = croi - bgroi # already normalized bg
-        croibg_errors = np.sqrt(croi_errors**2 + bgroi_errors**2)
+        croibg = (croi - bgroi) / sig_interval # already normalized bg
+        croibg_errors = np.sqrt(croi_errors**2 + bgroi_errors**2) / sig_interval
                 
         raw_croibg = raw_croi - raw_bgroi # already normalized bg
         raw_croibg_errors = np.sqrt(raw_croi_errors**2 + raw_bgroi_errors**2)
