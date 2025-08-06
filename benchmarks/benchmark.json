@@ -1,0 +1,283 @@
+{
+  "config": {
+    "ncpu": 24,
+    "affinity": 24,
+    "openmp_num_threads": "unset",
+    "blosc_nthreads": "unset",
+    "hdf5plugin": {
+      "openmp": false,
+      "native": false,
+      "bmi2": false,
+      "sse2": true,
+      "ssse3": false,
+      "avx2": false,
+      "avx512": false,
+      "cpp11": true,
+      "cpp14": true,
+      "cpp20": true,
+      "ipp": false,
+      "filter_file_extension": ".dll",
+      "embedded_filters": [
+        "blosc",
+        "blosc2",
+        "bshuf",
+        "bzip2",
+        "fcidecomp",
+        "lz4",
+        "sperr",
+        "sz",
+        "sz3",
+        "zfp",
+        "zstd"
+      ]
+    }
+  },
+  "results": {
+    "Raw": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 1680419416,
+      "write_duration": 1.2317311000078917,
+      "read_duration": 0.47931310000421945
+    },
+    "GZip": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 704764747,
+      "write_duration": 18.173568400001386,
+      "read_duration": 3.1217510999995284
+    },
+    "LZF": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 828648766,
+      "write_duration": 2.286776100008865,
+      "read_duration": 1.0857968000054825
+    },
+    "BZip2": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 738507024,
+      "write_duration": 120.03469000000041,
+      "read_duration": 30.7724872000108
+    },
+    "LZ4": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 805024721,
+      "write_duration": 0.89397160000226,
+      "read_duration": 0.953130499998224
+    },
+    "ZStd": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 728804608,
+      "write_duration": 1.558881199991447,
+      "read_duration": 1.3950439000036567
+    },
+    "Bitshuffle-lz4": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 739566198,
+      "write_duration": 1.68230910001148,
+      "read_duration": 1.6576900999934878
+    },
+    "Bitshuffle-zstd": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 705442701,
+      "write_duration": 3.4449690000037663,
+      "read_duration": 2.0570441000018036
+    },
+    "Blosc-lz4-NoShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 859746001,
+      "write_duration": 0.9031816999922739,
+      "read_duration": 0.8711345999909099
+    },
+    "Blosc-lz4-Shuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 629661807,
+      "write_duration": 1.0237669000052847,
+      "read_duration": 0.8545567999972263
+    },
+    "Blosc-lz4-BitShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 670304651,
+      "write_duration": 1.2718674000061583,
+      "read_duration": 1.4516875999979675
+    },
+    "Blosc-blosclz-NoShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 883801838,
+      "write_duration": 1.3676241000066511,
+      "read_duration": 0.7722577000095043
+    },
+    "Blosc-blosclz-Shuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 644000810,
+      "write_duration": 1.6579253999952925,
+      "read_duration": 1.1143531999987317
+    },
+    "Blosc-blosclz-BitShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 666425956,
+      "write_duration": 2.000110599998152,
+      "read_duration": 1.2546399000129895
+    },
+    "Blosc-lz4hc-NoShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 839749521,
+      "write_duration": 4.916304800004582,
+      "read_duration": 0.8236288000043714
+    },
+    "Blosc-lz4hc-Shuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 600740954,
+      "write_duration": 5.032627999986289,
+      "read_duration": 0.8325061999930767
+    },
+    "Blosc-lz4hc-BitShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 642048573,
+      "write_duration": 5.373367399995914,
+      "read_duration": 1.1280799000087427
+    },
+    "Blosc-snappy-NoShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 897910910,
+      "write_duration": 1.0569050000049174,
+      "read_duration": 1.0566325000108918
+    },
+    "Blosc-snappy-Shuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 679641727,
+      "write_duration": 1.1599964000051841,
+      "read_duration": 1.2532202000002144
+    },
+    "Blosc-snappy-BitShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 693012148,
+      "write_duration": 1.2466014999954496,
+      "read_duration": 1.5746237999992445
+    },
+    "Blosc-zlib-NoShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 739589788,
+      "write_duration": 16.230054100000416,
+      "read_duration": 3.733227699995041
+    },
+    "Blosc-zlib-Shuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 581962884,
+      "write_duration": 12.363277800002834,
+      "read_duration": 3.2186008999997284
+    },
+    "Blosc-zlib-BitShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 624237720,
+      "write_duration": 11.399306400009664,
+      "read_duration": 3.459703600005014
+    },
+    "Blosc-zstd-NoShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 710783322,
+      "write_duration": 7.969484000001103,
+      "read_duration": 2.377417099996819
+    },
+    "Blosc-zstd-Shuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 604003206,
+      "write_duration": 9.449025300011272,
+      "read_duration": 2.155946500002756
+    },
+    "Blosc-zstd-BitShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 635374929,
+      "write_duration": 8.639368800009834,
+      "read_duration": 2.216666399996029
+    },
+    "Blosc2-lz4-NoFilter-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 812579796,
+      "write_duration": 23.69130459999724,
+      "read_duration": 1.8681519999954617
+    },
+    "Blosc2-lz4-Shuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 625047181,
+      "write_duration": 20.68704109999817,
+      "read_duration": 1.6233019000064814
+    },
+    "Blosc2-lz4-BitShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 664455275,
+      "write_duration": 20.74687410000479,
+      "read_duration": 1.9941784999973606
+    },
+    "Blosc2-blosclz-NoFilter-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 850097417,
+      "write_duration": 20.04485739998927,
+      "read_duration": 1.5936325999937253
+    },
+    "Blosc2-blosclz-Shuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 662160876,
+      "write_duration": 21.96341609999945,
+      "read_duration": 1.647944299998926
+    },
+    "Blosc2-blosclz-BitShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 799231770,
+      "write_duration": 21.44789870000386,
+      "read_duration": 1.964991500004544
+    },
+    "Blosc2-lz4hc-NoFilter-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 808164448,
+      "write_duration": 38.73188610000943,
+      "read_duration": 1.9806656000000658
+    },
+    "Blosc2-lz4hc-Shuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 607644925,
+      "write_duration": 34.09600579999096,
+      "read_duration": 1.6347922999993898
+    },
+    "Blosc2-lz4hc-BitShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 643648513,
+      "write_duration": 35.70348140000715,
+      "read_duration": 1.927799800003413
+    },
+    "Blosc2-zlib-NoFilter-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 712969168,
+      "write_duration": 58.610741500000586,
+      "read_duration": 5.776921000011498
+    },
+    "Blosc2-zlib-Shuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 595665474,
+      "write_duration": 43.803627200002666,
+      "read_duration": 5.916832200004137
+    },
+    "Blosc2-zlib-BitShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 629051146,
+      "write_duration": 43.091252500002156,
+      "read_duration": 5.393661499998416
+    },
+    "Blosc2-zstd-NoFilter-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 718165684,
+      "write_duration": 27.086958400002914,
+      "read_duration": 2.520009999992908
+    },
+    "Blosc2-zstd-Shuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 583013719,
+      "write_duration": 32.95547769998666,
+      "read_duration": 1.7730976000020746
+    },
+    "Blosc2-zstd-BitShuffle-5": {
+      "raw_nbytes": 1680419776,
+      "compressed_nbytes": 642631991,
+      "write_duration": 26.831852999996045,
+      "read_duration": 2.805664600004093
+    }
+  }
+}

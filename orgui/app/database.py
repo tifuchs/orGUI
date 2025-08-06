@@ -52,8 +52,58 @@ from ..datautils.xrayutils import HKLVlieg, CTRcalc
 from ..datautils.xrayutils import DetectorCalibration
 from .. import resources
 
+
 from silx.io.dictdump import dicttonx ,nxtodict
 
+DEFAULT_FILTERS = {  # Filters available with h5py/libhdf5
+    "Raw": None,
+    "GZip": "gzip",
+    "LZF": "lzf",
+}
+
+FILTERS = {
+    **DEFAULT_FILTERS
+}
+
+try:
+    import hdf5plugin
+
+    LOSSLESS_FILTERS = {
+        "BZip2": hdf5plugin.BZip2(),
+        "LZ4": hdf5plugin.LZ4(),
+        "ZStd": hdf5plugin.Zstd(),
+    }
+    FILTERS.update(**LOSSLESS_FILTERS)
+
+    BITSHUFFLE_FILTERS = {
+        "Bitshuffle-lz4": hdf5plugin.Bitshuffle(cname='lz4'),
+        "Bitshuffle-zstd": hdf5plugin.Bitshuffle(cname='zstd'),
+    }
+    FILTERS.update(**BITSHUFFLE_FILTERS)
+        
+    BLOSC_FILTERS = {}
+    for cname in ('lz4', 'blosclz', 'lz4', 'lz4hc', 'snappy', 'zlib', 'zstd'):
+        for shuffle_name, shuffle in [('NoShuffle', hdf5plugin.Blosc.NOSHUFFLE),
+                                      ('Shuffle', hdf5plugin.Blosc.SHUFFLE),
+                                      ('BitShuffle', hdf5plugin.Blosc.BITSHUFFLE)]:
+            for clevel in [5]: #(1, 3, 5, 9):
+                BLOSC_FILTERS[f"Blosc-{cname}-{shuffle_name}-{clevel}"] = hdf5plugin.Blosc(
+                    cname=cname, clevel=clevel, shuffle=shuffle)
+    FILTERS.update(**BLOSC_FILTERS)
+
+    BLOSC2_FILTERS = {}
+    for cname in ('lz4', 'blosclz', 'lz4', 'lz4hc', 'zlib', 'zstd'):
+        for filters_name, filters in [('NoFilter', hdf5plugin.Blosc2.NOFILTER),
+                                    ('Shuffle', hdf5plugin.Blosc2.SHUFFLE),
+                                    ('BitShuffle', hdf5plugin.Blosc2.BITSHUFFLE)]:
+            for clevel in [5]: # (1, 3, 5, 9):
+                BLOSC2_FILTERS[f"Blosc2-{cname}-{filters_name}-{clevel}"] = hdf5plugin.Blosc2(
+                    cname=cname, clevel=clevel, filters=filters)
+    FILTERS.update(**BLOSC2_FILTERS)
+
+except Exception as e:
+    print("Unable to load hdf5plugin compression filters:")
+    traceback.print_exc()
 
 class ConfigData(qt.QObject):
     def __init__(self, config=None):
@@ -153,11 +203,11 @@ class ConfigData(qt.QObject):
         self.machineParams.setValues(paramlist)
         
         
-    
-    
 
 
 class DataBase(qt.QMainWindow):
+    
+    compression = FILTERS['Raw']
     
     sigChangeRockingScan = qt.Signal(object)
     
@@ -418,7 +468,7 @@ class DataBase(qt.QMainWindow):
         
     def saveDBFile(self, filename):
         alldata = nxtodict(self.nxfile)
-        dicttonx(alldata, filename)
+        dicttonx(alldata, filename, create_dataset_args={'compression' : self.compression})
         
     def createNewDBFile(self, filename, datadict=None):
         if self.nxfile is not None:
@@ -433,7 +483,7 @@ class DataBase(qt.QMainWindow):
         else:
             datadict.update(fileattrs)
         try:
-            dicttonx(datadict, filename)
+            dicttonx(datadict, filename, create_dataset_args={'compression' : self.compression})
             self.openDBFile(filename)
         except:
             msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
@@ -456,7 +506,7 @@ class DataBase(qt.QMainWindow):
     def add_nxdict(self, nxentry, update_mode='add', h5path='/'):
         if self.nxfile is None:
             raise Exception("No database file open.")
-        dicttonx(nxentry, self.nxfile, h5path=h5path, update_mode='add')
+        dicttonx(nxentry, self.nxfile, h5path=h5path, update_mode='add', create_dataset_args={'compression' : self.compression})
         while(self.hdf5model.hasPendingOperations()):
             qt.QApplication.processEvents()
             time.sleep(0.01)
@@ -545,6 +595,5 @@ class DataBase(qt.QMainWindow):
             if hasattr(self, "temp_directory"):
                 del self.temp_directory
         
-    
     
     

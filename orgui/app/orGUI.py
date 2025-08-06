@@ -73,7 +73,7 @@ from .QUBCalculator import QUBCalculator
 from .peak1Dintegr import RockingPeakIntegrator
 from .ArrayTableDialog import ArrayTableDialog
 from .bgroi import RectangleBgROI
-from .database import DataBase
+from .database import DataBase, FILTERS
 from ..backend.scans import SimulationScan
 from ..backend import backends
 from ..backend import universalScanLoader
@@ -307,7 +307,8 @@ class orGUI(qt.QMainWindow):
         self.showExcludedImagesAct.setCheckable(True)
         self.showExcludedImagesAct.toggled.connect(lambda visible : self.excludedImagesDialog.setVisible(visible))
         
-
+        self.dbCompressionAct = qt.QAction("Database compression",self)
+        self.dbCompressionAct.triggered.connect(self._onChangeDBCompression)
         
         config_menu.addAction(loadConfigAct)
         #config_menu.addAction(loadXtalAct)
@@ -316,7 +317,9 @@ class orGUI(qt.QMainWindow):
         config_menu.addAction(xtalParamsAct)
         config_menu.addSeparator()
         config_menu.addAction(cpucountAct)
+        config_menu.addAction(self.dbCompressionAct)
         config_menu.addAction(self.autoLoadAct)
+        config_menu.addSeparator()
         config_menu.addAction(self.showExcludedImagesAct)
         
         view_menu = menu_bar.addMenu("&View")
@@ -1192,7 +1195,20 @@ ub : gui for UB matrix and angle calculations
                                self.numberthreads,1)
         if success:
             self.numberthreads = cpus
-        
+    
+    def _onChangeDBCompression(self):
+        filter_names = list(FILTERS.keys())
+        currentCompression = self.database.compression
+        for fn in filter_names:
+            if currentCompression == FILTERS[fn]:
+                break
+        idx = filter_names.index(fn)
+        selection, success = qt.QInputDialog.getItem(self,"Data compression settings",
+                               "Available data base compression methods:\n(See discussion under https://github.com/tifuchs/orGUI/issues/16)\nRecommended: Blosc-lz4-Shuffle-5",
+                               filter_names, idx, False)
+        if success:
+            self.database.compression = FILTERS[selection]
+
         
     def calcBraggRefl(self):
         if self.fscan is not None:

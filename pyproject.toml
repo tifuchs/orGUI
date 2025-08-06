@@ -43,8 +43,8 @@ dependencies = [
 [project.optional-dependencies]
 console = ['qtconsole']
 speedup = ['numba']
-extendedfilesupport = ['ase']
-full = ['qtconsole', 'ase', 'numba' , 'PyOpenGL']
+extendedfilesupport = ['ase', 'hdf5plugin']
+full = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin']
 
 [build-system]
 requires = ["setuptools >= 61.0"]
