@@ -671,6 +671,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         name = self._currentRoInfo['name']
         h5_obj = self.database.nxfile[name]
         cnters = h5_obj["rois"]
+
         
         s_array = cnters['s'][()]
         alpha = np.deg2rad(cnters['alpha'][()])
@@ -679,6 +680,13 @@ class RockingPeakIntegrator(qt.QMainWindow):
         gamma = np.deg2rad(cnters['gamma'][()])
         
         axis = curves['axis']
+        scangroup = h5_obj.parent.parent
+        aux = {}
+        if 'auxillary' in scangroup:
+            for aux_n in scangroup['auxillary']:
+                if scangroup['auxillary'][aux_n].shape == axis.shape:
+                    aux[aux_n] = scangroup['auxillary'][aux_n][()]
+                    
         if self.lorentzButton.isChecked():
             if curves['axisname'] == 'mu':
                 C_Lor = 1/np.sin(2*alpha)
@@ -730,13 +738,18 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     'C_Lor' : [],
                     'C_rod' : [],
                     'C_flux_on_sample' : [],
-                    'C_illum_area' : []
+                    'C_illum_area' : [],
+                    'auxillary' : dict((a, []) for a in aux),
+                    'auxillary_int' : dict((a, []) for a in aux),
+                    'auxillary_num' : dict((a, []) for a in aux)
                 }
+        
                 
         deltaaxis = np.gradient(axis)
         
         progress = qt.QProgressDialog("Integrating rocking scans","abort",0,s_array.size,self)
         progress.setWindowModality(qt.Qt.WindowModal)
+        progress.show()
         
         for i, s in enumerate(s_array):
             croibg = curves['croibg'][i]
@@ -776,6 +789,12 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 
                 int_data[roikey]['cnts'].append(I_corr)
                 int_data[roikey]['cnts_errors'].append(I_corr_error)
+                
+                for a in aux:
+                    int_data[roikey]['auxillary_int'][a].append(np.trapz(aux[a][idx_from:idx_to], axis[idx_from:idx_to]))
+                    int_data[roikey]['auxillary'][a].append(np.sum(aux[a][idx_from:idx_to]))
+                    int_data[roikey]['auxillary_num'][a].append(float(aux[a][idx_from:idx_to].size))
+                
             
             progress.setValue(i)
             if progress.wasCanceled():
@@ -784,7 +803,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
         
         for roikey in int_data:
             for d in list(int_data[roikey].keys()):
-                int_data[roikey][d] = np.array(int_data[roikey][d])
+                if not d.startswith('auxillary'):
+                    int_data[roikey][d] = np.array(int_data[roikey][d])
+                else:
+                    for dd in list(int_data[roikey][d].keys()):
+                        int_data[roikey][d][dd] = np.array(int_data[roikey][d][dd])
         
         # signals:
         
@@ -795,10 +818,17 @@ class RockingPeakIntegrator(qt.QMainWindow):
         sig_interval = np.zeros(s_array.size,dtype=float)
         C_Lorentz = np.zeros(s_array.size,dtype=float)
         C_rod_intersect = np.zeros(s_array.size,dtype=float)
+        aux_cnts_integral = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
+        aux_cnts_integral_mean = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
+        aux_cnts_sum = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
+        aux_cnts_mean = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
+        aux_cnts_num = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
         
         for roikey in int_data:
             if roikey.startswith('sig'):
                 sig_interval += int_data[roikey]['int_interval']
+                for a in aux_cnts_num:
+                    aux_cnts_num[a] += int_data[roikey]['auxillary_num'][a]
                 
         for roikey in int_data:
             if roikey.startswith('sig'):
@@ -806,6 +836,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 croi_errors += int_data[roikey]['cnts_errors']**2
                 raw_croi += int_data[roikey]['raw_cnts']
                 raw_croi_errors += int_data[roikey]['raw_cnts_errors']**2
+                for a in aux_cnts_sum:
+                    aux_cnts_sum[a] += int_data[roikey]['auxillary'][a]
+                    aux_cnts_mean[a] += int_data[roikey]['auxillary'][a] / aux_cnts_num[a]
+                    aux_cnts_integral[a] += int_data[roikey]['auxillary_int'][a]
+                    aux_cnts_integral_mean[a] += int_data[roikey]['auxillary_int'][a] / sig_interval
                 if self.lorentzButton.isChecked():
                     C_Lorentz += int_data[roikey]['C_Lor'] * (int_data[roikey]['int_interval'] / sig_interval)
                     C_rod_intersect += int_data[roikey]['C_rod'] * (int_data[roikey]['int_interval'] / sig_interval)
@@ -819,11 +854,18 @@ class RockingPeakIntegrator(qt.QMainWindow):
         raw_bgroi = np.zeros(s_array.size,dtype=float)
         raw_bgroi_errors = np.zeros(s_array.size,dtype=float)
         bg_interval = np.zeros(s_array.size,dtype=float)
+        bgaux_cnts_integral = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
+        bgaux_cnts_integral_mean = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
+        bgaux_cnts_sum = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
+        bgaux_cnts_mean = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
+        bgaux_cnts_num = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
         
         for roikey in int_data:
             if roikey.startswith('bg'):
                 bg_interval += int_data[roikey]['int_interval']
-                
+                for a in bgaux_cnts_num:
+                    bgaux_cnts_num[a] += int_data[roikey]['auxillary_num'][a]
+                    
         for roikey in int_data:
             if roikey.startswith('bg'):
                 ratio = (sig_interval / bg_interval) * (int_data[roikey]['int_interval'] / bg_interval)
@@ -831,6 +873,13 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 bgroi_errors += (int_data[roikey]['cnts_errors'] * ratio)**2 # should improve error propagation here!
                 raw_bgroi += int_data[roikey]['raw_cnts'] * ratio
                 raw_bgroi_errors += (int_data[roikey]['raw_cnts_errors'] * ratio)**2
+                for a in bgaux_cnts_sum:
+                    bgaux_cnts_sum[a] += int_data[roikey]['auxillary'][a]
+                    bgaux_cnts_mean[a] += int_data[roikey]['auxillary'][a] / bgaux_cnts_num[a]
+                    bgaux_cnts_integral[a] += int_data[roikey]['auxillary_int'][a]
+                    bgaux_cnts_integral_mean[a] += int_data[roikey]['auxillary_int'][a]  / bg_interval
+
+                
         
         raw_bgroi_errors = np.sqrt(raw_croi_errors)
         bgroi_errors = np.sqrt(croi_errors)
@@ -844,6 +893,23 @@ class RockingPeakIntegrator(qt.QMainWindow):
         if self.lorentzButton.isChecked():
             F2_hkl = croibg / (C_Lorentz * C_rod_intersect)
             F2_hkl_errors = raw_croibg_errors / (C_Lorentz * C_rod_intersect)
+            
+        auxil = {
+            "@NX_class": u"NXcollection"
+        }
+        for a in aux_cnts_sum:
+            auxil[a] = {
+                "@NX_class": u"NXcollection",
+                'csum' : aux_cnts_sum[a],
+                'cmean' : aux_cnts_mean[a],
+                'cintegral' : aux_cnts_integral[a],
+                'cintegral_mean' : aux_cnts_integral_mean[a],
+                'bgsum' : bgaux_cnts_sum[a],
+                'bgmean' : bgaux_cnts_mean[a],
+                'bgintegral' : bgaux_cnts_integral[a],
+                'bgintegral_mean' : bgaux_cnts_integral_mean[a],
+            }
+            
         
         
         int_data["@NX_class"] = u"NXdetector"
@@ -907,6 +973,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 "x" : cnters['x'][:, 0][()],
                 "y"  : cnters['x'][:, 1][()]
             },
+            'auxillary' : auxil,
             "trajectory" : traj1,
             "@signal" : u"counters/croibg",
             "@axes": u"trajectory/s",
