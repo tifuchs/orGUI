@@ -363,7 +363,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
         try:
             self.integrate()
         except Exception as e:
-            qt.QMessageBox.critical(self,'Error during scan integration', 'Error during scan integration:\n%s' % e)
+            qutils.critical_detailed_message(self,'Error during scan integration', 'Error during scan integration:\n%s' % e, traceback.format_exc())
+            traceback.print_exc()
             return
         
     def set_roscan(self, name):
@@ -724,12 +725,12 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 if scangroup['auxillary'][aux_n].shape == axis.shape:
                     aux[aux_n] = scangroup['auxillary'][aux_n][()]
                     
-        if self.lorentzButton.isChecked():
+        if self.lorentzButton.isChecked(): # force Lorentz positive, sign of integrated intensities is forced positive. 
             if curves['axisname'] == 'mu':
-                C_Lor = 1/np.sin(2*alpha)
+                C_Lor = np.abs(1/np.sin(2*alpha))
                 C_rod = np.cos(gamma)
             elif curves['axisname'] == 'th':
-                C_Lor = 1 /(np.sin(delta) * np.cos(alpha) * np.cos(gamma))
+                C_Lor = np.abs(1 /(np.sin(delta) * np.cos(alpha) * np.cos(gamma)))
                 C_rod = np.cos(gamma)
             else:
                 raise NotImplementedError()
@@ -781,8 +782,15 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     'auxillary_num' : dict((a, []) for a in aux)
                 }
         
-                
-        deltaaxis = np.gradient(axis)
+        # for error propagation of trapz integral
+        dx = np.diff(axis)
+        deltaaxis = np.empty_like(axis)
+        deltaaxis[0]     = dx[0] / 2
+        deltaaxis[-1]    = dx[-1] / 2
+        deltaaxis[1:-1]  = (dx[:-1] + dx[1:]) / 2
+
+        # deltaaxis = np.gradient(axis) # wrong
+        
         
         progress = qt.QProgressDialog("Integrating rocking scans","abort",0,s_array.size,self)
         progress.setWindowModality(qt.Qt.WindowModal)
@@ -799,7 +807,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 idx_to = np.argmin(np.abs(axis - roi['to'][i]))
                 if idx_from > idx_to:
                     idx_from, idx_to = idx_to, idx_from
-                int_interval = abs(axis[idx_to] - axis[idx_from])
+                int_interval = np.abs(axis[idx_to] - axis[idx_from]) # can be negative!
+                sign_interval = np.sign(axis[idx_to] - axis[idx_from]) # we force integrals positive
                 int_data[roikey]['int_interval'].append(int_interval)
                 
                 cnts = croibg[idx_from:idx_to]
@@ -815,11 +824,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     int_data[roikey]['C_illum_area'].append( np.mean(C_illum_area[i][idx_from:idx_to]) )
                     C_corr *= C_flux_on_sample[i][idx_from:idx_to] * C_illum_area[i][idx_from:idx_to]
                     
-                I_raw = np.trapz(cnts, axis[idx_from:idx_to])
-                I_corr = np.trapz(cnts / C_corr , axis[idx_from:idx_to])
+                I_raw = np.trapz(cnts, axis[idx_from:idx_to]) * sign_interval # we force integrals positive
+                I_corr = np.trapz(cnts / C_corr , axis[idx_from:idx_to]) * sign_interval # we force integrals positive
                 
-                I_raw_error = np.sum(cnts_errors * deltaaxis[idx_from:idx_to])
-                I_corr_error = np.sum((cnts_errors / C_corr) * deltaaxis[idx_from:idx_to])
+                I_raw_error = np.sqrt(np.sum((cnts_errors * deltaaxis[idx_from:idx_to])**2 )) # to be checked!
+                I_corr_error = (I_raw_error / I_raw) * I_corr 
                 
                 int_data[roikey]['raw_cnts'].append(I_raw)
                 int_data[roikey]['raw_cnts_errors'].append(I_raw_error)
@@ -828,7 +837,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 int_data[roikey]['cnts_errors'].append(I_corr_error)
                 
                 for a in aux:
-                    int_data[roikey]['auxillary_int'][a].append(np.trapz(aux[a][idx_from:idx_to], axis[idx_from:idx_to]))
+                    int_data[roikey]['auxillary_int'][a].append(np.trapz(aux[a][idx_from:idx_to], axis[idx_from:idx_to])  * sign_interval) # we force integrals positive
                     int_data[roikey]['auxillary'][a].append(np.sum(aux[a][idx_from:idx_to]))
                     int_data[roikey]['auxillary_num'][a].append(float(aux[a][idx_from:idx_to].size))
                 
