@@ -292,7 +292,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         roi_edit_layout.addWidget(integrateOptionsGroup)
         
         self.integrateButton = qt.QPushButton("integrate")
-        self.integrateButton.clicked.connect(self.integrate)
+        self.integrateButton.clicked.connect(self.onIntegrate)
         
         roi_edit_layout.addWidget(self.integrateButton)
         
@@ -339,7 +339,32 @@ class RockingPeakIntegrator(qt.QMainWindow):
         
         self.curveSlider.sigValueChanged.connect(self.onSliderValueChanged)
         #self.roiwidget.sigROISignal.connect(lambda d: print(d))
-
+        
+    def _check_ro_present(self):
+        if not self.database.nxfile:
+            self._cFurrentRoInfo = {}
+            raise IOError('No database available.')
+        if self._currentRoInfo and 'name' in self._currentRoInfo:
+            if self._currentRoInfo['name'] in self.database.nxfile:
+                return True
+            else:
+                n = self._currentRoInfo['name']
+                self._cFurrentRoInfo = {}
+                raise ValueError('Scan %s is not in database.' % n)
+        else:
+            raise ValueError('No rocking scan loaded.')
+            
+    def onIntegrate(self):
+        try:
+            self._check_ro_present()
+        except Exception as e:
+            qt.QMessageBox.warning(self,'Cannot integrate scan', 'Cannot integrate scan:\n%s' % e)
+            return
+        try:
+            self.integrate()
+        except Exception as e:
+            qt.QMessageBox.critical(self,'Error during scan integration', 'Error during scan integration:\n%s' % e)
+            return
         
     def set_roscan(self, name):
         ro_info = self.get_rocking_scan_info(name)
@@ -396,7 +421,6 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 qutils.critical_detailed_message(self, 'Cannot save ROIs','Cannot save ROI locations: %s' % e, traceback.format_exc())
                 
     def saveROI(self, filename, fileext="dat"):
-        
         roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
         
         fmt = "%.7g"
@@ -449,6 +473,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
         #    print(datasetDialog.selectedUrl())
             
     def onAnchorLoadRoi(self):
+        try:
+            self._check_ro_present()
+        except Exception as e:
+            qt.QMessageBox.warning(self,'Cannot load roi locations', 'Cannot load ROI locations:\n%s' % e)
+            return
         if self._currentRoInfo:
             fileTypeDictSave1D = {"Plain ascii file (*.dat)" : "dat", "CSV file (*.csv)" : "csv"}
             
@@ -587,6 +616,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
     #    }
     
     def onToNextAnchor(self):
+        try:
+            self._check_ro_present()
+        except Exception as e: # non essential: silent
+            return
         if self._currentRoInfo and self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
             roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
             anchors_all = []
@@ -602,6 +635,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 self.plotRoCurve(anchors_next[0])
             
     def onToPreviousAnchor(self):
+        try:
+            self._check_ro_present()
+        except Exception as e: # non essential: silent
+            return
         if self._currentRoInfo and self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
             roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
             anchors_all = []
@@ -996,9 +1033,21 @@ class RockingPeakIntegrator(qt.QMainWindow):
         
     
     def onSliderValueChanged(self, ddict):
-        self.plotRoCurve(ddict['idx'])
+        try:
+            self.plotRoCurve(ddict['idx'])
+        except Exception as e: # non essential: silent
+            try:
+                self._check_ro_present()
+            except:
+                return
+        
         
     def onRoiChanged(self, roi):
+        try:
+            self._check_ro_present()
+        except Exception as e: # non essential: silent
+            qt.QMessageBox.warning(self,'Cannot change roi limits', 'Cannot change roi limits:\n%s' % e)
+            return
         #roi_dict = self.get_roi1D_info(self._idx)
         roi_t = self.roiwidget.roiTable.roidict[roi]
         new_roi_dict = roi_t.toDict()
@@ -1065,6 +1114,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
         
         
     def onAddAllROI(self):
+        try:
+            self._check_ro_present()
+        except Exception as e: # non essential: silent
+            qt.QMessageBox.warning(self,'Cannot add ROIs', 'Cannot add ROIs:\n%s' % e)
+            return
         if self._currentRoInfo:
             try:
                 self._addAllRoiDialog.set_axis(self._currentRoInfo['axis'], self._currentRoInfo['axisname'])
@@ -1118,6 +1172,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 qutils.warning_detailed_message(self, "Cannot add ROI", "Cannot add ROI: %s" % e, traceback.format_exc())
         
     def onAddROI(self):
+        try:
+            self._check_ro_present()
+        except Exception as e: # non essential: silent
+            qt.QMessageBox.warning(self,'Cannot add ROIs', 'Cannot add ROIs:\n%s' % e)
+            return
         if self._currentRoInfo:
             try:
                 self._addRoiDialog.set_axis(self._currentRoInfo['axis'], self._currentRoInfo['axisname'])
@@ -1163,6 +1222,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 qutils.warning_detailed_message(self, "Cannot add ROI", "Cannot add ROI: %s" % e, traceback.format_exc())
     
     def onDeleteROI(self):
+        try:
+            self._check_ro_present()
+        except Exception as e: # non essential: silent
+            qt.QMessageBox.warning(self,'Cannot delete ROIs', 'Cannot delete ROIs:\n%s' % e)
+            return
         if self._currentRoInfo:
             roi_name = self.roiwidget.currentRoi.getName()
             if qt.QMessageBox.Yes == qt.QMessageBox.question(self, "Delete ROI", "Are you sure you want to delete ROI %s?" % roi_name):
@@ -1173,6 +1237,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     qutils.warning_detailed_message(self, "Cannot delete ROI", "Cannot delete ROI: no such ROI in database", "")
     
     def onDeleteAllROI(self):
+        try:
+            self._check_ro_present()
+        except Exception as e: # non essential: silent
+            qt.QMessageBox.warning(self,'Cannot delete ROIs', 'Cannot delete ROIs:\n%s' % e)
+            return
         if self._currentRoInfo:
             if qt.QMessageBox.Yes == qt.QMessageBox.question(self, "Delete All ROIs", "Are you sure you want to delete all ROIs?"):
                 if self._currentRoInfo['name'] + '/integration/'in self.database.nxfile:
