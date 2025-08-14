@@ -478,8 +478,9 @@ class QUBCalculator(qt.QSplitter):
             alpha1 = lattice.getfloat('alpha1',-1)
             alpha2 = lattice.getfloat('alpha2',-1)
             alpha3 = lattice.getfloat('alpha3',-1)
-            self.n = 1 - lattice.getfloat('refractionindex',0.0)
-            
+            self.n = 1.0 # will be overwritten by onSwitchCrystal
+            refr_index = 1 - lattice.getfloat('refractionindex',0.0)
+
             lat = np.array([a1,a2,a3])
             
             latticeoverride = True
@@ -514,7 +515,7 @@ class QUBCalculator(qt.QSplitter):
                         qt.QMessageBox.warning(self,"Did not find crystal","Can not find crystal <%s> \nException occured during read of configfile %s,\nException:\n%s" % (lattice['crystal'],traceback.format_exc()))
                 else:
                     self.crystalparams.crystalComboBox.setCurrentIndex(idx)
-                    self.crystalparams.onSwitchCrystal(idx)
+                    self.crystalparams.onSwitchCrystal(idx) # overrides refraction index
                     #self.crystal = self.crystalparams.getCrystal()
 
             if latticeoverride:
@@ -557,8 +558,8 @@ class QUBCalculator(qt.QSplitter):
                 },
                 'SXRD_geometry' : self.detectorCal
             }
-
-            self.crystalparams.setValues(self.crystal,self.n)
+            self.n = refr_index
+            self.crystalparams.setValues(self.crystal,refr_index)
             self.machineParams.setValues(settings)
             
             if 'backend' in config:
