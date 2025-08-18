@@ -66,6 +66,7 @@ from .. import resources
 
 import numpy as np
 from scipy import special
+from scipy import interpolate as interp
 from ..datautils.xrayutils import HKLVlieg, CTRcalc
 from ..datautils.xrayutils import ReciprocalNavigation as rn
 
@@ -556,10 +557,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 
             
             if np.abs(np.amax(pk_pos) - np.amax(pk_pos_exact)) >= pktol:
-                raise ValueError('peak position mismatch tolerance exceeded at max')
+                raise ValueError('peak position mismatch tolerance exceeded at max by %s' % (np.amax(pk_pos) - np.amax(pk_pos_exact)))
             
             if np.abs(np.amin(pk_pos) - np.amin(pk_pos_exact)) >= pktol:
-                raise ValueError('peak position mismatch tolerance exceeded at min')
+                raise ValueError('peak position mismatch tolerance exceeded at min by %s' % (np.amin(pk_pos) - np.amin(pk_pos_exact)))
             
             roi_info_interp = dict()
             
@@ -567,13 +568,13 @@ class RockingPeakIntegrator(qt.QMainWindow):
             for k in roi_info:
                 if k.startswith(('sig', 'bg')):
                     roi_info_interp[k] = dict()
-                    interfrom = interp1d(roi_info["peakpos"],roi_info[k]['from'],fill_value="extrapolate")
+                    interfrom = interp.interp1d(roi_info["peakpos"],roi_info[k]['from'],fill_value="extrapolate")
                     roi_info_interp[k]['from'] = interfrom(pk_pos_exact)
                     
-                    interto = interp1d(roi_info["peakpos"],roi_info[k]['to'],fill_value="extrapolate")
+                    interto = interp.interp1d(roi_info["peakpos"],roi_info[k]['to'],fill_value="extrapolate")
                     roi_info_interp[k]['to'] = interto(pk_pos_exact)
                     
-                    interanchor = interp1d(roi_info["peakpos"],roi_info[k]['anchor'], kind='nearest',fill_value="extrapolate")
+                    interanchor = interp.interp1d(roi_info["peakpos"],roi_info[k]['anchor'], kind='nearest',fill_value="extrapolate")
                     roi_info_interp[k]['anchor'] = interanchor(pk_pos_exact).astype(bool)
             
             _set_roi_info(roi_info_interp)
