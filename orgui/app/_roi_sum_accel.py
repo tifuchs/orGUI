@@ -67,3 +67,50 @@ def processImage(image,     mask,       C_corr,    croi,      leftroi,   rightro
             all_counters[i, 3] += np.sum(invmask[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
     
     return all_counters
+
+@njit('f8[:,::1](f8[:,::1], f8[:,::1], b1[:, ::1], f8[:,::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], f8[:,::1])', nogil=True, cache=True)
+def processImage_bg(image,  bg,        mask,       C_corr,    croi,      leftroi,   rightroi,  toproi,   bottomroi, all_counters):
+    image -= bg
+    for i in range(image.shape[0]): # this is faster than image[mask] = np.nan for some reason
+        for j in range(image.shape[1]):
+            if mask[i, j]:
+                image[i, j] = np.nan
+            else:
+                image[i, j] *= C_corr[i, j]
+    
+    invmask = np.logical_not(mask)
+    
+    for i in range(croi.shape[0]):
+        ckey = croi[i]
+        leftkey = leftroi[i]
+        rightkey = rightroi[i]
+        topkey = toproi[i]
+        bottomkey = bottomroi[i]
+        
+        # signal
+        all_counters[i,0] = np.nansum(image[ckey[1, 0]: ckey[1, 1] , ckey[0, 0]: ckey[0, 1]])
+        all_counters[i,1] = np.sum(invmask[ckey[1, 0]: ckey[1, 1], ckey[0, 0]: ckey[0, 1]])
+        
+        # background
+        all_counters[i,2] = 0.
+        all_counters[i,3] = 0.
+        for key in [leftkey, rightkey, topkey, bottomkey]:
+            all_counters[i, 2] += np.nansum(image[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
+            all_counters[i, 3] += np.sum(invmask[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
+    
+    return all_counters
+
+@njit('void(f8[:,::1], f8[:,::1], f8[:,::1])', nogil=True, cache=True)
+def calcMaxSum(image,     sumimg,    maximg):
+    sumimg += image
+    maximg[:] = np.maximum(image, maximg)
+    
+@njit('void(f8[:,::1], f8[:,::1])', nogil=True, cache=True)
+def calcBgSub(image,     bg):
+    image -= bg
+    
+@njit('void(f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1])', nogil=True, cache=True)
+def calcMaxSum_bg(image,     sumimg,    maximg,  bg):
+    imgbgsub = image - bg
+    sumimg += imgbgsub
+    maximg[:] = np.maximum(imgbgsub, maximg)

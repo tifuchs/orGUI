@@ -46,6 +46,7 @@ import silx.gui.plot
 from silx.gui.plot import items
 from silx.gui.colors import Colormap
 import weakref
+import fabio
 
 #from silx import sx
 
@@ -100,6 +101,15 @@ DEBUG = 0
 
 MAX_ROIS_DISPLAY = 100
 
+MAX_MEMORY = 6000 # MB, 
+try:
+    import psutil
+    memory_info = psutil.virtual_memory()
+    avail_memory = memory_info.total / (1024**2)
+    MAX_MEMORY = avail_memory*0.7 # cap memory at 70%
+except Exception as e:
+    print('Cannot retrieve available memory size. Cap usage to 6 GB.')
+
 silx.config.DEFAULT_PLOT_SYMBOL = '.'
 
 
@@ -110,10 +120,13 @@ class orGUI(qt.QMainWindow):
         self.h5database = None # must be a h5py file-like, by default not opened to avoid reading issues at beamtimes!
         self.images_loaded = False
         self.resetZoom = True
+        self.background_image = None
         #icon = resources.getQicon("sum_image.svg")
         self.fscan = None
         self.activescanname = "scan"
         self.numberthreads = int(min(os.cpu_count(), 16)) if os.cpu_count() is not None else 1 
+        self.maxMemory = MAX_MEMORY
+
         if 'SLURM_CPUS_ON_NODE' in os.environ:
             self.numberthreads = int(os.environ['SLURM_CPUS_ON_NODE'])
         
@@ -124,7 +137,7 @@ class orGUI(qt.QMainWindow):
         
         
         self.centralPlot = Plot2DHKL(self.newXyHKLConverter(),parent=self)
-        self.centralPlot.setDefaultColormap(Colormap(name='jet',normalization='log'))
+        self.centralPlot.setDefaultColormap(Colormap(name='inferno',normalization='log'))
         self.centralPlot.setCallback(self._graphCallback)
         toolbar = qt.QToolBar()
         toolbar.addAction(control_actions.OpenGLAction(parent=toolbar, plot=self.centralPlot))
@@ -307,6 +320,9 @@ class orGUI(qt.QMainWindow):
         self.showExcludedImagesAct.setCheckable(True)
         self.showExcludedImagesAct.toggled.connect(lambda visible : self.excludedImagesDialog.setVisible(visible))
         
+        self.backgroundImageAct = qt.QAction("Set background image",self)
+        self.backgroundImageAct.triggered.connect(self._onSetBackgroundImage)
+        
         self.dbCompressionAct = qt.QAction("Database compression",self)
         self.dbCompressionAct.triggered.connect(self._onChangeDBCompression)
         
@@ -321,6 +337,7 @@ class orGUI(qt.QMainWindow):
         config_menu.addAction(self.autoLoadAct)
         config_menu.addSeparator()
         config_menu.addAction(self.showExcludedImagesAct)
+        config_menu.addAction(self.backgroundImageAct)
         
         view_menu = menu_bar.addMenu("&View")
         showRefReflectionsAct = view_menu.addAction("reference reflections")
@@ -663,6 +680,8 @@ ub : gui for UB matrix and angle calculations
         progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
         
+        background_image = self.background_image
+
         if HAS_ACCEL:
             if imgmask is not None:
                 mask = np.ascontiguousarray(imgmask, dtype=bool)
@@ -680,19 +699,28 @@ ub : gui for UB matrix and angle calculations
                     roi_list.append(np.array([[r[0].start , r[0].stop], [r[1].start , r[1].stop]]))
                 roi_list = np.ascontiguousarray(np.stack(roi_list), dtype=np.int64)
                 roi_lists_numba.append(roi_list)
-                
-            def sumImage(i):
-                image = np.ascontiguousarray(self.fscan.get_raw_img(i).img, dtype=np.float64) # unlocks gil during file read
-
-                all_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,)) # need gil for python object creation
-                _roi_sum_accel.processImage(image, mask, C_arr, *roi_lists_numba, all_counters) # numba nopython and nogil mode
-                return all_counters
+            if background_image is not None and background_image.shape == image.img.shape:
+                def sumImage(i):
+                    image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True) # unlocks gil during file read
+                    
+                    all_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,)) # need gil for python object creation
+                    _roi_sum_accel.processImage_bg(image, background_image, mask, C_arr, *roi_lists_numba, all_counters) # numba nopython and nogil mode
+                    return all_counters
+            else:
+                def sumImage(i):
+                    image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True) # unlocks gil during file read
+                    
+                    all_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,)) # need gil for python object creation
+                    _roi_sum_accel.processImage(image, mask, C_arr, *roi_lists_numba, all_counters) # numba nopython and nogil mode
+                    return all_counters
             
         else:
             
 
             def sumImage(i):
-                image = self.fscan.get_raw_img(i).img.astype(np.float64)
+                image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True)
+                if background_image is not None and background_image.shape == image.shape:
+                    np.subtract(image, background_image, out=image)
                 if imgmask is not None:
                     image[imgmask] = np.nan
                     pixelavail = (~imgmask).astype(np.float64)
@@ -1106,6 +1134,48 @@ ub : gui for UB matrix and angle calculations
                 self.calcBraggRefl()
             except:
                 pass
+    
+    def _onSetBackgroundImage(self):
+        extensions = {}
+        for description, ext in silx.io.supported_extensions().items():
+            extensions[description] = " ".join(sorted(list(ext)))
+
+        extensions["NeXus layout from EDF files"] = "*.edf"
+        extensions["NeXus layout from TIFF image files"] = "*.tif *.tiff"
+        extensions["NeXus layout from CBF files"] = "*.cbf"
+        extensions["NeXus layout from MarCCD image files"] = "*.mccd"
+
+        all_supported_extensions = set()
+        for name, exts in extensions.items():
+            exts = exts.split(" ")
+            all_supported_extensions.update(exts)
+        all_supported_extensions = sorted(list(all_supported_extensions))
+
+        filters = []
+        filters.append("All supported files (%s)" % " ".join(all_supported_extensions))
+        for name, extension in extensions.items():
+            filters.append("%s (%s)" % (name, extension))
+        filters.append("All files (*)")
+
+        fileTypeFilter = ""
+        for f in filters:
+            fileTypeFilter += f + ";;"
+
+        # call dialog
+        filename,_ = qt.QFileDialog.getOpenFileName(self,"Open background image",'',fileTypeFilter[:-2])
+        if filename == '':
+            return
+        try:
+            with fabio.open(filename) as fabf:
+                self.background_image = fabf.data.astype(np.float64, order='C', copy=True)
+        except Exception as e:
+            traceback.print_exc()
+            return
+            
+        #dialog = ImageFileDialog.ImageFileDialog(self)
+        #result = dialog.exec()
+        #if result:
+        #    self.background_image = dialog.selectedImage().astype(np.float64)
         
         
     def onShowBragg(self,visible):
@@ -1883,23 +1953,35 @@ ub : gui for UB matrix and angle calculations
         self.allimgmax = np.zeros_like(image.img)
         progress = qt.QProgressDialog("Reading images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
-        #tasks = queue.Queue()
-        #[tasks.put(i) for i in range(len(self.fscan))]
+        img_size = self.allimgsum.nbytes / (1024**2)
+        
+        chunk_size = min(np.floor((self.maxMemory - 2000) / (img_size * self.numberthreads)), 5)
+        image_numbers = np.arange(len(self.fscan))
+        #self.excludedImagesDialog.getData()
+        
         lock = threading.Lock()
+
         self.images_loaded = True
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor: # speedup only for the file reads 
             futures = {}
+            excl = self.excludedImagesDialog.getData()
+            bg = self.background_image
             def readfile_max(imgno):
-                if imgno in self.excludedImagesDialog.getData(): # skip if excluded
+                if imgno in excl: # skip if excluded
                     return imgno
-                image = self.fscan.get_raw_img(imgno) # here speedup during file read
+                image = self.fscan.get_raw_img(imgno).img.astype(np.float64, order='C', copy=True)
+                if bg is not None and bg.shape == image.shape:
+                    if HAS_ACCEL:
+                        _roi_sum_accel.calcBgSub(image, bg)
+                    else:
+                        np.subtract(image, bg, out=image)
                 with lock:
-                    self.allimgsum += image.img
-                    self.allimgmax = np.maximum(self.allimgmax,image.img)
+                    self.allimgsum += image
+                    np.maximum(self.allimgmax,image, out=self.allimgmax)
                 return imgno
             for i in range(len(self.fscan)):
                 futures[executor.submit(readfile_max, i)] = i
-            
+
             for f in concurrent.futures.as_completed(futures):
                 try:
                     imgno = f.result()
@@ -1970,11 +2052,17 @@ ub : gui for UB matrix and angle calculations
         
     def plotImage(self,key=0):
         try:
-            image = self.fscan.get_raw_img(key)
+            image = self.fscan.get_raw_img(key).img.astype(np.float64, order='C', copy=True) 
+            bg = self.background_image
+            if bg is not None and bg.shape == image.shape:
+                if HAS_ACCEL:
+                    _roi_sum_accel.calcBgSub(image, bg)
+                else:
+                    np.subtract(image, bg, out=image)
             #if self.currentImageLabel is not None:
             #    self.centralPlot.removeImage(self.currentImageLabel)
 
-            self.currentImageLabel = self.centralPlot.addImage(image.img,legend="scan_image",
+            self.currentImageLabel = self.centralPlot.addImage(image,legend="scan_image",
                                                                replace=False,resetzoom=self.resetZoom,copy=True)
             if self.currentAddImageLabel is None:
                 self.centralPlot.setActiveImage(self.currentImageLabel)
@@ -2369,6 +2457,7 @@ Do you want to continue without mask?""")
         progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
         
+        background_image = self.background_image
         def sumImage(i):
             if not dataavail[i]:
                 croi1 = np.nan; croi2 = np.nan
@@ -2376,7 +2465,12 @@ Do you want to continue without mask?""")
                 bgroi1 = np.nan; bgroi2 = np.nan
                 bgpixel1 = np.nan; bgpixel2 = np.nan
             else:
-                image = self.fscan.get_raw_img(i).img.astype(np.float64)
+                image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True)
+                if background_image is not None and background_image.shape == image.shape:
+                    if HAS_ACCEL:
+                        _roi_sum_accel.calcBgSub(image, background_image)
+                    else:
+                        np.subtract(image, background_image, out=image)
                 if imgmask is not None:
                     image[imgmask] = np.nan
                     pixelavail = (~imgmask).astype(np.float64)

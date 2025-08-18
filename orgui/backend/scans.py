@@ -141,7 +141,7 @@ class SimulationScan(Scan):
             raise ValueError("%s is not an implemented scan axis." % axis)
         self.nopoints = points
         
-        self.images = np.zeros((points,*detshape))
+        self.images = np.zeros((points,*detshape)) + 10
         self.title = "sim ascan %s %s %s %s" % (self.axisname,axismin,axismax,points)
         
     def __len__(self):
