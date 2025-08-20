@@ -68,6 +68,102 @@ def processImage(image,     mask,       C_corr,    croi,      leftroi,   rightro
     
     return all_counters
 
+@njit('void(f8[:,::1], f8[:,::1], b1[:, ::1], f8[:,::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], f8[:,::1], f8[:,::1], f8[:,::1])', nogil=True, cache=True)
+def processImage_bg_Carr(image,  bg,        mask,       C_corr,    croi,      leftroi,   rightroi,  toproi,   bottomroi, all_counters, all_Carr, all_Bgimg):
+    invmask = np.logical_not(mask)
+    """bgimage and C_corr mask must already be applied!!!
+    
+    
+    """
+    for i in range(image.shape[0]): # this is faster than image[mask] = np.nan for some reason
+        for j in range(image.shape[1]):
+            if mask[i, j]:
+                image[i, j] = np.nan
+                
+    for i in range(croi.shape[0]):
+        ckey = croi[i]
+        leftkey = leftroi[i]
+        rightkey = rightroi[i]
+        topkey = toproi[i]
+        bottomkey = bottomroi[i]
+        
+        # image signal
+        all_counters[i,0] = np.nansum(image[ckey[1, 0]: ckey[1, 1] , ckey[0, 0]: ckey[0, 1]])
+        
+        # image background
+        all_counters[i,2] = 0.0
+        for key in [leftkey, rightkey, topkey, bottomkey]:
+            all_counters[i, 2] += np.nansum(image[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
+        
+        # Correction image
+        all_Carr[i,0] = np.nansum(C_corr[ckey[1, 0]: ckey[1, 1] , ckey[0, 0]: ckey[0, 1]])
+        all_Carr[i,2] = 0.0
+        for key in [leftkey, rightkey, topkey, bottomkey]:
+            all_Carr[i, 2] += np.nansum(C_corr[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
+        
+        # Background image
+        all_Bgimg[i,0] = np.nansum(bg[ckey[1, 0]: ckey[1, 1] , ckey[0, 0]: ckey[0, 1]])
+        all_Bgimg[i,2] = 0.0
+        for key in [leftkey, rightkey, topkey, bottomkey]:
+            all_Bgimg[i, 2] += np.nansum(bg[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
+            
+        # number of available pixels
+        sig_pix = np.sum(invmask[ckey[1, 0]: ckey[1, 1], ckey[0, 0]: ckey[0, 1]])
+        bg_pix = 0.0
+        for key in [leftkey, rightkey, topkey, bottomkey]:
+            bg_pix += np.sum(invmask[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
+            
+        all_counters[i,1] = sig_pix
+        all_counters[i, 3] = bg_pix
+        all_Carr[i,1] = sig_pix
+        all_Carr[i, 3] = bg_pix        
+        all_Bgimg[i,1] = sig_pix
+        all_Bgimg[i, 3] = bg_pix
+
+@njit('void(f8[:,::1],  b1[:, ::1], f8[:,::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], f8[:,::1], f8[:,::1])', nogil=True, cache=True)
+def processImage_Carr(image,        mask,       C_corr,    croi,      leftroi,   rightroi,  toproi,   bottomroi, all_counters, all_Carr):
+    invmask = np.logical_not(mask)
+    """bgimage and C_corr mask must already be applied!!!
+    
+    
+    """
+    for i in range(image.shape[0]): # this is faster than image[mask] = np.nan for some reason
+        for j in range(image.shape[1]):
+            if mask[i, j]:
+                image[i, j] = np.nan
+                
+    for i in range(croi.shape[0]):
+        ckey = croi[i]
+        leftkey = leftroi[i]
+        rightkey = rightroi[i]
+        topkey = toproi[i]
+        bottomkey = bottomroi[i]
+        
+        # image signal
+        all_counters[i,0] = np.nansum(image[ckey[1, 0]: ckey[1, 1] , ckey[0, 0]: ckey[0, 1]])
+        
+        # image background
+        all_counters[i,2] = 0.0
+        for key in [leftkey, rightkey, topkey, bottomkey]:
+            all_counters[i, 2] += np.nansum(image[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
+        
+        # Correction image
+        all_Carr[i,0] = np.nansum(C_corr[ckey[1, 0]: ckey[1, 1] , ckey[0, 0]: ckey[0, 1]])
+        all_Carr[i,2] = 0.0
+        for key in [leftkey, rightkey, topkey, bottomkey]:
+            all_Carr[i, 2] += np.nansum(C_corr[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
+            
+        # number of available pixels
+        sig_pix = np.sum(invmask[ckey[1, 0]: ckey[1, 1], ckey[0, 0]: ckey[0, 1]])
+        bg_pix = 0.0
+        for key in [leftkey, rightkey, topkey, bottomkey]:
+            bg_pix += np.sum(invmask[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
+            
+        all_counters[i,1] = sig_pix
+        all_counters[i, 3] = bg_pix
+        all_Carr[i,1] = sig_pix
+        all_Carr[i, 3] = bg_pix        
+
 @njit('f8[:,::1](f8[:,::1], f8[:,::1], b1[:, ::1], f8[:,::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], f8[:,::1])', nogil=True, cache=True)
 def processImage_bg(image,  bg,        mask,       C_corr,    croi,      leftroi,   rightroi,  toproi,   bottomroi, all_counters):
     image -= bg

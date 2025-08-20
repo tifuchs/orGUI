@@ -638,12 +638,11 @@ ub : gui for UB matrix and angle calculations
         corr = self.scanSelector.useSolidAngleBox.isChecked() or\
             self.scanSelector.usePolarizationBox.isChecked()
         
-        if corr:
-            C_arr = np.ones(dc.detector.shape,dtype=np.float64)
-            if self.scanSelector.useSolidAngleBox.isChecked():
-                C_arr /= dc.solidAngleArray()
-            if self.scanSelector.usePolarizationBox.isChecked():
-                C_arr /= dc.polarization(factor=dc._polFactor,axis_offset=dc._polAxis)
+        C_arr = np.ones(dc.detector.shape,dtype=np.float64)
+        if self.scanSelector.useSolidAngleBox.isChecked():
+            C_arr /= dc.solidAngleArray()
+        if self.scanSelector.usePolarizationBox.isChecked():
+            C_arr /= dc.polarization(factor=dc._polFactor,axis_offset=dc._polAxis)
 
 
         def fill_counters(image,pixelavail, key, bkgkey):
@@ -672,16 +671,25 @@ ub : gui for UB matrix and angle calculations
         bgpixel1_a = np.zeros_like(hkl_del_gam_1.shape[0],dtype=np.float64)
 
         # initialize 2d np array to store roi integration counters together for all images/ROIs
-        croi1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],))
-        cpixel1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],))
-        bgroi1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],))
-        bgpixel1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],))
+        croi1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
+        cpixel1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
+        bgroi1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
+        bgpixel1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
+        Corr_croi1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
+        Corr_cpixel1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
+        Corr_bgroi1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
+        Corr_bgpixel1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
+        
+        bgimg_croi1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
+        bgimg_cpixel1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
+        bgimg_bgroi1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
+        bgimg_bgpixel1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
         
         progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
         
         background_image = self.background_image
-
+        has_bg_img = False
         if HAS_ACCEL:
             if imgmask is not None:
                 mask = np.ascontiguousarray(imgmask, dtype=bool)
@@ -700,19 +708,24 @@ ub : gui for UB matrix and angle calculations
                 roi_list = np.ascontiguousarray(np.stack(roi_list), dtype=np.int64)
                 roi_lists_numba.append(roi_list)
             if background_image is not None and background_image.shape == image.img.shape:
+                bg = background_image.astype(np.float64, order='C', copy=True) 
+                has_bg_img = True
                 def sumImage(i):
                     image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True) # unlocks gil during file read
                     
-                    all_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,)) # need gil for python object creation
-                    _roi_sum_accel.processImage_bg(image, background_image, mask, C_arr, *roi_lists_numba, all_counters) # numba nopython and nogil mode
-                    return all_counters
+                    all_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    Carr_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    BgImg_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    _roi_sum_accel.processImage_bg_Carr(image, bg, mask, C_arr, *roi_lists_numba, all_counters, Carr_counters, BgImg_counters) # numba nopython and nogil mode
+                    return all_counters, Carr_counters, BgImg_counters
             else:
                 def sumImage(i):
                     image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True) # unlocks gil during file read
                     
-                    all_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,)) # need gil for python object creation
-                    _roi_sum_accel.processImage(image, mask, C_arr, *roi_lists_numba, all_counters) # numba nopython and nogil mode
-                    return all_counters
+                    Carr_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    all_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    _roi_sum_accel.processImage_Carr(image, mask, C_arr, *roi_lists_numba, all_counters, Carr_counters) # numba nopython and nogil mode
+                    return all_counters, Carr_counters
             
         else:
             
@@ -747,7 +760,7 @@ ub : gui for UB matrix and angle calculations
                 return all_counters1
             
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor: # speedup only for the file reads 
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor:
             futures = {}
             for i in range(len(self.fscan)):
                 futures[executor.submit(sumImage, i)] = i
@@ -755,13 +768,32 @@ ub : gui for UB matrix and angle calculations
             status = "no error"
             for f in concurrent.futures.as_completed(futures): # iteration over jobs
                 try:
-                    for j in range(len(f.result())): # iteration over ROIs
-                        (croi1, cpixel1, bgroi1, bgpixel1) = f.result()[j]
-                        i = futures[f]
-                        croi1_all[i][j] = croi1
-                        cpixel1_all[i][j] = cpixel1
-                        bgroi1_all[i][j] = bgroi1
-                        bgpixel1_all[i][j] = bgpixel1
+                    i = futures[f]
+                    if has_bg_img:
+                        img_counters, Carr_counters, BgImg_counters = f.result()
+                        bgimg_croi1_all[i] = BgImg_counters.T[0]
+                        bgimg_cpixel1_all[i] = BgImg_counters.T[1]
+                        bgimg_bgroi1_all[i] = BgImg_counters.T[2]
+                        bgimg_bgpixel1_all[i] = BgImg_counters.T[3]
+                    else:
+                        img_counters, Carr_counters = f.result()
+                    
+                    croi1_all[i] = img_counters.T[0]
+                    cpixel1_all[i] = img_counters.T[1]
+                    bgroi1_all[i] = img_counters.T[2]
+                    bgpixel1_all[i] = img_counters.T[3]
+                    
+                    Corr_croi1_all[i] = Carr_counters.T[0]
+                    Corr_cpixel1_all[i] = Carr_counters.T[1]
+                    Corr_bgroi1_all[i] = Carr_counters.T[2]
+                    Corr_bgpixel1_all[i] = Carr_counters.T[3]
+                    #for j in range(len(img_counters)): # iteration over ROIs
+                    #    (croi1, cpixel1, bgroi1, bgpixel1) = img_counters[j]
+                    #    
+                    #    croi1_all[i][j] = croi1
+                    #    cpixel1_all[i][j] = cpixel1
+                    #    bgroi1_all[i][j] = bgroi1
+                    #    bgpixel1_all[i][j] = bgpixel1
                     progress.setValue(futures[f])
                     del f
                 except concurrent.futures.CancelledError:
@@ -777,7 +809,6 @@ ub : gui for UB matrix and angle calculations
                     [f.cancel() for f in futures]
                     
                     break
-                #gc.collect()
 
         progress.setValue(len(self.fscan))
         if status == 'error':
@@ -845,11 +876,14 @@ ub : gui for UB matrix and angle calculations
                     "@orgui_meta": u"scan"
                 }
             }
-
+            
+        croibg1_bgimg_a = None
+        croibg1_bgimg_err_a = None
+        
         #plot and save data in database
         for d in range(croi1_all.shape[1]):
             roi_d = rois['center'][d]
-            roisize = (roi_d[0].stop - roi_d[0].start) * (roi_d[1].stop - roi_d[1].start)
+            roi_size = (roi_d[0].stop - roi_d[0].start) * (roi_d[1].stop - roi_d[1].start)
 
             hkl_del_gam_1 = hkl_del_gam[d]
 
@@ -858,15 +892,52 @@ ub : gui for UB matrix and angle calculations
             bgroi1_a = bgroi1_all[...,d]
             bgpixel1_a = bgpixel1_all[...,d]
             
-        
-            if np.any(bgpixel1_a):
-                croibg1_a = ( croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a ) * (roisize / cpixel1_a)
-                croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * (roisize / cpixel1_a)
-            else:
-                croibg1_a = croi1_a * (roisize / cpixel1_a)
-                croibg1_err_a = np.sqrt(croi1_a) * (roisize / cpixel1_a)
-                
+            Corr_croi1_a = Corr_croi1_all[...,d]
+            Corr_cpixel1_a = Corr_cpixel1_all[...,d]
+            Corr_bgroi1_a = Corr_bgroi1_all[...,d]
+            Corr_bgpixel1_a = Corr_bgpixel1_all[...,d]
 
+            bgimg_croi1_a = bgimg_croi1_all[...,d]
+            bgimg_cpixel1_a = bgimg_cpixel1_all[...,d]
+            bgimg_bgroi1_a = bgimg_bgroi1_all[...,d]
+            bgimg_bgpixel1_a = bgimg_bgpixel1_all[...,d]
+            
+            Corr1 = Corr_croi1_a * ( roi_size / Corr_cpixel1_a) # normalize to number of pixels of center roi (croi)
+        
+            if np.any(bgimg_cpixel1_a): # assume the background image has no errors (would need a separate error image for that)
+                
+                bgimg_croi1_norm = bgimg_croi1_a * ( cpixel1_a / bgimg_cpixel1_a)
+                if np.any(bgpixel1_a):
+                    bgimg_bgroi1_norm = bgimg_bgroi1_a * ( bgpixel1_a / bgimg_bgpixel1_a)
+                    
+                    # method 1: simply subtract bg image from data and then subtract the remaining background
+                    croibg1_a = ( (croi1_a - bgimg_croi1_norm) - (cpixel1_a/bgpixel1_a) * (bgroi1_a - bgimg_bgroi1_norm) ) * ( roi_size / cpixel1_a)
+                    croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size / cpixel1_a)
+                    
+                    # method 2: scale bg image croi and subtract scaled bg image croi. Use ratio of bgroi of image and bg image as scale factor.
+                    factor = bgroi1_a / bgimg_bgroi1_norm 
+                    croibg1_bgimg_a = ( croi1_a - factor * bgimg_croi1_norm ) * ( roi_size / cpixel1_a)
+                    croibg1_bgimg_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size / cpixel1_a)
+                    
+                else: # not possible if no bgroi is set.
+                    croibg1_a = (croi1_a - bgimg_croi1_norm) * ( roi_size / cpixel1_a)
+                    croibg1_err_a = np.sqrt(croi1_a) * ( roi_size / cpixel1_a)
+
+            else: # no background image
+                if np.any(bgpixel1_a):
+                    croibg1_a = ( croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a  ) * ( roi_size / cpixel1_a)
+                    croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size / cpixel1_a)
+                else:
+                    croibg1_a = croi1_a  * ( roi_size / cpixel1_a)
+                    croibg1_err_a = np.sqrt(croi1_a) * ( roi_size / cpixel1_a)
+                
+            if corr:
+                croibg1_a *= Corr1
+                croibg1_err_a *= Corr1
+                if croibg1_bgimg_a is not None:
+                    croibg1_bgimg_a *= Corr1
+                    croibg1_bgimg_err_a *= Corr1
+                    
             rod_mask1 = np.isfinite(croibg1_a)
 
             
@@ -943,15 +1014,23 @@ ub : gui for UB matrix and angle calculations
                     "@NX_class": u"NXdetector",
                     "croibg"  : croibg1_a,
                     "croibg_errors" :  croibg1_err_a,
+                    'croibg_bgimg': croibg1_bgimg_a, # when None, will not create data set
+                    'croibg_bgimg_errors': croibg1_bgimg_err_a,  # when None, will not create data set
                     "croi" :  croi1_a,
                     "bgroi"  : bgroi1_a,
                     "croi_pix"  : cpixel1_a,
-                    "bgroi_pix" : bgpixel1_a
+                    "bgroi_pix" : bgpixel1_a,
+                    "Cfactors_croi" : Corr_croi1_a,
+                    "Cfactors_bgroi" : Corr_bgroi1_a,
+                    "bgimg_croi" : bgimg_croi1_a,
+                    "bgimg_bgroi" : bgimg_bgroi1_a
                 },
                 "pixelcoord": {
                     "@NX_class": u"NXdetector",
                     "x" : x_coord1_a,
-                    "y"  : y_coord1_a
+                    "y"  : y_coord1_a,
+                    'vsize' : (roi_d[0].stop - roi_d[0].start),
+                    'hsize' : (roi_d[1].stop - roi_d[1].start)
                 },
                 "trajectory" : traj1,
                 "@signal" : u"counters/croibg",
@@ -999,7 +1078,9 @@ ub : gui for UB matrix and angle calculations
         alpha_pk = []; theta_pk = []; delta_pk = []; gamma_pk = []; chi_pk = []; phi_pk = []; omega_pk = []; 
         x = []; y = []; h = []; k = []; l = []; 
         croibg = []; croibg_errors = []; croi = []; bgroi = []; croi_pix = []; bgroi_pix = []; 
+        croibg_bgimg = []; croibg_bgimg_errors = []; Cfactors_croi = []; Cfactors_bgroi = []; bgimg_croi = []; bgimg_bgroi = []; 
         axis = []; s = []; H_0 = []; H_1 = []; HKL_pk = []
+        vsize = []; hsize = []; 
         
         #from IPython import embed; embed()
         
@@ -1037,10 +1118,22 @@ ub : gui for UB matrix and angle calculations
                 bgroi.append(dsc["counters"]["bgroi"])
                 croi_pix.append(dsc["counters"]["croi_pix"])
                 bgroi_pix.append(dsc["counters"]["bgroi_pix"])
+                if dsc["counters"]["croibg_bgimg"] is not None:
+                    croibg_bgimg.append(dsc["counters"]["croibg_bgimg"])
+                    croibg_bgimg_errors.append(dsc["counters"]["croibg_bgimg_errors"])
+                Cfactors_croi.append(dsc["counters"]["Cfactors_croi"])
+                Cfactors_bgroi.append(dsc["counters"]["Cfactors_bgroi"])
+                bgimg_croi.append(dsc["counters"]["bgimg_croi"])
+                bgimg_bgroi.append(dsc["counters"]["bgimg_bgroi"])
                 
                 # 2D arrays
                 x.append(dsc["pixelcoord"]["x"])
                 y.append(dsc["pixelcoord"]["y"])
+                
+                # 1D arrays
+                vsize.append(dsc["pixelcoord"]["vsize"])
+                hsize.append(dsc["pixelcoord"]["hsize"])
+                
                 
                 axis.append(dsc["trajectory"]["axis"])
                 
@@ -1059,7 +1152,9 @@ ub : gui for UB matrix and angle calculations
             except Exception as e:
                 from IPython import embed; embed()
                 sys.exit(0)
+        
 
+        
         
         rois = {
                 "@NX_class": u"NXcollection",
@@ -1081,8 +1176,14 @@ ub : gui for UB matrix and angle calculations
                 "bgroi" : np.vstack(bgroi),
                 "croi_pix" : np.vstack(croi_pix),
                 "bgroi_pix" : np.vstack(bgroi_pix),
+                "Cfactors_croi" : np.vstack(Cfactors_croi),
+                "Cfactors_bgroi" : np.vstack(Cfactors_bgroi),
+                "bgimg_croi" : np.vstack(bgimg_croi),
+                "bgimg_bgroi" : np.vstack(bgimg_bgroi),
                 "x" : np.vstack(x),
                 "y" : np.vstack(y),
+                "vsize" : np.array(vsize),
+                "hsize" : np.array(hsize),
                 "axis" : np.vstack(axis),
                 "alpha_pk" : np.array(alpha_pk),
                 "theta_pk" : np.array(theta_pk),
@@ -1092,6 +1193,12 @@ ub : gui for UB matrix and angle calculations
                 "phi_pk" : np.array(phi_pk),
                 "omega_pk" : np.array(omega_pk)
             }
+        
+        if croibg_bgimg:
+            rois["croibg_bgimg"] = np.vstack(croibg_bgimg)
+            rois["croibg_bgimg_errors"] = np.vstack(croibg_bgimg_errors)
+            
+            
         for lbl in optional_labels:
             if optional_labels[lbl]:
                 rois[lbl] = np.squeeze(np.vstack(optional_labels[lbl]))
@@ -2416,12 +2523,11 @@ Do you want to continue without mask?""")
         corr = self.scanSelector.useSolidAngleBox.isChecked() or\
             self.scanSelector.usePolarizationBox.isChecked()
         
-        if corr:
-            C_arr = np.ones(dc.detector.shape,dtype=np.float64)
-            if self.scanSelector.useSolidAngleBox.isChecked():
-                C_arr /= dc.solidAngleArray()
-            if self.scanSelector.usePolarizationBox.isChecked():
-                C_arr /= dc.polarization(factor=dc._polFactor,axis_offset=dc._polAxis)
+        C_arr = np.ones(dc.detector.shape,dtype=np.float64)
+        if self.scanSelector.useSolidAngleBox.isChecked():
+            C_arr /= dc.solidAngleArray()
+        if self.scanSelector.usePolarizationBox.isChecked():
+            C_arr /= dc.polarization(factor=dc._polFactor,axis_offset=dc._polAxis)
 
         
         hkl_del_gam_s1, hkl_del_gam_s2 = self.getROIloc()
@@ -2451,77 +2557,177 @@ Do you want to continue without mask?""")
         cpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
         bgroi2_a = np.zeros_like(dataavail,dtype=np.float64)
         bgpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
+        
+        bgimg_croi1_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgimg_cpixel1_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgimg_bgroi1_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgimg_bgpixel1_a = np.zeros_like(dataavail,dtype=np.float64)
+        
+        Corr_croi1_a = np.zeros_like(dataavail,dtype=np.float64)
+        Corr_cpixel1_a = np.zeros_like(dataavail,dtype=np.float64)
+        Corr_bgroi1_a = np.zeros_like(dataavail,dtype=np.float64)
+        Corr_bgpixel1_a = np.zeros_like(dataavail,dtype=np.float64)
+        
+        bgimg_croi2_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgimg_cpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgimg_bgroi2_a = np.zeros_like(dataavail,dtype=np.float64)
+        bgimg_bgpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
+        
+        Corr_croi2_a = np.zeros_like(dataavail,dtype=np.float64)
+        Corr_cpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
+        Corr_bgroi2_a = np.zeros_like(dataavail,dtype=np.float64)
+        Corr_bgpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
+        
         x_coord2_a = hkl_del_gam_2[:,6]
         y_coord2_a = hkl_del_gam_2[:,7]
 
         progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
         
-        background_image = self.background_image
-        def sumImage(i):
-            if not dataavail[i]:
-                croi1 = np.nan; croi2 = np.nan
-                cpixel1 = np.nan; cpixel2 = np.nan
-                bgroi1 = np.nan; bgroi2 = np.nan
-                bgpixel1 = np.nan; bgpixel2 = np.nan
-            else:
-                image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True)
-                if background_image is not None and background_image.shape == image.shape:
-                    if HAS_ACCEL:
-                        _roi_sum_accel.calcBgSub(image, background_image)
-                    else:
-                        np.subtract(image, background_image, out=image)
-                if imgmask is not None:
-                    image[imgmask] = np.nan
-                    pixelavail = (~imgmask).astype(np.float64)
-                else:
-                    pixelavail = np.ones_like(image)
-                if corr:
-                    image *= C_arr
-                    
+
+        has_bg_img = False
+        
+        if imgmask is not None:
+            mask = np.ascontiguousarray(imgmask, dtype=bool)
+        else:
+            mask = np.zeros(image.img.shape, dtype=bool)
+        if corr:
+            C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
+            C_arr[mask] = 0.0
+        else:
+            C_arr = np.ones(image.img.shape, dtype=np.float64)
+            C_arr[mask] = 0.0
+        
+        if HAS_ACCEL:
+            roi_lists_numba = []
+            for i in range(len(self.fscan)):
+                roi_lists = [[], [], [], [], []]
                 if hkl_del_gam_1[i,-1]:
                     key = self.intkey(hkl_del_gam_1[i,6:8])
+                    roi_lists[0].append(np.array([[key[0].start , key[0].stop], [key[1].start , key[1].stop]])) # center
                     bkgkey = self.bkgkeys(hkl_del_gam_1[i,6:8])
-                    
-                    cimg = image[key[::-1]]
-                    
-                    # !!!!!!!!!! add mask here  !!!!!!!!!
-                    croi1 = np.nansum(cimg)
-                    cpixel1 = np.nansum(pixelavail[key[::-1]])
-                    bgroi1 = 0.
-                    bgpixel1 = 0.
-                    for bg in bkgkey:
-                        bgimg = image[bg[::-1]]
-                        bgroi1 += np.nansum(bgimg)
-                        bgpixel1 += np.nansum(pixelavail[bg[::-1]])
+                    for r, l in zip(bkgkey, roi_lists[1:]):
+                        l.append(np.array([[r[0].start , r[0].stop], [r[1].start , r[1].stop]]))
                 else:
-                    croi1 = np.nan
-                    cpixel1 = np.nan
-                    bgroi1 = np.nan
-                    bgpixel1 = np.nan
-                
+                    [l.append(np.array([[0 , 0], [0 , 0]])) for l in roi_lists[1:]] # will result in zeros, convert to np.nan later
+                    roi_lists[0].append(np.array([[0 , 0], [0 , 0]]))
                 if hkl_del_gam_2[i,-1]:
                     key = self.intkey(hkl_del_gam_2[i,6:8])
+                    roi_lists[0].append(np.array([[key[0].start , key[0].stop], [key[1].start , key[1].stop]])) # center
                     bkgkey = self.bkgkeys(hkl_del_gam_2[i,6:8])
-                    
-                    cimg = image[key[::-1]]
-                    # !!!!!!!!!! add mask here  !!!!!!!!!
-                    croi2 = np.nansum(cimg)
-                    cpixel2 = np.nansum(pixelavail[key[::-1]])
-                    bgroi2 = 0.
-                    bgpixel2 = 0.
-                    for bg in bkgkey:
-                        bgimg = image[bg[::-1]]
-                        bgroi2 += np.nansum(bgimg)
-                        bgpixel2 += np.nansum(pixelavail[bg[::-1]])
-
+                    for r, l in zip(bkgkey, roi_lists[1:]):
+                        l.append(np.array([[r[0].start , r[0].stop], [r[1].start , r[1].stop]]))
                 else:
-                    croi2 = np.nan
-                    cpixel2 = np.nan
-                    bgroi2 = np.nan
-                    bgpixel2 = np.nan
+                    [l.append(np.array([[0 , 0], [0 , 0]])) for l in roi_lists[1:]] # will result in zeros, convert to np.nan later
+                    roi_lists[0].append(np.array([[0 , 0], [0 , 0]]))
+                    
+                roi_lists = [np.ascontiguousarray(np.stack(l), dtype=np.int64) for l in roi_lists]
+                roi_lists_numba.append(roi_lists)
+            
+            if self.background_image is not None and self.background_image.shape == image.img.shape:
+                has_bg_img = True
+                background_image = self.background_image.astype(np.float64, order='C', copy=True)
+                background_image[mask] = 0.
+                def sumImage(i):
+                    all_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    Carr_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    BgImg_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    if not dataavail[i]:
+                        return all_counters, Carr_counters, BgImg_counters
+                    image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True) # unlocks gil during file read
+                    _roi_sum_accel.processImage_bg_Carr(image, background_image, mask, C_arr, *roi_lists_numba[i], all_counters, Carr_counters, BgImg_counters) # numba nopython and nogil mode
+                    return all_counters, Carr_counters, BgImg_counters
+            else:
+                def sumImage(i):
+                    all_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    Carr_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    if not dataavail[i]:
+                        return all_counters, Carr_counters
+                    image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True) # unlocks gil during file read
+                    _roi_sum_accel.processImage_Carr(image, mask, C_arr, *roi_lists_numba[i], all_counters, Carr_counters) # numba nopython and nogil mode
+                    return all_counters, Carr_counters
+            
+        else: # not HAS_ACCEL
+            if self.background_image is not None and self.background_image.shape == image.img.shape:
+                has_bg_img = True
+                background_image = self.background_image.astype(np.float64, order='C', copy=True)
+                background_image[mask] = 0.
+                def sumImage(i):
+                    all_counters = np.zeros((2,) + (4,), dtype=np.float64) # need gil for python object creation
+                    Carr_counters = np.zeros((2,) + (4,), dtype=np.float64) # need gil for python object creation
+                    BgImg_counters = np.zeros((2,) + (4,), dtype=np.float64) # need gil for python object creation
+                    if not dataavail[i]:
+                        return all_counters, Carr_counters, BgImg_counters
+                    else:
+                        image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True)
+                        if imgmask is not None:
+                            image[imgmask] = np.nan
+                            pixelavail = (~imgmask).astype(np.float64)
+                        else:
+                            pixelavail = np.ones_like(image)
 
-            return (croi1, cpixel1, bgroi1, bgpixel1), (croi2, cpixel2, bgroi2, bgpixel2)
+                        for intersect, hkl_del_gam_current in zip(range(2), [hkl_del_gam_1, hkl_del_gam_2]):
+                            if hkl_del_gam_current[i,-1]:
+                                key = self.intkey(hkl_del_gam_current[i,6:8])
+                                bkgkey = self.bkgkeys(hkl_del_gam_current[i,6:8])
+                                
+                                all_counters[intersect,0] = np.nansum(image[key[::-1]])
+                                Carr_counters[intersect,0] = np.nansum(C_arr[key[::-1]])
+                                BgImg_counters[intersect,0] = np.nansum(background_image[key[::-1]])
+                                
+                                cpixel1 = np.nansum(pixelavail[key[::-1]])
+                                all_counters[intersect,1] = cpixel1
+                                Carr_counters[intersect,1] = cpixel1
+                                BgImg_counters[intersect,1] = cpixel1
+                                
+                                bgpixel1 = 0.0
+                                for bg in bkgkey:
+                                    bgimg = image[bg[::-1]]
+                                    all_counters[intersect,2] += np.nansum(image[bg[::-1]])
+                                    Carr_counters[intersect,2] += np.nansum(C_arr[bg[::-1]])
+                                    BgImg_counters[intersect,2] += np.nansum(background_image[bg[::-1]])
+                                    bgpixel1 += np.nansum(pixelavail[bg[::-1]])
+                                    
+                                all_counters[intersect,3] = bgpixel1
+                                Carr_counters[intersect,3] = bgpixel1
+                                BgImg_counters[intersect,3] = bgpixel1
+                        return all_counters, Carr_counters, BgImg_counters
+            else:
+                def sumImage(i):
+                    all_counters = np.zeros((2,) + (4,), dtype=np.float64) # need gil for python object creation
+                    Carr_counters = np.zeros((2,) + (4,), dtype=np.float64) # need gil for python object creation
+                    if not dataavail[i]:
+                        return all_counters, Carr_counters
+                    else:
+                        image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True)
+                        if imgmask is not None:
+                            image[imgmask] = np.nan
+                            pixelavail = (~imgmask).astype(np.float64)
+                        else:
+                            pixelavail = np.ones_like(image)
+
+                        for intersect, hkl_del_gam_current in zip(range(2), [hkl_del_gam_1, hkl_del_gam_2]):
+                            if hkl_del_gam_current[i,-1]:
+                                key = self.intkey(hkl_del_gam_current[i,6:8])
+                                bkgkey = self.bkgkeys(hkl_del_gam_current[i,6:8])
+                                
+                                all_counters[intersect,0] = np.nansum(image[key[::-1]])
+                                Carr_counters[intersect,0] = np.nansum(C_arr[key[::-1]])
+                                
+                                cpixel1 = np.nansum(pixelavail[key[::-1]])
+                                all_counters[intersect,1] = cpixel1
+                                Carr_counters[intersect,1] = cpixel1
+                                
+                                bgpixel1 = 0.0
+                                for bg in bkgkey:
+                                    bgimg = image[bg[::-1]]
+                                    all_counters[intersect,2] += np.nansum(image[bg[::-1]])
+                                    Carr_counters[intersect,2] += np.nansum(C_arr[bg[::-1]])
+                                    bgpixel1 += np.nansum(pixelavail[bg[::-1]])
+                                    
+                                all_counters[intersect,3] = bgpixel1
+                                Carr_counters[intersect,3] = bgpixel1
+                        return all_counters, Carr_counters
                 
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor: # speedup only for the file reads 
@@ -2531,16 +2737,47 @@ Do you want to continue without mask?""")
             
             for f in concurrent.futures.as_completed(futures):
                 try:
-                    (croi1, cpixel1, bgroi1, bgpixel1), (croi2, cpixel2, bgroi2, bgpixel2) = f.result()
                     i = futures[f]
-                    croi1_a[i] = croi1
-                    cpixel1_a[i] = cpixel1
-                    bgroi1_a[i] = bgroi1
-                    bgpixel1_a[i] = bgpixel1
-                    croi2_a[i] = croi2
-                    cpixel2_a[i] = cpixel2
-                    bgroi2_a[i] = bgroi2
-                    bgpixel2_a[i] = bgpixel2
+                    #(croi1, cpixel1, bgroi1, bgpixel1), (croi2, cpixel2, bgroi2, bgpixel2) = f.result()
+                    if has_bg_img:
+                        all_counters, Carr_counters, BgImg_counters = f.result()
+                        bgimg_croi1_a[i]    = BgImg_counters[0, 0]
+                        bgimg_cpixel1_a[i]  = BgImg_counters[0, 1]
+                        bgimg_bgroi1_a[i]   = BgImg_counters[0, 2]
+                        bgimg_bgpixel1_a[i] = BgImg_counters[0, 3]
+                        bgimg_croi2_a[i]    = BgImg_counters[1, 0]
+                        bgimg_cpixel2_a[i]  = BgImg_counters[1, 1]
+                        bgimg_bgroi2_a[i]   = BgImg_counters[1, 2]
+                        bgimg_bgpixel2_a[i] = BgImg_counters[1, 3]
+                        
+                    else:
+                        all_counters, Carr_counters = f.result()
+                        bgimg_croi1_a[i]    = 0.0
+                        bgimg_cpixel1_a[i]  = 0.0
+                        bgimg_bgroi1_a[i]   = 0.0
+                        bgimg_bgpixel1_a[i] = 0.0
+                        bgimg_croi2_a[i]    = 0.0
+                        bgimg_cpixel2_a[i]  = 0.0
+                        bgimg_bgroi2_a[i]   = 0.0
+                        bgimg_bgpixel2_a[i] = 0.0
+                    
+                    croi1_a[i]    = all_counters[0, 0]
+                    cpixel1_a[i]  = all_counters[0, 1]
+                    bgroi1_a[i]   = all_counters[0, 2]
+                    bgpixel1_a[i] = all_counters[0, 3]
+                    croi2_a[i]    = all_counters[1, 0]
+                    cpixel2_a[i]  = all_counters[1, 1]
+                    bgroi2_a[i]   = all_counters[1, 2]
+                    bgpixel2_a[i] = all_counters[1, 3]
+                    
+                    Corr_croi1_a[i]    = Carr_counters[0, 0]
+                    Corr_cpixel1_a[i]  = Carr_counters[0, 1]
+                    Corr_bgroi1_a[i]   = Carr_counters[0, 2]
+                    Corr_bgpixel1_a[i] = Carr_counters[0, 3]
+                    Corr_croi2_a[i]    = Carr_counters[1, 0]
+                    Corr_cpixel2_a[i]  = Carr_counters[1, 1]
+                    Corr_bgroi2_a[i]   = Carr_counters[1, 2]
+                    Corr_bgpixel2_a[i] = Carr_counters[1, 3]
                     
                     progress.setValue(futures[f])
                 except concurrent.futures.CancelledError:
@@ -2555,19 +2792,79 @@ Do you want to continue without mask?""")
             
         progress.setValue(len(self.fscan))
         
-        if np.any(bgpixel1_a):
-            croibg1_a = ( croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a ) * ( roi_size / cpixel1_a)
-            croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size / cpixel1_a)
-        else:
-            croibg1_a = croi1_a * ( roi_size / cpixel1_a)
-            croibg1_err_a = np.sqrt(croi1_a) * ( roi_size / cpixel1_a)
+        Corr1 = Corr_croi1_a * ( roi_size / Corr_cpixel1_a) # normalize to number of pixels of center roi (croi)
+        Corr2 = Corr_croi2_a * ( roi_size / Corr_cpixel2_a)
+        croibg1_bgimg_a = None
+        croibg1_bgimg_err_a = None
+        
+        if np.any(bgimg_cpixel1_a): # assume the background image has no errors (would need a separate error image for that)
             
-        if np.any(bgpixel2_a):
-            croibg2_a = ( croi2_a - (cpixel2_a/bgpixel2_a) * bgroi2_a ) * ( roi_size / cpixel2_a)
-            croibg2_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2) * bgroi2_a) * ( roi_size / cpixel2_a)
-        else:
-            croibg2_a = croi2_a * ( roi_size / cpixel2_a)
-            croibg2_err_a = np.sqrt(croi2_a) * ( roi_size / cpixel2_a)
+            bgimg_croi1_norm = bgimg_croi1_a * ( cpixel1_a / bgimg_cpixel1_a)
+            if np.any(bgpixel1_a):
+                bgimg_bgroi1_norm = bgimg_bgroi1_a * ( bgpixel1_a / bgimg_bgpixel1_a)
+                
+                # method 1: simply subtract bg image from data and then subtract the remaining background
+                croibg1_a = ( (croi1_a - bgimg_croi1_norm) - (cpixel1_a/bgpixel1_a) * (bgroi1_a - bgimg_bgroi1_norm) ) * ( roi_size / cpixel1_a)
+                croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size / cpixel1_a)
+                
+                # method 2: scale bg image croi and subtract scaled bg image croi. Use ratio of bgroi of image and bg image as scale factor.
+                factor = bgroi1_a / bgimg_bgroi1_norm 
+                croibg1_bgimg_a = ( croi1_a - factor * bgimg_croi1_norm ) * ( roi_size / cpixel1_a)
+                croibg1_bgimg_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size / cpixel1_a)
+                
+            else: # not possible if no bgroi is set.
+                croibg1_a = (croi1_a - bgimg_croi1_norm) * ( roi_size / cpixel1_a)
+                croibg1_err_a = np.sqrt(croi1_a) * ( roi_size / cpixel1_a)
+
+        else: # no background image
+            if np.any(bgpixel1_a):
+                croibg1_a = ( croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a  ) * ( roi_size / cpixel1_a)
+                croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size / cpixel1_a)
+            else:
+                croibg1_a = croi1_a  * ( roi_size / cpixel1_a)
+                croibg1_err_a = np.sqrt(croi1_a) * ( roi_size / cpixel1_a)
+        
+        croibg2_bgimg_a = None
+        croibg2_bgimg_err_a = None
+        if np.any(bgimg_cpixel2_a): # assume the background image has no errors (would need a separate error image for that)
+            
+            bgimg_croi2_norm = bgimg_croi2_a * ( cpixel2_a / bgimg_cpixel2_a)
+            if np.any(bgpixel2_a):
+                bgimg_bgroi2_norm = bgimg_bgroi2_a * ( bgpixel2_a / bgimg_bgpixel2_a)
+                
+                # method 1: simply subtract bg image from data and then subtract the remaining background
+                croibg2_a = ( (croi2_a - bgimg_croi2_norm) - (cpixel2_a/bgpixel2_a) * (bgroi2_a - bgimg_bgroi2_norm) ) * ( roi_size / cpixel2_a)
+                croibg2_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2)  * bgroi2_a) * ( roi_size / cpixel2_a)
+                
+                # method 2: scale bg image croi and subtract scaled bg image croi. Use ratio of bgroi of image and bg image as scale factor.
+                factor = bgroi2_a / bgimg_bgroi2_norm 
+                croibg2_bgimg_a = ( croi2_a - factor * bgimg_croi2_norm ) * ( roi_size / cpixel2_a)
+                croibg2_bgimg_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2)  * bgroi2_a) * ( roi_size / cpixel2_a)
+                
+            else: # not possible if no bgroi is set.
+                croibg2_a = (croi2_a - bgimg_croi2_norm) * ( roi_size / cpixel2_a)
+                croibg2_err_a = np.sqrt(croi2_a) * ( roi_size / cpixel2_a)
+
+        else: # no background image
+            if np.any(bgpixel2_a):
+                croibg2_a = ( croi2_a - (cpixel2_a/bgpixel2_a) * bgroi2_a  ) * ( roi_size / cpixel2_a)
+                croibg2_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2)  * bgroi2_a) * ( roi_size / cpixel2_a)
+            else:
+                croibg2_a = croi2_a  * ( roi_size / cpixel2_a)
+                croibg2_err_a = np.sqrt(croi2_a) * ( roi_size / cpixel2_a)
+        
+        
+        if corr:
+            croibg1_a *= Corr1
+            croibg1_err_a *= Corr1
+            croibg2_a *= Corr2
+            croibg2_err_a *= Corr2
+            if croibg1_bgimg_a is not None:
+                croibg1_bgimg_a *= Corr1
+                croibg1_bgimg_err_a *= Corr1
+            if croibg2_bgimg_a is not None:
+                croibg2_bgimg_a *= Corr2
+                croibg2_bgimg_err_a *= Corr2
 
         rod_mask1 = np.isfinite(croibg1_a)
         rod_mask2 = np.isfinite(croibg2_a)
@@ -2676,15 +2973,23 @@ Do you want to continue without mask?""")
                 "@NX_class": u"NXdetector",
                 "croibg"  : croibg1_a,
                 "croibg_errors" :  croibg1_err_a,
+                'croibg_bgimg': croibg1_bgimg_a, # when None, will not create data set
+                'croibg_bgimg_errors': croibg1_bgimg_err_a,  # when None, will not create data set
                 "croi" :  croi1_a,
                 "bgroi"  : bgroi1_a,
                 "croi_pix"  : cpixel1_a,
-                "bgroi_pix" : bgpixel1_a
+                "bgroi_pix" : bgpixel1_a,
+                "Cfactors_croi" : Corr_croi1_a,
+                "Cfactors_bgroi" : Corr_bgroi1_a,
+                "bgimg_croi" : bgimg_croi1_a,
+                "bgimg_bgroi" : bgimg_bgroi1_a
             },
             "pixelcoord": {
                 "@NX_class": u"NXdetector",
                 "x" : x_coord1_a,
-                "y"  : y_coord1_a
+                "y"  : y_coord1_a,
+                'vsize' : vsize,
+                'hsize' : hsize
             },
             "trajectory" : traj1,
             "@signal" : u"counters/croibg",
@@ -2716,15 +3021,23 @@ Do you want to continue without mask?""")
                 "@NX_class": u"NXdetector",
                 "croibg"  : croibg2_a,
                 "croibg_errors" :  croibg2_err_a,
+                'croibg_bgimg': croibg2_bgimg_a,
+                'croibg_bgimg_errors': croibg2_bgimg_err_a,
                 "croi" :  croi2_a,
                 "bgroi"  : bgroi2_a,
                 "croi_pix"  : cpixel2_a,
-                "bgroi_pix" : bgpixel2_a
+                "bgroi_pix" : bgpixel2_a,
+                "Cfactors_croi" : Corr_croi2_a,
+                "Cfactors_bgroi" : Corr_bgroi2_a,
+                "bgimg_croi" : bgimg_croi2_a,
+                "bgimg_bgroi" : bgimg_bgroi2_a
             },
             "pixelcoord": {
                 "@NX_class": u"NXdetector",
                 "x" : x_coord2_a,
-                "y"  : y_coord2_a
+                "y"  : y_coord2_a,
+                'vsize' : vsize,
+                'hsize' : hsize
             },
             "trajectory" : traj2,
             "@signal" : u"counters/croibg",
