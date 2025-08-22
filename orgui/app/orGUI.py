@@ -588,7 +588,7 @@ ub : gui for UB matrix and angle calculations
 
         if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
             qt.QMessageBox.warning(self, "No scan loaded", "Cannot integrate scan: No scan loaded.")
-            return
+            return {'status': 'error', 'message' : 'no scan loaded'}
         refldict = self.get_rocking_coordinates()
 
         if self.scanSelector.intersS1Act.isChecked():
@@ -609,7 +609,7 @@ ub : gui for UB matrix and angle calculations
         
         ro_name = "rocking_[%.2f %.2f %.2f]_H0_[%.2f %.2f %.2f]_H1" % (*refldict['H_0'], *refldict['H_1'])
 
-        self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
+        return self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
             
 
 
@@ -618,10 +618,10 @@ ub : gui for UB matrix and angle calculations
             image = self.fscan.get_raw_img(0)
         except Exception as e:
             print("no images found! %s" % e)
-            return
+            return {'status': 'error', 'message' : 'No image found in current scan', 'traceback' : traceback.format_exc()}
         if self.database.nxfile is None:
             print("No database available")
-            return
+            return {'status': 'error', 'message' : 'No database available'}
         dc = self.ubcalc.detectorCal
         
         imgmask = None
@@ -631,7 +631,7 @@ ub : gui for UB matrix and angle calculations
                 btn = qt.QMessageBox.question(self,"No mask available","""No mask was selected with the masking tool.
     Do you want to continue without mask?""")
                 if btn != qt.QMessageBox.Yes:
-                    return
+                    return {'status': 'cancelled', 'message' : 'Reason: no mask selected'}
             else:
                 imgmask = self.centralPlot.getMaskToolsDockWidget().getSelectionMask() > 0.
         
@@ -759,7 +759,7 @@ ub : gui for UB matrix and angle calculations
 
                 return all_counters1
             
-
+        cancelled = False
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor:
             futures = {}
             for i in range(len(self.fscan)):
@@ -802,17 +802,22 @@ ub : gui for UB matrix and angle calculations
                     print("Cannot read image:\n%s" % traceback.format_exc())
                     print("Cancel to avoid memory leak")
                     [f.cancel() for f in futures]
+                    cancelled = True
                     status = 'error'
+                    trace = traceback.format_exc()
                     del f
                 if progress.wasCanceled():
-                    status = 'error'
+                    cancelled = True
                     [f.cancel() for f in futures]
-                    
                     break
 
         progress.setValue(len(self.fscan))
-        if status == 'error':
-            return
+        if cancelled:
+            
+            if status == 'error':
+                return {'status': 'error', 'message' : 'Error during integration', 'traceback' : trace}
+            else:
+                return {'status': 'cancelled', 'message' : 'Reason: Cancelled during integration'}
 
         currentPlotCount = len(self.integrdataPlot.getAllCurves())
         numberOfNewPlots = xylist.shape[0]
@@ -1214,6 +1219,7 @@ ub : gui for UB matrix and angle calculations
         data_2d_structured[self.activescanname]["measurement"][name]["rois"] = rois
                     
         self.database.add_nxdict(data_2d_structured)
+        return {'status': 'success'}
         
                 
     def updatePlotItems(self, recalculate=True):
@@ -2487,17 +2493,16 @@ ub : gui for UB matrix and angle calculations
     def integrateROI(self):
 
         if self.scanSelector.scanstab.currentIndex() == 2:
-            self.rocking_extraction()
-            return
+            return self.rocking_extraction()
             
         try:
             image = self.fscan.get_raw_img(0)
         except Exception as e:
             print("no images found! %s" % e)
-            return
+            return {'status': 'error', 'message' : 'No image found in current scan', 'traceback' : traceback.format_exc()}
         if self.database.nxfile is None:
             print("No database available")
-            return
+            return {'status': 'error', 'message' : 'No database available'}
         dc = self.ubcalc.detectorCal
         #mu = self.ubcalc.mu
         angles = self.ubcalc.angles
@@ -2516,7 +2521,7 @@ ub : gui for UB matrix and angle calculations
                 btn = qt.QMessageBox.question(self,"No mask available","""No mask was selected with the masking tool.
 Do you want to continue without mask?""")
                 if btn != qt.QMessageBox.Yes:
-                    return
+                    return {'status': 'cancelled', 'message' : 'Reason: no mask selected'}
             else:
                 imgmask = self.centralPlot.getMaskToolsDockWidget().getSelectionMask() > 0.
         
@@ -2729,7 +2734,7 @@ Do you want to continue without mask?""")
                                 Carr_counters[intersect,3] = bgpixel1
                         return all_counters, Carr_counters
                 
-
+        cancelled = False
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.numberthreads) as executor: # speedup only for the file reads 
             futures = {}
             for i in range(len(self.fscan)):
@@ -2787,11 +2792,16 @@ Do you want to continue without mask?""")
 
                 if progress.wasCanceled():
                     [f.cancel() for f in futures]
+                    cancelled = True
                     break
             
             
         progress.setValue(len(self.fscan))
         
+        if cancelled:
+            return {'status': 'cancelled', 'message' : 'Reason: Cancelled during integration'}
+            
+            
         Corr1 = Corr_croi1_a * ( roi_size / Corr_cpixel1_a) # normalize to number of pixels of center roi (croi)
         Corr2 = Corr_croi2_a * ( roi_size / Corr_cpixel2_a)
         croibg1_bgimg_a = None
@@ -3080,6 +3090,7 @@ Do you want to continue without mask?""")
             data[self.activescanname]["measurement"][availname2] = datas2
             
         self.database.add_nxdict(data)
+        return {'status': 'success'}
         
         
             
