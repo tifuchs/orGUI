@@ -510,7 +510,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 qutils.critical_detailed_message(self, 'Cannot load ROIs','Cannot apply ROI locations to rocking scan: %s' % e, traceback.format_exc())
                 return
         
-    def setROIinfo(self, roi_info, interpolate=True, pktol=0.1):
+    def setROIinfo(self, roi_info, interpolate=True, pktol=0.5):
         if self._currentRoInfo:
             ro_info = self.get_rocking_scan_info(self._currentRoInfo['name'])
             sc_h5 = self.database.nxfile[ro_info['name']]['rois']
@@ -666,6 +666,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
             pk_pos_exact = roi_info["peakpos"]
             axis = self._currentRoInfo['axis']
+            s_array = self._currentRoInfo['s']
             for roikey in roi_info:
                 if roikey.startswith('sig') or roikey.startswith('bg'):
                     rdict = roi_info[roikey]
@@ -684,12 +685,12 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     to_ar[:anchors[idx_prev]] = pk_pos_exact[:anchors[idx_prev]] + to_ar_anchors[idx_prev]
                     if anchors.size > 0:
                         for idx in range(1,anchors.size):
-                            slope = (from_ar_anchors[idx] - from_ar_anchors[idx_prev]) / ( axis[anchors[idx]] - axis[anchors[idx_prev]] )
-                            from_tmp = slope * (axis[anchors[idx_prev]: anchors[idx]] - axis[anchors[idx_prev]] ) 
+                            slope = (from_ar_anchors[idx] - from_ar_anchors[idx_prev]) / ( s_array[anchors[idx]] - s_array[anchors[idx_prev]] )
+                            from_tmp = slope * (s_array[anchors[idx_prev]: anchors[idx]] - s_array[anchors[idx_prev]] ) 
                             from_ar[anchors[idx_prev]: anchors[idx]] = (from_tmp + from_ar_anchors[idx_prev]) + pk_pos_exact[anchors[idx_prev]: anchors[idx]]
                             
-                            slope = (to_ar_anchors[idx] - to_ar_anchors[idx_prev]) / ( axis[anchors[idx]] - axis[anchors[idx_prev]] )
-                            to_tmp = slope * (axis[anchors[idx_prev]: anchors[idx]] - axis[anchors[idx_prev]] ) 
+                            slope = (to_ar_anchors[idx] - to_ar_anchors[idx_prev]) / ( s_array[anchors[idx]] - s_array[anchors[idx_prev]] )
+                            to_tmp = slope * (s_array[anchors[idx_prev]: anchors[idx]] - s_array[anchors[idx_prev]] ) 
                             to_ar[anchors[idx_prev]: anchors[idx]] = (to_tmp + to_ar_anchors[idx_prev]) + pk_pos_exact[anchors[idx_prev]: anchors[idx]]
                             
                             idx_prev = idx
