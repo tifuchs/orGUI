@@ -55,6 +55,9 @@ from .. import resources
 
 from silx.io.dictdump import dicttonx ,nxtodict
 
+class DBCloseError(IOError):
+    pass
+
 DEFAULT_FILTERS = {  # Filters available with h5py/libhdf5
     "Raw": None,
     "GZip": "gzip",
@@ -232,7 +235,7 @@ class DataBase(qt.QMainWindow):
         customModel.NODE_COLUMN = 5
         customModel.LINK_COLUMN = 6
         
-        self.hdf5model = customModel(self.view)
+        self.hdf5model = customModel(self.view, ownFiles=False)
         self.view.setModel(self.hdf5model)
 
         self.dataviewer = DataViewerFrame.DataViewerFrame()
@@ -407,7 +410,30 @@ class DataBase(qt.QMainWindow):
         
         self.filedialogdir = os.path.splitext(filename)[0]
         #filename += fileTypeDict[filetype]
-        self.saveNewDBFile(filename)
+        
+        try:
+            self.saveNewDBFile(filename)
+        except DBCloseError as e:
+            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot close old db file', 
+            'Cannot close old db file. The database might be corrupted!:\n%s\nWill proceed with new data base.' % e,
+            qt.QMessageBox.Ok, self)
+            msgbox.setDetailedText(traceback.format_exc())
+            clickedbutton = msgbox.exec()
+            try:
+                self.saveNewDBFile(filename)
+            except Exception as e:
+                msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
+                'Cannot create new db file.\n%s' % e,
+                qt.QMessageBox.Ok, self)
+                msgbox.setDetailedText(traceback.format_exc())
+                clickedbutton = msgbox.exec()
+        except Exception as e:
+            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
+            'Cannot create new db file.\n%s' % e,
+            qt.QMessageBox.Ok, self)
+            msgbox.setDetailedText(traceback.format_exc())
+            clickedbutton = msgbox.exec()
+            
         
     def onNewDatabase(self):
         fileTypeDict = {'NEXUS Files (*.h5)': '.h5', 'All files (*)': '' }
@@ -421,7 +447,29 @@ class DataBase(qt.QMainWindow):
         if filename == '':
             return
         self.filedialogdir = os.path.splitext(filename)[0]
-        self.createNewDBFile(filename)
+        try:
+            self.createNewDBFile(filename)
+        except DBCloseError as e:
+            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot close old db file', 
+            'Cannot close old db file. The database might be corrupted!:\n%s\nWill proceed with new data base.' % e,
+            qt.QMessageBox.Ok, self)
+            msgbox.setDetailedText(traceback.format_exc())
+            clickedbutton = msgbox.exec()
+            try:
+                self.createNewDBFile(filename)
+            except Exception as e:
+                msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
+                'Cannot create new db file.\n%s' % e,
+                qt.QMessageBox.Ok, self)
+                msgbox.setDetailedText(traceback.format_exc())
+                clickedbutton = msgbox.exec()
+        except Exception as e:
+            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
+            'Cannot create new db file.\n%s' % e,
+            qt.QMessageBox.Ok, self)
+            msgbox.setDetailedText(traceback.format_exc())
+            clickedbutton = msgbox.exec()
+        
 
     def onSaveDBFile(self):
         fileTypeDict = {'NEXUS Files (*.h5)': '.h5', 'All files (*)': '' }
@@ -437,7 +485,14 @@ class DataBase(qt.QMainWindow):
         
         self.filedialogdir = os.path.splitext(filename)[0]
         #filename += fileTypeDict[filetype]
-        self.saveDBFile(filename)
+        try:
+            self.saveDBFile(filename)
+        except Exception as e:
+            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot save db file', 
+            'Cannot open db file %s.' % filename,
+            qt.QMessageBox.Ok, self)
+            msgbox.setDetailedText(traceback.format_exc())
+            clickedbutton = msgbox.exec()
         
     def onOpenDatabase(self):
         fileTypeDict = {'NEXUS Files (*.h5)': '.h5', 'All files (*)': '' }
@@ -472,7 +527,10 @@ class DataBase(qt.QMainWindow):
         
     def createNewDBFile(self, filename, datadict=None):
         if self.nxfile is not None:
-            self.close()
+            try:
+                self.close()
+            except Exception as e:
+                raise DBCloseError('Cannot close previous database file.\nThe database might be corrupted.') from e # convert to common IOError since can also be RuntimeError
 
         fileattrs = {"@NX_class": u"NXroot",
                      "@creator": u"orGUI version %s" % __version__,
@@ -482,19 +540,17 @@ class DataBase(qt.QMainWindow):
             datadict = fileattrs
         else:
             datadict.update(fileattrs)
-        try:
-            dicttonx(datadict, filename, create_dataset_args={'compression' : self.compression})
-            self.openDBFile(filename)
-        except:
-            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
-            'Cannot create file %s.' % filename,
-            qt.QMessageBox.Ok, self)
-            msgbox.setDetailedText(traceback.format_exc())
-            clickedbutton = msgbox.exec()
+
+        dicttonx(datadict, filename, create_dataset_args={'compression' : self.compression})
+        self.openDBFile(filename)
+
         
     def openDBFile(self, filename):
         if self.nxfile is not None:
-            self.close()
+            try:
+                self.close()
+            except Exception as e:
+                raise DBCloseError('Cannot close previous database file.\nThe database might be corrupted.') from e # convert to common IOError since can also be RuntimeError
         self.nxfile = silx.io.h5py_utils.File(filename,'a')
         self._filepath = filename
         while(self.hdf5model.hasPendingOperations()):
@@ -588,10 +644,11 @@ class DataBase(qt.QMainWindow):
                 raise Exception('Timeout on hdf5 model operation, This is probably a bug, or a very long writing operation occurs, please report if this is a long writing opertion')
             try:
                 self.nxfile.close()
-            except RuntimeError:
-                traceback.print_exc()
+            except RuntimeError as e:
                 print('Closing of database file failed. The database file might be corrupted!')
-            self.nxfile = None
+                self.nxfile = None
+                raise
+            
             if hasattr(self, "temp_directory"):
                 del self.temp_directory
         
