@@ -387,6 +387,7 @@ class BlissScan_EBS(Fastscan):
                     self.mondio = mondiointer(self.epoch)
                 except ValueError as e0:
                     warnings.warn('Cannot interpolate mondio in scan %s out of dataset %s \n%s' % (self.scanno2, filename, traceback.format_exc()))
+                    self.mondio = data_2['measurement']['mondio']
                 
             if 'potential' in data_2['measurement']:
                 try:
@@ -394,6 +395,7 @@ class BlissScan_EBS(Fastscan):
                     self.potential = potentialinter(self.epoch)
                 except ValueError as e1:
                     warnings.warn('Cannot interpolate potential in scan %s out of dataset %s \n%s' % (self.scanno2, filename, traceback.format_exc()))
+                    self.potential = data_2['measurement']['potential']
                 
             if 'current' in data_2['measurement']:
                 try:
@@ -401,6 +403,7 @@ class BlissScan_EBS(Fastscan):
                     self.current = currentinter(self.epoch)
                 except ValueError as e2:
                     warnings.warn('Cannot interpolate current in scan %s out of dataset %s \n%s' % (self.scanno2, filename, traceback.format_exc()))
+                    self.current = data_2['measurement']['current']
         else: 
             if 'potential' in data_1['measurement']:
                 self.potential = data_1['measurement']['potential'][:self.nopoints]
@@ -439,8 +442,11 @@ class BlissScan_EBS(Fastscan):
     def parse_h5_node(cls, obj):
         ddict = dict() 
         scanname = obj.local_name
-        scansuffix = scanname.split('_')[-1]
-        scanname_nosuffix = '_'.join(scanname.split('_')[:-1])
+        if '_' in scanname:
+            scansuffix = scanname.split('_')[-1]
+        elif '/' in scanname:
+            scansuffix = scanname.split('/')[-1]
+        #scanname_nosuffix = '_'.join(scanname.split('_')[:-1])
         scanno, subscanno = scansuffix.split('.')
         ddict['scanno'] = int(scanno)
         ddict['name'] = obj.local_name
