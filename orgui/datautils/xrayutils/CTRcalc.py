@@ -206,12 +206,13 @@ class SXRDCrystal(object):
                     uc.set_below(loc, h)
                 uc.start_layer_number = layer_number
                 uc.pos_absolute = h
-                hnew = uc.height_absolute
-                locnew = uc.loc_absolute
-                layer_number_new = uc.end_layer_number
                 i += 1
                 if i == len(self.uc_stacking_ordered):
                     return
+                hnew = uc.height_absolute
+                locnew = uc.loc_absolute
+                layer_number_new = uc.end_layer_number
+
                 
     
     def F(self,harray,karray,Larray):

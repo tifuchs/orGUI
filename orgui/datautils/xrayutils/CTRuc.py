@@ -121,6 +121,7 @@ class WaterModel(Lattice, LinearFitFunctions):
             
         self.refHKLTransform = np.identity(3)
         self.refRealTransform = np.identity(3)
+        self._pos_absolute = 0.
     
     def setReferenceUnitCell(self,uc,rotMatrix=np.identity(3)):
         """   
@@ -141,6 +142,15 @@ class WaterModel(Lattice, LinearFitFunctions):
         self.refRealTransform[:] = self.R_mat_inv @ rotMatrix @ uc.R_mat 
         self.refHKLTransform[:] = self.B_mat_inv @ rotMatrix @ uc.B_mat
 
+    @property
+    def pos_absolute(self):
+        return self._pos_absolute
+    
+    @pos_absolute.setter
+    def pos_absolute(self, pos):
+        self._pos_absolute = pos
+            
+        
     def F_uc(self,h,k,l):
         mask = np.logical_and(np.isclose(h,0), np.isclose(k,0))
         if not np.any(mask):
@@ -165,7 +175,7 @@ class WaterModel(Lattice, LinearFitFunctions):
         l_masked = l[mask]
         zpos, d_layering, sigma_0, sigma_bar, A0 = self.basis
         
-        
+        zpos += self.pos_absolute / self.a[2]
         
         #f = np.empty_like(l_masked,dtype=np.complex128)
         
@@ -259,8 +269,8 @@ class WaterModel(Lattice, LinearFitFunctions):
         for i,name in enumerate(['O','H','O2-']):
             self.f[i,:11] = readWaasmaier(name)
             self.f[i,11:] = readDispersion(name,E)
-        f1,f2 = UnitCell.special_formfactors['H2O'][1](E)
-        self.wat_dispersion = f1 + 1j*f2
+        # f1,f2 = UnitCell.special_formfactors['H2O'][1](E)
+        # self.wat_dispersion = f1 + 1j*f2
             
     def _1layer_firstGauss(self,biaswidth=0.2547):
         p = [ 0.85886939,  1.03841354, -1.35438352]
@@ -314,11 +324,11 @@ class WaterModel(Lattice, LinearFitFunctions):
             warnings.warn("zDensity: z stepsize is not equal in given z array."
                           "This will result in numerical errors in electron density calculation!")
         zpos, d_layering, sigma_0, sigma_bar, A0 = self.basis
+        zpos += self.pos_absolute / self.a[2]
         if self.type == 'step':
             rho = 0.5*(10.+self.wat_dispersion)*self.pw*(1. + erf((z - zpos*self._a[2])/(np.sqrt(2)* sigma_0 * self._a[2])))
             rho = gaussian_filter1d(np.abs(rho),0.2547 / zstep_mean).astype(np.complex128) #estimation of water molecular form factor
         elif self.type == 'layered':
-            zpos, d_layering, sigma_0, sigma_bar, A0 = self.basis
             zrange_waterstructure = np.amax(z)/self._a[2] - zpos # lattice units
             nogausseans_inrange = np.ceil(zrange_waterstructure/d_layering)
             nogausseans = int(nogausseans_inrange + 20) # some additional gausseans to reduce edge effects
@@ -332,7 +342,6 @@ class WaterModel(Lattice, LinearFitFunctions):
                     rho += np.exp(- ((z/self._a[2] - zpos - i*d_layering)**2)/(2 * sigma2_rel) ) / (np.sqrt(2*np.pi * sigma2_rel) * self._a[2]) 
             rho *= layer_density
         elif self.type == 'layered_O':
-            zpos, d_layering, sigma_0, sigma_bar, A0 = self.basis
             zrange_waterstructure = np.amax(z)/self._a[2] - zpos # lattice units
             nogausseans_inrange = np.ceil(zrange_waterstructure/d_layering)
             nogausseans = int(nogausseans_inrange + 5) # some additional gausseans to reduce edge effects
@@ -1492,7 +1501,7 @@ class UnitCell(Lattice):
     def pos_cart(self,atomNo, domain=0):
         mat = self.coherentDomainMatrix[domain]
         domainmatrix = self.R_mat_inv @ mat[:,:-1] @ self.R_mat
-        xyz_rel = domainmatrix @ self.basis[i][1:4] + mat[:,-1]
+        xyz_rel = domainmatrix @ self.basis[atomNo][1:4] + mat[:,-1]
         return self.R_mat @ xyz_rel
         
     def pos_cart_error(self,atomNo, domain=0):
@@ -1752,9 +1761,9 @@ class UnitCell(Lattice):
                 if line.startswith('layer_behaviour:'):
                     layer_behaviour = line[len('layer_behaviour:'):].strip()
                     continue
-                line = line.split()
+                
                 try:
-                    if line:
+                    if line.strip():
                         if 'Name' in line or '=' in line: # parameter or statistics line
                             if '=' in line:
                                 try:
@@ -1766,23 +1775,26 @@ class UnitCell(Lattice):
                                     print("Cannot read statistics string: %s" % l)
                             continue
                         if '+-' in line:
+                            line_sp = line.split()
                             xprfile = True
-                            indices.append(int(line[0]))
-                            names.append(line[1])
+                            indices.append(int(line_sp[0]))
+                            names.append(line_sp[1])
                             params = re.findall(r'\(([^)]+)',line)
                             params_array = np.array([np.array(p.split('+-'),dtype=np.float64) for p in params]).T
-                            basis.append(np.concatenate(([int(line[0])], params_array[0] )))
-                            errors.append(np.concatenate(([int(line[0])], params_array[1] )))
+                            basis.append(np.concatenate(([int(line_sp[0])], params_array[0] )))
+                            errors.append(np.concatenate(([int(line_sp[0])], params_array[1] )))
                         else:
-                            if line[0].isnumeric():
-                                
-                                names.append(line[1])
-                                basis.append(np.concatenate(([int(line[0])], np.array(line[2:],dtype=np.float64) )))
-                                indices.append(int(line[0]))
+                            line_sp = line.split()
+                            if line_sp[0].isnumeric():
+
+                                names.append(line_sp[1])
+                                basis.append(np.concatenate(([int(line_sp[0])], np.array(line_sp[2:],dtype=np.float64) )))
+                                indices.append(int(line_sp[0]))
                             else:
-                                names.append(line[0])
+                                names.append(line_sp[0])
                                 indices.append(np.nan)
-                                basis.append(np.concatenate(([np.nan], np.array(line[1:],dtype=np.float64) )))
+                                basis.append(np.concatenate(([np.nan], np.array(line_sp[1:],dtype=np.float64) )))
+
                 except Exception as e:
                     raise IOError("Cannot read line \"%s\" describing atom parameters of UnitCell" % line) from e
             basis_save = np.vstack(basis).astype(np.float64)
