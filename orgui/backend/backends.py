@@ -54,7 +54,8 @@ beamtimes = {'ch5523': (datetime(2018, 9, 22), datetime(2018, 10, 5)),
              'ch5918' : (datetime(2021, 7, 18), datetime(2021, 8, 1)),
              'P212_default' : (datetime(1902, 7, 18), datetime(1903, 8, 1)),
              '20230930' : (datetime(2024, 7, 16), datetime(2024, 7, 25)),
-             'ch7149' : (datetime(2025, 2, 17), datetime(2025, 2, 25))#,
+             'ch7149' : (datetime(2025, 2, 17), datetime(2025, 2, 25)),
+             'ch7856' : (datetime(2025, 9, 20), datetime(2025, 9, 30))#,
              #'id31_default' : (datetime(2024, 8, 2), datetime(2500, 1, 1)) # all data not found in this list automatically detected as ID31 data.
              }
 
@@ -88,6 +89,7 @@ fscans = {'ch5523': BlissScan,
              'ch5918' : BlissScan_EBS,
              'P212_default' : H5Fastsweep,
              'ch7149' : BlissScan_EBS,
+             'ch7856' : BlissScan_EBS,
              'id31_default' : BlissScan_EBS
              }
 
@@ -117,11 +119,31 @@ def openScan(btid, ddict):
         
     elif btid == '20190017' or btid == '20200028' or btid == 'P212_default':
         fscan = fscancls(ddict['file'],ddict['scanno'])
+
     elif btid == 'ch5700' or btid == 'ch5918' or btid == 'id31_default':
         if 'node' in ddict:
             fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False)
         else:
             fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False)
+
+    elif btid == 'ch7856':
+        if 'pt110_prep2_naoh' in ddict['file'] and 'node' in ddict:
+            fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=-7.381881105095823)
+        elif 'pt110_prep2_naoh' in ddict['file'] and 'node' not in ddict:
+            fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=-7.381881105095823)
+        elif ('pt110_prep3_CsOH' in ddict['file'] or 'pt110_prep1_pt110_prep1_CsOH_CsClO4' in ddict['file']) and 'node' in ddict:
+            fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False, muoffset=-7.254956854)
+        elif ('pt110_prep3_CsOH' in ddict['file'] or 'pt110_prep1_pt110_prep1_CsOH_CsClO4' in ddict['file']) and 'node' not in ddict:
+            fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=-7.254956854)
+        elif ('Pt111' in ddict['file'] or 'pt111_prep1_CsOH' in ddict['file'] or 'pt111_prepSHIT_NaOH' in ddict['file'] or 'pt111_bs' in ddict['file']) and 'node' in ddict:
+            fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False, muoffset=-5.944448934945881)
+        elif ('Pt111' in ddict['file'] or 'pt111_prep1_CsOH' in ddict['file'] or 'pt111_prepSHIT_NaOH' in ddict['file'] or 'pt111_bs' in ddict['file']) and 'node' not in ddict:
+            fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=-5.944448934945881)
+        elif 'node' in ddict:
+            fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=0)
+        else:
+            fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=0)
+
     else:
         try:
             fscan = fscancls(ddict['file'], ddict['scanno'])

@@ -3429,21 +3429,28 @@ class QPlotDeleteWindow(qt.QDialog):
         self.action = None
         
         layout = qt.QGridLayout()
+
+        # create 'select all' button
+        self.selectAllPlotsCheckbox = qt.QCheckBox()
+        layout.addWidget(qt.QLabel('select all'),0,0,1,1)
+        layout.addWidget(self.selectAllPlotsCheckbox,0,1,1,1)
+        self.selectAllPlotsCheckbox.stateChanged.connect(self.checkOrUncheckAll)
+
+        # create an entry (checkbox + name) for each plot curve 
         self.boxes = []
         d = 0
-
         for i,j in enumerate(self.curves):
             d += 1
             self.boxes.append(qt.QCheckBox())
-            layout.addWidget(qt.QLabel(j),i,0,1,1)
-            layout.addWidget(self.boxes[i],i,1,1,1)
+            layout.addWidget(qt.QLabel(j),i+1,0,1,1)
+            layout.addWidget(self.boxes[i],i+1,1,1,1)
 
         self.buttons = qt.QDialogButtonBox()
         self.buttons.addButton('Delete curves',self.buttons.ActionRole)
         self.buttons.addButton('Hide curves',self.buttons.ActionRole)
         self.buttons.addButton(qt.QDialogButtonBox.Cancel)
 
-        layout.addWidget(self.buttons,d,0,-1,-1)
+        layout.addWidget(self.buttons,d+1,0,-1,-1)
 
         self.buttons.buttons()[1].clicked.connect(self.deleteClicked)
         self.buttons.buttons()[2].clicked.connect(self.hideClicked)
@@ -3458,8 +3465,18 @@ class QPlotDeleteWindow(qt.QDialog):
     def hideClicked(self):
         self.action = 'hide'
         self.accept()
-        
 
+    def checkOrUncheckAll(self):
+        if self.selectAllPlotsCheckbox.isChecked() == True:
+            for i in self.boxes:
+                i.blockSignals(True)
+                i.setChecked(True)
+                i.blockSignals(False)
+        elif self.selectAllPlotsCheckbox.isChecked() == False:
+            for i in self.boxes:
+                i.blockSignals(True)
+                i.setChecked(False)
+                i.blockSignals(False)
 
 
 class QScanCreator(qt.QDialog):
