@@ -713,7 +713,7 @@ class CTR(object):
             Ierr_masked = None
         weights_masked = weights[mask]
 
-        newctr = CTR(self.hk,l_masked,I_masked,final_error)
+        newctr = CTR(self.hk,l_masked,I_masked,Ierr_masked)
         newctr.contributions = weights_masked
         return newctr
     
