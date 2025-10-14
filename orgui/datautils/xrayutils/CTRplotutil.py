@@ -633,6 +633,89 @@ class CTR(object):
         k = float(idstrsp[2] + '.' + idstrsp[3])
         self.hk = h,k
         
+    def generateAverage(self, step_size=None, **kwargs):
+        """Creates a new averaged CTR.
+        
+        args: step_size:  step size along l
+              nbins : number of bins along l
+              overlap (float from 0 to 1): define how much the first and last bins exceed the data range.
+                                           This can solve issues with edge data points               
+        provide either step_size or nbins
+        
+        """
+        overlap = kwargs.get('overlap', 0.25)
+        
+        lmax = np.amax(self.l)
+        lmin = np.amin(self.l)
+        size_max = self.l.size
+        
+        l_range = lmax - lmin
+        
+        if 'nbins' in kwargs:
+            nbins = int(kwargs.get('nbins'))
+            #
+            l_full_range = l_range / (1. - (2*overlap) / nbins)
+            step = l_full_range / nbins
+            l_first_bin = lmin - step*overlap
+            bin_edges = l_first_bin + step*np.arange(nbins+1)
+            
+        elif step_size is not None:
+            nbins = int(np.floor(l_range / abs(step_size))) + 1
+            l_full_range = l_range / (1. - (2*overlap) / nbins)
+            
+            nbins = int(np.floor(l_full_range / abs(step_size))) + 1
+            
+            l_first_bin = lmin - step_size*overlap
+            bin_edges = l_first_bin + step_size*np.arange(nbins+1)
+        else:
+            nbins = size_max + 1
+
+            l_full_range = l_range / (1. - (2*overlap) / nbins)
+            step = l_full_range / nbins
+            
+            l_first_bin = lmin - step*overlap
+            bin_edges = l_first_bin + step*np.arange(nbins+1)
+            
+        l_cntr = np.zeros(nbins)
+        
+        indexes = np.digitize(self.l, bin_edges)
+        
+        if np.any(indexes == 0) or np.any(indexes == nbins+1):
+            raise Exception("bin edges were chosen incorrectly. This is probably a bug.")
+            
+        indexes -= 1
+        
+        weights = np.zeros_like(l_cntr)
+        np.add.at(weights,indexes,1.)
+        
+        np.add.at(l_cntr, indexes, self.l)
+        l_cntr /= weights
+        
+        I = np.zeros_like(l_cntr)
+        np.add.at(I, indexes, self.sfI)
+        I /= weights
+        
+        if hasattr(self,'err') and self.err is not None:
+            Ierr = np.zeros_like(l_cntr)
+            np.add.at(Ierr, indexes, self.err**2)
+            Ierr = np.sqrt(Ierr)
+            Ierr /= weights
+        else:
+            Ierr = None
+        
+        mask = np.logical_and(weights != 0, np.isfinite(I))
+        
+        l_masked = l_cntr[mask]
+        I_masked = I[mask]
+        if Ierr is not None:
+            Ierr_masked = Ierr[mask]
+        else:
+            Ierr_masked = None
+        weights_masked = weights[mask]
+
+        newctr = CTR(self.hk,l_masked,I_masked,final_error)
+        newctr.contributions = weights_masked
+        return newctr
     
     def __repr__(self):
         #return "<CTR %s ctrtype %s at %016X>" % (tuple(np.around(self.hk,2)), self.ctrtype , id(self))
@@ -678,6 +761,22 @@ class CTRCollection(list):
     def convertToF(self):
         for ctr in self:
             ctr.convertToF()
+            
+    def generateAverage(self, step_size=None, **kwargs):
+        """Creates a new CTRCollection with CTRs, which were individually
+        averaged.
+        
+        args: step_size:  step size along l
+              nbins : number of bins along l
+              overlap (float from 0 to 1): define how much the first and last bins exceed the data range.
+                                           This can solve issues with edge data points               
+        provide either step_size or nbins
+        
+        """
+        coll = CTRCollection(name='AVE: ' + self.name)
+        for ctr in self:
+            coll.append(ctr.generateAverage(step_size, **kwargs))
+        return coll
     
     def generateDifferenceCollection(self,other,sortby='repr'):
         coll = CTRCollection()
