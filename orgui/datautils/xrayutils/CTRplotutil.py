@@ -850,6 +850,8 @@ class CTRCollection(list):
             for rod in self:
                 if rod.hk == key:
                     return rod
+            else:
+                raise KeyError("<%s: %s> CTR indices %s not found." % (type(self).__name__, self.name, str(key)))
         return super(CTRCollection, self).__getitem__(key)
         
     def __repr__(self):
