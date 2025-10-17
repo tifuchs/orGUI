@@ -127,9 +127,9 @@ def openScan(btid, ddict):
             fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False)
 
     elif btid == 'ch7856':
-        if 'pt110_prep2_naoh' in ddict['file'] and 'node' in ddict:
-            fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=-7.381881105095823)
-        elif 'pt110_prep2_naoh' in ddict['file'] and 'node' not in ddict:
+        if ('pt110_prep2_naoh' in ddict['file']) and 'node' in ddict:
+            fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False, muoffset=-7.381881105095823)
+        elif ('pt110_prep2_naoh' in ddict['file']) and 'node' not in ddict:
             fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=-7.381881105095823)
         elif ('pt110_prep3_CsOH' in ddict['file'] or 'pt110_prep1_pt110_prep1_CsOH_CsClO4' in ddict['file']) and 'node' in ddict:
             fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False, muoffset=-7.254956854)
@@ -140,7 +140,7 @@ def openScan(btid, ddict):
         elif ('Pt111' in ddict['file'] or 'pt111_prep1_CsOH' in ddict['file'] or 'pt111_prepSHIT_NaOH' in ddict['file'] or 'pt111_bs' in ddict['file']) and 'node' not in ddict:
             fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=-5.944448934945881)
         elif 'node' in ddict:
-            fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=0)
+            fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False, muoffset=0)
         else:
             fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=0)
 
