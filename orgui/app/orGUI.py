@@ -2075,8 +2075,8 @@ ub : gui for UB matrix and angle calculations
         except Exception as e:
             print("no images found! %s" % e)
             return
-        self.allimgsum = np.zeros_like(image.img)
-        self.allimgmax = np.zeros_like(image.img)
+        self.allimgsum = np.zeros_like(image.img,dtype=np.float64)
+        self.allimgmax = np.zeros_like(image.img,dtype=np.float64)
         progress = qt.QProgressDialog("Reading images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
         img_size = self.allimgsum.nbytes / (1024**2)
