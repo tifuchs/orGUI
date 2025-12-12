@@ -428,13 +428,26 @@ ub : gui for UB matrix and angle calculations
         self.setMenuBar(menu_bar)
 
     def _removeAllIntegrPlotCurves(self):
-        curveList = self.integrdataPlot.getAllCurves(just_legend=True)
-        for i in curveList:
-            self.integrdataPlot.removeCurve(i)
+        # remove plotted curves
+        #curveList = self.integrdataPlot.getAllCurves(just_legend=True)
+        #for i in curveList:
+        #    self.integrdataPlot.removeCurve(i)
+
+        # remove plotted curves and curves that have been hidden
+        itemList = self.integrdataPlot.getAllCurves(withhidden=True)
+        for it in itemList:
+            self.integrdataPlot.removeCurve(it)
 
     def _removeIntegrPlotCurveSet(self):
-        curveList = self.integrdataPlot.getAllCurves(just_legend=True)
-        d = QPlotDeleteWindow(curveList)
+        curveList = self.integrdataPlot.getAllCurves(just_legend=True,withhidden=True)
+
+        # find out if curves are already hidden to later check boxes in QT GUI window
+        hidden = np.zeros_like(curveList,dtype='?')
+        for nr,i in enumerate(curveList):
+            if self.integrdataPlot.getCurve(i).getVisibleBounds() == None:
+                hidden[nr] = True
+
+        d = QPlotDeleteWindow(curveList,hidden)
         if d.exec() == qt.QDialog.Accepted:
             if d.action == 'delete':
                 try:
@@ -1047,7 +1060,7 @@ ub : gui for UB matrix and angle calculations
             data[self.activescanname]["measurement"][name]["rois"]["@default"] = availname1
             if np.any(cpixel1_a > 0.):
                 data[self.activescanname]["measurement"][name]["rois"][availname1] = datas1
-                if d % plotOnlyNth == 0:
+                if d % plotOnlyNth == 0 and not min(croibg1_a_masked)==max(croibg1_a_masked):
                     self.integrdataPlot.addCurve(axis_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
                                                     xlabel="trajectory/%s" % self.fscan.axisname, ylabel="counters/croibg", yerror=croibg1_err_a_masked)
 
@@ -3423,7 +3436,7 @@ class QImportScanCreator(qt.QDialog):
         
 class QPlotDeleteWindow(qt.QDialog):
     
-    def __init__(self,curveList, parent=None):
+    def __init__(self,curveList,hidden,parent=None):
         qt.QDialog.__init__(self, parent)
         self.curves = curveList
         self.action = None
@@ -3438,10 +3451,11 @@ class QPlotDeleteWindow(qt.QDialog):
 
         # create an entry (checkbox + name) for each plot curve 
         self.boxes = []
-        d = 0
         for i,j in enumerate(self.curves):
-            d += 1
-            self.boxes.append(qt.QCheckBox())
+            newbox = qt.QCheckBox()
+            if hidden[i] == True:
+                newbox.setChecked(True)
+            self.boxes.append(newbox)
             layout.addWidget(qt.QLabel(j),i+1,0,1,1)
             layout.addWidget(self.boxes[i],i+1,1,1,1)
 
@@ -3450,7 +3464,7 @@ class QPlotDeleteWindow(qt.QDialog):
         self.buttons.addButton('Hide curves',self.buttons.ActionRole)
         self.buttons.addButton(qt.QDialogButtonBox.Cancel)
 
-        layout.addWidget(self.buttons,d+1,0,-1,-1)
+        layout.addWidget(self.buttons,i+2,0,-1,-1)
 
         self.buttons.buttons()[1].clicked.connect(self.deleteClicked)
         self.buttons.buttons()[2].clicked.connect(self.hideClicked)
