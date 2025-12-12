@@ -259,7 +259,7 @@ class QReflectionSelector(qt.QWidget):
             self.peakReflDialog.activateWindow()
             return
         if not self.reflBragg:
-            qutils.warning_detailed_message(self, "Error","No Bragg reflection positions calculated.\nUse view->show Bragg reflectioins to calculate them", '')
+            qutils.warning_detailed_message(self, "Error","No Bragg reflection positions calculated.\nUse view->show Bragg reflections to calculate them", '')
             return
         self.peakReflDialog.set_candidates(self.getBraggCandidates())
         self.peakReflDialog.show()
