@@ -218,7 +218,7 @@ def thscanBragg(xtal: Union[CTRcalc.SXRDCrystal,CTRcalc.UnitCell],
 
     Qmax = sxrddetector.Qmax # np.abs(sxrddetector.qArray()).max() / 10. # to Angstrom-1
 
-    hkls, angles = anglesAllowedReflections_G(xtal,None, alpha,Qmax,**keyargs)
+    hkls, angles = anglesAllowedReflections_G(xtal,None, alpha,Qmax*1.1,**keyargs)
     
     ommask = np.logical_and(angles[:,3] > ommin ,  angles[:,3] < ommax)
     
