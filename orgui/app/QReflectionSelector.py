@@ -226,6 +226,11 @@ class QReflectionSelector(qt.QWidget):
             raise ValueError("No Bragg reflections calculated or available")
         
         refl_new = []
+
+        if self.reflections == []:
+            qutils.warning_detailed_message(self, "Error","No Bragg reflections set yet, place at least one reference reflection", '')
+            return
+
         refl_hkl_current = np.vstack([r.hkl for r in self.reflections])
         
         for refl in self.reflBragg:
@@ -234,7 +239,11 @@ class QReflectionSelector(qt.QWidget):
                     break
             else:
                 refl_new.append(refl)
-                
+
+        if refl_new == []:
+            qutils.warning_detailed_message(self, "Error","No new Bragg reflections found",'')
+            return
+        
         refl_new_hkl_Bragg = np.vstack([r.hkl for r in refl_new])
         
         Q_current = self.orparent.ubcalc.ubCal.lattice.getB() @ refl_hkl_current.T
@@ -999,5 +1008,4 @@ class PeakImgRangeDialog(qt.QDialog):
             return
         self.accept()
         
-        
-      
+
