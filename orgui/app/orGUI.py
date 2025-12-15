@@ -602,7 +602,13 @@ ub : gui for UB matrix and angle calculations
         if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
             qt.QMessageBox.warning(self, "No scan loaded", "Cannot integrate scan: No scan loaded.")
             return {'status': 'error', 'message' : 'no scan loaded'}
-        refldict = self.get_rocking_coordinates()
+        
+        try:
+            refldict = self.get_rocking_coordinates()
+        except Exception as e:
+            print("Rocking scan extraction is not implemented for scan axis " + str(self.fscan.axisname))
+            print(str(e))
+            return {'status': 'error', 'message' : 'Rocking scan extraction not implemented for scan axis ' + str(self.fscan.axisname), 'traceback' : traceback.format_exc()}
 
         if self.scanSelector.intersS1Act.isChecked():
             intersect = 1
