@@ -79,8 +79,3 @@ class InterlacedScan():
     @classmethod
     def parse_h5_node(cls, obj):
         ddict = dict()
-        return ddict
-
-    @property
-    def auxillary_counters(self):
-        return []
