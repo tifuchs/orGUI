@@ -3470,7 +3470,10 @@ class QPlotDeleteWindow(qt.QDialog):
         self.buttons.addButton('Hide curves',self.buttons.ActionRole)
         self.buttons.addButton(qt.QDialogButtonBox.Cancel)
 
-        layout.addWidget(self.buttons,i+2,0,-1,-1)
+        if curveList == []:
+            layout.addWidget(self.buttons,0,0,-1,-1)
+        else:
+            layout.addWidget(self.buttons,i+2,0,-1,-1)
 
         self.buttons.buttons()[1].clicked.connect(self.deleteClicked)
         self.buttons.buttons()[2].clicked.connect(self.hideClicked)
