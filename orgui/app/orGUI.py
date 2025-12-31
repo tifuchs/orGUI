@@ -31,6 +31,7 @@ __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
 import gc
+import copy
 import sys
 import os
 from silx.gui import qt
@@ -67,7 +68,7 @@ except:
 
 import traceback
 
-from . import qutils
+from . import qutils, ROIutils
 from .QScanSelector import QScanSelector
 from .QReflectionSelector import QReflectionSelector, QReflectionAnglesDialog
 from .QUBCalculator import QUBCalculator
@@ -126,6 +127,7 @@ class orGUI(qt.QMainWindow):
         self.activescanname = "scan"
         self.numberthreads = int(min(os.cpu_count(), 16)) if os.cpu_count() is not None else 1 
         self.maxMemory = MAX_MEMORY
+        self.maxROIs = MAX_ROIS_DISPLAY
 
         if 'SLURM_CPUS_ON_NODE' in os.environ:
             self.numberthreads = int(os.environ['SLURM_CPUS_ON_NODE'])
@@ -301,6 +303,7 @@ class orGUI(qt.QMainWindow):
         xtalParamsAct = qt.QAction("Crystal parameters",self)
         xtalParamsAct.setCheckable(True)
         cpucountAct = qt.QAction("Set CPU count",self)
+        roicountAct = qt.QAction("Set ROI count",self)
         
         
         loadConfigAct.triggered.connect(self.ubcalc._onLoadConfig)        
@@ -311,6 +314,8 @@ class orGUI(qt.QMainWindow):
         self.ubcalc.xtalDialog.sigHide.connect(lambda : xtalParamsAct.setChecked(False))
         
         cpucountAct.triggered.connect(self._onSelectCPUcount)
+        roicountAct.triggered.connect(self._onSelectROIcount)
+        
         
         self.autoLoadAct = qt.QAction("Auto load scans",self)
         self.autoLoadAct.setCheckable(True)
@@ -370,6 +375,10 @@ class orGUI(qt.QMainWindow):
         
         view_menu.addSeparator()
         
+        view_menu.addAction(roicountAct)
+        
+        view_menu.addSeparator()
+        
         saveBraggAct = view_menu.addAction("save allowed Bragg reflections")
         saveBraggAct.setCheckable(False)
         saveBraggAct.triggered.connect(self.saveBraggRefl)
@@ -382,7 +391,7 @@ orgui : top level gui
 ub : gui for UB matrix and angle calculations 
 """
             
-            self.console_dockwidget = console.IPythonDockWidget(self, {'orgui': self, 'ub': self.ubcalc}, custom_banner, "orGUI console")
+            self.console_dockwidget = console.IPythonDockWidget(self, {'orgui': self, 'ub': self.ubcalc, 'ROIutils' : ROIutils}, custom_banner, "orGUI console")
             
             self.console_dockwidget.setAllowedAreas(qt.Qt.LeftDockWidgetArea | qt.Qt.RightDockWidgetArea | qt.Qt.BottomDockWidgetArea)
             self.tabifyDockWidget(selectorDock,self.console_dockwidget)
@@ -479,8 +488,9 @@ ub : gui for UB matrix and angle calculations
             maxValue = self.scanSelector.roscanMaxS.value()
             
         dc = self.ubcalc.detectorCal
-        xoffset = kwargs.get('xoffset', self.scanSelector.offsetx.value())
-        yoffset = kwargs.get('yoffset', self.scanSelector.offsety.value())
+        xoffset, yoffset = self.scanSelector.roioptions.get_offsets()
+        xoffset = kwargs.get('xoffset', xoffset)
+        yoffset = kwargs.get('yoffset', yoffset)
 
         step_nr = round(maxValue/step_width) + 1
         s_points = np.linspace(0,maxValue,step_nr) 
@@ -504,16 +514,92 @@ ub : gui for UB matrix and angle calculations
         if xoffset != 0. or yoffset != 0.:
             #warnings.warn("Nonzero pixel offset selected. Experimental feature! Angles and hkl are incorrect!!!")
             refldict['xy_1'][..., 0] += xoffset
-            refldict['xy_1'][..., 0] += xoffset
-            refldict['xy_2'][..., 1] += yoffset
+            refldict['xy_2'][..., 0] += xoffset
+            refldict['xy_1'][..., 1] += yoffset
             refldict['xy_2'][..., 1] += yoffset
         refldict['H_0'] = H_0
         refldict['H_1'] = H_1
         return refldict
         
+    def get_Bragg_rocking_coordinates(self, strainVec=None, **kwargs):
+        if strainVec is None:
+            strainVec = np.array([h.value() for h in self.scanSelector.strain_Bragg])/100.0
+
+        xoffset, yoffset = self.scanSelector.roioptions.get_offsets()
+        xoffset = kwargs.get('xoffset', xoffset)
+        yoffset = kwargs.get('yoffset', yoffset)
+        
+        if self.fscan is not None:
+            if self.fscan.axisname != 'th':
+                raise NotImplementedError("Calculation of available Bragg reflections is not implemented for %s - scans" % self.fscan.axisname)
+            
+            xtal = self.ubcalc.crystal
+            ommin = np.deg2rad(np.amin(self.fscan.omega))
+            ommax = np.deg2rad(np.amax(self.fscan.omega))
+            dc = self.ubcalc.detectorCal
+            mu = self.ubcalc.mu
+            ub = self.ubcalc.ubCal
+            chi = self.ubcalc.chi
+            phi = self.ubcalc.phi
+            xtal.setEnergy(ub.getEnergy()*1e3)
+            
+            # apply strain:
+            ub_strained = copy.deepcopy(ub)
+            
+            xtal_cp = copy.deepcopy(xtal)
+            xtal_cp.a = xtal_cp.a * (1. + strainVec)
+            ub_strained.setLattice(xtal_cp)
+            
+            if self.scanSelector.bragg_multiple_enable.isChecked():
+                hkl_factor = np.array([h.value() for h in self.scanSelector.bragg_multiple])
+                a = xtal_cp.a
+                a /= hkl_factor
+                xtal_singleatom = CTRcalc.UnitCell(a, np.rad2deg(xtal_cp.alpha))
+                xtal_singleatom.addAtom('Pt',[0.,0.,0.],0.1,0.1,1.)
+                xtal_singleatom.setEnergy(ub.getEnergy()*1e3)
+                ub_strained.setLattice(xtal_singleatom)
+                
+                try:
+                    hkls, yx, angles = rn.thscanBragg(xtal_singleatom,ub_strained,mu,dc,(ommin,ommax), chi=chi, phi=phi)
+                    hkls = hkls.astype(np.float64)
+                    hkls *= hkl_factor.T
+                except Exception as e:
+                    raise Exception("Cannot calculate Bragg reflections") from e
+                
+            else:
+                
+                try:
+                    hkls, yx, angles = rn.thscanBragg(xtal_cp,ub_strained,mu,dc,(ommin,ommax), chi=chi, phi=phi)
+                    hkls = hkls.astype(np.float64)
+                except Exception as e:
+                    raise Exception("Cannot calculate Bragg reflections") from e
+
+        if hkls.size > 0:
+            s_points = np.arange(hkls.shape[0])
+            mask = np.ones(hkls.shape[0], dtype=bool)
+        else:
+            s_points = np.array([])
+            mask = np.array([])
+
+            
+        refldict = {
+           'hkl' : hkls,
+           'xy_1' : yx[:,::-1],
+           'angles_1' : angles,
+           's' : s_points,
+           'mask_1' : mask
+        }
+        if xoffset != 0.0 or yoffset != 0.0:
+            #warnings.warn("Nonzero pixel offset selected. Experimental feature! Angles and hkl are incorrect!!!")
+            refldict['xy_1'][..., 0] += xoffset
+            refldict['xy_1'][..., 1] += yoffset
+            
+        return refldict
+
     def intkeys_rocking(self, refldict, **kwargs):
         vsize = kwargs.get('vsize' ,int(self.scanSelector.vsize.value()))
         hsize = kwargs.get('hsize' ,int(self.scanSelector.hsize.value()))
+        size_exact = kwargs.get('size_exact', None)
         apply_mask = kwargs.get('mask' ,True)
         autoROIVsize = kwargs.get('autovsize', self.scanSelector.autoROIVsize.isChecked())
         autoROIHsize = kwargs.get('autohsize', self.scanSelector.autoROIHsize.isChecked())
@@ -526,9 +612,31 @@ ub : gui for UB matrix and angle calculations
         intersect = kwargs.get('intersect', intersect)
         
         xy = refldict['xy_%s' % int(intersect)]
+        
+        if size_exact is None:
+            roioptions = self.scanSelector.roioptions.get_parameters()
+            if roioptions['DetectorInclination'] or roioptions['ProjectSampleSize']:
+                if roioptions['ProjectSampleSize']:
+                    size_exact = ROIutils.calc_corrections(xy, 
+                                              self.ubcalc.detectorCal,
+                                              np.array([hsize, vsize]),
+                                              roioptions,
+                                              roioptions['DetectorInclination'],
+                                              roioptions['factor'])
+                else:
+                    size_exact = ROIutils.calc_corrections(xy, 
+                                              self.ubcalc.detectorCal,
+                                              np.array([hsize, vsize]),
+                                              None,
+                                              roioptions['DetectorInclination'],
+                                              roioptions['factor'])
+                
+        
         if apply_mask:
             xy = xy[refldict['mask_%s' % int(intersect)]]
-        
+            if size_exact is not None:
+                size_exact = size_exact[refldict['mask_%s' % int(intersect)]]
+            
         step_nr = xy.shape[0]
         if step_nr == 0:
             return {'center' : [], 'vsize' : vsize, 'hsize': hsize}
@@ -538,30 +646,50 @@ ub : gui for UB matrix and angle calculations
                 dist_in_pixels = np.median(np.abs(np.diff(xy[:,1])))
                 #roi_vlength = np.ceil(dist_in_pixels/step_nr)
                 vsize = int(np.ceil(dist_in_pixels))
+                if size_exact is not None:
+                    size_exact[:, 1] = vsize
                 
             if autoROIHsize:
                 #dist_in_pixels = np.abs(xy[0][1] - xy[-1][1])
                 dist_in_pixels = np.median(np.abs(np.diff(xy[:,0])))
                 #roi_vlength = np.ceil(dist_in_pixels/step_nr)
                 hsize = int(np.ceil(dist_in_pixels))
+                if size_exact is not None:
+                    size_exact[:, 0] = hsize
 
         detvsize, dethsize = self.ubcalc.detectorCal.detector.shape
         
         coord_restr = np.clip( xy, [0,0], [dethsize, detvsize])
+        if size_exact is not None:
+            vhalfsize = size_exact[:, 1] // 2
+            hhalfsize = size_exact[:, 0] // 2
+            fromcoords = np.round(coord_restr - np.vstack([hhalfsize, vhalfsize]).T)
+            tocoords = np.round(coord_restr + np.vstack([hhalfsize, vhalfsize]).T)
 
-        vhalfsize = vsize // 2
-        hhalfsize = hsize // 2
-        fromcoords = np.round(coord_restr - np.array([hhalfsize, vhalfsize]))
-        tocoords = np.round(coord_restr + np.array([hhalfsize, vhalfsize]))
-        
-        if hsize % 2:
+
+            mask_hsize = (size_exact[:, 0] % 2).astype(bool)
             remainder_mask = coord_restr[:,0] % 1 < 0.5
-            tocoords[remainder_mask, 0] += 1
-            fromcoords[~remainder_mask, 0] -= 1
-        if vsize % 2:
+            tocoords[mask_hsize & remainder_mask, 0] += 1
+            fromcoords[mask_hsize & ~remainder_mask, 0] -= 1
+            
+            mask_vsize = (size_exact[:, 1] % 2).astype(bool)
             remainder_mask = coord_restr[:,1] % 1 < 0.5
-            tocoords[remainder_mask, 1] += 1
-            fromcoords[~remainder_mask, 1] -= 1
+            tocoords[mask_vsize & remainder_mask, 1] += 1
+            fromcoords[mask_vsize & ~remainder_mask, 1] -= 1
+            
+        else:
+            vhalfsize = vsize // 2
+            hhalfsize = hsize // 2
+            fromcoords = np.round(coord_restr - np.array([hhalfsize, vhalfsize]))
+            tocoords = np.round(coord_restr + np.array([hhalfsize, vhalfsize]))
+            if hsize % 2:
+                remainder_mask = coord_restr[:,0] % 1 < 0.5
+                tocoords[remainder_mask, 0] += 1
+                fromcoords[~remainder_mask, 0] -= 1
+            if vsize % 2:
+                remainder_mask = coord_restr[:,1] % 1 < 0.5
+                tocoords[remainder_mask, 1] += 1
+                fromcoords[~remainder_mask, 1] -= 1
                 
         fromcoords = np.clip( fromcoords, [0,0], [dethsize, detvsize])
         tocoords = np.clip( tocoords, [0,0], [dethsize, detvsize])
@@ -569,7 +697,11 @@ ub : gui for UB matrix and angle calculations
         locations = []
         for roifrom, toroi in zip(fromcoords, tocoords): # any way to do this with ndarray operations?
             locations.append(tuple(slice(int(fromcoord), int(tocoord)) for fromcoord, tocoord in zip(roifrom,toroi)))
-        return {'center' : locations, 'vsize' : vsize, 'hsize': hsize}
+        roi_dict = {'center' : locations, 'vsize' : vsize, 'hsize': hsize}
+        
+        if size_exact is not None:
+            roi_dict['size_exact'] = size_exact
+        return roi_dict
         
     def intbkgkeys_rocking(self, refldict, **kwargs):
         left = kwargs.get( 'left' ,int(self.scanSelector.left.value()))
@@ -630,7 +762,32 @@ ub : gui for UB matrix and angle calculations
 
         return self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
             
+    def rocking_Bragg_extraction(self):
 
+        if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
+            qt.QMessageBox.warning(self, "No scan loaded", "Cannot integrate scan: No scan loaded.")
+            return {'status': 'error', 'message' : 'no scan loaded'}
+        
+        try:
+            refldict = self.get_Bragg_rocking_coordinates()
+        except Exception as e:
+            print("Rocking scan extraction is not implemented for scan axis " + str(self.fscan.axisname))
+            print(str(e))
+            return {'status': 'error', 'message' : 'Rocking scan extraction not implemented for scan axis ' + str(self.fscan.axisname), 'traceback' : traceback.format_exc()}
+
+        mask = refldict['mask_1']
+        xy = refldict['xy_1'][mask]
+        
+        refldict['angles'] = refldict['angles_1'][mask]
+        refldict['s_masked'] = refldict['s'][mask]
+        refldict['hkl_masked'] = refldict['hkl'][mask]
+        
+        roi_keys = self.intbkgkeys_rocking(refldict, autovsize=False, autohsize=False, intersect=1)
+        hkl_del_gam = self.getStaticROIparams(xy)
+        
+        ro_name = "rocking_Bragg"
+
+        return self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
 
     def rocking_integrate(self,xylist, rois, hkl_del_gam, refldict, name):
         try:
@@ -996,11 +1153,16 @@ ub : gui for UB matrix and angle calculations
                 "HKL_sixc_angles" : sixc_angles_hkl
             }
             # determine the type of rocking scan: 
-            if 's_masked' in refldict: # H_1 * s H_0 -like rocking scan (CTR scan)
+            if 'H_1' in refldict: # H_1 * s H_0 -like rocking scan (CTR scan)
                 traj1["s"] = refldict['s_masked'][d]
                 traj1["H_1"] = refldict['H_1']
                 traj1["H_0"] = refldict['H_0']
+                # equal refldict['hkl_masked']?
                 traj1["HKL_pk"] = refldict['H_1']*refldict['s_masked'][d] + refldict['H_0']
+            elif 's_masked' in refldict:
+                traj1["s"] = refldict['s_masked'][d]
+                traj1["HKL_pk"] = refldict['hkl_masked'][d]
+                
 
             
             suffix = ''
@@ -1397,6 +1559,14 @@ ub : gui for UB matrix and angle calculations
                                self.numberthreads,1)
         if success:
             self.numberthreads = cpus
+            
+    def _onSelectROIcount(self):
+
+        rois, success = qt.QInputDialog.getInt(self,"ROI count",
+                               "Max ROI count to display (current: %s)" % self.maxROIs,
+                               self.maxROIs,1)
+        if success:
+            self.maxROIs = rois
     
     def _onChangeDBCompression(self):
         filter_names = list(FILTERS.keys())
@@ -2244,6 +2414,7 @@ ub : gui for UB matrix and angle calculations
             if self.rocking_rois:
                 for roi in self.rocking_rois:
                     roi.setVisible(False)
+                    roi.setEditable(False)
             self.roiManager._roisUpdated()
             return
             #self.centralPlot.removeMarker('main_croi_loc')
@@ -2253,6 +2424,7 @@ ub : gui for UB matrix and angle calculations
             if self.rocking_rois:
                 for roi in self.rocking_rois:
                     roi.setVisible(False)
+                    roi.setEditable(False)
             try:
                 hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(self.imageno)
             except:
@@ -2295,14 +2467,15 @@ ub : gui for UB matrix and angle calculations
                 if self.rocking_rois:
                     for roi in self.rocking_rois:
                         roi.setVisible(False)
+                        roi.setEditable(False)
                 return
             roi_keys = self.intbkgkeys_rocking(refldict)
             self.scanSelector.autoSize_label.setText("%s x %s" % (roi_keys['hsize'], roi_keys['vsize']))
             
             number_rois = len(roi_keys['center'])
             divider = 1
-            if number_rois > MAX_ROIS_DISPLAY:
-                divider = np.ceil(number_rois / MAX_ROIS_DISPLAY)
+            if number_rois > self.maxROIs:
+                divider = np.ceil(number_rois / self.maxROIs)
             no_rois_to_display = int(np.floor(number_rois / divider))
             
             # lazy create ROIs 
@@ -2334,9 +2507,69 @@ ub : gui for UB matrix and angle calculations
                 bottom = bottomkey[1].stop - bottomkey[1].start
                 self.rocking_rois[roino].setGeometry(origin=origin, size=size, left=left, right=right, top=top, bottom=bottom)
                 self.rocking_rois[roino].setVisible(True)
+                self.rocking_rois[roino].setEditable(False)
             for roi in self.rocking_rois[no_rois_to_display:]:
                 roi.setVisible(False)
+                roi.setEditable(False)
         
+        elif (current_mode == 3 and not kwargs.get('image_changed', False)):
+            self.roiS1.setVisible(False)
+            self.roiS2.setVisible(False)
+            try:
+                refldict = self.get_Bragg_rocking_coordinates()
+                if len(refldict['xy_1']) <= 0:
+                    raise Exception('No reflections found.')
+            except:
+                print(traceback.format_exc())
+                if self.rocking_rois:
+                    for roi in self.rocking_rois:
+                        roi.setVisible(False)
+                        roi.setEditable(False)
+                        
+                return
+            roi_keys = self.intbkgkeys_rocking(refldict, autovsize=False, autohsize=False, intersect=1)
+
+            
+            number_rois = len(roi_keys['center'])
+            divider = 1
+            if number_rois > self.maxROIs:
+                divider = np.ceil(number_rois / self.maxROIs)
+            no_rois_to_display = int(np.floor(number_rois / divider))
+            
+            # lazy create ROIs 
+            if len(self.rocking_rois) < no_rois_to_display:
+                for i in range(no_rois_to_display - len(self.rocking_rois)):
+                    roi = RectangleBgROI()
+                    roi.setLineWidth(1)
+                    roi.setLineStyle('-')
+                    roi.setColor('red')
+                    roi.setBgStyle('pink', '-', 1.)
+                    roi.setVisible(False)
+                    roi.setGeometry(origin=(0, 0), size=(0, 0))
+                    self.rocking_rois.append(roi)
+                    self.roiManager.addRoi(roi,useManagerColor=False)
+            
+            for roino, i in enumerate(np.arange(no_rois_to_display)*divider):
+                ckey = roi_keys['center'][int(i)]
+                leftkey = roi_keys['left'][int(i)]
+                rightkey = roi_keys['right'][int(i)]
+                topkey = roi_keys['top'][int(i)]
+                bottomkey = roi_keys['bottom'][int(i)]
+
+                origin =(ckey[0].start, ckey[1].start)
+                size = (ckey[0].stop - ckey[0].start, ckey[1].stop - ckey[1].start)
+                #leftkey, rightkey, topkey, bottomkey
+                left = leftkey[0].stop - leftkey[0].start
+                right = rightkey[0].stop - rightkey[0].start
+                top = topkey[1].stop - topkey[1].start
+                bottom = bottomkey[1].stop - bottomkey[1].start
+                self.rocking_rois[roino].setGeometry(origin=origin, size=size, left=left, right=right, top=top, bottom=bottom)
+                self.rocking_rois[roino].setVisible(True)
+                self.rocking_rois[roino].setEditable(True)
+            for roi in self.rocking_rois[no_rois_to_display:]:
+                roi.setVisible(False)
+                roi.setEditable(False)
+                
         self.roiManager._roisUpdated()
                 #self.centralPlot.removeMarker('main_croi_loc')
             
@@ -2477,8 +2710,7 @@ ub : gui for UB matrix and angle calculations
         xy2 = yx2[...,::-1]
         
         if not kwargs.get('intersect', False):
-            xoffset = self.scanSelector.offsetx.value()
-            yoffset = self.scanSelector.offsety.value()
+            xoffset, yoffset = self.scanSelector.roioptions.get_offsets()
             
             if xoffset != 0. or yoffset != 0.:
                 warnings.warn("Nonzero pixel offset selected. Experimental feature! Angles and hkl are incorrect!!!")
@@ -2513,6 +2745,8 @@ ub : gui for UB matrix and angle calculations
 
         if self.scanSelector.scanstab.currentIndex() == 2:
             return self.rocking_extraction()
+        elif self.scanSelector.scanstab.currentIndex() == 3:
+            return self.rocking_Bragg_extraction()
             
         try:
             image = self.fscan.get_raw_img(0)
@@ -2531,7 +2765,7 @@ ub : gui for UB matrix and angle calculations
         
         vsize = int(self.scanSelector.vsize.value())
         hsize = int(self.scanSelector.hsize.value())
-        roi_size = vsize*hsize
+        roi_size = vsize*hsize # as set in GUI, no corrections
         
         imgmask = None
         
@@ -2576,6 +2810,8 @@ Do you want to continue without mask?""")
         bgpixel1_a = np.zeros_like(dataavail,dtype=np.float64)
         x_coord1_a = hkl_del_gam_1[:,6]
         y_coord1_a = hkl_del_gam_1[:,7]
+        roi_hsize1_a = np.full_like(dataavail, hsize, dtype=int)
+        roi_vsize1_a = np.full_like(dataavail, vsize, dtype=int)
         
         croi2_a = np.zeros_like(dataavail,dtype=np.float64)
         cpixel2_a = np.zeros_like(dataavail,dtype=np.float64)
@@ -2604,6 +2840,8 @@ Do you want to continue without mask?""")
         
         x_coord2_a = hkl_del_gam_2[:,6]
         y_coord2_a = hkl_del_gam_2[:,7]
+        roi_hsize2_a = np.full_like(dataavail, hsize, dtype=int)
+        roi_vsize2_a = np.full_like(dataavail, vsize, dtype=int)
 
         progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
         progress.setWindowModality(qt.Qt.WindowModal)
@@ -2622,13 +2860,26 @@ Do you want to continue without mask?""")
             C_arr = np.ones(image.img.shape, dtype=np.float64)
             C_arr[mask] = 0.0
         
+        j = 0
+        for i in range(len(self.fscan)):
+            key = self.intkey(hkl_del_gam_1[i,6:8])
+            croi_key = np.array([[key[0].start , key[0].stop], [key[1].start , key[1].stop]])
+            roi_hsize1_a[i] = int(np.abs(np.diff(croi_key[0])))
+            roi_vsize1_a[i] = int(np.abs(np.diff(croi_key[1])))
+            key = self.intkey(hkl_del_gam_2[i,6:8])
+            croi_key = np.array([[key[0].start , key[0].stop], [key[1].start , key[1].stop]])
+            roi_hsize2_a[i] = int(np.abs(np.diff(croi_key[0])))
+            roi_vsize2_a[i] = int(np.abs(np.diff(croi_key[1])))
+
+        
         if HAS_ACCEL:
             roi_lists_numba = []
             for i in range(len(self.fscan)):
                 roi_lists = [[], [], [], [], []]
                 if hkl_del_gam_1[i,-1]:
                     key = self.intkey(hkl_del_gam_1[i,6:8])
-                    roi_lists[0].append(np.array([[key[0].start , key[0].stop], [key[1].start , key[1].stop]])) # center
+                    croi_key = np.array([[key[0].start , key[0].stop], [key[1].start , key[1].stop]])   
+                    roi_lists[0].append(croi_key) # center
                     bkgkey = self.bkgkeys(hkl_del_gam_1[i,6:8])
                     for r, l in zip(bkgkey, roi_lists[1:]):
                         l.append(np.array([[r[0].start , r[0].stop], [r[1].start , r[1].stop]]))
@@ -2637,14 +2888,14 @@ Do you want to continue without mask?""")
                     roi_lists[0].append(np.array([[0 , 0], [0 , 0]]))
                 if hkl_del_gam_2[i,-1]:
                     key = self.intkey(hkl_del_gam_2[i,6:8])
-                    roi_lists[0].append(np.array([[key[0].start , key[0].stop], [key[1].start , key[1].stop]])) # center
+                    croi_key = np.array([[key[0].start , key[0].stop], [key[1].start , key[1].stop]])
+                    roi_lists[0].append(croi_key) # center
                     bkgkey = self.bkgkeys(hkl_del_gam_2[i,6:8])
                     for r, l in zip(bkgkey, roi_lists[1:]):
                         l.append(np.array([[r[0].start , r[0].stop], [r[1].start , r[1].stop]]))
                 else:
                     [l.append(np.array([[0 , 0], [0 , 0]])) for l in roi_lists[1:]] # will result in zeros, convert to np.nan later
                     roi_lists[0].append(np.array([[0 , 0], [0 , 0]]))
-                    
                 roi_lists = [np.ascontiguousarray(np.stack(l), dtype=np.int64) for l in roi_lists]
                 roi_lists_numba.append(roi_lists)
             
@@ -2820,9 +3071,11 @@ Do you want to continue without mask?""")
         if cancelled:
             return {'status': 'cancelled', 'message' : 'Reason: Cancelled during integration'}
             
+        roi_size1 = roi_hsize1_a * roi_vsize1_a
+        roi_size2 = roi_hsize2_a * roi_vsize2_a
             
-        Corr1 = Corr_croi1_a * ( roi_size / Corr_cpixel1_a) # normalize to number of pixels of center roi (croi)
-        Corr2 = Corr_croi2_a * ( roi_size / Corr_cpixel2_a)
+        Corr1 = Corr_croi1_a * ( roi_size1 / Corr_cpixel1_a) # normalize to number of pixels of center roi (croi)
+        Corr2 = Corr_croi2_a * ( roi_size2 / Corr_cpixel2_a)
         croibg1_bgimg_a = None
         croibg1_bgimg_err_a = None
         
@@ -2833,25 +3086,25 @@ Do you want to continue without mask?""")
                 bgimg_bgroi1_norm = bgimg_bgroi1_a * ( bgpixel1_a / bgimg_bgpixel1_a)
                 
                 # method 1: simply subtract bg image from data and then subtract the remaining background
-                croibg1_a = ( (croi1_a - bgimg_croi1_norm) - (cpixel1_a/bgpixel1_a) * (bgroi1_a - bgimg_bgroi1_norm) ) * ( roi_size / cpixel1_a)
-                croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size / cpixel1_a)
+                croibg1_a = ( (croi1_a - bgimg_croi1_norm) - (cpixel1_a/bgpixel1_a) * (bgroi1_a - bgimg_bgroi1_norm) ) * ( roi_size1 / cpixel1_a)
+                croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size1 / cpixel1_a)
                 
                 # method 2: scale bg image croi and subtract scaled bg image croi. Use ratio of bgroi of image and bg image as scale factor.
                 factor = bgroi1_a / bgimg_bgroi1_norm 
-                croibg1_bgimg_a = ( croi1_a - factor * bgimg_croi1_norm ) * ( roi_size / cpixel1_a)
-                croibg1_bgimg_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size / cpixel1_a)
+                croibg1_bgimg_a = ( croi1_a - factor * bgimg_croi1_norm ) * ( roi_size1 / cpixel1_a)
+                croibg1_bgimg_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size1 / cpixel1_a)
                 
             else: # not possible if no bgroi is set.
-                croibg1_a = (croi1_a - bgimg_croi1_norm) * ( roi_size / cpixel1_a)
-                croibg1_err_a = np.sqrt(croi1_a) * ( roi_size / cpixel1_a)
+                croibg1_a = (croi1_a - bgimg_croi1_norm) * ( roi_size1 / cpixel1_a)
+                croibg1_err_a = np.sqrt(croi1_a) * ( roi_size1 / cpixel1_a)
 
         else: # no background image
             if np.any(bgpixel1_a):
-                croibg1_a = ( croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a  ) * ( roi_size / cpixel1_a)
-                croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size / cpixel1_a)
+                croibg1_a = ( croi1_a - (cpixel1_a/bgpixel1_a) * bgroi1_a  ) * ( roi_size1 / cpixel1_a)
+                croibg1_err_a = np.sqrt(croi1_a + ((cpixel1_a/bgpixel1_a)**2)  * bgroi1_a) * ( roi_size1 / cpixel1_a)
             else:
-                croibg1_a = croi1_a  * ( roi_size / cpixel1_a)
-                croibg1_err_a = np.sqrt(croi1_a) * ( roi_size / cpixel1_a)
+                croibg1_a = croi1_a  * ( roi_size1 / cpixel1_a)
+                croibg1_err_a = np.sqrt(croi1_a) * ( roi_size1 / cpixel1_a)
         
         croibg2_bgimg_a = None
         croibg2_bgimg_err_a = None
@@ -2862,25 +3115,25 @@ Do you want to continue without mask?""")
                 bgimg_bgroi2_norm = bgimg_bgroi2_a * ( bgpixel2_a / bgimg_bgpixel2_a)
                 
                 # method 1: simply subtract bg image from data and then subtract the remaining background
-                croibg2_a = ( (croi2_a - bgimg_croi2_norm) - (cpixel2_a/bgpixel2_a) * (bgroi2_a - bgimg_bgroi2_norm) ) * ( roi_size / cpixel2_a)
-                croibg2_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2)  * bgroi2_a) * ( roi_size / cpixel2_a)
+                croibg2_a = ( (croi2_a - bgimg_croi2_norm) - (cpixel2_a/bgpixel2_a) * (bgroi2_a - bgimg_bgroi2_norm) ) * ( roi_size2 / cpixel2_a)
+                croibg2_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2)  * bgroi2_a) * ( roi_size2 / cpixel2_a)
                 
                 # method 2: scale bg image croi and subtract scaled bg image croi. Use ratio of bgroi of image and bg image as scale factor.
                 factor = bgroi2_a / bgimg_bgroi2_norm 
-                croibg2_bgimg_a = ( croi2_a - factor * bgimg_croi2_norm ) * ( roi_size / cpixel2_a)
-                croibg2_bgimg_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2)  * bgroi2_a) * ( roi_size / cpixel2_a)
+                croibg2_bgimg_a = ( croi2_a - factor * bgimg_croi2_norm ) * ( roi_size2 / cpixel2_a)
+                croibg2_bgimg_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2)  * bgroi2_a) * ( roi_size2 / cpixel2_a)
                 
             else: # not possible if no bgroi is set.
-                croibg2_a = (croi2_a - bgimg_croi2_norm) * ( roi_size / cpixel2_a)
-                croibg2_err_a = np.sqrt(croi2_a) * ( roi_size / cpixel2_a)
+                croibg2_a = (croi2_a - bgimg_croi2_norm) * ( roi_size2 / cpixel2_a)
+                croibg2_err_a = np.sqrt(croi2_a) * ( roi_size2 / cpixel2_a)
 
         else: # no background image
             if np.any(bgpixel2_a):
-                croibg2_a = ( croi2_a - (cpixel2_a/bgpixel2_a) * bgroi2_a  ) * ( roi_size / cpixel2_a)
-                croibg2_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2)  * bgroi2_a) * ( roi_size / cpixel2_a)
+                croibg2_a = ( croi2_a - (cpixel2_a/bgpixel2_a) * bgroi2_a  ) * ( roi_size2 / cpixel2_a)
+                croibg2_err_a = np.sqrt(croi2_a + ((cpixel2_a/bgpixel2_a)**2)  * bgroi2_a) * ( roi_size2 / cpixel2_a)
             else:
-                croibg2_a = croi2_a  * ( roi_size / cpixel2_a)
-                croibg2_err_a = np.sqrt(croi2_a) * ( roi_size / cpixel2_a)
+                croibg2_a = croi2_a  * ( roi_size2 / cpixel2_a)
+                croibg2_err_a = np.sqrt(croi2_a) * ( roi_size2 / cpixel2_a)
         
         
         if corr:
@@ -3018,7 +3271,9 @@ Do you want to continue without mask?""")
                 "x" : x_coord1_a,
                 "y"  : y_coord1_a,
                 'vsize' : vsize,
-                'hsize' : hsize
+                'hsize' : hsize,
+                'vsize_corr' : roi_vsize1_a,
+                'hsize_corr' : roi_hsize1_a
             },
             "trajectory" : traj1,
             "@signal" : u"counters/croibg",
@@ -3066,7 +3321,9 @@ Do you want to continue without mask?""")
                 "x" : x_coord2_a,
                 "y"  : y_coord2_a,
                 'vsize' : vsize,
-                'hsize' : hsize
+                'hsize' : hsize,
+                'vsize_corr' : roi_vsize2_a,
+                'hsize_corr' : roi_hsize2_a
             },
             "trajectory" : traj2,
             "@signal" : u"counters/croibg",
@@ -3144,6 +3401,26 @@ Do you want to continue without mask?""")
         
         coord_restr = np.clip( np.asarray(coords), [0,0], [dethsize, detvsize])
 
+        roioptions = self.scanSelector.roioptions.get_parameters()
+        if roioptions['DetectorInclination'] or roioptions['ProjectSampleSize']:
+            if roioptions['ProjectSampleSize']:
+                size_exact = ROIutils.calc_corrections(coord_restr, 
+                                          self.ubcalc.detectorCal,
+                                          np.array([hsize, vsize]),
+                                          roioptions,
+                                          roioptions['DetectorInclination'],
+                                          roioptions['factor'])
+            else:
+                size_exact = ROIutils.calc_corrections(coord_restr, 
+                                          self.ubcalc.detectorCal,
+                                          np.array([hsize, vsize]),
+                                          None,
+                                          roioptions['DetectorInclination'],
+                                          roioptions['factor'])
+            hsize = size_exact[0][0]
+            vsize = size_exact[0][1]
+                
+        
         
         vhalfsize = vsize // 2
         hhalfsize = hsize // 2
