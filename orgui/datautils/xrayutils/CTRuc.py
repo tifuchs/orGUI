@@ -1439,7 +1439,7 @@ class UnitCell(Lattice):
                         if random.random() > occup:
                             positions[no] = np.nan
                         no += 1
-            position_cart = self.R_mat @ (domainmatrix @ positions.T + mat[:,-1])
+            position_cart = self.R_mat @ (domainmatrix @ positions.T + np.atleast_2d(mat[:,-1]).T)
             #position_cart = self.RealspaceMatrix @ positions.T
             if len(translate.shape) > 1:
                 position_cart = np.asarray(translate[:,:-1] @ position_cart)
@@ -1483,7 +1483,7 @@ class UnitCell(Lattice):
                         else:
                             positions[no] = np.array([x + signx*(xno-1),y + signy*(yno-1),z+ signz*(zno-1)]) + translate
                         no += 1
-            positions_c = self.R_mat @ (domainmatrix @ positions.T + mat[:,-1])
+            positions_c = self.R_mat @ (domainmatrix @ positions.T + np.atleast_2d(mat[:,-1]).T)
             
             if len(translate.shape) > 1:
                 positions_c = np.asarray(translate[:,:-1] @ positions_c)
