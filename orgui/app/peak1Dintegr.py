@@ -1281,7 +1281,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
             hkl = self._currentRoInfo['H_1'] * s + self._currentRoInfo['H_0']
             title = "Rocking scan at s = %s, HKL = [%.2f %.2f %.2f]" % (s, *hkl)
         else:
-            title = "Rocking scan at s = %s" % s
+            hkl = self._currentRoInfo['HKL_pk'][idx]
+            title = "Rocking scan at s = %s, HKL = [%.2f %.2f %.2f]" % (s, *hkl)
+        self.plotROIselect.setGraphTitle(title)
         #print('before table clear')
         self.roiwidget.roiTable.clear()
         #print('after table clear')
@@ -1491,8 +1493,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
             ddict['H_0'] = H_0[0]
             ddict['H_1'] = H_1[0]
             ddict['type'] = 'hklscan'
+            ddict['HKL_pk'] = h5_obj["rois"]['HKL_pk'][()]
         elif 's' in h5_obj["rois"]:
             ddict['type'] = 'static'
+            ddict['HKL_pk'] = h5_obj["rois"]['HKL_pk'][()]
         else:
             raise ValueError("Invalid scan: scan has no parameter s")
             
