@@ -36,37 +36,44 @@ import numpy as np
 
 config.THREADING_LAYER = 'threadsafe'
 
-@njit('f8[:,::1](f8[:,::1], b1[:, ::1], f8[:,::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], f8[:,::1])', nogil=True, cache=True)
-def processImage(image,     mask,       C_corr,    croi,      leftroi,   rightroi,  toproi,   bottomroi, all_counters):
+@njit(inline='always')
+def interpolate_pixel(image, mask, i, j):
+    h, w = image.shape
 
-    for i in range(image.shape[0]): # this is faster than image[mask] = np.nan for some reason
-        for j in range(image.shape[1]):
-            if mask[i, j]:
-                image[i, j] = np.nan
-            else:
-                image[i, j] *= C_corr[i, j]
-    
-    invmask = np.logical_not(mask)
-    
-    for i in range(croi.shape[0]):
-        ckey = croi[i]
-        leftkey = leftroi[i]
-        rightkey = rightroi[i]
-        topkey = toproi[i]
-        bottomkey = bottomroi[i]
-        
-        # signal
-        all_counters[i,0] = np.nansum(image[ckey[1, 0]: ckey[1, 1] , ckey[0, 0]: ckey[0, 1]])
-        all_counters[i,1] = np.sum(invmask[ckey[1, 0]: ckey[1, 1], ckey[0, 0]: ckey[0, 1]])
-        
-        # background
-        all_counters[i,2] = 0.
-        all_counters[i,3] = 0.
-        for key in [leftkey, rightkey, topkey, bottomkey]:
-            all_counters[i, 2] += np.nansum(image[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
-            all_counters[i, 3] += np.sum(invmask[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
-    
-    return all_counters
+    # 4-connected neighbors
+    s = 0.0
+    c = 0
+
+    if i > 0 and not mask[i-1, j]:
+        s += image[i-1, j]; c += 1
+    if i < h-1 and not mask[i+1, j]:
+        s += image[i+1, j]; c += 1
+    if j > 0 and not mask[i, j-1]:
+        s += image[i, j-1]; c += 1
+    if j < w-1 and not mask[i, j+1]:
+        s += image[i, j+1]; c += 1
+
+    if c > 0:
+        return s / c
+
+    # fallback: 8-connected neighbors
+    s = 0.0
+    c = 0
+    for di in (-1, 0, 1):
+        for dj in (-1, 0, 1):
+            if di == 0 and dj == 0:
+                continue
+            ni = i + di
+            nj = j + dj
+            if 0 <= ni < h and 0 <= nj < w:
+                if not mask[ni, nj]:
+                    s += image[ni, nj]
+                    c += 1
+
+    if c > 0:
+        return s / c
+
+    return np.nan
 
 @njit('void(f8[:,::1], f8[:,::1], b1[:, ::1], f8[:,::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], f8[:,::1], f8[:,::1], f8[:,::1])', nogil=True, cache=True)
 def processImage_bg_Carr(image,  bg,        mask,       C_corr,    croi,      leftroi,   rightroi,  toproi,   bottomroi, all_counters, all_Carr, all_Bgimg):
@@ -163,38 +170,6 @@ def processImage_Carr(image,        mask,       C_corr,    croi,      leftroi,  
         all_counters[i, 3] = bg_pix
         all_Carr[i,1] = sig_pix
         all_Carr[i, 3] = bg_pix        
-
-@njit('f8[:,::1](f8[:,::1], f8[:,::1], b1[:, ::1], f8[:,::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], i8[:,:, ::1], f8[:,::1])', nogil=True, cache=True)
-def processImage_bg(image,  bg,        mask,       C_corr,    croi,      leftroi,   rightroi,  toproi,   bottomroi, all_counters):
-    image -= bg
-    for i in range(image.shape[0]): # this is faster than image[mask] = np.nan for some reason
-        for j in range(image.shape[1]):
-            if mask[i, j]:
-                image[i, j] = np.nan
-            else:
-                image[i, j] *= C_corr[i, j]
-    
-    invmask = np.logical_not(mask)
-    
-    for i in range(croi.shape[0]):
-        ckey = croi[i]
-        leftkey = leftroi[i]
-        rightkey = rightroi[i]
-        topkey = toproi[i]
-        bottomkey = bottomroi[i]
-        
-        # signal
-        all_counters[i,0] = np.nansum(image[ckey[1, 0]: ckey[1, 1] , ckey[0, 0]: ckey[0, 1]])
-        all_counters[i,1] = np.sum(invmask[ckey[1, 0]: ckey[1, 1], ckey[0, 0]: ckey[0, 1]])
-        
-        # background
-        all_counters[i,2] = 0.
-        all_counters[i,3] = 0.
-        for key in [leftkey, rightkey, topkey, bottomkey]:
-            all_counters[i, 2] += np.nansum(image[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
-            all_counters[i, 3] += np.sum(invmask[key[1, 0]:key[1, 1], key[0, 0]:key[0, 1]])
-    
-    return all_counters
 
 @njit('void(f8[:,::1], f8[:,::1], f8[:,::1])', nogil=True, cache=True)
 def calcMaxSum(image,     sumimg,    maximg):

@@ -57,6 +57,21 @@ from .QReflectionSelector import QReflectionAnglesDialog
 from .QHKLDialog import HKLDialog
 import runpy
 
+from contextlib import contextmanager
+
+@contextmanager
+def blockSignals(qobjects):
+    try:
+        for obj in qobjects:
+            obj.blockSignals(True)
+        yield
+        for obj in qobjects:
+            obj.blockSignals(False)
+    except TypeError:
+        qobjects.blockSignals(True)
+        yield
+        qobjects.blockSignals(False)
+
 
 class QScanSelector(qt.QMainWindow):
     sigScanChanged = qt.pyqtSignal(object)
@@ -280,8 +295,6 @@ class QScanSelector(qt.QMainWindow):
         self.right = qt.QDoubleSpinBox()
         self.top = qt.QDoubleSpinBox()
         self.bottom = qt.QDoubleSpinBox()
-        self.offsetx = qt.QDoubleSpinBox()
-        self.offsety = qt.QDoubleSpinBox()
         
         self.hsize.setRange(1,20000)
         self.hsize.setDecimals(1)
@@ -313,15 +326,7 @@ class QScanSelector(qt.QMainWindow):
         self.bottom.setSuffix(" px")
         self.bottom.setValue(0.)
         
-        self.offsetx.setRange(-20000,20000)
-        self.offsetx.setDecimals(1)
-        self.offsetx.setSuffix(" px")
-        self.offsetx.setValue(0.)
-        
-        self.offsety.setRange(-20000,20000)
-        self.offsety.setDecimals(1)
-        self.offsety.setSuffix(" px")
-        self.offsety.setValue(0.)
+
 
         roiGroupLayout.addWidget(qt.QLabel('center roi (h x v):'),0,0)
         roiGroupLayout.addWidget(self.hsize,0,1)
@@ -335,9 +340,17 @@ class QScanSelector(qt.QMainWindow):
         roiGroupLayout.addWidget(self.top,2,1)
         roiGroupLayout.addWidget(self.bottom,2,2)
         
-        roiGroupLayout.addWidget(qt.QLabel('roi loc offset (x, y):'),3,0)
-        roiGroupLayout.addWidget(self.offsetx,3,1)
-        roiGroupLayout.addWidget(self.offsety,3,2)
+        
+        self.roioptions = ROIAdvancedOptions()
+        self.roioptionsDiag = ROIAdvancedOptionsDialog(self.roioptions)
+        
+        #roiGroupLayout.addWidget(qt.QLabel('Advanced:'),3,1,1,2)
+        self.roioptionsBtn = qt.QPushButton('Advanced')
+        roiGroupLayout.addWidget(self.roioptionsBtn,3,2)
+        
+        self.roioptionsBtn.clicked.connect(self.roioptionsDiag.show)
+        
+        
 
         self.hsize.valueChanged.connect(lambda : self.sigROIChanged.emit())
         self.vsize.valueChanged.connect(lambda : self.sigROIChanged.emit())
@@ -345,8 +358,8 @@ class QScanSelector(qt.QMainWindow):
         self.right.valueChanged.connect(lambda : self.sigROIChanged.emit())
         self.top.valueChanged.connect(lambda : self.sigROIChanged.emit())
         self.bottom.valueChanged.connect(lambda : self.sigROIChanged.emit())
-        self.offsetx.valueChanged.connect(lambda : self.sigROIChanged.emit())
-        self.offsety.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.roioptions.sigROIOptionsChanged.connect(lambda : self.sigROIChanged.emit())
+
                 
         roiGroup.setLayout(roiGroupLayout)
         
@@ -565,13 +578,65 @@ class QScanSelector(qt.QMainWindow):
         self.ro_H_1_dialog.sigHKLchanged.connect(self._on_ro_H_1_changed)
         self._selectH_1_btn.clicked.connect(self.ro_H_1_dialog.exec)
         self.ro_H_1_dialog.set_hkl([0.,0.,1.])
+        
+        # Bragg reflection integration
+        
+        rocking_Bragg_integration_group = qt.QGroupBox("Bragg reflection rocking integration")
+        
+        ro_br_panel_layout = qt.QGridLayout()
+        ro_br_panel_layout.addWidget(qt.QLabel(u"Create rocking scans at Bragg reflections"),0,0, 1, -1)
+        
+        ro_br_panel_layout.addWidget(qt.QLabel(u"Strain (relative to set lattice, in %)"),1,0, 1, -1)
+        
+        self.strain_Bragg = [qt.QDoubleSpinBox() for i in range(3)]
+        [h.setRange(-20000,20000) for h in self.strain_Bragg]
+        [h.setDecimals(3) for h in self.strain_Bragg]
+        [h.setValue(0.) for h in self.strain_Bragg]
+        
+        [h.valueChanged.connect(lambda : self.sigROIChanged.emit()) for h in self.strain_Bragg]
+        
+        bragg_strain_xyzlayout = qt.QHBoxLayout()
+        for spinbox, lbl in zip(self.strain_Bragg, ["x:", "y:", "z:"]):
+            bragg_strain_xyzlayout.addWidget(qt.QLabel(lbl))
+            bragg_strain_xyzlayout.addWidget(spinbox)
+            
+        ro_br_panel_layout.addLayout(bragg_strain_xyzlayout,2,0, 1, -1)
+        
+        self.bragg_multiple_enable = qt.QCheckBox(u"Integrate at multiples of:")
+        
+        ro_br_panel_layout.addWidget(self.bragg_multiple_enable,3,0, 1, -1)
+        
+        self.bragg_multiple = [qt.QDoubleSpinBox() for i in range(3)]
+        [h.setRange(0.00,20000) for h in self.bragg_multiple]
+        [h.setDecimals(3) for h in self.bragg_multiple]
+        [h.setValue(1.) for h in self.bragg_multiple]
+        [h.setSingleStep(0.1) for h in self.bragg_multiple]
+        
+        [h.valueChanged.connect(lambda : self.sigROIChanged.emit()) for h in self.bragg_multiple]
+        
+        bragg_multiple_layout = qt.QHBoxLayout()
+        for spinbox, lbl in zip(self.bragg_multiple, ["Δh:", "Δk:", "Δl:"]):
+            bragg_multiple_layout.addWidget(qt.QLabel(lbl))
+            bragg_multiple_layout.addWidget(spinbox)
+            self.bragg_multiple_enable.toggled.connect(spinbox.setEnabled)
+            spinbox.setEnabled(False)
+        self.bragg_multiple_enable.clicked.connect(lambda : self.sigROIChanged.emit())
+        
+        ro_br_panel_layout.addLayout(bragg_multiple_layout,4,0, 1, -1)
+        
+        rocking_Bragg_integration_group.setLayout(ro_br_panel_layout)
 
         #  roi scan tab
         
         self.scanstab = qt.QTabWidget()
         self.scanstab.addTab(hklscanwidget, "hklscan")
-        self.scanstab.addTab(static_loc_Group, "fixed roi loc")
-        self.scanstab.addTab(rocking_integration_group, "rocking scan integration")
+        self.scanstab.addTab(static_loc_Group, "fixed")
+        self.scanstab.addTab(rocking_integration_group, "rocking hklscan")
+        self.scanstab.addTab(rocking_Bragg_integration_group, "rocking Bragg")
+        
+        
+        
+        
         self.scanstab.currentChanged.connect(lambda : self.sigROIChanged.emit())
 
         
@@ -1045,15 +1110,263 @@ class QScanSelector(qt.QMainWindow):
                     self.pathedit.setText(obj.local_filename)
                     self.scannoBox.setValue(ddict['scanno'])
                     self.sigScanChanged.emit(ddict)
-    """    
-    def _onSelectImageFolder(self):
-        
-        folder = PyMcaFileDialogs.getExistingDirectory(self,"select directory containing the images for the current scan")
-        if(len(folder)):
-            self.pathedit.setText(folder)
-            self._onAcceptImagePath()
-    """    
-        
+
     def _onAcceptImagePath(self):
         #print(self.pathedit.text())
         self.sigImagePathChanged.emit(self.pathedit.text())
+
+
+
+class ROIAdvancedOptions(qt.QWidget):
+    sigROIOptionsChanged = qt.pyqtSignal()
+
+    def __init__(self,parent=None):
+        qt.QWidget.__init__(self, parent=None)
+        
+        mainLayout = qt.QVBoxLayout()
+        
+        self._updating_parameters = False 
+        
+        self.offsetGroup = qt.QGroupBox("Automatic position offset:")
+        offsetLayout = qt.QGridLayout()
+        self.offsetGroup.setCheckable(True)
+        self.offsetGroup.setChecked(False)
+
+        self._offsetx = qt.QDoubleSpinBox()
+        self._offsety = qt.QDoubleSpinBox()
+
+        self._offsetx.setRange(-20000,20000)
+        self._offsetx.setDecimals(1)
+        self._offsetx.setSuffix(" px")
+        self._offsetx.setValue(0.)
+        
+        self._offsety.setRange(-20000,20000)
+        self._offsety.setDecimals(1)
+        self._offsety.setSuffix(" px")
+        self._offsety.setValue(0.)
+        
+        offsetLayout.addWidget(qt.QLabel('roi loc offset (x, y):'),0,0,1,-1)
+        offsetLayout.addWidget(self._offsetx,1,1)
+        offsetLayout.addWidget(self._offsety,1,2)
+
+        self._offsetx.valueChanged.connect(self._onAnyValueChanged)
+        self._offsety.valueChanged.connect(self._onAnyValueChanged)
+        
+        self.offsetGroup.setLayout(offsetLayout)
+        
+        self.sizeGroup = qt.QGroupBox("Dynamic ROI size:")
+        self.sizeGroup.setCheckable(True)
+        self.sizeGroup.setChecked(False)
+        
+        self.sizeGroup.toggled.connect(self._onAnyValueChanged)
+        
+        sizeLayout = qt.QGridLayout()
+        sizeLayout.addWidget(qt.QLabel('Project sample size'),0,0,1,-1)
+        
+        self._sizeXsample = qt.QDoubleSpinBox()
+        self._sizeXsample.setRange(1,100000)
+        self._sizeXsample.setDecimals(1)
+        self._sizeXsample.setSuffix(u" µm")
+        self._sizeXsample.setValue(1000.)
+        self._sizeXsample.setSingleStep(10.)
+        self._sizeXsample.valueChanged.connect(self._onAnyValueChanged)
+        
+        self._sizeYsample = qt.QDoubleSpinBox()
+        self._sizeYsample.setRange(1,100000)
+        self._sizeYsample.setDecimals(1)
+        self._sizeYsample.setSuffix(u" µm")
+        self._sizeYsample.setValue(10000.)
+        self._sizeYsample.setSingleStep(10.)
+        self._sizeYsample.valueChanged.connect(self._onAnyValueChanged)
+        
+        self._sizeZsample = qt.QDoubleSpinBox()
+        self._sizeZsample.setRange(1,100000)
+        self._sizeZsample.setDecimals(1)
+        self._sizeZsample.setSuffix(u" µm")
+        self._sizeZsample.setValue(500.)
+        self._sizeZsample.setSingleStep(10.)
+        self._sizeZsample.valueChanged.connect(self._onAnyValueChanged)
+        
+        sizeLayout.addWidget(qt.QLabel('X: '),1,0)
+        sizeLayout.addWidget(self._sizeXsample,1,1)
+        
+        sizeLayout.addWidget(qt.QLabel('Y: (along beam)'),2,0)
+        sizeLayout.addWidget(self._sizeYsample,2,1)
+        
+        sizeLayout.addWidget(qt.QLabel('Z: '),3,0)
+        sizeLayout.addWidget(self._sizeZsample,3,1)
+        
+        self.sizeGroup.setLayout(sizeLayout)
+        
+        self.inclinationGroup = qt.QGroupBox("Detector beam inclination:")
+        self.inclinationGroup.setCheckable(True)
+        self.inclinationGroup.setChecked(False)
+        
+        self.inclinationGroup.toggled.connect(self._onAnyValueChanged)
+        
+        inclinationLayout = qt.QGridLayout()
+        
+        self._inclinationLabel = qt.QLabel('scale roi proportional')
+        inclinationLayout.addWidget(self._inclinationLabel,0,0,1,-1)
+        
+        self._inclinationFactor = qt.QDoubleSpinBox()
+        self._inclinationFactor.setRange(0.001,100000)
+        self._inclinationFactor.setDecimals(3)
+        #self._inclinationFactor.setSuffix(u" µm")
+        self._inclinationFactor.setValue(1.)
+        self._inclinationFactor.setSingleStep(0.1)
+        inclinationLayout.addWidget(qt.QLabel('Factor: '),1,0)
+        inclinationLayout.addWidget(self._inclinationFactor,1,1)
+        
+        self.inclinationGroup.setLayout(inclinationLayout)
+        
+        
+        self.factorGroup = qt.QGroupBox("Apply at factor:")
+
+        factorLayout = qt.QGridLayout()
+        
+        self._sizeFactor = qt.QDoubleSpinBox()
+        self._sizeFactor.setRange(-10000.,100000.)
+        self._sizeFactor.setDecimals(3)
+        self._sizeFactor.setSuffix(u" %")
+        self._sizeFactor.setValue(100.)
+        self._sizeFactor.setSingleStep(10.)
+        self._sizeFactor.valueChanged.connect(self._onAnyValueChanged)
+        
+        factorLayout.addWidget(qt.QLabel('Apply at factor:'),0,0)
+        factorLayout.addWidget(self._sizeFactor,0,1)
+        
+        self.factorGroup.setLayout(factorLayout)
+        
+        mainLayout.addWidget(self.sizeGroup)
+        mainLayout.addWidget(self.inclinationGroup)
+        mainLayout.addWidget(self.factorGroup)
+        
+        mainLayout.addWidget(self.offsetGroup)
+        self.setLayout(mainLayout)
+        
+        
+    def hasOffsets(self):
+        return self.offsetGroup.isChecked()
+        
+    def hasProjectSampleSize(self):
+        return self.sizeGroup.isChecked()
+    
+    def hasDetectorInclination(self):
+        return self.inclinationGroup.isChecked()
+        
+    def hasROIsizeCorrection(self):
+        return self.hasDetectorInclination() or self.hasProjectSampleSize()
+        
+    def get_offsets(self):
+        if self.offsetGroup.isChecked():
+            return self._offsetx.value(), self._offsety.value()
+        else:
+            return 0.,0.
+            
+    def get_apply_factor(self):
+        return self._sizeFactor.value() / 100.
+    
+    def set_apply_factor(self, factor):
+        with blockSignals(self._sizeFactor):
+            self._sizeFactor.setValue(factor * 100.)
+        self._onAnyValueChanged()
+        
+    
+    def set_offsets(self, offsetx, offsety):
+        with blockSignals([self._offsetx, self._offsety]):
+            self._offsetx.setValue(offsetx)
+            self._offsety.setValue(offsety)
+        self._onAnyValueChanged()
+        
+    def get_parameters(self):
+        sizes = self.get_sample_size()
+        offX, offY = self._offsetx.value(), self._offsety.value()
+        
+        ddict = {
+            'DetectorInclination' : self.hasDetectorInclination(),
+            'ProjectSampleSize' : self.hasProjectSampleSize(),
+            'xoffset' : offX,
+            'yoffset' : offY,
+            'sizeX' : sizes[0],
+            'sizeY' : sizes[1],
+            'sizeZ' : sizes[2],
+            'factor' : self.get_apply_factor()
+        }
+        
+        return ddict
+        
+    def set_parameters(self, ddict):
+        self._updating_parameters = True
+        try:
+            self.inclinationGroup.setChecked(ddict['DetectorInclination'])
+            self.sizeGroup.setChecked(ddict['ProjectSampleSize'])
+            self.set_sample_size(ddict['sizeX'], ddict['sizeY'], ddict['sizeZ'])
+            self.set_offsets(ddict['xoffset'], ddict['yoffset'])
+            self.set_apply_factor(ddict['factor'])
+        except: 
+            raise
+        finally:
+            self._updating_parameters = False
+        self._onAnyValueChanged()
+            
+    def get_sample_size(self):
+        return self._sizeXsample.value()*1e-6, self._sizeYsample.value()*1e-6, self._sizeZsample.value()*1e-6
+
+    def set_sample_size(self, sizeX, sizeY, sizeZ):
+        with blockSignals([self._sizeXsample, self._sizeYsample, self._sizeZsample]):
+            self._sizeXsample.setValue(sizeX*1e6)
+            self._sizeYsample.setValue(sizeY*1e6)
+            self._sizeZsample.setValue(sizeZ*1e6)
+        self._onAnyValueChanged()
+
+    def _onAnyValueChanged(self):
+        if not self._updating_parameters:
+            self.sigROIOptionsChanged.emit()
+ 
+
+
+class ROIAdvancedOptionsDialog(qt.QDialog):
+    sigHide = qt.pyqtSignal()
+
+    def __init__(self,roioptions,parent=None):
+        qt.QDialog.__init__(self, parent=None)
+        self.roioptions = roioptions
+        layout = qt.QVBoxLayout()
+        layout.addWidget(roioptions)
+        
+        self.savedParams = None
+        
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel | qt.QDialogButtonBox.Reset,
+                                      qt.Qt.Horizontal)
+        layout.addWidget(buttons)
+        
+        okbtn = buttons.button(qt.QDialogButtonBox.Ok)
+        cancelbtn = buttons.button(qt.QDialogButtonBox.Cancel)
+        resetbtn = buttons.button(qt.QDialogButtonBox.Reset)
+        
+        okbtn.clicked.connect(self.hide)
+        cancelbtn.clicked.connect(self.onCancel)
+        resetbtn.clicked.connect(self.resetParameters)
+        
+        self.setLayout(layout)
+        
+    def showEvent(self, event):
+        if event.spontaneous():
+            super().showEvent(event)
+        else:
+            self.savedParams = self.roioptions.get_parameters()
+            super().showEvent(event)
+            
+    def hideEvent(self, event):
+        self.sigHide.emit()
+        super().hideEvent(event)
+            
+    def resetParameters(self):
+        if self.savedParams is not None:
+            self.roioptions.set_parameters(self.savedParams)
+        #self.machineparams._onAnyValueChanged()
+            
+    def onCancel(self):
+        self.resetParameters()
+        self.hide()
