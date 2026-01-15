@@ -1855,17 +1855,17 @@ class UnitCell(Lattice):
             uc._test_special_formfactors()
             return uc
         elif len(basis) == 1: 
-            if basis[0].size == 7:
-                basis[0] = np.concatenate((basis[0], [0]))
+            if basis[0].size == 7: # basis is already ndarray with ndim=2 for some reason 
+                basis = np.insert(basis, basis.shape[1], 0, axis=1)
                 if xprfile:
-                    errors[0] = np.concatenate((errors[0], [np.nan]))
+                    errors = np.insert(errors, errors.shape[1], np.nan, axis=1)
             elif basis.shape[1] == 8:
                 pass # all good, layer parameter provided
             else:
                 raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
-            uc.basis = np.array([basis])
+            uc.basis = basis
             if xprfile:
-                uc.errors = np.array([errors])
+                uc.errors = errors
             uc.names = names
             uc.basis_0 = np.copy(uc.basis)
             uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
