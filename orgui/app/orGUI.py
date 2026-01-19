@@ -33,6 +33,7 @@ __email__ = "tfuchs@cornell.edu"
 import gc
 import sys
 import os
+import re
 from silx.gui import qt
 import warnings
 
@@ -1827,16 +1828,12 @@ ub : gui for UB matrix and angle calculations
             return
         rootI = indexes.pop(0)
 
-        #todo: check if file has a parent to catch exception
-        #nodes = list(self.scanSelector.hdfTreeView.selectedH5Nodes())
-        #obj = nodes[0]
-        #print(model.parent(rootI))
-        #print(model.indexFromH5Object(obj))
-        
-        # parent file
-        h5file = model.data(model.parent(rootI), role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE)
+        #check if file has a parent to correctly address root node
+        if rootI.parent().isValid():
+            h5file = model.data(model.parent(rootI), role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE)
+        else:
+            h5file = model.data(rootI, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE)
 
-        import re # not very beautiful to load the package here
 
         # select keys which are from scans
         kl_full = list(h5file.keys())
