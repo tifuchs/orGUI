@@ -2722,7 +2722,7 @@ ub : gui for UB matrix and angle calculations
         xy1 = yx1[...,::-1]
         xy2 = yx2[...,::-1]
         
-        if not kwargs.get('intersect', False):
+        if not kwargs.get('intersect', False) and self.scanSelector.scanstab.currentIndex() != 1:
             xoffset, yoffset = self.scanSelector.roioptions.get_offsets()
             
             if xoffset != 0. or yoffset != 0.:
@@ -3415,7 +3415,8 @@ Do you want to continue without mask?""")
         coord_restr = np.clip( np.asarray(coords), [0,0], [dethsize, detvsize])
 
         roioptions = self.scanSelector.roioptions.get_parameters()
-        if roioptions['DetectorInclination'] or roioptions['ProjectSampleSize']:
+        current_mode = self.scanSelector.scanstab.currentIndex()
+        if (roioptions['DetectorInclination'] or roioptions['ProjectSampleSize']) and current_mode != 1:
             if roioptions['ProjectSampleSize']:
                 size_exact = ROIutils.calc_corrections(coord_restr, 
                                           self.ubcalc.detectorCal,

@@ -1198,30 +1198,12 @@ class ROIAdvancedOptions(qt.QWidget):
         
         self.sizeGroup.setLayout(sizeLayout)
         
-        self.inclinationGroup = qt.QGroupBox("Detector beam inclination:")
-        self.inclinationGroup.setCheckable(True)
-        self.inclinationGroup.setChecked(False)
+        self.inclinationBox = qt.QCheckBox("Correct detector beam inclination")
+        self.inclinationBox.setChecked(False)
         
-        self.inclinationGroup.toggled.connect(self._onAnyValueChanged)
+        self.inclinationBox.toggled.connect(self._onAnyValueChanged)
         
-        inclinationLayout = qt.QGridLayout()
-        
-        self._inclinationLabel = qt.QLabel('scale roi proportional')
-        inclinationLayout.addWidget(self._inclinationLabel,0,0,1,-1)
-        
-        self._inclinationFactor = qt.QDoubleSpinBox()
-        self._inclinationFactor.setRange(0.001,100000)
-        self._inclinationFactor.setDecimals(3)
-        #self._inclinationFactor.setSuffix(u" µm")
-        self._inclinationFactor.setValue(1.)
-        self._inclinationFactor.setSingleStep(0.1)
-        inclinationLayout.addWidget(qt.QLabel('Factor: '),1,0)
-        inclinationLayout.addWidget(self._inclinationFactor,1,1)
-        
-        self.inclinationGroup.setLayout(inclinationLayout)
-        
-        
-        self.factorGroup = qt.QGroupBox("Apply at factor:")
+        self.factorGroup = qt.QGroupBox("Apply dynamic ROI size:")
 
         factorLayout = qt.QGridLayout()
         
@@ -1233,13 +1215,13 @@ class ROIAdvancedOptions(qt.QWidget):
         self._sizeFactor.setSingleStep(10.)
         self._sizeFactor.valueChanged.connect(self._onAnyValueChanged)
         
-        factorLayout.addWidget(qt.QLabel('Apply at factor:'),0,0)
+        factorLayout.addWidget(qt.QLabel('Factor:'),0,0)
         factorLayout.addWidget(self._sizeFactor,0,1)
         
         self.factorGroup.setLayout(factorLayout)
         
         mainLayout.addWidget(self.sizeGroup)
-        mainLayout.addWidget(self.inclinationGroup)
+        mainLayout.addWidget(self.inclinationBox)
         mainLayout.addWidget(self.factorGroup)
         
         mainLayout.addWidget(self.offsetGroup)
@@ -1253,7 +1235,7 @@ class ROIAdvancedOptions(qt.QWidget):
         return self.sizeGroup.isChecked()
     
     def hasDetectorInclination(self):
-        return self.inclinationGroup.isChecked()
+        return self.inclinationBox.isChecked()
         
     def hasROIsizeCorrection(self):
         return self.hasDetectorInclination() or self.hasProjectSampleSize()
@@ -1299,7 +1281,7 @@ class ROIAdvancedOptions(qt.QWidget):
     def set_parameters(self, ddict):
         self._updating_parameters = True
         try:
-            self.inclinationGroup.setChecked(ddict['DetectorInclination'])
+            self.inclinationBox.setChecked(ddict['DetectorInclination'])
             self.sizeGroup.setChecked(ddict['ProjectSampleSize'])
             self.set_sample_size(ddict['sizeX'], ddict['sizeY'], ddict['sizeZ'])
             self.set_offsets(ddict['xoffset'], ddict['yoffset'])
