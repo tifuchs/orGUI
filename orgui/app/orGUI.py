@@ -162,7 +162,7 @@ class orGUI(qt.QMainWindow):
         #ubWidget.setChildrenCollapsible(False)
         ubLayout = qt.QVBoxLayout()
         ubWidget = qt.QWidget()
-        self.ubcalc = QUBCalculator(configfile, self)
+        self.ubcalc = QUBCalculator(None, self)
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
         
 
@@ -437,6 +437,9 @@ ub : gui for UB matrix and angle calculations
         aboutQtAct.triggered.connect(lambda : qt.QMessageBox.aboutQt(self))
         
         self.setMenuBar(menu_bar)
+        
+        if configfile is not None:
+            self.ubcalc.readConfig(configfile)
 
     def _removeAllIntegrPlotCurves(self):
         # remove plotted curves
