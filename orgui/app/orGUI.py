@@ -1942,7 +1942,22 @@ ub : gui for UB matrix and angle calculations
             ddict['file'] = obj.local_filename
             #ddict['node'] = kl[i]
             ddict['beamtime'] = IS_btid.currentText()
-            scansegments.append(backends.openScan(IS_btid.currentText(),ddict))
+            try:
+                scansegments.append(backends.openScan(IS_btid.currentText(),ddict))
+            except Exception as e:
+                msg = qt.QMessageBox()
+                msg.setIcon(qt.QMessageBox.Warning)
+                msg.setWindowTitle("Cannot open scan")
+                msg.setText("Cannot open scan:\n%s\nDo you want to continue?" % e)
+                msg.setDetailedText(traceback.format_exc())
+                msg.setStandardButtons(qt.QMessageBox.Yes | qt.QMessageBox.No)
+                msg.setDefaultButton(qt.QMessageBox.Yes)
+                result = msg.exec()
+                if result != qt.QMessageBox.Yes:
+                    return
+        if not scansegments: # no scans loaded - abort.
+            qt.QMessageBox.critical(self, 'No scans loaded', 'No scans were loaded.')
+            return
 
         # create interlaced scan object
         self.scanno = 1
