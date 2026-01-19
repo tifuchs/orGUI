@@ -37,35 +37,91 @@ from .scans import h5_Image
 
 class InterlacedScan():
 
-    def __init__(self, scansegments):
+    def __init__(self, scansegments, sort, ax):
         self.subscans = scansegments
 
         scan0 = self.subscans[0]
         lensum = 0
-        th_area = []
+        ax_area = []
 
-        for i in scansegments:
-            lensum += i.nopoints
-            th_area.append(i.th)
+        self.sort = sort
 
-        self.axisname = scan0.axisname # todo: check if all scans share the same axis
+        #self.axisname = scan0.axisname # todo: check if all scans have the same axis as selected in GUI window
+        self.axisname = ax
+
+        if ax == 'th':
+            for i in scansegments:
+                lensum += i.nopoints
+                ax_area.append(i.th)
+
+            self.th = np.concatenate(ax_area)
+            self.omega = -1*self.th
+
+            self.mu = scan0.mu # todo: check if all scans share the same mu
+            self.axis = self.th
+
+        if ax == 'mu':
+            for i in scansegments:
+                lensum += i.nopoints
+                ax_area.append(i.mu)
+
+            self.mu = np.concatenate(ax_area)
+
+            self.th = scan0.th # todo: check if all scans share the same th
+            self.omega = -1*self.th
+            self.axis = self.mu
         
-        self.th = np.concatenate(th_area) # todo: add option to sort th entries
-        self.axis = np.concatenate(th_area)
-        self.omega = -1*self.th
+        if self.sort:
+            if ax == 'mu':
+                self.indices = np.argsort(self.mu)
+                self.mu = self.mu[self.indices]
+                self.axis = self.mu
+            elif ax == 'th':
+                self.indices = np.argsort(self.th)
+                self.th = self.th[self.indices]
+                self.axis = self.th
+        else:
+            self.indices = None
+        
         self.title = "interlaced scan"
-
-        self.mu = scan0.mu # todo: check if all scans share the same mu
 
         self.nopoints = lensum
 
     def get_raw_img(self, i):
         len_previous = 0
-        for k in self.subscans:
-            if i < k.nopoints+len_previous:
-                return k.get_raw_img(i-len_previous)
-            else:
-                len_previous += k.nopoints
+        if self.sort:
+            for k in self.subscans:
+                if self.indices[i] < k.nopoints+len_previous:
+                    return k.get_raw_img(self.indices[i]-len_previous)
+                else:
+                    len_previous += k.nopoints
+        else:
+            for k in self.subscans:
+                if i < k.nopoints+len_previous:
+                    return k.get_raw_img(i-len_previous)
+                else:
+                    len_previous += k.nopoints
+    
+    def get_origin_scan_nr(self, i):
+        len_previous = 0
+        if self.sort:
+            for k in self.subscans:
+                if self.indices[i] < k.nopoints+len_previous:
+                    try:
+                        return k.scanname
+                    except Exception as e:
+                        return
+                else:
+                    len_previous += k.nopoints
+        else:
+            for k in self.subscans:
+                if i < k.nopoints+len_previous:
+                    try:
+                        return k.scanname
+                    except Exception as e:
+                        return
+                else:
+                    len_previous += k.nopoints
 
     @property
     def auxillary_counters(self):
@@ -79,3 +135,4 @@ class InterlacedScan():
     @classmethod
     def parse_h5_node(cls, obj):
         ddict = dict()
+        return ddict
