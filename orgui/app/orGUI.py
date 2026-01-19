@@ -325,8 +325,10 @@ class orGUI(qt.QMainWindow):
         self.showExcludedImagesAct.setCheckable(True)
         self.showExcludedImagesAct.toggled.connect(lambda visible : self.excludedImagesDialog.setVisible(visible))
         
-        self.backgroundImageAct = qt.QAction("Set background image",self)
-        self.backgroundImageAct.triggered.connect(self._onSetBackgroundImage)
+        self.backgroundImageAct = qt.QAction("Subtract/select background image",self)
+        self.backgroundImageAct.toggled.connect(self._onSetBackgroundImage)
+        self.backgroundImageAct.setCheckable(True)
+        self.backgroundImageAct.setChecked(False)
         
         self.dbCompressionAct = qt.QAction("Database compression",self)
         self.dbCompressionAct.triggered.connect(self._onChangeDBCompression)
@@ -1428,8 +1430,13 @@ ub : gui for UB matrix and angle calculations
                 self.calcBraggRefl()
             except:
                 pass
+
     
-    def _onSetBackgroundImage(self):
+    def _onSetBackgroundImage(self, checked):
+        if not checked:
+            self.background_image = None
+            self.plotImage(self.imageno) # will not raise Exception, 
+            return
         extensions = {}
         for description, ext in silx.io.supported_extensions().items():
             extensions[description] = " ".join(sorted(list(ext)))
@@ -1458,12 +1465,18 @@ ub : gui for UB matrix and angle calculations
         # call dialog
         filename,_ = qt.QFileDialog.getOpenFileName(self,"Open background image",'',fileTypeFilter[:-2])
         if filename == '':
+            self.backgroundImageAct.setChecked(False)
+            self.plotImage(self.imageno) # will not raise Exception, 
             return
         try:
             with fabio.open(filename) as fabf:
                 self.background_image = fabf.data.astype(np.float64, order='C', copy=True)
+            self.plotImage(self.imageno) # will not raise Exception, 
+            
         except Exception as e:
             traceback.print_exc()
+            self.backgroundImageAct.setChecked(False)
+            self.plotImage(self.imageno) # will not raise Exception, 
             return
             
         #dialog = ImageFileDialog.ImageFileDialog(self)
