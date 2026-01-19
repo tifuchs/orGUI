@@ -255,7 +255,7 @@ class WaterModel(Lattice, LinearFitFunctions):
         
         F_water = np.zeros_like(l,dtype=np.complex128)
         F_water[mask] = F_wat
-        return F_water/self.volume
+        return F_water/self.uc_area
     
     def setWaterParameters(self,zpos,layer_spacing,sigma_0,sigma_bar,A0):
         self.basis = np.array([zpos,layer_spacing,sigma_0,sigma_bar,A0])
@@ -578,6 +578,7 @@ class UnitCell(Lattice):
             'relative' : []
         }
         self.layer_behaviour = keyargs.get('layer_behaviour', 'ignore')
+        self._start_layer = -1
         self.layerpos = {0.0 : 0.0}
         self.basis_0 = np.array([])
         self._basis_parvalues = None
@@ -845,12 +846,12 @@ class UnitCell(Lattice):
 
     @property    
     def start_layer_number(self): # not implemented
-        return -1.
+        return self._start_layer
         
     @start_layer_number.setter
     def start_layer_number(self, ln):
         if self.layer_behaviour == 'select':
-            pass
+            self._start_layer = ln
     
     # in eV
     def setEnergy(self,E):
@@ -1138,25 +1139,44 @@ class UnitCell(Lattice):
             raise ValueError("Some errors are non-finite or not set.")
         return err0
         
+    def build_selected_basis(self):
+        if self.layer_behaviour == 'select':
+            if self.start_layer_number == -1.0:
+                warnings.warn('Layer behaviour is >select<, but start number is -1 (undefined). Proceed with layer 1.')
+                ln = 0.0
+            else:
+                ln = self.start_layer_number
+                
+            mask_layer = self.basis[:, 7] == ln
+            if not np.any(mask_layer):
+                raise ValueError('Layer %s does not exist in UnitCell.' % ln)
+            return self.basis[mask_layer], self.f[mask_layer], np.asarray(self.names)[mask_layer]
+            
+        elif self.layer_behaviour == 'ignore':
+            return self.basis, self.f, self.names
+        else:
+            warnings.warn('unknown layer behaviour %s: proceed calculating F while ignoring layer behaviour.' % self.layer_behaviour)
+            return self.basis, self.f, self.names
 
     # returns the structure factor of the unit cell
     # h,k,l have to be 1d arrays 
     def F_uc_bulk(self,h,k,l,atten=0):
+        basis, formf, names = self.build_selected_basis()
         if HAS_NUMBA_ACCEL:
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
             F = _CTRcalc_accel.unitcell_F_uc_bulk(h,
                     k,
                     l,
                     atten,
-                    self.basis,
-                    self.f,
+                    basis,
+                    formf,
                     self.refHKLTransform,
                     self.B_mat,
                     self.R_mat,
                     self.R_mat_inv,
                     np.asarray(self.coherentDomainMatrix),
                     np.asarray(self.coherentDomainOccupancy),
-                    self.volume)
+                    self.uc_area)
             return F
         else:
             F = np.zeros(h.size,dtype=np.complex128)
@@ -1169,20 +1189,21 @@ class UnitCell(Lattice):
             
             domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]
             
-            for i in range(len(self.basis)):
-                f[:] =  self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]
+            for i in range(len(basis)):
+                f[:] =  formf[i][10] + formf[i][11] + 1j*formf[i][12]
                 for j in range(5):
-                    f += self.f[i][j]*np.exp(- self.f[i][j+5]*Q2)
-                f *= np.exp(- (self.basis[i][4] * Q_para2 + self.basis[i][5] * Q_perp2)/ (16*np.pi**2))
-                f *= self.basis[i][6]
+                    f += formf[i][j]*np.exp(- formf[i][j+5]*Q2)
+                f *= np.exp(- (basis[i][4] * Q_para2 + basis[i][5] * Q_perp2)/ (16*np.pi**2))
+                f *= basis[i][6]
                 for mat, weight, eff_mat in zip(self.coherentDomainMatrix,self.coherentDomainOccupancy, domainmatrix):
-                    xyz_rel = np.dot(eff_mat,self.basis[i][1:4]) + mat[:,-1]
+                    xyz_rel = np.dot(eff_mat,basis[i][1:4]) + mat[:,-1]
                     F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) ) * math.exp(atten*xyz_rel[2])
-            return F/self.volume
+            return F/self.uc_area
     
     # returns the structure factor of the unit cell
     # h,k,l have to be 1d arrays 
     def F_uc_bulk_direct(self,h,k,l,atten=0):
+        basis, formf, names = self.build_selected_basis()
         F = np.zeros(h.size,dtype=np.complex128)
         f = np.zeros(h.size,dtype=np.complex128)
         hkl =  np.vstack((h,k,l))
@@ -1193,32 +1214,33 @@ class UnitCell(Lattice):
         
         domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]
         
-        for i in range(len(self.basis)):
-            f[:] =  self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]
+        for i in range(len(basis)):
+            f[:] =  formf[i][10] + formf[i][11] + 1j*formf[i][12]
             for j in range(5):
-                f += self.f[i][j]*np.exp(- self.f[i][j+5]*Q2)
-            f *= np.exp(- (self.basis[i][4] * Q_para2 + self.basis[i][5] * Q_perp2)/ (16*np.pi**2))
-            f *= self.basis[i][6]
+                f += formf[i][j]*np.exp(- formf[i][j+5]*Q2)
+            f *= np.exp(- (basis[i][4] * Q_para2 + basis[i][5] * Q_perp2)/ (16*np.pi**2))
+            f *= basis[i][6]
             for mat, weight, eff_mat in zip(self.coherentDomainMatrix,self.coherentDomainOccupancy,domainmatrix):
-                xyz_rel = np.dot(eff_mat,self.basis[i][1:4]) + mat[:,-1]
+                xyz_rel = np.dot(eff_mat,basis[i][1:4]) + mat[:,-1]
                 F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) ) * math.exp(atten*xyz_rel[2])
-        return F/self.volume
+        return F/self.uc_area
     
     def F_uc(self,h,k,l):
+        basis, formf, names = self.build_selected_basis()
         if HAS_NUMBA_ACCEL and not self._special_formfactors_present:
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
             F = _CTRcalc_accel.unitcell_F_uc(h,
                     k,
                     l,
-                    self.basis,
-                    self.f,
+                    basis,
+                    formf,
                     self.refHKLTransform,
                     self.B_mat,
                     self.R_mat,
                     self.R_mat_inv,
                     np.asarray(self.coherentDomainMatrix),
                     np.asarray(self.coherentDomainOccupancy),
-                    self.volume)
+                    self.uc_area)
             return F
         else:
             F = np.zeros(h.size,dtype=np.complex128)
@@ -1231,36 +1253,37 @@ class UnitCell(Lattice):
             
             domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]
                 
-            for i,name in zip(range(len(self.basis)),self.names):
+            for i,name in zip(range(len(basis)), names):
                 if name in UnitCell.special_formfactors:
-                    f[:] = UnitCell.special_formfactors[name][0](np.sqrt(Q2)) + self.f[i][11] + 1j*self.f[i][12]
+                    f[:] = UnitCell.special_formfactors[name][0](np.sqrt(Q2)) + formf[i][11] + 1j*formf[i][12]
                 else:
-                    f[:] =  self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]
+                    f[:] =  formf[i][10] + formf[i][11] + 1j*formf[i][12]
                     for j in range(5):
-                        f += self.f[i][j]*np.exp(- self.f[i][j+5]*Q2)
-                f *= np.exp(- (self.basis[i][4] * Q_para2 + self.basis[i][5] * Q_perp2)/ (16*np.pi**2))
-                f *= self.basis[i][6]
+                        f += formf[i][j]*np.exp(- formf[i][j+5]*Q2)
+                f *= np.exp(- (basis[i][4] * Q_para2 + basis[i][5] * Q_perp2)/ (16*np.pi**2))
+                f *= basis[i][6]
                 for mat, weight, eff_mat in zip(self.coherentDomainMatrix,self.coherentDomainOccupancy, domainmatrix):
-                    xyz_rel = np.dot(eff_mat,self.basis[i][1:4]) + mat[:,-1]
+                    xyz_rel = np.dot(eff_mat,basis[i][1:4]) + mat[:,-1]
                     F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) )
-            return F/self.volume
+            return F/self.uc_area
     
     def F_bulk(self,h,k,l,atten=0):
+        basis, formf, names = self.build_selected_basis()
         if HAS_NUMBA_ACCEL:
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
             F = _CTRcalc_accel.unitcell_F_bulk(h,
                     k,
                     l,
                     atten,
-                    self.basis,
-                    self.f,
+                    basis,
+                    formf,
                     self.refHKLTransform,
                     self.B_mat,
                     self.R_mat,
                     self.R_mat_inv,
                     np.asarray(self.coherentDomainMatrix),
                     np.asarray(self.coherentDomainOccupancy),
-                    self.volume)
+                    self.uc_area)
             return F
         else:
             hkl = self.refHKLTransform @ np.vstack((h,k,l))
@@ -1293,6 +1316,8 @@ class UnitCell(Lattice):
             calculate the absolute value to get the electron density
 
         """
+        basis, formf, names = self.build_selected_basis()
+        
         hkl = (self.refHKLTransform @ np.array([h,k,0.])).flatten()
         Qpara2 = np.sum(np.dot(self.B_mat , hkl)**2)
         a,alpha,_,_ = self.getLatticeParameters()
@@ -1309,33 +1334,35 @@ class UnitCell(Lattice):
         
         domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]
         
-        for i,name in zip(range(len(self.basis)),self.names):
-            deltaZ2i = self.basis[i][5]/(8*(np.pi)**2)
-            deltaPara2i = self.basis[i][4]/(8*(np.pi)**2)
+        for i,name in zip(range(len(basis)),names):
+            deltaZ2i = basis[i][5]/(8*(np.pi)**2)
+            deltaPara2i = basis[i][4]/(8*(np.pi)**2)
             for mat, weight, eff_mat in zip(self.coherentDomainMatrix,self.coherentDomainOccupancy, domainmatrix):
-                xyz_rel = eff_mat @ self.basis[i][1:4] + mat[:,-1]
+                xyz_rel = eff_mat @ basis[i][1:4] + mat[:,-1]
                 z_i = xyz_rel[2]*self._a[2]
                 y_i_frac = xyz_rel[1]
                 x_i_frac = xyz_rel[0]
                 if name in UnitCell.special_eDensity:
-                    rho_i[:] = (self.f[i][11] + 1j*self.f[i][12])/ (np.sqrt(2*np.pi*deltaZ2i))
+                    rho_i[:] = (formf[i][11] + 1j*formf[i][12])/ (np.sqrt(2*np.pi*deltaZ2i))
                     rho_i *= np.exp( -0.5 *( deltaPara2i * Qpara2 +  ((z- z_i)**2)/deltaZ2i ))
                     rho_i += gaussian_filter1d(UnitCell.special_eDensity[name](z- z_i)*np.exp( -0.5 *( deltaPara2i * Qpara2)),np.sqrt(deltaZ2i)/ zstep_mean)
                 else:                
-                    rho_i[:] = (self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]) / (np.sqrt(2*np.pi*deltaZ2i))
+                    rho_i[:] = (formf[i][10] + formf[i][11] + 1j*formf[i][12]) / (np.sqrt(2*np.pi*deltaZ2i))
                     rho_i *= np.exp( -0.5 *( deltaPara2i * Qpara2 +  ((z- z_i)**2)/deltaZ2i ))
                     for j in range(5):
-                        exp_dpara = self.f[i][j+5] + 0.5*deltaPara2i
-                        exp_dz = self.f[i][j+5] + 0.5*deltaZ2i
-                        rho_i += (self.f[i][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- exp_dpara * Qpara2  - (((z- z_i)**2)/(4*exp_dz))  )
+                        exp_dpara = formf[i][j+5] + 0.5*deltaPara2i
+                        exp_dz = formf[i][j+5] + 0.5*deltaZ2i
+                        rho_i += (formf[i][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- exp_dpara * Qpara2  - (((z- z_i)**2)/(4*exp_dz))  )
                         
                 rho_i *= np.exp(-2j*np.pi*(h*x_i_frac + k*y_i_frac + (z- z_i)/self._a[2]))
-                rho += rho_i*self.basis[i][6] * weight
+                rho += rho_i*basis[i][6] * weight
         
         return rho/self.uc_area
     
     
     def zDensity_G_asbulk(self, z, h,k, noUC=30):
+        basis, formf, names = self.build_selected_basis()
+        
         hkl = (self.refHKLTransform @ np.array([h,k,0.])).flatten()
         Qpara2 = np.sum(np.dot(self.B_mat , hkl)**2)
         a,alpha,_,_ = self.getLatticeParameters()
@@ -1345,24 +1372,24 @@ class UnitCell(Lattice):
         rho_i = np.empty_like(z,dtype=np.complex128)
         for no in range(noUC):
             noA = no*self._a[2]
-            for i in range(len(self.basis)):
-                deltaZ2i = self.basis[i][5]/(8*(np.pi)**2)
-                deltaPara2i = self.basis[i][4]/(8*(np.pi)**2)
-                z_i = self.basis[i][3]*self._a[2]
-                y_i_frac = self.basis[i][2]
-                x_i_frac = self.basis[i][1]
+            for i in range(len(basis)):
+                deltaZ2i = basis[i][5]/(8*(np.pi)**2)
+                deltaPara2i = basis[i][4]/(8*(np.pi)**2)
+                z_i = basis[i][3]*self._a[2]
+                y_i_frac = basis[i][2]
+                x_i_frac = basis[i][1]
                 
-                rho_i[:] = (self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]) / (np.sqrt(2*np.pi*deltaZ2i))
+                rho_i[:] = (formf[i][10] + formf[i][11] + 1j*formf[i][12]) / (np.sqrt(2*np.pi*deltaZ2i))
                 rho_i *= np.exp( -0.5 *( deltaPara2i * Qpara2 +  ((z- z_i + noA)**2)/deltaZ2i ))
                         
                 
                 for j in range(5):
-                    exp_dpara = self.f[i][j+5] + 0.5*deltaPara2i
-                    exp_dz = self.f[i][j+5] + 0.5*deltaZ2i
-                    rho_i += (self.f[i][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- exp_dpara * Qpara2  - (((z- z_i + noA)**2)/(4*exp_dz))  )
+                    exp_dpara = formf[i][j+5] + 0.5*deltaPara2i
+                    exp_dz = formf[i][j+5] + 0.5*deltaZ2i
+                    rho_i += (formf[i][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- exp_dpara * Qpara2  - (((z- z_i + noA)**2)/(4*exp_dz))  )
                     
                 rho_i *= np.exp(-2j*np.pi*(h*x_i_frac + k*y_i_frac + (z- z_i + noA)/self._a[2]))
-                rho += rho_i*self.basis[i][6]
+                rho += rho_i*basis[i][6]
         
         return rho/self.uc_area
     
@@ -1392,6 +1419,10 @@ class UnitCell(Lattice):
         if figure is None:
             figure = mlab.figure()
         
+        if keyargs.get('useSelected', True):
+            basis, formf, names = self.build_selected_basis()
+        else:
+            basis, formf, names = self.basis, self.f, self.names
         if ucx == 0 or ucy == 0 or ucz == 0:
             raise ValueError("One of ucx,ucy or ucz is zero. Must plot at least one unit cell.")
         
@@ -1400,9 +1431,9 @@ class UnitCell(Lattice):
             
         elcolors = keyargs.get('color')
         if elcolors is None:
-            elcolors = [color_generator(name) for name in self.names]
+            elcolors = [color_generator(name) for name in names]
         elif isinstance(elcolors ,tuple):
-            elcolors = [elcolors for params in self.basis]
+            elcolors = [elcolors for params in basis]
             
         resolution = keyargs.get('resolution')
         if resolution is None:
@@ -1411,9 +1442,9 @@ class UnitCell(Lattice):
         mat = self.coherentDomainMatrix[domain]
         domainmatrix = self.R_mat_inv @ mat[:,:-1] @ self.R_mat
         
-        for i,params in enumerate(self.basis):
+        for i,params in enumerate(basis):
             
-            radius = cov_radii_array[atomic_number(self.names[i])-1][2]*2
+            radius = cov_radii_array[atomic_number(names[i])-1][2]*2
             #elcolor_c = keyargs.get('color')
             #if elcolor_c is None:
             #    elcolor_c = elements.rgb(int(params[0]))
