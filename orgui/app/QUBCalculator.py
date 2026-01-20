@@ -553,17 +553,17 @@ class QUBCalculator(qt.QSplitter):
                         p = os.path.abspath(configfile)
                         ponipath = os.path.join(os.path.dirname(p), machine['poni'])
                     self.detectorCal.load(ponipath)
-                    self.ubCal.setLambda(self.detectorCal.get_wavelength()*1e10)
-                    self.crystal.setEnergy(self.detectorCal.get_energy()*1e3)
+                    self.ubCal.setLambda(self.detectorCal.wavelength*1e10)
+                    self.crystal.setEnergy(self.detectorCal.energy*1e3)
                 else:
                     self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
-                    self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+                    self.detectorCal.wavelength = self.ubCal.getLambda()*1e-10
                     self.detectorCal.detector.shape = det_shape # Perkin 
                     self.detectorCal.detector.max_shape = det_shape # Perkin det_shape
                     
             else:
                 self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
-                self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+                self.detectorCal.wavelength = self.ubCal.getLambda()*1e-10
                 self.detectorCal.detector.shape = det_shape
                 self.detectorCal.detector.max_shape = det_shape
                 
@@ -577,7 +577,7 @@ class QUBCalculator(qt.QSplitter):
                     'chi' : self.chi
                 },
                 'source' :  {
-                    'E' : self.detectorCal.get_energy()
+                    'E' : self.detectorCal.energy
                 },
                 'SXRD_geometry' : self.detectorCal
             }
@@ -629,7 +629,7 @@ class QUBCalculator(qt.QSplitter):
         self.detectorCal = DetectorCalibration.Detector2D_SXRD()
         self.detectorCal.detector = pyFAI.detector_factory("Pilatus2m")
         self.detectorCal.setFit2D(sdd*1e3,cp[0],cp[1],pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
-        self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
+        self.detectorCal.wavelength = self.ubCal.getLambda()*1e-10
         self.detectorCal.setAzimuthalReference(np.deg2rad(90.))
         self.detectorCal.setPolarization(0.,0.)
 
@@ -640,7 +640,7 @@ class QUBCalculator(qt.QSplitter):
                 'chi' : self.chi
             },
             'source' :  {
-                'E' : self.detectorCal.get_energy()
+                'E' : self.detectorCal.energy
             },
             'SXRD_geometry' : self.detectorCal
         }
@@ -1451,15 +1451,15 @@ class QMachineParameters(qt.QWidget):
             try:
                 az = pyFAI.load(f)
                 #self._detectorDialog.selectDetector(az.detector)
-                self.set_Xray_source({'wavelength' : az.get_wavelength()*1e10})
+                self.set_Xray_source({'wavelength' : az.wavelength*1e10})
                 model = self.geometryTabs.geometryModel()
                 model.lockSignals()
-                model.distance().setValue(az.get_dist())
-                model.poni1().setValue(az.get_poni1())
-                model.poni2().setValue(az.get_poni2())
-                model.rotation1().setValue(az.get_rot1())
-                model.rotation2().setValue(az.get_rot2())
-                model.rotation3().setValue(az.get_rot3())
+                model.distance().setValue(az.dist)
+                model.poni1().setValue(az.poni1)
+                model.poni2().setValue(az.poni2)
+                model.rotation1().setValue(az.rot1)
+                model.rotation2().setValue(az.rot2)
+                model.rotation3().setValue(az.rot3)
                 #model.wavelength().setValue(az.get_wavelength())
                 model.unlockSignals()
                 self.set_detector(az.detector)
@@ -1543,14 +1543,14 @@ class QMachineParameters(qt.QWidget):
         rot2 = model.rotation2().value()
         rot3 = model.rotation3().value()
         wavelength = model.wavelength().value()
-        detectorCal.setPyFAI(dist=dist,
-                          poni1=poni1,
-                          poni2=poni2,
-                          rot1=rot1,
-                          rot2=rot2,
-                          rot3=rot3,
-                          detector=self.get_detector(),
-                          wavelength=wavelength)
+        detectorCal.set_config({'dist':dist,
+                          'poni1':poni1,
+                          'poni2':poni2,
+                          'rot1':rot1,
+                          'rot2':rot2,
+                          'rot3':rot3,
+                          'detector':self.get_detector(),
+                          'wavelength':wavelength})
         azim = np.deg2rad(self.azimbox.value())
         polax = np.deg2rad(self.polaxbox.value())
         polf = self.polfbox.value()

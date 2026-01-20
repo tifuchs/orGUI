@@ -37,7 +37,7 @@ import math as m
 import scipy.optimize as opt
 import pyFAI
 from pyFAI import geometry
-from pyFAI.utils import binning
+from pyFAI.utils.mathutil import binning
 #import pyFAI.azimuthalIntegrator
 from pyFAI.ext import invert_geometry
 import copy
