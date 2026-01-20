@@ -2,6 +2,123 @@
 
 This is the changelog for the software orGUI, written by Timo Fuchs
 
+
+## [1.4.0] (2026-01-20)
+
+[ef10ee8](https://github.com/tifuchs/orGUI/commit/ef10ee8e805c13b60bb51361c38868da928d7116)...[eb2d82f](https://github.com/tifuchs/orGUI/commit/eb2d82f796a5f34798d7f78f7794ef73b9231332)
+
+This is a feature release with lots of additional bug fixes.
+
+- Added a new dialog which automatically calculates the position of the
+  Bragg peak, which helps to improve the U matrix the most and adds it
+  to the list of reference reflections.
+- Added a Bragg peak search, which searches for the center of mass in a
+  small section of multiple images. This can be used to quickly find the
+  image and position of a Bragg peak. To be used when an estimate of the
+  Bragg position is already given (such as with the new Bragg peak
+  dialog)
+- Auxilliary counters (potential, temperature, \...) are now also
+  integrated in all integration functions.
+- A static background image can now be subtracted from the detector
+  images. This can be used to subtract static sample environment
+  scattering such as water or air (beamline background) scattering.
+- Multiple scans can be concatenated and treated as a single scan. This
+  is done to avoid high-intensity sample positions which would lead to
+  damage to the detector (Thanks to Finn!).
+- Positions of Bragg reflections can now be integrated as rocking scans.
+  This enables fast conventional single crystal X-ray difffraction
+  analysis of Bragg reflection structure factor. Strain with respect to
+  the reference lattice can be added for epitaxially grown thin films.
+- 2D ROI size can now be dynamically adjusted. Currently, the ROI size
+  can be corected for
+  - Peak size increase due to scattered beam - detector inclination
+  - Peak size increase due to the illuminated sample size. Currently,
+    the sample is approximated as a cuboid (size to be set in Advanced
+    ROI options dialog) and its outlines are projected onto the
+    detector.
+- The orGUI hdf5 data base can now be compressed using
+  [hdf5plugin](https://github.com/silx-kit/hdf5plugin). This compression
+  is not visible to the user, but reduces the file size by a factor of
+  2x - 3x. Calculation speed loss is possible and depends on the OS,
+  available libraries , etc. See [Issue
+  #16](https://github.com/tifuchs/orGUI/issues/16) for an overview.
+  Opening compressed data bases with external software requires the user
+  to install and import
+  [hdf5plugin](https://github.com/silx-kit/hdf5plugin).
+
+### Added
+
+- [ReflectionSelector] add automatic peak search (2d image peak and rocking peak) and automatic Bragg reflection add function ([985f9ca](https://github.com/tifuchs/orGUI/commit/985f9ca803eead6487d68a3341c6652ff39b72cc))
+- [ReflectionSelector] add automatic Bragg reflection search dialog ([4fe31db](https://github.com/tifuchs/orGUI/commit/4fe31dbc1a181b9d37561dd16bb488c1b8c6253e))
+- [Database] add optional compression, add compression benchmarks ([e468efd](https://github.com/tifuchs/orGUI/commit/e468efdbfcba6bd13a2791674388f84274999a39))
+- [RoIntegr] add aux counter integration ([2aa1cc9](https://github.com/tifuchs/orGUI/commit/2aa1cc9ee9e9a4b580562c0df6dd83ece1a4c40a))
+- Add static background image subtraction ([b9777f9](https://github.com/tifuchs/orGUI/commit/b9777f90aed18ecad12c6a86c6b5fc6e1a109b08))
+- Add social media logo ([e900408](https://github.com/tifuchs/orGUI/commit/e900408ba5c756744ef3a56ac2f5fceaa3c4479c))
+- OrGUI.py - add 'select all' functionality when removing curves in the integrated data plot ([cf26b34](https://github.com/tifuchs/orGUI/commit/cf26b348ed726aaa0d51e9960f02f05a520ca39b))
+- [CTRplot] add CTR average functions ([915c2d5](https://github.com/tifuchs/orGUI/commit/915c2d53c8e825314d8fbaae856f320c3d10bd10))
+- Added functionality to concatenate scans ([2aa59b1](https://github.com/tifuchs/orGUI/commit/2aa59b1233d4bbd8bb4aaaa21622d59ad3da9368))
+- Add Bragg reflection rocking integration, add variable ROI sizes ([798269f](https://github.com/tifuchs/orGUI/commit/798269fa23edfd7008f08b17d3d8cccb8f20147d))
+- Add missing ROIutils.py ([871f486](https://github.com/tifuchs/orGUI/commit/871f486ea5544ae6d7b487938bfadd38b156de7a))
+- Add title showing hkl and s to rocking peak integr graph ([bf42ad6](https://github.com/tifuchs/orGUI/commit/bf42ad67ebe17e0a532074577d80bc518883adbc))
+- [config] add compression and autoload setting to config file ([598b558](https://github.com/tifuchs/orGUI/commit/598b55853a135332634edf6b98464209758bf19c))
+- Add setuptools_scm for automatic version numbering, update .gitignore ([0c33c71](https://github.com/tifuchs/orGUI/commit/0c33c7194e5a748f8ab8b86d72d4668022329b6e))
+- Add cliff.toml for automatic CHANGELOG creation, replace CHANGELOG ([a155cdb](https://github.com/tifuchs/orGUI/commit/a155cdb23fbef6245fba8cf4fb42016f53a805b2))
+
+### Changed
+
+- [orGUI.py] - integrated curves can now be hidden/removed ([9c0a93e](https://github.com/tifuchs/orGUI/commit/9c0a93e39e95a773ef2a5b26a10326548d057e93))
+- [ROIRoIntegr] drop requirement of rocking_integrate for s, H_0 and H_1 ([d2400f7](https://github.com/tifuchs/orGUI/commit/d2400f72cb19fd14c8a68acdfd0d6744e62d95b3))
+- [Recip Space Nav dock] automatically expand reflection table to its ma size ([02e842a](https://github.com/tifuchs/orGUI/commit/02e842a967d7ed56d53348753af8a42599cfb341))
+- [integration] Normalize croibg by the number of available pixels ([c126d5c](https://github.com/tifuchs/orGUI/commit/c126d5c2b2f5ae56189e61c784cfee9585365ab5))
+- [RoIntegr] force integrated intensities positive, bugfix in error propagation ([cfbf202](https://github.com/tifuchs/orGUI/commit/cfbf2029d714131c538c4efe3874f3ed5b79eb74))
+- Rework integration: Corrections are applied after background subtraction, add scaling of bg image as method of background subtraction, croi, bgroi are now raw counts, add Corrections and bg image as counter in database ([9067dbb](https://github.com/tifuchs/orGUI/commit/9067dbbce4722fe470ea884a8c57e02ba4a3f40f))
+- Integrate functions return a status message to handle errors in batch processing ([152a713](https://github.com/tifuchs/orGUI/commit/152a7137f36d46672a616c6a62b85542f85f1d19))
+- [Database] Hdf5Model set ownfile=False to avoid multiple open file handles, improve handling of harddrive faults and general I/O errors ([e682e56](https://github.com/tifuchs/orGUI/commit/e682e562fa660f4de4ed05c70ef5b6394e8c90ca))
+- Backends.py / id31_tools.py - adjustments to correctly read and process beamtime ch7856 datasets ([d90b3ff](https://github.com/tifuchs/orGUI/commit/d90b3ffeb3984ea8d8dddf11930134d22e8e35f3))
+- Merge branch 'master' of https://github.com/tifuchs/orGUI ([fddbe5e](https://github.com/tifuchs/orGUI/commit/fddbe5eeabf4b4df239146bdd17eac3bbd53cc92))
+- [CTR] raise more descripitve error when CTR is not in CTRcollection ([a8586ed](https://github.com/tifuchs/orGUI/commit/a8586ed5ab237527e8d5fe458e2ad0c3cd4eee7a))
+- Backends.py - further improved ch7856 scan opening backend function ([dfcd034](https://github.com/tifuchs/orGUI/commit/dfcd03439a9cb8a8cec94c71fcdbbb645688bfc4))
+- OrGUI.py - optimize plotting of rocking scan curves: scans over panel edges (zero intensity in every point) are not plotted anymore and hiding + removing of curves is fixed ([a3a35fb](https://github.com/tifuchs/orGUI/commit/a3a35fbc3d7838f7029ee4ae20b0aa21ee3e4bac))
+- ReciprocalNavigation.py - hotfix of allowed Bragg peak searching function ([9f3ce20](https://github.com/tifuchs/orGUI/commit/9f3ce205eb5b73fd625d84f1cd11da3649212de5))
+- QReflectionSelector.py - typo ([5e22e16](https://github.com/tifuchs/orGUI/commit/5e22e166ab053c52fa8b99458cd1249378217790))
+- Revert "ReciprocalNavigation.py - hotfix of allowed Bragg peak searching function" ([96aeb74](https://github.com/tifuchs/orGUI/commit/96aeb7432969ce5804008be8b7db849ca109a24f))
+- ReciprocalNavigation.py - temporary fix of incorrect Qmax ([5195d34](https://github.com/tifuchs/orGUI/commit/5195d3441173449fc81692eff2d5134ed0fd068a))
+- QReflectionSelector.py - catch errors if Bragg lists are empty ([77d24da](https://github.com/tifuchs/orGUI/commit/77d24dad49803b15dfb12aeee880b3d3866f2867))
+- OrGUI.py - catch exception in rocking_extraction() ([109c18e](https://github.com/tifuchs/orGUI/commit/109c18e199d1456cc7a50d9df0ef97e4c423410d))
+- Orgui.py - small improvements to 'load segemented scan' functionality ([37fc6b7](https://github.com/tifuchs/orGUI/commit/37fc6b7b4b46df099cf76c9086ad954c81bd730c))
+- Improvements to scan concatenation function ([64a9351](https://github.com/tifuchs/orGUI/commit/64a93514214847e818c85b741e34bef9d47e10ca))
+- Merge pull request #32 from tifuchs/ro-Bragg ([bc77481](https://github.com/tifuchs/orGUI/commit/bc774812da79075f2d5ae9905826f30a75638736))
+- [UI] make background image action checkable - allows to disable the image subtraction ([3785b65](https://github.com/tifuchs/orGUI/commit/3785b650d85dbea0f75876d74d28437b0204ca4f))
+- Merge branch 'master' into concatenate-partial-scans ([e97da08](https://github.com/tifuchs/orGUI/commit/e97da08bf7e4922b8444bcee1ceebb5c965a7854))
+- Merge pull request #35 from tifuchs/concatenate-partial-scans ([c3b6a73](https://github.com/tifuchs/orGUI/commit/c3b6a73cc6ca27dd7f4cc7427a15b524bab72965))
+- Update deprecated pyFAI dependencies and functions ([24a4600](https://github.com/tifuchs/orGUI/commit/24a4600332cf4c61754317d23105278b48246dec))
+
+### Fixed
+
+- [RoIntegr] Bugfix: apply mask to s and hkl to handle missing data ([a9829fb](https://github.com/tifuchs/orGUI/commit/a9829fb957d4da457e1bc2dd91f599202a92cb3c))
+- [Database] Bugfix: fix gui lock when database has pending operations and main thread is performing database operations by allowing Qt to process events in wait loop ([1822c35](https://github.com/tifuchs/orGUI/commit/1822c353c918fc822a0039fe26f0abcb39a7ada0))
+- [RoPeakIntegr] Bugfix: normalize F2 to integration range ([cda3540](https://github.com/tifuchs/orGUI/commit/cda3540077d21eba800551f8efb16a42e93bc4cc))
+- [RoIntegr] Fix crash when scan is active which is not in database. ([30b6dd0](https://github.com/tifuchs/orGUI/commit/30b6dd0b92663bde6acd2ba5ffa2ab04f0beefc6))
+- [UBcalc] Fix loading of refraction index from config file ([285cbc1](https://github.com/tifuchs/orGUI/commit/285cbc1410f74bbff199567a3f7d45e609c78f64))
+- [RoPeakIntegr] Fix peak position interpolation ([cbc907e](https://github.com/tifuchs/orGUI/commit/cbc907e12d46bc5cd629f66aee237bf77eab0473))
+- [RoPeakIntegr] Fix fit along rod by using intersect point s as abscissa instead of axis ([eb04e01](https://github.com/tifuchs/orGUI/commit/eb04e0104f1a24933c1397d814bf6976bc1ff1cd))
+- [CTRuc] Fix loading of xpr files, fix layered_O water model ([e7d1d00](https://github.com/tifuchs/orGUI/commit/e7d1d005f10dd46d01eab0f0f23de3b8889c68e8))
+- [CTRplot] fix typo ([17543ab](https://github.com/tifuchs/orGUI/commit/17543ab8b3b6ddb6ace46b394e9b61fe752d9d32))
+- OrGUI.py - bugfix in sum image creation ([6b82ccb](https://github.com/tifuchs/orGUI/commit/6b82ccbd02de704c002982c2e42ef56db39e8e1c))
+- [interlacedScan] fix crash if data is missing or corrupted ([ab6abcf](https://github.com/tifuchs/orGUI/commit/ab6abcfd18e825647db742ff452763315f4d5abe))
+- OrGUI.py - fix uncaught exception in integrdata Plot function ([e0ca4fe](https://github.com/tifuchs/orGUI/commit/e0ca4fe320cc833032520ea1cb79498fb49f0eaf))
+- [CTRuc] fix crash in calculation of cartesian position of atom in UnitCell ([774dfe3](https://github.com/tifuchs/orGUI/commit/774dfe34d7672e93830ebd810624bc876181f046))
+- Fix loading of Bragg reflection rocking scans in roIntegr window ([0469f61](https://github.com/tifuchs/orGUI/commit/0469f61eb26c5503491791771e52a69282307a43))
+- [CTRuc] fix loading of unit cell from file with single atom ([baf1d12](https://github.com/tifuchs/orGUI/commit/baf1d121d1c997ab9a9951f6c44acb36c6474aa8))
+- [RoIntegr] fix saving of x y coordinates ([26221e1](https://github.com/tifuchs/orGUI/commit/26221e19313a727c7e1db39fb1c59b27d2f91660))
+- [Ro1DIntegr] fix / remove integration range normalization for F2 calculation ([88403f3](https://github.com/tifuchs/orGUI/commit/88403f33641be594f46c10789705105901da2faf))
+- Fix commit links in clffi.toml template ([eb2d82f](https://github.com/tifuchs/orGUI/commit/eb2d82f796a5f34798d7f78f7794ef73b9231332))
+
+### Removed
+
+- InterlacedScanLoader.py - delete function that was defined twice ([2b77efc](https://github.com/tifuchs/orGUI/commit/2b77efc13d33a788ae2846de29b459f10a8a0e63))
+- [ROIoptions] remove size adjustment of static ROI, remove unused scale factor in ROIoptions dialog. ([4ad37ba](https://github.com/tifuchs/orGUI/commit/4ad37bae01d9d69e5b64025f5851fac5b43e4392))
+
 ## [1.3.0] (2025-07-22)
 
 [dd31b00](https://github.com/tifuchs/orGUI/commit/dd31b000c631d1df3752d39ad2f71414322a49c0)...[ef10ee8](https://github.com/tifuchs/orGUI/commit/ef10ee8e805c13b60bb51361c38868da928d7116)
@@ -464,6 +581,7 @@ in form of a README and a diffractometer image showing the geometry.
 - Remove old reflection spinbox edit, add toolbar buttons instead ([7854679](https://github.com/tifuchs/orGUI/commit/7854679ff96344e40fd9d88334672309f62be219))
 - Remove array index widget from ArrayTableWidget, as only 1D or 2D arrays are used ([25796e2](https://github.com/tifuchs/orGUI/commit/25796e21f103a2a6f9e4dd8544e941bd7886605d))
 
+[1.4.0]: https://github.com/tifuchs/orGUI/compare/1.3.0..v1.4.0
 [1.3.0]: https://github.com/tifuchs/orGUI/compare/1.2.0..1.3.0
 [1.2.0]: https://github.com/tifuchs/orGUI/compare/1.1.2..1.2.0
 [1.1.2]: https://github.com/tifuchs/orGUI/compare/1.1.1..1.1.2
