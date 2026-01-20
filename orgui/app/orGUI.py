@@ -1183,9 +1183,10 @@ ub : gui for UB matrix and angle calculations
                 i += 1
                 
             availname1 = name1 + suffix
-
-            x_coord1_a = xylist[:,0]
-            y_coord1_a = xylist[:,1]
+            
+            x, y = xylist[d] # 
+            # x_coord1_a = xylist[:,0]
+            # y_coord1_a = xylist[:,1]
                         
             datas1 = {
                 "@NX_class": u"NXdata",
@@ -1223,10 +1224,10 @@ ub : gui for UB matrix and angle calculations
                 },
                 "pixelcoord": {
                     "@NX_class": u"NXdetector",
-                    "x" : x_coord1_a,
-                    "y"  : y_coord1_a,
-                    'vsize' : (roi_d[0].stop - roi_d[0].start),
-                    'hsize' : (roi_d[1].stop - roi_d[1].start)
+                    "x" : x,
+                    "y"  : y,
+                    'vsize' : (roi_d[1].stop - roi_d[1].start),
+                    'hsize' : (roi_d[0].stop - roi_d[0].start)
                 },
                 "trajectory" : traj1,
                 "@signal" : u"counters/croibg",
@@ -1322,7 +1323,7 @@ ub : gui for UB matrix and angle calculations
                 bgimg_croi.append(dsc["counters"]["bgimg_croi"])
                 bgimg_bgroi.append(dsc["counters"]["bgimg_bgroi"])
                 
-                # 2D arrays
+                # 1D arrays
                 x.append(dsc["pixelcoord"]["x"])
                 y.append(dsc["pixelcoord"]["y"])
                 
@@ -1376,8 +1377,8 @@ ub : gui for UB matrix and angle calculations
                 "Cfactors_bgroi" : np.vstack(Cfactors_bgroi),
                 "bgimg_croi" : np.vstack(bgimg_croi),
                 "bgimg_bgroi" : np.vstack(bgimg_bgroi),
-                "x" : np.vstack(x),
-                "y" : np.vstack(y),
+                "x" : np.array(x),
+                "y" : np.array(y),
                 "vsize" : np.array(vsize),
                 "hsize" : np.array(hsize),
                 "axis" : np.vstack(axis),
@@ -1531,7 +1532,7 @@ ub : gui for UB matrix and angle calculations
     def _onShowAbout(self):
         dial = AboutDialog(self, __version__)
         dial.exec()
-#        messageStr = """Copyright (c) 2020-2024 Timo Fuchs, published under MIT License
+#        messageStr = """Copyright (c) 2020-2026 Timo Fuchs, published under MIT License
 #        <br> <br>
 #orGUI: Orientation and Integration with 2D detectors (1.0.0).<br>
 #Zenodo. <a href=\"https://doi.org/10.5281/zenodo.12592485\">https://doi.org/10.5281/zenodo.12592485</a> <br> <br> 
