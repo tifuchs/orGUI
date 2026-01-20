@@ -1439,7 +1439,7 @@ class UnitCell(Lattice):
                         if random.random() > occup:
                             positions[no] = np.nan
                         no += 1
-            position_cart = self.R_mat @ (domainmatrix @ positions.T + mat[:,-1])
+            position_cart = self.R_mat @ (domainmatrix @ positions.T + np.atleast_2d(mat[:,-1]).T)
             #position_cart = self.RealspaceMatrix @ positions.T
             if len(translate.shape) > 1:
                 position_cart = np.asarray(translate[:,:-1] @ position_cart)
@@ -1483,7 +1483,7 @@ class UnitCell(Lattice):
                         else:
                             positions[no] = np.array([x + signx*(xno-1),y + signy*(yno-1),z+ signz*(zno-1)]) + translate
                         no += 1
-            positions_c = self.R_mat @ (domainmatrix @ positions.T + mat[:,-1])
+            positions_c = self.R_mat @ (domainmatrix @ positions.T + np.atleast_2d(mat[:,-1]).T)
             
             if len(translate.shape) > 1:
                 positions_c = np.asarray(translate[:,:-1] @ positions_c)
@@ -1855,17 +1855,17 @@ class UnitCell(Lattice):
             uc._test_special_formfactors()
             return uc
         elif len(basis) == 1: 
-            if basis[0].size == 7:
-                basis[0] = np.concatenate((basis[0], [0]))
+            if basis[0].size == 7: # basis is already ndarray with ndim=2 for some reason 
+                basis = np.insert(basis, basis.shape[1], 0, axis=1)
                 if xprfile:
-                    errors[0] = np.concatenate((errors[0], [np.nan]))
+                    errors = np.insert(errors, errors.shape[1], np.nan, axis=1)
             elif basis.shape[1] == 8:
                 pass # all good, layer parameter provided
             else:
                 raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
-            uc.basis = np.array([basis])
+            uc.basis = basis
             if xprfile:
-                uc.errors = np.array([errors])
+                uc.errors = errors
             uc.names = names
             uc.basis_0 = np.copy(uc.basis)
             uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)

@@ -962,20 +962,32 @@ class RockingPeakIntegrator(qt.QMainWindow):
         
         int_data["@NX_class"] = u"NXdetector"
         
-        H_1 = cnters['H_1'][0][()]
-        H_0 = cnters['H_0'][0][()]
+        if 'H_1' in cnters:
+            H_1 = cnters['H_1'][0][()]
+            H_0 = cnters['H_0'][0][()]
 
-        traj1 = {
-            "@NX_class": u"NXcollection",
-            "@direction" : u" Integrated rocking scan along H_1*s + H_0 in reciprocal space",
-            "H_1"  : H_1,
-            "H_0" : H_0,
-            "s" : s_array
-        }
+            traj1 = {
+                "@NX_class": u"NXcollection",
+                "@direction" : u" Integrated rocking scan along H_1*s + H_0 in reciprocal space",
+                "H_1"  : H_1,
+                "H_0" : H_0,
+                "s" : s_array
+            }
 
-        suffix = ''
-        i = 0
-        name1 = str(H_1) + "*s1+" + str(H_0)
+            suffix = ''
+            i = 0
+            name1 = str(H_1) + "*s1+" + str(H_0)
+        else:
+            traj1 = {
+                "@NX_class": u"NXcollection",
+                "@direction" : u" Integrated rocking intensity at fixed position",
+                "s" : s_array
+            }
+
+            suffix = ''
+            i = 0
+            name1 = 'static_rocking_scan'
+            
         while(self._currentRoInfo['name'] + "/measurement/" + name1 + suffix in self.database.nxfile):
             suffix = "_%s" % i
             i += 1
@@ -1265,8 +1277,13 @@ class RockingPeakIntegrator(qt.QMainWindow):
     def plotRoCurve(self, idx):
         ro_curve = self.get_ro_curve(idx)
         s = self._currentRoInfo['s'][idx]
-        hkl = self._currentRoInfo['H_1'] * s + self._currentRoInfo['H_0']
-        title = "Rocking scan at s = %s, HKL = [%.2f %.2f %.2f]" % (s, *hkl)
+        if self._currentRoInfo['type'] == 'hklscan':
+            hkl = self._currentRoInfo['H_1'] * s + self._currentRoInfo['H_0']
+            title = "Rocking scan at s = %s, HKL = [%.2f %.2f %.2f]" % (s, *hkl)
+        else:
+            hkl = self._currentRoInfo['HKL_pk'][idx]
+            title = "Rocking scan at s = %s, HKL = [%.2f %.2f %.2f]" % (s, *hkl)
+        self.plotROIselect.setGraphTitle(title)
         #print('before table clear')
         self.roiwidget.roiTable.clear()
         #print('after table clear')
@@ -1456,25 +1473,36 @@ class RockingPeakIntegrator(qt.QMainWindow):
         axisname = list(positioners.keys())[0]
         axis = positioners[axisname][()]
         
-        H_1 = h5_obj["rois"]['H_1'][()]
-        H_0 = h5_obj["rois"]['H_0'][()]
-        
-        if not ( np.allclose(H_1.T[0], H_1.T[0][0]) and np.allclose(H_1.T[1], H_1.T[1][0]) and np.allclose(H_1.T[2], H_1.T[2][0]) ):
-            raise ValueError("Rocking scan H_1 mismatch: Are these multiple scans?")
-        
-        if not ( np.allclose(H_0.T[0], H_0.T[0][0]) and np.allclose(H_0.T[1], H_0.T[1][0]) and np.allclose(H_0.T[2], H_0.T[2][0])):
-            raise ValueError("Rocking scan H_0 mismatch: Are these multiple scans?")
-        
-        s_array = h5_obj["rois"]['s'][()]
-        
         ddict = {
             'name' : name,
             'axisname' : axisname,
-            'axis' : axis,
-            's' : s_array,
-            'H_0' : H_0[0],
-            'H_1' : H_1[0]
+            'axis' : axis
         }
+        
+        if 'H_1' in h5_obj["rois"]:
+            
+            H_1 = h5_obj["rois"]['H_1'][()]
+            H_0 = h5_obj["rois"]['H_0'][()]
+        
+            if not ( np.allclose(H_1.T[0], H_1.T[0][0]) and np.allclose(H_1.T[1], H_1.T[1][0]) and np.allclose(H_1.T[2], H_1.T[2][0]) ):
+                raise ValueError("Rocking scan H_1 mismatch: Are these multiple scans?")
+            
+            if not ( np.allclose(H_0.T[0], H_0.T[0][0]) and np.allclose(H_0.T[1], H_0.T[1][0]) and np.allclose(H_0.T[2], H_0.T[2][0])):
+                raise ValueError("Rocking scan H_0 mismatch: Are these multiple scans?")
+                
+            ddict['H_0'] = H_0[0]
+            ddict['H_1'] = H_1[0]
+            ddict['type'] = 'hklscan'
+            ddict['HKL_pk'] = h5_obj["rois"]['HKL_pk'][()]
+        elif 's' in h5_obj["rois"]:
+            ddict['type'] = 'static'
+            ddict['HKL_pk'] = h5_obj["rois"]['HKL_pk'][()]
+        else:
+            raise ValueError("Invalid scan: scan has no parameter s")
+            
+        
+        s_array = h5_obj["rois"]['s'][()]
+        ddict['s'] = s_array
         return ddict
     
     

@@ -57,7 +57,7 @@ from .ArrayTableDialog import ArrayEditWidget
 
 from ..backend import udefaults, backends
 from .. import resources
-from . import qutils
+from . import qutils, database
 
 from pyFAI.gui.dialog import DetectorSelectorDialog
 from pyFAI.gui.widgets import GeometryTabs
@@ -446,6 +446,29 @@ class QUBCalculator(qt.QSplitter):
         except Exception as e:
             qt.QMessageBox.warning(self,"Can not read config","Can not read config file:\nException occured during read of configfile %s,\nException:\n %s" % (configfile,e))
             return False
+        
+        if 'Settings' in config: # general program settings
+            settings = config['Settings']
+            try:
+                autoload = settings.getboolean('autoload', True)
+            except Exception as e:
+                autoload = True
+                qt.QMessageBox.warning(self,"Error parsing autoload setting", str(e))
+            try:
+                compression = settings.get('compression', 'Raw')
+            except Exception as e:
+                compression = 'Raw'
+                qt.QMessageBox.warning(self,"Error parsing compression setting", str(e))
+            
+            if compression not in database.FILTERS:
+                qutils.warning_detailed_message(self, "Compression filter not available", 
+                                            "ompression filter not available:\n%s\nSee below for all available filters" % compression,
+                                            str(list(database.FILTERS.keys())))
+                compression = 'Raw'
+            
+            self.mainGui.autoLoadAct.setChecked(autoload)
+            self.mainGui.database.compression = database.FILTERS[compression]
+            
         try:
             machine = config['Machine']
             lattice = config['Lattice']

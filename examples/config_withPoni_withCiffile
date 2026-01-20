@@ -52,3 +52,10 @@ mu = 0.1
 
 chi = 0
 phi = 0
+
+[Settings]
+# automatically load all images to create max / sum image when opening a scan 
+autoload = True 
+# database compression (Multiple options are available: For example: Raw, Blosc-lz4-Shuffle-5, LZ4, GZip)
+# see a selected list here: https://github.com/tifuchs/orGUI/issues/16
+compression = Blosc-lz4-Shuffle-5
