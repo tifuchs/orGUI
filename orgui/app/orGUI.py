@@ -34,6 +34,7 @@ import gc
 import copy
 import sys
 import os
+import re
 from silx.gui import qt
 import warnings
 
@@ -79,6 +80,7 @@ from .database import DataBase, FILTERS
 from ..backend.scans import SimulationScan
 from ..backend import backends
 from ..backend import universalScanLoader
+from ..backend import interlacedScanLoader
 from .. import resources
 
 try:
@@ -162,7 +164,7 @@ class orGUI(qt.QMainWindow):
         #ubWidget.setChildrenCollapsible(False)
         ubLayout = qt.QVBoxLayout()
         ubWidget = qt.QWidget()
-        self.ubcalc = QUBCalculator(configfile, self)
+        self.ubcalc = QUBCalculator(None, self)
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
         
 
@@ -290,6 +292,9 @@ class orGUI(qt.QMainWindow):
         
         self.folderToScan = file.addAction("Generate scan from images")
         self.folderToScan.triggered.connect(self._onLoadScanFromImages)
+
+        self.interlacedScanMenu = file.addAction("Load interlaced/segmented scan")
+        self.interlacedScanMenu.triggered.connect(self._onLoadInterlacedScan)
         file.addSeparator()
 
         self.loadImagesAct = file.addAction("reload images")
@@ -437,6 +442,9 @@ ub : gui for UB matrix and angle calculations
         aboutQtAct.triggered.connect(lambda : qt.QMessageBox.aboutQt(self))
         
         self.setMenuBar(menu_bar)
+        
+        if configfile is not None:
+            self.ubcalc.readConfig(configfile)
 
     def _removeAllIntegrPlotCurves(self):
         # remove plotted curves
@@ -1175,9 +1183,10 @@ ub : gui for UB matrix and angle calculations
                 i += 1
                 
             availname1 = name1 + suffix
-
-            x_coord1_a = xylist[:,0]
-            y_coord1_a = xylist[:,1]
+            
+            x, y = xylist[d] # 
+            # x_coord1_a = xylist[:,0]
+            # y_coord1_a = xylist[:,1]
                         
             datas1 = {
                 "@NX_class": u"NXdata",
@@ -1215,10 +1224,10 @@ ub : gui for UB matrix and angle calculations
                 },
                 "pixelcoord": {
                     "@NX_class": u"NXdetector",
-                    "x" : x_coord1_a,
-                    "y"  : y_coord1_a,
-                    'vsize' : (roi_d[0].stop - roi_d[0].start),
-                    'hsize' : (roi_d[1].stop - roi_d[1].start)
+                    "x" : x,
+                    "y"  : y,
+                    'vsize' : (roi_d[1].stop - roi_d[1].start),
+                    'hsize' : (roi_d[0].stop - roi_d[0].start)
                 },
                 "trajectory" : traj1,
                 "@signal" : u"counters/croibg",
@@ -1314,7 +1323,7 @@ ub : gui for UB matrix and angle calculations
                 bgimg_croi.append(dsc["counters"]["bgimg_croi"])
                 bgimg_bgroi.append(dsc["counters"]["bgimg_bgroi"])
                 
-                # 2D arrays
+                # 1D arrays
                 x.append(dsc["pixelcoord"]["x"])
                 y.append(dsc["pixelcoord"]["y"])
                 
@@ -1368,8 +1377,8 @@ ub : gui for UB matrix and angle calculations
                 "Cfactors_bgroi" : np.vstack(Cfactors_bgroi),
                 "bgimg_croi" : np.vstack(bgimg_croi),
                 "bgimg_bgroi" : np.vstack(bgimg_bgroi),
-                "x" : np.vstack(x),
-                "y" : np.vstack(y),
+                "x" : np.array(x),
+                "y" : np.array(y),
                 "vsize" : np.array(vsize),
                 "hsize" : np.array(hsize),
                 "axis" : np.vstack(axis),
@@ -1523,7 +1532,7 @@ ub : gui for UB matrix and angle calculations
     def _onShowAbout(self):
         dial = AboutDialog(self, __version__)
         dial.exec()
-#        messageStr = """Copyright (c) 2020-2024 Timo Fuchs, published under MIT License
+#        messageStr = """Copyright (c) 2020-2026 Timo Fuchs, published under MIT License
 #        <br> <br>
 #orGUI: Orientation and Integration with 2D detectors (1.0.0).<br>
 #Zenodo. <a href=\"https://doi.org/10.5281/zenodo.12592485\">https://doi.org/10.5281/zenodo.12592485</a> <br> <br> 
@@ -1990,6 +1999,169 @@ ub : gui for UB matrix and angle calculations
             except MemoryError:
                 qutils.warning_detailed_message(self, "Can not create simulation scan","Can not create simualtion scan. Memory is insufficient for the scan size. See details for further information.", traceback.format_exc())
         
+
+        
+    def _onLoadInterlacedScan(self):
+        # GUI function to concatenate multiple scans into one
+        # a user can select which scans to combine in a GUI dialog
+        # uses new class interlacedScan
+
+        # grab the selected h5 file / node from the tree in the scan selector tab
+        model = self.scanSelector.hdfTreeView.model()
+        selection = self.scanSelector.hdfTreeView.selectionModel()
+        indexes = selection.selectedIndexes()
+        if indexes == []:
+            qutils.warning_detailed_message(self, "Can not create interlaced scan","Can not create interlaced scan. Select a node in the tree view first!", traceback.format_exc())
+            return
+        rootI = indexes.pop(0)
+
+        # address the root node to correctly get the scan names
+        if rootI.parent().isValid():
+            h5file = model.data(model.parent(rootI), role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE)
+        else:
+            h5file = model.data(rootI, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE)
+
+        isID31 = self.scanSelector.btid.currentText() in ['ch5523','ch5700','ch5918','ch6392','ch7131','ch7149','ch7856','ch8153','id31_default']
+        kl_full = list(h5file.keys())
+        kl = np.empty(0,dtype=int)
+        for i in kl_full:
+            if isID31:
+                pattern = r'\.\d'
+                result = re.findall(pattern, i)[0][1:]
+                if result == '1':
+                    # select only scan names which are ending on suffix '.1' (fast counters of id31 hdf5 format)
+                    kl = np.append(kl,i) 
+            else:
+                kl = np.append(kl,i) 
+
+        # separate scan nr and delete duplicates suffixes
+        if isID31:
+            # try to get the scan nr and '/title' from the hdf5 file
+            nr = np.empty(0,dtype=int)
+            name = np.empty(0,dtype=str)
+
+            for i in kl:
+                pattern = r'\d+\.'
+                result = re.findall(pattern, i)
+                name = np.append(name,h5file[i +'/title'])
+                nr = np.append(nr,int(result[0][:-1]))
+
+            lsort = np.argsort(nr)[::1]
+            nr = nr[lsort]
+            name = name[lsort]
+        else:
+            nr = np.empty(0,dtype=int)
+            name = np.empty(0,dtype=str)
+            for nth,i in enumerate(kl):
+                name = np.append(name,i)
+                nr = np.append(nr,nth+1)    # create scan nr list with ascending integers, starting with 1
+                                            # This will later be used to address the subscans, so check if your scans are handled like this!!! 
+
+        # open GUI dialog to select which scans to combine
+        interlacedSelectDialog = qt.QDialog()
+
+        llayout = qt.QGridLayout()
+        llayout.addWidget(qt.QLabel("Available scans:"),0,0)
+
+        a = qt.QScrollArea()
+        b = qt.QFormLayout()
+        box = qt.QGroupBox()
+        scanBoxes = []
+        #labels = []
+        for i,item in enumerate(nr):
+            ithScanBox = qt.QCheckBox()
+            scanBoxes.append(ithScanBox)
+            #labels.append(qt.QLabel('Scan '+str(item)+':'+str(name[i][2:-1])))
+            if isID31:
+                b.addRow(qt.QLabel('Scan '+str(item)+': '+name[i].decode()),ithScanBox)
+            else:
+                b.addRow(qt.QLabel('Scan '+str(item)+': '+name[i]),ithScanBox)
+
+        box.setLayout(b)
+        a.setWidget(box)
+        a.setWidgetResizable(True)
+        llayout.addWidget(a,1,0,1,-1)
+
+        llayout.addWidget(qt.QLabel("sort the scans by axis values?"),2,0)
+
+        noScans = qt.QCheckBox()
+        llayout.addWidget(noScans,2,1)
+
+        llayout.addWidget(qt.QLabel("Backend:"),3,0)
+
+        IS_btid = qt.QComboBox()
+        [IS_btid.addItem(bt) for bt in backends.fscans]
+        IS_btid.setCurrentText(self.scanSelector.btid.currentText())
+        llayout.addWidget(IS_btid,3,1)
+        
+        llayout.addWidget(qt.QLabel("scan axis:"),4,0)
+
+        axisbox = qt.QComboBox()
+        [axisbox.addItem(a) for a in ['th','mu']]
+        axisbox.setCurrentText('th')
+        llayout.addWidget(axisbox,4,1)
+
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
+        buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(interlacedSelectDialog.accept)
+        buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(interlacedSelectDialog.reject)
+
+        llayout.addWidget(buttons,5,0,-1,-1)
+        interlacedSelectDialog.setLayout(llayout)
+        interlacedSelectDialog.setWindowTitle("Segmented scan loader")
+
+        if not interlacedSelectDialog.exec() == qt.QDialog.Accepted:
+            return
+        
+        # generate scan objects for selected scans
+        selectedScans = []
+        for i,j in enumerate(scanBoxes):
+            if j.isChecked():
+                selectedScans.append(nr[i])
+                #selectedScans.append(name[i])
+
+        nodes = list(self.scanSelector.hdfTreeView.selectedH5Nodes())
+        obj = nodes[0]
+
+        scansegments = []
+        for i in selectedScans:
+            ddict = dict()
+            ddict['scanno'] = int(i)
+            ddict['file'] = obj.local_filename
+            #ddict['node'] = kl[i]
+            ddict['beamtime'] = IS_btid.currentText()
+            try:
+                scansegments.append(backends.openScan(IS_btid.currentText(),ddict))
+            except Exception as e:
+                msg = qt.QMessageBox()
+                msg.setIcon(qt.QMessageBox.Warning)
+                msg.setWindowTitle("Cannot open scan")
+                msg.setText("Cannot open scan:\n%s\nDo you want to continue?" % e)
+                msg.setDetailedText(traceback.format_exc())
+                msg.setStandardButtons(qt.QMessageBox.Yes | qt.QMessageBox.No)
+                msg.setDefaultButton(qt.QMessageBox.Yes)
+                result = msg.exec()
+                if result != qt.QMessageBox.Yes:
+                    return
+        if not scansegments: # no scans loaded - abort.
+            qt.QMessageBox.critical(self, 'No scans loaded', 'No scans were loaded.')
+            return
+
+        # create interlaced scan object
+        self.scanno = 1
+        self.fscan = interlacedScanLoader.InterlacedScan(scansegments,noScans.isChecked(),axisbox.currentText())
+        self.imageno = 0
+        self.plotImage()
+        self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
+        self.activescanname = "%s-segmentedScan %s %s-%s" % (self.fscan.axisname, ','.join(str(itemNr) for itemNr in selectedScans), np.amin(self.fscan.axis),np.amax(self.fscan.axis))
+
+        # generate sum and max image
+        self.images_loaded = False
+        if self.fscan is not None and self.autoLoadAct.isChecked():
+            self.loadAll()
+            self.scanSelector.showMaxAct.setChecked(False)
+            self.scanSelector.showMaxAct.setChecked(True)
+
+
     def _onLoadScanFromImages(self):
         # generates a scan from a selected folder containing raw detector images
         
@@ -2722,7 +2894,7 @@ ub : gui for UB matrix and angle calculations
         xy1 = yx1[...,::-1]
         xy2 = yx2[...,::-1]
         
-        if not kwargs.get('intersect', False):
+        if not kwargs.get('intersect', False) and self.scanSelector.scanstab.currentIndex() != 1:
             xoffset, yoffset = self.scanSelector.roioptions.get_offsets()
             
             if xoffset != 0. or yoffset != 0.:
@@ -3415,7 +3587,8 @@ Do you want to continue without mask?""")
         coord_restr = np.clip( np.asarray(coords), [0,0], [dethsize, detvsize])
 
         roioptions = self.scanSelector.roioptions.get_parameters()
-        if roioptions['DetectorInclination'] or roioptions['ProjectSampleSize']:
+        current_mode = self.scanSelector.scanstab.currentIndex()
+        if (roioptions['DetectorInclination'] or roioptions['ProjectSampleSize']) and current_mode != 1:
             if roioptions['ProjectSampleSize']:
                 size_exact = ROIutils.calc_corrections(coord_restr, 
                                           self.ubcalc.detectorCal,

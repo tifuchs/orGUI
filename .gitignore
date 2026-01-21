@@ -8,8 +8,10 @@
 *.so
 *.py[cod]
 __pycache__/
+dist/
 build/
 orgui.egg-info/
+orgui/_version.py
 
 # Packages #
 ############
@@ -33,3 +35,4 @@ orgui.egg-info/
 .Trashes
 ehthumbs.db
 Thumbs.db
+.vs/

@@ -932,8 +932,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
         raw_bgroi_errors = np.sqrt(raw_croi_errors)
         bgroi_errors = np.sqrt(croi_errors)
         
-        croibg = (croi - bgroi) / sig_interval # already normalized bg
-        croibg_errors = np.sqrt(croi_errors**2 + bgroi_errors**2) / sig_interval
+        # not divided by sig_interval - see issue #25
+        croibg = (croi - bgroi) # / sig_interval # already normalized bg
+        croibg_errors = np.sqrt(croi_errors**2 + bgroi_errors**2) # / sig_interval
                 
         raw_croibg = raw_croi - raw_bgroi # already normalized bg
         raw_croibg_errors = np.sqrt(raw_croi_errors**2 + raw_bgroi_errors**2)
@@ -992,6 +993,15 @@ class RockingPeakIntegrator(qt.QMainWindow):
             suffix = "_%s" % i
             i += 1
         availname1 = name1 + suffix
+        
+        if cnters['x'].ndim > 1:
+            warnings.warn('You are using an old data base orGUI v1.3.0-alpha'
+                          'X and Y pixel coordinates of rocking scans will be incorrect')
+            x = cnters['x'][:, 0][()] # may provide fix of database here, if anyone asks
+            y = cnters['y'][:, 0][()] # may provide fix of database here, if anyone asks
+        else:
+            x = cnters['x'][()]
+            y = cnters['y'][()]
                     
         datas1 = {
             "@NX_class": u"NXdata",
@@ -1030,8 +1040,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
             },
             "pixelcoord": {
                 "@NX_class": u"NXdetector",
-                "x" : cnters['x'][:, 0][()],
-                "y"  : cnters['x'][:, 1][()]
+                "x" : x,
+                "y"  : y
             },
             'auxillary' : auxil,
             "trajectory" : traj1,

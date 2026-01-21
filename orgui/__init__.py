@@ -29,8 +29,12 @@ __author__ = "Timo Fuchs"
 __copyright__ = "Copyright 2020-2025 Timo Fuchs"
 __credits__ = []
 __license__ = "MIT License"
-__version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
 __all__ = ['main']
+try:
+    from ._version import version as __version__
+except:
+    print('orGUI is not installed. Version number will be incorrect!')
+    __version__ = '1.3.0-unknown'
