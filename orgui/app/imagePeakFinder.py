@@ -30,6 +30,9 @@ from .. import __version__
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
+import logging
+logger = logging.getLogger(__name__)
+
 import sys
 import os
 from silx.gui import qt
@@ -135,7 +138,7 @@ def calc_image_range(fscan, axis_range, **kargs):
             try:
                 imgno = f.result()
             except Exception as e:
-                print("Cannot read image:\n%s" % traceback.format_exc())
+                logger.error("Cannot read image.", exc_info=True)
                 
     return {'max' : imgmax, 'sum' : imgsum, 'rocking_curve' : rocking_curve, 'rocking_axis' : rocking_axis}
 

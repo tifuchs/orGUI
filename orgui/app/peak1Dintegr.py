@@ -33,6 +33,9 @@ from .. import __version__
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 import sys
 import os
@@ -359,13 +362,30 @@ class RockingPeakIntegrator(qt.QMainWindow):
         try:
             self._check_ro_present()
         except Exception as e:
-            qt.QMessageBox.warning(self,'Cannot integrate scan', 'Cannot integrate scan:\n%s' % e)
+            logger.exception('Cannot integrate scan', 
+                                 extra={'title' : 'Cannot integrate scan',
+                                        'show_dialog' : True,
+                                        'description' : str(e),
+                                        'parent' : self,
+                                        'dialog_level' : logging.WARNING})
             return
         try:
             self.integrate()
+        except ValueError as e:
+            if e.args[0] == 'No rocking scan selected.':
+                logger.error('No rocking scan selected.', exc_info=True)
+            else:
+                logger.exception('Error during scan integration', 
+                                 extra={'title' : 'Error during scan integration',
+                                        'show_dialog' : True,
+                                        'description' : str(e),
+                                        'parent' : self})
         except Exception as e:
-            qutils.critical_detailed_message(self,'Error during scan integration', 'Error during scan integration:\n%s' % e, traceback.format_exc())
-            traceback.print_exc()
+            logger.exception('Error during scan integration', 
+                             extra={'title' : 'Error during scan integration',
+                                    'show_dialog' : True,
+                                    'description' : str(e),
+                                    'parent' : self})
             return
         
     def set_roscan(self, name):
@@ -706,7 +726,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
     
     def integrate(self):
         if not self._currentRoInfo:
-            return
+            raise ValueError('No rocking scan selected.')
         curves = self.get_all_ro_curves()
         name = self._currentRoInfo['name']
         h5_obj = self.database.nxfile[name]
@@ -1258,7 +1278,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
         try:
             self._check_ro_present()
         except Exception as e: # non essential: silent
-            qt.QMessageBox.warning(self,'Cannot delete ROIs', 'Cannot delete ROIs:\n%s' % e)
+            logger.warning("Invalid rocking scan info", 
+                 extra={'title' : 'Cannot delete ROIs',
+                        'show_dialog' : True,
+                        'parent' : self,
+                        'description' : 'Cannot delete ROIs:\n%s' % e })
             return
         if self._currentRoInfo:
             roi_name = self.roiwidget.currentRoi.getName()
@@ -1273,7 +1297,12 @@ class RockingPeakIntegrator(qt.QMainWindow):
         try:
             self._check_ro_present()
         except Exception as e: # non essential: silent
-            qt.QMessageBox.warning(self,'Cannot delete ROIs', 'Cannot delete ROIs:\n%s' % e)
+            logger.warning("Invalid rocking scan info", 
+                 extra={'title' : 'Cannot delete ROIs',
+                        'show_dialog' : True,
+                        'parent' : self,
+                        'description' : 'Cannot delete ROIs:\n%s' % e })
+            # qt.QMessageBox.warning(self,'Cannot delete ROIs', 'Cannot delete ROIs:\n%s' % e)
             return
         if self._currentRoInfo:
             if qt.QMessageBox.Yes == qt.QMessageBox.question(self, "Delete All ROIs", "Are you sure you want to delete all ROIs?"):
@@ -1458,11 +1487,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
         try:
             self.set_roscan(name)
         except Exception as e:
-            msgbox = qt.QMessageBox(qt.QMessageBox.Critical, 'Invalid rocking scan info', 
-            'Invalid or missig rocking scan info: %s.\n%s' % (name, e),
-            qt.QMessageBox.Ok, self)
-            msgbox.setDetailedText(traceback.format_exc())
-            clickedbutton = msgbox.exec()
+            logger.exception("Invalid rocking scan info", 
+                 extra={'title' : 'Invalid rocking scan info',
+                        'show_dialog' : True,
+                        'parent' : self,
+                        'description' : 'Invalid or missig rocking scan info: %s.\n%s' % (name, e) })
             return
         
         
@@ -1685,7 +1714,11 @@ class IntegrationEstimator(qt.QDialog):
         try:
             self._verify_ranges()
         except Exception as e:
-            qt.QMessageBox.warning(self, "Invalid input", str(e))
+            logger.exception("Invalid input", 
+                 extra={'title' : 'Invalid input',
+                        'show_dialog' : True,
+                        'parent' : self,
+                        'description' : str(e)})
             return
         self.accept()
         
@@ -1773,7 +1806,11 @@ class ROICreatorDialog(qt.QDialog):
         try:
             self._verify_ranges()
         except Exception as e:
-            qt.QMessageBox.warning(self, "Invalid input", str(e))
+            logger.exception("Invalid input", 
+                 extra={'title' : 'Invalid input',
+                        'show_dialog' : True,
+                        'parent' : self,
+                        'description' : str(e)})
             return
         self.accept()
         

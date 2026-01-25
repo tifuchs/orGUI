@@ -52,6 +52,9 @@ from ..datautils.xrayutils import HKLVlieg, CTRcalc
 from ..datautils.xrayutils import DetectorCalibration
 from .. import resources
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 from silx.io.dictdump import dicttonx ,nxtodict
 
@@ -105,8 +108,9 @@ try:
     FILTERS.update(**BLOSC2_FILTERS)
 
 except Exception as e:
-    print("Unable to load hdf5plugin compression filters:")
-    traceback.print_exc()
+    logger.warning("Unable to load hdf5plugin compression filters", exc_info=True,
+                    extra={'show_dialog' : False})
+
 
 class ConfigData(qt.QObject):
     def __init__(self, config=None):
@@ -414,25 +418,33 @@ class DataBase(qt.QMainWindow):
         try:
             self.saveNewDBFile(filename)
         except DBCloseError as e:
-            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot close old db file', 
-            'Cannot close old db file. The database might be corrupted!:\n%s\nWill proceed with new data base.' % e,
-            qt.QMessageBox.Ok, self)
-            msgbox.setDetailedText(traceback.format_exc())
-            clickedbutton = msgbox.exec()
+            logger.exception("Cannot close old db file. The database might be corrupted!", 
+                         extra={'title' : 'The database might be corrupted',
+                                'description' : 'Will proceed with new data base.',
+                                'show_dialog' : True,
+                                'parent' : self})
+            # msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot close old db file', 
+            # 'Cannot close old db file. The database might be corrupted!:\n%s\nWill proceed with new data base.' % e,
+            # qt.QMessageBox.Ok, self)
+            # msgbox.setDetailedText(traceback.format_exc())
+            # clickedbutton = msgbox.exec()
             try:
                 self.saveNewDBFile(filename)
             except Exception as e:
-                msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
-                'Cannot create new db file.\n%s' % e,
-                qt.QMessageBox.Ok, self)
-                msgbox.setDetailedText(traceback.format_exc())
-                clickedbutton = msgbox.exec()
+                logger.exception("Cannot create db file.", 
+                     extra={'title' : 'Cannot create new db file',
+                            'show_dialog' : True,
+                            'parent' : self})
+                # msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
+                # 'Cannot create new db file.\n%s' % e,
+                # qt.QMessageBox.Ok, self)
+                # msgbox.setDetailedText(traceback.format_exc())
+                # clickedbutton = msgbox.exec()
         except Exception as e:
-            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
-            'Cannot create new db file.\n%s' % e,
-            qt.QMessageBox.Ok, self)
-            msgbox.setDetailedText(traceback.format_exc())
-            clickedbutton = msgbox.exec()
+            logger.exception("Cannot create db file.", 
+                 extra={'title' : 'Cannot create new db file',
+                        'show_dialog' : True,
+                        'parent' : self})
             
         
     def onNewDatabase(self):
@@ -450,25 +462,25 @@ class DataBase(qt.QMainWindow):
         try:
             self.createNewDBFile(filename)
         except DBCloseError as e:
-            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot close old db file', 
-            'Cannot close old db file. The database might be corrupted!:\n%s\nWill proceed with new data base.' % e,
-            qt.QMessageBox.Ok, self)
-            msgbox.setDetailedText(traceback.format_exc())
-            clickedbutton = msgbox.exec()
+            logger.exception("Cannot close old db file. The database might be corrupted!", 
+                         extra={'title' : 'The database might be corrupted',
+                                'description' : 'Will proceed with new data base.',
+                                'show_dialog' : True,
+                                'parent' : self})
             try:
                 self.createNewDBFile(filename)
             except Exception as e:
-                msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
-                'Cannot create new db file.\n%s' % e,
-                qt.QMessageBox.Ok, self)
-                msgbox.setDetailedText(traceback.format_exc())
-                clickedbutton = msgbox.exec()
+                logger.exception("Cannot create db file.", 
+                     extra={'title' : 'Cannot create new db file',
+                            'description' : 'Filename: %s' % filename,
+                            'show_dialog' : True,
+                            'parent' : self})
         except Exception as e:
-            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
-            'Cannot create new db file.\n%s' % e,
-            qt.QMessageBox.Ok, self)
-            msgbox.setDetailedText(traceback.format_exc())
-            clickedbutton = msgbox.exec()
+            logger.exception("Cannot create db file.", 
+                 extra={'title' : 'Cannot create new db file',
+                        'description' : 'Filename: %s' % filename,
+                        'show_dialog' : True,
+                        'parent' : self})
         
 
     def onSaveDBFile(self):
@@ -488,11 +500,11 @@ class DataBase(qt.QMainWindow):
         try:
             self.saveDBFile(filename)
         except Exception as e:
-            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot save db file', 
-            'Cannot open db file %s.' % filename,
-            qt.QMessageBox.Ok, self)
-            msgbox.setDetailedText(traceback.format_exc())
-            clickedbutton = msgbox.exec()
+            logger.exception("Cannot save db file.", 
+                 extra={'title' : 'Cannot save data base file',
+                        'show_dialog' : True,
+                        'description' : 'Filename: %s' % filename,
+                        'parent' : self})
         
     def onOpenDatabase(self):
         fileTypeDict = {'NEXUS Files (*.h5)': '.h5', 'All files (*)': '' }
@@ -511,11 +523,11 @@ class DataBase(qt.QMainWindow):
         try:
             self.openDBFile(filename)
         except:
-            msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot open db file', 
-            'Cannot open db file %s.' % filename,
-            qt.QMessageBox.Ok, self)
-            msgbox.setDetailedText(traceback.format_exc())
-            clickedbutton = msgbox.exec()
+            logger.exception("Cannot open data base file.", 
+                 extra={'title' : 'Cannot open data base file',
+                        'show_dialog' : True,
+                        'description' : 'Filename: %s' % filename,
+                        'parent' : self})
         
     def saveNewDBFile(self, filename):
         alldata = nxtodict(self.nxfile)
@@ -645,7 +657,7 @@ class DataBase(qt.QMainWindow):
             try:
                 self.nxfile.close()
             except RuntimeError as e:
-                print('Closing of database file failed. The database file might be corrupted!')
+                logger.error("Closing of database file failed. The database file might be corrupted!", exc_info=True)
                 self.nxfile = None
                 raise
             
