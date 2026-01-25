@@ -125,7 +125,7 @@ def main():
         qr = mainWindow.frameGeometry()
         qr.moveCenter(current_screen.geometry().center())
         mainWindow.move(qr.topLeft())
-        
+        app.aboutToQuit.connect(mainWindow.database.close)
         return app.exec()
     else:
         raise Exception("%s is no file" % options.configfile)
