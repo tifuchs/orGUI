@@ -109,12 +109,38 @@ def _start_CLI(options):
     
     if os.path.isfile(options.configfile) or options.configfile == defaultconfigfile:
         from IPython.terminal.embed import InteractiveShellEmbed
-        custom_banner = f"""orGUI v. {__version__} console 
+        from IPython.terminal.prompts import Prompts, Token
+        
+        class OrGUIPrompts(Prompts):
+            def in_prompt_tokens(self):
+                return [
+                    (Token.Prompt.Mode, self.vi_mode()),
+                    (
+                        Token.Prompt.LineNumber,
+                        self.shell.prompt_line_number_format.format(
+                            line=1, rel_line=-self.current_line()
+                        ),
+                    ),
+                    (Token.Prompt, "orCLI In["),
+                    (Token.PromptNum, str(self.shell.execution_count)),
+                    (Token.Prompt, ']: '),
+                ]
+
+            def out_prompt_tokens(self):
+                return [
+                    (Token.OutPrompt, '     Out['),
+                    (Token.OutPromptNum, str(self.shell.execution_count)),
+                    (Token.OutPrompt, ']: '),
+                ]
+
+        custom_banner = f"""orCLI {__version__} console  - the command line interface to orGUI
 Available variables:
 orgui : top level gui
 ub : gui for UB matrix and angle calculations 
 """
         ipshell = InteractiveShellEmbed(banner2=custom_banner )
+        ipshell.prompts = OrGUIPrompts(ipshell)
+
         ipshell.enable_gui('qt')
         from silx.gui import qt
         app = qt.QApplication(sys.argv)
