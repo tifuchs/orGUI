@@ -36,9 +36,16 @@ __email__ = "tfuchs@cornell.edu"
 import os
 import sys
 import datetime
+import runpy
 from argparse import ArgumentParser
 import logging 
 from . import logger_settings
+
+def existing_file(path):
+    if not os.path.isfile(path):
+        raise argparse.ArgumentTypeError(f"File '{path}' does not exist")
+    return path
+
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +73,10 @@ def main():
                         action="store_true",
                         default=False,
                         help="Start an orGUI IPython shell (no graphical user interface)")
+    parser.add_argument("-i", "--input", type=existing_file, 
+        help="Path to a batch script file, will be executed with access to the orgui API, orGUI will quit after execution")
+    parser.add_argument("--keep-running", dest='keeprunning', action='store_true', default=False,
+        help="set to keep orGUI running after completion of the batch script")
     parser.add_argument("--opengl", "--gl", dest="opengl",
                         action="store_true",
                         default=False,
@@ -78,7 +89,7 @@ def main():
     locking_parser.add_argument('--hdflocking', '-l', dest='locking', action='store_true', help="HDF5_USE_FILE_LOCKING=True (default)")
     locking_parser.add_argument('--no-hdflocking', '-nl', dest='locking', action='store_false', help="HDF5_USE_FILE_LOCKING=False")
     
-    parser.set_defaults(locking=True)
+    parser.set_defaults(locking=True, )
 
     options = parser.parse_args()
     
@@ -97,6 +108,7 @@ def main():
     if options.cli:
         logger_settings.set_logging_context('cli')
         _start_CLI(options)
+        
     else:
         logger_settings.set_logging_context('gui')
         _start_GUI(options)
@@ -110,7 +122,7 @@ def _start_CLI(options):
     if os.path.isfile(options.configfile) or options.configfile == defaultconfigfile:
         from IPython.terminal.embed import InteractiveShellEmbed
         from IPython.terminal.prompts import Prompts, Token
-        
+
         class OrGUIPrompts(Prompts):
             def in_prompt_tokens(self):
                 return [
@@ -152,10 +164,28 @@ ub : gui for UB matrix and angle calculations
         from .datautils.xrayutils import CTRcalc, CTRplotutil
         logger.info("load orGUI libraries")
         from orgui.app.orGUI import orGUI, UncaughtHook
-        logger.info("starting orGUI")
+        logger.info("loading orGUI")
         mainWindow = orGUI(configfile)
         app.aboutToQuit.connect(mainWindow.database.close)
-        ipshell(local_ns={'app': app, 'orgui': mainWindow, 'ub': mainWindow.ubcalc})
+        
+        namespace = {'app': app, 'orgui': mainWindow, 'ub': mainWindow.ubcalc}
+
+        if options.input:
+            logger.info("Run batch script %s" % options.input)
+            try:
+                runpy.run_path(options.input, init_globals=namespace)
+            except:
+                mainWindow.database.close()
+                app.quit()
+                raise
+            logger.info("Completed batch script %s" % options.input)
+            if not options.keeprunning:
+                logger.info("All tasks completed. Application will now exit.")
+                mainWindow.database.close()
+                app.quit()
+                return
+        logger.info("starting orGUI")
+        ipshell(local_ns=namespace)
         app.quit()
 
 
@@ -187,8 +217,8 @@ def _start_GUI(options):
         logger.info("load orGUI libraries")
         splash.raise_()
         from orgui.app.orGUI import orGUI, UncaughtHook
-        splash.showMessage("starting orGUI", qt.Qt.AlignLeft | qt.Qt.AlignBottom)
-        logger.info("starting orGUI")
+        splash.showMessage("loading orGUI", qt.Qt.AlignLeft | qt.Qt.AlignBottom)
+        logger.info("loading orGUI")
         splash.raise_()
         qt_exception_hook = UncaughtHook()
         mainWindow = orGUI(configfile)
@@ -201,6 +231,20 @@ def _start_GUI(options):
         qr.moveCenter(current_screen.geometry().center())
         mainWindow.move(qr.topLeft())
         app.aboutToQuit.connect(mainWindow.database.close)
+        namespace = {'app': app, 'orgui': mainWindow, 'ub': mainWindow.ubcalc}
+        if options.input:
+            logger.info("Run batch script %s" % options.input)
+            try:
+                runpy.run_path(options.input, init_globals=namespace)
+            except:
+                raise
+            logger.info("Completed batch script %s" % options.input)
+            if not options.keeprunning:
+                logger.info("All tasks completed. Application will now exit.")
+                mainWindow.database.close()
+                app.quit()
+                return
+        logger.info("starting orGUI")
         return app.exec()
     else:
         raise Exception("%s is no file" % options.configfile)

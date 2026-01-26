@@ -119,6 +119,7 @@ class MessageBoxHandler(logging.Handler):
         show_dialog = getattr(record, "show_dialog", False) # only show dialog when explicitly requested
         if not show_dialog:
             return
+        msg = self.format(record)
         defaulttitle =  f"{record.levelname} [{record.module}:{record.funcName}:{record.lineno}]"
         title = getattr(record, "title", defaulttitle)
         description = getattr(record, "description", "")

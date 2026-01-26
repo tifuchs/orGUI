@@ -747,10 +747,16 @@ class QScanSelector(qt.QMainWindow):
         
     def _onLoadScan(self):
         if self.bt_autodetect_enable.isChecked():
-            msgbox = qt.QMessageBox(qt.QMessageBox.Warning,'Cannot auto detect backend', 
-                        'Cannot auto detect beamtime id and corresponding backend in minimal mode.\nPlease first deselect the beamtime auto detection and then chose the correct beamtime or default backend.',
-                        qt.QMessageBox.Ok, self)
-            clickedbutton = msgbox.exec()
+            # msgbox = qt.QMessageBox(qt.QMessageBox.Warning,'Cannot auto detect backend', 
+            #             'Cannot auto detect beamtime id and corresponding backend in minimal mode.\nPlease first deselect the beamtime auto detection and then chose the correct beamtime or default backend.',
+            #             qt.QMessageBox.Ok, self)
+            # clickedbutton = msgbox.exec()
+            logger.error("Cannot auto detect backend.", 
+                 extra={'title' : 'Cannot create new db file',
+                        'description' : 'Cannot auto detect beamtime id and corresponding backend in minimal mode.\nPlease first deselect the beamtime auto detection and then chose the correct beamtime or default backend.',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
             return
         
         # initialize dict to return scan information
