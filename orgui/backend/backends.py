@@ -79,7 +79,7 @@ def getBeamtimeId(dt):
 # add actual backends here, which perform the file reads:
 # They must implement scans.Scan
 
-from .beamline.id31_tools import BlissScan_EBS, BlissScan
+from .beamline.id31_tools import BlissScan_EBS_p4, BlissScan_EBS, BlissScan
 from .beamline.P212_tools import H5Fastsweep
 
 fscans = {'ch5523': BlissScan,
@@ -90,7 +90,8 @@ fscans = {'ch5523': BlissScan,
              'P212_default' : H5Fastsweep,
              'ch7149' : BlissScan_EBS,
              'ch7856' : BlissScan_EBS,
-             'id31_default' : BlissScan_EBS
+             'id31_default' : BlissScan_EBS,
+             'id31_default_p4' : BlissScan_EBS_p4
              }
 
 
@@ -120,7 +121,7 @@ def openScan(btid, ddict):
     elif btid == '20190017' or btid == '20200028' or btid == 'P212_default':
         fscan = fscancls(ddict['file'],ddict['scanno'])
 
-    elif btid == 'ch5700' or btid == 'ch5918' or btid == 'id31_default':
+    elif btid == 'ch5700' or btid == 'ch5918' or btid == 'id31_default' or btid == 'id31_default_p4':
         if 'node' in ddict:
             fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False)
         else:

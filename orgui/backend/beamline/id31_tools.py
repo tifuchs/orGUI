@@ -541,7 +541,349 @@ class BlissScan_EBS(Fastscan):
             imgdata.counters['mondio'] = self.mondio[img]
             
         return imgdata                   
+
+class BlissScan_EBS_p4(Fastscan):
+    def __init__(self, hdffilepath_orNode=None, scanno=None, loadimg=True, saveh5data=False, **keyargs):
+        #self.scanname = scanname
+        self.cameras = []
+        data_1 = None
+        data_2 = None
+        self.loadimg=loadimg
+        excludenames = None if self.loadimg else ['p4_lima1']
+        
+        if hdffilepath_orNode is None:
+            return
+        self.hdffilepath_orNode=hdffilepath_orNode    
+
+        if isinstance(hdffilepath_orNode, str):
+            filepath,filename = os.path.split(hdffilepath_orNode)
+            _,filename_noext = os.path.split(filepath)
+            #filename_noext = filename.split('.')[0]
+            self.filename_base = filename_noext #filename_noext[:filename_noext.rfind('_')]
+            with silx.io.open(hdffilepath_orNode) as f:
+                #print([d for d in f])
+                for d in f:
+                    scansuffix = d.split('_')[-1]
+                    scanname_nosuffix = '_'.join(d.split('_')[:-1])
+                    scanno_s, subscanno = scansuffix.split('.')
+                    if int(scanno_s) == scanno:
+                        break
+                else:
+                    raise IOError("Scan number %s not found in file" % scanno)
+                self.scanno1 = str(scanno) + '.' + '1'
+                self.scanno2 = str(scanno) + '.' + '2'
+                self.scanname_1 = scanname_nosuffix + '_' + self.scanno1
+                self.scanname_2 = scanname_nosuffix + '_' + self.scanno2
+                self.scanname = self.scanname_1
+                if self.scanname_1 in f:
+                    data_1 = dictdump.h5todict(f,self.scanname_1, exclude_names=excludenames)
+                    if 'p4_lima1' in f[self.scanname_1]['measurement']:
+                        self.cameras.append('p4_lima1')
+                        self.nopoints = f[self.scanname_1]['measurement']['p4_lima1'].shape[0]
+                    if self.scanname_2 in f:
+                        data_2 = dictdump.h5todict(f,self.scanname_2, exclude_names=excludenames)
+                else:
+                    data_1 = dictdump.h5todict(f,self.scanno1, exclude_names=excludenames)                
+                    if 'p4_lima1' in f[self.scanno1]['measurement']:
+                        self.cameras.append('p4_lima1')
+                        self.nopoints = f[self.scanno1]['measurement']['p4_lima1'].shape[0]
+                    if self.scanno2 in f:
+                        data_2 = dictdump.h5todict(f,self.scanno2, exclude_names=excludenames)
+                    
+        else:
+            hdffilepath = hdffilepath_orNode.local_filename
+            filepath,filename = os.path.split(hdffilepath)
+            _,filename_noext = os.path.split(filepath)
+            self.filename_base = filename_noext
+            
+            f = hdffilepath_orNode.file
+            for d in f:
+                scansuffix = d.split('_')[-1]
+                scanname_nosuffix = '_'.join(d.split('_')[:-1])
+                scanno_s, subscanno = scansuffix.split('.')
+                
+                if int(scanno_s) == scanno:
+                    break
+            else:
+                raise IOError("Scan number %s not found in file" % scanno)
+            self.scanno1 = str(scanno) + '.' + '1'
+            self.scanno2 = str(scanno) + '.' + '2'
+            self.scanname_1 = scanname_nosuffix + '_' + self.scanno1
+            self.scanname_2 = scanname_nosuffix + '_' + self.scanno2
+            self.scanname = self.scanname_1
+            
+            if self.scanname_1 in f:
+                data_1 = dictdump.h5todict(f,self.scanname_1, exclude_names=excludenames)
+                if 'p4_lima1' in f[self.scanname_1]['measurement']:
+                    self.cameras.append('p4_lima1')
+                    self.nopoints = f[self.scanname_1]['measurement']['p4_lima1'].shape[0]
+                if 'mpx' in f[self.scanname_1]['measurement']:
+                    self.cameras.append('mpx')
+                    self.nopoints = f[self.scanname_1]['measurement']['mpx'].shape[0]
+                if self.scanname_2 in f:
+                    data_2 = dictdump.h5todict(f,self.scanname_2, exclude_names=excludenames)
+            else:
+                data_1 = dictdump.h5todict(f,self.scanno1, exclude_names=excludenames)
+                if 'p4_lima1' in f[self.scanno1]['measurement']:
+                    self.cameras.append('p4_lima1')
+                    self.nopoints = f[self.scanno1]['measurement']['p4_lima1'].shape[0]
+                if 'mpx' in f[self.scanno1]['measurement']:
+                    self.cameras.append('mpx')
+                    self.nopoints = f[self.scanno1]['measurement']['mpx'].shape[0]
+                if self.scanno2 in f:
+                    data_2 = dictdump.h5todict(f,self.scanno2, exclude_names=excludenames)
+        if saveh5data:
+            self.data_1 = data_1
+            self.data_2 = data_2
+        
+        if 'title' in data_1:
+            self.title = data_1['title']
+        
+        self.positioners = data_1['instrument']['positioners']
+        if 'p4_lima1' in data_1['measurement']:
+            self.cameras.append('p4_lima1')
+            self.nopoints = data_1['measurement']['p4_lima1'].shape[0]
+            if self.loadimg:
+                print('load p4 images')
+                self.p4 = data_1['measurement']['p4_lima1'][()]
+            
+        if 'mpx' in data_1['measurement']:
+            self.mpx = data_1['measurement']['mpx'][()]
+            self.nopoints = data_1['measurement']['mpx'].shape[0]
+            self.cameras.append('mpx')        
+        
+        # detect motor scans and select motor data as axis 'th' or 'mu'
+        if 'th' in data_1['measurement']: # HEMD rotation motor
+            self.th = data_1['measurement']['th'][:self.nopoints]
+            if 'th_trig' in data_1['measurement'] and 'th_delta' in data_1['measurement']:
+                self.th = data_1['measurement']['th_trig'][:self.nopoints] + data_1['measurement']['th_delta'][:self.nopoints] / 2
+            self.axisname = 'th'
+            self.mu = self.positioners['mu']
+
+        elif 'nth' in data_1['measurement']: # microstation rotation motor
+            self.th = data_1['measurement']['nth'][:self.nopoints]
+            self.axisname = 'th'
+            self.mu = self.positioners['nai'] *-1 # unsure which sign is correct
+
+        elif 'uth' in data_1['measurement']: # HEIMDALL rotation motor
+            self.th = data_1['measurement']['uth'][:self.nopoints]
+            self.axisname = 'th'
+            self.mu = self.positioners['mu'] *-1
+            
+        elif 'mu' in data_1['measurement']: # maxipix incident angle motor
+            self.mu = data_1['measurement']['mu'][:self.nopoints]
+            self.axisname = 'mu'
+            self.th = self.positioners['th']
+
+        elif 'nai' in data_1['measurement']: # microstation incident angle motor
+            self.mu = data_1['measurement']['nai'][:self.nopoints]
+            self.axisname = 'mu'
+            self.th = self.positioners['nth']
+
+        elif 'linai' in data_1['measurement']: # HEMD incident angle motor
+            lintomu = ID31DiffractLinTilt()
+            if 'muoffset' in keyargs:
+                lintomu.config['muoffset'] = keyargs['muoffset']
+            self.linai = data_1['measurement']['linai'][:self.nopoints]
+            if 'linai_trig' in data_1['measurement'] and 'linai_delta' in data_1['measurement']:
+                self.linai = data_1['measurement']['linai_trig'][:self.nopoints] + data_1['measurement']['linai_delta'][:self.nopoints] / 2
+            self.mu = lintomu.linai_to_mu(self.linai)
+            self.axisname = 'mu'
+            self.th = self.positioners['th']
+        else:
+            self.axisname = 'time'
+            self.th = self.positioners['th']
+            self.mu = self.positioners['mu']
+
+        # define additional metadata counters of id31
+        if 'potv' in data_1['measurement']:
+            self.potv = data_1['measurement']['potv'][:self.nopoints]
+
+        if 'scaled_potv2f' in data_1['measurement']:
+            self.scaled_potv2f = data_1['measurement']['scaled_potv2f'][:self.nopoints]
+            
+        if 'srcur' in data_1['measurement']:
+            self.srcur = data_1['measurement']['srcur'][:self.nopoints]
+        else:
+            self.srcur = np.ones(self.nopoints)
+            
+        if 'timer_trig' in data_1['measurement']:
+            self.time = data_1['measurement']['timer_trig'][:self.nopoints]
+        elif 'elapsed_time' in data_1['measurement']:
+            self.time = data_1['measurement']['elapsed_time'][:self.nopoints]
+        else:
+            raise IOError("Cannot find time counter in scan")
+        
+        if 'epoch_trig' in data_1['measurement']:
+            self.epoch = data_1['measurement']['epoch_trig'][:self.nopoints]
+        elif 'epoch' in data_1['measurement']:
+            self.epoch = data_1['measurement']['epoch'][:self.nopoints]
+        else:
+            raise IOError("Cannot find epoch counter in scan")
+        
+        # read 'slow' counters of second data node of id31 data structure
+        if data_2 is not None:
+            if 'mondio' in data_2['measurement']:
+                try:
+                    mondiointer = scipy.interpolate.interp1d(data_2['measurement']['epoch'],data_2['measurement']['mondio'])
+                    self.mondio = mondiointer(self.epoch)
+                except ValueError as e0:
+                    warnings.warn('Cannot interpolate mondio in scan %s out of dataset %s \n%s' % (self.scanno2, filename, traceback.format_exc()))
+                    self.mondio = data_2['measurement']['mondio']
+                
+            if 'potential' in data_2['measurement']:
+                try:
+                    potentialinter = scipy.interpolate.interp1d(data_2['measurement']['epoch'],data_2['measurement']['potential'])
+                    self.potential = potentialinter(self.epoch)
+                except ValueError as e1:
+                    warnings.warn('Cannot interpolate potential in scan %s out of dataset %s \n%s' % (self.scanno2, filename, traceback.format_exc()))
+                    self.potential = data_2['measurement']['potential']
+                
+            if 'current' in data_2['measurement']:
+                try:
+                    currentinter = scipy.interpolate.interp1d(data_2['measurement']['epoch'],data_2['measurement']['current'])
+                    self.current = currentinter(self.epoch)
+                except ValueError as e2:
+                    warnings.warn('Cannot interpolate current in scan %s out of dataset %s \n%s' % (self.scanno2, filename, traceback.format_exc()))
+                    self.current = data_2['measurement']['current']
+        else: 
+            if 'potential' in data_1['measurement']:
+                self.potential = data_1['measurement']['potential'][:self.nopoints]
+            #else:
+            #    raise IOError("Didn't find potential counter.")
+            if 'current' in data_1['measurement']:
+                self.current = data_1['measurement']['current'][:self.nopoints]
+            #else:
+            #    raise IOError("Didn't find current counter.")
+        if 'mondio' in data_1['measurement']:
+            self.mondio = data_1['measurement']['mondio'][:self.nopoints]
+        
+        if not hasattr(self,'mondio'):
+            self.mondio = np.ones(self.nopoints)
+        self.mondio = self.mondio/np.mean(self.mondio)
+        self.srcur = self.srcur/np.mean(self.srcur)
+        if 'timer_delta' in data_1['measurement']:
+            self.exposure_time = data_1['measurement']['timer_delta'][:self.nopoints]
+        elif 'sec' in data_1['measurement']:
+            self.exposure_time = data_1['measurement']['sec'][:self.nopoints]
+        else:
+            raise IOError("Cannot find exposure time in scan")
+
+        self.relative_exposure = self.exposure_time / np.mean(self.exposure_time)
+        
+        self.offsetindex = 0
+        self.scandatapoints = self.nopoints
+        self.imageno = np.arange(self.nopoints)
+        
+        if hasattr(self,"th"):
+            self.omega = -1*self.th
+            
+        self.axis = getattr(self,self.axisname)
     
+    @classmethod
+    def parse_h5_node(cls, obj):
+        ddict = dict() 
+        scanname = obj.local_name
+        if '_' in scanname:
+            scansuffix = scanname.split('_')[-1]
+        elif '/' in scanname:
+            scansuffix = scanname.split('/')[-1]
+        #scanname_nosuffix = '_'.join(scanname.split('_')[:-1])
+        scanno, subscanno = scansuffix.split('.')
+        ddict['scanno'] = int(scanno)
+        ddict['name'] = obj.local_name
+        return ddict
+        
+    @property
+    def auxillary_counters(self):
+        """Optional: provide a list of counters or motor names, that should 
+        be copied into the orGUI data base for further processing.
+        
+        e.g. return ['exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch']
+        
+        after each integration, orGUI will search for these counter names in the Scan
+        object and copy the entries into the database.
+        """
+        return ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch','scaled_potv2f'] 
+        
+ 
+    # returns single default image!
+    def get_raw_img(self,img):
+        if not hasattr(self, 'p4'):
+            if isinstance(self.hdffilepath_orNode, str):
+                with silx.io.h5py_utils.File(self.hdffilepath_orNode, 'r') as f:
+                    if self.scanname_1 in f:
+                        data_1 = f[self.scanname_1]
+                    else:
+                        data_1 = f[self.scanno1]
+                    image = data_1['measurement']['p4_lima1'][img][()]
+            else:
+                f = self.hdffilepath_orNode.file
+                if self.scanname_1 in f:
+                    data_1 = f[self.scanname_1]
+                else:
+                    data_1 = f[self.scanno1]
+                image = data_1['measurement']['p4_lima1'][img][()]
+        else:
+            image = self.p4[img]
+        return h5_Image(image)
+            
+    def slice(self,startno,endno):
+        if startno > endno:
+            startno, endno = endno, startno
+ 
+        fscan = BlissScan_EBS_p4()
+        
+        for dat in self.__dict__:
+            if isinstance(self.__dict__[dat], np.ndarray):
+                if self.__dict__[dat].ndim > 0:
+                    fscan.__dict__[dat] = copy.deepcopy(self.__dict__[dat][startno:endno])
+                else:
+                    fscan.__dict__[dat] = copy.deepcopy(self.__dict__[dat])
+            else:
+                fscan.__dict__[dat] = copy.deepcopy(self.__dict__[dat])
+                
+        if self.loadimg==False:    
+            with silx.io.h5py_utils.File(self.hdffilepath_orNode, 'r') as f:
+                data_1 = f[self.scanname_1]
+                fscan.p3 = data_1['measurement']['p4_lima1'][startno:endno][()]
+        
+        fscan.offsetindex = copy.deepcopy(startno)
+        fscan.nopoints = copy.deepcopy(endno - startno)
+        
+        return fscan
+        
+
+    def get_p3_img(self,img):
+        #img = img - self.offsetindex
+        imgdata = self.get_raw_img(img)
+        imgdata.counters['Time'] = self.time[img]
+        imgdata.counters['exposure'] = self.exposure_time[img]
+        imgdata.counters['TrigTime'] = self.relative_exposure[img]
+        imgdata.counters['imageno'] = self.imageno[img]
+        if hasattr(self,"th"):
+            if self.axisname == 'th':
+                imgdata.counters['th'] = self.th[img]
+                imgdata.counters['om'] = self.omega[img]
+            else:
+                imgdata.counters['th'] = self.th
+                imgdata.counters['om'] = self.omega
+        #if hasattr(self,"fixed_th"):        
+        #    imgdata.counters['th'] = self.fixed_th
+        #    imgdata.counters['om'] = self.fixed_th*-1
+        if hasattr(self,"mu"):
+            if self.axisname == 'mu':
+                imgdata.counters['mu'] = self.mu[img]
+            else:
+                imgdata.counters['mu'] = self.mu
+        if self.srcur is not None:
+            imgdata.counters['srcur'] = self.srcur[img]
+        
+        if self.mondio is not None:
+            imgdata.counters['mondio'] = self.mondio[img]
+            
+        return imgdata      
+
 # TODO: change subclassing! this is terrible, but works for the moment
 class BlissScan(Fastscan):
     def __init__(self,hdffilepath, scanname):
