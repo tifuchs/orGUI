@@ -68,3 +68,4 @@ include-package-data = false
 
 [tool.setuptools_scm]
 version_file = "orgui/_version.py"
+fallback_version = "1.4.1+nogit"
