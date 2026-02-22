@@ -37,6 +37,7 @@ import os
 import sys
 import datetime
 import runpy
+import argparse
 from argparse import ArgumentParser
 import logging 
 from . import logger_utils
@@ -45,6 +46,19 @@ def existing_file(path):
     if not os.path.isfile(path):
         raise argparse.ArgumentTypeError(f"File '{path}' does not exist")
     return path
+
+def writable_file(path: str):
+    """Argparse type: ensure the file can be created or written."""
+    try:
+        # Try opening the file in append mode; creates it if needed
+        with open(path, "a"):
+            pass
+    except Exception as e:
+        raise argparse.ArgumentTypeError(
+            f"Cannot write to '{path}': {e.strerror}"
+        ) from e
+    return path
+
 
 
 logger = logging.getLogger(__name__)
@@ -81,6 +95,11 @@ def main():
                         action="store_true",
                         default=False,
                         help="Enable OpenGL rendering (else matplotlib is used)")
+    parser.add_argument("--logfile", type=writable_file, 
+                        help="Path for a log file (default level: INFO)")
+    parser.add_argument("--errorlog", type=writable_file, 
+                        help="Path for a separate error log file")
+
     group = parser.add_argument_group('HDF5 file locking', "Sets HDF5_USE_FILE_LOCKING variable. "
                         "Setting to False can resolve some file read issues "
                         "but can also cause file corruption! "
@@ -92,6 +111,55 @@ def main():
     parser.set_defaults(locking=True, )
 
     options = parser.parse_args()
+    
+    # set up log files first
+    
+    root_logger = logging.getLogger() # use root logger, i.e. log everything
+    
+    formatter = logging.Formatter(
+        "%(levelname)s:%(asctime)s:%(name)s:%(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S"
+    )
+
+    console_stdout = logging.StreamHandler(sys.stdout)
+    console_stdout.setLevel(logging.INFO)
+    console_stdout.addFilter(lambda r: r.levelno < logging.WARNING)
+    console_stdout.setFormatter(formatter)
+    root_logger.addHandler(console_stdout)
+
+    console_stderr = logging.StreamHandler(sys.stderr)
+    console_stderr.setLevel(logging.WARNING)
+    console_stderr.setFormatter(formatter)
+    root_logger.addHandler(console_stderr)
+
+    root_logger.setLevel(logging.WARNING)
+    
+    orgui_logger = logging.getLogger() # use root logger for now, i.e. log everything
+    
+    orgui_logger.setLevel(logging.INFO)
+    
+    
+    if options.logfile:
+        # use root logger, i.e. log everything
+        formatter = logging.Formatter(
+            "%(levelname)s:%(asctime)s:%(name)s:%(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S"
+        )
+        logfile_handler = logging.FileHandler(options.logfile)
+        logfile_handler.setLevel(logging.INFO)
+        logfile_handler.setFormatter(formatter)
+        orgui_logger.addHandler(logfile_handler)
+    
+    if options.errorlog:
+        
+        formatter = logging.Formatter(
+            "%(levelname)s:%(asctime)s:%(name)s:Line:%(lineno)d:%(funcName)s():%(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S"
+        )
+        errorlog_handler = logging.FileHandler(options.errorlog)
+        errorlog_handler.setLevel(logging.ERROR)
+        errorlog_handler.setFormatter(formatter)
+        orgui_logger.addHandler(errorlog_handler)
     
     if "HDF5_USE_FILE_LOCKING" not in os.environ:
         if options.locking:

@@ -36,13 +36,6 @@ import os
 import sys
 import logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s:%(asctime)s:%(name)s:%(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S"
-)
-
-
 from . import __version__
 
 from silx.gui import qt
@@ -144,8 +137,9 @@ def set_logging_context(context):
     if context == _LOGGING_CONTEXT:
         return
     for h in logger.handlers[:]:
-        logger.removeHandler(h)
-        h.close()
+        if isinstance(h, (CLIExceptionHandler, MessageBoxHandler)):
+            logger.removeHandler(h)
+            h.close()
     
     if context.lower() == 'gui':
         handler = MessageBoxHandler()
