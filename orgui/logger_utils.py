@@ -36,6 +36,13 @@ import os
 import sys
 import logging
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(asctime)s:%(name)s:%(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S"
+)
+
+
 from . import __version__
 
 from silx.gui import qt
@@ -43,12 +50,68 @@ from silx.gui import icons
 import numpy as np
 import traceback
 
+from abc import ABC, abstractmethod
+import inspect
 
-# QMetaObject.invokeMethod(
-#             QApplication.instance(),
-#             lambda: show_messagebox(level, msg),
-#             Qt.QueuedConnection
-#         )
+
+class Progress(ABC):
+    def __init__(self, logger_name : str, total: int, title: str = "", **kwargs):
+        self.total = total
+        self.title = title
+
+    @abstractmethod
+    def update(self, value: int, message: str = ""):
+        pass
+
+    @abstractmethod
+    def finish(self):
+        pass
+        
+    def wasCanceled(self):
+        return False
+
+
+class LogProgress(Progress):
+    def __init__(self, logger_name : str, total: int, title: str = "", **kwargs):
+        super().__init__(logger_name, total, title)
+        self.logger = logging.getLogger(logger_name)
+        self.logger.info(f"Start {self.title}")
+        self.logevery = kwargs.get('logevery', 100)
+
+    def update(self, value: int, message: str = ""):
+        if not (value % self.logevery):
+            percent = (value / self.total) * 100
+            if message == '':
+                self.logger.info(f"PROGRESS:{self.title}:{percent:.1f}\%")
+            else:
+                self.logger.info(f"PROGRESS:{self.title}:{percent:.1f}\%:{message}")
+
+    def finish(self):
+        self.logger.info(f"PROGRESS:{self.title}:COMPLETED")
+
+
+class QtProgress(LogProgress):
+    def __init__(self, logger_name : str ,total: int, title: str = "", parent: qt.QWidget = None, **kwargs):
+        super().__init__(logger_name, total, title, **kwargs)
+        self.dialog = qt.QProgressDialog(title, "abort", 0, total, parent)
+        self.dialog.setWindowTitle(title)
+        self.dialog.setWindowModality(qt.Qt.WindowModal)
+        self.dialog.setValue(0)
+        self.dialog.show()
+
+    def update(self, value: int, message: str = ""):
+        super().update(value, message)
+        self.dialog.setValue(value)
+        if message:
+            self.dialog.setLabelText(message)
+
+    def finish(self):
+        super().finish()
+        self.dialog.setValue(self.total)
+        self.dialog.close()
+
+    def wasCanceled(self):
+        return self.dialog.wasCanceled()
 
 
 def messagebox_detailed_message(parent, title, text, detailed_text, icon, buttons=qt.QMessageBox.Ok):
@@ -98,6 +161,17 @@ def set_logging_context(context):
         _LOGGING_CONTEXT = 'cli'
     else:
         raise ValueError('Logging context %s is unknown.' % context)
+        
+def create_progress_logger(parent : qt.QWidget, total: int, title: str = "") -> Progress:
+    caller_module = inspect.getmodule(inspect.stack()[1][0]).__name__
+    context = get_logging_context()
+    if context == 'cli':
+        return LogProgress(caller_module, total, title)
+    elif context == 'gui':
+        return QtProgress(caller_module, total, title, parent)
+    else:
+        raise RuntimeError('Progress logger for context %s is unknown' % context)
+
         
 
 class CLIExceptionHandler(logging.Handler):

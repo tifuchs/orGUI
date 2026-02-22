@@ -39,7 +39,7 @@ import datetime
 import runpy
 from argparse import ArgumentParser
 import logging 
-from . import logger_settings
+from . import logger_utils
 
 def existing_file(path):
     if not os.path.isfile(path):
@@ -106,18 +106,18 @@ def main():
         logger.info("No hdf5 locking. This is potentially dangerous and can cause file corruption. Especially if orGUI crashes.")
     
     if options.cli:
-        logger_settings.set_logging_context('cli')
+        logger_utils.set_logging_context('cli')
         _start_CLI(options)
         
     else:
-        logger_settings.set_logging_context('gui')
+        logger_utils.set_logging_context('gui')
         _start_GUI(options)
 
         
 def _start_CLI(options):
     
-    os.environ["QT_QPA_PLATFORM"] = "offscreen" # maybe use minimal instead
-    os.environ["QT_LOGGING_RULES"] = "*.warning=false"
+    os.environ["QT_QPA_PLATFORM"] = "minimal" # "offscreen" # maybe use minimal instead
+    # os.environ["QT_LOGGING_RULES"] = "*.warning=false"
     
     if os.path.isfile(options.configfile) or options.configfile == defaultconfigfile:
         from IPython.terminal.embed import InteractiveShellEmbed
@@ -178,6 +178,7 @@ ub : gui for UB matrix and angle calculations
                 mainWindow.database.close()
                 app.quit()
                 raise
+                
             logger.info("Completed batch script %s" % options.input)
             if not options.keeprunning:
                 logger.info("All tasks completed. Application will now exit.")
@@ -191,6 +192,7 @@ ub : gui for UB matrix and angle calculations
 
 def _start_GUI(options):
     from silx.gui import qt
+    import silx
     
     if options.opengl:
         silx.config.DEFAULT_PLOT_BACKEND = "opengl"

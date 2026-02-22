@@ -675,7 +675,27 @@ class QScanSelector(qt.QMainWindow):
         
         
         maintab.addTab(self.roiIntegrateTab,"ROI integration")
-        
+
+    def set_integration_options(self, ddict):
+        for key in ddict:
+            if key == 'mask':
+                self.useMaskBox.setChecked(ddict[key])
+            elif key == 'solidAngle':
+                self.useSolidAngleBox.setChecked(ddict[key])
+            elif key == 'polarization':
+                self.usePolarizationBox.setChecked(ddict[key])
+            elif key == 'advanced':
+                self.roioptions.set_parameters(ddict[key])
+
+    def get_integration_options(self):
+        ddict = {}
+        ddict['mask'] = self.useMaskBox.isChecked()
+        ddict['solidAngle'] = self.useSolidAngleBox.isChecked()
+        ddict['polarization'] = self.usePolarizationBox.isChecked()
+        ddict['advanced'] = self.roioptions.get_parameters()
+        return ddict
+
+
     def _on_ro_H_0_changed(self, hkl):
         label = "H: %s K: %s L: %s" % tuple(hkl)
         self._H_0_label.setText(label)
@@ -752,7 +772,7 @@ class QScanSelector(qt.QMainWindow):
             #             qt.QMessageBox.Ok, self)
             # clickedbutton = msgbox.exec()
             logger.error("Cannot auto detect backend.", 
-                 extra={'title' : 'Cannot create new db file',
+                 extra={'title' : 'Cannot auto detect backend',
                         'description' : 'Cannot auto detect beamtime id and corresponding backend in minimal mode.\nPlease first deselect the beamtime auto detection and then chose the correct beamtime or default backend.',
                         'show_dialog' : True,
                         "dialog_level" : logging.WARNING,
@@ -792,8 +812,13 @@ class QScanSelector(qt.QMainWindow):
                 ddict2 = backends.fscans[btid].parse_h5_node(obj)
                 ddict['name'] = ddict2['name']
             else:
-                print('active node does not match selected file')
-
+                logger.warning("active node does not match selected file.", 
+                    extra={'title' : 'active node does not match selected file.',
+                        'show_dialog' : False,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+                # print('active node does not match selected file')
+        logger.info('Load scan with info %s' % ddict)
         self.sigScanChanged.emit(ddict)
         
     def _onLoadBackend(self):
@@ -811,7 +836,12 @@ class QScanSelector(qt.QMainWindow):
         try:
             self.loadBackendFile(filename)
         except:
-            qutils.warning_detailed_message(self, "Cannot load backend", "Cannot load backend", traceback.format_exc())
+            logger.exception("Cannot load backend.",
+                 extra={'title' : 'Cannot load backend',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+            # qutils.warning_detailed_message(self, "Cannot load backend", "Cannot load backend", traceback.format_exc())
 
     def loadBackendFile(self, filename):
         backend_file = runpy.run_path(filename)
