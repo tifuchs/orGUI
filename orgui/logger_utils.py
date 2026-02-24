@@ -75,9 +75,9 @@ class LogProgress(Progress):
         if not (value % self.logevery):
             percent = (value / self.total) * 100
             if message == '':
-                self.logger.info(f"PROGRESS:{self.title}:{percent:.1f}\%")
+                self.logger.info(f"PROGRESS:{self.title}:{percent:.1f}%")
             else:
-                self.logger.info(f"PROGRESS:{self.title}:{percent:.1f}\%:{message}")
+                self.logger.info(f"PROGRESS:{self.title}:{percent:.1f}%:{message}")
 
     def finish(self):
         self.logger.info(f"PROGRESS:{self.title}:COMPLETED")

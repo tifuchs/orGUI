@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 import sys
 import os
 import shutil
+from scipy.optimize import root_scalar
+import numpy as np
+
 from dateutil import parser as dateparser
 from datetime import datetime
 
@@ -499,13 +502,13 @@ class QScanSelector(qt.QMainWindow):
         self.roscanMaxS.setRange(-20000,20000)
         self.roscanMaxS.setDecimals(3)
         self.roscanMaxS.setValue(6.)
-        self.roscanMaxS.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.roscanMaxS.valueChanged.connect(lambda : self.onRoSChanged)
         self.roscanDeltaS = qt.QDoubleSpinBox()
         self.roscanDeltaS.setRange(0.00000001,20000)
         self.roscanDeltaS.setDecimals(5)
         self.roscanDeltaS.setValue(0.1)
-        self.roscanDeltaS.setSingleStep(0.1)
-        self.roscanDeltaS.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.roscanDeltaS.setSingleStep(0.01)
+        self.roscanDeltaS.valueChanged.connect(self.onRoSChanged)
         
         maxSlayout = qt.QHBoxLayout()
         maxSlayout.addWidget(qt.QLabel("Max S:"))
@@ -675,6 +678,76 @@ class QScanSelector(qt.QMainWindow):
         
         
         maintab.addTab(self.roiIntegrateTab,"ROI integration")
+        
+    def onRoSChanged(self):
+        """validate that delta S is not too small for the detector resolution.
+        
+        Clip to lowest deltaS if deltaS is too small. Currently it is the median.
+        
+        """
+        if self.scanstab.currentIndex() == 2:
+            if self.intersS1Act.isChecked():
+                intersect = 1
+            elif self.intersS2Act.isChecked():
+                intersect = 2
+            else:
+                intersect = 1 # default
+            
+            xy_key = 'xy_%s' % intersect
+            mask_key = 'mask_%s' % intersect
+            
+            try: 
+                refl_dict = self.parentmainwindow.get_rocking_coordinates()
+            except Exception as e:
+                logger.warning('Cannot verify deltaS range', exc_info=True,
+                     extra={'title' : 'Cannot verify deltaS range',
+                            'description' : 'Cannot verify deltaS range',
+                            'show_dialog' : False,
+                            "dialog_level" : logging.WARNING,
+                            'parent' : self})
+                self.sigROIChanged.emit()
+                return
+            
+            xy = refl_dict[xy_key][refl_dict[mask_key]]
+            
+            pixeldiff = np.linalg.norm(np.diff(xy,axis=0), axis=1)
+            
+            # if np.any(pixeldiff < 1.):
+            if np.median(pixeldiff) < 1.:
+                try:
+                    with blockSignals(self.roscanDeltaS):
+                        def fun(x):
+                            try:
+                                refl_dict = self.parentmainwindow.get_rocking_coordinates(step_width=x)
+                            except:
+                                logger.exception('foo')
+                                return np.inf
+                            xy = refl_dict[xy_key][refl_dict[mask_key]]
+                            pixeldiff = np.linalg.norm(np.diff(xy,axis=0), axis=1)
+                            medi = np.median(pixeldiff)
+                            if np.isnan(medi):
+                                medi = np.inf
+                            # return np.amin(pixeldiff) - 1.0000001 # no pixel overlap, fails if CTR points are very close together
+                            return medi - 1.0000001 # add a little bit to enforce no pixel overlap
+                        sol = root_scalar(fun, bracket=[self.roscanDeltaS.value(), 5.])
+                        self.roscanDeltaS.setValue(sol.root)
+                except:
+                    logger.warning('Cannot verify deltaS range', exc_info=True,
+                             extra={'title' : 'Cannot verify deltaS range',
+                                    'description' : 'Cannot verify deltaS range',
+                                    'show_dialog' : False,
+                                    "dialog_level" : logging.WARNING,
+                                    'parent' : self})
+        else:
+            logger.warning('Cannot verify deltaS range',
+                     extra={'title' : 'Cannot verify deltaS range',
+                            'description' : 'Cannot verify deltaS range',
+                            'show_dialog' : False,
+                            "dialog_level" : logging.WARNING,
+                            'parent' : self})
+            
+        self.sigROIChanged.emit()
+        
 
     def set_integration_options(self, ddict):
         for key in ddict:

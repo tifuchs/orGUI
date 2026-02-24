@@ -1124,7 +1124,10 @@ class VliegAngles():
                               (1 / (np.cos(gamma)*np.cos(alpha)))
             mask = np.logical_or(accos_arg > 0.99, accos_arg < -0.99) # handle numerical precision issue close to arccos(1). 
             accos_arg[mask] = np.round(accos_arg[mask], np.finfo(np.float64).precision - 2)
-            delta = np.arccos(accos_arg)
+            with np.errstate(invalid='ignore'):
+                delta = np.arccos(accos_arg)
+
+            # delta = np.arccos(accos_arg)
 
             gamma = np.full_like(delta,gamma) if np.array(gamma).size < 2 else gamma
             alpha = np.full_like(delta,alpha) if np.array(alpha).size < 2 else alpha
