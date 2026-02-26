@@ -29,6 +29,10 @@ __version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
+import logging
+from .. import logger_utils
+logger = logging.getLogger(__name__)
+
 from io import StringIO
 from silx.gui import qt
 from silx.gui import icons
@@ -444,7 +448,13 @@ class QUBCalculator(qt.QSplitter):
             else:
                 raise Exception("File does not exist")
         except Exception as e:
-            qt.QMessageBox.warning(self,"Can not read config","Can not read config file:\nException occured during read of configfile %s,\nException:\n %s" % (configfile,e))
+            logger.exception("Can not read config.", 
+                 extra={'title' : 'Can not read config',
+                        'description' : "Can not read config file:\nException occured during read of configfile %s" % (configfile),
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+            # qt.QMessageBox.warning(self,"Can not read config","Can not read config file:\nException occured during read of configfile %s,\nException:\n %s" % (configfile,e))
             return False
         
         if 'Settings' in config: # general program settings
@@ -453,17 +463,35 @@ class QUBCalculator(qt.QSplitter):
                 autoload = settings.getboolean('autoload', True)
             except Exception as e:
                 autoload = True
-                qt.QMessageBox.warning(self,"Error parsing autoload setting", str(e))
+                logger.exception("Error parsing autoload setting.", 
+                     extra={'title' : 'Error parsing autoload setting',
+                            'description' : "Error parsing autoload setting in file %s" % (configfile),
+                            'show_dialog' : True,
+                            "dialog_level" : logging.WARNING,
+                            'parent' : self})
+                # qt.QMessageBox.warning(self,"Error parsing autoload setting", str(e))
             try:
                 compression = settings.get('compression', 'Raw')
             except Exception as e:
                 compression = 'Raw'
-                qt.QMessageBox.warning(self,"Error parsing compression setting", str(e))
+                logger.exception("Error parsing compression setting.", 
+                     extra={'title' : 'Error parsing compression setting',
+                            'description' : "Error parsing compression setting in file %s" % (configfile),
+                            'show_dialog' : True,
+                            "dialog_level" : logging.WARNING,
+                            'parent' : self})
+                # qt.QMessageBox.warning(self,"Error parsing compression setting", str(e))
             
             if compression not in database.FILTERS:
-                qutils.warning_detailed_message(self, "Compression filter not available", 
-                                            "ompression filter not available:\n%s\nSee below for all available filters" % compression,
-                                            str(list(database.FILTERS.keys())))
+                logger.error("Compression filter not available", 
+                     extra={'title' : "Compression filter not available",
+                            'description' : "compression filter not available:\n%s\nSee below for all available filters\n%s" % (compression, str(list(database.FILTERS.keys())) ),
+                            'show_dialog' : True,
+                            "dialog_level" : logging.WARNING,
+                            'parent' : self})
+                #qutils.warning_detailed_message(self, "Compression filter not available", 
+                #                            "compression filter not available:\n%s\nSee below for all available filters\n%s" % (compression, str(list(database.FILTERS.keys())) ),
+                #                            str(list(database.FILTERS.keys())))
                 compression = 'Raw'
             
             self.mainGui.autoLoadAct.setChecked(autoload)
@@ -535,7 +563,13 @@ class QUBCalculator(qt.QSplitter):
                             xtalpath = os.path.join(os.path.dirname(p), lattice['crystal'])
                         self.crystalparams.loadUnitCell(xtalpath)
                     except Exception:
-                        qt.QMessageBox.warning(self,"Did not find crystal","Can not find crystal <%s> \nException occured during read of configfile %s,\nException:\n%s" % (lattice['crystal'],traceback.format_exc()))
+                        logger.exception("Did not find crystal", 
+                        extra={'title' : "Did not find crystal",
+                                'description' : "Can not find crystal <%s> \nException occured during read of configfile" % (lattice['crystal']),
+                                'show_dialog' : True,
+                                "dialog_level" : logging.WARNING,
+                                'parent' : self})
+                        # qt.QMessageBox.warning(self,"Did not find crystal","Can not find crystal <%s> \nException occured during read of configfile %s,\nException:\n%s" % (lattice['crystal'],traceback.format_exc()))
                 else:
                     self.crystalparams.crystalComboBox.setCurrentIndex(idx)
                     self.crystalparams.onSwitchCrystal(idx) # overrides refraction index
@@ -599,12 +633,19 @@ class QUBCalculator(qt.QSplitter):
                         self.mainGui.scanSelector.btid.setCurrentText(beamtime)
                         self.mainGui.scanSelector.bt_autodetect_enable.setChecked(False)
                     else:
+                        
                         raise ValueError("Cannot find beamtime %s in the list of available backends" % beamtime)
             #self.machineParams.set_detector(self.detectorCal.detector)
             return True
             
         except Exception as e:
-            qt.QMessageBox.warning(self,"Can not parse config","Can not parse config file:\nException occured during parsing of configfile %s,\nException:\n %s" % (configfile,traceback.format_exc()))
+            logger.exception("Can not parse config", 
+                 extra={'title' : 'Can not parse config file',
+                        'description' : "Can not parse config file:\nException occured during parsing of configfile %s" % (configfile),
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+            # qt.QMessageBox.warning(self,"Can not parse config","Can not parse config file:\nException occured during parsing of configfile %s,\nException:\n %s" % (configfile,traceback.format_exc()))
             return False
         
     def toFallbackConfig(self):
