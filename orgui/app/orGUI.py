@@ -134,9 +134,6 @@ class orGUI(qt.QMainWindow):
         self.numberthreads = int(min(os.cpu_count(), 16)) if os.cpu_count() is not None else 1 
         self.maxMemory = MAX_MEMORY
         self.maxROIs = MAX_ROIS_DISPLAY
-
-        if 'SLURM_CPUS_ON_NODE' in os.environ:
-            self.numberthreads = int(os.environ['SLURM_CPUS_ON_NODE'])
         
         self.filedialogdir = os.getcwd()
         

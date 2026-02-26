@@ -99,7 +99,10 @@ def main():
                         help="Path for a log file (default level: INFO)")
     parser.add_argument("--errorlog", type=writable_file, 
                         help="Path for a separate error log file")
-
+    
+    parser.add_argument("--cpus", type=int, 
+                        help="Number of threads used for computation and file reads (will use SLURM_CPUS_ON_NODE or NSLOTS if available, or try to detect otherwise)")
+    
     group = parser.add_argument_group('HDF5 file locking', "Sets HDF5_USE_FILE_LOCKING variable. "
                         "Setting to False can resolve some file read issues "
                         "but can also cause file corruption! "
@@ -108,7 +111,7 @@ def main():
     locking_parser.add_argument('--hdflocking', '-l', dest='locking', action='store_true', help="HDF5_USE_FILE_LOCKING=True (default)")
     locking_parser.add_argument('--no-hdflocking', '-nl', dest='locking', action='store_false', help="HDF5_USE_FILE_LOCKING=False")
     
-    parser.set_defaults(locking=True, )
+    parser.set_defaults(locking=True)
 
     options = parser.parse_args()
     
@@ -173,16 +176,31 @@ def main():
         logger.info("HDF5_USE_FILE_LOCKING=%s" % os.environ["HDF5_USE_FILE_LOCKING"])
         logger.info("No hdf5 locking. This is potentially dangerous and can cause file corruption. Especially if orGUI crashes.")
     
+    if options.cpus:
+        ncpus = options.cpus
+    else:
+        if 'SLURM_CPUS_ON_NODE' in os.environ:
+            ncpus = int(os.environ['SLURM_CPUS_ON_NODE'])
+            logger.info('Detected SLURM_CPUS_ON_NODE=%s (on SLURM).' % ncpus)
+        elif 'NSLOTS' in os.environ:
+            ncpus = int(os.environ['NSLOTS'])
+            logger.info('Detected NSLOTS=%s. (on SGE).' % ncpus)
+        else:
+            ncpus = int(min(os.cpu_count(), 16)) if os.cpu_count() is not None else 1
+            logger.info('Detected ncpus=%s. (capped to 16)' % ncpus)
+    logger.info('Using ncpus=%s. (capped to 16)' % ncpus)
+
+    
     if options.cli:
         logger_utils.set_logging_context('cli')
-        _start_CLI(options)
+        _start_CLI(options, ncpus)
         
     else:
         logger_utils.set_logging_context('gui')
-        _start_GUI(options)
+        _start_GUI(options, ncpus)
 
         
-def _start_CLI(options):
+def _start_CLI(options, ncpu):
     
     os.environ["QT_QPA_PLATFORM"] = "minimal" # "offscreen" # maybe use minimal instead
     # os.environ["QT_LOGGING_RULES"] = "*.warning=false"
@@ -234,6 +252,7 @@ ub : gui for UB matrix and angle calculations
         from orgui.app.orGUI import orGUI, UncaughtHook
         logger.info("loading orGUI")
         mainWindow = orGUI(configfile)
+        mainWindow.numberthreads = ncpu
         app.aboutToQuit.connect(mainWindow.database.close)
         
         namespace = {'app': app, 'orgui': mainWindow, 'ub': mainWindow.ubcalc}
@@ -258,7 +277,7 @@ ub : gui for UB matrix and angle calculations
         app.quit()
 
 
-def _start_GUI(options):
+def _start_GUI(options, ncpu):
     from silx.gui import qt
     import silx
     
@@ -292,6 +311,7 @@ def _start_GUI(options):
         splash.raise_()
         qt_exception_hook = UncaughtHook()
         mainWindow = orGUI(configfile)
+        mainWindow.numberthreads = ncpu
         qt_exception_hook.set_orgui(mainWindow)
         splash.finish(mainWindow)
 
