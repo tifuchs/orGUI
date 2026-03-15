@@ -228,8 +228,8 @@ class Detector2D_SXRD(geometry.Geometry):
         
         """
         if self._cached_array.get("gamma_p") is None or self._cached_array.get("delta_p") is None:
-            azimuth = self.chiArray(shape=shape) + self._deltaChi
-            tth = self.array_from_unit(unit=pyFAI.units.TTH_RAD)
+            azimuth = self.center_array(shape, unit=pyFAI.units.CHI_RAD) + self._deltaChi
+            tth = self.center_array(shape,unit=pyFAI.units.TTH_RAD)
             sintth = np.sin(tth); costth = np.cos(tth)
             
             delta_p = np.arctan2(sintth*np.sin(azimuth), costth)
@@ -383,30 +383,14 @@ class Detector2D_SXRD(geometry.Geometry):
         p = (np.column_stack((ptilde1,ptilde2)) + np.array([self.poni1, self.poni2])) / np.array([self.pixel1, self.pixel2])
         
         return p.reshape((*shape, 2))
-    
 
-    
-    @property
-    def rangegamdel_p(self):
-        """Is not identical to rangegamdel_p_full_det, where each pixel is calculated, but close within 1e-5
-        
-        Not sure why... 
-        """
-        xx = np.array([0.,self.detector.shape[0],0,self.detector.shape[0]]) #+ 0.5 # corner pixel center coordinates
-        yy = np.array([0.,0., self.detector.shape[1],self.detector.shape[1]]) #+ 0.5
-        gamma_p, delta_p = self.primBeamPoints(xx,yy)
-        delrange = np.amin(delta_p), np.amax(delta_p)
-        gamrange = np.amin(gamma_p), np.amax(gamma_p)
-        return gamrange, delrange
-    
+
     @property        
     def Qmax(self):
         """in A-1
         """
-        xx = np.array([0.,self.detector.shape[0],0,self.detector.shape[0]]) #+ 0.5 # corner pixel center coordinates
-        yy = np.array([0.,0., self.detector.shape[1],self.detector.shape[1]]) #+ 0.5
-        Q = self.qFunction(xx,yy) / 10.
-        return np.amax(Q)
+        qmin, qmax = self.Qrange
+        return qmax
         
     @property 
     def Qmin(self):
@@ -419,41 +403,41 @@ class Detector2D_SXRD(geometry.Geometry):
     def Qrange(self):
         """in A-1
         """
-        xx = np.array([0.,self.detector.shape[0],0,self.detector.shape[0]]) #+ 0.5 # corner pixel center coordinates
-        yy = np.array([0.,0., self.detector.shape[1],self.detector.shape[1]]) #+ 0.5
-        Q = self.qFunction(xx,yy) / 10.
+        xx, yy = self._edge_pixcoord()
+        Q = self.qFunction(xx,yy) / 10. # qFunction returns Q at pixel center
+
         f2d_cal = self.getFit2D()
         # beam on detector ?
         if 0 <= f2d_cal['centerX'] <= self.detector.shape[1] and 0 <= f2d_cal['centerY'] <= self.detector.shape[0]:
             return 0., np.amax(Q)
-        else: # fallback to numerical search
-            edge_1_x = np.arange(self.detector.shape[0])
-            edge_1_y = np.zeros(self.detector.shape[0])
-            edge_2_x = edge_1_x
-            edge_2_y = np.full(self.detector.shape[0], self.detector.shape[1] -1)
-            edge_3_x = np.zeros(self.detector.shape[1]) 
-            edge_3_y = np.arange(self.detector.shape[1])
-            edge_4_x = np.full(self.detector.shape[1], self.detector.shape[0]-1)
-            edge_4_y = edge_3_y
-            #                   left edge right edge top edge  bottom edge
-            xx = np.concatenate([edge_1_x, edge_2_x, edge_3_x, edge_4_x])
-            yy = np.concatenate([edge_1_y, edge_2_y, edge_3_y, edge_4_y])
-            Q = self.qFunction(xx,yy) / 10.
+        else:
             return np.amin(Q), np.amax(Q) 
+
     
+    @property
+    def rangegamdel_p(self):
+        """Is not identical to rangegamdel_p_full_det, where each pixel is calculated, but close within 1e-5
+        
+        Not sure why... 
+        """
+        xx, yy = self._edge_pixcoord()
+        gamma_p, delta_p = self.primBeamPoints(xx,yy)
+        delrange = np.amin(delta_p), np.amax(delta_p)
+        gamrange = np.amin(gamma_p), np.amax(gamma_p)
+        return gamrange, delrange
+    
+
     def rangegamdel(self, alpha_i):
         """Is not identical to _rangegamdel_full_det, where each pixel is calculated, but close within 1e-5
         
         Not sure why... 
         """
-        xx = np.array([0.,self.detector.shape[0],0,self.detector.shape[0]]) #+ 0.5 # corner pixel center coordinates
-        yy = np.array([0.,0., self.detector.shape[1],self.detector.shape[1]]) #+ 0.5
+        xx, yy = self._edge_pixcoord()
         gamma, delta = self.surfaceAnglesPoint(xx,yy,alpha_i)
         delrange = np.amin(delta), np.amax(delta)
         gamrange = np.amin(gamma), np.amax(gamma)
         return gamrange, delrange
     
-
     @property
     def _rangegamdel_p_full_det(self):
         gamma_p, delta_p = self.primBeamAngles()
@@ -531,165 +515,18 @@ class Detector2D_SXRD(geometry.Geometry):
         else:
             self._cached_array["corrarr"] = self.solidAngleArray(shape)*self.polarization(shape=shape,factor=self._polFactor,axis_offset=self._polAxis)
         return self._cached_array.get("corrarr")
-    
-    
-class DetectorCalibration():
-    
-    def __init__(self,E,calibrationCrystal,pixelsize):
-        self._energy = E
-        self._crystal = calibrationCrystal
-        self._pixelsize = pixelsize
+        
 
-    def setE(self,E):
-        self._energy = E
-
-    # shapes: hkl = [[h1,k1,l1], [h2,k2,l2], ...] , xy = [[x1,y1], [x2,y2], ...]
-    def calibrateFromReflections(self,hkl,xy):
-        x_centralPixel = 730.
-        xy = xy.T
-        xyz = np.zeros((3,xy.shape[1]))
-        xyz[:2] = xy
-        
-        twoTheta = self._crystal.get2ThetaFromHKL(hkl,self._energy)
-        
-        """
-        p[0]: th_x, p[1]: th_y, p[2]: d_detector, p[3]: y_centralPixel
-        """
-        def Chi2(p):
-            centralPixel = np.array([x_centralPixel,p[3],0.])
-            _xyz = np.matrix((xyz.T - centralPixel).T)
-            # uncomment to enable detector tilt correction:
-            #_xyz = util.x_rotation(p[0])*util.y_rotation(p[1])*_xyz
-            _xyz[2] = 0
-            d = LA.norm(_xyz,axis=0)*self._pixelsize
-            print(list((twoTheta - np.arctan(d/p[2])) / twoTheta ))
-            return LA.norm((twoTheta - np.arctan(d/p[2]))/twoTheta)
-        
-        fitbounds = [(-0.1,0.1),(-0.1,0.1),(0.5,1.),(1400,1430)]
-        res = opt.minimize(Chi2,np.array([0.0,0.0,0.72,1415.]),bounds=fitbounds,method='TNC')
-        print(res)
-        res = opt.minimize(Chi2,res.x)
-        print(res)
-        self.setCalibration([x_centralPixel,res.x[3]],res.x[2],[res.x[0],res.x[1]])
-        self._rotz = None
-        
-    def setCalibration(self,centralPixel,distance,rotz=None):
-        self._centralPixel = centralPixel
-        self._distance = distance
-        self._rotz = rotz
-        
-    def xyToDelGam(self,x,y):
-        x = (x - self._centralPixel[0])*self._pixelsize
-        y = (y - self._centralPixel[1])*-self._pixelsize
-        #print(x)
-        xy = np.vstack([x,y])
-        if self._rotz is not None:
-            mat = np.matrix([[np.cos(self._rotz),-np.sin(self._rotz)],
-                             [np.sin(self._rotz),np.cos(self._rotz)]])
-            #print(xy)
-            xy = mat*xy
-            xy = xy.A
-            #print(xy)
-            #raise NotImplementedError("Detector tilt is not implemented")
-        
-        delta = np.arctan(xy[0]/self._distance)
-        gamma = np.arctan(xy[1]/self._distance)
-        
-        #print(delta)
-        return delta , gamma
-    
-    def delGamToxy(self,delta,gamma):
-        x = np.tan(delta)*self._distance
-        y = np.tan(gamma)*self._distance
-        
-        x = (x/self._pixelsize) + self._centralPixel[0]
-        y = -(y/self._pixelsize) + self._centralPixel[1]
-        
-        return [x,y]
-    
-    def xyToDelGam_corr(self,x,y):
-        x = (x - self._centralPixel[0])*self._pixelsize
-        y = (y - self._centralPixel[1])*-self._pixelsize
-        #print(x)
-        #xy = np.vstack([x,y])
-        """
-        if self._rotz is not None:
-            mat = np.matrix([[np.cos(self._rotz),-np.sin(self._rotz)],
-                             [np.sin(self._rotz),np.cos(self._rotz)]])
-            #print(xy)
-            xy = mat*xy
-            xy = xy.A
-            #print(xy)
-            #raise NotImplementedError("Detector tilt is not implemented")
-        """
-        delta = np.arctan(x/self._distance)
-        gamma = np.arctan(y/self._distance)
-        
-        deldelta = np.arctan((x+self._pixelsize)*(1/self._distance)) - delta
-        delgamma = np.arctan((y+self._pixelsize)*(1/self._distance)) - gamma
-        
-        dd,dg = np.meshgrid(deldelta,delgamma)
-                
-        correction = dd*dg
-        correction /= np.amax(correction)
-        #print(delta)
-        return delta , gamma, correction
-    
-    def xyToDelGam_grid(self,x,y):
-        x = (np.array(x,dtype=np.float64) - self._centralPixel[0])*self._pixelsize
-        y = (np.array(y,dtype=np.float64) - self._centralPixel[1])*-self._pixelsize
-        #print(x)
-            
-        xx, yy = np.meshgrid(x,y)
-        
-        if self._rotz is not None:
-            xx = np.cos(self._rotz)*xx - np.sin(self._rotz)*yy
-            yy = np.sin(self._rotz)*xx + np.cos(self._rotz)*yy
-        
-        
-        
-        delta = np.arctan(xx*(1/self._distance))
-        gamma = np.arctan(yy*(1/self._distance))
-        
-        deldelta = np.arctan((xx+self._pixelsize)*(1/self._distance)) - delta
-        delgamma = np.arctan((yy+self._pixelsize)*(1/self._distance)) - gamma
-        
-        correction = deldelta*delgamma
-        correction /= np.amax(correction)
-        
-        return delta , gamma, correction
-    
-    # **** Depricated  ****
-    # Doesn't work good with just 4 points, but nice idea
-    # P1 and P2 are one pair, P3, P4 the other, lower theta first
-    def powderCalibration(self,P1,P2,P3,P4):
-        hkl1 , pos1 = P1 
-        hkl2 , pos2 = P2
-        hkl3 , pos3 = P3
-        hkl4 , pos4 = P4
-        
-        twoTheta1 = self._crystal.get2ThetaFromHKL(hkl1,self._energy)
-        twoTheta2 = self._crystal.get2ThetaFromHKL(hkl2,self._energy)
-        gamma = twoTheta2 -twoTheta1
-        
-        l1 = LA.norm(pos1 - pos2)*pixelsize
-        l2 = LA.norm(pos3 - pos4)*pixelsize
-        
-        delta = util.solveTrigEquation(twoTheta1,twoTheta2,l1,l2)
-        
-        b1 = (l1/m.sin(gamma))*m.cos(delta - twoTheta2)
-        
-        A = (m.cos(delta - twoTheta1) / m.sin(twoTheta1) )**2 - 1.
-        B = -2. * b1 *m.cos(delta - twoTheta1) * (1/m.tan(twoTheta1))
-        print(b1)
-        
-        ld = - (B/(2*A)) + m.sqrt((B/(2*A))**2 - (b1**2)/A)
-        print(m.sqrt((B/(2*A))**2 - (b1**2)/A))
-        
-        print("angle : %s, distance: %s pixel" % (np.rad2deg(delta),ld/pixelsize ))
-        
-        direction = (pos1 - pos2)/LA.norm(pos1 - pos2)
-        print ("Central pixel: %s" % (direction*ld/pixelsize + pos1))
-        #print("prev: %s" % LA.norm(pos1 - centralPixel))
-
-    
+    def _edge_pixcoord(self):
+        edge_1_x = np.arange(self.detector.shape[0]) # pixel center
+        edge_1_y = np.zeros(self.detector.shape[0])
+        edge_2_x = edge_1_x
+        edge_2_y = np.full(self.detector.shape[0], self.detector.shape[1] -1)
+        edge_3_x = np.zeros(self.detector.shape[1]) 
+        edge_3_y = np.arange(self.detector.shape[1])
+        edge_4_x = np.full(self.detector.shape[1], self.detector.shape[0]-1)
+        edge_4_y = edge_3_y
+        #                   left edge right edge top edge  bottom edge
+        xx = np.concatenate([edge_1_x, edge_2_x, edge_3_x, edge_4_x])
+        yy = np.concatenate([edge_1_y, edge_2_y, edge_3_y, edge_4_y])
+        return xx, yy
