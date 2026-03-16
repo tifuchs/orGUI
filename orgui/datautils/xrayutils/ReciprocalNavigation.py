@@ -105,9 +105,9 @@ def allowedReflections_G(xtal: Union[CTRcalc.SXRDCrystal,CTRcalc.UnitCell],maxQ:
         b = xtal.b
     hklmax = np.floor(maxQ/b).astype(np.int64)
     if 'negative' in keyargs and keyargs['negative']:
-        h = np.arange(-hklmax[0]+1,hklmax[0])
-        k = np.arange(-hklmax[1]+1,hklmax[1])
-        l = np.arange(-hklmax[2]+1,hklmax[2])
+        h = np.arange(-hklmax[0],hklmax[0])
+        k = np.arange(-hklmax[1],hklmax[1])
+        l = np.arange(-hklmax[2],hklmax[2])
     else:
         h = np.arange(hklmax[0])
         k = np.arange(hklmax[1])
@@ -218,7 +218,7 @@ def thscanBragg(xtal: Union[CTRcalc.SXRDCrystal,CTRcalc.UnitCell],
 
     Qmax = sxrddetector.Qmax # np.abs(sxrddetector.qArray()).max() / 10. # to Angstrom-1
 
-    hkls, angles = anglesAllowedReflections_G(xtal,None, alpha,Qmax*1.1,**keyargs)
+    hkls, angles = anglesAllowedReflections_G(xtal,None, alpha,Qmax,**keyargs)
     
     ommask = np.logical_and(angles[:,3] > ommin ,  angles[:,3] < ommax)
     
