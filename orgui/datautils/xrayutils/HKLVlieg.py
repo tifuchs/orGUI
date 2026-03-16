@@ -997,15 +997,15 @@ class VliegAngles():
             PCO[:,2,2] = coschi*cosphi
         else:
             PCO = np.empty((3, 3), dtype=np.float64)
-            PCO[0,0] = coschi*cosomega
-            PCO[0,1] = -sinomega*coschi
-            PCO[0,2] = -sinchi
-            PCO[1,0] = sinchi*sinphi*cosomega + sinomega*cosphi
-            PCO[1,1] = -sinchi*sinomega*sinphi + cosomega*cosphi
-            PCO[1,2] = sinphi*coschi
-            PCO[2,0] = sinchi*cosomega*cosphi - sinomega*sinphi
-            PCO[2,1] = -sinchi*sinomega*cosphi - sinphi*cosomega
-            PCO[2,2] = coschi*cosphi
+            PCO[0,0] = coschi[0]*cosomega[0]
+            PCO[0,1] = -sinomega[0]*coschi[0]
+            PCO[0,2] = -sinchi[0]
+            PCO[1,0] = sinchi[0]*sinphi[0]*cosomega[0] + sinomega[0]*cosphi[0]
+            PCO[1,1] = -sinchi[0]*sinomega[0]*sinphi[0] + cosomega[0]*cosphi[0]
+            PCO[1,2] = sinphi[0]*coschi[0]
+            PCO[2,0] = sinchi[0]*cosomega[0]*cosphi[0] - sinomega[0]*sinphi[0]
+            PCO[2,1] = -sinchi[0]*sinomega[0]*cosphi[0] - sinphi[0]*cosomega[0]
+            PCO[2,2] = coschi[0]*cosphi[0]
 
         #calculate UBi * PHIi * CHIi * OMEGAi * Q_alpha 
         hkl = np.einsum('...ij,...j->...i', (UBi @ PCO), Qalp)
