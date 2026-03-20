@@ -2613,6 +2613,7 @@ ub : gui for UB matrix and angle calculations
             try:
                 hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(self.imageno)
             except:
+                print(traceback.format_exc())
                 #for roi in self.rois:
                 #    roi.setVisible(False)
                 self.roiS1.setVisible(False)
@@ -2852,8 +2853,8 @@ ub : gui for UB matrix and angle calculations
                 gamma, delta, alpha = self.ubcalc.detectorCal.crystalAnglesPoint(np.array([y]),np.array([x]), mu,  self.ubcalc.n)
                 pos = [alpha,delta,gamma,om,self.ubcalc.chi,self.ubcalc.phi]
                 hkl_del_gam_1[:3] = np.concatenate(self.ubcalc.angles.anglesToHkl(*pos))
-                hkl_del_gam_1[3] = delta
-                hkl_del_gam_1[4] = gamma
+                hkl_del_gam_1[3] = delta[0]
+                hkl_del_gam_1[4] = gamma[0]
                 hkl_del_gam_1[5] = self.fscan.axis[imageno]
                 hkl_del_gam_2 = np.full_like(hkl_del_gam_1, -1)
         
@@ -3049,12 +3050,12 @@ Do you want to continue without mask?""")
         for i in range(len(self.fscan)):
             key = self.intkey(hkl_del_gam_1[i,6:8])
             croi_key = np.array([[key[0].start , key[0].stop], [key[1].start , key[1].stop]])
-            roi_hsize1_a[i] = int(np.abs(np.diff(croi_key[0])))
-            roi_vsize1_a[i] = int(np.abs(np.diff(croi_key[1])))
+            roi_hsize1_a[i] = int(np.abs(np.diff(croi_key[0])[0]))
+            roi_vsize1_a[i] = int(np.abs(np.diff(croi_key[1])[0]))
             key = self.intkey(hkl_del_gam_2[i,6:8])
             croi_key = np.array([[key[0].start , key[0].stop], [key[1].start , key[1].stop]])
-            roi_hsize2_a[i] = int(np.abs(np.diff(croi_key[0])))
-            roi_vsize2_a[i] = int(np.abs(np.diff(croi_key[1])))
+            roi_hsize2_a[i] = int(np.abs(np.diff(croi_key[0])[0]))
+            roi_vsize2_a[i] = int(np.abs(np.diff(croi_key[1])[0]))
 
         
         if HAS_ACCEL:
