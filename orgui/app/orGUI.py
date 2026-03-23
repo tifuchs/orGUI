@@ -1749,7 +1749,7 @@ ub : gui for UB matrix and angle calculations
         for refl in self.reflectionSel.reflections:
             #print(refl.xy)
             gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([refl.xy[1]]),np.array([refl.xy[0]]),self.ubcalc.mu)
-            delta = float(delta); gamma = float(gamma)
+            delta = float(delta[0]); gamma = float(gamma[0])
             try:
                 pos = np.array([self.ubcalc.mu,delta,gamma,self.imageNoToOmega(refl.imageno),self.ubcalc.chi,self.ubcalc.phi])
             except:
