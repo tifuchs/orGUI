@@ -1329,7 +1329,7 @@ class UnitCell(Lattice):
                         exp_dz = self.f[i][j+5] + 0.5*deltaZ2i
                         rho_i += (self.f[i][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- exp_dpara * Qpara2  - (((z- z_i)**2)/(4*exp_dz))  )
                         
-                rho_i *= np.exp(-2j*np.pi*(h*x_i_frac + k*y_i_frac + (z- z_i)/self._a[2]))
+                rho_i *= np.exp(-2j*np.pi*(h*x_i_frac + k*y_i_frac))
                 rho += rho_i*self.basis[i][6] * weight
         
         return rho/self.uc_area
@@ -1361,7 +1361,7 @@ class UnitCell(Lattice):
                     exp_dz = self.f[i][j+5] + 0.5*deltaZ2i
                     rho_i += (self.f[i][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- exp_dpara * Qpara2  - (((z- z_i + noA)**2)/(4*exp_dz))  )
                     
-                rho_i *= np.exp(-2j*np.pi*(h*x_i_frac + k*y_i_frac + (z- z_i + noA)/self._a[2]))
+                rho_i *= np.exp(-2j*np.pi*(h*x_i_frac + k*y_i_frac))
                 rho += rho_i*self.basis[i][6]
         
         return rho/self.uc_area
