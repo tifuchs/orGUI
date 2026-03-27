@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -35,7 +34,6 @@ __email__ = "tfuchs@cornell.edu"
 
 import os
 import sys
-import datetime
 from argparse import ArgumentParser
 
 description = """Load th scans of HESXRD reciprocal space mappings from 
@@ -53,11 +51,11 @@ defaultconfigfile = os.path.expanduser("~/orgui")
 
 def main():
 
-    
+
 
     parser = ArgumentParser(usage=usage, description=description, epilog=epilog)
-    parser.add_argument("configfile", metavar="FILE", 
-                        help="configuration file, will use ~/orgui otherwise", 
+    parser.add_argument("configfile", metavar="FILE",
+                        help="configuration file, will use ~/orgui otherwise",
                         nargs='?',default=defaultconfigfile)
     parser.add_argument("--opengl", "--gl", dest="opengl",
                         action="store_true",
@@ -73,7 +71,7 @@ def main():
     parser.set_defaults(locking=True)
 
     options = parser.parse_args()
-    
+
     if "HDF5_USE_FILE_LOCKING" not in os.environ:
         if options.locking:
             os.environ["HDF5_USE_FILE_LOCKING"] = "TRUE"
@@ -85,14 +83,14 @@ def main():
     else:
         print("HDF5_USE_FILE_LOCKING=%s" % os.environ["HDF5_USE_FILE_LOCKING"])
         print("No hdf5 locking. This is potentially dangerous and can cause file corruption. Especially if orGUI crashes.")
-    
-    
+
+
     import silx
     from silx.gui import qt
-    
+
     if options.opengl:
         silx.config.DEFAULT_PLOT_BACKEND = "opengl"
-    
+
     if os.path.isfile(options.configfile) or options.configfile == defaultconfigfile:
         app = qt.QApplication(sys.argv)
         app.setApplicationName("orGUI")
@@ -107,9 +105,8 @@ def main():
         configfile = options.configfile
         if options.configfile == defaultconfigfile and not os.path.isfile(options.configfile):
             configfile = None
-        
+
         splash.showMessage("jit compile libraries, this may take a while on first start...", qt.Qt.AlignLeft | qt.Qt.AlignBottom)
-        from .datautils.xrayutils import CTRcalc, CTRplotutil
         splash.showMessage("load orGUI libraries", qt.Qt.AlignLeft | qt.Qt.AlignBottom)
         splash.raise_()
         from orgui.app.orGUI import orGUI, UncaughtHook

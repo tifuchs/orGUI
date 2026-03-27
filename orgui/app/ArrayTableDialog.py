@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -38,8 +37,6 @@ from silx.gui.widgets.TableWidget import TableView
 from silx.gui.dialog.DataFileDialog import DataFileDialog
 from silx.gui import icons
 
-from silx.io.utils import save1D, savespec, NEXUS_HDF5_EXT
-from silx.io.nxdata import save_NXdata
 
 from orgui import resources
 
@@ -62,7 +59,7 @@ class DeleteRowAction(qt.QAction):
         if not isinstance(table, qt.QTableView):
             raise ValueError('DeleteRowAction must be initialised ' +
                              'with a QTableWidget.')
-        super(DeleteRowAction, self).__init__(table)
+        super().__init__(table)
         self.table = table
         self.arrayTableWidget = arrayTableWidget
         self.setText("Delete row")
@@ -82,19 +79,19 @@ class DeleteRowAction(qt.QAction):
             #msgBox.setText("A single cell must be selected to delete data")
             #msgBox.exec()
             return False
-        
-        
+
+
         data_model = self.table.model()
         data = data_model.getData()
-        
+
         selected_row = np.unique([idx.row() for idx in selected_idx])
         mask = np.ones(data.shape[0], dtype=np.bool_)
         mask[selected_row] = False
 
         self.arrayTableWidget.updateArrayData(data[mask])
         self.arrayTableWidget.sigRowsDeleted.emit(selected_row)
-        
-        
+
+
 class AddRowAction(qt.QAction):
     """QAction to add a row in a ArrayTableWidget
 
@@ -104,7 +101,7 @@ class AddRowAction(qt.QAction):
         if not isinstance(table, qt.QTableView):
             raise ValueError('AddRowAction must be initialised ' +
                              'with a QTableWidget.')
-        super(AddRowAction, self).__init__(table)
+        super().__init__(table)
         self.fill_value = fill_value
         self.table = table
         self.arrayTableWidget = arrayTableWidget
@@ -125,10 +122,10 @@ class AddRowAction(qt.QAction):
             msgBox.setText("A single cell must be selected to add a row")
             msgBox.exec()
             return False
-        
+
         data_model = self.table.model()
         data = data_model.getData()
-        
+
         if len(selected_idx) == 0:
             selected_row = data.shape[0]
         else:
@@ -137,8 +134,8 @@ class AddRowAction(qt.QAction):
         newdata = np.insert(data, selected_row, np.full(data.shape[-1],self.fill_value) ,0)
         self.arrayTableWidget.updateArrayData(newdata)
         self.arrayTableWidget.sigRowAdded.emit(selected_row)
-        
-        
+
+
 class ArrayTableHeaderModel(ArrayTableModel.ArrayTableModel):
     def headerData(self, section, orientation, role=qt.Qt.DisplayRole):
         """QAbstractTableModel method
@@ -172,7 +169,7 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
     sigRowAdded = qt.pyqtSignal(int)
     sigRowsDeleted = qt.pyqtSignal(np.ndarray)
     sigDataLoaded = qt.pyqtSignal()
-    
+
     def __init__(self, saveact: bool = True, openact: int = -1, rowActions=True, parent = None):
         """Creates a new :class:`ArrayEditWidget`. 
         
@@ -209,15 +206,15 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
         self.axesSelector.setVisible(False)
 
         self.view = TableView(self)
-        
+
         self.toolbar = qt.QToolBar("Array modifier", self)
         self.filedialogdir = os.getcwd()
         if openact >= 0:
             self.enableOpenAction()
-            
+
         if saveact:
             self.enableSaveAction()
-        
+
         self.mainLayout.addWidget(self.toolbar)
         #self.mainLayout.addWidget(self.browserContainer)
         #self.mainLayout.addWidget(self.axesSelector)
@@ -228,15 +225,15 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
         if rowActions:
             self.view.deleteRowAction = DeleteRowAction(self.view, self)
             self.view.addAction(self.view.deleteRowAction)
-            
+
             self.view.addRowAction = AddRowAction(self.view, self)
             self.view.addAction(self.view.addRowAction)
-        
+
         self.retain_axis = openact
-    
+
     def getData(self, copy=True):
         return np.atleast_1d(np.squeeze(super().getData(copy)))
-        
+
     def enableOpenAction(self):
         if not hasattr(self, 'openAct'):
             self.openAct = self.toolbar.addAction(icons.getQIcon('document-open'), "open ascii file")
@@ -244,12 +241,12 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
         if not hasattr(self, 'openNXAct'):
             self.openNXAct = self.toolbar.addAction(resources.getQicon('document-nx-open'), "open NEXUS-like")
             self.openNXAct.triggered.connect(lambda x: self.openNXlike(self.retain_axis))
-            
+
     def enableSaveAction(self):
         if not hasattr(self, 'saveAct'):
             self.saveAct = self.toolbar.addAction(icons.getQIcon('document-save'), "save as file")
             self.saveAct.triggered.connect(self.savetxt)
-            
+
     def openLoadtxt(self, retain_axis=1):
         """Displays a dialog to open an array using the `:meth:~numpy.loadtxt` function.
         
@@ -265,7 +262,7 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
         fileTypeFilter = ""
         for f in fileTypeDict:
             fileTypeFilter += f + ";;"
-        #print(retain_axis)    
+        #print(retain_axis)
         filename, filetype = qt.QFileDialog.getOpenFileName(self,"Open file",
                                                   self.filedialogdir,
                                                   fileTypeFilter[:-2])
@@ -293,10 +290,10 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
                 self.updateArrayData(array_data, header=None, labels=None)
                 self.sigDataLoaded.emit()
                 return True
-            
+
         except Exception:
             qt.QMessageBox.critical(self,"Error during loading of array","Error during loading of array.\n%s" % traceback.format_exc())
-            
+
     def openNXlike(self, retain_axis=1):
         """Displays a dialog to open an array from any NEXUS like data source.
         
@@ -310,7 +307,7 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
         """
         dialog = DataFileDialog(self)
         dialog.setFilterMode(DataFileDialog.FilterMode.ExistingDataset)
-        
+
         def customFilter(obj):
             if len(obj.shape) == 0:
                 return False
@@ -336,16 +333,16 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
             else:
                 self.updateArrayData(data, header=None, labels=None)
             self.sigDataLoaded.emit()
-                
+
     def savetxt(self):
         fmt = "%.7g"
         csvdelim=";"
         fileTypeDictSave1D = {"Plain ascii file (*.dat)" : "dat", "CSV file (*.csv)" : "csv",  "NumPy format (*.npy)" : "ndarray"}
-        
+
         fileTypeDictSPEC = {'SPEC file (*.spec)': 'spec'}
-        
+
         fileTypeDict = {**fileTypeDictSave1D, **fileTypeDictSPEC}
-        
+
         fileTypeFilter = ""
         for f in fileTypeDict:
             fileTypeFilter += f + ";;"
@@ -359,7 +356,7 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
 
         if filetype in fileTypeDictSave1D:
             if self.header is not None:
-                header = " ".join(self.header) 
+                header = " ".join(self.header)
             elif isinstance(self.header, str):
                 header = self.header
             else:
@@ -374,13 +371,13 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
                 np.save(filename, data)
             else:
                 raise Exception("No supported file type %s" % fileext)
-        
+
     def updateArrayData(self, data, **kwargs):
         editable = kwargs.get('editable', self.model._editable)
         labels = kwargs.get('labels', self._dimensionLabelsText)
         header = kwargs.get('header', self.header)
         self.setArrayData(data, labels=labels, editable=editable, header=self.header)
-    
+
     def setArrayData(self, data, labels=None, copy=True, editable=False, header=None):
         if len(data.shape) == 1:
             data = data[:,np.newaxis]
@@ -398,36 +395,36 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
         super().setArrayData(data, labels, copy, editable)
         self.view.resizeColumnsToContents()
         self.view.resizeRowsToContents()
-        
+
 
 class ArrayTableDialog(qt.QDialog):
-    
+
     def __init__(self, saveact: bool = True, openact: int = -1, parent = None):
         qt.QDialog.__init__(self, parent)
 
         self.arrayWidget = ArrayEditWidget(saveact, openact, self)
-        
+
         self.setArrayData = self.arrayWidget.setArrayData
         self.updateArrayData = self.arrayWidget.updateArrayData
         self.getData = self.arrayWidget.getData
 
         layout = qt.QVBoxLayout(self)
-        
+
         layout.addWidget(self.arrayWidget)
-        
+
         self.setLayout(layout)
-        
+
 if __name__ == "__main__":
-    
-    
+
+
     app = qt.QApplication([])
-    
+
     diag = ArrayTableDialog(True, 1)
-    
+
     array = np.arange(10*1).reshape((10,1))#[:,np.newaxis]
     #array = np.arange(10)
     diag.setArrayData(array,editable=True, header= ['h'])
-    
+
     diag.show()
     app.exec()
-    
+

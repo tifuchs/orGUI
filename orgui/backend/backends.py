@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -29,23 +28,21 @@ __version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
-import numpy as np
 
-from .scans import Scan
 from datetime import datetime
 import pytz
 
 # --- parse h5node name and return the scan number and name ---
 
-    
+
 # --- dates of the beamtimes. Used to identify the beamtimes from the files ---
 
 # This enables the beamtime auto detect functionality.
-# However, you can always override this setting by unchecking 
+# However, you can always override this setting by unchecking
 # the box in the lower left corner in the gui and manually selecting
 # a backend
 
-default_beamtime = 'id31_default' 
+default_beamtime = 'id31_default'
 
 beamtimes = {'ch5523': (datetime(2018, 9, 22), datetime(2018, 10, 5)),
              '20190017': (datetime(2019, 12, 8), datetime(2019, 12, 24)),
@@ -65,7 +62,7 @@ def localize(dt):
         return grenobletime.localize(dt)
     else:
         return dt
-             
+
 def getBeamtimeId(dt):
     for bt in beamtimes:
         start, end = beamtimes[bt]
@@ -74,8 +71,8 @@ def getBeamtimeId(dt):
     else:
         return default_beamtime
         #raise Exception("Didn't find matching beamtime for date %s" % dt.ctime())
- 
-            
+
+
 # add actual backends here, which perform the file reads:
 # They must implement scans.Scan
 
@@ -97,17 +94,17 @@ fscans = {'ch5523': BlissScan,
 
 def openScan(btid, ddict):
     fscancls = fscans[btid]
-    
+
     # ideally, now the scan should only be opened with:
     # fscan = fscancls(ddict['file'], ddict['scanno'])
     # but this doesn't always work. So handle special cases here
-    
+
     if btid == 'ch5523':
         fscan = fscancls(ddict['file'],ddict['name'])
-        
+
         if ddict['name'].startswith('ascan') and 'Pt111_3' in ddict['file']:
             if fscan.axisname == 'mu':
-                 mu = fscan.mu - 0.055 # misalignment! 
+                 mu = fscan.mu - 0.055 # misalignment!
                  fscan.axis = mu
                  fscan.mu = mu
                  print("Correct mu misalignment 0.055 deg,  Pt111_3")
@@ -117,7 +114,7 @@ def openScan(btid, ddict):
             fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False, muoffset=-0.544424)
         else:
             fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=-0.544424)
-        
+
     elif btid == '20190017' or btid == '20200028' or btid == 'P212_default':
         fscan = fscancls(ddict['file'],ddict['scanno'])
 
@@ -150,6 +147,6 @@ def openScan(btid, ddict):
             fscan = fscancls(ddict['file'], ddict['scanno'])
         except Exception:
             raise ValueError("Did not find matching scan in backends for beamtime id %s" % btid)
-    return fscan 
+    return fscan
 
 

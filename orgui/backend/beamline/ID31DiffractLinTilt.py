@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 """ID31 beamline code.
 
@@ -8,7 +7,7 @@ Used for this software with permission from Jakub Drnec
 
 import numpy as np
 
-class ID31DiffractLinTilt(object):
+class ID31DiffractLinTilt:
     """
     ID31DiffractLinTilt: transforms linear motors into tilt motor (angular)
 
@@ -32,7 +31,7 @@ class ID31DiffractLinTilt(object):
     @property
     def b(self):
         return self.config.get("b", float)
-        
+
     @property
     def muoffset(self):
         return self.config.get("muoffset", float)
@@ -64,12 +63,12 @@ class ID31DiffractLinTilt(object):
         bc = np.sqrt(a2 + c2 - 2 * a * c * np.cos(tilt + d))
         linear = bc - b
         return dict(linear=linear)
-        
+
     def linai_to_mu(self,linai):
         positions = {'linear' : linai}
         tilt = self.calc_from_real(positions)
         return tilt["tilt"] - self.muoffset
-        
+
     def mu_to_linai(self,mu):
         ai = mu + self.muoffset #np.linspace(-1.0,1,11) + muoffset
         tilts = {'tilt' : ai}

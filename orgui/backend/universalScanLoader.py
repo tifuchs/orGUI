@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2024-2025 Finn Schroeter
@@ -35,7 +34,7 @@ import numpy as np
 
 from .scans import h5_Image
 
-class ImportImagesScan():
+class ImportImagesScan:
 
     def __init__(self, imgpath):
         self.filename = imgpath
@@ -64,13 +63,13 @@ class ImportImagesScan():
         self.omega = 0
         self.mu = 0
 
-        self.title = "manually loaded scan" 
+        self.title = "manually loaded scan"
 
         self.nopoints = (len(self.inpath[1])-1)*self.FramesPerFile + self.FramesLastFile
 
 
     def find_files(self):
-        re_str = re.compile(r'_\d+' + os.path.splitext(self.filename)[1]) #define search string. It matches a file source with syntax name_0000i.extension -> may need to be adapted 
+        re_str = re.compile(r'_\d+' + os.path.splitext(self.filename)[1]) #define search string. It matches a file source with syntax name_0000i.extension -> may need to be adapted
         selected_directory = os.path.dirname(os.path.abspath(self.filename))
         filenames = ''.join(os.listdir(selected_directory))
 
@@ -100,10 +99,10 @@ class ImportImagesScan():
             self.omega = -1*self.th
             self.mu = fixedAxisValue
 
-        
+
     def __len__(self):
         return self.nopoints
-        
+
     def get_raw_img(self, i):
         if self.FramesPerFile > 1:
             index = i // self.FramesPerFile
@@ -114,7 +113,7 @@ class ImportImagesScan():
             with fabio.open(self.inpath[0] + self.inpath[1][i]) as fabf:
                 img_data = fabf.data
         return h5_Image(img_data)
-        
+
     @classmethod
     def parse_h5_node(cls, obj):
         ddict = dict()
@@ -122,4 +121,4 @@ class ImportImagesScan():
 
     @property
     def auxillary_counters(self):
-        return [] 
+        return []

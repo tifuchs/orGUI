@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2025 Timo Fuchs
@@ -35,14 +34,10 @@ import numpy
 from silx.gui import utils
 from silx.gui.plot import items
 from silx.gui.colors import rgba
-from silx.image.shapes import Polygon
 from silx.image._boundingbox import _BoundingBox
 from silx.utils.proxy import docstring
-from silx.gui.plot.utils.intersections import segments_intersection
-from silx.gui.plot.items._roi_base import _RegionOfInterestBase
 
 # He following imports have to be exposed by this module
-from silx.gui.plot.items._roi_base import RegionOfInterest
 from silx.gui.plot.items._roi_base import HandleBasedROI
 from silx.gui.plot.items._arc_roi import ArcROI  # noqa
 from silx.gui.plot.items._roi_base import InteractionModeMixIn  # noqa
@@ -78,7 +73,7 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
         self._handleBottomRight = self.addHandle()
         self._handleCenter = self.addTranslateHandle()
         self._handleLabel = self.addLabelHandle()
-        
+
         self.__bgshapes = {}
         self.__bgsize = {}
         for n in ['left', 'right', 'top', 'bottom']:
@@ -92,11 +87,11 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
             self.__bgshapes[n] = shape
             self.__bgsize[n] = 0
             self.addItem(shape)
-            
+
         self.centerMarker = items.Marker() #setPosition
         self.centerMarker.setPosition(0,0)
         self.addItem(self.centerMarker)
-        
+
         shape = items.Shape("rectangle")
         shape.setPoints([[0, 0], [0, 0]])
         shape.setFill(False)
@@ -112,10 +107,10 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
         if event in [items.ItemChangedType.VISIBLE]:
             self._updateItemProperty(event, self, [self.__shape, *self.__bgshapes.values(), self.centerMarker])
             #self._updateItemProperty(event, self, self.__shape)
-        super(RectangleBgROI, self)._updated(event, checkVisibility)
+        super()._updated(event, checkVisibility)
 
     def _updatedStyle(self, event, style):
-        super(RectangleBgROI, self)._updatedStyle(event, style)
+        super()._updatedStyle(event, style)
         self.__shape.setColor(style.getColor())
         self.__shape.setLineStyle(style.getLineStyle())
         self.__shape.setLineWidth(style.getLineWidth())
@@ -139,7 +134,7 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
 
     def _updateText(self, text):
         self._handleLabel.setText(text)
-        
+
     def setBgSize(self, left=None, right=None, top=None, bottom=None):
         if left is not None:
             self.__bgsize['left'] = left
@@ -153,7 +148,7 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
         origin = self.getOrigin()
         size = self.getSize()
         self._updateGeometry(origin=origin, size=size)
-        
+
     def _setBgSize(self, left=None, right=None, top=None, bottom=None):
         if left is not None:
             self.__bgsize['left'] = left
@@ -163,13 +158,13 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
             self.__bgsize['top'] = top
         if bottom is not None:
             self.__bgsize['bottom'] = bottom
-        
+
     def setBgStyle(self, color, linestyle, linewidth):
         for n in self.__bgshapes:
             self.__bgshapes[n].setColor(color)
             self.__bgshapes[n].setLineStyle(linestyle)
             self.__bgshapes[n].setLineWidth(linewidth)
-            
+
     def getCenter(self):
         """Returns the central point of this rectangle
 
@@ -226,10 +221,10 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
         if ((origin is None or numpy.array_equal(origin, self.getOrigin())) and
                 (center is None or numpy.array_equal(center, self.getCenter())) and
                 numpy.array_equal(size, self.getSize())):
-                    
+
             if left is None and right is None and top is None and bottom is None:
                 return  # Nothing has changed
-        
+
         self._setBgSize(left, right, top, bottom)
         self._updateGeometry(origin, size, center)
 
@@ -259,7 +254,7 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
             self._handleCenter.setPosition(center[0], center[1])
         with utils.blockSignals(self._handleLabel):
             self._handleLabel.setPosition(points[0, 0], points[0, 1])
-        
+
         # left:
         leftorigin = [points[0, 0] - self.__bgsize['left'], points[0, 1]]
         leftcornerur = [points[0, 0], points[1, 1]]
@@ -277,9 +272,9 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
         bottomcornerur = [points[1, 0] , points[0, 1] ]
         self.__bgshapes['bottom'].setPoints(numpy.array([bottomorigin, bottomcornerur]))
         self.__shape.setPoints(points)
-        
+
         self.centerMarker.setPosition(*center)
-        
+
         self.sigRegionChanged.emit()
 
     @docstring(HandleBasedROI)
@@ -326,8 +321,8 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
         params = origin[0], origin[1], w, h
         params = 'origin: %f %f; width: %f; height: %f' % params
         return "%s(%s)" % (self.__class__.__name__, params)
-        
-        
+
+
 if __name__ == '__main__':
     from silx.gui import qt
     from silx.gui.plot import Plot2D
@@ -337,34 +332,33 @@ if __name__ == '__main__':
     img = np.arange(100*100).reshape((100,100))
     pt = Plot2D()
     pt.addImage(img)
-    
+
     roiManager = RegionOfInterestManager(pt)
     roiManager.setColor('pink')  # Set the color of ROI
-    
+
     #self.roiTable = RegionOfInterestTableWidget()
     #self.roiTable.setRegionOfInterestManager(self.roiManager)
-    
+
     #roi order: left, top, right, bottom,  croi
     rois = []
 
     roi = RectangleBgROI()
-    
+
     roi.setGeometry(origin=(30, 30), size=(10, 10), left=5, right=6, top=7, bottom=8)
 
     roi.setColor('red') # bg color
-    
+
 
     roi.setLineWidth(2)
     roi.setLineStyle('-')
     roi.setBgStyle('pink', '-', 2.)
     roi.setVisible(True)
-    
+
     roi.setEditable(True)
 
     roiManager.addRoi(roi,useManagerColor=False)
     rois.append(roi)
-    
+
     pt.show()
     app.exec()
-    
-    
+
