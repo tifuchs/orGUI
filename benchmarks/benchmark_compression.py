@@ -8,10 +8,8 @@ import os
 import sys
 import tempfile
 import time
-from typing import Optional, NamedTuple
+from typing import NamedTuple
 
-import h5py
-import numpy
 
 
 # Set affinity and env. var. before importing hdf5plugin
@@ -54,11 +52,11 @@ class Result(NamedTuple):
         lambda self: (self.raw_nbytes / 1024**2) / self.read_duration,
         doc="Unit: MB/sec")
 
-    
+
 def benchmark(
     data: dict,
     data_nbytes : int,
-    directory: Optional[str] = None,
+    directory: str | None = None,
     **kwargs
 ) -> Result:
     """Run benchmark for given conditions
@@ -81,12 +79,12 @@ def benchmark(
     # Compression
     start_write_time = time.perf_counter()
     dicttonx(data, filename, create_dataset_args=kwargs)
-        
-        
+
+
     #with h5py.File(filename, "w") as h5file:
     #    dataset = h5file.create_dataset(
     #        "data", shape=data.shape, dtype=data.dtype, **kwargs)
-    #    
+    #
     #    dataset[:] = data
     #    dataset.flush()
     write_duration = time.perf_counter() - start_write_time
@@ -109,7 +107,7 @@ def benchmark(
 
     return Result(data_nbytes, storage_size, write_duration, read_duration)
 
-    
+
 DEFAULT_FILTERS = {  # Filters available with h5py/libhdf5
     "Raw": None,
     "GZip": "gzip",
@@ -126,7 +124,7 @@ BITSHUFFLE_FILTERS = {
     "Bitshuffle-lz4": hdf5plugin.Bitshuffle(cname='lz4'),
     "Bitshuffle-zstd": hdf5plugin.Bitshuffle(cname='zstd'),
 }
-    
+
 BLOSC_FILTERS = {}
 for cname in ('lz4', 'blosclz', 'lz4', 'lz4hc', 'snappy', 'zlib', 'zstd'):
     for shuffle_name, shuffle in [('NoShuffle', hdf5plugin.Blosc.NOSHUFFLE),

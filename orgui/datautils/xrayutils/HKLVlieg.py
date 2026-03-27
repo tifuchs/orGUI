@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -48,7 +47,7 @@ def calculate_q_phi(pos,K=1.):
 """
 pos = [ALPHA, DELTA, GAMMA, OMEGA, CHI, PHI] (angles)
 accepts also 1d-arrays of the angles in pos
-""" 
+"""
 def createVliegMatrices(pos):
 
     ALPHA = None if pos[0] is None else calcALPHA(pos[0])
@@ -59,7 +58,7 @@ def createVliegMatrices(pos):
     PHI = None if pos[5] is None else calcPHI(pos[5])
     return ALPHA, DELTA, GAMMA, OMEGA, CHI, PHI
 
-def calcALPHA(alpha): # alpha = mu if GID geometry and there is no miscut 
+def calcALPHA(alpha): # alpha = mu if GID geometry and there is no miscut
     if isinstance(alpha,np.ndarray):
         return util.x_rotationArray(alpha)
     return util.x_rotation(alpha)
@@ -77,7 +76,7 @@ def calcGAMMA(gamma):
     return util.x_rotation(gamma)
 
 
-def calcOMEGA(omega): 
+def calcOMEGA(omega):
     if isinstance(omega,np.ndarray):
         return util.z_rotationArray(-omega)
     return util.z_rotation(-omega)
@@ -116,7 +115,7 @@ def vliegDiffracAngles(pos_p):
     gamma = np.arcsin( np.cos(alpha)*np.sin(gamma_p) - np.sin(alpha)*np.cos(delta_p)*np.cos(gamma_p) )
     delta = np.arcsin( (np.sin(delta_p)*np.cos(gamma_p))/np.cos(gamma) )
     return [alpha,delta,gamma,omega,chi,phi]
-    
+
 
 """
 transforms alpha and gamma into the crystal frame using 
@@ -130,11 +129,11 @@ def crystalAngles(pos,refraction_index):
     if len(pos.shape) == 1:
         pos[0] = crystalAngles_singleArray(pos[0], refraction_index) #np.arccos(np.cos(pos[0]) / refraction_index)
         pos[2] = crystalAngles_singleArray(pos[2], refraction_index) #np.arccos(np.cos(pos[2]) / refraction_index)
-        #pos[np.isnan(pos)] = 0. 
+        #pos[np.isnan(pos)] = 0.
     else:
         pos[:,0] = crystalAngles_singleArray(pos[:,0], refraction_index) #np.arccos(np.cos(pos[:,0]) / refraction_index)
         pos[:,2] = crystalAngles_singleArray(pos[:,2], refraction_index) #np.arccos(np.cos(pos[:,2]) / refraction_index)
-        #pos[np.isnan(pos)] = 0. 
+        #pos[np.isnan(pos)] = 0.
     return pos
 
 def crystalAngles_singleArray(angle,refraction_index):
@@ -161,19 +160,19 @@ def crystalAngles_singleArray(angle,refraction_index):
         if np.isnan(angle):
             angle = 0.
     return angle
-	
+
 def vacAngles(pos,refraction_index):
     pos = np.array(pos)
     if len(pos.shape) == 1:
         pos[0] = vacAngles_singleArray(pos[0], refraction_index) #np.arccos(np.cos(pos[0]) * refraction_index)
         pos[2] = vacAngles_singleArray(pos[2], refraction_index) #np.arccos(np.cos(pos[2]) * refraction_index)
-        #pos[np.isnan(pos)] = 0. 
+        #pos[np.isnan(pos)] = 0.
     else:
         pos[:,0] = vacAngles_singleArray(pos[:,0], refraction_index) #np.arccos(np.cos(pos[:,0]) * refraction_index)
         pos[:,2] = vacAngles_singleArray(pos[:,2], refraction_index) #np.arccos(np.cos(pos[:,2]) * refraction_index)
-        #pos[np.isnan(pos)] = 0. 
+        #pos[np.isnan(pos)] = 0.
     return pos
-    
+
 def vacAngles_singleArray(angle,refraction_index):
     if isinstance(angle,np.ndarray):
         sign = np.sign(angle)
@@ -195,23 +194,23 @@ def printPos(pos,phichi=False):
     if phichi:
         print("alp=%.2f, del=%.2f, gam=%.2f, om=%.2f, phi=%.2f, chi=%.2f" % tuple(pos))
     else:
-        print("alp=%.2f, del=%.2f, gam=%.2f, om=%.2f" % tuple(np.array((pos))[:-2]) )
-        
+        print("alp=%.2f, del=%.2f, gam=%.2f, om=%.2f" % tuple(np.array(pos)[:-2]) )
+
 def strPos(pos,phichi=False):
     pos = np.rad2deg(pos)
     if phichi:
         spos = "alp=%.2f, del=%.2f, gam=%.2f, om=%.2f, phi=%.2f, chi=%.2f" % tuple(pos)
     else:
-        spos = "alp=%.2f, del=%.2f, gam=%.2f, om=%.2f" % tuple(np.array((pos))[:-2])
+        spos = "alp=%.2f, del=%.2f, gam=%.2f, om=%.2f" % tuple(np.array(pos)[:-2])
     return spos
-    
+
 def strPos_prim(pos,phichi=False):
     spos = "Vlieg: "
     spos += strPos(pos,phichi)
     spos += "  pb:"
     spos += strPos(primBeamAngles(pos),phichi)
     return spos
-    
+
 def printPos_prim(pos,phichi=False):
     print("Vlieg angles:")
     printPos(pos,phichi)
@@ -219,14 +218,14 @@ def printPos_prim(pos,phichi=False):
     printPos(primBeamAngles(pos),phichi)
 
 def spec_pa(ub):
-    print(str(ub.lattice))    
-    
- 
-"""
+    print(str(ub.lattice))
+
 
 """
 
-class Lattice(object):
+"""
+
+class Lattice:
     """The coordiante system of the lattice is defined by first calculating the\
     reciprocal lattice's vector lengths and angles. After that, the\
     definition of the reciprocal lattice coordiante system as in\
@@ -242,7 +241,7 @@ class Lattice(object):
     """
     def __init__(self,a,alpha):
         self.setLattice(a,alpha)
-    
+
     def setLattice(self,a,alpha):
         """Sets real space lattice from lengths and angles of lattice vectors.
         
@@ -256,24 +255,24 @@ class Lattice(object):
                np.sqrt(1 + 2 * np.cos(self._alpha[0]) * np.cos(self._alpha[1]) * np.cos(self._alpha[2]) -
                np.cos(self._alpha[0]) ** 2 - np.cos(self._alpha[1]) ** 2 - np.cos(self._alpha[2]) ** 2))
         self.uc_area = self._a[0]*self._a[1]*np.sin(self._alpha[2]) #unit cell area
-        
+
         self.B_mat = Lattice.reciprocalMatrix(self._a,self._alpha,self._b,self._beta)
         self.B_mat_inv = LA.inv(self.B_mat)
-        self.R_mat = 2*np.pi * np.ascontiguousarray(self.B_mat_inv.T) 
+        self.R_mat = 2*np.pi * np.ascontiguousarray(self.B_mat_inv.T)
         self.RealspaceMatrix = self.R_mat # old: Lattice.realspaceMatrix(self._a,self._alpha,self._b,self._beta)
         self.R_mat_inv = LA.inv(self.R_mat)
-        
+
     #def setReciprocalLattice(self, b, beta):
         """Sets reciprocal space lattice.
         
         :param np.ndarray b: reciprocal lattice vector lengths in Angstrom-1. Must include the factor 2pi.
         :param np.ndarray beta: angles between lattice vectors in degrees
         """
-    
+
     @property
     def a(self):
         return self._a
-    
+
     @a.setter
     def a(self, a):
         self._a = np.asarray(a)
@@ -281,12 +280,12 @@ class Lattice(object):
         self.volume = (np.prod(self._a) *
                np.sqrt(1 + 2 * np.cos(self._alpha[0]) * np.cos(self._alpha[1]) * np.cos(self._alpha[2]) -
                np.cos(self._alpha[0]) ** 2 - np.cos(self._alpha[1]) ** 2 - np.cos(self._alpha[2]) ** 2))
-               
+
         self.uc_area = self._a[0]*self._a[1]*np.sin(self._alpha[2]) #unit cell area
-        
+
         self.B_mat = Lattice.reciprocalMatrix(self._a,self._alpha,self._b,self._beta)
         self.B_mat_inv = LA.inv(self.B_mat)
-        self.R_mat = 2*np.pi * np.ascontiguousarray(self.B_mat_inv.T) 
+        self.R_mat = 2*np.pi * np.ascontiguousarray(self.B_mat_inv.T)
         self.RealspaceMatrix = self.R_mat # old: Lattice.realspaceMatrix(self._a,self._alpha,self._b,self._beta)
         self.R_mat_inv = LA.inv(self.R_mat)
 
@@ -297,7 +296,7 @@ class Lattice(object):
         in radians.
         """
         return self._alpha
-    
+
     @alpha.setter
     def alpha(self, alpha):
         self._alpha = np.asarray(alpha)
@@ -306,13 +305,13 @@ class Lattice(object):
                np.sqrt(1 + 2 * np.cos(self._alpha[0]) * np.cos(self._alpha[1]) * np.cos(self._alpha[2]) -
                np.cos(self._alpha[0]) ** 2 - np.cos(self._alpha[1]) ** 2 - np.cos(self._alpha[2]) ** 2))
         self.uc_area = self._a[0]*self._a[1]*np.sin(self._alpha[2]) #unit cell area
-        
+
         self.B_mat = Lattice.reciprocalMatrix(self._a,self._alpha,self._b,self._beta)
         self.B_mat_inv = LA.inv(self.B_mat)
-        self.R_mat = 2*np.pi * np.ascontiguousarray(self.B_mat_inv.T) 
+        self.R_mat = 2*np.pi * np.ascontiguousarray(self.B_mat_inv.T)
         self.RealspaceMatrix = self.R_mat # old: Lattice.realspaceMatrix(self._a,self._alpha,self._b,self._beta)
         self.R_mat_inv = LA.inv(self.R_mat)
-    
+
     @property
     def beta(self):
         """Angle between reciprocal lattice vectors.
@@ -320,7 +319,7 @@ class Lattice(object):
         in radians.
         """
         return self._beta
-        
+
     @property
     def b(self):
         return self._b
@@ -329,12 +328,12 @@ class Lattice(object):
         """Legacy. Use Lattice.a and Lattice.alpha instead
         """
         return self._a, self._alpha, self._b, self._beta
-    
+
     def getB(self):
         """Legacy. Use Lattice.B_mat instead
         """
         return self.B_mat
-    
+
     #in rad, shape of hkl must be either (3,) or (3,n)
     def get2ThetaFromHKL(self,hkl,energy):
         """Calculates scattering angle 2theta for given hkl.
@@ -349,9 +348,9 @@ class Lattice(object):
             G = LA.norm(self.reciprocalVectorCart(hkl).T,axis=1)
         return 2*np.arcsin((G*wavelength)/(4*np.pi))
 
-    
-    # calculates atomic positions from fractional coordinates xyz_frac 
-    # to cartesian coordinates in Angstroms  
+
+    # calculates atomic positions from fractional coordinates xyz_frac
+    # to cartesian coordinates in Angstroms
     def directVectorCart(self,xyz_frac):
         """Calculates real space vector in cartesian coordinates in crystal frame\
         from fractional coordinates xyz_frac.
@@ -361,7 +360,7 @@ class Lattice(object):
         in Angstrom
         """
         return self.R_mat @ np.asarray(xyz_frac).T
-    
+
     def reciprocalVectorCart(self,hkl):
         """Calculates reciprocal vector in cartesian coordinates in crystal frame\
         from reciprocal lattice units hkl.
@@ -369,19 +368,19 @@ class Lattice(object):
         in Angstrom-1
         """
         return self.B_mat @ np.asarray(hkl).T
-        
-    # calculates reciprocal vector in cartesian coordinates 
+
+    # calculates reciprocal vector in cartesian coordinates
     # from lattice units hkl
     def getReciprocalVectorCart(self,hkl):
         """deprecated. use reciprocalVectorCart instead.
         """
         warnings.warn("getReciprocalVectorCart is deprecated. Use reciprocalVectorCart instead.", FutureWarning)
         return self.B_mat @ np.asarray(hkl).T
-    
+
     @staticmethod
     def _calcReciprocalLattice(a, alpha):
         beta = np.empty(3)
-        
+
         beta[0] = np.arccos((np.cos(alpha[1]) * np.cos(alpha[2]) - np.cos(alpha[0])) /
                            (np.sin(alpha[1]) * np.sin(alpha[2])))
 
@@ -390,19 +389,19 @@ class Lattice(object):
 
         beta[2] = np.arccos((np.cos(alpha[0]) * np.cos(alpha[1]) - np.cos(alpha[2])) /
                                    (np.sin(alpha[0]) * np.sin(alpha[1])))
-        
+
         b = np.empty(3)
-        
+
         volume = (np.prod(a) *
           np.sqrt(1 + 2 * np.cos(alpha[0]) * np.cos(alpha[1]) * np.cos(alpha[2]) -
                np.cos(alpha[0]) ** 2 - np.cos(alpha[1]) ** 2 - np.cos(alpha[2]) ** 2))
-        
+
         b[0] = 2 * np.pi * a[1] * a[2] * np.sin(alpha[0]) / volume
         b[1] = 2 * np.pi * a[0] * a[2] * np.sin(alpha[1]) / volume
         b[2] = 2 * np.pi * a[0] * a[1] * np.sin(alpha[2]) / volume
-        
+
         return b, beta
-    
+
     @staticmethod
     def reciprocalMatrix(a,alpha,b,beta):
         """Creates a matrix that transforms reciprocal lattice coordinates into cartesian coordinates.
@@ -412,7 +411,7 @@ class Lattice(object):
         return np.array([(b[0],     b[1]*np.cos(beta[2]),   b[2]*np.cos(beta[1])),
                          (0.,        b[1]*np.sin(beta[2]),   -b[2]*np.sin(beta[1])*np.cos(alpha[0])),
                          (0.,        0.,                     2.*np.pi/a[2])])
-    @staticmethod 
+    @staticmethod
     def realspaceMatrix(a,alpha,b,beta):
         """Creates a matrix that transforms lattice coordinates into cartesian coordinates.
         
@@ -423,8 +422,8 @@ class Lattice(object):
                          (0.,        a[1]*np.sin(alpha[2]),   -a[2]*np.sin(alpha[1])*np.cos(beta[0])),
                          (0.,        0.,                     2.*np.pi/b[2])])
 
-    
-    
+
+
     def __str__(self):
         name = "Lattice:\nReal space: \t" + str(self._a) + " / " + str(np.rad2deg(self._alpha)) + "\n"
         name += "Reciprocal space: \t" + str(self._b) + " / " + str(np.rad2deg(self._beta))
@@ -441,19 +440,19 @@ class Crystal(Lattice):
         warnings.warn("Crystal is deprecated. Use Lattice instead.", FutureWarning)
         super().__init__(*args, **kwargs)
 
-class UBCalculator():
-    
+class UBCalculator:
+
     def __init__(self,lattice, energy):
         self._U = None
         self._UB = None
         self.setLattice(lattice)
         self.setEnergy(energy)
-    
+
     def setLattice(self, lattice):
         self.lattice = lattice
         if self._U is not None:
             self._UB = self._U @ self.lattice.B_mat
-        
+
     def setEnergy(self,energy):
         """in keV
         
@@ -461,7 +460,7 @@ class UBCalculator():
         self._energy = energy
         self._lambda = 12.39842 / energy
         self._K = (2*np.pi)/self._lambda
-        
+
     def setLambda(self,lmbda):
         """in Angstrom
         
@@ -469,27 +468,27 @@ class UBCalculator():
         self._energy = 12.39842 / lmbda
         self._lambda = lmbda
         self._K = (2*np.pi)/self._lambda
-    
+
     def getLattice(self):
         """depricated. use UBCalculator.lattice instead.
         """
         return self.lattice
-    
+
     def getEnergy(self):
         return self._energy
-    
+
     def getLambda(self):
         return self._lambda
-    
+
     def getK(self):
         return self._K
-    
+
     def setPrimaryReflection(self,pos,hkl):
         self._primary = (pos,hkl)
-        
+
     def setSecondayReflection(self,pos,hkl):
         self._secondary = (pos,hkl)
-        
+
     # l in z-direction
     def defaultU(self):
         """For compatibility of legacy code. Use one of the explicit defaults for future developments instead. 
@@ -502,7 +501,7 @@ class UBCalculator():
         self.setSecondayReflection([0.,TwoTheta2,0.,0.,0.,0.],[0,1,0])
         self.calculateU()
         """
-        
+
     def alignU_lab(self, hkl, pos, orientation):
         """Rotate current U matrix in the shortest way,
         so that the reflection ´hkl´ with the angles ´pos´
@@ -513,20 +512,20 @@ class UBCalculator():
         :param orientation np.ndarray: direction to rotate in laboratory coordinates
         """
         ALPHA, _, _, OMEGA, CHI, PHI = createVliegMatrices(pos)
-        
+
         Vlab = ALPHA @ OMEGA @ CHI @ PHI
         Qphi = np.asarray(self.getUB()) @ hkl
         Qlab = Vlab @ Qphi
-        
+
         Qlab_norm = Qlab / np.linalg.norm(Qlab)
         orientation_norm = orientation / np.linalg.norm(orientation)
-        
+
         rotation = util.rotation_matrix_from_vectors(Qlab_norm, orientation_norm)
-        
+
         Unew = Vlab.T @ rotation @ Vlab @ np.asarray(self.getU())
-        
+
         self.setU(Unew)
-        
+
     def alignU_alpha(self, hkl, pos, orientation):
         """Rotate current U matrix in the shortest way,
         so that the reflection ´hkl´ with the angles ´pos´
@@ -537,20 +536,20 @@ class UBCalculator():
         :param orientation np.ndarray: direction to rotate in laboratory coordinates
         """
         _, _, _, OMEGA, CHI, PHI = createVliegMatrices(pos)
-        
+
         Valp = OMEGA @ CHI @ PHI
         Qphi = np.asarray(self.getUB()) @ hkl
         Qalp = Valp @ Qphi
-        
+
         Qalp_norm = Qalp / np.linalg.norm(Qalp)
         orientation_norm = orientation / np.linalg.norm(orientation)
-        
+
         rotation = util.rotation_matrix_from_vectors(Qalp_norm, orientation_norm)
-        
+
         Unew = Valp.T @ rotation @ Valp @ np.asarray(self.getU())
-        
+
         self.setU(Unew)
-    
+
     def defaultU_GID(self):
         """Sets a default U matrix for Grazing incidence surface diffraction geometry.
         
@@ -567,40 +566,40 @@ class UBCalculator():
         # cartesian crystal frame (hc = B @ hkl)
         h1c = self.lattice.reciprocalVectorCart([0.,0.,1.]).flatten() # for hkl = (0, 0, 1)
         h2c = self.lattice.reciprocalVectorCart([0.,1.,0.]).flatten() # for hkl = (0, 1, 0)
-        
+
         # Calculate the sample rotation matrices
-        
+
         chi1 = np.deg2rad(0.)
         phi1 = np.deg2rad(0.)
         omega1 = np.deg2rad(0.)
-        
+
         chi2 = np.deg2rad(0.)
         phi2 = np.deg2rad(0.)
         omega2 = np.deg2rad(0.)
-        
+
         # [ALPHA, DELTA, GAMMA, OMEGA, CHI, PHI]
         pos1 = np.array([None, None, None, omega1, chi1, phi1])
         pos2 = np.array([None, None, None, omega2, chi2, phi2])
-        
+
         _,_,_, OM1, CHI1, PHI1 = createVliegMatrices(pos1) # rotation matrices
         _,_,_, OM2, CHI2, PHI2 = createVliegMatrices(pos2) # rotation matrices
-        
+
         # define reference directions in alpha frame
-        
+
         Qalp1 = np.array([0.,0.,1.]) * np.linalg.norm(h1c) # reference 1:  z direction
         Qalp2 = np.array([1.,0.,0.]) * np.linalg.norm(h2c) # reference 2:  x direction
-        
+
         # Transform Qalp in Qphi
         # hint: matrix inverse of rotation matrices is the transpose (T)
         Qphi1 = PHI1.T @ CHI1.T @ OM1.T @ Qalp1
         Qphi2 = PHI2.T @ CHI2.T @ OM2.T @ Qalp2
-        
+
         # 1: primary vector, 2: secondary vector
-        
+
         U, stats = UBCalculator.calc_U_from_vectors(Qphi1, Qphi2, h1c, h2c)
-        
+
         self.setU(U)
-        
+
     def defaultU_TSD(self):
         """Sets a default U matrix for Transmission Surface Diffraction geometry.
         
@@ -623,43 +622,43 @@ class UBCalculator():
         # cartesian crystal frame (hc = B @ hkl)
         h1c = self.lattice.reciprocalVectorCart([0.,0.,1.]).flatten() # for hkl = (0, 0, 1)
         h2c = self.lattice.reciprocalVectorCart([0.,1.,0.]).flatten() # for hkl = (0, 1, 0)
-        
+
         # Calculate the sample rotation matrices
-        
+
         chi1 = np.deg2rad(00.)
         phi1 = np.deg2rad(90.)
         omega1 = np.deg2rad(0.)
         alpha1 = np.deg2rad(0.)
-        
+
         chi2 = np.deg2rad(0.)
         phi2 = np.deg2rad(90.)
         omega2 = np.deg2rad(0.)
         alpha2 = np.deg2rad(0.)
-        
+
         # [ALPHA, DELTA, GAMMA, OMEGA, CHI, PHI]
         pos1 = np.array([alpha1, None, None, omega1, chi1, phi1])
         pos2 = np.array([alpha2, None, None, omega2, chi2, phi2])
-        
+
         A1,_,_, OM1, CHI1, PHI1 = createVliegMatrices(pos1) # rotation matrices
         A2,_,_, OM2, CHI2, PHI2 = createVliegMatrices(pos2) # rotation matrices
-        
+
         # define reference directions in laboratory frame
-        
+
         Qlab1 = np.array([0.,1.,0.]) * np.linalg.norm(h1c) # reference 1:  y direction
         Qlab2 = np.array([0.,0.,1.]) * np.linalg.norm(h2c) # reference 2:  z direction
-        
+
         # Transform Qlab in Qphi
         # hint: matrix inverse of rotation matrices is the transpose (T)
         Qphi1 = PHI1.T @ CHI1.T @ OM1.T @ A1.T @ Qlab1
         Qphi2 = PHI2.T @ CHI2.T @ OM2.T @ A2.T @ Qlab2
-        
+
         # 1: primary vector, 2: secondary vector
-        
+
         U, stats = UBCalculator.calc_U_from_vectors(Qphi1, Qphi2, h1c, h2c)
-        
+
         self.setU(U)
-        
-        
+
+
     def zmodeUSingleRefl(self,pos,hkl):
         """
         assumes L pointing in z-direction
@@ -693,7 +692,7 @@ class UBCalculator():
         U /= np.real(evreal)  
         self.setU(U)
         """
-    
+
     @staticmethod
     def calc_U_from_vectors(Q_phi_1, Q_phi_2, Q_c_1, Q_c_2):
         """Calculate the orientation matrix ´U´ from two reference reflections.
@@ -714,57 +713,57 @@ class UBCalculator():
         reflection vectors Q_phi_1, Q_c_1 are the primary vectors, i.e. they define a fixed reference,
         and the secondary vectors Q_phi_2, Q_c_2 only lead to a rotation around the primary vector.
         """
-        
+
         # Normalize vectors as we are only interested in orientations
-        
+
         u_phi_1 = Q_phi_1 / np.linalg.norm(Q_phi_1) # could also normalize after doing cross products...
         u_phi_2 = Q_phi_2 / np.linalg.norm(Q_phi_2)
-        
+
         h_c_1 = Q_c_1 / np.linalg.norm(Q_c_1)
         h_c_2 = Q_c_2 / np.linalg.norm(Q_c_2)
-        
+
         vector_norm_mismatch_1 = np.linalg.norm(Q_phi_1) / np.linalg.norm(Q_c_1)
         vector_norm_mismatch_2 = np.linalg.norm(Q_phi_2) / np.linalg.norm(Q_c_2)
-        
+
         # Create modified, orthogonal unit vectors t_c and t_phi in crystal and phi frame, respectively
-        
+
         # t_c_1 parallel to h_c_1, t_c_2 lies in the plane of h_c_1 and h_c_2, and t_c_3 is perpendicular to this plane.
         t_c_1 = h_c_1
         t_c_3 = np.cross(h_c_1, h_c_2)
         t_c_2 = np.cross(t_c_3, t_c_1)
-        
+
         vector_angle_c = np.arcsin(np.linalg.norm(t_c_3))
-        
+
         t_p_1 = u_phi_1
         t_p_3 = np.cross(u_phi_1, u_phi_2)
         t_p_2 = np.cross(t_p_3, t_p_1)
-        
+
         vector_angle_p = np.arcsin(np.linalg.norm(t_p_3))
-        
+
         vector_angle_mismatch = np.abs(vector_angle_c - vector_angle_p)
         vector_angle = np.mean([vector_angle_c, vector_angle_p])
-        
+
         if np.rad2deg(vector_angle) < 5.:
             raise Exception("Angle between reference vectors < 5°, this would result in a bad orientation matrix")
-        
+
         t_c_3 /= np.linalg.norm(t_c_3)
         t_c_2 /= np.linalg.norm(t_c_2)
-        
+
         t_p_3 /= np.linalg.norm(t_p_3)
         t_p_2 /= np.linalg.norm(t_p_2)
-        
+
         Tc = np.column_stack([t_c_1, t_c_2, t_c_3])
         Tp = np.column_stack([t_p_1, t_p_2, t_p_3])
-        
+
         U = Tp @ Tc.T
-        
+
         stats = {'angle' : vector_angle,
                  'angle_mismatch' : vector_angle_mismatch,
                  'norm_mismatch_1' : vector_norm_mismatch_1,
                  'norm_mismatch_2' : vector_norm_mismatch_2}
-        
+
         return U, stats
-    
+
     def calculateU(self):
         """Calculate the orientation matrix ´U´ from the two reference reflections.
         
@@ -774,38 +773,38 @@ class UBCalculator():
         """
         ppos, phkl =  self._primary
         spos, shkl =  self._secondary
-        
+
         # Compute the two reflections' reciprical lattice vectors in the
         # cartesian crystal frame (hc = B * hkl)
         h1c = self.lattice.reciprocalVectorCart(phkl).flatten()
         h2c = self.lattice.reciprocalVectorCart(shkl).flatten()
-        
-        # Calculate observed vectors in the phi frame. 
+
+        # Calculate observed vectors in the phi frame.
         u1p = calculate_q_phi(ppos, self._K).flatten()
         u2p = calculate_q_phi(spos, self._K).flatten()
-        
+
         U, stats = UBCalculator.calc_U_from_vectors(u1p, u2p, h1c, h2c)
-        
+
         self.setU(U)
         return self._U
 
     def getU(self):
-        return self._U 
-        
+        return self._U
+
     def getUB(self):
         return self._UB
 
     def getUmB(self):
         B = self.lattice.B_mat
         return  self._U @ B
-    
+
     def setU(self,U):
         U = np.asarray(U).reshape((3,3))
         self._U = np.ascontiguousarray(U)
         self._UB = np.ascontiguousarray(self._U @ self.lattice.getB())
-        
-    # this fits the U matrix and also fits the lattice constants 
-    # you can either scale the lattice constants equally or fit them 
+
+    # this fits the U matrix and also fits the lattice constants
+    # you can either scale the lattice constants equally or fit them
     # individually
     # mode: either 'scale' or 'indivdual'
     def refineULattice(self,hkl,angles,mode='scale',rod=None,factor=100.):
@@ -814,12 +813,12 @@ class UBCalculator():
             qphi.append(calculate_q_phi(pos,self._K).T)
         qphi = np.array(qphi).T
         # p[0], p[1], p[2]: rotation angles
-        
+
         weights = np.ones(angles.shape[0])
-        
+
         if rod is not None:
             weights[np.all(hkl[:,:2] == rod,axis=1)] = factor
-        
+
         #a,alpha,_,_ = self.lattice.getLatticeParameters()
         a = self.lattice.a
         alpha = np.rad2deg(self.lattice.alpha)
@@ -827,12 +826,12 @@ class UBCalculator():
         if mode=='scale':
             def Chi2(p):
                 self.lattice.setLattice(a*p[3],alpha)
-                UBnew = util.x_rotation(p[0]) @ util.y_rotation(p[1]) @ util.z_rotation(p[2]) @ self._U @ self.lattice.B_mat                
+                UBnew = util.x_rotation(p[0]) @ util.y_rotation(p[1]) @ util.z_rotation(p[2]) @ self._U @ self.lattice.B_mat
                 hklnew = (np.linalg.inv(UBnew) @ qphi).T
                 return np.sum(LA.norm(hkl - hklnew,axis=1) * weights)
             res = opt.minimize(Chi2,[0,0,0,1.])
         else:
-            
+
             def Chi2(p):
                 self.lattice.setLattice(a*np.array(p[3:]),alpha)
                 UBnew = util.x_rotation(p[0]) @ util.y_rotation(p[1]) @ util.z_rotation(p[2]) @ self._U @ self.lattice.B_mat
@@ -842,20 +841,20 @@ class UBCalculator():
         #print(res)
         U = util.x_rotation(res.x[0]) @ util.y_rotation(res.x[1]) @ util.z_rotation(res.x[2]) @ self._U
         self.setU(U)
-    
-    
+
+
     def refineU(self,hkl,angles,allowPhiChi_opt=False,rod=None,factor=100.):
         qphi = []
         for pos in angles:
             qphi.append(calculate_q_phi(pos,self.getK()).T)
         qphi = np.array(qphi).T
         # p[0], p[1], p[2]: rotation angles
-        
+
         weights = np.ones(angles.shape[0])
-        
+
         if rod is not None:
             weights[np.all(hkl[:,:2] == rod,axis=1)] = factor
-        
+
         if allowPhiChi_opt:
             def Chi2(p):
                 qphi = []
@@ -866,18 +865,18 @@ class UBCalculator():
                     pos[5] = p[4]
                     qphi.append(calculate_q_phi(pos,self.getK()).T)
                 qphi = np.array(qphi).T
-                
+
                 hklnew = (np.linalg.inv(UBnew) @ qphi).T
                 #print(np.sum(LA.norm(hkl - hklnew,axis=1)))
                 return np.sum(LA.norm(hkl - hklnew,axis=1) * weights )
             res = opt.minimize(Chi2,[0,0,0,0,0])
         else:
-            
+
             def Chi2(p):
                 UBnew = util.x_rotation(p[0]) @ util.y_rotation(p[1]) @ util.z_rotation(p[2]) @ self._U @ self.lattice.B_mat
                 hklnew = (np.linalg.inv(UBnew) @ qphi).T
                 return np.sum(LA.norm(hkl - hklnew,axis=1) * weights)
-                
+
             res = opt.minimize(Chi2,[0,0,0])
         U = util.x_rotation(res.x[0]) @ util.y_rotation(res.x[1]) @ util.z_rotation(res.x[2]) @ self._U
         self.setU(U)
@@ -899,7 +898,7 @@ class UBCalculator():
         res = opt.minimize(Chi2,[0,0,0])
         U = util.x_rotation(res.x[0]) @ util.y_rotation(res.x[1]) @ util.z_rotation(res.x[2])
         self.setU(U)
-    
+
     def __str__(self):
         pstr = 'E = ' + str(self.getEnergy()) + ' keV, lambda = ' +str(self.getLambda()) + "\n"
         pstr += str(self.lattice)
@@ -907,10 +906,10 @@ class UBCalculator():
             ppos, phkl =  self._primary
             pstr += '\nprimary reflection (or0): %s\n%s\n' % (phkl , strPos_prim(ppos) )
         if hasattr(self, "_secondary"):
-            spos, shkl =  self._secondary 
+            spos, shkl =  self._secondary
             pstr += 'secondary reflection (or1): %s\n%s\n' % (shkl , strPos_prim(spos) )
         return pstr
-    
+
     def __repr__(self):
         pstr = 'E = ' + str(self.getEnergy()) + ' keV, lambda = ' +str(self.getLambda()) + "\n"
         pstr += str(self.lattice)
@@ -918,18 +917,18 @@ class UBCalculator():
             ppos, phkl =  self._primary
             pstr += '\nprimary reflection (or0): %s\n%s\n' % (phkl , strPos_prim(ppos) )
         if hasattr(self, "_secondary"):
-            spos, shkl =  self._secondary 
+            spos, shkl =  self._secondary
             pstr += 'secondary reflection (or1): %s\n%s\n' % (shkl , strPos_prim(spos) )
         return pstr
-        
-    
-    
 
 
-class VliegAngles():
+
+
+
+class VliegAngles:
     def __init__(self,ubCalculator):
         self._ubCalculator = ubCalculator
-        
+
     """
     Returns the hkl values of a aingle detector frame. 
     phi,chi,alpha,omega are fixed, gamma and delta are 1-d arrays
@@ -948,15 +947,15 @@ class VliegAngles():
         for i in range(gamma.size):
             #calculate ( DELTA * GAMMA - ALPHA**-1 ) * K_lab = Q_alpha
             DEL_GAM_minALP = np.matmul((np.matmul(DELTA,GAMMA[i]) - ALPHAi), np.array([0.,K,0.]) ).T
-            #calculate UBi * PHIi * CHIi * OMEGAi * Q_alpha 
+            #calculate UBi * PHIi * CHIi * OMEGAi * Q_alpha
             hkl[i] = np.matmul(UBi,np.matmul(PHIi,np.matmul(CHIi,np.matmul(OMEGAi,DEL_GAM_minALP)))).T
         return hkl[:,:,0], hkl[:,:,1], hkl[:,:,2] # h k l
-        
+
     def anglesToHklDetector_mesh(self,alpha,delta,gamma,omega,chi,phi):
         warnings.warn("anglesToHklDetector_mesh is deprecated and will be removed in the future. Use anglesToHkl instead.", FutureWarning)
         return self.anglesToHkl(alpha,delta,gamma,omega,chi,phi)
 
-    
+
     def anglesToHkl(self,alpha,delta,gamma,omega,chi,phi):
         alpha = np.asarray(alpha)
         delta = np.asarray(delta)
@@ -965,24 +964,24 @@ class VliegAngles():
         chi = np.asarray(chi)
         phi = np.asarray(phi)
         ang = [alpha,delta,gamma,omega,chi,phi]
-        
+
         shape = max([a.shape for a in ang])
-        
+
         #[_, _, _, OMEGA, CHI, PHI] = createVliegMatrices([None,None,None,omega,chi,phi])
         #hkl = np.empty((*shape,3))
         K = self._ubCalculator.getK()
         UBi = np.linalg.inv(self._ubCalculator.getUB())
-        
+
         Qalp = self.QAlpha(alpha,delta,gamma)
         Qalp = np.ascontiguousarray(Qalp.reshape((-1,3)))
-        
-        #now UBi * PHIi * CHIi * OMEGAi * Q_alpha 
-        
+
+        #now UBi * PHIi * CHIi * OMEGAi * Q_alpha
+
         #calculate PHIi @ CHIi @ OMEGAi
         sinphi = np.sin(phi.flatten()); cosphi = np.cos(phi.flatten())
         sinchi = np.sin(chi.flatten()); coschi = np.cos(chi.flatten())
         sinomega = np.sin(omega.flatten()); cosomega = np.cos(omega.flatten())
-        
+
         if phi.size > 1 or chi.size > 1 or omega.size > 1:
             # this will be expensive, could optimize here in the future
             PCO = np.empty((np.prod(shape), 3, 3), dtype=np.float64)
@@ -997,17 +996,17 @@ class VliegAngles():
             PCO[:,2,2] = coschi*cosphi
         else:
             PCO = np.empty((3, 3), dtype=np.float64)
-            PCO[0,0] = coschi*cosomega
-            PCO[0,1] = -sinomega*coschi
-            PCO[0,2] = -sinchi
-            PCO[1,0] = sinchi*sinphi*cosomega + sinomega*cosphi
-            PCO[1,1] = -sinchi*sinomega*sinphi + cosomega*cosphi
-            PCO[1,2] = sinphi*coschi
-            PCO[2,0] = sinchi*cosomega*cosphi - sinomega*sinphi
-            PCO[2,1] = -sinchi*sinomega*cosphi - sinphi*cosomega
-            PCO[2,2] = coschi*cosphi
+            PCO[0,0] = coschi[0]*cosomega[0]
+            PCO[0,1] = -sinomega[0]*coschi[0]
+            PCO[0,2] = -sinchi[0]
+            PCO[1,0] = sinchi[0]*sinphi[0]*cosomega[0] + sinomega[0]*cosphi[0]
+            PCO[1,1] = -sinchi[0]*sinomega[0]*sinphi[0] + cosomega[0]*cosphi[0]
+            PCO[1,2] = sinphi[0]*coschi[0]
+            PCO[2,0] = sinchi[0]*cosomega[0]*cosphi[0] - sinomega[0]*sinphi[0]
+            PCO[2,1] = -sinchi[0]*sinomega[0]*cosphi[0] - sinphi[0]*cosomega[0]
+            PCO[2,2] = coschi[0]*cosphi[0]
 
-        #calculate UBi * PHIi * CHIi * OMEGAi * Q_alpha 
+        #calculate UBi * PHIi * CHIi * OMEGAi * Q_alpha
         hkl = np.einsum('...ij,...j->...i', (UBi @ PCO), Qalp)
         #hkl = np.matmul(UBi,np.matmul(PHIi,np.matmul(CHIi,np.matmul(OMEGAi,DEL_GAM_minALP.T)))).T.reshape((*shape,3))
         hkl = hkl.reshape((*shape,3))
@@ -1029,7 +1028,7 @@ class VliegAngles():
             qphi = np.array(qphi).T
             return (np.linalg.inv(self._ubCalculator.getUB()) @ qphi).T
 
-            
+
     def QAlpha(self,alpha,delta,gamma):
         delta = np.asarray(delta)
         gamma = np.asarray(gamma)
@@ -1041,15 +1040,15 @@ class VliegAngles():
                     raise ValueError("Shape %s of %s is incompatible with max shape %s" % (name, ang.shape, shape))
 
         Qxyz = np.empty((*shape,3),dtype=np.float64)
-        cosgam = np.cos(gamma) 
+        cosgam = np.cos(gamma)
         Qxyz[...,0] = - np.sin(-delta)*cosgam
         Qxyz[...,1] = np.cos(-delta)*cosgam - np.cos(alpha)
         Qxyz[...,2] = np.sin(gamma) + np.sin(alpha)
-        
+
         Qxyz *= self._ubCalculator.getK()
         return Qxyz
-        
-        
+
+
     def QAlphaDetector(self,alpha,delta,gamma):
         [ALPHA, DELTA, GAMMA, OMEGA, CHI, PHI] = createVliegMatrices([alpha,delta,gamma,None,None,None])
         K = self._ubCalculator.getK()
@@ -1059,7 +1058,7 @@ class VliegAngles():
             #calculate ( DELTA * GAMMA - ALPHA**-1 ) * K_lab = Q_alpha
             Qxyz[i] = np.matmul((np.matmul(DELTA,GAMMA[i]) - ALPHAi), np.array([0.,K,0.]) )
         return Qxyz[:,:,0], Qxyz[:,:,1], Qxyz[:,:,2] # Qx Qy Qz
-    
+
     def anglesZmode(self,hkl,fixedangle,fixed='in',chi=0,phi=0,**keyargs):
         """
         Calculates the diffractometer angles for the z-mode of the
@@ -1107,14 +1106,14 @@ class VliegAngles():
         hkl = np.array(hkl)
         K = self._ubCalculator.getK()
         Hphi = np.matmul(self._ubCalculator.getUB(),hkl)
-        
+
         Homega = CHI @ PHI @ Hphi
         if fixed == 'in':
             alpha = fixedangle
             gamma = np.arcsin(Homega[2]/K - np.sin(alpha) )
         elif fixed == 'out':
             gamma = fixedangle
-            alpha = np.arcsin(Homega[2]/K - np.sin(gamma) )            
+            alpha = np.arcsin(Homega[2]/K - np.sin(gamma) )
         elif fixed == 'eq':
             gamma = alpha = np.arcsin(Homega[2]/(2*K))
         else:
@@ -1122,7 +1121,7 @@ class VliegAngles():
         if len(hkl.shape) > 1:
             accos_arg = (1. - np.sum(Homega**2,axis=0) / (2*K**2) + np.sin(gamma)*np.sin(alpha)) * \
                               (1 / (np.cos(gamma)*np.cos(alpha)))
-            mask = np.logical_or(accos_arg > 0.99, accos_arg < -0.99) # handle numerical precision issue close to arccos(1). 
+            mask = np.logical_or(accos_arg > 0.99, accos_arg < -0.99) # handle numerical precision issue close to arccos(1).
             accos_arg[mask] = np.round(accos_arg[mask], np.finfo(np.float64).precision - 2)
             with np.errstate(invalid='ignore'):
                 delta = np.arccos(accos_arg)
@@ -1143,7 +1142,7 @@ class VliegAngles():
             delta = - delta # solution since delta is calculated using arccos above
         omega = np.arctan2((Homega[1]*np.sin(delta)*np.cos(gamma) - Homega[0]*(np.cos(delta)*np.cos(gamma) - np.cos(alpha))),
                           (Homega[0]*np.sin(delta)*np.cos(gamma) + Homega[1]*(np.cos(delta)*np.cos(gamma) - np.cos(alpha))))
-        
+
         # omega now in range +-pi
         # convert to 0 - 2*pi, since most diffractometers work from 0 to 360 degrees
         #omega = (omega + np.pi) % np.pi
@@ -1151,12 +1150,12 @@ class VliegAngles():
             return np.vstack((alpha, delta, gamma, omega, chi, phi)).T
         else:
             return alpha, delta, gamma, omega, chi, phi
-        
+
     def intersectLineEwald(self, H_0, H_1, alpha,omega,phi=0.,chi=0.,**keyargs):
         shape = H_0.shape
         assert len(H_0.shape) == 2 or len(H_0.shape) == 1
         #assert H_0.shape == H_1.shape
-        
+
         [ALPHA, DELTA, GAMMA, OMEGA, CHI, PHI] = createVliegMatrices([alpha, None, None, omega, chi, phi])
         #rotmatrices = [np.asarray(mat) for mat in rotmatrices]
         #[ALPHA, DELTA, GAMMA, OMEGA, CHI, PHI] = rotmatrices
@@ -1166,52 +1165,52 @@ class VliegAngles():
         Vmat = OMEGA @ (CHI @ (PHI @ ub)) # this can be super expensive!
         Vmat_H_0 = np.squeeze(Vmat @ H_0[...,np.newaxis])
         Vmat_H_1 = np.squeeze(Vmat @ H_1[...,np.newaxis])
-        
+
         # np.swapaxes(ALPHA,1,2) transposes matrices inside the stack, works also with a single matrix
         C_vec = (np.swapaxes(ALPHA,-1,-2)[...,1] * K) + Vmat_H_0
-        
+
         C_vec_sqr = np.sum(C_vec**2, axis=-1)
         Vmat_H_1_sqr = np.sum(Vmat_H_1**2, axis=-1)
         Vmat_H_1_C = np.sum(Vmat_H_1*C_vec, axis=-1)
-        
+
         term1 = Vmat_H_1_C / Vmat_H_1_sqr
 
         with warnings.catch_warnings(): # will be nan if there is no solution!
             warnings.simplefilter("ignore")
             sqrtTerm = np.sqrt(term1**2 + (K**2 - C_vec_sqr) / Vmat_H_1_sqr)
-            
-        
+
+
         s1 = -(term1 + sqrtTerm)
         s2 = -(term1 - sqrtTerm)
-        
+
         #from IPython import embed; embed()
-        
+
         HKL_1 = H_1*s1[...,np.newaxis] + H_0
         HKL_2 = H_1*s2[...,np.newaxis] + H_0
-        
+
         if keyargs.get('Qalpha',False):
             Qalpha1 = np.squeeze(Vmat @ HKL_1[...,np.newaxis])
             Qalpha2 = np.squeeze(Vmat @ HKL_2[...,np.newaxis])
             return np.concatenate((HKL_1,Qalpha1,s1[...,np.newaxis]),axis=-1), np.concatenate((HKL_2,Qalpha2,s2[...,np.newaxis]),axis=-1)
         else:
             return HKL_1, HKL_2
-        
+
     def anglesIntersectLineEwald(self, H_0, H_1, alpha,omega,phi=0.,chi=0.,**keyargs):
         HKL_Q1, HKL_Q2 = self.intersectLineEwald(H_0, H_1, alpha,omega,phi,chi, Qalpha=True)
         K = self._ubCalculator.getK()
         HKL_1 = HKL_Q1[...,:3]
         HKL_2 = HKL_Q2[...,:3]
-        
+
         Qa_1 = HKL_Q1[...,3:-1] / K
         Qa_2 = HKL_Q2[...,3:-1] / K
-        
+
         sinalpha = np.sin(alpha)
         gamma_1 = np.arcsin(Qa_1[...,2] - sinalpha)
         gamma_2 = np.arcsin(Qa_2[...,2] - sinalpha)
-        
+
         delta_1 = np.arctan2(Qa_1[...,0], Qa_1[...,1] + np.cos(alpha))
         delta_2 = np.arctan2(Qa_2[...,0], Qa_2[...,1] + np.cos(alpha))
-        
+
         #gamma_1 = np.arctan2((Qa_1[...,2] - sinalpha) * np.sin(delta_1), Qa_1[...,0])
         #gamma_2 = np.arctan2((Qa_2[...,2] - sinalpha) * np.sin(delta_2), Qa_2[...,0])
         if keyargs.get('Qalpha',False):
@@ -1221,7 +1220,7 @@ class VliegAngles():
         else:
             return np.concatenate((HKL_1,delta_1[...,np.newaxis], gamma_1[...,np.newaxis],HKL_Q1[...,-1][...,np.newaxis]),axis=-1),\
                    np.concatenate((HKL_2,delta_2[...,np.newaxis], gamma_2[...,np.newaxis],HKL_Q2[...,-1][...,np.newaxis]),axis=-1)
-        
+
     def hkIntersect(self,rod,alpha,omega,phi=0.,chi=0.):
         hk = np.asarray(rod)
         if len(hk.shape) > 1:
@@ -1229,16 +1228,16 @@ class VliegAngles():
         else:
             H_0 = np.array([*hk,0.])
         H_1 = np.array([0.,0.,1.])
-        
+
         hkl_del_gam_1, hkl_del_gam_2 = self.anglesIntersectLineEwald(H_0, H_1, alpha,omega,phi,chi)
-        
+
         L1 = hkl_del_gam_1[...,2]
         L2 = hkl_del_gam_2[...,2]
         delta1 = hkl_del_gam_1[...,3]
         delta2 = hkl_del_gam_2[...,3]
         gam1 = hkl_del_gam_1[...,4]
         gam2 = hkl_del_gam_2[...,4]
-        
+
         return (L1,gam1,delta1), (L2,gam2,delta2)
 
     def coordinatesAlpha(self, xyz_rel, omega,phi=0.,chi=0.):
@@ -1250,7 +1249,7 @@ class VliegAngles():
         """
         xyz_rel = np.atleast_2d(np.asarray(xyz_rel))
         shape = xyz_rel.shape
-    
+
         OMEGA = calcOMEGA(omega)
         PHI = calcPHI(phi)
         CHI = calcCHI(chi)
@@ -1258,7 +1257,7 @@ class VliegAngles():
         R = self._ubCalculator.lattice.RealspaceMatrix
         xyz_alpha = (OMEGA @ CHI @ PHI @ U @ R) @ xyz_rel.T
         return (xyz_alpha.T).reshape(shape)
-        
+
     def coordinatesLab(self, xyz_rel,alpha, omega,phi=0.,chi=0.):
         """Calculates the coordinates xyz_rel in the laboratory frame (y along beam).
         
@@ -1268,11 +1267,11 @@ class VliegAngles():
         """
         xyz_rel = np.atleast_2d(np.asarray(xyz_rel))
         shape = xyz_rel.shape
-        
+
         ALPHA = calcALPHA(alpha)
         xyz_alpha = self.coordinatesAlpha(xyz_rel, omega, phi, chi)
         return ((ALPHA @ xyz_alpha.T).T).reshape(shape)
-        
+
     def transform_coordinates(self, xyz_rel, origin_frame,
                               target_frame, **angles):
         if origin_frame == target_frame:
@@ -1281,16 +1280,16 @@ class VliegAngles():
         calc_functions = [calcALPHA, calcOMEGA, calcCHI, calcPHI]
         if origin_frame not in order:
             raise ValueError("Origin reference frame %s does not exist, can be one of %s" % (origin_frame,order))
-            
+
         if target_frame not in order:
             raise ValueError("Target reference frame %s does not exist, can be one of %s" % (target_frame,order))
-        
+
         idx_origin = order.index(origin_frame)
         idx_target = order.index(target_frame)
-        
+
         xyz_rel = np.atleast_2d(np.asarray(xyz_rel))
         shape = xyz_rel.shape
-        
+
         invert_mat = idx_origin < idx_target
         if invert_mat:
             idx = idx_origin
@@ -1307,7 +1306,7 @@ class VliegAngles():
                     try:
                         val = angles[angle_name]
                     except Exception:
-                        raise ValueError("The transformation %s -> %s requires diffractometer angle %s" 
+                        raise ValueError("The transformation %s -> %s requires diffractometer angle %s"
                                          % (origin_frame, target_frame, angle_name))
                     rot_matrix = calc_functions[idx](val)
                     current_xyz = LA.inv(rot_matrix) @ current_xyz
@@ -1328,80 +1327,80 @@ class VliegAngles():
                     try:
                         val = angles[angle_name]
                     except Exception:
-                        raise ValueError("The transformation %s -> %s requires diffractometer angle %s" 
+                        raise ValueError("The transformation %s -> %s requires diffractometer angle %s"
                                          % (origin_frame, target_frame, angle_name))
                     rot_matrix = calc_functions[idx - 1](val)
                     current_xyz = rot_matrix @ current_xyz
                     idx -= 1
             return (current_xyz.T).reshape(shape)
-        
-        
+
+
     def anglesOrientationAlpha(self, xyz_rel, xyz_direction):
         xyz_rel = np.atleast_2d(np.asarray(xyz_rel))
         xyz_direction = np.atleast_2d(np.asarray(xyz_direction))
         shape = xyz_rel.shape
         assert xyz_rel.shape == xyz_direction.shape
-        
+
         xyz_rel = xyz_rel.reshape((-1,3))
         xyz_direction = xyz_direction.reshape((-1,3))
-        
+
         om = np.empty(xyz_rel.shape[0])
         chi = np.empty(xyz_rel.shape[0])
         phi = np.empty(xyz_rel.shape[0])
-        
+
         U = np.array(self._ubCalculator.getU())
         R = np.array(self._ubCalculator.lattice.RealspaceMatrix)
         UR = U @ R
-        
+
         for i, (xyz_r, xyz_d) in enumerate(zip(xyz_rel, xyz_direction)):
             urx = UR @ xyz_r
             rotmat = util.rotation_matrix_from_vectors(urx, xyz_d)
             rot = Rotation.from_matrix(rotmat)
             rotangles = rot.as_euler('xyz')
             phi[i] = rotangles[0]
-            chi[i] = rotangles[1] 
-            om[i] = -rotangles[2] 
-        
+            chi[i] = rotangles[1]
+            om[i] = -rotangles[2]
+
         return om.reshape(shape[:-1]), chi.reshape(shape[:-1]), phi.reshape(shape[:-1])
-        
-        
-        
-        
+
+
+
+
     def getGeometryCorrection(self):
         return GeometryCorrection(self)
 
 # only for phi/omega scans, partially zmode
 # deprecated! can be removed in release!
-class GeometryCorrection():
+class GeometryCorrection:
     def __init__(self,vliegangles):
         self._angles = vliegangles
-    
+
     def lorentzFactor(self,delta,beta_in,gamma):
         return 1./(np.sin(delta)*np.cos(beta_in)*np.cos(gamma))
-    
+
     def polarization(self,delta,gamma,alpha,fraction_horiz=1.):
         P_hor = 1. - (np.sin(alpha)*np.cos(delta)*np.cos(gamma) + np.cos(alpha)*np.sin(gamma))**2
-        P_vert = 1. - (np.sin(delta)**2)*(np.cos(gamma)**2) 
+        P_vert = 1. - (np.sin(delta)**2)*(np.cos(gamma)**2)
         return fraction_horiz*P_hor + (1.-fraction_horiz)*P_vert
-    
+
     # without footprint correction
     def activeSurfaceArea(self,delta,alpha,beta_in):
         return 1./(np.sin(delta)*np.cos(alpha-beta_in))
-    
+
     def correctionZmode(self,hkl,fixedangle,fixed='in',polarization_horiz=1.):
         alpha, delta, gamma, omega, chi, phi = self._angles.anglesZmode(hkl,fixedangle,fixed)
         P = self.polarization(delta,gamma,alpha,polarization_horiz)
         #L_phi = self.lorentzFactor(delta,alpha,gamma)
         Carea = self.activeSurfaceArea(delta,alpha,alpha)
         return P*Carea
-    
+
     def correctDatasetZmode(self,hkl,I,fixedangle,fixed='in',polarization_horiz=1.):
         corr = np.empty_like(I)
         for i in range(I.size):
             corr[i] = self.correctionZmode(hkl[i],fixedangle,fixed,polarization_horiz)
         corr /= np.mean(corr)
         return I/corr
-    
+
     def correctionFactorZmode(self,alpha,delta,gamma,polarization_horiz=1.):
         delta = np.abs(delta)
         corr = np.empty_like(delta)
@@ -1410,11 +1409,11 @@ class GeometryCorrection():
             Carea = self.activeSurfaceArea(delta[i],alpha,alpha)
             corr[i] = (P*Carea)
         return corr
-    
+
     def correctImageZmode(self,intensity,alpha,delta,gamma,polarization_horiz=1.):
         I = np.copy(intensity)
         delta = np.abs(delta)
-        
+
         for i in range(delta.shape[0]):
             #print(i)
             P = self.polarization(delta[i],gamma[i],alpha,polarization_horiz)
@@ -1423,11 +1422,11 @@ class GeometryCorrection():
             #print((P*Carea).shape)
             I[i] = I[i]/(P*Carea)
         return I
-    
+
     def applyImageZmode(self,intensity,alpha,delta,gamma,polarization_horiz=1.):
         I = np.copy(intensity)
         delta = np.abs(delta)
-        
+
         for i in range(delta.shape[0]):
             #print(i)
             P = self.polarization(delta[i],gamma[i],alpha,polarization_horiz)
@@ -1436,8 +1435,8 @@ class GeometryCorrection():
             #print((P*Carea).shape)
             I[i] = I[i]*(P*Carea)
         return I
-        
-        
+
+
 
 #pos = [ALPHA, DELTA, GAMMA, OMEGA, CHI, PHI] (angles)
 
@@ -1453,19 +1452,19 @@ if __name__ == "__main__":
     """
     ub = UBCalculator(pt111,69.971)
     ub.defaultU()
-    
+
     #ub.setPrimaryReflection(np.deg2rad([0.15,4.2168,1.354,0,0.,0.]),[1.,0.,1.])
     #ub.setSecondayReflection(np.deg2rad([0.15,4.211,2.839,+32.43 + 28.12,0.,0.]),[0.,1.,2.])
     #ub.calculateU()
-    
-    
+
+
     angles = VliegAngles(ub)
-    
-    
-    
+
+
+
     #delta = np.linspace(-np.pi/8,np.pi/8,1100)
     #gamma = np.linspace(-np.pi/8,np.pi/8,1600)
     h , k , l = angles.anglesToHklDetector(0.15,delta,gamma,0.1,0,0)
-    
+
 
 

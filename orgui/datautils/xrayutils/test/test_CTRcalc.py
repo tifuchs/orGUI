@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2024 Timo Fuchs
@@ -102,19 +101,19 @@ Name   x/frac     y/frac     z/frac     iDW     oDW      occup
         with self.assertRaises(ValueError):
             uc = xtal['notexisting']
         self.assertEqual(str(xtal), TestReadSXRDCrystal.xpr_file)
-        
-        self.assertTrue(np.array_equal(xtal['relaxations'].coherentDomainMatrix[0], 
-            np.array([[1.00000, 2.00000, 3.00000, 10.00000], 
+
+        self.assertTrue(np.array_equal(xtal['relaxations'].coherentDomainMatrix[0],
+            np.array([[1.00000, 2.00000, 3.00000, 10.00000],
                       [4.00000, 5.00000, 6.00000, 11.00000],
                       [7.00000, 8.00000, 9.00000, 0.00000]])))
-    
+
     def testFromFile(self):
         fp = os.path.split(__file__)[0]
         xtal = CTRcalc.SXRDCrystal.fromFile(os.path.join(fp,"testdata/0V12_calculated.xpr"))
         self.assertEqual(str(xtal), TestReadSXRDCrystal.xpr_file_orig)
-        
-    
-    
+
+
+
 class TestCTRcalculationNumPy(unittest.TestCase):
     def setUp(self):
         fp = os.path.split(__file__)[0]
@@ -123,14 +122,14 @@ class TestCTRcalculationNumPy(unittest.TestCase):
         pt100 = CTRcalc.UnitCell([3.9242, 3.9242, 3.9242] ,[90.0000 ,90.0000, 90.0000])
         self.xtal_unitcells.setGlobalReferenceUnitCell(pt100,util.z_rotation(np.deg2rad(45.)))
         CTRcalc.HAS_NUMBA_ACCEL = False
-        
+
     def testStructureFactorEqual(self):
         calc_CTRs = self.CTRs.generateCollectionFromXtal(self.xtal_unitcells)
 
         for calc, reference in zip(calc_CTRs, self.CTRs):
             self.assertTrue(np.allclose(calc.sfI, reference.sfI, rtol=1e-02))
-        
-        
+
+
 class TestCTRcalculationNumba(unittest.TestCase):
     def setUp(self):
         fp = os.path.split(__file__)[0]
@@ -142,11 +141,11 @@ class TestCTRcalculationNumba(unittest.TestCase):
             CTRcalc.HAS_NUMBA_ACCEL = True
         else:
             raise Exception("Can not perform Numba tests: _CTRcalc_accel library not imported. Is Numba installed?")
-            
+
     def testStructureFactorEqual(self):
         calc_CTRs = self.CTRs.generateCollectionFromXtal(self.xtal_unitcells)
 
         for calc, reference in zip(calc_CTRs, self.CTRs):
             self.assertTrue(np.allclose(calc.sfI, reference.sfI, rtol=1e-02))
-        
+
 

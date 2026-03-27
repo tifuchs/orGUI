@@ -4,7 +4,6 @@ matplotlib >= 1.2
 fabio >= 0.7
 silx >= 1.1
 pyFAI >= 0.19
-pymca >= 5.3
 xraydb >= 4.0
 
 #optional

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -29,7 +28,6 @@ __version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
-import sys
 import numpy as np
 import silx.gui.hdf5
 from silx.gui import icons
@@ -47,7 +45,6 @@ import os
 import traceback
 import time
 
-from ..datautils.xrayutils import unitcells
 from ..datautils.xrayutils import HKLVlieg, CTRcalc
 from ..datautils.xrayutils import DetectorCalibration
 from .. import resources
@@ -86,7 +83,7 @@ try:
         "Bitshuffle-zstd": hdf5plugin.Bitshuffle(cname='zstd'),
     }
     FILTERS.update(**BITSHUFFLE_FILTERS)
-        
+
     BLOSC_FILTERS = {}
     for cname in ('lz4', 'blosclz', 'lz4', 'lz4hc', 'snappy', 'zlib', 'zstd'):
         for shuffle_name, shuffle in [('NoShuffle', hdf5plugin.Blosc.NOSHUFFLE),
@@ -107,30 +104,30 @@ try:
                     cname=cname, clevel=clevel, filters=filters)
     FILTERS.update(**BLOSC2_FILTERS)
 
+
 except Exception as e:
     logger.warning("Unable to load hdf5plugin compression filters", exc_info=True,
                     extra={'show_dialog' : False})
 
-
 class ConfigData(qt.QObject):
     def __init__(self, config=None):
         self.detector = DetectorCalibration.Detector2D_SXRD()
-        
+
         pass
-    
+
     #@classmethod
     def readConfig(self, filename):
         config = configparser.ConfigParser()
         config.read(configfile)
-        
+
         machine = config['Machine']
         lattice = config['Lattice']
         diffrac = config['Diffractometer']
-            
+
         self.azimuth = np.deg2rad(diffrac.getfloat('azimuthal_reference',0))
         self.polaxis = np.deg2rad(diffrac.getfloat('polarization_axis',90))
         self.polfactor = diffrac.getfloat('polarization_factor',0)
-            
+
         sdd = machine.getfloat('SDD',0.729) #m
         E =  machine.getfloat('E',78.0) #keV
         pixelsize = machine.getfloat('pixelsize',172e-6) #m
@@ -141,7 +138,7 @@ class ConfigData(qt.QObject):
         self.mu = np.deg2rad(diffrac.getfloat('mu',0.05))
         self.chi = np.deg2rad(diffrac.getfloat('chi',0.0))
         self.phi = np.deg2rad(diffrac.getfloat('phi',0.0))
-            
+
 
         a1 = lattice.getfloat('a1',-1)
         a2 = lattice.getfloat('a2',-1)
@@ -150,25 +147,25 @@ class ConfigData(qt.QObject):
         alpha2 = lattice.getfloat('alpha2',-1)
         alpha3 = lattice.getfloat('alpha3',-1)
         self.n = 1 - lattice.getfloat('refractionindex',0.0)
-            
+
         lat = np.array([a1,a2,a3])
-            
+
         latticeoverride = True
         latangle = np.array([alpha1,alpha2,alpha3])
         if np.any(lat < 0.) or np.any(latangle < 0):
             latticeoverride = False
             a1 = a2 = a3 = 1.
             alpha1 = alpha2 = alpha3 = 90.
-            
-        
+
+
         self.crystal = CTRcalc.UnitCell([a1,a2,a3],[alpha1,alpha2,alpha3])
         self.crystal.addAtom('Pt',[0.,0.,0.],0.1,0.1,1.)
         self.crystal.setEnergy(E*1e3)
-        
+
         self.ubCal = HKLVlieg.UBCalculator(self.crystal,E)
         self.ubCal.defaultU()
         self.angles = HKLVlieg.VliegAngles(self.ubCal)
-        
+
         if 'crystal' in lattice:
             idx = self.crystalparams.crystalComboBox.findText(lattice['crystal'],qt.Qt.MatchFixedString)
             if idx == -1:
@@ -181,26 +178,26 @@ class ConfigData(qt.QObject):
         if latticeoverride:
             print('foo')
             self.crystal.setLattice([a1,a2,a3],[alpha1,alpha2,alpha3])
-        
+
 
         if 'poni' in machine:
             if machine['poni']:
                 self.detectorCal.load(machine['poni'])
                 self.ubCal.setLambda(self.detectorCal.get_wavelength()*1e10)
-                
+
             else:
                 self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
                 self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
-                self.detectorCal.detector.shape = (2880,2880) # Perkin 
-                
+                self.detectorCal.detector.shape = (2880,2880) # Perkin
+
         else:
             self.detectorCal.setFit2D(sdd*1e3,cpx,cpy,pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
             self.detectorCal.set_wavelength(self.ubCal.getLambda()*1e-10)
             self.detectorCal.detector.shape = (2880,2880)
-            
+
         self.detectorCal.setAzimuthalReference(self.azimuth)
         self.detectorCal.setPolarization(self.polaxis,self.polfactor)
-        
+
         fit2dCal = self.detectorCal.getFit2D()
 
         paramlist = [self.ubCal.getEnergy(),self.mu,fit2dCal['directDist']/1e3,
@@ -208,28 +205,28 @@ class ConfigData(qt.QObject):
                      ,self.polfactor,self.azimuth,self.chi,self.phi]
         self.crystalparams.setValues(self.crystal,self.n)
         self.machineParams.setValues(paramlist)
-        
-        
+
+
 
 
 class DataBase(qt.QMainWindow):
-    
+
     compression = FILTERS['Raw']
-    
+
     sigChangeRockingScan = qt.Signal(object)
-    
+
     def __init__(self, plot, parent=None):
         qt.QMainWindow.__init__(self, parent)
         self.nxfile = None
         self.filedialogdir = os.getcwd()
         self.plot = plot
-        
+
         self.view = silx.gui.hdf5.Hdf5TreeView()
         self.view.setSortingEnabled(True)
-        
+
         #self.view.addContextMenuCallback(self.nexus_treeview_callback)
         #self.hdf5model = self.view.findHdf5TreeModel()
-        
+
         customModel = Hdf5TreeModel
         customModel.NAME_COLUMN = 0
         customModel.DESCRIPTION_COLUMN = 1
@@ -238,7 +235,7 @@ class DataBase(qt.QMainWindow):
         customModel.TYPE_COLUMN = 4
         customModel.NODE_COLUMN = 5
         customModel.LINK_COLUMN = 6
-        
+
         self.hdf5model = customModel(self.view, ownFiles=False)
         self.view.setModel(self.hdf5model)
 
@@ -248,7 +245,7 @@ class DataBase(qt.QMainWindow):
         dvlayout.addWidget(self.dataviewer)
         self.dataviewerDialog.setLayout(dvlayout)
         self.dataviewerDialog.setModal(False)
-        
+
         self.view.setExpandsOnDoubleClick(False)
         self.hdf5model.setFileMoveEnabled(True)
         #self.__treeModelSorted = silx.gui.hdf5.NexusSortFilterProxyModel(self.view)
@@ -257,35 +254,35 @@ class DataBase(qt.QMainWindow):
         #self.__treeModelSorted.setSortCaseSensitivity(qt.Qt.CaseInsensitive)
 
         #self.hdfTreeView.setModel(self.__treeModelSorted)
-        
+
         self.view.doubleClicked.connect(self._onNEXUSDoubleClicked)
         self.view.addContextMenuCallback(self.nexus_treeview_callback)
-        
+
         self.temp_directory = tempfile.TemporaryDirectory(dir=os.path.join(os.getcwd()))
         tempfilepath = os.path.join(self.temp_directory.name,"orgui_database.h5")
         self.createNewDBFile(tempfilepath)
         #self.add_nxdict(gauss)
         #self.add_nxdict(gauss)
         self.setCentralWidget(self.view)
-        
+
         toolbar = qt.QToolBar("Database toolbar",self)
-        
-        
-        
+
+
+
         newDatabaseAct = toolbar.addAction(resources.getQicon("document-nx-new"),"Create new orgui database")
         newDatabaseAct.triggered.connect(self.onNewDatabase)
-        
+
         loadDatabaseAct = toolbar.addAction(icons.getQIcon("document-open"),"Open orgui database")
         loadDatabaseAct.triggered.connect(self.onOpenDatabase)
-        
+
         savenewact = toolbar.addAction(icons.getQIcon("layer-nx"),"Select orgui database location")
         savenewact.triggered.connect(self.onSaveNewDBFile)
-                
+
         saveact = toolbar.addAction(icons.getQIcon("document-save"),"Save orgui database")
         saveact.triggered.connect(self.onSaveDBFile)
-        
+
         self.addToolBar(toolbar)
-        
+
     def _onNEXUSDoubleClicked(self,index): # ToDo add try except with popup message!
         nodes = list(self.view.selectedH5Nodes())
         if len(nodes) > 0:
@@ -296,7 +293,7 @@ class DataBase(qt.QMainWindow):
                     self.plot_signal_callback(roi_node, obj)
                     return
             self.plot_default(obj.h5py_object)
-                
+
     def plot_default(self, h5py_object):
         try:
             nxdat = nxdata.get_default(h5py_object)
@@ -311,23 +308,23 @@ class DataBase(qt.QMainWindow):
     def get_roinode(self, obj):
         if silx.io.utils.get_h5_class(obj) is None:
             return None
-            
+
         while(obj.name != '/'):
             meta = obj.attrs.get('orgui_meta', False)
             if meta and meta == 'roi':
                 return obj
             obj = obj.parent
-            
+
     def get_scannode(self, obj):
         if silx.io.utils.get_h5_class(obj) is None:
             return None
-            
+
         while(obj.name != '/'):
             meta = obj.attrs.get('orgui_meta', False)
             if meta and meta == 'scan':
                 return obj
             obj = obj.parent
-            
+
     def nexus_treeview_callback(self,event):
         objects = list(event.source().selectedH5Nodes())
         obj = objects[0]  # for single selection
@@ -338,14 +335,14 @@ class DataBase(qt.QMainWindow):
         action = qt.QAction("details", menu)
         action.triggered.connect(lambda:  self.view_data_callback(obj))
         menu.addAction(action)
-        
+
         if obj.ntype is h5py.Dataset:
             roi_node = self.get_roinode(obj.h5py_object)
             if roi_node is not None:
                 action = qt.QAction("plot %s" % obj.name, menu)
                 action.triggered.connect(lambda:  self.plot_signal_callback(roi_node, obj))
                 menu.addAction(action)
-        
+
         if obj.ntype is h5py.Group:
             meta = obj.h5py_object.attrs.get('orgui_meta', False)
             if meta and 'roi' in meta:
@@ -357,7 +354,7 @@ class DataBase(qt.QMainWindow):
                 action = qt.QAction("delete", menu)
                 action.triggered.connect(lambda:  self.delete_node(obj.h5py_object))
                 menu.addAction(action)
-                
+
             elif meta and 'rocking' in meta:
                 action = qt.QAction("Show in rocking integration", menu)
                 action.triggered.connect(lambda: self.onShowRoIntegrate(obj))
@@ -369,15 +366,15 @@ class DataBase(qt.QMainWindow):
                 action = qt.QAction("delete", menu)
                 action.triggered.connect(lambda:  self.delete_node(obj.h5py_object))
                 menu.addAction(action)
-                
+
             if meta and 'scan' in meta:
                 menu.addSeparator()
                 action = qt.QAction("delete", menu)
                 action.triggered.connect(lambda:  self.onDeleteScan(obj.h5py_object))
                 menu.addAction(action)
-                
 
-            
+
+
         """    
         if obj.ntype is h5py.File:
             action = qt.QAction("remove", menu)
@@ -395,26 +392,26 @@ class DataBase(qt.QMainWindow):
         except Exception as e:
             traceback.print_exc()
             print("Cannot plot data: %s" % e)
-        
+
     def view_data_callback(self,obj):
         self.dataviewer.setData(obj)
         self.dataviewerDialog.open()
-        
+
     def onSaveNewDBFile(self):
         fileTypeDict = {'NEXUS Files (*.h5)': '.h5', 'All files (*)': '' }
         fileTypeFilter = ""
         for f in fileTypeDict:
             fileTypeFilter += f + ";;"
-            
+
         filename, filetype = qt.QFileDialog.getSaveFileName(self,"Select database location",
                                                   self.filedialogdir,
                                                   fileTypeFilter[:-2])
         if filename == '':
             return
-        
+
         self.filedialogdir = os.path.splitext(filename)[0]
         #filename += fileTypeDict[filetype]
-        
+
         try:
             self.saveNewDBFile(filename)
         except DBCloseError as e:
@@ -423,11 +420,6 @@ class DataBase(qt.QMainWindow):
                                 'description' : 'Will proceed with new data base.',
                                 'show_dialog' : True,
                                 'parent' : self})
-            # msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot close old db file', 
-            # 'Cannot close old db file. The database might be corrupted!:\n%s\nWill proceed with new data base.' % e,
-            # qt.QMessageBox.Ok, self)
-            # msgbox.setDetailedText(traceback.format_exc())
-            # clickedbutton = msgbox.exec()
             try:
                 self.saveNewDBFile(filename)
             except Exception as e:
@@ -435,24 +427,18 @@ class DataBase(qt.QMainWindow):
                      extra={'title' : 'Cannot create new db file',
                             'show_dialog' : True,
                             'parent' : self})
-                # msgbox = qt.QMessageBox(qt.QMessageBox.Critical,'Cannot create db file', 
-                # 'Cannot create new db file.\n%s' % e,
-                # qt.QMessageBox.Ok, self)
-                # msgbox.setDetailedText(traceback.format_exc())
-                # clickedbutton = msgbox.exec()
         except Exception as e:
             logger.exception("Cannot create db file.", 
                  extra={'title' : 'Cannot create new db file',
                         'show_dialog' : True,
                         'parent' : self})
-            
-        
+
     def onNewDatabase(self):
         fileTypeDict = {'NEXUS Files (*.h5)': '.h5', 'All files (*)': '' }
         fileTypeFilter = ""
         for f in fileTypeDict:
             fileTypeFilter += f + ";;"
-            
+
         filename, filetype = qt.QFileDialog.getSaveFileName(self,"Select database location",
                                                   self.filedialogdir,
                                                   fileTypeFilter[:-2])
@@ -481,24 +467,24 @@ class DataBase(qt.QMainWindow):
                         'description' : 'Filename: %s' % filename,
                         'show_dialog' : True,
                         'parent' : self})
-        
 
     def onSaveDBFile(self):
         fileTypeDict = {'NEXUS Files (*.h5)': '.h5', 'All files (*)': '' }
         fileTypeFilter = ""
         for f in fileTypeDict:
             fileTypeFilter += f + ";;"
-            
+
         filename, filetype = qt.QFileDialog.getSaveFileName(self,"Save database",
                                                   self.filedialogdir,
                                                   fileTypeFilter[:-2])
         if filename == '':
             return
-        
+
         self.filedialogdir = os.path.splitext(filename)[0]
         #filename += fileTypeDict[filetype]
         try:
             self.saveDBFile(filename)
+
         except Exception as e:
             logger.exception("Cannot save db file.", 
                  extra={'title' : 'Cannot save data base file',
@@ -511,13 +497,13 @@ class DataBase(qt.QMainWindow):
         fileTypeFilter = ""
         for f in fileTypeDict:
             fileTypeFilter += f + ";;"
-            
+
         filename, filetype = qt.QFileDialog.getOpenFileName(self,"Save database",
                                                   self.filedialogdir,
                                                   fileTypeFilter[:-2])
         if filename == '':
             return
-        
+
         self.filedialogdir = os.path.splitext(filename)[0]
         #filename += fileTypeDict[filetype]
         try:
@@ -532,11 +518,11 @@ class DataBase(qt.QMainWindow):
     def saveNewDBFile(self, filename):
         alldata = nxtodict(self.nxfile)
         self.createNewDBFile(filename, alldata)
-        
+
     def saveDBFile(self, filename):
         alldata = nxtodict(self.nxfile)
         dicttonx(alldata, filename, create_dataset_args={'compression' : self.compression})
-        
+
     def createNewDBFile(self, filename, datadict=None):
         if self.nxfile is not None:
             try:
@@ -544,8 +530,8 @@ class DataBase(qt.QMainWindow):
             except Exception as e:
                 raise DBCloseError('Cannot close previous database file.\nThe database might be corrupted.') from e # convert to common IOError since can also be RuntimeError
 
-        fileattrs = {"@NX_class": u"NXroot",
-                     "@creator": u"orGUI version %s" % __version__,
+        fileattrs = {"@NX_class": "NXroot",
+                     "@creator": "orGUI version %s" % __version__,
                      "@file_name": str(os.path.basename(filename)),
                      "@file_time": datetime.datetime.utcnow().isoformat()}
         if datadict is None:
@@ -556,7 +542,7 @@ class DataBase(qt.QMainWindow):
         dicttonx(datadict, filename, create_dataset_args={'compression' : self.compression})
         self.openDBFile(filename)
 
-        
+
     def openDBFile(self, filename):
         if self.nxfile is not None:
             try:
@@ -580,12 +566,12 @@ class DataBase(qt.QMainWindow):
             time.sleep(0.01)
         self.hdf5model.synchronizeH5pyObject(self.nxfile)
         self.view.expandToDepth(0)
-        
+
     def onDeleteScan(self, obj):
         btn = qt.QMessageBox.question(self,"Delete scan?","Are you sure that you want to delete %s from the orgui database?" % obj.name.split("/")[-1])
         if btn == qt.QMessageBox.Yes:
             self.delete_node(obj)
-            
+
     def onShowRoIntegrate(self, obj):
         meta = obj.h5py_object.attrs.get('orgui_meta', False)
         h5_obj = obj.h5py_object
@@ -595,15 +581,15 @@ class DataBase(qt.QMainWindow):
                 break
             h5_obj = h5_obj.parent
         else:
-            msgbox = qt.QMessageBox(qt.QMessageBox.Critical, 'Invalid rocking scan', 
+            msgbox = qt.QMessageBox(qt.QMessageBox.Critical, 'Invalid rocking scan',
             'Not a rocking scan: %s.' % (dir_name),
             qt.QMessageBox.Ok, self)
             clickedbutton = msgbox.exec()
             return # invalid dataset
-        
+
         dir_name = h5_obj.name
         self.sigChangeRockingScan.emit(dir_name)
-        
+
     def delete_node(self, obj):
         basename = obj.name.split("/")[-1]
         objpar = obj.parent
@@ -613,7 +599,7 @@ class DataBase(qt.QMainWindow):
             time.sleep(0.01)
         self.hdf5model.synchronizeH5pyObject(self.nxfile)
         self.view.expandToDepth(0)
-        
+
     def onRenameNode(self, obj):
         basename = obj.name.split("/")[-1]
         newname, success = qt.QInputDialog.getText(self,"Rename NEXUS node",
@@ -621,7 +607,7 @@ class DataBase(qt.QMainWindow):
                                basename)
         if success and newname != '':
             self.rename_node(obj, newname)
-                               
+
     def rename_node(self, obj, newname):
         basename = obj.name.split("/")[-1]
         objpar = obj.parent
@@ -631,8 +617,8 @@ class DataBase(qt.QMainWindow):
             time.sleep(0.01)
         self.hdf5model.synchronizeH5pyObject(self.nxfile)
         self.view.expandToDepth(0)
-        
-        
+
+
     def close(self):
         if self.nxfile is not None:
             timer = 1
@@ -660,9 +646,9 @@ class DataBase(qt.QMainWindow):
                 logger.error("Closing of database file failed. The database file might be corrupted!", exc_info=True)
                 self.nxfile = None
                 raise
-            
+
             if hasattr(self, "temp_directory"):
                 del self.temp_directory
-        
-    
-    
+
+
+

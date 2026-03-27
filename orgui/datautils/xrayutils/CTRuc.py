@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -33,26 +32,17 @@ __email__ = "tfuchs@cornell.edu"
 from .HKLVlieg import Lattice
 import numpy as np
 import numpy.linalg as LA
-from silx.io import dictdump
 from .. import util
 import xraydb
 import warnings
 import random
-import json
 import math
-from scipy.interpolate import interp1d
-from scipy.signal import savgol_filter
 from scipy.ndimage import gaussian_filter1d
 import os
 import re
 from scipy.special import erf
 #random.seed(45)
 from collections import OrderedDict
-import dataclasses
-from dataclasses import dataclass ,field
-import typing
-import enum
-import copy
 import errno
 import glob
 
@@ -61,7 +51,7 @@ from .element_data import cov_radii_array, rgb_array
 from .CTRutil import (special_elementcolors, ParameterType, Parameter,
                      _ensure_contiguous, next_skip_comment, DWtoDisorder,
                      readWaasmaier, readDispersion, atomic_number,
-                     estimateDispersionCompound, LinearFitFunctions)
+                     LinearFitFunctions)
 
 try:
     from . import _CTRcalc_accel
@@ -70,28 +60,28 @@ except:
     HAS_NUMBA_ACCEL = False
 
 class WaterModel(Lattice, LinearFitFunctions):
-    
+
     #path = os.path.split(__file__)[0]
 
     #f_water = np.loadtxt("%s/water_scattering.dat" % path).T
     #f_water[0] *= 4*np.pi/10.
     #f_water[1] *= np.sqrt(18.015)
     #f_water[2] *= np.sqrt(18.015)
-    
+
     # 2 for measured bulk liquid water
-    # 1 for calculated "free atom model" 
+    # 1 for calculated "free atom model"
     #f0_water_fun = interp1d(f_water[0],f_water[2])
     supportedTypes = ['step', 'layered','1layer','1layer_O','layered_O','1layer_s_O']
-    
+
     parameterOrder = "zpos/frac layer_spacing/frac sigma_0/frac  sigma_bar/frac rho_0_r"
-    
+
     parameterLookup = {'z' : 0, 'spacing' : 1,
                        'sigma_0' : 2, 'sigma_bar' : 3, 'rho_0' : 4}
-    
+
     parameterLookup_inv = dict(map(reversed, parameterLookup.items()))
-    
+
     def __init__(self,a,alpha,watertype='step',**keyargs):
-        super(WaterModel,self).__init__(a,alpha)
+        super().__init__(a,alpha)
         LinearFitFunctions.__init__(self)
         self.basis = np.array([0.,2.8,0.5,1.,0.])
         self.pw = 0.0334
@@ -118,11 +108,11 @@ class WaterModel(Lattice, LinearFitFunctions):
         if watertype not in WaterModel.supportedTypes:
             raise Exception("Water model %s is not supported, should be one of %s" % (watertype,WaterModel.supportedTypes))
         self.type = watertype
-            
+
         self.refHKLTransform = np.identity(3)
         self.refRealTransform = np.identity(3)
         self._pos_absolute = 0.
-    
+
     def setReferenceUnitCell(self,uc,rotMatrix=np.identity(3)):
         """   
         set reference unit cell. 
@@ -139,18 +129,18 @@ class WaterModel(Lattice, LinearFitFunctions):
         
         !!! This has to be checked !!!
         """
-        self.refRealTransform[:] = self.R_mat_inv @ rotMatrix @ uc.R_mat 
+        self.refRealTransform[:] = self.R_mat_inv @ rotMatrix @ uc.R_mat
         self.refHKLTransform[:] = self.B_mat_inv @ rotMatrix @ uc.B_mat
 
     @property
     def pos_absolute(self):
         return self._pos_absolute
-    
+
     @pos_absolute.setter
     def pos_absolute(self, pos):
         self._pos_absolute = pos
-            
-        
+
+
     def F_uc(self,h,k,l):
         mask = np.logical_and(np.isclose(h,0), np.isclose(k,0))
         if not np.any(mask):
@@ -164,21 +154,21 @@ class WaterModel(Lattice, LinearFitFunctions):
         #l = hkl[2]
         #Q_cart2 = ((self._BMatrix * hkl).A)**2
         #Q2 = np.sum(Q_cart2,axis=0) #squared!!!
-        
+
         #for i in range(2):
         #    f[:] +=  self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]
         #    for j in range(5):
         #        f += self.f[i][j]*np.exp(- self.f[i][j+5]*Q2)
-        #zwater = WaterModel.f0_water_fun(Q) + self.f #scattering factor of water 
+        #zwater = WaterModel.f0_water_fun(Q) + self.f #scattering factor of water
         #sigma_bar = self.basis[3]
         #spacing = self.basis[1]
         l_masked = l[mask]
         zpos, d_layering, sigma_0, sigma_bar, A0 = self.basis
-        
+
         zpos += self.pos_absolute / self.a[2]
-        
+
         #f = np.empty_like(l_masked,dtype=np.complex128)
-        
+
         if self.type == 'step':
             raise NotImplementedError("This water type uses data, that is not distributed with this version of datautils.")
             #fwater = f0_water_fun(l_masked*b[2]) + self.wat_dispersion
@@ -196,15 +186,15 @@ class WaterModel(Lattice, LinearFitFunctions):
             #    F_wat = f_w_layer*( A0*np.exp(-0.5*(sigma_0*l_masked*b[2])**2) + sf*np.exp(2j*np.pi * l_masked * d_layering))
         elif self.type == 'layered_O':
             #fwater = f0_water_fun(l_masked*b[2]) + self.wat_dispersion
-            
+
             f = np.empty_like(l_masked,dtype=np.complex128)
             f[:] =  self.f[0][10] + self.f[0][11] + 1j*self.f[0][12]
             for j in range(5):
                 f += self.f[0][j]*np.exp(- self.f[0][j+5]*(l_masked*b[2])**2)
             #f *= (10/8)
-            
+
             f_w_layer = f*self.pw*self.volume*d_layering
-            
+
             if A0 == 1.:
                 sf = np.exp(-2*(np.pi * sigma_0 * l_masked)**2)/(1. - np.exp(-2*(np.pi * sigma_bar * l_masked)**2)*np.exp(2j*np.pi * l_masked * d_layering))
                 F_wat = f_w_layer*sf
@@ -212,51 +202,51 @@ class WaterModel(Lattice, LinearFitFunctions):
                 sigma_1 = np.sqrt(sigma_0**2 + sigma_bar**2)
                 sf = np.exp(-2*(np.pi * sigma_1 * l_masked)**2)/(1. - np.exp(-2*(np.pi * sigma_bar * l_masked)**2)*np.exp(2j*np.pi * l_masked * d_layering))
                 F_wat = f_w_layer*( A0*np.exp(-0.5*(sigma_0*l_masked*b[2])**2) + sf*np.exp(2j*np.pi * l_masked * d_layering))
-            
+
         elif self.type == '1layer':
             raise NotImplementedError("This water type uses data, that is not distributed with this version of datautils.")
             #fwater = f0_water_fun(l_masked*b[2]) + self.wat_dispersion
             #rho, mu_offset = self._1layer_firstGauss()
             #F_wat = 1j*self.pw*fwater*self.volume*np.exp(-2*(np.pi * sigma_0 * l_masked)**2)/(2*np.pi*l_masked)
             #F_wat = F_wat + A0*fwater*np.exp(-0.5*(sigma_0*l_masked*b[2])**2)*np.exp(2j*np.pi * l_masked * mu_offset)
-        
+
         elif self.type == '1layer_O':
             rho, mu_offset = self._1layer_firstGauss(0.00)
             f = np.empty_like(l_masked,dtype=np.complex128)
             f[:] =  self.f[0][10] + self.f[0][11] + 1j*self.f[0][12]
             for j in range(5):
                 f += self.f[0][j]*np.exp(- self.f[0][j+5]*(l_masked*b[2])**2)
-                
+
             f *= (10/8)
             F_wat = 1j*self.pw*f*self.volume*np.exp(-2*(np.pi * sigma_0 * l_masked)**2)/(2*np.pi*l_masked)
-                            
+
             F_wat = F_wat + A0*f*np.exp(-0.5*(sigma_0*l_masked*b[2])**2)*np.exp(2j*np.pi * l_masked * mu_offset)
-            
+
         elif self.type == '1layer_s_O':
             rho, mu_offset = self._1layer_firstGauss(0.0)
             f = np.empty_like(l_masked,dtype=np.complex128)
             f[:] =  self.f[2][10] + self.f[2][11] + 1j*self.f[2][12] # self.f[2] is O2-
             for j in range(5):
                 f += self.f[2][j]*np.exp(- self.f[2][j+5]*(l_masked*b[2])**2)
-                
+
             F_wat = 1j*self.pw*f*self.volume*np.exp(-2*(np.pi * sigma_0 * l_masked)**2)/(2*np.pi*l_masked)
-                            
+
             F_wat = F_wat + A0*f*np.exp(-0.5*(sigma_0*l_masked*b[2])**2)
-            
+
         else:
             warnings.warn("unknown water type %s !" % self.type)
             F_wat = np.zeros_like(l_masked)
 
         F_wat *= np.exp(2j*np.pi * l_masked * zpos) # position of water
-        
-        #temp = np.exp(-0.5*(Q*sigma_bar)**2)*np.exp(1j*Q*spacing) 
+
+        #temp = np.exp(-0.5*(Q*sigma_bar)**2)*np.exp(1j*Q*spacing)
         #flayer = spacing*(zwater)*pw*self.uc_area*np.exp(-0.5*(Q*sigma_0)**2)
         #F = (np.exp(2j*np.pi*l[mask]*zpos)*(flayer/(1-temp)))/self.volume
-        
+
         F_water = np.zeros_like(l,dtype=np.complex128)
         F_water[mask] = F_wat
         return F_water/self.volume
-    
+
     def setWaterParameters(self,zpos,layer_spacing,sigma_0,sigma_bar,A0):
         self.basis = np.array([zpos,layer_spacing,sigma_0,sigma_bar,A0])
 
@@ -264,32 +254,32 @@ class WaterModel(Lattice, LinearFitFunctions):
         self._E = E
         self.lookupScatteringFactors(E)
 
-    def lookupScatteringFactors(self,E):        
+    def lookupScatteringFactors(self,E):
         self.f = np.empty((3,13),dtype=np.float64)
         for i,name in enumerate(['O','H','O2-']):
             self.f[i,:11] = readWaasmaier(name)
             self.f[i,11:] = readDispersion(name,E)
         # f1,f2 = UnitCell.special_formfactors['H2O'][1](E)
         # self.wat_dispersion = f1 + 1j*f2
-            
+
     def _1layer_firstGauss(self,biaswidth=0.2547):
         p = [ 0.85886939,  1.03841354, -1.35438352]
         zpos, d_layering, sigma_0, sigma_bar, A0 = self.basis
         #a,alpha,_,_ = self.getLatticeParameters()
         #uc_area = a[0]*a[1]*np.sin(alpha[2])
-        
+
         rho_0 = A0/(self.volume*np.sqrt(2*np.pi*(sigma_0**2 + (biaswidth/self._a[2])**2)))
-        
+
         A = rho_0/self.pw
-        
+
         mu_rel = np.sqrt(2*np.log(2)) + util.stepdown(np.log10(A),p[0],p[1],p[2])
         mu = mu_rel*np.sqrt(sigma_0**2 + (biaswidth/self._a[2])**2)
-        
+
         return rho_0*(10.+self.wat_dispersion), mu
-    
-        
-        
-        
+
+
+
+
     def zDensity_G(self, z, h,k):
         """
         calculates h,k-th Fourier component of the electron density
@@ -314,8 +304,8 @@ class WaterModel(Lattice, LinearFitFunctions):
             complex h,k-th Fourier component of the electron density 
             in electrons/Angstrom**3
 
-        """    
-        
+        """
+
         if abs(h) > 0.001 or  abs(k) > 0.001:
             return np.zeros_like(z)
         zstep = np.diff(z)
@@ -337,9 +327,9 @@ class WaterModel(Lattice, LinearFitFunctions):
             for i in range(nogausseans):
                 sigma2_rel = sigma_0**2 + i*sigma_bar**2 + (0.2547/self._a[2])**2
                 if i == 0:
-                    rho += A0*np.exp(- ((z/self._a[2] - zpos - i*d_layering)**2)/(2 * sigma2_rel) ) / (np.sqrt(2*np.pi * sigma2_rel) * self._a[2]) 
+                    rho += A0*np.exp(- ((z/self._a[2] - zpos - i*d_layering)**2)/(2 * sigma2_rel) ) / (np.sqrt(2*np.pi * sigma2_rel) * self._a[2])
                 else:
-                    rho += np.exp(- ((z/self._a[2] - zpos - i*d_layering)**2)/(2 * sigma2_rel) ) / (np.sqrt(2*np.pi * sigma2_rel) * self._a[2]) 
+                    rho += np.exp(- ((z/self._a[2] - zpos - i*d_layering)**2)/(2 * sigma2_rel) ) / (np.sqrt(2*np.pi * sigma2_rel) * self._a[2])
             rho *= layer_density
         elif self.type == 'layered_O':
             zrange_waterstructure = np.amax(z)/self._a[2] - zpos # lattice units
@@ -347,13 +337,13 @@ class WaterModel(Lattice, LinearFitFunctions):
             nogausseans = int(nogausseans_inrange + 5) # some additional gausseans to reduce edge effects
             layer_density = self.pw*d_layering*self._a[2]
             rho = np.zeros_like(z,dtype=np.complex128)
-            
+
             for i in range(nogausseans):
                 sigma2_rel = sigma_0**2 + i*sigma_bar**2
                 deltaZ2i = sigma2_rel*self._a[2]**2
-                
+
                 z_i = (zpos + i*d_layering)*self._a[2]
-                
+
                 rho_i = ((self.f[0][10] + self.f[0][11] + 1j*self.f[0][12]) / (np.sqrt(2*np.pi*deltaZ2i))) *np.exp( -0.5 *(  ((z- z_i)**2)/deltaZ2i ))
                 for j in range(5):
                     exp_dz = self.f[0][j+5] + 0.5*deltaZ2i
@@ -363,7 +353,7 @@ class WaterModel(Lattice, LinearFitFunctions):
                     rho += A0*rho_i*layer_density
                 else:
                     rho += rho_i*layer_density
-            
+
         elif self.type == '1layer':
             sigma2_rel = sigma_0**2 + (0.2547/self._a[2])**2
             rho = 0.5*(10.+self.wat_dispersion)*self.pw*(1. + erf((z - zpos*self._a[2])/(np.sqrt(2)* sigma_0 * self._a[2])))
@@ -372,15 +362,15 @@ class WaterModel(Lattice, LinearFitFunctions):
             rho += rho_layer*np.exp(- ((z/self._a[2] - zpos - mu_offset)**2)/(2 * sigma2_rel) )
         elif self.type == '1layer_O':
 
-            
+
 
             #rho = 0.5*(10.+self.wat_dispersion)*self.pw*(1. + erf((z - zpos*self._a[2])/(np.sqrt(2)* sigma_0 * self._a[2])))
             #rho = gaussian_filter1d(np.abs(rho),0.2547 / zstep_mean).astype(np.complex128) #estimation of water molecular form factor
             rho_layer, mu_offset = self._1layer_firstGauss(0.00)
-            
+
             deltaZ2i = (sigma_0*self._a[2])**2
             z_i = (zpos + mu_offset)*self._a[2]
-            
+
             rho_i = ((self.f[0][10] + self.f[0][11] + 1j*self.f[0][12]) / (np.sqrt(2*np.pi*deltaZ2i))) *np.exp( -0.5 *(  ((z- z_i)**2)/deltaZ2i ))
             rho_step = util.stepup(z,self.f[0][10] + self.f[0][11] + 1j*self.f[0][12],sigma_0*self._a[2],zpos*self._a[2])
             for j in range(5):
@@ -390,16 +380,16 @@ class WaterModel(Lattice, LinearFitFunctions):
                 rho_step += util.stepup(z,self.f[0][j],eff_sigma,zpos*self._a[2])
                 rho_i += (self.f[0][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- (((z- z_i)**2)/(4*exp_dz))  )
             rho_i *= A0*np.exp(-2j*np.pi*((z- z_i)/self._a[2]))
-            
+
             rho_step *= (10/8)*self.pw
-            
+
             rho = rho_i/self.uc_area + rho_step
         elif self.type == '1layer_s_O':
             rho_layer, mu_offset = self._1layer_firstGauss(0.0)
-            
+
             deltaZ2i = (sigma_0*self._a[2])**2
             z_i = (zpos)*self._a[2]
-            
+
             rho_i = ((self.f[2][10] + self.f[2][11] + 1j*self.f[2][12]) / (np.sqrt(2*np.pi*deltaZ2i))) *np.exp( -0.5 *(  ((z- z_i)**2)/deltaZ2i ))
             rho_step = util.stepup(z,self.f[2][10] + self.f[2][11] + 1j*self.f[2][12],sigma_0*self._a[2],zpos*self._a[2])
             for j in range(5):
@@ -409,18 +399,18 @@ class WaterModel(Lattice, LinearFitFunctions):
                 rho_step += util.stepup(z,self.f[2][j],eff_sigma,zpos*self._a[2])
                 rho_i += (self.f[2][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- (((z- z_i)**2)/(4*exp_dz))  )
             rho_i *= A0*np.exp(-2j*np.pi*((z- z_i)/self._a[2]))
-            
+
             rho_step *= self.pw
-            
+
             rho = rho_i/self.uc_area + rho_step
-            
-            
+
+
         return rho
 
     def __repr__(self):
-        repr_super = super(WaterModel,self).__repr__()
+        repr_super = super().__repr__()
         return "%s\n water model" % repr_super
-        
+
     def waterModelToStr(self,showErrors=True):
         param = self.basis
         if (self.errors is not None) and showErrors:
@@ -435,49 +425,49 @@ class WaterModel(Lattice, LinearFitFunctions):
     def latticeRODStr(self):
         a,alpha,_,_ = self.getLatticeParameters()
         return "return\n%s\n%.4f %.4f %.4f %.4f %.4f %.4f" % (self.type,*a,*np.rad2deg(alpha))
-    
-    
+
+
     def parameterStr(self):
         return self.waterModelToStr() + "\n"
-    
+
     def parameterStrRod(self):
         return self.waterModelToStr(False) + "\n"
-            
+
     def __str__(self):
         st = repr(self) + "\n"
         st += "id  " + WaterModel.parameterOrder + "\n"
         return st + self.parameterStr()
-            
+
     def writeWATfile(self,filename):
         with open(filename,'w') as f:
             st = self.latticeRODStr() + "\n" + self.parameterStrRod()
             f.write(st)
-            
+
     def toRODStr(self):
         return self.latticeRODStr() + "\n" + self.parameterStrRod()
-    
+
     def toStr(self):
         return self.latticeRODStr() + "\n" + WaterModel.parameterOrder + "\n" + self.parameterStr()
-    
+
     def pos(self):
         return self.basis[0]*self._a[2]
-        
+
     def pos_cart_error(self):
         z = self.pos()
         error_zeros = np.nan_to_num(self.errors,0)
         z_error = error_zeros[0]*self._a[2]
         return z, z_error
-    
+
     def width_error(self):
         ds0 = self.basis[2]*self._a[2]
         ds1 = self.basis[3]*self._a[2]
         errds0 = self.errors[2]*self._a[2]
         errds1 = self.errors[3]*self._a[2]
         return ds0, ds1, errds0, errds1
-    
+
     @staticmethod
     def fromWATfile(watfile):
-        with open(watfile,'r') as f:
+        with open(watfile) as f:
             next_skip_comment(f) # return line
             nline = next_skip_comment(f).split()
             try:
@@ -493,7 +483,7 @@ class WaterModel(Lattice, LinearFitFunctions):
         uc.basis = basis
         uc.basis_0 = np.copy(uc.basis)
         return uc
-    
+
     @staticmethod
     def fromStr(string):
         with util.StringIO(string) as f:
@@ -509,7 +499,7 @@ class WaterModel(Lattice, LinearFitFunctions):
                 while True:
                     nline = next_skip_comment(f)
                     sline = nline.split()
-                    if sline and not 'zpos/frac' in sline:
+                    if sline and 'zpos/frac' not in sline:
                         if '+-' in sline:
                             params = re.findall(r'\(([^)]+)',nline)
                             params_array = np.array([np.array(p.split('+-'),dtype=np.float64) for p in params]).T
@@ -532,15 +522,15 @@ class WaterModel(Lattice, LinearFitFunctions):
 
 
 class UnitCell(Lattice):
-    
+
     parameterOrder = "Name   x/frac     y/frac     z/frac     iDW     oDW      occup    layerIdx"
-    
+
     parameterLookup = {'x' : 1, 'y' : 2, 'z' : 3,
                        'iDW' : 4, 'oDW' : 5,
                        'occ' : 6, 'layer' : 7}
-    
+
     parameterLookup_inv = dict(map(reversed, parameterLookup.items()))
-    
+
     # lookuptable for special materials
     # give two functions: 1. for f0 (Q) , 2. lookup for f1 and f2 (E)
     #special_formfactors = OrderedDict([('H2O' , (f0_water_fun, lambda E : estimateDispersionCompound('H2O', E) ) )])
@@ -554,14 +544,14 @@ class UnitCell(Lattice):
         __elems = __db.get_cache('elements')
         special_onset = len([e.element for e in __elems])
     __db.close()
-        
+
     special_numbers = OrderedDict(zip(special_formfactors.keys(),np.arange(len(special_formfactors))+special_onset))
-    
+
     def __init__(self,a,alpha,**keyargs):
-        super(UnitCell,self).__init__(a,alpha)
+        super().__init__(a,alpha)
         self.basis = np.array([])
         self.names = []
-        
+
         """
         self.fitparameters = []
         self.fitparameters_name = []
@@ -572,7 +562,7 @@ class UnitCell(Lattice):
         self.relfitparam_prior = []
         self.fitparameter_prior = []
         """
-        
+
         self.parameters = {
             'absolute' : [],
             'relative' : []
@@ -593,7 +583,7 @@ class UnitCell(Lattice):
         self.coherentDomainOccupancy = [1.]
         self.dw_increase_constraint = np.array([],dtype=np.bool_)
         self._special_formfactors_present = False
-        
+
     def parametersToDict(self):
         d = dict()
         d['basis_0'] = self.basis_0
@@ -603,7 +593,7 @@ class UnitCell(Lattice):
             for i, param in enumerate(self.parameters[p]):
                 d[p]["%s_%s" % (i,param.name)] = param.asdict()
         return d
-    
+
     def parametersFromDict(self, d, override_values=True):
         for p in self.parameters:
             self.parameters[p] = []
@@ -620,7 +610,7 @@ class UnitCell(Lattice):
             try:
                 self.updateFromParameters()
             except Exception as e:
-                warnings.warn("Can not apply fit parameter values to this unitcell: %s" % e) 
+                warnings.warn("Can not apply fit parameter values to this unitcell: %s" % e)
         else:
             warnings.warn("Basis values not updated from Parameter values. This can cause a mismatch between basis and fitparameter values!")
 
@@ -654,7 +644,7 @@ class UnitCell(Lattice):
         self._basis_parvalues = np.copy(self.basis)
         if not no_errors:
             self._errors_parvalues = np.copy(self.errors)
-    
+
     def clearParameters(self):
         for p in self.parameters:
             self.parameters[p] = []
@@ -677,9 +667,9 @@ class UnitCell(Lattice):
         
         !!! This has to be checked !!!
         """
-        self.refRealTransform[:] = self.R_mat_inv @ rotMatrix @ uc.R_mat 
+        self.refRealTransform[:] = self.R_mat_inv @ rotMatrix @ uc.R_mat
         self.refHKLTransform[:] = self.B_mat_inv @ rotMatrix @ uc.B_mat
-        
+
     def _test_special_formfactors(self):
         for name in self.names:
             if name in UnitCell.special_formfactors:
@@ -688,7 +678,7 @@ class UnitCell(Lattice):
         else:
             self._special_formfactors_present = False
             return False
-    
+
     def addAtom(self,element_or_param, xyz_rel=None, iDW=None, oDW=None, occu=None, layer=0):
         if xyz_rel is not None:
             if not isinstance(element_or_param, str):
@@ -701,7 +691,7 @@ class UnitCell(Lattice):
                                    oDW,
                                    occu,
                                    layer],dtype=np.float64)
-            self.names.append(element_or_param) 
+            self.names.append(element_or_param)
         else:
             if not isinstance(element_or_param[0], str):
                 raise ValueError("You must provide a atom symbol. Got: %s" % element_or_param[0])
@@ -709,7 +699,7 @@ class UnitCell(Lattice):
             atom_no = atomic_number(element_or_param[0])
             element_or_param[0] = atom_no
             parameters = np.array(element_or_param,dtype=np.float64)
-            
+
         if self.basis.size > 0:
             self.basis = np.vstack([self.basis,parameters])
         else:
@@ -724,7 +714,7 @@ class UnitCell(Lattice):
         self.dw_increase_constraint = np.insert(self.dw_increase_constraint, len(self.dw_increase_constraint), True)
         self._test_special_formfactors()
         return
-    
+
     def insertAtom(self,index,element_or_param, xyz_rel=None, iDW=None, oDW=None, occu=None, layer=0):
         if xyz_rel is not None:
             if not isinstance(element_or_param, str):
@@ -737,7 +727,7 @@ class UnitCell(Lattice):
                                    oDW,
                                    occu,
                                    layer],dtype=np.float64)
-            self.names.insert(element_or_param,index) 
+            self.names.insert(element_or_param,index)
         else:
             if not isinstance(element_or_param[0], str):
                 raise ValueError("You must provide a atom symbol. Got: %s" % element_or_param[0])
@@ -745,7 +735,7 @@ class UnitCell(Lattice):
             atom_no = atomic_number(element_or_param[0])
             element_or_param[0] = atom_no
             parameters = np.array(element_or_param,dtype=np.float64)
-            
+
         if self.basis.size > 0:
             self.basis = np.insert(self.basis,index,parameters,axis=0)
         else:
@@ -780,7 +770,7 @@ class UnitCell(Lattice):
         layers = OrderedDict()
         if not hasattr(self, 'f'):
             self.setEnergy(10000.) # populate f with some values to enable in-place modification
-        
+
         for l in layer_numbers:
             where = (self.basis[:, 7] == l).nonzero()[0]
             idx_low = where[0]
@@ -810,29 +800,29 @@ class UnitCell(Lattice):
 
             sort_uc = np.argsort(avg_height)
             uc_nms = np.array(uc_nms)[sort_uc]
-            
+
             layers = OrderedDict([(n, layers[n]) for n in uc_nms])
 
         return layers
-    
-    @property    
+
+    @property
     def layers(self):
         return np.sort(np.unique(self.basis[:, 7]))
-        
+
     @property
     def height_absolute(self):
         H = (self.coherentDomainMatrix[-1][2,3] +1)*self.a[2]
         return H
-        
+
     @property
     def end_layer_number(self):
         idxmax = np.argmax(self.basis[:,3])
         return self.basis[idxmax][7]
-        
+
     @property
     def pos_absolute(self):
         return self.coherentDomainMatrix[0][2,3]*self.a[2]
-    
+
     @pos_absolute.setter
     def pos_absolute(self, pos):
         current_pos = self.pos_absolute
@@ -843,15 +833,15 @@ class UnitCell(Lattice):
     def loc_absolute(self):
         return self.pos_absolute
 
-    @property    
+    @property
     def start_layer_number(self): # not implemented
         return -1.
-        
+
     @start_layer_number.setter
     def start_layer_number(self, ln):
         if self.layer_behaviour == 'select':
             pass
-    
+
     # in eV
     def setEnergy(self,E):
         """
@@ -860,7 +850,7 @@ class UnitCell(Lattice):
         """
         self._E = E
         self.lookupScatteringFactors(E)
-        
+
     def addFitParameter(self,indexarray,limits=(-np.inf,np.inf),**keyargs):
         """
         
@@ -883,90 +873,90 @@ class UnitCell(Lattice):
             internal id of the parameter.
 
         """
-        
+
         atoms, par = indexarray
         try:
             parindexes = np.array([p if isinstance(p, (np.integer,int)) else UnitCell.parameterLookup[p] for p in np.atleast_1d(par)],dtype=np.intp)
         except Exception as e:
             raise ValueError("Invalid atom parameter name %s." % par) from e
         atoms = np.atleast_1d(atoms).astype(np.intp)
-        
+
         if 'name' in keyargs:
             name = keyargs['name']
         else:
             parameternames = tuple([UnitCell.parameterLookup_inv[n] for n in parindexes])
             atomnames = tuple([f"{n}_{self.names[n]}" for n in atoms])
             name = self.name + " " + " ".join(["_".join((n,p)) for p, n in zip(parameternames,atomnames)])
-        
+
         if name in self.fitparnames:
             raise ValueError("Absolute fit parameter %s already exists." % name)
-        
+
         indexarray = atoms, parindexes
         try:
             curr_val = self.basis[indexarray]
         except IndexError as e:
             raise ValueError("Invalid parameter indices.") from e
-        
+
         if not limits[0] <= np.mean(curr_val) <= limits[1]:
             raise ValueError("start parameter is not within limits! Is not: %s <= %s <= %s" % (limits[0],np.mean(self.basis[indexarray]), limits[1]))
         prior = keyargs.get('prior', None)
         keyargs['name'] = name
         keyargs['prior'] = prior
-        
+
         par = Parameter(name,indexarray, ParameterType.ABSOLUTE, limits, prior, keyargs)
         self.parameters['absolute'].append(par)
         return par
-    
+
     def addRelParameter(self,indexarray,factors,limits=(-np.inf,np.inf),**keyargs):
         #if not limits[0] <= np.mean(self.basis[indexarray]) <= limits[1]:
         #    raise ValueError("start parameter is not within limits!")
-        
+
         atoms, par = indexarray
         try:
             parindexes = np.array([p if isinstance(p, (np.integer,int)) else UnitCell.parameterLookup[p] for p in np.atleast_1d(par)],dtype=np.intp)
         except Exception as e:
             raise ValueError("Invalid atom parameter name %s." % par) from e
         atoms = np.atleast_1d(atoms).astype(np.intp)
-        
+
         if 'name' in keyargs:
             name = keyargs['name']
         else:
             parameternames = tuple([UnitCell.parameterLookup_inv[n] + '_r' for n in parindexes])
             atomnames = tuple([f"{n}_{self.names[n]}" for n in atoms])
             name = self.name + " " + " ".join(["_".join((n,p)) for p, n in zip(parameternames,atomnames)])
-        
+
         if name in self.fitparnames:
             raise ValueError("Relative fit parameter %s already exists." % name)
-        
+
         prior = keyargs.get('prior', None)
         keyargs['name'] = name
         keyargs['prior'] = prior
-        
+
         factors = np.atleast_1d(factors)
         try:
             curr_val = self.basis[(atoms, parindexes)]
         except IndexError as e:
             raise ValueError("UnitCell %s: Invalid parameter indices (%s, %s) ." % (self.name, atoms, parindexes)) from e
-        
+
         if curr_val.shape != factors.shape:
             raise ValueError("Number of basis parameters does not match number of factors.")
 
         par = Parameter(name,(atoms, parindexes), ParameterType.RELATIVE, limits, prior, keyargs, factors)
         self.parameters['relative'].append(par)
         return par
-    
+
     def showFitparameters(self):
         print(self.fitparameterList())
-        
+
     def parameter_list(self):
         return self.parameters['absolute'] + self.parameters['relative']
-    
+
     @property
     def fitparnames(self):
         #pars = [self.fitparToStr(i,True) for i in range(len(self.fitparameters))] + [self.fitparToStr(i + len(self.fitparameters),True) for i in range(len(self.relfitparam))]
-        #pars = 
+        #pars =
         return [p.name for p in self.parameters['absolute']] + [p.name for p in self.parameters['relative']]
-    
+
     @property
     def priors(self):
         priorlist = []
@@ -979,39 +969,39 @@ class UnitCell(Lattice):
             else:
                 priorlist.append(par.prior) # real prior distribution
         return priorlist
-    
+
     def fitparameterList(self,verbosity=3):
         if verbosity > 1:
             outstr = "{}".format("# Direct fit parameters:\n")
         else:
             outstr = ""
-            
+
         if len(self.parameters['absolute']) > 0:
             outstr += "{:10} {:15} {:20} {:10} {:10}".format("Id","atoms","parameters","Value","Limits")
-            
+
             for par in self.parameters['absolute']:
                 outstr += "\n" + self.fitparToStr(par)
         elif verbosity > 2:
             outstr += "# No direct fit parameters"
-        
+
         outstr += "\n{}".format("# Relative fit parameters:\n")
         if len(self.parameters['relative']) > 0:
             outstr += "{:10} {:15} {:20} {:10} {:10} {:10}".format("Id","atoms","parameters","Value","Factors","Limits")
-            
+
             for par in self.parameters['relative']:
                 outstr += "\n" + self.fitparToStr(par)
         elif verbosity > 2:
             outstr += "# No rel. parameters"
-        
+
         return outstr
-    
+
     def fitparToStr(self, par):
         if self.basis_0 is None:
             basis_0 = np.copy(self.basis)
         else:
             basis_0 = self.basis_0
-        
-        if par.kind & ParameterType.ABSOLUTE: 
+
+        if par.kind & ParameterType.ABSOLUTE:
             val = np.mean(self.basis[par.indices])
             #if isinstance(par.indices[1], (np.integer,int)):
             #    parameternames = (UnitCell.parameterLookup_inv[par.indices[1]],)
@@ -1019,9 +1009,9 @@ class UnitCell(Lattice):
             #else:
             parameternames = tuple([UnitCell.parameterLookup_inv[n] for n in par.indices[1]])
             atoms = tuple([f"{n}_{self.names[n]}" for n in par.indices[0]])
-            return "{:10} {:15} {:20} {:10} {:10}".format(par.name,str(atoms),str(parameternames),val,str(par.limits))
-        
-        
+            return f"{par.name:10} {str(atoms):15} {str(parameternames):20} {val:10} {str(par.limits):10}"
+
+
         elif par.kind & ParameterType.RELATIVE:
             val = np.mean( (self.basis[par.indices] - basis_0[par.indices]) / par.factors)
             #if isinstance(par.indices[1], (np.integer,int)):
@@ -1030,8 +1020,8 @@ class UnitCell(Lattice):
             #else:
             parameternames = tuple([UnitCell.parameterLookup_inv[n] + '_r' for n in par.indices[1]])
             atoms = tuple([f"{n}_{self.names[n]}" for n in par.indices[0]])
-            return "{:10} {:15} {:20} {:10} {:10} {:10}".format(par.name ,str(atoms),str(parameternames),val, str(par.factors) ,str(par.limits))
-            
+            return f"{par.name:10} {str(atoms):15} {str(parameternames):20} {val:10} {str(par.factors):10} {str(par.limits):10}"
+
         else:
             raise ValueError("Unvalid parameter type %s for UnitCell" % par.kind)
 
@@ -1040,19 +1030,19 @@ class UnitCell(Lattice):
 
     def getInitialParameters(self, force_recalculate=False):
         x0, _, _ = self.getStartParamAndLimits(force_recalculate)
-        return x0   
-        
+        return x0
+
     def getStartParamAndLimits(self, force_recalculate=False):
         #if self.basis_0 is None:
         #    self.basis_0 = np.copy(self.basis)
-        try: 
+        try:
             mismatch = not np.allclose(self._basis_parvalues, self.basis, equal_nan=True)
         except Exception:
             mismatch = True
         recalculate = force_recalculate or mismatch
         abspar = self.parameters['absolute']
         relpar = self.parameters['relative']
-        
+
         x0 = []
         lower = []
         upper = []
@@ -1060,20 +1050,20 @@ class UnitCell(Lattice):
             if recalculate or par.value is None:
                 x0.append(np.mean(self.basis[par.indices]))
             else:
-                x0.append(par.value) 
+                x0.append(par.value)
             lower.append(par.limits[0])
             upper.append(par.limits[1])
-        
+
         for par in relpar:
-            if recalculate or par.value is None:    
+            if recalculate or par.value is None:
                 x0.append(np.mean( (self.basis[par.indices] - self.basis_0[par.indices]) / par.factors))
             else:
-                x0.append(par.value) 
+                x0.append(par.value)
             lower.append(par.limits[0])
             upper.append(par.limits[1])
-        
+
         return np.array(x0), np.array(lower), np.array(upper)
-        
+
     def setFitParameters(self,x):
         x_0 = x[:len(self.parameters['absolute'])]
         x_r = x[len(self.parameters['absolute']):]
@@ -1085,7 +1075,7 @@ class UnitCell(Lattice):
             self.basis[par.indices] += par.factors*val
             par.value = val
         self._basis_parvalues = np.copy(self.basis)
-        
+
     def setLimits(self, lim):
         x_0 = lim[:len(self.parameters['absolute'])]
         x_r = lim[len(self.parameters['absolute']):]
@@ -1112,9 +1102,9 @@ class UnitCell(Lattice):
         self._errors_parvalues = np.copy(self.errors)
 
     def getFitErrors(self):
-        if self.errors is None: 
+        if self.errors is None:
             raise ValueError("No errors have been set.")
-        try: 
+        try:
             mismatch = not np.allclose(self._errors_parvalues, self.errors, equal_nan=True)
         except Exception:
             mismatch = True
@@ -1126,21 +1116,21 @@ class UnitCell(Lattice):
                 err0.append(np.mean(self.errors[par.indices]))
             else:
                 err0.append(par.error)
-                
+
         for par in relpar:
             if mismatch:
                 err0.append(np.mean( self.errors[par.indices]  / np.abs(par.factors)))
             else:
                 err0.append(par.error)
-        
+
         err0 = np.array(err0)
         if np.any(~np.isfinite(err0)):
             raise ValueError("Some errors are non-finite or not set.")
         return err0
-        
+
 
     # returns the structure factor of the unit cell
-    # h,k,l have to be 1d arrays 
+    # h,k,l have to be 1d arrays
     def F_uc_bulk(self,h,k,l,atten=0):
         if HAS_NUMBA_ACCEL:
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
@@ -1166,9 +1156,9 @@ class UnitCell(Lattice):
             Q_para2 = np.sum(Q_cart2[:2],axis=0) #squared!!!
             Q_perp2 = Q_cart2[2] #squared!!!
             Q2 = Q_para2 + Q_perp2 #squared!!!
-            
+
             domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]
-            
+
             for i in range(len(self.basis)):
                 f[:] =  self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]
                 for j in range(5):
@@ -1179,9 +1169,9 @@ class UnitCell(Lattice):
                     xyz_rel = np.dot(eff_mat,self.basis[i][1:4]) + mat[:,-1]
                     F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) ) * math.exp(atten*xyz_rel[2])
             return F/self.volume
-    
+
     # returns the structure factor of the unit cell
-    # h,k,l have to be 1d arrays 
+    # h,k,l have to be 1d arrays
     def F_uc_bulk_direct(self,h,k,l,atten=0):
         F = np.zeros(h.size,dtype=np.complex128)
         f = np.zeros(h.size,dtype=np.complex128)
@@ -1190,9 +1180,9 @@ class UnitCell(Lattice):
         Q_para2 = np.sum(Q_cart2[:2],axis=0) #squared!!!
         Q_perp2 = Q_cart2[2] #squared!!!
         Q2 = Q_para2 + Q_perp2 #squared!!!
-        
+
         domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]
-        
+
         for i in range(len(self.basis)):
             f[:] =  self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]
             for j in range(5):
@@ -1203,7 +1193,7 @@ class UnitCell(Lattice):
                 xyz_rel = np.dot(eff_mat,self.basis[i][1:4]) + mat[:,-1]
                 F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) ) * math.exp(atten*xyz_rel[2])
         return F/self.volume
-    
+
     def F_uc(self,h,k,l):
         if HAS_NUMBA_ACCEL and not self._special_formfactors_present:
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
@@ -1228,9 +1218,9 @@ class UnitCell(Lattice):
             Q_para2 = np.sum(Q_cart2[:2],axis=0) #squared!!!
             Q_perp2 = Q_cart2[2] #squared!!!
             Q2 = Q_para2 + Q_perp2 #squared!!!
-            
+
             domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]
-                
+
             for i,name in zip(range(len(self.basis)),self.names):
                 if name in UnitCell.special_formfactors:
                     f[:] = UnitCell.special_formfactors[name][0](np.sqrt(Q2)) + self.f[i][11] + 1j*self.f[i][12]
@@ -1244,7 +1234,7 @@ class UnitCell(Lattice):
                     xyz_rel = np.dot(eff_mat,self.basis[i][1:4]) + mat[:,-1]
                     F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) )
             return F/self.volume
-    
+
     def F_bulk(self,h,k,l,atten=0):
         if HAS_NUMBA_ACCEL:
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
@@ -1266,7 +1256,7 @@ class UnitCell(Lattice):
             hkl = self.refHKLTransform @ np.vstack((h,k,l))
             Fuc = self.F_uc_bulk_direct(*hkl,atten)
             return Fuc/(1- np.exp(- 2j*np.pi * l - atten ))
-    
+
     SQRT2pi = np.sqrt(2*np.pi)
     def zDensity_G(self, z, h,k):
         """
@@ -1303,12 +1293,12 @@ class UnitCell(Lattice):
         if not np.allclose(zstep,zstep_mean):
             warnings.warn("zDensity: z stepsize is not equal in given z array."
                           "This will result in numerical errors in electron density calculation!")
-        
+
         rho = np.zeros_like(z,dtype=np.complex128)
         rho_i = np.empty_like(z,dtype=np.complex128)
-        
+
         domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]
-        
+
         for i,name in zip(range(len(self.basis)),self.names):
             deltaZ2i = self.basis[i][5]/(8*(np.pi)**2)
             deltaPara2i = self.basis[i][4]/(8*(np.pi)**2)
@@ -1321,20 +1311,20 @@ class UnitCell(Lattice):
                     rho_i[:] = (self.f[i][11] + 1j*self.f[i][12])/ (np.sqrt(2*np.pi*deltaZ2i))
                     rho_i *= np.exp( -0.5 *( deltaPara2i * Qpara2 +  ((z- z_i)**2)/deltaZ2i ))
                     rho_i += gaussian_filter1d(UnitCell.special_eDensity[name](z- z_i)*np.exp( -0.5 *( deltaPara2i * Qpara2)),np.sqrt(deltaZ2i)/ zstep_mean)
-                else:                
+                else:
                     rho_i[:] = (self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]) / (np.sqrt(2*np.pi*deltaZ2i))
                     rho_i *= np.exp( -0.5 *( deltaPara2i * Qpara2 +  ((z- z_i)**2)/deltaZ2i ))
                     for j in range(5):
                         exp_dpara = self.f[i][j+5] + 0.5*deltaPara2i
                         exp_dz = self.f[i][j+5] + 0.5*deltaZ2i
                         rho_i += (self.f[i][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- exp_dpara * Qpara2  - (((z- z_i)**2)/(4*exp_dz))  )
-                        
-                rho_i *= np.exp(-2j*np.pi*(h*x_i_frac + k*y_i_frac + (z- z_i)/self._a[2]))
+
+                rho_i *= np.exp(-2j*np.pi*(h*x_i_frac + k*y_i_frac))
                 rho += rho_i*self.basis[i][6] * weight
-        
+
         return rho/self.uc_area
-    
-    
+
+
     def zDensity_G_asbulk(self, z, h,k, noUC=30):
         hkl = (self.refHKLTransform @ np.array([h,k,0.])).flatten()
         Qpara2 = np.sum(np.dot(self.B_mat , hkl)**2)
@@ -1351,28 +1341,28 @@ class UnitCell(Lattice):
                 z_i = self.basis[i][3]*self._a[2]
                 y_i_frac = self.basis[i][2]
                 x_i_frac = self.basis[i][1]
-                
+
                 rho_i[:] = (self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]) / (np.sqrt(2*np.pi*deltaZ2i))
                 rho_i *= np.exp( -0.5 *( deltaPara2i * Qpara2 +  ((z- z_i + noA)**2)/deltaZ2i ))
-                        
-                
+
+
                 for j in range(5):
                     exp_dpara = self.f[i][j+5] + 0.5*deltaPara2i
                     exp_dz = self.f[i][j+5] + 0.5*deltaZ2i
                     rho_i += (self.f[i][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- exp_dpara * Qpara2  - (((z- z_i + noA)**2)/(4*exp_dz))  )
-                    
-                rho_i *= np.exp(-2j*np.pi*(h*x_i_frac + k*y_i_frac + (z- z_i + noA)/self._a[2]))
+
+                rho_i *= np.exp(-2j*np.pi*(h*x_i_frac + k*y_i_frac))
                 rho += rho_i*self.basis[i][6]
-        
+
         return rho/self.uc_area
-    
+
     def lookupScatteringFactors(self,E):
         if hasattr(self, 'f'):
             if self.f.shape != (self.basis.shape[0],13):
                 self.f = np.empty((self.basis.shape[0],13),dtype=np.float64)
         else:
             self.f = np.empty((self.basis.shape[0],13),dtype=np.float64)
-        
+
         for i,name in enumerate(self.names):
             if name in UnitCell.special_formfactors:
                 self.f[i,:11] = 0.
@@ -1381,7 +1371,7 @@ class UnitCell(Lattice):
                 self.f[i,:11] = readWaasmaier(name)
                 self.f[i,11:] = readDispersion(name,E)
         return
-    
+
     def plot3d(self,ucx=1,ucy=1,ucz=1,dwon=False,occuon=False,figure=None,translate=np.array([0.,0.,0.]), domain=0, **keyargs):
         try:
             from mayavi import mlab
@@ -1391,28 +1381,28 @@ class UnitCell(Lattice):
 
         if figure is None:
             figure = mlab.figure()
-        
+
         if ucx == 0 or ucy == 0 or ucz == 0:
             raise ValueError("One of ucx,ucy or ucz is zero. Must plot at least one unit cell.")
-        
+
         def color_generator(name):
             return special_elementcolors.get(name, tuple(rgb_array[atomic_number(name)-1]))
-            
+
         elcolors = keyargs.get('color')
         if elcolors is None:
             elcolors = [color_generator(name) for name in self.names]
         elif isinstance(elcolors ,tuple):
             elcolors = [elcolors for params in self.basis]
-            
+
         resolution = keyargs.get('resolution')
         if resolution is None:
             resolution = 25
-        
+
         mat = self.coherentDomainMatrix[domain]
         domainmatrix = self.R_mat_inv @ mat[:,:-1] @ self.R_mat
-        
+
         for i,params in enumerate(self.basis):
-            
+
             radius = cov_radii_array[atomic_number(self.names[i])-1][2]*2
             #elcolor_c = keyargs.get('color')
             #if elcolor_c is None:
@@ -1431,7 +1421,7 @@ class UnitCell(Lattice):
             for xno in range(1,abs(ucx)+1):
                 for yno in range(1,abs(ucy)+1):
                     for zno in range(1,abs(ucz)+1):
-                        if len(translate.shape) > 1: 
+                        if len(translate.shape) > 1:
                             x_t, y_t, z_t = np.array([x,y,z]) + translate[:,-1].flatten()
                             positions[no] = np.array([x_t + signx*(xno-1),y_t + signy*(yno-1),z_t + signz*(zno-1)])
                         else:
@@ -1447,18 +1437,18 @@ class UnitCell(Lattice):
             sigmas = np.empty_like(position_cart)
             sigmas[:2] = iDW
             sigmas[2] = oDW
-            
+
             if dwon:
                 position_cart = np.random.normal(position_cart,sigmas)
             mlab.points3d(*position_cart,scale_factor=radius,color=elcolors[i],resolution=resolution,figure=figure)
-            
+
         atomlist = keyargs.get('atomlist')
         if atomlist is not None:
             atomlist.append(self.pos_cart_all(ucx,ucy,ucz,translate))
-                
+
         return figure
-    
-    
+
+
     def pos_cart_all(self,ucx=1,ucy=1,ucz=1,translate=np.array([0.,0.,0.]), domain=0):
         dt = np.dtype([('name', 'U6'),('x', np.float64), ('y', np.float64), ('z', np.float64)])
         xyz_array = np.empty(np.abs(ucx*ucy*ucz)*len(self.names),dtype=dt)
@@ -1466,7 +1456,7 @@ class UnitCell(Lattice):
         names = []
         mat = self.coherentDomainMatrix[domain]
         domainmatrix = self.R_mat_inv @ mat[:,:-1] @ self.R_mat
-        
+
         for i,params in enumerate(self.basis):
             x,y,z = params[1:4]
             positions = np.empty((np.abs(ucx*ucy*ucz),3))
@@ -1477,19 +1467,19 @@ class UnitCell(Lattice):
             for xno in range(1,abs(ucx)+1):
                 for yno in range(1,abs(ucy)+1):
                     for zno in range(1,abs(ucz)+1):
-                        if len(translate.shape) > 1: 
+                        if len(translate.shape) > 1:
                             x_t, y_t, z_t = np.array([x,y,z]) + translate[:,-1].flatten()
                             positions[no] = np.array([x_t + signx*(xno-1),y_t + signy*(yno-1),z_t + signz*(zno-1)])
                         else:
                             positions[no] = np.array([x + signx*(xno-1),y + signy*(yno-1),z+ signz*(zno-1)]) + translate
                         no += 1
             positions_c = self.R_mat @ (domainmatrix @ positions.T + np.atleast_2d(mat[:,-1]).T)
-            
+
             if len(translate.shape) > 1:
                 positions_c = np.asarray(translate[:,:-1] @ positions_c)
             position_cart.append(positions_c)
             names.append([self.names[i] for k in range(no)])
-            
+
         positions_all = np.concatenate(position_cart,axis=1)
         xyz_array['x'] = positions_all[0]
         xyz_array['y'] = positions_all[1]
@@ -1497,24 +1487,24 @@ class UnitCell(Lattice):
         xyz_array['name'] = np.concatenate(names)
         return xyz_array
 
-    
+
     def pos_cart(self,atomNo, domain=0):
         mat = self.coherentDomainMatrix[domain]
         domainmatrix = self.R_mat_inv @ mat[:,:-1] @ self.R_mat
         xyz_rel = domainmatrix @ self.basis[atomNo][1:4] + mat[:,-1]
         return self.R_mat @ xyz_rel
-        
+
     def pos_cart_error(self,atomNo, domain=0):
         xyz = self.pos_cart(atomNo, domain)
         realMatrix = self.RealspaceMatrix**2
         error_zeros = np.nan_to_num(self.errors,0)
         xyz_error = np.sqrt(realMatrix @ (error_zeros[atomNo][1:4]**2).T)
         return xyz, xyz_error
-        
-        
+
+
     def distanceVectorAtom(self,atomNo1,atomNo2, domain=0):
         return self.pos_cart(atomNo1, domain) - self.pos_cart(atomNo2, domain)
-    
+
     def bondingLength(self,xyz_atom, domain=0):
         pos_atom_cart = self.RealspaceMatrix @ xyz_atom.T
         blength = np.empty(self.basis.shape[0],dtype=np.float64)
@@ -1525,19 +1515,19 @@ class UnitCell(Lattice):
             #iDW, oDW = DWtoDisorder(params[4:6])
             blength[i] = LA.norm(pos_atom_cart - pos_cart)
         return blength
-            
+
     def disorder_error(self,atomNo):
         dr = np.sqrt(self.basis[atomNo][4]/(8*np.pi**2))
         dz = np.sqrt(self.basis[atomNo][5]/(8*np.pi**2))
         errdr = 0.5*dr*(self.errors[atomNo][4]/self.basis[atomNo][4])
         errdz = 0.5*dz*(self.errors[atomNo][5]/self.basis[atomNo][5])
         return dr, dz, errdr, errdz
-        
-    
+
+
     def __repr__(self):
-        repr_super = super(UnitCell,self).__repr__()
+        repr_super = super().__repr__()
         return "%s\n%i atoms in unit cell" % (repr_super,len(self.names))
-        
+
     def atomToStr(self,no,showErrors=True):
         param = self.basis[no][1:]
         name = self.names[no]
@@ -1549,19 +1539,19 @@ class UnitCell(Lattice):
             return "%s  (%.5f +- %.5f)  (%.5f +- %.5f)  (%.5f +- %.5f)  (%.4f +- %.4f)  (%.4f +- %.4f)  (%.4f +- %.4f) (%.0f +- %.0f)" % (name,*l)
         else:
             return "%s     %.5f     %.5f     %.5f  %.4f  %.4f  %.4f %.0f" % (name,*param)
-        
+
     def domainsToStr(self):
         s = ""
         for mat, occu in zip(self.coherentDomainMatrix,self.coherentDomainOccupancy):
             matT = np.vstack((mat[:,:-1],mat[:,-1]))
             s += ("Coherent %.5f   " % occu) + np.array2string(np.array(matT).flatten(), formatter={'float_kind':lambda x: "%.5f" % x},max_line_width=100000)[1:-1] + "\n"
         return s
-            
+
     def latticeRODStr(self):
         a,alpha,_,_ = self.getLatticeParameters()
         return "%.4f %.4f %.4f %.4f %.4f %.4f" % (*a,*np.rad2deg(alpha))
-    
-    
+
+
     def parameterStr(self):
         st = ""
         for i in range(len(self.names)):
@@ -1570,39 +1560,39 @@ class UnitCell(Lattice):
         for p in self.layerpos:
             st += "%s = %s, " % (p,self.layerpos[p])
         st = st[:-2] # remove last ', '
-        st += "\nlayer_behaviour: %s\n" % self.layer_behaviour 
+        st += "\nlayer_behaviour: %s\n" % self.layer_behaviour
         return st
-    
+
     def parameterStrRod(self):
         st = ""
         for i in range(len(self.names)):
             st += self.atomToStr(i,False) + "\n"
         return st
-            
+
     def __str__(self):
         st = repr(self) + "\n"
         st += "id  " + UnitCell.parameterOrder + "\n"
         return st + self.parameterStr()
-            
+
     def writeSURfile(self,filename):
         with open(filename,'w') as f:
             st = "return\n" + self.domainsToStr() + self.latticeRODStr() + "\n" + self.parameterStrRod()
             f.write(st)
-            
+
     def toRODStr(self):
         return "return\n" + self.domainsToStr() + self.latticeRODStr() + "\n" + self.parameterStrRod()
-    
+
     def toStr(self):
         return "return\n" + self.domainsToStr() + self.latticeRODStr() + "\n" + UnitCell.parameterOrder + "\n" + self.parameterStr()
-    
+
     def toXYZfile(self,xyzfile, ucx=1,ucy=1,ucz=1,translate=np.array([0.,0.,0.])):
         xyz_array = self.pos_cart_all(ucx,ucy,ucz,translate)
         with open(xyzfile,'w') as f:
             noatoms = len(xyz_array)
-            f.write("{}\n".format(noatoms))
-            f.write("{}\n".format(self.latticeRODStr()))
+            f.write(f"{noatoms}\n")
+            f.write(f"{self.latticeRODStr()}\n")
             np.savetxt(f,xyz_array,fmt=['%s','%.6f','%.6f','%.6f'])
-            
+
     @staticmethod
     def fromFile(filename):
         f, ext = os.path.splitext(filename)
@@ -1621,13 +1611,13 @@ class UnitCell(Lattice):
                         ext = extensions
             else:
                 if os.path.isfile(filename):
-                    raise IOError("File %s has no file extension." % filename)
+                    raise OSError("File %s has no file extension." % filename)
                 else:
                     raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), filename)
         elif ext not in ['.sur', '.bul']:
             if not os.path.isfile(filename):
                 raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), filename)
-                
+
         if ext == '.sur':
             return UnitCell.fromSURfile(f + '.sur')
         elif ext == '.bul':
@@ -1636,7 +1626,7 @@ class UnitCell(Lattice):
             try:
                 import ase.io
             except ImportError:
-                raise IOError("File %s has no known file extension. Try to install ASE for more supported file types." % filename)
+                raise OSError("File %s has no known file extension. Try to install ASE for more supported file types." % filename)
             if type(ext) == list:
                 for e in ext:
                     try:
@@ -1645,21 +1635,21 @@ class UnitCell(Lattice):
                     except:
                         pass
                 else:
-                    raise IOError("Cannot read file %s." % filename)
+                    raise OSError("Cannot read file %s." % filename)
             else:
                 atoms = ase.io.read(f + ext)
             if not atoms.cell:
-                raise IOError("File %s contains no valid crystal lattice parameters" % filename)
+                raise OSError("File %s contains no valid crystal lattice parameters" % filename)
             uc = UnitCell(atoms.cell.lengths(), atoms.cell.angles())
             coord = atoms.get_scaled_positions()
             symb = atoms.get_chemical_symbols()
             for sym, xyz in zip(symb, coord):
                 uc.addAtom(sym, xyz, 0., 0., 1.)
             return uc
-    
+
     @classmethod
     def fromSURfile(cls, surfile):
-        with open(surfile,'r') as f:
+        with open(surfile) as f:
             #next(f) # return line
             line = next_skip_comment(f).split()
             domainoccu = []
@@ -1693,7 +1683,7 @@ class UnitCell(Lattice):
             elif basis.shape[1] == 8:
                 pass # all good, layer parameter provided
             else:
-                raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
+                raise ValueError(f"wrong number of atomic parameters. read basis is: {basis}")
             uc.basis = basis
             uc.basis_0 = np.copy(uc.basis)
             uc.names = names
@@ -1701,13 +1691,13 @@ class UnitCell(Lattice):
             uc._test_special_formfactors()
             return uc
 
-        elif len(basis) == 1: 
+        elif len(basis) == 1:
             if basis[0].size == 7:
                 basis[0] = np.concatenate((basis[0], [0]))
             elif basis.shape[1] == 8:
                 pass # all good, layer parameter provided
             else:
-                raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
+                raise ValueError(f"wrong number of atomic parameters. read basis is: {basis}")
             uc.basis = np.array([basis])
             uc.dw_increase_constraint = np.ones(basis.shape[0],dtype=np.bool_)
             uc.names = names
@@ -1716,7 +1706,7 @@ class UnitCell(Lattice):
             return uc
         else:
             return uc # no atoms
-    
+
     @classmethod
     def fromStr(cls, string):
         xprfile = False
@@ -1761,7 +1751,7 @@ class UnitCell(Lattice):
                 if line.startswith('layer_behaviour:'):
                     layer_behaviour = line[len('layer_behaviour:'):].strip()
                     continue
-                
+
                 try:
                     if line.strip():
                         if 'Name' in line or '=' in line: # parameter or statistics line
@@ -1796,31 +1786,31 @@ class UnitCell(Lattice):
                                 basis.append(np.concatenate(([np.nan], np.array(line_sp[1:],dtype=np.float64) )))
 
                 except Exception as e:
-                    raise IOError("Cannot read line \"%s\" describing atom parameters of UnitCell" % line) from e
+                    raise OSError("Cannot read line \"%s\" describing atom parameters of UnitCell" % line) from e
             basis_save = np.vstack(basis).astype(np.float64)
             basis = np.empty_like(basis_save)
-            
+
             indices = np.array(indices)
             names_save = np.array(names)
             names = np.copy(names_save)
-            
+
             mask_read = ~np.isnan(indices) # atoms with explicitly given index
             indices = indices.astype(np.intp) # convert to int to allow indexing.
             indices_explicit = indices[mask_read] # only the entries, where an index is given
-            
+
             mask_write = np.zeros_like(mask_read, dtype=np.bool_)
             mask_write[indices_explicit] = True # mask where to store the atoms (if array is sorted!)
             sortidx = np.argsort(indices_explicit) # get order of atoms with explicit indices
-            
+
             if indices_explicit.size != np.unique(indices_explicit).size:
                 raise ValueError("Atom indices are not unique. This may be caused by assigning two atoms the same index.")
-            
+
             basis[mask_write] = basis_save[mask_read][sortidx] # store atoms with explicit index
             names[mask_write] = names_save[mask_read][sortidx]
-            
+
             basis[~mask_write] = basis_save[~mask_read] # all other just retain the order of the file
             names[~mask_write] = names_save[~mask_read]
-            
+
             names = list(names)
 
             if xprfile:
@@ -1828,7 +1818,7 @@ class UnitCell(Lattice):
                 errors = np.copy(errors_save)
                 errors[mask_write] = errors_save[mask_read][sortidx]
                 errors[~mask_write] = errors_save[~mask_read]
-                
+
         uc = cls(latticeparams[:3],latticeparams[3:])
         uc.coherentDomainMatrix = domainmatrix
         uc.coherentDomainOccupancy = domainoccu
@@ -1845,7 +1835,7 @@ class UnitCell(Lattice):
             elif basis.shape[1] == 8:
                 pass # all good, layer parameter provided
             else:
-                raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
+                raise ValueError(f"wrong number of atomic parameters. read basis is: {basis}")
             if xprfile:
                 uc.errors = errors
             uc.names = names
@@ -1854,15 +1844,15 @@ class UnitCell(Lattice):
             uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
             uc._test_special_formfactors()
             return uc
-        elif len(basis) == 1: 
-            if basis[0].size == 7: # basis is already ndarray with ndim=2 for some reason 
+        elif len(basis) == 1:
+            if basis[0].size == 7: # basis is already ndarray with ndim=2 for some reason
                 basis = np.insert(basis, basis.shape[1], 0, axis=1)
                 if xprfile:
                     errors = np.insert(errors, errors.shape[1], np.nan, axis=1)
             elif basis.shape[1] == 8:
                 pass # all good, layer parameter provided
             else:
-                raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
+                raise ValueError(f"wrong number of atomic parameters. read basis is: {basis}")
             uc.basis = basis
             if xprfile:
                 uc.errors = errors
@@ -1872,13 +1862,13 @@ class UnitCell(Lattice):
             uc._test_special_formfactors()
             return uc
         else:
-            raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
+            raise ValueError(f"wrong number of atomic parameters. read basis is: {basis}")
 
-    
+
     #ugly!!!! please redo this for faster file reads!
     @classmethod
     def fromBULfile(cls, bulfile,DW=0.):
-        with open(bulfile,'r') as f:
+        with open(bulfile) as f:
             #next_skip_comment(f) # return line
             line = next_skip_comment(f).split()
             domainoccu = []
@@ -1930,7 +1920,7 @@ class UnitCell(Lattice):
                 uc._test_special_formfactors()
                 return uc
             else:
-                raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
+                raise ValueError(f"wrong number of atomic parameters. read basis is: {basis}")
         elif len(basis) == 1:
             if basis.shape[1] < 7:
                 uc.addAtom(names[0],basis[0][1:4],DW,DW,1)
@@ -1952,9 +1942,9 @@ class UnitCell(Lattice):
                 uc._test_special_formfactors()
                 return uc
             else:
-                raise ValueError("wrong number of atomic parameters. read basis is: {}".format(basis))
+                raise ValueError(f"wrong number of atomic parameters. read basis is: {basis}")
 
         else:
             return uc
-   
+
 

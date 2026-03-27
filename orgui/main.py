@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -77,11 +76,9 @@ usage = "orGUI [options] configfile"
 defaultconfigfile = os.path.expanduser("~/orgui")
 
 def main():
-
-
     parser = ArgumentParser(usage=usage, description=description, epilog=epilog)
-    parser.add_argument("configfile", metavar="FILE", 
-                        help="configuration file, will use ~/orgui otherwise", 
+    parser.add_argument("configfile", metavar="FILE",
+                        help="configuration file, will use ~/orgui otherwise",
                         nargs='?',default=defaultconfigfile)
     parser.add_argument("--nogui", "--cli", "--headless", dest="cli",
                         action="store_true",
@@ -283,7 +280,7 @@ def _start_GUI(options, ncpu):
     
     if options.opengl:
         silx.config.DEFAULT_PLOT_BACKEND = "opengl"
-    
+
     if os.path.isfile(options.configfile) or options.configfile == defaultconfigfile:
         app = qt.QApplication(sys.argv)
         app.setApplicationName("orGUI")
@@ -298,7 +295,7 @@ def _start_GUI(options, ncpu):
         configfile = options.configfile
         if options.configfile == defaultconfigfile and not os.path.isfile(options.configfile):
             configfile = None
-        
+
         splash.showMessage("jit compile libraries, this may take a while on first start...", qt.Qt.AlignLeft | qt.Qt.AlignBottom)
         logger.info("jit compile libraries, this may take a while on first start...")
         from .datautils.xrayutils import CTRcalc, CTRplotutil

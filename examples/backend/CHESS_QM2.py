@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2024 Timo Fuchs
@@ -31,18 +30,11 @@ __email__ = "tfuchs@cornell.edu"
 
 
 import numpy as np
-import datetime
 import re
-import warnings
 import fabio
-import h5py
 import os
-import re
-from datetime import datetime
-import json
 
 import silx.io
-from silx.io import dictdump
 
 from orgui.backend.scans import Scan
 
@@ -59,7 +51,7 @@ class P3_Image:
         self.counters['Exposure_period'] = header.header_dict['Exposure_period']
         self.counters['datetime'] = header.get_date_time()
         self.header_dict = header.header_dict
-        
+
 # This is the backend, must implement `Scan`!
 class QM2_backend_2024(Scan):
     def __init__(self, hdffilepath_orNode=None, scanno=None):
@@ -67,8 +59,8 @@ class QM2_backend_2024(Scan):
         if hdffilepath_orNode is None:
             return
         self.hdffilepath_orNode=hdffilepath_orNode
-        
-        ## --- dump all data for the specified scan into `data` 
+
+        ## --- dump all data for the specified scan into `data`
 
         if isinstance(hdffilepath_orNode, str):
             self.hdffilepath_orNode = os.path.abspath(hdffilepath_orNode)
@@ -83,7 +75,7 @@ class QM2_backend_2024(Scan):
                     if int(scanno_s) == scanno:
                         break
                 else:
-                    raise IOError("Scan number %s not found in file" % scanno)
+                    raise OSError("Scan number %s not found in file" % scanno)
                 self.scanname = '.'.join((scanno_s,subscanno))
 
                 data = f[self.scanname]
@@ -92,50 +84,50 @@ class QM2_backend_2024(Scan):
             self.filepath,self.filename = os.path.split(hdffilepath)
             filename_noext,_ = os.path.splitext(self.filepath)
             self.filename_base = filename_noext
-            
-            
+
+
             f = hdffilepath_orNode.file
             for d in f:
                 scanno_s, subscanno = d.split('.')
                 if int(scanno_s) == scanno:
                     break
             else:
-                raise IOError("Scan number %s not found in file" % scanno)
+                raise OSError("Scan number %s not found in file" % scanno)
             self.scanname = '.'.join((scanno_s,subscanno))
 
             data = f[self.scanname]
-            
+
         self.name = "%s.1" % scanno
         self.title = data['title'][()]
-        
+
         positioners_section = data['instrument']['positioners']
         measurement_section = data['measurement']
-        
+
 
         # motor conversion table:
         motor_names =     ['phi2', 'chi', 'th', 'phi']
         sixc_equivalent = ['omega',   'chi', 'alpha', 'omega']
         sixc_sign =       [     -1,       1,      1,  1.]
         sxic_offset =     [      0,    -270,      0,   0]
-        
-        
+
+
         scanned_motors = {}
         for mot in motor_names:
             if mot in measurement_section:
                 scanned_motors[mot] = measurement_section[mot]
-        
+
         for mot, sixc_mot, sign, offset in zip(motor_names, sixc_equivalent, sixc_sign, sxic_offset):
             try:
-                val = sign * np.asarray(positioners_section[mot][()] + offset, dtype=np.float64) # values at start of scan 
+                val = sign * np.asarray(positioners_section[mot][()] + offset, dtype=np.float64) # values at start of scan
                 setattr(self, sixc_mot, val)
             except:
                 pass # can fail
-                
+
             if mot in scanned_motors:
                 val = sign * scanned_motors[mot] + offset # values during scan
                 setattr(self, sixc_mot, val)
-                
-        
+
+
         if 'Time' in measurement_section:
             self.time = measurement_section['Time'][()]
         else:
@@ -143,7 +135,7 @@ class QM2_backend_2024(Scan):
 
         self.th = -1*self.omega
         self.mu = self.alpha
-                    
+
         if scanned_motors:
             mot = list(scanned_motors.keys())[0] # use only first, this might be changed in the future
             idx = motor_names.index(mot)
@@ -156,25 +148,25 @@ class QM2_backend_2024(Scan):
                 self.axisname = sixc_angle
         else:
             self.axisname = 'time'
-            
+
         self.axis = np.atleast_1d(getattr(self,self.axisname))
-        
+
         self.nopoints = self.axis.size
 
-        
+
         for c in self.auxillary_counters:
             try:
-                val = np.asarray(measurement_section[c][()], dtype=np.float64) # values at start of scan 
+                val = np.asarray(measurement_section[c][()], dtype=np.float64) # values at start of scan
                 setattr(self, c, val)
             except:
                 try:
-                    val = np.asarray(positioners_section[c][()], dtype=np.float64) # values at start of scan 
+                    val = np.asarray(positioners_section[c][()], dtype=np.float64) # values at start of scan
                     setattr(self, c, val)
                 except:
                     pass
-        
+
         # search for scan folder in raw6M
-        
+
         foldername_scan = self.filename + ("_%03i" % scanno)
         root = os.path.join(self.filepath, 'raw6M', self.filename)
 
@@ -186,7 +178,7 @@ class QM2_backend_2024(Scan):
                 for ssf in os.scandir(sf):
                     if ssf.is_dir():
                         sssfolders.extend([f.path for f in os.scandir(ssf) if f.is_dir()])
-            
+
             for sssf in sssfolders:
                 directory, fname = os.path.split(sssf)
                 if fname == foldername_scan:
@@ -213,9 +205,9 @@ class QM2_backend_2024(Scan):
         self.imagefolder = os.path.abspath(sssf)
         self.image_prefix = self.filename + ("_PIL10_%03i_" % scanno)
         self.image_suffix = ".cbf"
-        
-        
-    
+
+
+
     @property
     def auxillary_counters(self):
         """Optional: provide a list of counters or motor names, that should 
@@ -226,8 +218,8 @@ class QM2_backend_2024(Scan):
         after each integration, orGUI will search for these counter names in the Scan
         object and copy the entries into the database.
         """
-        return ['diode', 'ic1', 'ic2', 'emon', 'nemon', 'pemon'] 
-    
+        return ['diode', 'ic1', 'ic2', 'emon', 'nemon', 'pemon']
+
     @classmethod
     def parse_h5_node(cls, obj):
         """parse scan number from the selected h5node.
@@ -237,28 +229,28 @@ class QM2_backend_2024(Scan):
         
         Here: the nodes are named as in SPEC files, i.e. 1.1, 1.2, 1.3, ... 
         """
-        ddict = dict() 
+        ddict = dict()
         scanname = obj.basename
         scanno, subscanno = scanname.split('.')
         ddict['scanno'] = int(scanno)
         ddict['name'] = obj.local_name
         return ddict
-        
+
     # returns single image, attempts to use the default camera!
     def get_raw_img(self,img, **kwargs):
         imagepath = os.path.join(self.imagefolder, self.image_prefix + ("%05i" % img) + self.image_suffix)
         try:
             return P3_Image(imagepath)
-        except IOError:
+        except OSError:
             imagepath = os.path.join(self.imagefolder, self.image_prefix + ("%03i" % img) + self.image_suffix)
             return P3_Image(imagepath)
-        
 
 
-    
+
+
     def __getitem__(self,key):
         return self.get_raw_img(key)
-    
+
     def __len__(self):
         return self.nopoints
 
@@ -321,7 +313,7 @@ ALL_KEYWORDS = {}
 ALL_KEYWORDS.update(NON_OPTIONAL_KEYWORDS)
 ALL_KEYWORDS.update(OPTIONAL_KEYWORDS)
 
-class PilatusHeader(object):
+class PilatusHeader:
     """
     Class for parsing contents of a Pilatus cbf header from a minimal
     or full cbf file.
@@ -334,17 +326,17 @@ class PilatusHeader(object):
         self.header_lines = rawheader.splitlines()
         #self.read_header_lines()
         self.parse_header()
-        
+
     def _rawheader(self):
         return self.rawheader
-    
+
     def has_pilatus_cbf_convention(self):
         # Check for the _array_data.header_convention data item
         pilatus_header_pattern = re.compile(
             r'''_array_data.header_convention +["']?(SLS|PILATUS)'''
             r'''_\d+(\.?\d*)*["']?''')
         return bool(pilatus_header_pattern.search(self._rawheader()))
-    
+
     def read_header_lines(self):
         """
         Populate the self.header_lines list.
@@ -355,7 +347,7 @@ class PilatusHeader(object):
         contents_match = contents_pattern.search(self._rawheader())
         assert contents_match is not None
         self.header_lines = contents_match.group().splitlines()
-        
+
     def _spaced_header_lines(self):
         """
         Return header_lines with all space equivalent charecters converted
@@ -367,7 +359,7 @@ class PilatusHeader(object):
                 line = line.replace(space_equivalent, ' ')
             spaced_header_lines.append(line)
         return spaced_header_lines
-    
+
     def parse_header(self):
         """
         Populate self.header_dict with contents of Pilatus cbf header
@@ -393,7 +385,7 @@ class PilatusHeader(object):
                     value = self._datatype_handling(values, key, datatype)
                     if value is not None:
                         self.header_dict[key] = value
-    
+
     def _datatype_handling(self, values, key, datatype):
         # handle rare cases of value "not set"
         if datatype is float and values[0] == 'not':
@@ -411,11 +403,11 @@ class PilatusHeader(object):
             else:
                 values = tuple([datatype(v) for v in values])
         return values
-    
+
     def get_beam_xy_mm(self, factor=1000):
         return tuple([n * size * factor for n, size in zip(
             self.header_dict['Beam_xy'], self.header_dict['Pixel_size'])])
-    
+
     def get_date_time(self):
         """
         Return date and time of image acquistion.
@@ -427,11 +419,11 @@ class PilatusHeader(object):
         date_time_pattern = re.compile(
             r'(\d{4}-\d{2}-\d{2}T|\d{4}/\D+/\d{2} )\d{2}:\d{2}:\d{2}.\d+')
         return date_time_pattern.search(self._rawheader()).group()
-    
+
     def get_time(self):
         time_pattern = re.compile(r'\d{2}:\d{2}:\d{2}.\d+')
         return time_pattern.search(self.get_date_time()).group()
-    
+
     date_time = property(get_date_time)
     time = property(get_time)
-        
+

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -31,7 +30,6 @@ __email__ = "tfuchs@cornell.edu"
 
 import numpy as np
 import numpy.linalg as LA
-from scipy.linalg import svd
 import scipy.optimize as opt
 from scipy import special
 from scipy.optimize._numdiff import approx_derivative
@@ -42,7 +40,7 @@ from .xrayutils import HKLVlieg
 import warnings
 
 # numdifftools sets TLS to static?
-# causes OSError while hdf5 read 
+# causes OSError while hdf5 read
 #import numdifftools as nd
 from math import *
 import os
@@ -54,8 +52,8 @@ try:
     from StringIO import StringIO
 except ImportError:
     from io import StringIO
-    
-    
+
+
 def atomlist_to_xyzfile(filename,atomlist):
     """
     
@@ -72,28 +70,28 @@ def atomlist_to_xyzfile(filename,atomlist):
     None.
 
     """
-    
+
     with open(filename,'w') as f:
         noatoms = atomlist.shape[0]
-        f.write("{}\n".format(noatoms))
+        f.write(f"{noatoms}\n")
         f.write(" \n")
         np.savetxt(f,atomlist,fmt=['%s','%.6f','%.6f','%.6f'])
-    
-    
-    
+
+
+
 def formatMeasurement_LatexFloat(x,dx,pad=1,concise=False):
     roundedx, roundederr, prec = roundMeasurement(x,dx)
     if prec < 0:
         prec = 0
-    
+
     if concise:
         valstr = "${:{pad}.{prec}f}".format(float(roundedx),prec=prec,pad=pad)
-        errstr = "({:d})$".format(int(roundederr*10**prec))
-        
+        errstr = f"({int(roundederr*10**prec):d})$"
+
     else:
-        valstr = r"${:{pad}.{prec}f} \pm ".format(float(roundedx),prec=prec,pad=pad)    
+        valstr = r"${:{pad}.{prec}f} \pm ".format(float(roundedx),prec=prec,pad=pad)
         errstr = r"{:{pad}.{prec}f}$".format(float(roundederr),prec=prec,pad=pad)
-        
+
     return valstr + errstr
 
 
@@ -105,28 +103,28 @@ def roundMeasurement(x,dx, fallbackdigits=4):
         roundedx = np.round(x/errprec)*errprec
         roundederr = np.ceil(dx/errprec)*errprec
         return roundedx, roundederr, precision
-        
+
     firstdigit = 10**np.floor(np.log10(dx)) #mask first digit != 0
 
     smaller3 = np.array(dx < 3*firstdigit,dtype=np.float64)
-    
+
     errprec = 10**(np.floor(np.log10(dx)) - smaller3)
-    
+
     roundederr = np.ceil(dx/errprec)*errprec
-    
+
     roundedx = np.round(x/errprec)*errprec
     precision = int(-1*np.log10(errprec))
-    
+
     return roundedx, roundederr, precision
 
 def F_stat(chi1, chi2, p1, p2, n):
     nom = (chi1 - chi2)/(p2-p1)
     denom = chi2/(n - p2)
     return nom/denom
-    
+
 def leastsq_covariance(fun,x0):
     J = approx_derivative(fun, x0, method='3-point')
-    
+
     if J.ndim != 2:
         J = np.atleast_2d(J)
     _, s, VT = LA.svd(J, full_matrices=False)
@@ -142,11 +140,11 @@ def leastsq_covariance_unstable(fun,x0):
     if J.ndim != 2:
         J = np.atleast_2d(J)
     pcov = LA.pinv(np.dot(J.T ,J))
-    
+
     return pcov
-    
+
 def leastsq_covariance_lm(fun,x0):
-    
+
     res = opt.least_squares(fun,x0,jac='3-point')
     J = res.jac
     if J.ndim != 2:
@@ -157,20 +155,20 @@ def leastsq_covariance_lm(fun,x0):
     VT = VT[:s.size]
     pcov = np.dot(VT.T / s**2, VT)
     return pcov
-    
-    
+
+
 def get_scale_chi2(obs, theo, err=None):
     """returns scale ``s`` so that chi2 is minimized.
     
     chi2 = sum_i ((obs_i - s * theo_i)/err_i)**2    
     """
-    
+
     if err is None:
         err = 1.
     err2 = err**2
     scale = np.sum((obs*theo)/ err2) / np.sum((theo**2)/ err2)
     return scale
-    
+
 def get_scale_logchi2(obs, theo):
     """returns scale ``s`` so that chi2 is minimized.
     
@@ -184,7 +182,7 @@ def getScalefactor_fitted(ctr,xtal):
     harr = np.full_like(ctr.l,h)
     karr = np.full_like(ctr.l,k)
     logI = np.log( xtal.F(harr,karr,ctr.l)**2 )
-    
+
     def minfun(x):
         if x[0] < 0:
             return np.inf
@@ -204,30 +202,30 @@ def getScalefactor_collection(coll,xtal):
     for ctr in coll:
         scale.append(getScalefactor(ctr,xtal))
     return scale
-    
+
 def stepup(z,A,sigma,mu):
     return A*0.5*(1 + special.erf(np.sqrt(0.5)*((z-mu)/(sigma))))
 
 def stepdown(z,A,sigma,mu):
     return A*0.5*(1 - special.erf(np.sqrt(0.5)*((z-mu)/(sigma))))
-    
-    
+
+
 def averageCTRs_fcc111(CTRcoll, cutoff=2,nosymmetry_factor=3, pclip=0.3, **keyargs):
     fcc111_lattice = HKLVlieg.Crystal([1./np.sqrt(2),1./np.sqrt(2),np.sqrt(3)],[90.,90.,120.])
     B = np.asarray(fcc111_lattice.getB())
     rods = [B @ np.array([*ctr.hk,0.]) for ctr in CTRcoll]
     rotaxis = np.array([0,0,1])
-    
+
     Bi = np.linalg.inv(B)
-    
+
     equiv = equivalentReflectionsRotation(3,rotaxis,rods)
-    
+
     equiv_hkl = [(Bi @ e.T).T for e in equiv]
-    
+
     equivalent = [[] for _ in range(len(equiv))]
-    
+
     decimals = keyargs.get('decimals', 3)
-    
+
     for ctr in CTRcoll:
         ctrhkl = np.array([*ctr.hk,0.])
         for i, ehkl in enumerate(equiv_hkl):
@@ -236,10 +234,10 @@ def averageCTRs_fcc111(CTRcoll, cutoff=2,nosymmetry_factor=3, pclip=0.3, **keyar
                 break
         else:
             raise Exception("Did not find the group of symmetry equivalent rods for %s." % ctr)
-    
+
     return averageCTRs(equivalent, cutoff,nosymmetry_factor,pclip)
-                
-    
+
+
 
 def averageCTRs_fcc100(CTRcoll, cutoff=2,nosymmetry_factor=3, pclip=0.3):
     #temporary fix!!
@@ -253,7 +251,7 @@ def averageCTRs_fcc100(CTRcoll, cutoff=2,nosymmetry_factor=3, pclip=0.3):
         else:
             hk = abs(k), abs(h)
         rodnames.append(hk)
-        
+
     #CTRcoll_copy = copy.deepcopy(CTRcoll)
     rodnames = list(sorted(set(rodnames)))
     equivalent = []
@@ -290,18 +288,18 @@ def equivalentReflectionsRotation(numberrot, rotaxis, reflections, decimals=3):
     rotvec_norm = rotaxis / np.linalg.norm(rotaxis)
     rotation_vectors = [2*np.pi * (i / numberrot) * rotvec_norm for i in range(numberrot)]
     rotations = Rotation.from_rotvec(rotation_vectors)
-    
+
     reflections = [np.atleast_2d(r) for r in reflections]
-    
+
     all_symmetry = []
 
     for refl in reflections:
         symmetry_reflections = np.vstack([rotations.apply(r) for r in refl])
         _, idx = np.unique(np.around(symmetry_reflections,decimals),return_index=True,axis=0)
         all_symmetry.append(symmetry_reflections[idx])
-    
+
     reduced_symmety = []
-    
+
     # very slow and super ugly code :( !!!
     for i in range(len(all_symmetry)):
         for sym_refl in all_symmetry[i]:
@@ -320,9 +318,9 @@ def equivalentReflectionsRotation(numberrot, rotaxis, reflections, decimals=3):
         else:
             reduced_symmety.append(all_symmetry[i])
     return reduced_symmety
-    
-    
-    
+
+
+
 def averageCTRs(equivalent_list, cutoff=2,nosymmetry_factor=3, pclip=0.3):
     """Averages symmetry equivalent reflections.
     
@@ -337,7 +335,7 @@ def averageCTRs(equivalent_list, cutoff=2,nosymmetry_factor=3, pclip=0.3):
     -percentile of the agreement of the whole dataset.
     
     """
-    
+
     #temporary fix!!
     from datautils.xrayutils import CTRplotutil
     newColl = CTRplotutil.CTRCollection()
@@ -368,21 +366,21 @@ def averageCTRs(equivalent_list, cutoff=2,nosymmetry_factor=3, pclip=0.3):
             err = np.concatenate((err,ctr.err[~mask2]**2))
             sfI = np.concatenate((sfI,ctr.sfI[~mask2]))
             count = np.concatenate((count,np.ones(np.sum(~mask2))))
-            
+
             sortarg = np.argsort(l)
-            
+
             l = l[sortarg]
             err = err[sortarg]
             sfI = sfI[sortarg]
             count = count[sortarg]
-            
+
         sfI /= count # mean structure factor of symmetry equivalent rods
         err = np.sqrt(err) / count # statistical error
         """
         now calculate the variance of symmetry equivalent reflections
         """
         varerr = np.zeros_like(err)
-        
+
         for ctrno in range(1,len(e_curr)):
             #print(l)
             ctr = copy.deepcopy(e_curr[ctrno])
@@ -392,7 +390,7 @@ def averageCTRs(equivalent_list, cutoff=2,nosymmetry_factor=3, pclip=0.3):
             mask2 = np.zeros_like(ctr.l, dtype=np.bool_)
             mask2[i2] = True
             varerr[mask1] += (sfI[mask1] - ctr.sfI[mask2])**2
-            
+
         varerr = np.sqrt(varerr/count) # systematic error, only averaged, hence the count in the sqrt !
         agreement_factor = varerr/sfI
         no_symmetry_equivalent = varerr == 0.
@@ -402,11 +400,11 @@ def averageCTRs(equivalent_list, cutoff=2,nosymmetry_factor=3, pclip=0.3):
             varerr[no_symmetry_equivalent] = meanagreement*sfI[no_symmetry_equivalent]*nosymmetry_factor # no symmetry equivalent reflections available
         else:
             meanagreement = None
-        
+
         #sufficient_qualtity_indicator = sfI*cutoff > err
-        
+
         final_error = np.sqrt(err**2 + varerr**2)
-        
+
         hk = list(reversed(sorted([ctr.hk for ctr in e])))[0]
         newctr = CTRplotutil.CTR(hk,l,sfI,final_error)
         newctr.contributions = count
@@ -417,7 +415,7 @@ def averageCTRs(equivalent_list, cutoff=2,nosymmetry_factor=3, pclip=0.3):
         newctr.no_symmetry_equivalent = no_symmetry_equivalent
         newctr.meanagreement = meanagreement
         newColl.append(newctr)
-    
+
     agreements = np.concatenate([ctr.agreement_factor for ctr in newColl])
     globalagreement = np.nanmean(agreements)
     clipagreement = np.nanpercentile(agreements,pclip*100)
@@ -432,11 +430,11 @@ def averageCTRs(equivalent_list, cutoff=2,nosymmetry_factor=3, pclip=0.3):
 
     newColl.globalagreement = globalagreement
     newColl.clipagreement = clipagreement
-        
+
     return newColl
 
 def openRodfile(name):
-    with open(name,'r') as ctr:
+    with open(name) as ctr:
         names = next(ctr).split('\t')[:-1]
         names[0] = names[0][2:]
         formats = [np.float64 for name in names]
@@ -454,19 +452,19 @@ def as_ndarray(obj):
     if isinstance(obj, (float, int)):
         return np.array([obj])
     return np.asarray(obj)
-    
+
 def readNDarrayConfig(filename):
-    
+
     header = StringIO()
-    
-    with open(filename,'r') as f:
+
+    with open(filename) as f:
         for line in f:
             if not line.startswith('#'):
                 break
             header.write(line[2:])
     config = configparser.ConfigParser()
     config.read_string(header.getvalue())
-    
+
     data = np.loadtxt(filename)
     return data.T, config
 
@@ -483,7 +481,7 @@ def rotation_matrix_from_vectors(vec1, vec2):
     kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
     rotation_matrix = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
     return rotation_matrix
-    
+
 
 def sumRoi(image,roi):
     xlo,xhi = roi[0]
@@ -496,12 +494,12 @@ def sumRoi(image,roi):
 def calcIntersect(g1,g2):
     g1P1 , g1P2 = g1
     g2P1 , g2P2 = g2
-    
+
     a = g1P1 - g1P2
     b = g2P1 - g2P2
-    
+
     res = LA.solve(np.array([a,-b]),g2P1-g1P1)
-    
+
     return a*res[0] + g1P1
 """
 gives delta in:
@@ -509,19 +507,19 @@ gives delta in:
 """
 
 def solveTrigEquation(theta1,theta2,l1,l2):
-    
+
     def Chi2(delta):
         res = function(theta1,theta2,l1,l2,delta)
         #print("%s : %s" % (delta,res))
         return res
-    
+
     res = opt.minimize(Chi2,np.array([0.0]),bounds=[(-np.pi,np.pi)],method='TNC')
     print(res)
     print(np.rad2deg(res.x))
     return res.x
 
 def function(theta1,theta2,l1,l2,delta):
-    t1 = cos(theta1 - delta[0])**2 * l1**2 
+    t1 = cos(theta1 - delta[0])**2 * l1**2
     t2 = cos(theta1 + delta[0])**2 * l2**2
     t3 = 2 * l1 * l2 * cos(theta1 + delta[0]) * cos(theta1 - delta[0]) * cos(2*theta2)
     t4 = ( (l2**2) * cos(theta1 + delta[0])**2 * sin(2*theta2)**2 )/( cos(delta[0] - theta2)**2 )
@@ -559,7 +557,7 @@ def x_rotationArray(th):
     matrices[:,2,1] = np.sin(th)
     matrices[:,2,2] = np.cos(th)
     return matrices
-    
+
 
 def y_rotationArray(th):
     matrices = np.zeros((th.size,3,3))
@@ -582,9 +580,9 @@ def z_rotationArray(th):
 
 def orthogonal(matrix):
     matrix = np.array(matrix)
-    
+
     SMALL = 1e-4
-    
+
     def normalise(m):
         d = LA.norm(m)
         if d < SMALL:
@@ -596,13 +594,13 @@ def orthogonal(matrix):
     print(LA.norm(v1))
     v2 = normalise(matrix[:,1])
     v3 = normalise(matrix[:,2])
-    
+
     return np.hstack([v1, v2, v3]).A
 
 
 def calcHighPixel(image,threshold):
     return np.argwhere(image > threshold)
-    
+
     #old:
     highintensity = image > threshold
     highpixel = []
@@ -614,7 +612,7 @@ def calcHighPixel(image,threshold):
 
     highpixel = np.array(highpixel).T
     return highpixel
-    
+
 def lines_concatenated(x, m, x0, b0, **kwargs):
     """Series of concatenated lines
     
@@ -633,7 +631,7 @@ def lines_concatenated(x, m, x0, b0, **kwargs):
     :param kwargs: optional: when f1_x_intersect is set to True, the b0 parameter will be the x intersect of the first line. I.e.
     """
     y = np.zeros_like(x, dtype=np.float64)
-    
+
     line_switch_idx = np.argmin(np.abs(x - x0[0]))
     if x[line_switch_idx] - x0[0] < 0.:
         line_switch_idx += 1
@@ -643,11 +641,11 @@ def lines_concatenated(x, m, x0, b0, **kwargs):
     else:
         y[:line_switch_idx] = m[0] * x[:line_switch_idx] + b0
         b_n = b0
-        
+
     last_idx = line_switch_idx
     m_n = m[0]
     x_n = x0[0]
-    
+
     for i, x_np in enumerate(x0[1:], start=1):
         line_switch_idx = np.argmin(np.abs(x - x_np))
         if x[line_switch_idx] - x_np < 0.:
@@ -655,16 +653,16 @@ def lines_concatenated(x, m, x0, b0, **kwargs):
         m_np = m[i]
         b_np = (m_n - m_np) * x_n + b_n
         y[last_idx:line_switch_idx] = m_np * x[last_idx:line_switch_idx] + b_np
-        
-        
+
+
         #print(i, m[i], last_idx, line_switch_idx)
         m_n, b_n, x_n = m_np, b_np, x_np
         last_idx = line_switch_idx
-    
+
     m_np = m[-1]
     b_np = (m_n - m_np) * x_n + b_n
     y[last_idx:] = m_np * x[last_idx:] + b_np
-        
+
     return y
 
 def plotP3Image(image,vmin=0,vmax=None,cmap='jet',thresholdMarker=None,**keyargs):
@@ -682,7 +680,7 @@ def plotP3Image(image,vmin=0,vmax=None,cmap='jet',thresholdMarker=None,**keyargs
         ax.imshow(image,interpolation='none',cmap=plt.get_cmap(cmap),norm=colors.SymLogNorm(linthresh=1,linscale=1,vmin=vmin))
     else:
         ax.imshow(image,interpolation='none',cmap=plt.get_cmap(cmap),norm=colors.SymLogNorm(linthresh=1,linscale=1,vmin=vmin,vmax=vmax))
-    
+
     if thresholdMarker is not None:
         highpixel = calcHighPixel(thresholdMarker)
         if highpixel.size > 0:

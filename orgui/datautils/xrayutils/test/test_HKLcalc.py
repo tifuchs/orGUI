@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2024 Timo Fuchs
@@ -32,10 +31,8 @@ __email__ = "fuchs@physik.uni-kiel.de"
 import unittest
 
 from .. import HKLVlieg
-from ... import util
 
 import numpy as np
-import os
 
 
 class TestLattice(unittest.TestCase):
@@ -46,43 +43,43 @@ class TestLattice(unittest.TestCase):
         self.assertTrue(np.allclose(np.deg2rad([90.0000 ,90.0000, 120.0000]), lat.alpha))
         self.assertTrue(np.allclose(np.deg2rad([90.0000 ,90.0000, 60.0000]), lat.beta))
         self.assertTrue(np.allclose([1.84883478, 1.84883478, 1.60113789], lat.b))
-        
+
         lat.setLattice([3.9242, 3.9242, 3.9242] ,[90.0000 ,90.0000, 120.0000])
         self.assertTrue(np.allclose([3.9242, 3.9242, 3.9242], lat.a))
         self.assertTrue(np.allclose(np.deg2rad([90.0000 ,90.0000, 120.0000]), lat.alpha))
         self.assertTrue(np.allclose(np.deg2rad([90.0000 ,90.0000, 60.0000]), lat.beta))
         self.assertTrue(np.allclose([1.84883478, 1.84883478, 1.60113789], lat.b))
-        
+
         lat.a = [3.9242, 3.9242, 3.9242]
         self.assertTrue(np.allclose([3.9242, 3.9242, 3.9242], lat.a))
         self.assertTrue(np.allclose(np.deg2rad([90.0000 ,90.0000, 120.0000]), lat.alpha))
         self.assertTrue(np.allclose(np.deg2rad([90.0000 ,90.0000, 60.0000]), lat.beta))
         self.assertTrue(np.allclose([1.84883478, 1.84883478, 1.60113789], lat.b))
-        
+
         lat.alpha = np.deg2rad([90.0000 ,90.0000, 120.0000])
         self.assertTrue(np.allclose([3.9242, 3.9242, 3.9242], lat.a))
         self.assertTrue(np.allclose(np.deg2rad([90.0000 ,90.0000, 120.0000]), lat.alpha))
         self.assertTrue(np.allclose(np.deg2rad([90.0000 ,90.0000, 60.0000]), lat.beta))
         self.assertTrue(np.allclose([1.84883478, 1.84883478, 1.60113789], lat.b))
-        
-        
+
+
     def testIsReciprocal(self):
-        
+
         lat = HKLVlieg.Lattice([3.9242, 6.9242, 2.9242] ,[100.0000 ,90.0000, 120.0000])
-        
+
         xyz_rel = (np.arange(100*3).reshape((3,100)) - 150) / 10.
         hkl = (np.arange(100*3).reshape((3,100)) - 150) / 10.
-        
+
         phase = 2*np.pi * np.sum(xyz_rel*hkl,axis=0)
-        
-        xyz_cart = lat.directVectorCart(xyz_rel.T) 
+
+        xyz_cart = lat.directVectorCart(xyz_rel.T)
         self.assertTrue(np.allclose(xyz_cart, lat.R_mat @ xyz_rel))
 
-        Q_cart = lat.reciprocalVectorCart(hkl.T) 
+        Q_cart = lat.reciprocalVectorCart(hkl.T)
         self.assertTrue(np.allclose(Q_cart, lat.B_mat @ hkl))
-        
+
         phase_lat = np.sum(xyz_cart*Q_cart,axis=0)
-        
+
         self.assertTrue(np.allclose(phase_lat, phase))
 
 

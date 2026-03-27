@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -31,30 +30,23 @@ __email__ = "tfuchs@cornell.edu"
 
 
 import os
-import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.figure as mplfig
 import matplotlib.transforms as mtransforms
 import scipy.interpolate as interp
-from scipy.stats.mstats import gmean
-import numpy as np 
-from matplotlib import rc
-import matplotlib.ticker
-import matplotlib.pyplot as plt
-from matplotlib import colors as mcolors
+import numpy as np
 import math
 import json
 import warnings
 from collections import OrderedDict
 from .CTRcalc import SXRDCrystal
-from .HKLVlieg import VliegAngles
 from .. import util
 
 # don't init CTRFigure directly, use ctrfigure instead
 class CTRFigure(mplfig.Figure):
-    
+
     def __init__(self,**figargs):
-        super(CTRFigure, self).__init__(**figargs)
+        super().__init__(**figargs)
         self.data = OrderedDict()
         self.xlabels = "L / r.l.u."
         self.ylabels = "Structure factor / arb. units"
@@ -62,23 +54,23 @@ class CTRFigure(mplfig.Figure):
         self.ylim = None #[3e1,2e3]
         self.wspace = 0
         self.hspace = 0.05
-        
-        
+
+
     def settings(self,**settings):
         self.__dict__.update(settings)
-        
-        
+
+
     def addCTR(self,ctr,*plotargs,**keyargs):
         if ctr.ctr_id in self.data:
             self.data[ctr.ctr_id].append([ctr,plotargs,keyargs])
         else:
             self.data[ctr.ctr_id] = [[ctr,plotargs,keyargs]]
-            
+
     def addCollection(self,collection):
         for rod in collection:
             self.addCTR(rod,*collection.plotsett,**collection.plotkeyargs)
-        
-            
+
+
     def generateCTRplot(self,cols=2,maxrelerr=None,**keyargs):
         rows = math.ceil(float(len(self.data))/float(cols))
         ax1 = self.add_subplot( rows,cols,1 )
@@ -104,7 +96,7 @@ class CTRFigure(mplfig.Figure):
             ctrname, ctrid = ctrkey
             self.axes_ctr_id.append(ctrkey)
             self.axes_ctr_hk.append(ctrname)
-            
+
             def formatMillerName(h):
                 h = round(h, 3)
                 if not h % 1:
@@ -113,17 +105,17 @@ class CTRFigure(mplfig.Figure):
                     return r"\overline{%s}" % abs(h)
                 else:
                     return r"%s" % abs(h)
-            
+
             if 'rodLabelL' in keyargs:
                 ctrstr = r"$( \, %s \, %s \, \ell \, )$" % (formatMillerName(ctrname[0]),formatMillerName(ctrname[1]))
             else:
                 ctrstr = r"$( \,%s \, %s \,)$" % (formatMillerName(ctrname[0]),formatMillerName(ctrname[1]) )
-            
+
             if hasattr(self,"rodlabelsize"):
                 size = self.rodlabelsize
             else:
                 size = None
-            
+
             if hasattr(self,"rodlabelweight"):
                 weight = self.rodlabelweight
             else:
@@ -149,7 +141,7 @@ class CTRFigure(mplfig.Figure):
                     if maxrelerr is not None:
                         relerr = ctr.err / ctr.sfI
                         mask = relerr > maxrelerr
-                        ax.errorbar(ctr.l[~mask],ctr.sfI[~mask],yerr=ctr.err[~mask],**keyargs_c)                        
+                        ax.errorbar(ctr.l[~mask],ctr.sfI[~mask],yerr=ctr.err[~mask],**keyargs_c)
                         if 'plotcaps' in keyargs:
                             errbar = ax.errorbar(ctr.l[mask],ctr.sfI[mask],yerr=ctr.err[mask],**keyargs_c)
                             _,_,barlinecols = errbar.lines
@@ -158,7 +150,7 @@ class CTRFigure(mplfig.Figure):
                         ax.errorbar(ctr.l,ctr.sfI,yerr=ctr.err,**keyargs_c) # ,fmt='.',elinewidth=0.5,capsize=1. ,errorevery=1,color='k',zorder=1
                 else:
                     ax.plot(ctr.l,ctr.sfI,*plotargs,**keyargs_c)
-            if self.data[ctrkey][0][0].difference:    
+            if self.data[ctrkey][0][0].difference:
                 ax.set_yscale('linear')
             else:
                 ax.set_yscale('log')
@@ -167,7 +159,7 @@ class CTRFigure(mplfig.Figure):
                 ax.set_xlim(xlim)
             elif self.xlim is not None:
                 ax.set_xlim(self.xlim)
-            
+
             if ylim is not None:
                 self.to_sharey[i] = False
                 ax.set_ylim(ylim)
@@ -180,7 +172,7 @@ class CTRFigure(mplfig.Figure):
                 if axy is shareyaxes[0]:
                     continue
                 axy.sharey(shareyaxes[0])
-        
+
         if np.any(self.to_sharex):
             sharexaxes = np.array(self.axes)[self.to_sharex]
             for axx in sharexaxes:
@@ -214,7 +206,7 @@ class CTRFigure(mplfig.Figure):
 
         self.tight_layout()
         self.subplots_adjust(wspace=self.wspace,hspace=self.hspace)
-        
+
         if keyargs.get('sharexyLabels', False):
             if 'x' in xy_lablel:
                 avepos_width = 0.5 * (self.subplotpars.left + self.subplotpars.right)
@@ -223,11 +215,11 @@ class CTRFigure(mplfig.Figure):
                 axes[-1,0].xaxis.label.set_x(avepos_width)
             if 'y' in xy_lablel:
                 avepos_height = 0.5 * (self.subplotpars.bottom + self.subplotpars.top)
-                transform_ylabel = mtransforms.blended_transform_factory(mtransforms.IdentityTransform(), self.transFigure) 
+                transform_ylabel = mtransforms.blended_transform_factory(mtransforms.IdentityTransform(), self.transFigure)
                 axes[0,0].yaxis.label.set_transform(transform_ylabel)
                 axes[0,0].yaxis.label.set_y(avepos_height)
-            
-        
+
+
     def get_ctr_ax(self, hk, ident=None):
         hk = (float(hk[0]), float(hk[1]))
         if ident is None:
@@ -235,12 +227,12 @@ class CTRFigure(mplfig.Figure):
         else:
             idx = self.axes_ctr_id.index((hk,ident))
         return self.axes[idx]
-        
+
     def set_ctr_xlim(self, hk, xlim, ident=None):
         hk = (float(hk[0]), float(hk[1]))
         if self.axes:
             ax = self.get_ctr_ax(hk, ident)
-            if len(ax.get_shared_x_axes().get_siblings(ax)) > 1: 
+            if len(ax.get_shared_x_axes().get_siblings(ax)) > 1:
                 raise RuntimeError("CTR axes limits must be set before plot creation.")
             else:
                 ax.set_xlim(xlim)
@@ -254,13 +246,13 @@ class CTRFigure(mplfig.Figure):
                     raise KeyError("CTR %s not found in figure data" % str(hk))
             else:
                 self.data[(hk, ident)][0][2]['xlim'] = xlim
-                
-                
+
+
     def set_ctr_ylim(self, hk, ylim, ident=None):
         hk = (float(hk[0]), float(hk[1]))
         if self.axes:
             ax = self.get_ctr_ax(hk, ident)
-            if len(ax.get_shared_y_axes().get_siblings(ax)) > 1: 
+            if len(ax.get_shared_y_axes().get_siblings(ax)) > 1:
                 raise RuntimeError("CTR axes limits must be set before plot creation.")
             else:
                 ax.set_ylim(ylim)
@@ -275,13 +267,13 @@ class CTRFigure(mplfig.Figure):
             else:
                 self.data[(hk, ident)][0][2]['ylim'] = ylim
 
-                
-class CTR(object):
-    
+
+class CTR:
+
     ctrtype = 100
-    
+
     optional_counters = ['bgI', 'ctrI', 'croi_pix', 'bgroi_pix', 'weight']
-    
+
     def __init__(self,hk,l=None,sfI=None,err=None,phi=None,**keyargs):
         self.hk = tuple(hk)
         h,k = hk
@@ -303,27 +295,27 @@ class CTR(object):
             self.name = 'default'
         self.harr = np.full_like(self.l,h)
         self.karr = np.full_like(self.l,k)
-        
+
     def toNXdict(self):
         nxdict = {
-            "@NX_class": u"NXdata",
+            "@NX_class": "NXdata",
             "sixc_angles": {
-                "@NX_class": u"NXpositioner",
-                "@unit" : u"deg"
+                "@NX_class": "NXpositioner",
+                "@unit" : "deg"
             },
             "hkl": {
-                "@NX_class": u"NXcollection",
+                "@NX_class": "NXcollection",
                 "h" :  self.harr,
                 "k" :  self.harr,
                 "l" :  self.l,
-                "@unit" : u"r.l.u."
+                "@unit" : "r.l.u."
             },
             "counters":{
-                "@NX_class": u"NXdetector",
+                "@NX_class": "NXdetector",
                 "structurefactor" : self.sfI
             },
-            "@signal" : u"counters/structurefactor",
-            "@axes": u"hkl/l",
+            "@signal" : "counters/structurefactor",
+            "@axes": "hkl/l",
             "@title" : repr(self),
             "@name" : self.name,
             "@difference" : self.difference
@@ -331,19 +323,19 @@ class CTR(object):
         for cnter in CTR.optional_counters:
             if hasattr(self, cnter):
                 nxdict["counters"][cnter] = getattr(self, cnter)
-                
+
         if self.err is not None:
             nxdict["counters"]["structurefactor_errors"] = self.err
-        
+
         if self.phi is not None:
             nxdict["counters"]["phase"] = self.phi
-            
+
         if hasattr(self, 'angles'):
             for ang in self.angles.dtype.fields:
                 nxdict["sixc_angles"][ang] = self.angles[ang]
-        
+
         return nxdict
-    
+
     @classmethod
     def fromNXdict(cls, nxdict):
         h = nxdict['hkl']['h']
@@ -353,18 +345,18 @@ class CTR(object):
         err = nxdict['counters'].get('structurefactor_errors', None)
         phi = nxdict['counters'].get('phase', None)
         name = nxdict.get('@name', 'default')
-        
+
         ctr = cls((h[0], k[0]), l, sfI, err, phi, name=name)
         ctr.harr = h
         ctr.karr = k
-        
+
         if '@difference' in nxdict:
             ctr.difference = nxdict['@difference']
-        
+
         for cnter in CTR.optional_counters:
             if hasattr(nxdict['counters'], cnter):
                 setattr(ctr, cnter, nxdict["counters"][cnter])
-        
+
         angles = []
         angles_names = []
         for ang in nxdict['sixc_angles']:
@@ -378,20 +370,20 @@ class CTR(object):
             ctr.angles = angles
         return ctr
 
-        
+
     def getPlotLabel(self):
         if self.plotlabel in self:
             return self.plotlabel
         else:
             return self.name
-    
+
     def convertToF(self,excludeInvalid=True):
         self.sfI = np.sqrt(self.sfI)
         if excludeInvalid:
             mask = ~np.isnan(self.sfI)
         else:
             mask = np.ones_like(self.sfI,dtype=np.bool_)
-        
+
         if self.isWithError:
             self.err = 0.5*(self.err/self.sfI)[mask]
         if hasattr(self,'bgI'):
@@ -404,63 +396,63 @@ class CTR(object):
         self.karr = self.karr[mask]
         if self.isWithPhase:
             self.phi = self.phi[mask]
-        
+
     # in degrees
     def setPhase(self,phi):
         self.phi = phi
-    
+
     def setWithError(self,err):
         self.withErr = err
-    
+
     @property
     def isWithPhase(self):
         if not isinstance(self.phi,np.ndarray):
             return False
         else:
             return True
-        
+
     @property
     def isWithError(self):
         if not isinstance(self.err,np.ndarray):
             return False
         return self.withErr
-    
+
     def getComplexSF(self):
         if not self.isWithPhase:
             raise Exception("%s:\nNo phase informaion available." % repr(self))
         return self.sfI*np.exp(1j*np.deg2rad(self.phi))
-    
+
     @property
     def ctr_id(self):
         return tuple(np.around(self.hk,2)),self.ctrtype
-    
+
     def setToDefaultID(self):
         self.ctrtype = 0
-    
+
     def generateDifference(self,other):
         otherinter = interp.interp1d(other.l,other.sfI)
         self.sfI -= otherinter(self.l)
         self.difference = True
         return self
-    
+
     def meanSF(self,lowerL,upperL):
         upper = np.nanargmin(np.abs(self.l - upperL))
         lower = np.nanargmin(np.abs(self.l - lowerL))
         return np.nanmean(self.sfI[lower:upper])
-        
+
     def __imul__(self,valOrArray):
         self.sfI *= valOrArray
         if isinstance(self.err,np.ndarray):
             self.err *= valOrArray
         return self
-    
+
     def __iadd__(self,valOrArray):
         self.sfI += valOrArray
         #raise NotImplementedError()
         #if isinstance(self.err,np.ndarray):
         #    self.err += valOrArray
         return self
-    
+
     def cut(self,lower,upper, invert=False):
         """Restricts the CTR to the selected lower and upper index
         
@@ -479,7 +471,7 @@ class CTR(object):
                 self.sfI[lower] = np.nan
             else:
                 mask[lower:upper] = False
-                
+
         else:
             mask = slice(lower,upper)
         self.l = self.l[mask]
@@ -494,7 +486,7 @@ class CTR(object):
             self.bgI = self.bgI[mask]
         if hasattr(self,'ctrI'):
             self.ctrI = self.ctrI[mask]
-            
+
     def cutToL(self,lowerL,upperL, invert=False):
         """Restricts the CTR to the selected lowerL and upperL.
         
@@ -508,16 +500,16 @@ class CTR(object):
         upper = np.nanargmin(np.abs(self.l - upperL))
         lower = np.nanargmin(np.abs(self.l - lowerL))
         self.cut(lower,upper,invert)
-        
-        
+
+
     def cutToROIfile(self,jsonfile):
-        with open(jsonfile,'r') as f:
+        with open(jsonfile) as f:
             udict = json.load(f)
-        
+
         rois = udict['ROI']['roidict']
         del rois['ICR']
         mask = np.zeros_like(self.l,dtype=np.bool_)
-        
+
         for roikey in rois:
             fr = rois[roikey]['from']
             to = rois[roikey]['to']
@@ -528,7 +520,7 @@ class CTR(object):
         self.harr = self.harr[mask]
         self.karr = self.karr[mask]
         self.sfI = self.sfI[mask]
-        
+
         if self.isWithError:
             self.err = self.err[mask]
         if self.isWithPhase:
@@ -537,7 +529,7 @@ class CTR(object):
             self.bgI = self.bgI[mask]
         if hasattr(self,'ctrI'):
             self.ctrI = self.ctrI[mask]
-            
+
     def get_scale(self, xtal, omitErrors=False ,lognorm=False):
         if not hasattr(self,'err') or omitErrors:
             err = None
@@ -548,24 +540,24 @@ class CTR(object):
             return util.get_scale_logchi2(F_cryst, self.sfI)
         else:
             return util.get_scale_chi2(F_cryst, self.sfI, err)
-        
+
     def scaleToXtal(self,xtal, omitErrors=False, lognorm=False):
         self.__imul__(self.get_scale(xtal,omitErrors,lognorm))
 
-        
+
     def calcAnglesZmode(self,vliegangles,fixedangle=np.deg2rad(0.1),
                         fixed='in', chi=0.,phi=0., **keyargs):
         l = self.l
         h = self.harr
         k = self.karr
         hkl = np.vstack((h,k,l))
-    
+
         pos = vliegangles.anglesZmode(hkl,fixedangle,fixed='in',chi=0,phi=0,**keyargs)
         dt = np.dtype([('alpha', 'f8'), ('delta','f8'), ('gamma','f8'), ('omega','f8'), ('chi','f8'), ('phi','f8')])
         self.angles = np.core.records.fromarrays(pos.T,dtype=dt)
         return self.angles
-        
-        
+
+
     def toArray(self,mode=None):
         if mode is not None:
             data = np.empty((6,self.l.size))
@@ -576,13 +568,13 @@ class CTR(object):
         data[1] = self.karr
         data[2] = self.l
         data[3] = self.sfI
-        if self.err is not None: 
+        if self.err is not None:
             data[4] = self.err
         elif self.phi is not None:
             data[4] = self.phi
         else:
             data[4] = np.nan
-            
+
         return data.T
 
     #returns a list of CTRs!!!
@@ -605,9 +597,9 @@ class CTR(object):
             else:
                 err = rod[:,4] if rod.shape[1] > 4 else None
                 CTRs.append(CTR(tuple(hk),l,sfI,err))
-            
+
         return CTRCollection(CTRs)
-    
+
     @classmethod
     def fromArray(cls, array,RODexport=False):
         h = array[:,0][0]
@@ -621,18 +613,18 @@ class CTR(object):
             err = array[:,4] if array.shape[1] > 4 else None
             phase = None
         return cls([h,k],l,sfI,err,phase)
-    
+
     def millerIdentifier(self):
         h,k = self.hk
         idstr = "%i_%02i_%i_%02i" % (round(h), round((h % 1) * 100),round(k), round((k % 1) * 100))
         return idstr
-    
+
     def rollbackHK(self):
         idstrsp = self.name.split('_')
         h = float(idstrsp[0] + '.' + idstrsp[1])
         k = float(idstrsp[2] + '.' + idstrsp[3])
         self.hk = h,k
-        
+
     def generateAverage(self, step_size=None, **kwargs):
         """Creates a new averaged CTR.
         
@@ -644,13 +636,13 @@ class CTR(object):
         
         """
         overlap = kwargs.get('overlap', 0.25)
-        
+
         lmax = np.amax(self.l)
         lmin = np.amin(self.l)
         size_max = self.l.size
-        
+
         l_range = lmax - lmin
-        
+
         if 'nbins' in kwargs:
             nbins = int(kwargs.get('nbins'))
             #
@@ -658,13 +650,13 @@ class CTR(object):
             step = l_full_range / nbins
             l_first_bin = lmin - step*overlap
             bin_edges = l_first_bin + step*np.arange(nbins+1)
-            
+
         elif step_size is not None:
             nbins = int(np.floor(l_range / abs(step_size))) + 1
             l_full_range = l_range / (1. - (2*overlap) / nbins)
-            
+
             nbins = int(np.floor(l_full_range / abs(step_size))) + 1
-            
+
             l_first_bin = lmin - step_size*overlap
             bin_edges = l_first_bin + step_size*np.arange(nbins+1)
         else:
@@ -672,29 +664,29 @@ class CTR(object):
 
             l_full_range = l_range / (1. - (2*overlap) / nbins)
             step = l_full_range / nbins
-            
+
             l_first_bin = lmin - step*overlap
             bin_edges = l_first_bin + step*np.arange(nbins+1)
-            
+
         l_cntr = np.zeros(nbins)
-        
+
         indexes = np.digitize(self.l, bin_edges)
-        
+
         if np.any(indexes == 0) or np.any(indexes == nbins+1):
             raise Exception("bin edges were chosen incorrectly. This is probably a bug.")
-            
+
         indexes -= 1
-        
+
         weights = np.zeros_like(l_cntr)
         np.add.at(weights,indexes,1.)
-        
+
         np.add.at(l_cntr, indexes, self.l)
         l_cntr /= weights
-        
+
         I = np.zeros_like(l_cntr)
         np.add.at(I, indexes, self.sfI)
         I /= weights
-        
+
         if hasattr(self,'err') and self.err is not None:
             Ierr = np.zeros_like(l_cntr)
             np.add.at(Ierr, indexes, self.err**2)
@@ -702,9 +694,9 @@ class CTR(object):
             Ierr /= weights
         else:
             Ierr = None
-        
+
         mask = np.logical_and(weights != 0, np.isfinite(I))
-        
+
         l_masked = l_cntr[mask]
         I_masked = I[mask]
         if Ierr is not None:
@@ -716,40 +708,40 @@ class CTR(object):
         newctr = CTR(self.hk,l_masked,I_masked,Ierr_masked)
         newctr.contributions = weights_masked
         return newctr
-    
+
     def __repr__(self):
         #return "<CTR %s ctrtype %s at %016X>" % (tuple(np.around(self.hk,2)), self.ctrtype , id(self))
         return "<CTR<%s> %s ctrtype %s>" % (self.name,tuple(np.around(self.hk,2)), self.ctrtype)
-        
+
 
 class CTRCollection(list):
     def __init__(self,iterableCTRs=[], **kwargs):
-        super(CTRCollection, self).__init__(iterableCTRs)
+        super().__init__(iterableCTRs)
         self.plotsett = ()
         self.plotkeyargs = {'linestyle':'-', 'marker':'.','color':'k','zorder':1}
         #self._updaterodtypes()
         self.name = kwargs.get('name', 'CTRs')
-        
+
     def setPlotSettings(self,*settings,**keyargs):
         self.plotsett = settings
         self.plotkeyargs = keyargs
-    
+
     def getReprList(self):
         return [repr(rod) for rod in self]
-        
+
     def getHKList(self):
         return [rod.hk for rod in self]
-    
+
     def setAllToDefaultID(self):
         for rod in self:
             rod.setToDefaultID()
-    
+
     def deleteRod(self,key):
         if isinstance(key,tuple):
             for rod in self:
                 if rod.hk == key:
                     self.remove(rod)
-            
+
     def __and__(self,other):
         coll = CTRCollection()
         for rod in self:
@@ -757,11 +749,11 @@ class CTRCollection(list):
                 coll.append(rod)
         #coll._updaterodtypes()
         return coll
-        
+
     def convertToF(self):
         for ctr in self:
             ctr.convertToF()
-            
+
     def generateAverage(self, step_size=None, **kwargs):
         """Creates a new CTRCollection with CTRs, which were individually
         averaged.
@@ -777,7 +769,7 @@ class CTRCollection(list):
         for ctr in self:
             coll.append(ctr.generateAverage(step_size, **kwargs))
         return coll
-    
+
     def generateDifferenceCollection(self,other,sortby='repr'):
         coll = CTRCollection()
         if isinstance(other,CTRCollection):
@@ -809,7 +801,7 @@ class CTRCollection(list):
             return coll
         else:
             raise NotImplementedError("Can not generate difference collection for type %s" % type(other))
-        
+
     def addScalar(self,scalar):
         for rod in self:
             rod += scalar
@@ -841,18 +833,18 @@ class CTRCollection(list):
                 F =  xtal.F(ctr.harr,ctr.karr,ctr.l)
                 CTRs.append( CTR(ctr.hk, ctr.l, np.abs(F),phi=np.angle(F)))
             return CTRs
-        
+
     def toANAROD(self,filename, mode=-3):
         if self.__getitem__(0).isWithError:
             header = "H  K  L  F_HKL  errorF  mode"
         else:
             header = "H  K  L  F_HKL  phi"
-            
+
         data_combined = np.vstack([ctr.toArray(mode) for ctr in self])
-        
+
         np.savetxt(filename,data_combined,header=header,fmt='%.5f')
-        
-                    
+
+
     @staticmethod
     def fromANAROD(filenameOrArray,RODexport=False, **kwargs):
         if not isinstance(filenameOrArray,np.ndarray):
@@ -874,23 +866,23 @@ class CTRCollection(list):
             else:
                 err = rod[:,4] if rod.shape[1] > 4 else None
                 CTRs.append(CTR(tuple(hk),l,sfI,err))
-            
+
         return CTRCollection(CTRs, name=name)
-        
+
     def toNXdict(self):
 
         nxdict = {
-            "@title":u"%s" % self.name,
-            "@NX_class": u"NXentry",
-            "@name" : u"%s" % self.name
+            "@title":"%s" % self.name,
+            "@NX_class": "NXentry",
+            "@name" : "%s" % self.name
         }
         for ctr in self:
             d = ctr.toNXdict()
             nxdict[d['@title']] = d
             nxdict["@default"] = d['@title']
-            
+
         return nxdict
-    
+
     @classmethod
     def fromNXdict(cls, nxdict):
         ctrs = []
@@ -899,11 +891,11 @@ class CTRCollection(list):
                 ctr = CTR.fromNXdict(nxdict[dt])
                 ctrs.append(ctr)
         name = nxdict["@name"]
-        
+
         CTRs = cls(ctrs, name=name)
         return CTRs
-        
-        
+
+
     def get_flat(self):
         h = []; k = []; l = []; F = []
         for ctr in self:
@@ -912,13 +904,13 @@ class CTRCollection(list):
             l.append(ctr.l)
             F.append(ctr.sfI)
         return (np.concatenate(h),np.concatenate(k),np.concatenate(l)),np.concatenate(F)
-        
+
     def get_err_flat(self):
         err = []
         for ctr in self:
             err.append(ctr.err)
         return np.concatenate(err)
-        
+
     def get_scale(self, xtal, omitErrors=False ,lognorm=False):
         hkl, F = self.get_flat()
         F_cryst = np.abs( xtal.F(*hkl))
@@ -930,15 +922,15 @@ class CTRCollection(list):
             return util.get_scale_logchi2(F_cryst, F)
         else:
             return util.get_scale_chi2(F_cryst, F, err)
-        
-        
+
+
     def scaleToXtal(self,xtal, individual=True, omitErrors=False, lognorm=False):
         if individual:
             for ctr in self:
                 ctr.scaleToXtal(xtal,lognorm, omitErrors)
         else:
             self.__imul__(self.get_scale(xtal,omitErrors,lognorm))
-    
+
     def __imul__(self,valOrArray):
         for rod in self:
             rod *= valOrArray
@@ -951,20 +943,20 @@ class CTRCollection(list):
                     return rod
             else:
                 raise KeyError("<%s: %s> CTR indices %s not found." % (type(self).__name__, self.name, str(key)))
-        return super(CTRCollection, self).__getitem__(key)
-        
+        return super().__getitem__(key)
+
     def __repr__(self):
         s = "<%s: %s\n" % (type(self).__name__, self.name)
         s += super().__repr__()
         s += ">"
         return s
 
-     
+
 def ctrfigure(**figargs):
     figargs['FigureClass'] = CTRFigure
     fig = plt.figure(**figargs)
     return fig
-    
+
 if __name__ == "__main__":
     fig = ctrfigure(figsize=(12,8))
     ctrlist = CTR.fromANAROD("CTRfit/data_in/0V17/CH4977_0V17_0001.dat")
@@ -975,21 +967,21 @@ if __name__ == "__main__":
     [ctr.setWithError(False) for ctr in ctrlist]
     [ctr.setToDefaultID() for ctr in ctrlist]
     [fig.addCTR(r,linestyle='', marker='.',color='g',zorder=1) for r in ctrlist]
-    
+
     ctrlist = CTR.fromANAROD("CTRfit/data_in/0V72/CH4977_0V72_0001.dat")
     [ctr.setWithError(False) for ctr in ctrlist]
     [ctr.setToDefaultID() for ctr in ctrlist]
     [fig.addCTR(r,linestyle='', marker='.',color='b',zorder=1) for r in ctrlist]
-    
+
     ctrlist = CTR.fromANAROD("CTRfit/data_in/0V02/CH4977_0V02_0001.dat")
     [ctr.setWithError(False) for ctr in ctrlist]
     [ctr.setToDefaultID() for ctr in ctrlist]
     [fig.addCTR(r,linestyle='', marker='.',color='y',zorder=1) for r in ctrlist]
-    
-    fig.settings(wspace=0.05,hspace=0,ylabels='|F| / a.u.',ylim=[1e1,1e3]) 
+
+    fig.settings(wspace=0.05,hspace=0,ylabels='|F| / a.u.',ylim=[1e1,1e3])
     fig.generateCTRplot()
     fig.show()
-    
+
 
 
 
