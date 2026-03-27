@@ -68,6 +68,12 @@ DEBUG = 0
 
 MAX_ROIS_DISPLAY = 100
 
+if hasattr(np, "trapezoid"): # ToDo remove for orGUI release >1.5
+    _trapz_impl = np.trapezoid # numpy >= 2.0
+else:
+    _trapz_impl = np.trapz # numpy < 2.0
+
+
 
 class RockingPeakIntegrator(qt.QMainWindow):
     def __init__(self, database, parent=None):
@@ -771,7 +777,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     'auxillary_num' : dict((a, []) for a in aux)
                 }
 
-        # for error propagation of trapz integral
+        # for error propagation of trapezoidal integral
         dx = np.diff(axis)
         deltaaxis = np.empty_like(axis)
         deltaaxis[0]     = dx[0] / 2
@@ -813,8 +819,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     int_data[roikey]['C_illum_area'].append( np.mean(C_illum_area[i][idx_from:idx_to]) )
                     C_corr *= C_flux_on_sample[i][idx_from:idx_to] * C_illum_area[i][idx_from:idx_to]
 
-                I_raw = np.trapz(cnts, axis[idx_from:idx_to]) * sign_interval # we force integrals positive
-                I_corr = np.trapz(cnts / C_corr , axis[idx_from:idx_to]) * sign_interval # we force integrals positive
+                I_raw = _trapz_impl(cnts, axis[idx_from:idx_to]) * sign_interval # we force integrals positive
+                I_corr = _trapz_impl(cnts / C_corr , axis[idx_from:idx_to]) * sign_interval # we force integrals positive
 
                 I_raw_error = np.sqrt(np.sum((cnts_errors * deltaaxis[idx_from:idx_to])**2 )) # to be checked!
                 I_corr_error = (I_raw_error / I_raw) * I_corr
@@ -826,7 +832,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 int_data[roikey]['cnts_errors'].append(I_corr_error)
 
                 for a in aux:
-                    int_data[roikey]['auxillary_int'][a].append(np.trapz(aux[a][idx_from:idx_to], axis[idx_from:idx_to])  * sign_interval) # we force integrals positive
+                    int_data[roikey]['auxillary_int'][a].append(_trapz_impl(aux[a][idx_from:idx_to], axis[idx_from:idx_to])  * sign_interval) # we force integrals positive
                     int_data[roikey]['auxillary'][a].append(np.sum(aux[a][idx_from:idx_to]))
                     int_data[roikey]['auxillary_num'][a].append(float(aux[a][idx_from:idx_to].size))
 
