@@ -1,10 +1,15 @@
-numpy >= 1.12
+numpy >= 1.16
 scipy >= 1.0
-matplotlib >= 1.2
+matplotlib >= 3.7
 fabio >= 0.7
 silx >= 1.1
-pyFAI >= 0.19
+pyFAI >= 2023.3,!=2025.12.0,!=2025.12.1,!=2026.2.0
 xraydb >= 4.0
+pytz >= 2022
 
 #optional
 qtconsole
+ase 
+hdf5plugin
+PyOpenGL
+numba
