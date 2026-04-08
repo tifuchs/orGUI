@@ -3,6 +3,45 @@
 This is the changelog for the software orGUI, written by Timo Fuchs
 
 
+## [1.4.1] (2026-03-27)
+
+[260ab5d](https://github.com/tifuchs/orGUI/commit/260ab5d63d3e3cacbefdbc9f62eb640bb0d80e80)...[3f5ce1a](https://github.com/tifuchs/orGUI/commit/3f5ce1a77cfe8bde3f2551dba35d117fbe87f023)
+
+This is a bugfix and maintenance release.
+
+*The last version to support python <=3.10 and NumPy 1.x.* 
+
+**Attention: pyFAI versions 2025.12.0, 2025.12.1 and 2026.2.0 cause a software crash when selecting a detector in the machine parameters.**
+
+Two ***critical bugs*** were fixed that affect physics calculations:
+
+- Allowed Bragg reflections close to the search bounds (usually high Q) were sometimes not found. This bug was present in all previous versions <v1.4.0.
+- The complex phase of the Fourier components rho_G of the electron density along z was incorrectly calculated (zDensity_G). This bug was present in all previous versions <v1.4.0.
+
+### Added
+
+- Add support for Pilatus 4 4M in id31 backend ([8977d82](https://github.com/tifuchs/orGUI/commit/8977d82d09598c42b1357e33dd2d0afca4d6f0a4))
+- Add ruff linting rules and apply simple fixes ([bb89a41](https://github.com/tifuchs/orGUI/commit/bb89a41f9bc8cc02733ec965e9dfd905ec669e26))
+
+### Changed
+
+- Drop pymca requirement ([9cbf849](https://github.com/tifuchs/orGUI/commit/9cbf8490578e920d1971dc4c8d9487a23e0bdbcc))
+
+### Fixed
+
+- Explicitly close data base upon quitting the app ([f9d0bf0](https://github.com/tifuchs/orGUI/commit/f9d0bf07f1b39fd8e06944b572b1ca256720989a))
+- Add fallback version to setuptools_scm configuration ([c3b3345](https://github.com/tifuchs/orGUI/commit/c3b3345ad08de725b07230984a8f0f13a6a30551))
+- Fix DetectorCalibration: Qrange and delgamrange calculation ([80c6a0b](https://github.com/tifuchs/orGUI/commit/80c6a0be6795a86c1a62b15eae95b00dd365f28f))
+- ReciprocalNavigation: extend the negative hkl calculation bound for allowedReflections_G ([8cea91f](https://github.com/tifuchs/orGUI/commit/8cea91fe7483b9cba011d3763989ac91b3ab01db)), Addresses #29: Bragg reflections at high Q sometimes not found
+- ReciprocalNavigation: fix hkl calculation array for allowedReflections_G ([6aad788](https://github.com/tifuchs/orGUI/commit/6aad788e62831ba4cd4c95ecd6ab16e6cf69b8cb)), Addresses #29: Bragg reflections at high Q sometimes not found
+- HKLVlieg: PCO calculation - numpy compatibility ([a1ff3d9](https://github.com/tifuchs/orGUI/commit/a1ff3d927f590fe399d3b2c199b1c9edb1ecf325))
+- Orgui: Numpy errors in ROI operations ([dc06b17](https://github.com/tifuchs/orGUI/commit/dc06b1770a625bd0ea8a3d80bfbc291ee6685841))
+- Orgui: another fix for Numpy 2.4 compatibility ([a56714b](https://github.com/tifuchs/orGUI/commit/a56714bd3b885693cf3a4e147444bb6a414efe1f))
+- Remove z phase factor of z Fourier components of electron density ([5cd1746](https://github.com/tifuchs/orGUI/commit/5cd17467eb83e28c5b62bb4298089b388bce50e6)), affected:UnitCell.zDensity_G and UnitCell.zDensity_G_asbulk. Absolute density unchanged., BREAKING CHANGE:phase of hk Fourier components of z electron density were incorrect
+- Reenable array arguments phi, chi, omega in HKLVlieg.anglesToHkl ([3629b96](https://github.com/tifuchs/orGUI/commit/3629b968b4878db8308e5c51c8a03295cd40ecea)), addresses #48: Compatibility issues with NumPy 2.4
+- Add np.trapz/np.trapezoid compatibility for NumPy 1.6 and >2.0 ([3f5ce1a](https://github.com/tifuchs/orGUI/commit/3f5ce1a77cfe8bde3f2551dba35d117fbe87f023)), addresses #48: Compatibility issues with Numpy 2.4
+
+
 ## [1.4.0] (2026-01-20)
 
 [ef10ee8](https://github.com/tifuchs/orGUI/commit/ef10ee8e805c13b60bb51361c38868da928d7116)...[eb2d82f](https://github.com/tifuchs/orGUI/commit/eb2d82f796a5f34798d7f78f7794ef73b9231332)
@@ -581,6 +620,7 @@ in form of a README and a diffractometer image showing the geometry.
 - Remove old reflection spinbox edit, add toolbar buttons instead ([7854679](https://github.com/tifuchs/orGUI/commit/7854679ff96344e40fd9d88334672309f62be219))
 - Remove array index widget from ArrayTableWidget, as only 1D or 2D arrays are used ([25796e2](https://github.com/tifuchs/orGUI/commit/25796e21f103a2a6f9e4dd8544e941bd7886605d))
 
+[1.4.1]: https://github.com/tifuchs/orGUI/compare/1.4.0..v1.4.1
 [1.4.0]: https://github.com/tifuchs/orGUI/compare/1.3.0..v1.4.0
 [1.3.0]: https://github.com/tifuchs/orGUI/compare/1.2.0..1.3.0
 [1.2.0]: https://github.com/tifuchs/orGUI/compare/1.1.2..1.2.0

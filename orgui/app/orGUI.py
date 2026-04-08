@@ -1,6 +1,6 @@
 # /*##########################################################################
 #
-# Copyright (c) 2020-2025 Timo Fuchs
+# Copyright (c) 2020-2026 Timo Fuchs
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -23,7 +23,7 @@
 # ###########################################################################*/
 __author__ = "Timo Fuchs"
 __credits__ = ['Finn Schroeter']
-__copyright__ = "Copyright 2020-2025 Timo Fuchs"
+__copyright__ = "Copyright 2020-2026 Timo Fuchs"
 __license__ = "MIT License"
 from .. import __version__
 __maintainer__ = "Timo Fuchs"
@@ -2699,7 +2699,7 @@ ub : gui for UB matrix and angle calculations
             try:
                 hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(self.imageno)
             except:
-                print(traceback.format_exc())
+                # print(traceback.format_exc())
                 #for roi in self.rois:
                 #    roi.setVisible(False)
                 self.roiS1.setVisible(False)
@@ -2942,10 +2942,11 @@ ub : gui for UB matrix and angle calculations
                 if len(np.asarray(mu).shape) > 0:
                     mu = mu[imageno]
                 gamma, delta, alpha = self.ubcalc.detectorCal.crystalAnglesPoint(np.array([y]),np.array([x]), mu,  self.ubcalc.n)
+                gamma, delta, alpha = gamma[0], delta[0], alpha # crystalAnglesPoint retains shape, even for 0d array
                 pos = [alpha,delta,gamma,om,self.ubcalc.chi,self.ubcalc.phi]
                 hkl_del_gam_1[:3] = np.concatenate(self.ubcalc.angles.anglesToHkl(*pos))
-                hkl_del_gam_1[3] = delta[0]
-                hkl_del_gam_1[4] = gamma[0]
+                hkl_del_gam_1[3] = delta
+                hkl_del_gam_1[4] = gamma
                 hkl_del_gam_1[5] = self.fscan.axis[imageno]
                 hkl_del_gam_2 = np.full_like(hkl_del_gam_1, -1)
 

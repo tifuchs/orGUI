@@ -40,4 +40,4 @@ try:
     from ._version import version as __version__
 except:
     logger.info('orGUI is not installed. Version number will be incorrect!')
-    __version__ = '1.3.0-unknown'
+    __version__ = '1.4.1-unknown'

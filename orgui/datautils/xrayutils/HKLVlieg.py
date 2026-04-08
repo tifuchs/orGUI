@@ -976,11 +976,16 @@ class VliegAngles:
         Qalp = np.ascontiguousarray(Qalp.reshape((-1,3)))
 
         #now UBi * PHIi * CHIi * OMEGAi * Q_alpha
-
+        if omega.ndim > 0:
+            omega = omega.ravel()
+        if chi.ndim > 0:
+            chi = chi.ravel()
+        if phi.ndim > 0:
+            phi = phi.ravel()
         #calculate PHIi @ CHIi @ OMEGAi
-        sinphi = np.sin(phi.flatten()); cosphi = np.cos(phi.flatten())
-        sinchi = np.sin(chi.flatten()); coschi = np.cos(chi.flatten())
-        sinomega = np.sin(omega.flatten()); cosomega = np.cos(omega.flatten())
+        sinphi = np.sin(phi); cosphi = np.cos(phi)
+        sinchi = np.sin(chi); coschi = np.cos(chi)
+        sinomega = np.sin(omega); cosomega = np.cos(omega)
 
         if phi.size > 1 or chi.size > 1 or omega.size > 1:
             # this will be expensive, could optimize here in the future
@@ -996,15 +1001,15 @@ class VliegAngles:
             PCO[:,2,2] = coschi*cosphi
         else:
             PCO = np.empty((3, 3), dtype=np.float64)
-            PCO[0,0] = coschi[0]*cosomega[0]
-            PCO[0,1] = -sinomega[0]*coschi[0]
-            PCO[0,2] = -sinchi[0]
-            PCO[1,0] = sinchi[0]*sinphi[0]*cosomega[0] + sinomega[0]*cosphi[0]
-            PCO[1,1] = -sinchi[0]*sinomega[0]*sinphi[0] + cosomega[0]*cosphi[0]
-            PCO[1,2] = sinphi[0]*coschi[0]
-            PCO[2,0] = sinchi[0]*cosomega[0]*cosphi[0] - sinomega[0]*sinphi[0]
-            PCO[2,1] = -sinchi[0]*sinomega[0]*cosphi[0] - sinphi[0]*cosomega[0]
-            PCO[2,2] = coschi[0]*cosphi[0]
+            PCO[0,0] = coschi*cosomega
+            PCO[0,1] = -sinomega*coschi
+            PCO[0,2] = -sinchi
+            PCO[1,0] = sinchi*sinphi*cosomega + sinomega*cosphi
+            PCO[1,1] = -sinchi*sinomega*sinphi + cosomega*cosphi
+            PCO[1,2] = sinphi*coschi
+            PCO[2,0] = sinchi*cosomega*cosphi - sinomega*sinphi
+            PCO[2,1] = -sinchi*sinomega*cosphi - sinphi*cosomega
+            PCO[2,2] = coschi*cosphi
 
         #calculate UBi * PHIi * CHIi * OMEGAi * Q_alpha
         hkl = np.einsum('...ij,...j->...i', (UBi @ PCO), Qalp)

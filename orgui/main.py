@@ -1,6 +1,6 @@
 # /*##########################################################################
 #
-# Copyright (c) 2020-2025 Timo Fuchs
+# Copyright (c) 2020-2026 Timo Fuchs
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -25,7 +25,7 @@
 
 """
 __author__ = "Timo Fuchs"
-__copyright__ = "Copyright 2020-2025 Timo Fuchs"
+__copyright__ = "Copyright 2020-2026 Timo Fuchs"
 __credits__ = []
 __license__ = "MIT License"
 from . import __version__
