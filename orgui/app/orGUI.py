@@ -2944,7 +2944,7 @@ ub : gui for UB matrix and angle calculations
                 gamma, delta, alpha = self.ubcalc.detectorCal.crystalAnglesPoint(np.array([y]),np.array([x]), mu,  self.ubcalc.n)
                 gamma, delta, alpha = gamma[0], delta[0], alpha # crystalAnglesPoint retains shape, even for 0d array
                 pos = [alpha,delta,gamma,om,self.ubcalc.chi,self.ubcalc.phi]
-                hkl_del_gam_1[:3] = np.concatenate(self.ubcalc.angles.anglesToHkl(*pos))
+                hkl_del_gam_1[:3] = np.array(self.ubcalc.angles.anglesToHkl(*pos))
                 hkl_del_gam_1[3] = delta
                 hkl_del_gam_1[4] = gamma
                 hkl_del_gam_1[5] = self.fscan.axis[imageno]
