@@ -147,8 +147,20 @@ def openScan(btid, ddict):
     else:
         try:
             fscan = fscancls(ddict['file'], ddict['scanno'])
-        except Exception:
-            raise ValueError("Did not find matching scan in backends for beamtime id %s" % btid)
+        except Exception as exc:
+            if btid == default_beamtime:
+                raise ValueError(
+                    "Did not find a matching beamtime id for this scan. "
+                    "orGUI tried the default backend '%s', but that backend "
+                    "could not open scan %s from %s. Original error: %s"
+                    % (
+                        btid,
+                        ddict.get('scanno'),
+                        ddict.get('file'),
+                        str(exc) or exc.__class__.__name__,
+                    )
+                ) from exc
+            raise
     return fscan
 
 

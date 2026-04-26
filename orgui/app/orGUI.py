@@ -2494,12 +2494,13 @@ ub : gui for UB matrix and angle calculations
                     self.loadAll()
                     self.scanSelector.showMaxAct.setChecked(False)
                     self.scanSelector.showMaxAct.setChecked(True)
-            except Exception:
+            except Exception as exc:
                 if logger_utils.get_logging_context() == 'gui':
                     msg.hide()
+                exc_msg = str(exc) or exc.__class__.__name__
                 logger.exception("Cannot open scan", 
                          extra={'title' : 'Cannot open scan',
-                                'description' : 'Cannot open scan',
+                                'description' : 'Cannot open scan:\n%s' % exc_msg,
                                 'show_dialog' : True,
                                 'parent' : self})
                 # qutils.warning_detailed_message(self, "Cannot open scan", "Cannot open scan" , traceback.format_exc())
