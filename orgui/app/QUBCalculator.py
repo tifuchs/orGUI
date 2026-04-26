@@ -462,6 +462,9 @@ class QUBCalculator(qt.QSplitter):
                 autoload = settings.getboolean('autoload', True)
             except Exception as e:
                 autoload = True
+                # GUI falls back to autoload=True after showing the warning.
+                # CLI intentionally treats this ERROR log as fatal via
+                # CLIExceptionHandler, so malformed config files fail fast.
                 logger.exception("Error parsing autoload setting.", 
                      extra={'title' : 'Error parsing autoload setting',
                             'description' : "Error parsing autoload setting in file %s" % (configfile),
@@ -472,6 +475,9 @@ class QUBCalculator(qt.QSplitter):
                 compression = settings.get('compression', 'Raw')
             except Exception as e:
                 compression = 'Raw'
+                # GUI falls back to compression='Raw' after showing the warning.
+                # CLI intentionally treats this ERROR log as fatal via
+                # CLIExceptionHandler, so malformed config files fail fast.
                 logger.exception("Error parsing compression setting.", 
                      extra={'title' : 'Error parsing compression setting',
                             'description' : "Error parsing compression setting in file %s" % (configfile),

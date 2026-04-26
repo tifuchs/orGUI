@@ -177,9 +177,9 @@ class CLIExceptionHandler(logging.Handler):
         if record.levelno >= logging.ERROR:
             if record.exc_info:
                 exc_type, exc_value, exc_tb = record.exc_info
-                raise exc_value.with_traceback(exc_tb)
-            else:
-                raise RuntimeError(msg)
+                if exc_value is not None:
+                    raise exc_value.with_traceback(exc_tb)
+            raise RuntimeError(msg)
 
     
 class MessageBoxHandler(logging.Handler):

@@ -502,11 +502,12 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 data.append(roi_info[k]["anchor"].astype(float))
 
         data = np.vstack(data).T
-        header_line = " ".join(header)
 
         if fileext == "dat":
+            header_line = " ".join(header)
             np.savetxt(filename, data, header=header_line, fmt=fmt)
         elif fileext == "csv":
+            header_line = csvdelim.join(header)
             np.savetxt(filename, data, header=header_line, fmt=fmt, delimiter=csvdelim)
         elif fileext == "ndarray":
             np.save(filename, {"header": header, "data": data})
@@ -549,7 +550,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             )
             return
         if self._currentRoInfo:
-            fileTypeDictSave1D = {"Plain ascii file (*.dat)" : "dat", "CSV file (*.csv)" : "csv"}
+            fileTypeDictSave1D = {"Plain ascii file (*.dat)" : "dat", "CSV file (*.csv)" : "csv", "NumPy format (*.npy)" : "ndarray"}
             fileTypeDict = {**fileTypeDictSave1D}
 
             fileTypeFilter = ""
