@@ -496,7 +496,7 @@ class QScanSelector(qt.QMainWindow):
         self.roscanMaxS.setRange(-20000,20000)
         self.roscanMaxS.setDecimals(3)
         self.roscanMaxS.setValue(6.)
-        self.roscanMaxS.valueChanged.connect(lambda : self.onRoSChanged)
+        self.roscanMaxS.valueChanged.connect(self.onRoSChanged)
         self.roscanDeltaS = qt.QDoubleSpinBox()
         self.roscanDeltaS.setRange(0.00000001,20000)
         self.roscanDeltaS.setDecimals(5)

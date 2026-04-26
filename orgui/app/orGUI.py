@@ -1054,7 +1054,9 @@ ub : gui for UB matrix and angle calculations
         if cancelled:
 
             if status == 'error':
-                logger.exception('Error during integration' , 
+                trace = "".join(traceback.format_exception(*exc_info))
+                logger.error('Error during integration',
+                    exc_info=exc_info,
                     extra={'title' : 'Error during integration',
                         'description' : 'Error during integration. Integration was aborted.',
                         'show_dialog' : True,
@@ -1474,8 +1476,12 @@ ub : gui for UB matrix and angle calculations
             if t.startswith('@'):
                 continue
             if rois[t].shape[0] != scsize:
-                logger.error("Error during ro integration: roi %s does not match scan size %s." () + \
-                             "This is likely a coding error")
+                logger.error(
+                    "Error during ro integration: roi %s does not match scan size %s. "
+                    "This is likely a coding error",
+                    t,
+                    scsize,
+                )
                 return {'status': 'error', 'message' : "Error during ro integration: size mismatch", 'traceback' : ""}
 
         data_2d_structured[self.activescanname]["measurement"][name]["rois"] = rois
