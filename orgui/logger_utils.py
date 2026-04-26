@@ -47,6 +47,57 @@ from abc import ABC, abstractmethod
 import inspect
 
 
+# Qt widgets, including modal message boxes, must be created and executed on
+# the Qt main thread. Logging can originate from worker threads, so GUI log
+# records pass through this dispatcher before showing dialogs.
+class _MessageBoxDispatcher(qt.QObject):
+    show_message = qt.Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.show_message.connect(self._show_message, qt.Qt.QueuedConnection)
+
+    def show(self, payload):
+        app = qt.QApplication.instance()
+        if app is None or qt.QThread.currentThread() == app.thread():
+            self._show_message(payload)
+        else:
+            self.show_message.emit(payload)
+
+    def _show_message(self, payload):
+        if payload["dialog_level"] >= logging.ERROR:
+            critical_detailed_message(
+                payload["parent"],
+                payload["title"],
+                payload["message"],
+                payload["detailed_text"],
+            )
+        elif payload["dialog_level"] >= logging.WARNING:
+            warning_detailed_message(
+                payload["parent"],
+                payload["title"],
+                payload["message"],
+                payload["detailed_text"],
+            )
+        elif payload["dialog_level"] >= logging.INFO:
+            information_detailed_message(
+                payload["parent"],
+                payload["title"],
+                payload["message"],
+                payload["detailed_text"],
+            )
+
+
+_MESSAGE_BOX_DISPATCHER = None
+
+
+def _get_message_box_dispatcher():
+    global _MESSAGE_BOX_DISPATCHER
+    if _MESSAGE_BOX_DISPATCHER is None:
+        _MESSAGE_BOX_DISPATCHER = _MessageBoxDispatcher()
+    return _MESSAGE_BOX_DISPATCHER
+
+
 class Progress(ABC):
     def __init__(self, logger_name : str, total: int, title: str = "", **kwargs):
         self.total = total
@@ -198,21 +249,18 @@ class MessageBoxHandler(logging.Handler):
         if description != "":
             msg += '\n' + description
             
-        if dialog_level >= logging.ERROR:
-            if record.exc_info:
-                exc_text = "".join(traceback.format_exception(*record.exc_info))
-                detailed_text += exc_text
-            critical_detailed_message(parent, title, msg, detailed_text)
-        elif dialog_level >= logging.WARNING:
-            if record.exc_info:
-                exc_text = "".join(traceback.format_exception(*record.exc_info))
-                detailed_text += exc_text
-            warning_detailed_message(parent, title, msg, detailed_text)
-        elif dialog_level >= logging.INFO:
-            if record.exc_info:
-                exc_text = "".join(traceback.format_exception(*record.exc_info))
-                detailed_text += exc_text
-            information_detailed_message(parent, title, msg, detailed_text)
+        if record.exc_info:
+            exc_text = "".join(traceback.format_exception(*record.exc_info))
+            detailed_text += exc_text
+
+        payload = {
+            "dialog_level": dialog_level,
+            "parent": parent,
+            "title": title,
+            "message": msg,
+            "detailed_text": detailed_text,
+        }
+        _get_message_box_dispatcher().show(payload)
 
 
 
