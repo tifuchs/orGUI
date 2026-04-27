@@ -4,6 +4,9 @@ build:
   os: ubuntu-24.04
   tools:
     python: "latest"
+  jobs:
+    post_install:
+      - python doc/check_rtd_imports.py
 
 sphinx:
   configuration: doc/source/conf.py
