@@ -27,6 +27,20 @@ extensions = [
     "sphinx.ext.doctest",
 ]
 
+autodoc_mock_imports = [
+    "dateutil",
+    "fabio",
+    "h5py",
+    "hdf5plugin",
+    "matplotlib",
+    "numba",
+    "pyFAI",
+    "pytz",
+    "scipy",
+    "silx",
+    "xraydb",
+]
+
 autodoc_default_options = {
     "members": True,
     "member-order": "bysource",
