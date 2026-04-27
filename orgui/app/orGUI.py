@@ -898,7 +898,10 @@ ub : gui for UB matrix and angle calculations
         """
         logger.info("Start hklscan rocking integration")
         if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
-            logger.error("No scan loaded.", 
+            # In GUI mode this shows a dialog and then returns the status dict
+            # below. In CLI mode logger.error intentionally raises through the
+            # CLI logging handler so scripts fail loudly on missing scan state.
+            logger.error("No scan loaded.",
                  extra={'title' : 'Cannot integrate scan',
                         'description' : 'Cannot integrate scan: No scan loaded.',
                         'show_dialog' : True,

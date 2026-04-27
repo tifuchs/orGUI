@@ -95,6 +95,9 @@ def _get_message_box_dispatcher():
     global _MESSAGE_BOX_DISPATCHER
     if _MESSAGE_BOX_DISPATCHER is None:
         _MESSAGE_BOX_DISPATCHER = _MessageBoxDispatcher()
+        app = qt.QApplication.instance()
+        if app is not None and _MESSAGE_BOX_DISPATCHER.thread() != app.thread():
+            _MESSAGE_BOX_DISPATCHER.moveToThread(app.thread())
     return _MESSAGE_BOX_DISPATCHER
 
 

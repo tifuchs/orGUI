@@ -133,7 +133,7 @@ def calc_image_range(fscan, axis_range, **kargs):
             try:
                 imgno = f.result()
             except Exception as e:
-                logger.error("Cannot read image.", exc_info=True)
+                logger.warning("Cannot read image.", exc_info=True)
     return {'max' : imgmax, 'sum' : imgsum, 'rocking_curve' : rocking_curve, 'rocking_axis' : rocking_axis}
 
 
