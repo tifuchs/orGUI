@@ -2,11 +2,15 @@ orGUI: Orientation and Integration with 2D Detectors
 ====================================================
 
 .. |logo| image:: ./orgui/resources/icons/logo.svg
-   :height: 320px
+   :height: 480px
 
 .. |docs| image:: https://readthedocs.org/projects/orgui/badge/?version=latest
    :target: https://orgui.readthedocs.io/en/latest/
    :alt: Documentation Status
+
+.. |pypi| image:: https://img.shields.io/pypi/v/orGUI.svg
+   :target: https://pypi.org/project/orGUI/
+   :alt: PyPI Version
 
 .. |zenodo DOI| image:: https://zenodo.org/badge/DOI/10.5281/zenodo.12592485.svg
    :target: https://doi.org/10.5281/zenodo.12592485
@@ -14,7 +18,7 @@ orGUI: Orientation and Integration with 2D Detectors
 .. |diffractometer| image:: ./orgui/resources/icons/diffractometer_v3.png
    :height: 360px
 
-|docs| |zenodo DOI|
+|docs| |pypi| |zenodo DOI|
 
 |logo|
 
@@ -26,6 +30,21 @@ reciprocal-space coordinates.
 Its primary use cases are High Energy Surface X-ray Diffraction
 (`HESXRD <https://doi.org/10.1126/science.1246834>`_) and Transmission Surface
 Diffraction (`TSD <https://doi.org/10.1021/acs.jpclett.7b00332>`_).
+
+Installation
+------------
+
+Install orGUI with its full GUI and analysis dependency set:
+
+.. code-block:: bash
+
+   pip install orGUI[full]
+
+For a minimal install:
+
+.. code-block:: bash
+
+   pip install orGUI
 
 Geometry and Detector Calibration
 ---------------------------------
@@ -50,13 +69,13 @@ Integration Modes
 -----------------
 
 * **Stationary reciprocal-space integration:** Integrates a scan along a line
-  in reciprocal lattice coordinates, such as a crystal truncation rod (CTR). orGUI
-  calculates the line intersections with the Ewald sphere and places ROIs at
-  the corresponding detector positions. Each image produces one I(hkl).
-  This is the fasted way to get integrated CTRs from large 2D detectors.
+  in reciprocal lattice coordinates, such as a crystal truncation rod (CTR).
+  orGUI calculates the line intersections with the Ewald sphere and places ROIs
+  at the corresponding detector positions. Each image produces one I(hkl).
+  This is the fastest way to get integrated CTRs from large 2D detectors.
 
 * **Fixed-pixel integration:** Integrates a detector ROI at a fixed pixel
-  position. Corresponds to a conventional rocking scan if motors are moved. 
+  position. Corresponds to a conventional rocking scan if motors are moved.
   This is often useful for time-resolved measurements.
 
 * **Rocking reciprocal-space integration:** Defines a reciprocal-space line
@@ -64,7 +83,7 @@ Integration Modes
   often useful for quantitative CTR extraction because the rocking dimension
   helps separate signal from background and improves CTR resolution at low Qz.
 
-* **Rocking Bragg integration:** Calculates allowed Bragg peaks and their position 
+* **Rocking Bragg integration:** Calculates allowed Bragg peaks and their position
   on the detector from the crystal, UB matrix, detector calibration, strain,
   then integrates those positions as rocking scans.
 
@@ -80,24 +99,10 @@ Further Reading
 
 The geometry and orientation-matrix workflows build on:
 
-* W. R. Busing and H. A. Levy, Acta Crystallographica 22, 457-464 (1967).
-* M. Lohmeier and E. Vlieg, Journal of Applied Crystallography 26, 706-716
-  (1993), https://doi.org/10.1107/S0021889893004868.
-
-Installation
-------------
-
-Install orGUI with its full GUI and analysis dependency set:
-
-.. code-block:: bash
-
-   pip install orGUI[full]
-
-For a minimal install:
-
-.. code-block:: bash
-
-   pip install orGUI
+* `Busing and Levy <https://doi.org/10.1107/S0365110X67000970>`_,
+  Acta Crystallographica 22, 457-464 (1967).
+* `Lohmeier and Vlieg <https://doi.org/10.1107/S0021889893004868>`_,
+  Journal of Applied Crystallography 26, 706-716 (1993).
 
 License
 -------
