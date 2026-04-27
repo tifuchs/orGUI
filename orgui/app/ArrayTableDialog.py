@@ -40,6 +40,8 @@ from silx.gui import icons
 
 from orgui import resources
 
+import logging
+logger = logging.getLogger(__name__)
 
 
 def is_number(s):
@@ -118,9 +120,13 @@ class AddRowAction(qt.QAction):
         """
         selected_idx = self.table.selectedIndexes()
         if len(selected_idx) > 1:
-            msgBox = qt.QMessageBox(parent=self.table)
-            msgBox.setText("A single cell must be selected to add a row")
-            msgBox.exec()
+            # msgBox = qt.QMessageBox(parent=self.table)
+            # msgBox.setText("A single cell must be selected to add a row")
+            # msgBox.exec()
+            logger.error("Cannot add row to table: A single cell must be selected to add a row", 
+                 extra={'title' : 'Cannot add row to table',
+                        'show_dialog' : True,
+                        'parent' : self.table})
             return False
 
         data_model = self.table.model()
@@ -290,9 +296,12 @@ class ArrayEditWidget(ArrayTableWidget.ArrayTableWidget):
                 self.updateArrayData(array_data, header=None, labels=None)
                 self.sigDataLoaded.emit()
                 return True
-
-        except Exception:
-            qt.QMessageBox.critical(self,"Error during loading of array","Error during loading of array.\n%s" % traceback.format_exc())
+        except Exception as e:
+            logger.exception("Error during loading of array", 
+                             extra={'title' : 'Error during loading of array',
+                                    'show_dialog' : True,
+                                    'description' : str(e),
+                                    'parent' : self})
 
     def openNXlike(self, retain_axis=1):
         """Displays a dialog to open an array from any NEXUS like data source.

@@ -28,8 +28,13 @@ __version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
+import logging
+logger = logging.getLogger(__name__)
 
 import os
+import shutil
+from scipy.optimize import root_scalar
+import numpy as np
 from dateutil import parser as dateparser
 
 from silx.gui import qt
@@ -491,13 +496,13 @@ class QScanSelector(qt.QMainWindow):
         self.roscanMaxS.setRange(-20000,20000)
         self.roscanMaxS.setDecimals(3)
         self.roscanMaxS.setValue(6.)
-        self.roscanMaxS.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.roscanMaxS.valueChanged.connect(self.onRoSChanged)
         self.roscanDeltaS = qt.QDoubleSpinBox()
         self.roscanDeltaS.setRange(0.00000001,20000)
         self.roscanDeltaS.setDecimals(5)
         self.roscanDeltaS.setValue(0.1)
-        self.roscanDeltaS.setSingleStep(0.1)
-        self.roscanDeltaS.valueChanged.connect(lambda : self.sigROIChanged.emit())
+        self.roscanDeltaS.setSingleStep(0.01)
+        self.roscanDeltaS.valueChanged.connect(self.onRoSChanged)
 
         maxSlayout = qt.QHBoxLayout()
         maxSlayout.addWidget(qt.QLabel("Max S:"))
@@ -668,6 +673,95 @@ class QScanSelector(qt.QMainWindow):
 
         maintab.addTab(self.roiIntegrateTab,"ROI integration")
 
+    def onRoSChanged(self):
+        """validate that delta S is not too small for the detector resolution.
+        
+        Clip to lowest deltaS if deltaS is too small. Currently it is the median.
+        
+        """
+        if self.scanstab.currentIndex() == 2:
+            if self.intersS1Act.isChecked():
+                intersect = 1
+            elif self.intersS2Act.isChecked():
+                intersect = 2
+            else:
+                intersect = 1 # default
+            
+            xy_key = 'xy_%s' % intersect
+            mask_key = 'mask_%s' % intersect
+            
+            try: 
+                refl_dict = self.parentmainwindow.get_rocking_coordinates()
+            except Exception as e:
+                logger.warning('Cannot verify deltaS range', exc_info=True,
+                     extra={'title' : 'Cannot verify deltaS range',
+                            'description' : 'Cannot verify deltaS range',
+                            'show_dialog' : False,
+                            "dialog_level" : logging.WARNING,
+                            'parent' : self})
+                self.sigROIChanged.emit()
+                return
+            
+            xy = refl_dict[xy_key][refl_dict[mask_key]]
+            
+            pixeldiff = np.linalg.norm(np.diff(xy,axis=0), axis=1)
+            
+            # if np.any(pixeldiff < 1.):
+            if np.median(pixeldiff) < 1.:
+                try:
+                    with blockSignals(self.roscanDeltaS):
+                        def fun(x):
+                            try:
+                                refl_dict = self.parentmainwindow.get_rocking_coordinates(step_width=x)
+                            except:
+                                logger.exception('foo')
+                                return np.inf
+                            xy = refl_dict[xy_key][refl_dict[mask_key]]
+                            pixeldiff = np.linalg.norm(np.diff(xy,axis=0), axis=1)
+                            medi = np.median(pixeldiff)
+                            if np.isnan(medi):
+                                medi = np.inf
+                            # return np.amin(pixeldiff) - 1.0000001 # no pixel overlap, fails if CTR points are very close together
+                            return medi - 1.0000001 # add a little bit to enforce no pixel overlap
+                        sol = root_scalar(fun, bracket=[self.roscanDeltaS.value(), 5.])
+                        self.roscanDeltaS.setValue(sol.root)
+                except:
+                    logger.warning('Cannot verify deltaS range', exc_info=True,
+                             extra={'title' : 'Cannot verify deltaS range',
+                                    'description' : 'Cannot verify deltaS range',
+                                    'show_dialog' : False,
+                                    "dialog_level" : logging.WARNING,
+                                    'parent' : self})
+        else:
+            logger.warning('Cannot verify deltaS range',
+                     extra={'title' : 'Cannot verify deltaS range',
+                            'description' : 'Cannot verify deltaS range',
+                            'show_dialog' : False,
+                            "dialog_level" : logging.WARNING,
+                            'parent' : self})
+            
+        self.sigROIChanged.emit()
+        
+
+    def set_integration_options(self, ddict):
+        for key in ddict:
+            if key == 'mask':
+                self.useMaskBox.setChecked(ddict[key])
+            elif key == 'solidAngle':
+                self.useSolidAngleBox.setChecked(ddict[key])
+            elif key == 'polarization':
+                self.usePolarizationBox.setChecked(ddict[key])
+            elif key == 'advanced':
+                self.roioptions.set_parameters(ddict[key])
+
+    def get_integration_options(self):
+        ddict = {}
+        ddict['mask'] = self.useMaskBox.isChecked()
+        ddict['solidAngle'] = self.useSolidAngleBox.isChecked()
+        ddict['polarization'] = self.usePolarizationBox.isChecked()
+        ddict['advanced'] = self.roioptions.get_parameters()
+        return ddict
+
     def _on_ro_H_0_changed(self, hkl):
         label = "H: %s K: %s L: %s" % tuple(hkl)
         self._H_0_label.setText(label)
@@ -739,10 +833,12 @@ class QScanSelector(qt.QMainWindow):
 
     def _onLoadScan(self):
         if self.bt_autodetect_enable.isChecked():
-            msgbox = qt.QMessageBox(qt.QMessageBox.Warning,'Cannot auto detect backend',
-                        'Cannot auto detect beamtime id and corresponding backend in minimal mode.\nPlease first deselect the beamtime auto detection and then chose the correct beamtime or default backend.',
-                        qt.QMessageBox.Ok, self)
-            clickedbutton = msgbox.exec()
+            logger.error("Cannot auto detect backend.", 
+                 extra={'title' : 'Cannot auto detect backend',
+                        'description' : 'Cannot auto detect beamtime id and corresponding backend in minimal mode.\nPlease first deselect the beamtime auto detection and then chose the correct beamtime or default backend.',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
             return
 
         # initialize dict to return scan information
@@ -778,8 +874,13 @@ class QScanSelector(qt.QMainWindow):
                 ddict2 = backends.fscans[btid].parse_h5_node(obj)
                 ddict['name'] = ddict2['name']
             else:
-                print('active node does not match selected file')
-
+                logger.warning("active node does not match selected file.", 
+                    extra={'title' : 'active node does not match selected file.',
+                        'show_dialog' : False,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+                # print('active node does not match selected file')
+        logger.info('Load scan with info %s' % ddict)
         self.sigScanChanged.emit(ddict)
 
     def _onLoadBackend(self):
@@ -797,7 +898,12 @@ class QScanSelector(qt.QMainWindow):
         try:
             self.loadBackendFile(filename)
         except:
-            qutils.warning_detailed_message(self, "Cannot load backend", "Cannot load backend", traceback.format_exc())
+            logger.exception("Cannot load backend.",
+                 extra={'title' : 'Cannot load backend',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+            # qutils.warning_detailed_message(self, "Cannot load backend", "Cannot load backend", traceback.format_exc())
 
     def loadBackendFile(self, filename):
         backend_file = runpy.run_path(filename)

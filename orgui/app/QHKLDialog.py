@@ -28,6 +28,9 @@ __version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
+import logging
+logger = logging.getLogger(__name__)
+
 from silx.gui import qt
 import numpy as np
 from contextlib import contextmanager

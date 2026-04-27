@@ -28,6 +28,13 @@ __license__ = "MIT License"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
+import logging
+logger = logging.getLogger(__name__)
+
+import sys
+import os
+from silx.gui import qt
+import warnings
 
 import concurrent.futures
 import threading
@@ -125,9 +132,8 @@ def calc_image_range(fscan, axis_range, **kargs):
         for f in concurrent.futures.as_completed(futures):
             try:
                 imgno = f.result()
-            except Exception:
-                print("Cannot read image:\n%s" % traceback.format_exc())
-
+            except Exception as e:
+                logger.warning("Cannot read image.", exc_info=True)
     return {'max' : imgmax, 'sum' : imgsum, 'rocking_curve' : rocking_curve, 'rocking_axis' : rocking_axis}
 
 

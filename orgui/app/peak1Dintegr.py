@@ -26,10 +26,13 @@
 # ###########################################################################*/
 __author__ = "Timo Fuchs"
 __credits__ = []
-__copyright__ = "Copyright 2020-2025 Timo Fuchs"
+__copyright__ = "Copyright 2020-2026 Timo Fuchs"
 __license__ = "MIT License"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 import sys
@@ -53,6 +56,7 @@ import traceback
 
 from . import qutils
 from .. import resources
+from .. import logger_utils
 
 import numpy as np
 from scipy import special
@@ -336,14 +340,14 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
     def _check_ro_present(self):
         if not self.database.nxfile:
-            self._cFurrentRoInfo = {}
+            self._currentRoInfo = {}
             raise OSError('No database available.')
         if self._currentRoInfo and 'name' in self._currentRoInfo:
             if self._currentRoInfo['name'] in self.database.nxfile:
                 return True
             else:
                 n = self._currentRoInfo['name']
-                self._cFurrentRoInfo = {}
+                self._currentRoInfo = {}
                 raise ValueError('Scan %s is not in database.' % n)
         else:
             raise ValueError('No rocking scan loaded.')
@@ -352,13 +356,30 @@ class RockingPeakIntegrator(qt.QMainWindow):
         try:
             self._check_ro_present()
         except Exception as e:
-            qt.QMessageBox.warning(self,'Cannot integrate scan', 'Cannot integrate scan:\n%s' % e)
+            logger.exception('Cannot integrate scan', 
+                                 extra={'title' : 'Cannot integrate scan',
+                                        'show_dialog' : True,
+                                        'description' : str(e),
+                                        'parent' : self,
+                                        'dialog_level' : logging.WARNING})
             return
         try:
             self.integrate()
+        except ValueError as e:
+            if e.args[0] == 'No rocking scan selected.':
+                logger.error('No rocking scan selected.', exc_info=True)
+            else:
+                logger.exception('Error during scan integration', 
+                                 extra={'title' : 'Error during scan integration',
+                                        'show_dialog' : True,
+                                        'description' : str(e),
+                                        'parent' : self})
         except Exception as e:
-            qutils.critical_detailed_message(self,'Error during scan integration', 'Error during scan integration:\n%s' % e, traceback.format_exc())
-            traceback.print_exc()
+            logger.exception('Error during scan integration', 
+                             extra={'title' : 'Error during scan integration',
+                                    'show_dialog' : True,
+                                    'description' : str(e),
+                                    'parent' : self})
             return
 
     def set_roscan(self, name):
@@ -378,24 +399,26 @@ class RockingPeakIntegrator(qt.QMainWindow):
             self.resetXZoomScaled(self.zoomslider.value())
 
     def onAnchorSaveRoi(self):
-        if self._currentRoInfo and 'name' in self._currentRoInfo:
-            if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
-                if self._currentRoInfo['name'] + '/integration/peakpos' not in self.database.nxfile:
-                    qt.QMessageBox.warning(self,'Cannot save roi locations', 'Cannot save ROI locations:\nNo ROI information availabe')
-                    return
-            else:
-                qt.QMessageBox.warning(self,'Cannot save roi locations', 'Cannot save ROI locations:\nNo ROI information availabe')
-                return
-        else:
-            qt.QMessageBox.warning(self,'Cannot save roi locations', 'Cannot save ROI locations:\nNo ROI information availabe')
+        # GUI-only: user-triggered save dialog path.
+        try:
+            self._check_ro_present()
+            self.saveAnchorROI(None)
+        except (ValueError, OSError) as e:
+            logger.error(
+                'Cannot save roi locations',
+                extra={
+                    'title': 'Cannot save roi locations',
+                    'show_dialog': True,
+                    'description': 'Cannot save ROI locations:\nNo ROI information availabe',
+                    'parent': self,
+                    'dialog_level': logging.WARNING,
+                }
+            )
             return
-
 
         fileTypeDictSave1D = {"Plain ascii file (*.dat)" : "dat", "CSV file (*.csv)" : "csv",  "NumPy format (*.npy)" : "ndarray"}
 
-        fileTypeDictSPEC = {'SPEC file (*.spec)': 'spec'}
-
-        fileTypeDict = {**fileTypeDictSave1D, **fileTypeDictSPEC}
+        fileTypeDict = {**fileTypeDictSave1D}
 
         fileTypeFilter = ""
         for f in fileTypeDict:
@@ -411,9 +434,53 @@ class RockingPeakIntegrator(qt.QMainWindow):
         if filetype in fileTypeDictSave1D:
             fileext = fileTypeDictSave1D[filetype]
             try:
-                self.saveROI(filename, fileext)
+                self.saveAnchorROI(filename, fileext)
             except Exception as e:
-                qutils.critical_detailed_message(self, 'Cannot save ROIs','Cannot save ROI locations: %s' % e, traceback.format_exc())
+                logger.exception(
+                    'Cannot save ROIs',
+                    extra={
+                        'title': 'Cannot save ROIs',
+                        'show_dialog': True,
+                        'description': 'Cannot save ROI locations: %s' % e,
+                        'detailed_text': traceback.format_exc(),
+                        'parent': self,
+                    }
+                )
+
+    def saveAnchorROI(self, filename=None, fileext=None):
+        """Save anchor ROI information without invoking GUI code.
+
+        :param str filename:
+            Destination path. If ``None``, only validate that anchor ROI data is
+            available for saving.
+        :param str fileext:
+            Output format identifier such as ``"dat"``, ``"csv"``, or
+            ``"ndarray"``. If omitted, it is inferred from ``filename`` when a
+            filename is provided.
+        :raises ValueError:
+            If no rocking scan is loaded or no anchor ROI information is
+            available.
+        :raises Exception:
+            If the requested file format is unsupported.
+        """
+        self._check_ro_present()
+        integration_path = self._currentRoInfo['name'] + '/integration/'
+        if integration_path not in self.database.nxfile:
+            raise ValueError('No ROI information availabe')
+        if integration_path + 'peakpos' not in self.database.nxfile:
+            raise ValueError('No ROI information availabe')
+
+        if filename is None:
+            return
+
+        if fileext is None:
+            _, inferred_ext = os.path.splitext(filename)
+            if inferred_ext == '.npy':
+                fileext = 'ndarray'
+            else:
+                fileext = inferred_ext.lstrip('.').lower()
+
+        self.saveROI(filename, fileext)
 
     def saveROI(self, filename, fileext="dat"):
         roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
@@ -422,9 +489,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         csvdelim=";"
 
         data = []
-        header = []
-
-        header.append("peakpos")
+        header = ["peakpos"]
         data.append(roi_info["peakpos"])
 
         for k in list(roi_info.keys()):
@@ -437,14 +502,15 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 data.append(roi_info[k]["anchor"].astype(float))
 
         data = np.vstack(data).T
-        header = " ".join(header)
 
         if fileext == "dat":
-            np.savetxt(filename, data, header=header, fmt=fmt)
+            header_line = " ".join(header)
+            np.savetxt(filename, data, header=header_line, fmt=fmt)
         elif fileext == "csv":
-            np.savetxt(filename, data, header=header, fmt=fmt, delimiter=csvdelim)
+            header_line = csvdelim.join(header)
+            np.savetxt(filename, data, header=header_line, fmt=fmt, delimiter=csvdelim)
         elif fileext == "ndarray":
-            np.save(filename, data)
+            np.save(filename, {"header": header, "data": data})
         else:
             raise Exception("No supported file type %s" % fileext)
 
@@ -468,17 +534,24 @@ class RockingPeakIntegrator(qt.QMainWindow):
         #    print(datasetDialog.selectedUrl())
 
     def onAnchorLoadRoi(self):
+        # GUI-only: user-triggered open dialog path.
         try:
             self._check_ro_present()
         except Exception as e:
-            qt.QMessageBox.warning(self,'Cannot load roi locations', 'Cannot load ROI locations:\n%s' % e)
+            logger.exception(
+                'Cannot load roi locations',
+                extra={
+                    'title': 'Cannot load roi locations',
+                    'show_dialog': True,
+                    'description': 'Cannot load ROI locations:\n%s' % e,
+                    'parent': self,
+                    'dialog_level': logging.WARNING,
+                }
+            )
             return
         if self._currentRoInfo:
-            fileTypeDictSave1D = {"Plain ascii file (*.dat)" : "dat", "CSV file (*.csv)" : "csv"}
-
-            fileTypeDictSPEC = {'SPEC file (*.spec)': 'spec'}
-
-            fileTypeDict = {**fileTypeDictSave1D, **fileTypeDictSPEC}
+            fileTypeDictSave1D = {"Plain ascii file (*.dat)" : "dat", "CSV file (*.csv)" : "csv", "NumPy format (*.npy)" : "ndarray"}
+            fileTypeDict = {**fileTypeDictSave1D}
 
             fileTypeFilter = ""
             for f in fileTypeDict:
@@ -492,16 +565,34 @@ class RockingPeakIntegrator(qt.QMainWindow):
             self.filedialogdir = os.path.splitext(filename)[0]
 
             try:
-                roi_info = self.loadROIinfo(filename)
+                self.loadAnchorROI(filename)
             except Exception as e:
-                qutils.critical_detailed_message(self, 'Cannot load ROIs','Cannot load ROI locations: %s' % e, traceback.format_exc())
+                logger.exception(
+                    'Cannot load ROIs',
+                    extra={
+                        'title': 'Cannot load ROIs',
+                        'show_dialog': True,
+                        'description': 'Cannot apply ROI locations to rocking scan: %s' % e,
+                        'detailed_text': traceback.format_exc(),
+                        'parent': self,
+                    }
+                )
                 return
 
-            try:
-                self.setROIinfo(roi_info)
-            except Exception as e:
-                qutils.critical_detailed_message(self, 'Cannot load ROIs','Cannot apply ROI locations to rocking scan: %s' % e, traceback.format_exc())
-                return
+    def loadAnchorROI(self, filename, interpolate=True, pktol=0.5):
+        """Load anchor ROI information without invoking GUI code.
+
+        :param str filename:
+            Source path containing ROI locations.
+        :param bool interpolate:
+            If ``True``, interpolate ROI limits onto the current rocking scan
+            peak positions when needed.
+        :param float pktol:
+            Maximum tolerated mismatch in peak position before interpolation is
+            rejected. Unit follows the rocking scan axis and is typically deg.
+        """
+        roi_info = self.loadROIinfo(filename)
+        self.setROIinfo(roi_info, interpolate=interpolate, pktol=pktol)
 
     def setROIinfo(self, roi_info, interpolate=True, pktol=0.5):
         if self._currentRoInfo:
@@ -574,27 +665,102 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
 
     def loadROIinfo(self, filename):
+        """Load ROI information from a file.
+
+        :param str filename:
+            ROI file in ``.dat``, ``.csv``, or ``.npy`` format.
+        :returns:
+            Mapping with ``peakpos`` and per-ROI ``from``, ``to``, and
+            ``anchor`` arrays.
+        :rtype: dict
+        :raises Exception:
+            If the file extension is unsupported or the file contents do not
+            provide the required ROI columns.
+        """
         fname, fileext = os.path.splitext(filename)
         if fileext == ".dat":
             data = np.genfromtxt(filename, names=True)
-            roi_names = []
-            for k in data.dtype.names:
-                if k.startswith(('sig', 'bg')):
-                    k_sp = k.split('_')
-                    no = int(k_sp[1])
-                    rname = k_sp[0] + '_' + k_sp[1]
-                    if rname not in roi_names:
-                        roi_names.append(rname)
-
-            roi_info = dict()
-            roi_info["peakpos"] = data["peakpos"]
-            for k in roi_names:
-                roi_info[k] = dict()
-                roi_info[k]['from'] = data[k + '_from']
-                roi_info[k]['to'] = data[k + '_to']
-                roi_info[k]['anchor'] = data[k + '_anchor'].astype(bool)
+            roi_info = self._load_roi_info_from_structured_array(data)
+        elif fileext == ".csv":
+            data = np.genfromtxt(filename, names=True, delimiter=';')
+            roi_info = self._load_roi_info_from_structured_array(data)
+        elif fileext == ".npy":
+            roi_info = self._load_roi_info_from_npy(filename)
         else:
             raise Exception("Not supported file type %s" % fileext)
+        return roi_info
+
+    def _load_roi_info_from_npy(self, filename):
+        """Load ROI information from the self-describing NumPy format.
+
+        :param str filename:
+            NumPy ``.npy`` file created by :meth:`saveROI` with
+            ``fileext="ndarray"``.
+        :returns:
+            ROI information mapping used by :meth:`setROIinfo`.
+        :rtype: dict
+        :raises ValueError:
+            If the file does not contain the expected header and data payload.
+        """
+        payload = np.load(filename, allow_pickle=True)
+        if not isinstance(payload, np.ndarray) or payload.shape != ():
+            raise ValueError("NumPy ROI file %s has unsupported payload shape" % filename)
+
+        payload = payload.item()
+        if not isinstance(payload, dict):
+            raise ValueError("NumPy ROI file %s does not contain a ROI payload dictionary" % filename)
+        if "header" not in payload or "data" not in payload:
+            raise ValueError("NumPy ROI file %s is missing header or data" % filename)
+
+        header = tuple(payload["header"])
+        data = np.asarray(payload["data"])
+        if data.ndim != 2:
+            raise ValueError("NumPy ROI file %s data must be a 2D array" % filename)
+        if data.shape[1] != len(header):
+            raise ValueError(
+                "NumPy ROI file %s column mismatch: data has %s columns, header has %s"
+                % (filename, data.shape[1], len(header))
+            )
+
+        structured = np.core.records.fromarrays(data.T, names=header)
+        return self._load_roi_info_from_structured_array(structured)
+
+    def _load_roi_info_from_structured_array(self, data):
+        """Build ROI info from a structured array.
+
+        :param numpy.ndarray data:
+            Structured array with a ``peakpos`` column and ROI columns named
+            like ``sig_1_from`` and ``bg_2_anchor``.
+        :returns:
+            ROI information mapping used by :meth:`setROIinfo`.
+        :rtype: dict
+        :raises ValueError:
+            If required columns are missing.
+        """
+        if data.dtype.names is None or "peakpos" not in data.dtype.names:
+            raise ValueError("ROI file does not contain required column peakpos")
+
+        roi_names = []
+        for k in data.dtype.names:
+            if k.startswith(('sig', 'bg')):
+                k_sp = k.split('_')
+                if len(k_sp) < 3:
+                    continue
+                int(k_sp[1])
+                rname = k_sp[0] + '_' + k_sp[1]
+                if rname not in roi_names:
+                    roi_names.append(rname)
+
+        roi_info = dict()
+        roi_info["peakpos"] = data["peakpos"]
+        for k in roi_names:
+            for suffix in ('_from', '_to', '_anchor'):
+                if k + suffix not in data.dtype.names:
+                    raise ValueError("ROI file is missing required column %s" % (k + suffix))
+            roi_info[k] = dict()
+            roi_info[k]['from'] = data[k + '_from']
+            roi_info[k]['to'] = data[k + '_to']
+            roi_info[k]['anchor'] = data[k + '_anchor'].astype(bool)
         return roi_info
 
 
@@ -698,8 +864,14 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
 
     def integrate(self):
+        """Integrate rocking-scan ROIs.
+
+        This shared path must stay safe in both GUI and CLI startup modes.
+        Progress reporting is routed through :mod:`orgui.logger_utils` so CLI
+        mode logs progress instead of opening modal dialogs.
+        """
         if not self._currentRoInfo:
-            return
+            raise ValueError('No rocking scan selected.')
         curves = self.get_all_ro_curves()
         name = self._currentRoInfo['name']
         h5_obj = self.database.nxfile[name]
@@ -787,9 +959,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
         # deltaaxis = np.gradient(axis) # wrong
 
 
-        progress = qt.QProgressDialog("Integrating rocking scans","abort",0,s_array.size,self)
-        progress.setWindowModality(qt.Qt.WindowModal)
-        progress.show()
+        progress = logger_utils.create_progress_logger(
+            self, s_array.size, "Integrating rocking scans"
+        )
 
         for i, s in enumerate(s_array):
             croibg = curves['croibg'][i]
@@ -837,10 +1009,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     int_data[roikey]['auxillary_num'][a].append(float(aux[a][idx_from:idx_to].size))
 
 
-            progress.setValue(i)
+            progress.update(i)
             if progress.wasCanceled():
                 break
-        progress.setValue(s_array.size)
+        progress.finish()
 
         for roikey in int_data:
             for d in list(int_data[roikey].keys()):
@@ -1071,8 +1243,17 @@ class RockingPeakIntegrator(qt.QMainWindow):
     def onRoiChanged(self, roi):
         try:
             self._check_ro_present()
-        except Exception as e: # non essential: silent
-            qt.QMessageBox.warning(self,'Cannot change roi limits', 'Cannot change roi limits:\n%s' % e)
+        except Exception as e:
+            logger.exception(
+                "Cannot change roi limits",
+                extra={
+                    'title': 'Cannot change roi limits',
+                    'show_dialog': True,
+                    'description': str(e),
+                    'parent': self,
+                    'dialog_level': logging.WARNING,
+                }
+            )
             return
         #roi_dict = self.get_roi1D_info(self._idx)
         roi_t = self.roiwidget.roiTable.roidict[roi]
@@ -1143,7 +1324,16 @@ class RockingPeakIntegrator(qt.QMainWindow):
         try:
             self._check_ro_present()
         except Exception as e: # non essential: silent
-            qt.QMessageBox.warning(self,'Cannot add ROIs', 'Cannot add ROIs:\n%s' % e)
+            logger.exception(
+                'Cannot add ROIs',
+                extra={
+                    'title': 'Cannot add ROIs',
+                    'show_dialog': True,
+                    'description': 'Cannot add ROIs:\n%s' % e,
+                    'parent': self,
+                    'dialog_level': logging.WARNING,
+                }
+            )
             return
         if self._currentRoInfo:
             try:
@@ -1195,13 +1385,32 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     self.database.add_nxdict(roi1Ddict, update_mode='modify', h5path=ro_info['name'] + '/integration')
                     self.plotRoCurve(self._idx)
             except Exception as e:
-                qutils.warning_detailed_message(self, "Cannot add ROI", "Cannot add ROI: %s" % e, traceback.format_exc())
+                logger.exception(
+                    'Cannot add ROI',
+                    extra={
+                        'title': 'Cannot add ROI',
+                        'show_dialog': True,
+                        'description': 'Cannot add ROI: %s' % e,
+                        'detailed_text': traceback.format_exc(),
+                        'parent': self,
+                        'dialog_level': logging.WARNING,
+                    }
+                )
 
     def onAddROI(self):
         try:
             self._check_ro_present()
         except Exception as e: # non essential: silent
-            qt.QMessageBox.warning(self,'Cannot add ROIs', 'Cannot add ROIs:\n%s' % e)
+            logger.exception(
+                'Cannot add ROIs',
+                extra={
+                    'title': 'Cannot add ROIs',
+                    'show_dialog': True,
+                    'description': 'Cannot add ROIs:\n%s' % e,
+                    'parent': self,
+                    'dialog_level': logging.WARNING,
+                }
+            )
             return
         if self._currentRoInfo:
             try:
@@ -1245,13 +1454,27 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     self.database.add_nxdict(roi1Ddict, update_mode='modify', h5path=ro_info['name'] + '/integration')
                     self.plotRoCurve(self._idx)
             except Exception as e:
-                qutils.warning_detailed_message(self, "Cannot add ROI", "Cannot add ROI: %s" % e, traceback.format_exc())
+                logger.exception(
+                    'Cannot add ROI',
+                    extra={
+                        'title': 'Cannot add ROI',
+                        'show_dialog': True,
+                        'description': 'Cannot add ROI: %s' % e,
+                        'detailed_text': traceback.format_exc(),
+                        'parent': self,
+                        'dialog_level': logging.WARNING,
+                    }
+                )
 
     def onDeleteROI(self):
         try:
             self._check_ro_present()
         except Exception as e: # non essential: silent
-            qt.QMessageBox.warning(self,'Cannot delete ROIs', 'Cannot delete ROIs:\n%s' % e)
+            logger.warning("Invalid rocking scan info", 
+                 extra={'title' : 'Cannot delete ROIs',
+                        'show_dialog' : True,
+                        'parent' : self,
+                        'description' : 'Cannot delete ROIs:\n%s' % e })
             return
         if self._currentRoInfo:
             roi_name = self.roiwidget.currentRoi.getName()
@@ -1260,13 +1483,27 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     del self.database.nxfile[self._currentRoInfo['name'] + '/integration/' + roi_name]
                     self.plotRoCurve(self._idx)
                 else:
-                    qutils.warning_detailed_message(self, "Cannot delete ROI", "Cannot delete ROI: no such ROI in database", "")
+                    logger.error(
+                        'Cannot delete ROI',
+                        extra={
+                            'title': 'Cannot delete ROI',
+                            'show_dialog': True,
+                            'description': 'Cannot delete ROI: no such ROI in database',
+                            'parent': self,
+                            'dialog_level': logging.WARNING,
+                        }
+                    )
 
     def onDeleteAllROI(self):
         try:
             self._check_ro_present()
         except Exception as e: # non essential: silent
-            qt.QMessageBox.warning(self,'Cannot delete ROIs', 'Cannot delete ROIs:\n%s' % e)
+            logger.warning("Invalid rocking scan info", 
+                 extra={'title' : 'Cannot delete ROIs',
+                        'show_dialog' : True,
+                        'parent' : self,
+                        'description' : 'Cannot delete ROIs:\n%s' % e })
+            # qt.QMessageBox.warning(self,'Cannot delete ROIs', 'Cannot delete ROIs:\n%s' % e)
             return
         if self._currentRoInfo:
             if qt.QMessageBox.Yes == qt.QMessageBox.question(self, "Delete All ROIs", "Are you sure you want to delete all ROIs?"):
@@ -1274,7 +1511,16 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     del self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
                     self.plotRoCurve(self._idx)
                 else:
-                    qutils.warning_detailed_message(self, "Cannot delete ROIs", "Cannot delete ROI: no ROIs in database", "")
+                    logger.error(
+                        'Cannot delete ROIs',
+                        extra={
+                            'title': 'Cannot delete ROIs',
+                            'show_dialog': True,
+                            'description': 'Cannot delete ROI: no ROIs in database',
+                            'parent': self,
+                            'dialog_level': logging.WARNING,
+                        }
+                    )
 
 
     def plotRoCurve(self, idx):
@@ -1451,11 +1697,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
         try:
             self.set_roscan(name)
         except Exception as e:
-            msgbox = qt.QMessageBox(qt.QMessageBox.Critical, 'Invalid rocking scan info',
-            'Invalid or missig rocking scan info: %s.\n%s' % (name, e),
-            qt.QMessageBox.Ok, self)
-            msgbox.setDetailedText(traceback.format_exc())
-            clickedbutton = msgbox.exec()
+            logger.exception("Invalid rocking scan info", 
+                 extra={'title' : 'Invalid rocking scan info',
+                        'show_dialog' : True,
+                        'parent' : self,
+                        'description' : 'Invalid or missig rocking scan info: %s.\n%s' % (name, e) })
             return
 
 
@@ -1678,7 +1924,11 @@ class IntegrationEstimator(qt.QDialog):
         try:
             self._verify_ranges()
         except Exception as e:
-            qt.QMessageBox.warning(self, "Invalid input", str(e))
+            logger.exception("Invalid input", 
+                 extra={'title' : 'Invalid input',
+                        'show_dialog' : True,
+                        'parent' : self,
+                        'description' : str(e)})
             return
         self.accept()
 
@@ -1766,7 +2016,11 @@ class ROICreatorDialog(qt.QDialog):
         try:
             self._verify_ranges()
         except Exception as e:
-            qt.QMessageBox.warning(self, "Invalid input", str(e))
+            logger.exception("Invalid input", 
+                 extra={'title' : 'Invalid input',
+                        'show_dialog' : True,
+                        'parent' : self,
+                        'description' : str(e)})
             return
         self.accept()
 
@@ -2232,6 +2486,7 @@ class CurvesROIWidget(qt.QWidget):
         self.roiTable.load(filename)
 
     def _save(self):
+        # GUI-only: save button handler for the ROI widget.
         """Save button clicked handler"""
         dialog = qt.QFileDialog(self)
         dialog.setNameFilters(["INI File  *.ini", "JSON File *.json"])

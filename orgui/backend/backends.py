@@ -1,6 +1,6 @@
 # /*##########################################################################
 #
-# Copyright (c) 2020-2025 Timo Fuchs
+# Copyright (c) 2020-2026 Timo Fuchs
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -22,7 +22,7 @@
 #
 # ###########################################################################*/
 __author__ = "Timo Fuchs"
-__copyright__ = "Copyright 2020-2025 Timo Fuchs"
+__copyright__ = "Copyright 2020-2026 Timo Fuchs"
 __license__ = "MIT License"
 __version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
@@ -31,6 +31,8 @@ __email__ = "tfuchs@cornell.edu"
 
 from datetime import datetime
 import pytz
+import logging
+logger = logging.getLogger(__name__)
 
 # --- parse h5node name and return the scan number and name ---
 
@@ -107,7 +109,7 @@ def openScan(btid, ddict):
                  mu = fscan.mu - 0.055 # misalignment!
                  fscan.axis = mu
                  fscan.mu = mu
-                 print("Correct mu misalignment 0.055 deg,  Pt111_3")
+                 logger.warning("Correct mu misalignment 0.055 deg,  Pt111_3")
 
     elif btid == 'ch7149':
         if 'node' in ddict:
@@ -145,8 +147,20 @@ def openScan(btid, ddict):
     else:
         try:
             fscan = fscancls(ddict['file'], ddict['scanno'])
-        except Exception:
-            raise ValueError("Did not find matching scan in backends for beamtime id %s" % btid)
+        except Exception as exc:
+            if btid == default_beamtime:
+                raise ValueError(
+                    "Did not find a matching beamtime id for this scan. "
+                    "orGUI tried the default backend '%s', but that backend "
+                    "could not open scan %s from %s. Original error: %s"
+                    % (
+                        btid,
+                        ddict.get('scanno'),
+                        ddict.get('file'),
+                        str(exc) or exc.__class__.__name__,
+                    )
+                ) from exc
+            raise
     return fscan
 
 

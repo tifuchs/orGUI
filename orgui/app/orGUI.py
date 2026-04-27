@@ -29,6 +29,11 @@ from .. import __version__
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
+import logging
+from .. import logger_utils
+logger = logging.getLogger(__name__) # noqa
+
+import gc
 import copy
 import sys
 import os
@@ -108,6 +113,12 @@ silx.config.DEFAULT_PLOT_SYMBOL = '.'
 
 class orGUI(qt.QMainWindow):
     def __init__(self,configfile,parent=None):
+        """Initialize the main orGUI window.
+
+        .. note::
+           CLI-capable. CLI mode still creates this Qt main-window object, but
+           it must not show blocking dialogs during construction.
+        """
         qt.QMainWindow.__init__(self, parent)
         #self.setWindowIcon(resources.getQicon("orguiicon"))
         self.h5database = None # must be a h5py file-like, by default not opened to avoid reading issues at beamtimes!
@@ -120,9 +131,6 @@ class orGUI(qt.QMainWindow):
         self.numberthreads = int(min(os.cpu_count(), 16)) if os.cpu_count() is not None else 1
         self.maxMemory = MAX_MEMORY
         self.maxROIs = MAX_ROIS_DISPLAY
-
-        if 'SLURM_CPUS_ON_NODE' in os.environ:
-            self.numberthreads = int(os.environ['SLURM_CPUS_ON_NODE'])
 
         self.filedialogdir = os.getcwd()
 
@@ -437,6 +445,7 @@ ub : gui for UB matrix and angle calculations
             self.ubcalc.readConfig(configfile)
 
     def _removeAllIntegrPlotCurves(self):
+        """CLI-capable: clear all integration curves from the plot widget."""
         # remove plotted curves
         #curveList = self.integrdataPlot.getAllCurves(just_legend=True)
         #for i in curveList:
@@ -448,6 +457,7 @@ ub : gui for UB matrix and angle calculations
             self.integrdataPlot.removeCurve(it)
 
     def _removeIntegrPlotCurveSet(self):
+        """GUI-only: open a dialog to choose integration curves to hide/delete."""
         curveList = self.integrdataPlot.getAllCurves(just_legend=True,withhidden=True)
 
         # find out if curves are already hidden to later check boxes in QT GUI window
@@ -465,7 +475,12 @@ ub : gui for UB matrix and angle calculations
                             self.integrdataPlot.removeCurve(curveList[i])
                             self.integrdataPlot.getLegendsDockWidget().updateLegends()
                 except MemoryError:
-                    qutils.warning_detailed_message(self, "Error","Can not delete selected plots.", traceback.format_exc())
+                    logger.exception("Can not delete selected plots.", 
+                        extra={'title' : "Can not delete selected plots.",
+                            'description' : "Can not delete selected plots.",
+                            'show_dialog' : True,
+                            "dialog_level" : logging.WARNING,
+                            'parent' : self})
             elif d.action == 'hide':
                 try:
                     for i,j in enumerate(d.boxes):
@@ -473,11 +488,40 @@ ub : gui for UB matrix and angle calculations
                             self.integrdataPlot.getCurve(curveList[i]).setVisible(False)
                             self.integrdataPlot.getLegendsDockWidget().updateLegends()
                 except MemoryError:
-                    qutils.warning_detailed_message(self, "Error","Can not delete selected plots.", traceback.format_exc())
-
+                    logger.exception("Can not delete selected plots.", 
+                        extra={'title' : "Can not delete selected plots.",
+                            'description' : "Can not delete selected plots.",
+                            'show_dialog' : True,
+                            "dialog_level" : logging.WARNING,
+                            'parent' : self})
+        
 
     def get_rocking_coordinates(self, H_0=None, H_1=None, maxValue=None,step_width=None, **kwargs):
-        # going back to the more universal integration along H_0 + s*H_1 positions
+        """Calculate detector coordinates along a reciprocal-space line.
+
+        The trajectory is the line :math:`\\vec{H}_0 + s\\vec{H}_1` in
+        reciprocal space, where :math:`\\vec{H}_0` is a reciprocal-space origin
+        vector, :math:`\\vec{H}_1` is a direction vector, and :math:`s` is a
+        scalar trajectory coordinate.
+
+        :param numpy.ndarray H_0:
+            Starting reciprocal-space vector in r.l.u. Shape ``(3,)``.
+        :param numpy.ndarray H_1:
+            Reciprocal-space direction vector in r.l.u. Shape ``(3,)``.
+        :param float maxValue:
+            Maximum scalar :math:`s` value sampled along
+            :math:`\\vec{H}_0 + s\\vec{H}_1`.
+        :param float step_width:
+            Step width in scalar ``s`` units.
+        :returns:
+            Reflection dictionary with detector pixel coordinates, masks, and
+            trajectory values.
+        :rtype: dict
+
+        .. note::
+           CLI-capable. Missing arguments are read from GUI widgets.
+        """
+        # going back to the more universal integration along H_0 + s*H_1 coordinates
         if H_0 is None:
             H_0 = self.scanSelector.ro_H_0_dialog.get_hkl()
         if H_1 is None:
@@ -522,6 +566,22 @@ ub : gui for UB matrix and angle calculations
         return refldict
 
     def get_Bragg_rocking_coordinates(self, strainVec=None, **kwargs):
+        """Calculate detector coordinates for Bragg rocking reflections.
+
+        :param numpy.ndarray strainVec:
+            Optional fractional strain applied component-wise to the direct
+            lattice constants ``a`` before calculating Bragg coordinates. This
+            scales each lattice constant as ``a_strained = a * (1 + strainVec)``
+            and does not represent a full strain tensor. If omitted, GUI spin
+            boxes are read and interpreted as percent strain.
+        :returns:
+            Reflection dictionary with hkl values in r.l.u., detector pixel
+            coordinates, angles in rad, and masks.
+        :rtype: dict
+
+        .. note::
+           CLI-capable for ``th`` scans when state is already configured.
+        """
         if strainVec is None:
             strainVec = np.array([h.value() for h in self.scanSelector.strain_Bragg])/100.0
 
@@ -597,6 +657,56 @@ ub : gui for UB matrix and angle calculations
         return refldict
 
     def intkeys_rocking(self, refldict, **kwargs):
+        """Build center ROI slice coordinates for rocking-scan integration.
+
+        This converts detector coordinates from ``refldict`` into rectangular
+        center-ROI slice tuples. The slice tuple order is detector
+        ``(x, y)``/``(horizontal, vertical)``. NumPy images are indexed as
+        ``image[y_slice, x_slice]``, so integration code applies these slices
+        as ``key[::-1]``. Coordinates and ROI extents are clipped to the
+        detector bounds.
+
+        :param dict refldict:
+            Reflection dictionary produced by a rocking coordinate helper. For
+            CTR-style rocking scans, it represents points sampled along the
+            reciprocal-space line :math:`\\vec{H}_0 + s\\vec{H}_1`. The selected
+            intersection must provide ``xy_<intersect>`` detector coordinates
+            in pixels, and normally ``mask_<intersect>`` detector-valid flags.
+        :param int vsize:
+            Optional vertical base ROI size in pixels. Defaults to the GUI
+            value and, by default, may be adjusted by advanced ROI options such
+            as detector inclination and projected sample size.
+        :param int hsize:
+            Optional horizontal base ROI size in pixels. Defaults to the GUI
+            value and, by default, may be adjusted by advanced ROI options such
+            as detector inclination and projected sample size.
+        :param numpy.ndarray size_exact:
+            Optional per-point ROI sizes in pixels with columns
+            ``(hsize, vsize)``. If provided, advanced ROI size calculation is
+            skipped and these exact per-point sizes are used.
+        :param bool mask:
+            Whether to apply ``mask_<intersect>`` before creating slices.
+            Defaults to ``True``.
+        :param bool autovsize:
+            Whether to derive vertical ROI size from the median vertical
+            spacing between neighboring detector coordinates. Defaults to the
+            GUI setting.
+        :param bool autohsize:
+            Whether to derive horizontal ROI size from the median horizontal
+            spacing between neighboring detector coordinates. Defaults to the
+            GUI setting.
+        :param int intersect:
+            Detector-intersection index to use, usually ``1`` or ``2``.
+            Defaults to the GUI-selected intersection.
+        :returns:
+            Dictionary containing ``center`` as a list of ``(x_slice, y_slice)``
+            ROI coordinates, effective ``vsize`` and ``hsize`` in pixels, and
+            ``size_exact`` when corrected per-point sizes were used.
+        :rtype: dict
+
+        .. note::
+           CLI-capable. Defaults are read from GUI ROI controls.
+        """
         vsize = kwargs.get('vsize' ,int(self.scanSelector.vsize.value()))
         hsize = kwargs.get('hsize' ,int(self.scanSelector.hsize.value()))
         size_exact = kwargs.get('size_exact', None)
@@ -704,6 +814,46 @@ ub : gui for UB matrix and angle calculations
         return roi_dict
 
     def intbkgkeys_rocking(self, refldict, **kwargs):
+        """Build center and background ROI slice coordinates.
+
+        This extends :meth:`intkeys_rocking` by adding left, right, top, and
+        bottom background ROIs around each center ROI. Slice tuple order stays
+        in detector ``(x, y)``/``(horizontal, vertical)`` coordinates. NumPy
+        images are indexed as ``image[y_slice, x_slice]``, so integration code
+        applies these slices as ``key[::-1]``.
+
+        :param dict refldict:
+            Reflection dictionary produced by a rocking coordinate helper. For
+            CTR-style rocking scans, it represents points sampled along the
+            reciprocal-space line :math:`\\vec{H}_0 + s\\vec{H}_1`. The selected
+            intersection must provide ``xy_<intersect>`` detector coordinates
+            in pixels, and normally ``mask_<intersect>`` detector-valid flags.
+        :param int left:
+            Optional left-background width in detector pixels. Defaults to the
+            GUI value.
+        :param int right:
+            Optional right-background width in detector pixels. Defaults to the
+            GUI value.
+        :param int top:
+            Optional top-background height in detector pixels. Defaults to the
+            GUI value.
+        :param int bottom:
+            Optional bottom-background height in detector pixels. Defaults to
+            the GUI value.
+        :param kwargs:
+            Center-ROI options forwarded to :meth:`intkeys_rocking`, including
+            ``vsize``, ``hsize``, ``size_exact``, ``mask``, ``autovsize``,
+            ``autohsize``, and ``intersect``.
+        :returns:
+            Dictionary containing ``center``, ``left``, ``right``, ``top``, and
+            ``bottom`` lists of ``(x_slice, y_slice)`` ROI coordinates,
+            effective center-ROI ``vsize`` and ``hsize`` in pixels, and
+            ``size_exact`` when corrected per-point sizes were used.
+        :rtype: dict
+
+        .. note::
+           CLI-capable. Defaults are read from GUI ROI controls.
+        """
         left = kwargs.get( 'left' ,int(self.scanSelector.left.value()))
         right = kwargs.get( 'right' ,int(self.scanSelector.right.value()))
         top = kwargs.get( 'top' ,int(self.scanSelector.top.value()))
@@ -730,16 +880,44 @@ ub : gui for UB matrix and angle calculations
         return roi_dict
 
     def rocking_extraction(self):
+        """Start CTR-style rocking extraction along a reciprocal-space line.
 
+        :math:`\\vec{H}_0` and :math:`\\vec{H}_1` are reciprocal-space vectors
+        in r.l.u. read from the rocking-scan controls. They define the
+        reciprocal-space line :math:`\\vec{H}_0 + s\\vec{H}_1` whose detector
+        intersections are integrated. This function uses configuration from
+        the UI elements, including the line vectors, intersection selection,
+        ROI sizes, background sizes, masks, and correction options.
+
+        :returns:
+            Status dictionary describing success, cancellation, or error.
+        :rtype: dict
+
+        .. note::
+           CLI-capable when scan, database, and ROI state are preconfigured.
+        """
+        logger.info("Start hklscan rocking integration")
         if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
-            qt.QMessageBox.warning(self, "No scan loaded", "Cannot integrate scan: No scan loaded.")
+            # In GUI mode this shows a dialog and then returns the status dict
+            # below. In CLI mode logger.error intentionally raises through the
+            # CLI logging handler so scripts fail loudly on missing scan state.
+            logger.error("No scan loaded.",
+                 extra={'title' : 'Cannot integrate scan',
+                        'description' : 'Cannot integrate scan: No scan loaded.',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
             return {'status': 'error', 'message' : 'no scan loaded'}
 
         try:
             refldict = self.get_rocking_coordinates()
         except Exception as e:
-            print("Rocking scan extraction is not implemented for scan axis " + str(self.fscan.axisname))
-            print(str(e))
+            logger.exception('Rocking scan extraction not implemented for scan axis '+ str(self.fscan.axisname) , 
+                 extra={'title' : 'Cannot integrate scan',
+                        'description' : 'Rocking scan extraction not implemented for scan axis '+ str(self.fscan.axisname),
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
             return {'status': 'error', 'message' : 'Rocking scan extraction not implemented for scan axis ' + str(self.fscan.axisname), 'traceback' : traceback.format_exc()}
 
         if self.scanSelector.intersS1Act.isChecked():
@@ -759,20 +937,44 @@ ub : gui for UB matrix and angle calculations
         hkl_del_gam = self.getStaticROIparams(xy)
 
         ro_name = "rocking_[%.2f %.2f %.2f]_H0_[%.2f %.2f %.2f]_H1" % (*refldict['H_0'], *refldict['H_1'])
-
+        
+        logger.info("Start rocking integration of scan %s" % ro_name)
         return self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
 
     def rocking_Bragg_extraction(self):
+        """Integrate rocking-scan ROIs centered on Bragg peak coordinates.
 
+        Bragg peak detector coordinates are calculated from the current
+        crystal, UB, detector, strain, and ``th``-scan state. The valid
+        Bragg coordinates are converted to center and
+        background ROIs, then integrated across the rocking scan.
+
+        :returns:
+            Status dictionary describing success, cancellation, or error.
+        :rtype: dict
+
+        .. note::
+           CLI-capable when scan, database, and ROI state are preconfigured.
+        """
+        logger.info("Start Bragg rocking integration")
         if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
-            qt.QMessageBox.warning(self, "No scan loaded", "Cannot integrate scan: No scan loaded.")
+            logger.error("No scan loaded.", 
+                 extra={'title' : 'Cannot integrate scan',
+                        'description' : 'Cannot integrate scan: No scan loaded.',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
             return {'status': 'error', 'message' : 'no scan loaded'}
 
         try:
             refldict = self.get_Bragg_rocking_coordinates()
         except Exception as e:
-            print("Rocking scan extraction is not implemented for scan axis " + str(self.fscan.axisname))
-            print(str(e))
+            logger.exception('Rocking scan extraction not implemented for scan axis '+ str(self.fscan.axisname) , 
+                 extra={'title' : 'Cannot integrate scan',
+                        'description' : 'Rocking scan extraction not implemented for scan axis '+ str(self.fscan.axisname),
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
             return {'status': 'error', 'message' : 'Rocking scan extraction not implemented for scan axis ' + str(self.fscan.axisname), 'traceback' : traceback.format_exc()}
 
         mask = refldict['mask_1']
@@ -786,17 +988,96 @@ ub : gui for UB matrix and angle calculations
         hkl_del_gam = self.getStaticROIparams(xy)
 
         ro_name = "rocking_Bragg"
+        return self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
+        
+    def rocking_static_extraction(self, xy, hsize, vsize):
+        """Integrate fixed detector-pixel ROIs through a rocking scan.
 
+        This path is for ROIs defined directly in detector pixel coordinates
+        rather than from reciprocal-space line or Bragg-coordinate searches.
+        Each input coordinate is treated as a fixed ROI center for every image
+        in the scan. The provided ROI sizes are passed as exact per-ROI sizes,
+        so automatic ROI sizing and advanced ROI size corrections are disabled.
+
+        :param numpy.ndarray xy:
+            ROI center coordinates in detector pixels. Shape ``(N, 2)`` for
+            multiple ROIs, with columns ``(x, y)``.
+        :param numpy.ndarray hsize:
+            Horizontal ROI sizes in pixels, one value per ROI.
+        :param numpy.ndarray vsize:
+            Vertical ROI sizes in pixels, one value per ROI.
+        :returns:
+            Status dictionary from the rocking integration.
+        :rtype: dict
+
+        .. note::
+           CLI-capable when scan and database state are preconfigured.
+        """
+        logger.info("Start static fixed integration")
+        if self.fscan is None: #or isinstance(self.fscan, SimulationScan):
+            logger.error("No scan loaded.", 
+                 extra={'title' : 'Cannot integrate scan',
+                        'description' : 'Cannot integrate scan: No scan loaded.',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+            return {'status': 'error', 'message' : 'no scan loaded'}
+        
+        hkl_del_gam = self.getStaticROIparams(xy)
+        refldict = {
+           'xy_1' : xy
+        }
+        size_exact = np.vstack([hsize, vsize]).T
+
+        roi_keys = self.intbkgkeys_rocking(refldict, autovsize=False, autohsize=False, intersect=1,mask=False,size_exact=size_exact)
+        
+        ro_name = "rocking_static"
         return self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
 
     def rocking_integrate(self,xylist, rois, hkl_del_gam, refldict, name):
+        """Integrate rocking-scan images over prepared ROIs.
+
+        For CTR-style rocking scans, ``refldict`` may contain
+        :math:`\\vec{H}_0` and :math:`\\vec{H}_1` reciprocal-space vectors in
+        r.l.u.; together they define the line
+        :math:`\\vec{H}_0 + s\\vec{H}_1` that is recorded in the output
+        trajectory.
+
+        :param numpy.ndarray xylist:
+            ROI center coordinates in detector pixels.
+        :param dict rois:
+            Center and background ROI slice definitions.
+        :param numpy.ndarray hkl_del_gam:
+            Per-point hkl, detector-angle, and pixel metadata.
+        :param dict refldict:
+            Reflection metadata used to describe the saved trajectory.
+        :param str name:
+            Dataset name stem for saved integrated data.
+        :returns:
+            Status dictionary describing success, cancellation, or error.
+        :rtype: dict
+
+        .. note::
+           CLI-capable. Progress reporting is routed through ``logger_utils``.
+        """
+        logger.info("Start rocking integration of scan %s" % name)
         try:
             image = self.fscan.get_raw_img(0)
         except Exception as e:
-            print("no images found! %s" % e)
+            logger.exception("No image found in current scan.", 
+                 extra={'title' : 'No image found in current scan',
+                        'description' : 'Cannot integrate scan: No image found in current scan.',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
             return {'status': 'error', 'message' : 'No image found in current scan', 'traceback' : traceback.format_exc()}
         if self.database.nxfile is None:
-            print("No database available")
+            logger.exception("Cannot integrate scan: No database available.", 
+                 extra={'title' : 'Cannot integrate scan',
+                        'description' : 'Cannot integrate scan: No database available.',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
             return {'status': 'error', 'message' : 'No database available'}
         dc = self.ubcalc.detectorCal
 
@@ -804,10 +1085,12 @@ ub : gui for UB matrix and angle calculations
 
         if self.scanSelector.useMaskBox.isChecked():
             if self.centralPlot.getMaskToolsDockWidget().getSelectionMask() is None:
-                btn = qt.QMessageBox.question(self,"No mask available","""No mask was selected with the masking tool.
-    Do you want to continue without mask?""")
-                if btn != qt.QMessageBox.Yes:
-                    return {'status': 'cancelled', 'message' : 'Reason: no mask selected'}
+                if logger_utils.get_logging_context() == 'gui':
+                    btn = qt.QMessageBox.question(self,"No mask available","""No mask was selected with the masking tool.
+        Do you want to continue without mask?""")
+                    if btn != qt.QMessageBox.Yes:
+                        return {'status': 'cancelled', 'message' : 'Reason: no mask selected'}
+                logger.warn("No mask was selected with the masking tool.")
             else:
                 imgmask = self.centralPlot.getMaskToolsDockWidget().getSelectionMask() > 0.
 
@@ -822,6 +1105,7 @@ ub : gui for UB matrix and angle calculations
 
 
         def fill_counters(image,pixelavail, key, bkgkey):
+            """CLI-safe: sum one center ROI and its background ROIs."""
 
             cimg = image[key[::-1]]
 
@@ -861,8 +1145,7 @@ ub : gui for UB matrix and angle calculations
         bgimg_bgroi1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
         bgimg_bgpixel1_all = np.zeros((hkl_del_gam_1.shape[0],) + (xylist.shape[0],),dtype=np.float64)
 
-        progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
-        progress.setWindowModality(qt.Qt.WindowModal)
+        progress = logger_utils.create_progress_logger(self, len(self.fscan), "Integrating images")
 
         background_image = self.background_image
         has_bg_img = False
@@ -887,6 +1170,7 @@ ub : gui for UB matrix and angle calculations
                 bg = background_image.astype(np.float64, order='C', copy=True)
                 has_bg_img = True
                 def sumImage(i):
+                    """CLI-safe worker: read and integrate one image with background."""
                     image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True) # unlocks gil during file read
 
                     all_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
@@ -896,6 +1180,7 @@ ub : gui for UB matrix and angle calculations
                     return all_counters, Carr_counters, BgImg_counters
             else:
                 def sumImage(i):
+                    """CLI-safe worker: read and integrate one image."""
                     image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True) # unlocks gil during file read
 
                     Carr_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
@@ -907,6 +1192,7 @@ ub : gui for UB matrix and angle calculations
 
 
             def sumImage(i):
+                """CLI-safe worker: read and integrate one image without acceleration."""
                 image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True)
                 if background_image is not None and background_image.shape == image.shape:
                     np.subtract(image, background_image, out=image)
@@ -970,27 +1256,34 @@ ub : gui for UB matrix and angle calculations
                     #    cpixel1_all[i][j] = cpixel1
                     #    bgroi1_all[i][j] = bgroi1
                     #    bgpixel1_all[i][j] = bgpixel1
-                    progress.setValue(futures[f])
+                    progress.update(futures[f])
                     del f
                 except concurrent.futures.CancelledError:
                     del f
-                except Exception:
-                    print("Cannot read image:\n%s" % traceback.format_exc())
-                    print("Cancel to avoid memory leak")
+                except Exception as e:
+                    logger.warn("Cannot read image, cancel to avoid memory leak:\n%s" % traceback.format_exc())
                     [f.cancel() for f in futures]
                     cancelled = True
                     status = 'error'
-                    trace = traceback.format_exc()
+                    exc_info = sys.exc_info()
                     del f
                 if progress.wasCanceled():
                     cancelled = True
                     [f.cancel() for f in futures]
                     break
 
-        progress.setValue(len(self.fscan))
+        progress.finish()
         if cancelled:
 
             if status == 'error':
+                trace = "".join(traceback.format_exception(*exc_info))
+                logger.error('Error during integration',
+                    exc_info=exc_info,
+                    extra={'title' : 'Error during integration',
+                        'description' : 'Error during integration. Integration was aborted.',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.ERROR,
+                        'parent' : self})
                 return {'status': 'error', 'message' : 'Error during integration', 'traceback' : trace}
             else:
                 return {'status': 'cancelled', 'message' : 'Reason: Cancelled during integration'}
@@ -1133,35 +1426,41 @@ ub : gui for UB matrix and angle calculations
 
             x, y = xylist[d]
             name1 = "rocking_%s" % (d)
-
-            alpha1, delta1, gamma1, omega1, chi1, phi1 = refldict['angles'][d]
-            sixc_angles_hkl = {
-                    "@NX_class": "NXpositioner",
-                    "alpha" : np.rad2deg(alpha1),
-                    "omega" :  np.rad2deg(omega1),
-                    "theta" :  np.rad2deg(-1*omega1),
-                    "delta" : np.rad2deg(delta1),
-                    "gamma" :  np.rad2deg(gamma1),
-                    "chi" :  np.rad2deg(chi1),
-                    "phi" :  np.rad2deg(phi1),
-                    "@unit" : "deg"
-            }
-            traj1 = {
-                #"@direction" : u"Rocking scan at fixed pixel location along H_1*s + H_0 in reciprocal space",
-                "@NX_class": "NXcollection",
-                "axis" : hkl_del_gam_1[:,5],
-                "HKL_sixc_angles" : sixc_angles_hkl
-            }
-            # determine the type of rocking scan:
-            if 'H_1' in refldict: # H_1 * s H_0 -like rocking scan (CTR scan)
-                traj1["s"] = refldict['s_masked'][d]
-                traj1["H_1"] = refldict['H_1']
-                traj1["H_0"] = refldict['H_0']
-                # equal refldict['hkl_masked']?
-                traj1["HKL_pk"] = refldict['H_1']*refldict['s_masked'][d] + refldict['H_0']
-            elif 's_masked' in refldict:
-                traj1["s"] = refldict['s_masked'][d]
-                traj1["HKL_pk"] = refldict['hkl_masked'][d]
+            if 'angles' in refldict:
+                alpha1, delta1, gamma1, omega1, chi1, phi1 = refldict['angles'][d]
+                sixc_angles_hkl = {
+                        "@NX_class": "NXpositioner",
+                        "alpha" : np.rad2deg(alpha1),
+                        "omega" :  np.rad2deg(omega1),
+                        "theta" :  np.rad2deg(-1*omega1),
+                        "delta" : np.rad2deg(delta1),
+                        "gamma" :  np.rad2deg(gamma1),
+                        "chi" :  np.rad2deg(chi1),
+                        "phi" :  np.rad2deg(phi1),
+                        "@unit" : "deg"
+                }
+                traj1 = {
+                    #"@direction" : u"Rocking scan at fixed pixel location along H_1*s + H_0 in reciprocal space",
+                    "@NX_class": "NXcollection",
+                    "axis" : hkl_del_gam_1[:,5],
+                    "HKL_sixc_angles" : sixc_angles_hkl
+                }
+                # determine the type of rocking scan:
+                if 'H_1' in refldict: # H_1 * s H_0 -like rocking scan (CTR scan)
+                    traj1["s"] = refldict['s_masked'][d]
+                    traj1["H_1"] = refldict['H_1']
+                    traj1["H_0"] = refldict['H_0']
+                    # equal refldict['hkl_masked']?
+                    traj1["HKL_pk"] = refldict['H_1']*refldict['s_masked'][d] + refldict['H_0']
+                elif 's_masked' in refldict:
+                    traj1["s"] = refldict['s_masked'][d]
+                    traj1["HKL_pk"] = refldict['hkl_masked'][d]
+            else:
+                traj1 = {
+                    #"@direction" : u"Rocking scan at fixed pixel location along H_1*s + H_0 in reciprocal space",
+                    "@NX_class": "NXcollection",
+                    "axis" : hkl_del_gam_1[:,5]
+                }
 
 
 
@@ -1329,16 +1628,18 @@ ub : gui for UB matrix and angle calculations
                         optional_labels[lbl].append(dsc["trajectory"][lbl])
 
                 # 1d Array
-                alpha_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["alpha"])
-                theta_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["theta"])
-                delta_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["delta"])
-                gamma_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["gamma"])
-                chi_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["chi"])
-                phi_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["phi"])
-                omega_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["omega"])
-            except Exception:
-                from IPython import embed; embed()
-                sys.exit(0)
+                if "HKL_sixc_angles" in dsc["trajectory"]:
+                    alpha_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["alpha"])
+                    theta_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["theta"])
+                    delta_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["delta"])
+                    gamma_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["gamma"])
+                    chi_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["chi"])
+                    phi_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["phi"])
+                    omega_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["omega"])
+            except Exception as e:
+                logger.exception("Unexpected exception while creating data sets to save")
+                # from IPython import embed; embed()
+                # sys.exit(0)
 
 
 
@@ -1372,14 +1673,16 @@ ub : gui for UB matrix and angle calculations
                 "vsize" : np.array(vsize),
                 "hsize" : np.array(hsize),
                 "axis" : np.vstack(axis),
-                "alpha_pk" : np.array(alpha_pk),
-                "theta_pk" : np.array(theta_pk),
-                "delta_pk" : np.array(delta_pk),
-                "gamma_pk" : np.array(gamma_pk),
-                "chi_pk" : np.array(chi_pk),
-                "phi_pk" : np.array(phi_pk),
-                "omega_pk" : np.array(omega_pk)
+
             }
+        if alpha_pk:
+            rois["alpha_pk"] = np.array(alpha_pk)
+            rois["theta_pk"] = np.array(theta_pk)
+            rois["delta_pk"] = np.array(delta_pk)
+            rois["gamma_pk"] = np.array(gamma_pk)
+            rois["chi_pk"] = np.array(chi_pk)
+            rois["phi_pk"] = np.array(phi_pk)
+            rois["omega_pk"] = np.array(omega_pk)
 
         if croibg_bgimg:
             rois["croibg_bgimg"] = np.vstack(croibg_bgimg)
@@ -1390,21 +1693,35 @@ ub : gui for UB matrix and angle calculations
             if optional_labels[lbl]:
                 rois[lbl] = np.squeeze(np.vstack(optional_labels[lbl]))
 
-        scsize = np.array(alpha_pk).shape[0]
+        scsize = rois['axis'].shape[0]
         for t in rois:
             if t.startswith('@'):
                 continue
             if rois[t].shape[0] != scsize:
-                from IPython import embed; embed()
-                sys.exit(0)
+                logger.error(
+                    "Error during ro integration: roi %s does not match scan size %s. "
+                    "This is likely a coding error",
+                    t,
+                    scsize,
+                )
+                return {'status': 'error', 'message' : "Error during ro integration: size mismatch", 'traceback' : ""}
 
         data_2d_structured[self.activescanname]["measurement"][name]["rois"] = rois
 
         self.database.add_nxdict(data_2d_structured)
+        logger.info(f"Rocking integration succeeded and data saved with name %s" % name)
         return {'status': 'success'}
 
 
     def updatePlotItems(self, recalculate=True):
+        """Refresh displayed ROI and reflection overlays.
+
+        :param bool recalculate:
+            Recalculate CTR coordinates before updating reflection markers.
+
+        .. note::
+           CLI-capable, but it mutates Qt plot widgets.
+        """
         if self.roivisible:
             try:
                 self.updateROI()
@@ -1432,6 +1749,7 @@ ub : gui for UB matrix and angle calculations
 
 
     def _onSetBackgroundImage(self, checked):
+        """GUI-only: select or clear a background image via a file dialog."""
         if not checked:
             self.background_image = None
             self.plotImage(self.imageno) # will not raise Exception,
@@ -1485,32 +1803,53 @@ ub : gui for UB matrix and angle calculations
 
 
     def onShowBragg(self,visible):
+        """GUI/CLI hint: toggle Bragg reflection overlays on the plot."""
         try:
             self.reflectionSel.setBraggReflectionsVisible(visible)
             if visible:
                 self.calcBraggRefl()
         except Exception:
-            qutils.warning_detailed_message(self, "Cannot show show Bragg reflections", "Cannot show Bragg reflections", traceback.format_exc())
+            logger.exception('Cannot show Bragg reflections', 
+                    extra={'title' : 'Cannot show Bragg reflections',
+                        'description' : 'Cannot show Bragg reflections',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+            # qutils.warning_detailed_message(self, "Cannot show show Bragg reflections", "Cannot show Bragg reflections", traceback.format_exc())
             #qt.QMessageBox.critical(self,"Cannot show show Bragg reflections", "Cannot Cannot show Bragg reflections:\n%s" % traceback.format_exc())
 
     def onShowROI(self,visible):
+        """GUI/CLI hint: toggle ROI display and refresh ROI graphics."""
         self.roivisible = visible
         try:
             self.updateROI()
         except Exception:
-            qutils.warning_detailed_message(self, "Cannot show ROI", "Cannot show ROI", traceback.format_exc())
+            logger.exception('Cannot show ROI', 
+                    extra={'title' : 'Cannot show ROI',
+                        'description' : 'Cannot show ROI',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+            # qutils.warning_detailed_message(self, "Cannot show ROI", "Cannot show ROI", traceback.format_exc())
             #qt.QMessageBox.critical(self,"Cannot show ROI", "Cannot Cannot show ROI:\n%s" % traceback.format_exc())
 
     def onShowCTRreflections(self,visible):
+        """GUI/CLI hint: toggle CTR reflection overlays on the plot."""
         self.reflectionsVisible = visible
         if self.reflectionsVisible:
             try:
                 hkm = self.calculateAvailableCTR()
             except Exception:
-                qutils.warning_detailed_message(self, "Cannot calculate CTR locations", "Cannot calculate CTR locatons", traceback.format_exc())
-                #qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
                 self.showCTRreflAct.setChecked(False)
                 self.reflectionsVisible = False
+                logger.exception('Cannot calculate CTR locations', 
+                    extra={'title' : 'Cannot calculate CTR locations',
+                        'description' : 'Cannot calculate CTR locations',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+                # qutils.warning_detailed_message(self, "Cannot calculate CTR locations", "Cannot calculate CTR locatons", traceback.format_exc())
+                #qt.QMessageBox.critical(self,"Cannot calculate CTR locatons", "Cannot calculate CTR locatons:\n%s" % traceback.format_exc())
                 return
             hk = np.unique(hkm[:,:2],axis=0)
             H_0 = np.hstack((hk, np.zeros((hk.shape[0],1))))
@@ -1520,27 +1859,12 @@ ub : gui for UB matrix and angle calculations
         self.updateReflections()
 
     def _onShowAbout(self):
+        """GUI-only: show the modal About dialog."""
         dial = AboutDialog(self, __version__)
         dial.exec()
-#        messageStr = """Copyright (c) 2020-2026 Timo Fuchs, published under MIT License
-#        <br> <br>
-#orGUI: Orientation and Integration with 2D detectors (1.0.0).<br>
-#Zenodo. <a href=\"https://doi.org/10.5281/zenodo.12592485\">https://doi.org/10.5281/zenodo.12592485</a> <br> <br>
-#New software updates will be published under <a href=\"https://doi.org/10.5281/zenodo.12592485\">Zenodo</a>.
-#<br> <br>
-#Help requests can be send via Email to Timo Fuchs.
-#<br> <br>
-#"orGUI" was developed during the PhD work of Timo Fuchs,
-#within the group of Olaf Magnussen.
-#"""
-#        msg0 = qt.QMessageBox(self)
-#        msg0.setWindowTitle("About orGUI")
-#        msg0.setText(messageStr)
-#        msg0.setTextInteractionFlags(qt.Qt.TextBrowserInteraction)
-#        msg0.setTextFormat(qt.Qt.RichText)
-#        msg0.exec()
 
     def _onShowDiffractionGeometry(self):
+        """GUI-only: show or create the diffraction-geometry dialog."""
         if hasattr(self, 'diffractometerdialog'):
             self.diffractometerdialog.show()
         else:
@@ -1548,6 +1872,7 @@ ub : gui for UB matrix and angle calculations
             self.diffractometerdialog.show()
 
     def _onToggleExcludeImage(self, exclude):
+        """CLI-capable: update the excluded-image list for the active image."""
         currentimgno = self.scanSelector.slider.value()
         data = self.excludedImagesDialog.getData()
         imgno_in_excudearray = currentimgno in data
@@ -1562,6 +1887,7 @@ ub : gui for UB matrix and angle calculations
             self.excludedImagesDialog.updateArrayData(data)
 
     def _onSelectCPUcount(self):
+        """GUI-only: ask the user for the worker-thread count."""
         maxavail = os.cpu_count() if os.cpu_count() is not None else 1
         if 'SLURM_CPUS_ON_NODE' in os.environ:
             maxavail = int(os.environ['SLURM_CPUS_ON_NODE'])
@@ -1573,6 +1899,7 @@ ub : gui for UB matrix and angle calculations
             self.numberthreads = cpus
 
     def _onSelectROIcount(self):
+        """GUI-only: ask the user for the maximum displayed ROI count."""
 
         rois, success = qt.QInputDialog.getInt(self,"ROI count",
                                "Max ROI count to display (current: %s)" % self.maxROIs,
@@ -1581,6 +1908,7 @@ ub : gui for UB matrix and angle calculations
             self.maxROIs = rois
 
     def _onChangeDBCompression(self):
+        """GUI-only: ask the user for the database compression filter."""
         filter_names = list(FILTERS.keys())
         currentCompression = self.database.compression
         for fn in filter_names:
@@ -1595,6 +1923,11 @@ ub : gui for UB matrix and angle calculations
 
 
     def calcBraggRefl(self):
+        """Calculate and display available Bragg reflections for the scan.
+
+        .. note::
+           CLI-capable for ``th`` scans, but it updates GUI reflection state.
+        """
         if self.fscan is not None:
             if self.fscan.axisname != 'th':
                 raise NotImplementedError("Calculation of available Bragg reflections is not implemented for %s - scans" % self.fscan.axisname)
@@ -1611,11 +1944,22 @@ ub : gui for UB matrix and angle calculations
                 hkls, yx, angles = rn.thscanBragg(xtal,ub,mu,dc,(ommin,ommax), chi=chi, phi=phi)
                 self.reflectionSel.setBraggReflections(hkls, yx, angles)
             except Exception:
-                qutils.warning_detailed_message(self, "Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections", traceback.format_exc())
+                logger.exception('Cannot calculate Bragg reflections', 
+                    extra={'title' : 'Cannot calculate Bragg reflections',
+                        'description' : 'Cannot calculate Bragg reflections',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+                # qutils.warning_detailed_message(self, "Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections", traceback.format_exc())
                 #qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\n%s" % traceback.format_exc())
 
 
     def saveBraggRefl(self):
+        """Save calculated Bragg reflection coordinates selected in the GUI.
+
+        .. note::
+           GUI-only. This path opens confirmation and file-save dialogs.
+        """
         try:
             hkls, yx, angles = self.reflectionSel.getBraggReflections()
         except ValueError:
@@ -1635,11 +1979,23 @@ ub : gui for UB matrix and angle calculations
 
                     #self.reflectionSel.setBraggReflections(hkls, yx, angles)
                 except Exception:
-                    qutils.warning_detailed_message(self, "Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections", traceback.format_exc())
+                    logger.exception('Cannot calculate Bragg reflections', 
+                        extra={'title' : 'Cannot calculate Bragg reflections',
+                            'description' : 'Cannot calculate Bragg reflections',
+                            'show_dialog' : True,
+                            "dialog_level" : logging.WARNING,
+                            'parent' : self})
+                    # qutils.warning_detailed_message(self, "Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections", traceback.format_exc())
                     #qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\n%s" % traceback.format_exc())
                     return
             else:
-                qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\nNo scan loaded.")
+                logger.exception('Cannot calculate Bragg reflections: No scan loaded.', 
+                    extra={'title' : 'Cannot calculate Bragg reflections',
+                        'description' : 'Cannot calculate Bragg reflections: No scan loaded.',
+                        'show_dialog' : True,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+                # qt.QMessageBox.critical(self,"Cannot calculate Bragg reflections", "Cannot calculate Bragg reflections:\nNo scan loaded.")
                 return
 
         hkm = np.concatenate((hkls, yx[:,::-1], np.rad2deg(angles)), axis=1)
@@ -1676,6 +2032,15 @@ ub : gui for UB matrix and angle calculations
             np.savetxt(filename,hkm,fmt="%.3f",header="H K L x y alpha delta gamma omega chi phi")
 
     def calculateAvailableCTR(self):
+        """Calculate CTR coordinates available to the current ``th`` scan.
+
+        :returns:
+            Array columns containing H, K, and detector-side information.
+        :rtype: numpy.ndarray
+
+        .. note::
+           CLI-safe when a compatible scan and UB state are loaded.
+        """
         if self.fscan is None:
             raise Exception("No scan selected!")
         if self.fscan.axisname != 'th':
@@ -1696,6 +2061,7 @@ ub : gui for UB matrix and angle calculations
         return hkm
 
     def _onCalcAvailableCTR(self):
+        """GUI-only: calculate CTRs and optionally save them via dialogs."""
         try:
             hkm = self.calculateAvailableCTR()
         except Exception:
@@ -1734,6 +2100,25 @@ ub : gui for UB matrix and angle calculations
 
 
     def getReflections(self):
+        """Return selected reference reflections for UB calculation.
+
+        The reference reflections are taken from the reflection selector. For
+        each selected reflection, the detector pixel coordinate is converted to
+        surface detector angles ``delta`` and ``gamma`` in rad, and the image
+        number is converted to ``omega`` in rad. The returned angle rows use
+        the Vlieg six-circle order ``[alpha, delta, gamma, omega, chi, phi]``.
+        In this GUI workflow, ``alpha`` is the current fixed incidence angle
+        stored as ``self.ubcalc.mu``.
+
+        :returns:
+            Tuple ``(hkls, angles)``. ``hkls`` has columns ``[h, k, l]`` in
+            r.l.u. ``angles`` has columns
+            ``[alpha, delta, gamma, omega, chi, phi]`` in rad.
+        :rtype: tuple[numpy.ndarray, numpy.ndarray]
+
+        .. note::
+           CLI-safe when reference-selection state is already populated.
+        """
         hkls = []
         angles = []
         for refl in self.reflectionSel.reflections:
@@ -1743,7 +2128,7 @@ ub : gui for UB matrix and angle calculations
             try:
                 pos = np.array([self.ubcalc.mu,delta,gamma,self.imageNoToOmega(refl.imageno),self.ubcalc.chi,self.ubcalc.phi])
             except:
-                from IPython import embed; embed()
+                # from IPython import embed; embed()
                 raise
             #print(pos)
             hkls.append(refl.hkl)
@@ -1752,6 +2137,7 @@ ub : gui for UB matrix and angle calculations
 
 
     def _onPlotMachineParams(self, enable=None):
+        """GUI/CLI hint: toggle detector center and azimuth plot markers."""
         #[cp,azimxy,polax] = paramslist
         if enable is None:
             enable = self.showMachineParamsAct.isChecked()
@@ -1767,6 +2153,38 @@ ub : gui for UB matrix and angle calculations
             self.centralPlot.removeMarker("azimuth")
 
     def searchPixelCoordHKL(self, hkl):
+        """Find detector coordinates and image numbers for a reflection.
+
+        This calculates the two possible diffractometer solutions for ``hkl``
+        with :meth:`QUBCalculator.calcReflection`, which uses
+        :meth:`HKLVlieg.VliegAngles.anglesZmode`. The angle calculation follows
+        the six-circle geometry described by Lohmeier & Vlieg, J. Appl. Cryst.
+        26, 706-716 (1993), https://doi.org/10.1107/S0021889893004868.
+
+        Scan-axis mapping:
+
+        * ``mu`` scans: the image number is selected from the solution
+          ``alpha`` angle.
+        * ``th`` scans: the image number is selected from ``-omega`` because
+          the scan axis stores theta with the opposite sign convention used
+          internally for omega.
+
+        :param numpy.ndarray hkl:
+            Reciprocal-space coordinate in r.l.u. Shape ``(3,)``.
+        :returns:
+            Reflection dictionary from ``calcReflection`` with added
+            ``imageno_1``/``imageno_2`` entries when the candidate angle falls
+            within the active scan range, and ``selectable_1``/``selectable_2``
+            flags indicating whether ``xy_1``/``xy_2`` lie on the detector.
+            The ``angles_1`` and ``angles_2`` rows use
+            ``[alpha, delta, gamma, omega, chi, phi]`` in rad; ``xy_1`` and
+            ``xy_2`` are detector pixel coordinates as ``(x, y)``.
+        :rtype: dict
+
+        .. note::
+           CLI-capable for active ``mu`` and ``th`` scans. Unsupported scan
+           axes are reported through logging and return ``None``.
+        """
         refldict = self.ubcalc.calcReflection(hkl)
         axisname = self.fscan.axisname
         dc = self.ubcalc.detectorCal
@@ -1778,7 +2196,13 @@ ub : gui for UB matrix and angle calculations
             angle_idx = 3
             sign = -1.
         else:
-            qt.QMessageBox.warning(self,"Cannot calculate reflection","Cannot calculate reflection.\n%s is no supported scan axis." % self.fscan.axisname)
+
+            logger.error("Cannot calculate reflection. %s is no supported scan axis." % self.fscan.axisname, 
+                extra={'title' : 'Cannot calculate reflection.',
+                    'description' : "Cannot calculate reflection. %s is no supported scan axis." % self.fscan.axisname,
+                    'show_dialog' : True,
+                    "dialog_level" : logging.WARNING,
+                    'parent' : self})
             return
         try:
             imageno1 = self.axisToImageNo(np.rad2deg(refldict['angles_1'][angle_idx]) * sign)
@@ -1808,6 +2232,7 @@ ub : gui for UB matrix and angle calculations
         return refldict
 
     def onSearchHKLforStaticROI(self, hkl):
+        """GUI/CLI hint: search an hkl and prompt for a static ROI location."""
         try:
             refldict = self.searchPixelCoordHKL(hkl)
         except Exception as e:
@@ -1822,6 +2247,7 @@ ub : gui for UB matrix and angle calculations
                     return
 
     def _onStaticROIedited(self):
+        """GUI/CLI hint: synchronize ROI widget edits back to scan controls."""
         xy = self.roiS1.getCenter()
         hsize, vsize = np.round(self.roiS1.getSize())
         self.scanSelector.hsize.blockSignals(True)
@@ -1834,6 +2260,7 @@ ub : gui for UB matrix and angle calculations
 
 
     def _onNewReflection(self,refldict):
+        """GUI-only: prompt the user to add calculated reflection candidates."""
         axisname = self.fscan.axisname
         dc = self.ubcalc.detectorCal
 
@@ -1882,7 +2309,17 @@ ub : gui for UB matrix and angle calculations
                     self.reflectionSel.addReflection(eventdict,refldict['imageno_%s' % i],refldict['hkl'])
 
     def newXyHKLConverter(self):
+        """Create a pixel-to-hkl converter bound to the active image state.
+
+        :returns:
+            Callable accepting ``x`` and ``y`` detector pixel coordinates.
+        :rtype: callable
+
+        .. note::
+           CLI-safe. The returned callable reads current scan and UB state.
+        """
         def xyToHKL(x,y):
+            """CLI-safe: convert detector pixels to hkl and detector angles."""
             #print("xytoHKL:")
             #print("x,y = %s, %s" % (x,y))
             if self.fscan is None:
@@ -1899,6 +2336,18 @@ ub : gui for UB matrix and angle calculations
         return xyToHKL
 
     def getMuOm(self, imageno=None):
+        """Return mu and omega for an image or the whole active scan.
+
+        :param imageno:
+            Optional image index. If omitted, arrays for the full scan are
+            returned where available.
+        :returns:
+            ``mu`` and ``omega`` angles in rad.
+        :rtype: tuple
+
+        .. note::
+           CLI-safe when a scan is loaded.
+        """
         if imageno is not None:
             if self.fscan.axisname == 'th':
                 mu = self.ubcalc.mu
@@ -1927,6 +2376,17 @@ ub : gui for UB matrix and angle calculations
             return mu, om
 
     def omegaToImageNo(self,omega):
+        """Map an omega angle to the nearest image index.
+
+        :param float omega:
+            Omega angle in rad.
+        :returns:
+            Nearest image index.
+        :rtype: int
+
+        .. note::
+           CLI-safe when a scan is loaded.
+        """
         if self.fscan is not None:
             omrad = np.deg2rad(self.fscan.omega)
             ommax = np.amax(omrad)
@@ -1940,18 +2400,49 @@ ub : gui for UB matrix and angle calculations
             raise Exception("No Scan selected")
 
     def imageNoToOmega(self,imageno):
+        """Return omega for an image index.
+
+        :param int imageno:
+            Image index in the active scan.
+        :returns:
+            Omega angle in rad, or ``0.0`` when no scan is loaded.
+
+        .. note::
+           CLI-safe.
+        """
         if self.fscan is not None:
             return np.deg2rad(self.fscan.omega[imageno])
         else:
             return 0.
 
     def imageNoToAxis(self,imageno):
+        """Return the scan-axis value for an image index.
+
+        :param int imageno:
+            Image index in the active scan.
+        :returns:
+            Scan-axis value in the scan's stored units, usually deg.
+
+        .. note::
+           CLI-safe.
+        """
         if self.fscan is not None:
             return self.fscan.axis[imageno]
         else:
             return 0.
 
     def axisToImageNo(self,axisval):
+        """Map a scan-axis value to the nearest image index.
+
+        :param float axisval:
+            Scan-axis value in the scan's stored units, usually deg.
+        :returns:
+            Nearest image index.
+        :rtype: int
+
+        .. note::
+           CLI-safe when a scan is loaded.
+        """
         if self.fscan is not None:
             #axis = np.deg2rad(self.fscan.axis)
             axismax = np.amax(self.fscan.axis)
@@ -1962,9 +2453,10 @@ ub : gui for UB matrix and angle calculations
                 raise Exception("Value of scan axis \"%s\" not in range: %s < %s < %s" % tuple([self.fscan.axisname]+axisrange))
             return np.argmin(np.abs(self.fscan.axis - axisval))
         else:
-            raise Exception("No Scan selected")
+            raise Exception("No Scan loaded")
 
     def _onCreateScan(self):
+        """GUI-only: create a simulation scan from dialog-entered angles."""
         try:
             mu, om = self.getMuOm(self.imageno)
         except:
@@ -1992,6 +2484,7 @@ ub : gui for UB matrix and angle calculations
 
 
     def _onLoadInterlacedScan(self):
+        """GUI-only: build an interlaced scan from selected HDF5 scans."""
         # GUI function to concatenate multiple scans into one
         # a user can select which scans to combine in a GUI dialog
         # uses new class interlacedScan
@@ -2153,6 +2646,7 @@ ub : gui for UB matrix and angle calculations
 
 
     def _onLoadScanFromImages(self):
+        """GUI-only: import detector images through file and setup dialogs."""
         # generates a scan from a selected folder containing raw detector images
 
         # generate file source selection GUI
@@ -2303,6 +2797,7 @@ ub : gui for UB matrix and angle calculations
                 qutils.warning_detailed_message(self, "Can not create scan","Can not create scan. Memory is insufficient for the scan size. See details for further information.", traceback.format_exc())
 
     def _onScanChanged(self,sel_list):
+        """CLI-capable: load or activate the selected scan object/list."""
         self.resetZoom = True
         #print(sel_list)
         self.activescanname = "scan"
@@ -2359,12 +2854,15 @@ ub : gui for UB matrix and angle calculations
             self.hdffile = sel_list['file']
             #self.scanname = sel_list['name'].strip("/")
             try:
-                msg = qt.QMessageBox(self)
-                msg.setWindowTitle("Loading Scan")
-                msg.setText("Loading Scan. This might take a while...")
-                msg.setStandardButtons(qt.QMessageBox.Cancel)
-                msg.setModal(True)
-                msg.show()
+                logger.info('Loading scan...')
+                if logger_utils.get_logging_context() == 'gui':
+                    msg = qt.QMessageBox(self)
+                    msg.setWindowTitle("Loading Scan")
+                    msg.setText("Loading Scan. This might take a while...")
+                    msg.setStandardButtons(qt.QMessageBox.Cancel)
+                    msg.setModal(True)
+                    msg.show()
+
                 if 'beamtime' in sel_list:
                     self.fscan = backends.openScan(sel_list['beamtime'], sel_list)
                 else:
@@ -2372,15 +2870,23 @@ ub : gui for UB matrix and angle calculations
 
                 self.plotImage()
                 self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
-                msg.hide()
+                if logger_utils.get_logging_context() == 'gui':
+                    msg.hide()
                 self.images_loaded = False
                 if self.fscan is not None and self.autoLoadAct.isChecked():
                     self.loadAll()
                     self.scanSelector.showMaxAct.setChecked(False)
                     self.scanSelector.showMaxAct.setChecked(True)
-            except Exception:
-                msg.hide()
-                qutils.warning_detailed_message(self, "Cannot open scan", "Cannot open scan" , traceback.format_exc())
+            except Exception as exc:
+                if logger_utils.get_logging_context() == 'gui':
+                    msg.hide()
+                exc_msg = str(exc) or exc.__class__.__name__
+                logger.exception("Cannot open scan", 
+                         extra={'title' : 'Cannot open scan',
+                                'description' : 'Cannot open scan:\n%s' % exc_msg,
+                                'show_dialog' : True,
+                                'parent' : self})
+                # qutils.warning_detailed_message(self, "Cannot open scan", "Cannot open scan" , traceback.format_exc())
                 #qt.QMessageBox.critical(self,"Cannot open scan", "Cannot open scan:\n%s" % traceback.format_exc())
         if hasattr(self.fscan, 'name'):
             self.activescanname = self.fscan.name
@@ -2388,6 +2894,7 @@ ub : gui for UB matrix and angle calculations
 
 
     def _onImagePathChanged(self,path):
+        """CLI-capable: update the image folder for the active scan."""
         #print("newpath %s" % path)
         self.imagepath = path
         if self.fscan is not None:
@@ -2403,17 +2910,20 @@ ub : gui for UB matrix and angle calculations
             #print(self.centralPlot._callback)
 
     def _onChangeImage(self,imageno):
+        """GUI/CLI hint: switch the active image and replot it."""
         if self.fscan is not None:
             self.scanSelector.slider.setValue(imageno)
             self.plotImage(self.scanSelector.slider.value())
 
     def _onSliderValueChanged(self,value):
+        """GUI/CLI hint: replot the image selected by the scan slider."""
         if self.fscan is not None:
             self.plotImage(value)
         #print(self.centralPlot._callback)
 
 
     def _onLoadAll(self):
+        """GUI/CLI hint: reload all images and refresh max-image display."""
         self.images_loaded = False
         if self.fscan is not None:
             self.loadAll()
@@ -2421,15 +2931,30 @@ ub : gui for UB matrix and angle calculations
             self.scanSelector.showMaxAct.setChecked(True)
 
     def loadAll(self):
+        """Load all scan images and compute summed and maximum images.
+
+        :returns:
+            ``None``. Results are stored on ``self.allimgsum`` and
+            ``self.allimgmax``.
+
+        .. note::
+           CLI-capable. Progress reporting is routed through ``logger_utils``.
+        """
         try:
             image = self.fscan.get_raw_img(0)
         except Exception as e:
-            print("no images found! %s" % e)
+            logger.exception('No image found in scan. (image 0 is missing)', 
+                 extra={'title' : 'No image found in scan.',
+                        'description' : 'No image found in scan. (image 0 is missing)',
+                        'show_dialog' : False,
+                        "dialog_level" : logging.ERROR,
+                        'parent' : self})
             return
         self.allimgsum = np.zeros_like(image.img,dtype=np.float64)
         self.allimgmax = np.zeros_like(image.img,dtype=np.float64)
-        progress = qt.QProgressDialog("Reading images","abort",0,len(self.fscan),self)
-        progress.setWindowModality(qt.Qt.WindowModal)
+        
+        progress = logger_utils.create_progress_logger(self, len(self.fscan), "Reading images")
+        
         img_size = self.allimgsum.nbytes / (1024**2)
 
         chunk_size = min(np.floor((self.maxMemory - 2000) / (img_size * self.numberthreads)), 5)
@@ -2444,6 +2969,7 @@ ub : gui for UB matrix and angle calculations
             excl = self.excludedImagesDialog.getData()
             bg = self.background_image
             def readfile_max(imgno):
+                """CLI-safe worker: read one image into sum and max buffers."""
                 if imgno in excl: # skip if excluded
                     return imgno
                 image = self.fscan.get_raw_img(imgno).img.astype(np.float64, order='C', copy=True)
@@ -2462,30 +2988,36 @@ ub : gui for UB matrix and angle calculations
             for f in concurrent.futures.as_completed(futures):
                 try:
                     imgno = f.result()
-                    progress.setValue(imgno)
+                    progress.update(imgno)
                 except concurrent.futures.CancelledError:
                     pass
-                except Exception:
-                    print("Cannot read image:\n%s" % traceback.format_exc())
+
+                except Exception as e:
+                    logger.warn("Cannot read image:\n%s" % traceback.format_exc())
+                    # print("Cannot read image:\n%s" % traceback.format_exc())
 
                 if progress.wasCanceled():
                     [f.cancel() for f in futures]
                     self.images_loaded = False
+                    logger.warn("Loading of images cancelled. Max and Sum images are incomplete.")
                     break
-
-        progress.setValue(len(self.fscan))
+        progress.finish()
 
     def _onMaxToggled(self,value):
+        """GUI/CLI hint: toggle display of the precomputed maximum image."""
         if self.scanSelector.showSumAct.isChecked():
             self.scanSelector.showSumAct.setChecked(False)
         if value:
             if not self.images_loaded and self.fscan is not None:
-                btn = qt.QMessageBox.question(self,"Incomplete sum / max image", "Sum/Max image was not loaded completely. Displayed maximum image will be incomplete! Do you want to load all images?",qt.QMessageBox.Yes | qt.QMessageBox.No | qt.QMessageBox.Cancel)
-                if btn == qt.QMessageBox.Yes:
-                    self.loadAll()
-                elif btn == qt.QMessageBox.Cancel:
-                    self.scanSelector.showMaxAct.setChecked(False)
-                    return
+                if logger_utils.get_logging_context() == 'gui':
+                    btn = qt.QMessageBox.question(self,"Incomplete sum / max image", "Sum/Max image was not loaded completely. Displayed maximum image will be incomplete! Do you want to load all images?",qt.QMessageBox.Yes | qt.QMessageBox.No | qt.QMessageBox.Cancel)
+                    if btn == qt.QMessageBox.Yes:
+                        self.loadAll()
+                    elif btn == qt.QMessageBox.Cancel:
+                        self.scanSelector.showMaxAct.setChecked(False)
+                        return
+                else:
+                    logger.warning("Maximum image requested before all images were loaded; continuing with incomplete data.")
             if self.allimgmax is not None:
                 self.currentAddImageLabel = self.centralPlot.addImage(self.allimgmax,legend="special",
                                                                replace=False,resetzoom=False,copy=True,z=1)
@@ -2501,16 +3033,20 @@ ub : gui for UB matrix and angle calculations
 
 
     def _onSumToggled(self,value):
+        """GUI/CLI hint: toggle display of the precomputed summed image."""
         if self.scanSelector.showMaxAct.isChecked():
             self.scanSelector.showMaxAct.setChecked(False)
         if value:
             if not self.images_loaded and self.fscan is not None:
-                btn = qt.QMessageBox.question(self,"Incomplete sum / max image", "Sum/Max image was not loaded completely. Displayed sum image will be incomplete! Do you want to load all images?",qt.QMessageBox.Yes | qt.QMessageBox.No | qt.QMessageBox.Cancel)
-                if btn == qt.QMessageBox.Yes:
-                    self.loadAll()
-                elif btn == qt.QMessageBox.Cancel:
-                    self.scanSelector.showSumAct.setChecked(False)
-                    return
+                if logger_utils.get_logging_context() == 'gui':
+                    btn = qt.QMessageBox.question(self,"Incomplete sum / max image", "Sum/Max image was not loaded completely. Displayed sum image will be incomplete! Do you want to load all images?",qt.QMessageBox.Yes | qt.QMessageBox.No | qt.QMessageBox.Cancel)
+                    if btn == qt.QMessageBox.Yes:
+                        self.loadAll()
+                    elif btn == qt.QMessageBox.Cancel:
+                        self.scanSelector.showSumAct.setChecked(False)
+                        return
+                else:
+                    logger.warning("Summed image requested before all images were loaded; continuing with incomplete data.")
             if self.allimgsum is not None:
                 self.currentAddImageLabel = self.centralPlot.addImage(self.allimgsum,legend="special",
                                                                replace=False,resetzoom=False,copy=True,z=1)
@@ -2528,6 +3064,14 @@ ub : gui for UB matrix and angle calculations
 
 
     def plotImage(self,key=0):
+        """Plot one raw image from the active scan.
+
+        :param int key:
+            Image index in the active scan.
+
+        .. note::
+           CLI-capable, but it mutates Qt plot and reflection widgets.
+        """
         try:
             image = self.fscan.get_raw_img(key).img.astype(np.float64, order='C', copy=True)
             bg = self.background_image
@@ -2557,11 +3101,20 @@ ub : gui for UB matrix and angle calculations
             self.scanSelector.excludeImageAct.blockSignals(False)
 
         except Exception as e:
-            print(traceback.format_exc())
-            print("no image %s" % e)
+            logger.exception('Cannot plot image', 
+                extra={'title' : 'Cannot plot image',
+                        'description' : 'Cannot plot image',
+                        'show_dialog' : False,
+                        "dialog_level" : logging.ERROR,
+                        'parent' : self})
 
 
     def updateReflections(self):
+        """Update CTR reflection markers for the current image.
+
+        .. note::
+           CLI-capable, but it mutates Qt plot widgets.
+        """
         if not self.reflectionsVisible:
             self.centralPlot.removeCurve('all_image_reflections')
             return
@@ -2582,6 +3135,11 @@ ub : gui for UB matrix and angle calculations
 
 
     def updateROI(self, **kwargs):
+        """Update visible ROI graphics for the current scan mode.
+
+        .. note::
+           CLI-capable, but it mutates Qt ROI widgets and reads GUI controls.
+        """
         if not self.roivisible:
             #for roi in self.rois:
             self.roiS1.setVisible(False)
@@ -2696,12 +3254,17 @@ ub : gui for UB matrix and angle calculations
                 if len(refldict['xy_1']) <= 0:
                     raise Exception('No reflections found.')
             except:
-                print(traceback.format_exc())
+                # print(traceback.format_exc())
                 if self.rocking_rois:
                     for roi in self.rocking_rois:
                         roi.setVisible(False)
                         roi.setEditable(False)
-
+                logger.exception('Cannot calculate Bragg rocking coordinates', 
+                    extra={'title' : 'Cannot calculate Bragg rocking coordinates',
+                            'description' : 'Cannot calculate Bragg rocking coordinates',
+                            'show_dialog' : False,
+                            "dialog_level" : logging.ERROR,
+                            'parent' : self})
                 return
             roi_keys = self.intbkgkeys_rocking(refldict, autovsize=False, autohsize=False, intersect=1)
 
@@ -2751,6 +3314,18 @@ ub : gui for UB matrix and angle calculations
 
 
     def getStaticROIparams(self, xy, **kwargs):
+        """Calculate hkl, detector angles, and pixel metadata for fixed ROIs.
+
+        :param xy:
+            ROI center coordinates in detector pixels.
+        :returns:
+            Array containing hkl in r.l.u., detector angles in rad, trajectory
+            coordinate, pixel coordinates, and detector mask flag.
+        :rtype: numpy.ndarray
+
+        .. note::
+           CLI-safe when scan and UB state are loaded.
+        """
         if self.fscan is None:
             raise Exception("No scan loaded!")
         mu, om = self.getMuOm()
@@ -2786,6 +3361,29 @@ ub : gui for UB matrix and angle calculations
 
 
     def getROIloc(self, imageno=None, H_0=None, H_1=None, **kwargs):
+        """Calculate detector ROI locations for a reciprocal-space line.
+
+        When :math:`\\vec{H}_0` and :math:`\\vec{H}_1` are provided, they
+        define the line :math:`\\vec{H}_0 + s\\vec{H}_1` in reciprocal space.
+        The returned arrays describe the two possible detector intersections
+        of that line with the Ewald sphere.
+
+        :param int imageno:
+            Optional image index. If omitted, locations are calculated over the
+            scan where applicable.
+        :param numpy.ndarray H_0:
+            Starting reciprocal-space vector in r.l.u. Shape ``(3,)`` or
+            ``(N, 3)``.
+        :param numpy.ndarray H_1:
+            Reciprocal-space direction vector in r.l.u. Shape ``(3,)`` or
+            ``(N, 3)``.
+        :returns:
+            Two arrays for the two possible detector intersections.
+        :rtype: tuple[numpy.ndarray, numpy.ndarray]
+
+        .. note::
+           CLI-capable. Missing coordinates are read from GUI controls.
+        """
         if self.fscan is None:
             raise Exception("No scan loaded!")
 
@@ -2843,7 +3441,7 @@ ub : gui for UB matrix and angle calculations
                 gamma, delta, alpha = self.ubcalc.detectorCal.crystalAnglesPoint(np.array([y]),np.array([x]), mu,  self.ubcalc.n)
                 gamma, delta, alpha = gamma[0], delta[0], alpha # crystalAnglesPoint retains shape, even for 0d array
                 pos = [alpha,delta,gamma,om,self.ubcalc.chi,self.ubcalc.phi]
-                hkl_del_gam_1[:3] = np.concatenate(self.ubcalc.angles.anglesToHkl(*pos))
+                hkl_del_gam_1[:3] = np.array(self.ubcalc.angles.anglesToHkl(*pos))
                 hkl_del_gam_1[3] = delta
                 hkl_del_gam_1[4] = gamma
                 hkl_del_gam_1[5] = self.fscan.axis[imageno]
@@ -2890,7 +3488,7 @@ ub : gui for UB matrix and angle calculations
             xoffset, yoffset = self.scanSelector.roioptions.get_offsets()
 
             if xoffset != 0. or yoffset != 0.:
-                warnings.warn("Nonzero pixel offset selected. Experimental feature! Angles and hkl are incorrect!!!")
+                logger.warn("Nonzero pixel offset selected. Experimental feature! Angles and hkl are incorrect!!!")
                 xy1[..., 0] += xoffset
                 xy2[..., 0] += xoffset
                 xy1[..., 1] += yoffset
@@ -2900,6 +3498,16 @@ ub : gui for UB matrix and angle calculations
                np.concatenate((np.atleast_2d(hkl_del_gam_2), xy2, yxmask2[...,np.newaxis]),axis=-1)
 
     def plotROI(self, loc, roi):
+        """Set a visible ROI object around a detector-pixel location.
+
+        :param loc:
+            ROI center in detector pixels.
+        :param roi:
+            ROI widget to update.
+
+        .. note::
+           CLI-capable, but it mutates Qt ROI widgets.
+        """
 
         key = self.intkey(loc)
         leftkey, rightkey, topkey, bottomkey = self.bkgkeys(loc)
@@ -2919,6 +3527,43 @@ ub : gui for UB matrix and angle calculations
         #self.roiManager._roisUpdated()
 
     def integrateROI(self):
+        """Integrate the active ROI workflow and save data to the database.
+
+        The active tab in ``self.scanSelector.scanstab`` selects the
+        integration workflow:
+
+        * ``hklscan`` (tab id ``0``): integrate stationary-scan ROIs whose
+          detector
+          coordinates are calculated from the reciprocal-space line
+          :math:`\\vec{H}_0 + s\\vec{H}_1`. :math:`\\vec{H}_0` and
+          :math:`\\vec{H}_1` are numpy vector values in r.l.u. read from the
+          ROI controls, and the two Ewald-sphere intersections are integrated
+          as separate S1/S2 trajectories.
+        * ``fixed`` (tab id ``1``): integrate a stationary detector-pixel ROI
+          from the ``xy_static`` controls. The same pixel coordinates are used
+          through the scan, while the corresponding reciprocal-space
+          coordinates and diffractometer angles are recorded for each image.
+        * ``rocking hklscan`` (tab id ``2``): delegate to
+          :meth:`rocking_extraction`, which integrates multiple rocking-scan
+          ROIs whose coordinates are sampled along
+          :math:`\\vec{H}_0 + s\\vec{H}_1`.
+        * ``rocking Bragg`` (tab id ``3``): delegate to
+          :meth:`rocking_Bragg_extraction`, which calculates Bragg peak
+          coordinates from the current crystal, detector, UB, strain, and scan
+          state before integrating valid rocking-scan ROIs.
+
+        All modes use the current UI/database state for scan selection, ROI
+        sizes, masks, background settings, and correction factors. The
+        resulting intensities and metadata are written to the active Nexus
+        database file.
+
+        :returns:
+            Status dictionary describing success, cancellation, or error.
+        :rtype: dict
+
+        .. note::
+           CLI-capable when scan, database, and ROI state are preconfigured.
+        """
 
         if self.scanSelector.scanstab.currentIndex() == 2:
             return self.rocking_extraction()
@@ -2928,11 +3573,25 @@ ub : gui for UB matrix and angle calculations
         try:
             image = self.fscan.get_raw_img(0)
         except Exception as e:
-            print("no images found! %s" % e)
+            logger.exception('Cannot perform stationary scan integration: no images found.', 
+                 extra={'title' : 'Cannot integrate scan',
+                        'description' : 'Cannot perform stationary scan integration: no images found.',
+                        'show_dialog' : False,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+            # print("no images found! %s" % e)
             return {'status': 'error', 'message' : 'No image found in current scan', 'traceback' : traceback.format_exc()}
         if self.database.nxfile is None:
-            print("No database available")
+            logger.exception('Cannot perform stationary scan integration: no database available.', 
+                 extra={'title' : 'Cannot integrate scan',
+                        'description' : 'Cannot perform stationary scan integration: no database available.',
+                        'show_dialog' : False,
+                        "dialog_level" : logging.WARNING,
+                        'parent' : self})
+            # print("No database available")
             return {'status': 'error', 'message' : 'No database available'}
+            
+        logger.info("Start integration of stationary scan")
         dc = self.ubcalc.detectorCal
         #mu = self.ubcalc.mu
         angles = self.ubcalc.angles
@@ -2948,10 +3607,12 @@ ub : gui for UB matrix and angle calculations
 
         if self.scanSelector.useMaskBox.isChecked():
             if self.centralPlot.getMaskToolsDockWidget().getSelectionMask() is None:
-                btn = qt.QMessageBox.question(self,"No mask available","""No mask was selected with the masking tool.
-Do you want to continue without mask?""")
-                if btn != qt.QMessageBox.Yes:
-                    return {'status': 'cancelled', 'message' : 'Reason: no mask selected'}
+                if logger_utils.get_logging_context() == 'gui':
+                    btn = qt.QMessageBox.question(self,"No mask available","""No mask was selected with the masking tool.
+        Do you want to continue without mask?""")
+                    if btn != qt.QMessageBox.Yes:
+                        return {'status': 'cancelled', 'message' : 'Reason: no mask selected'}
+                logger.warn("No mask was selected with the masking tool. Continue without mask.")
             else:
                 imgmask = self.centralPlot.getMaskToolsDockWidget().getSelectionMask() > 0.
 
@@ -3020,9 +3681,7 @@ Do you want to continue without mask?""")
         roi_hsize2_a = np.full_like(dataavail, hsize, dtype=int)
         roi_vsize2_a = np.full_like(dataavail, vsize, dtype=int)
 
-        progress = qt.QProgressDialog("Integrating images","abort",0,len(self.fscan),self)
-        progress.setWindowModality(qt.Qt.WindowModal)
-
+        progress = logger_utils.create_progress_logger(self, len(self.fscan), "Integrating stationary scan")
 
         has_bg_img = False
 
@@ -3081,6 +3740,7 @@ Do you want to continue without mask?""")
                 background_image = self.background_image.astype(np.float64, order='C', copy=True)
                 background_image[mask] = 0.
                 def sumImage(i):
+                    """CLI-safe worker: integrate one stationary image with background."""
                     all_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
                     Carr_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
                     BgImg_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
@@ -3091,6 +3751,7 @@ Do you want to continue without mask?""")
                     return all_counters, Carr_counters, BgImg_counters
             else:
                 def sumImage(i):
+                    """CLI-safe worker: integrate one stationary image."""
                     all_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
                     Carr_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
                     if not dataavail[i]:
@@ -3105,6 +3766,7 @@ Do you want to continue without mask?""")
                 background_image = self.background_image.astype(np.float64, order='C', copy=True)
                 background_image[mask] = 0.
                 def sumImage(i):
+                    """CLI-safe worker: integrate one image with background."""
                     all_counters = np.zeros((2,) + (4,), dtype=np.float64) # need gil for python object creation
                     Carr_counters = np.zeros((2,) + (4,), dtype=np.float64) # need gil for python object creation
                     BgImg_counters = np.zeros((2,) + (4,), dtype=np.float64) # need gil for python object creation
@@ -3146,6 +3808,7 @@ Do you want to continue without mask?""")
                         return all_counters, Carr_counters, BgImg_counters
             else:
                 def sumImage(i):
+                    """CLI-safe worker: integrate one image without acceleration."""
                     all_counters = np.zeros((2,) + (4,), dtype=np.float64) # need gil for python object creation
                     Carr_counters = np.zeros((2,) + (4,), dtype=np.float64) # need gil for python object creation
                     if not dataavail[i]:
@@ -3231,19 +3894,18 @@ Do you want to continue without mask?""")
                     Corr_bgroi2_a[i]   = Carr_counters[1, 2]
                     Corr_bgpixel2_a[i] = Carr_counters[1, 3]
 
-                    progress.setValue(futures[f])
+                    progress.update(futures[f])
                 except concurrent.futures.CancelledError:
                     pass
-                except Exception:
-                    print("Cannot read image:\n%s" % traceback.format_exc())
+                except Exception as e:
+                    logger.warn("Cannot read image:\n%s" % traceback.format_exc())
 
                 if progress.wasCanceled():
                     [f.cancel() for f in futures]
                     cancelled = True
                     break
 
-
-        progress.setValue(len(self.fscan))
+        progress.finish()
 
         if cancelled:
             return {'status': 'cancelled', 'message' : 'Reason: Cancelled during integration'}
@@ -3529,12 +4191,15 @@ Do you want to continue without mask?""")
                 }
             }
 
+        names_to_log = ""
+
         if np.any(cpixel1_a > 0.):
 
             self.integrdataPlot.addCurve(s1_masked,croibg1_a_masked,legend=self.activescanname + "_" + availname1,
                                          xlabel="trajectory/s", ylabel="counters/croibg", yerror=croibg1_err_a_masked)
 
             data[self.activescanname]["measurement"][availname1] = datas1
+            names_to_log += availname1
         if np.any(cpixel2_a > 0.):
 
             self.integrdataPlot.addCurve(s2_masked,croibg2_a_masked,legend=self.activescanname + "_" + availname2,
@@ -3542,13 +4207,17 @@ Do you want to continue without mask?""")
 
             data[self.activescanname]["measurement"][availname2] = datas2
 
+            names_to_log += availname2
+
         self.database.add_nxdict(data)
+        logger.info("stationary scan integrated and saved with name(s) %s" % names_to_log)
         return {'status': 'success'}
 
 
 
 
     def _graphCallback(self,eventdict):
+        """GUI-only: handle plot mouse and marker events."""
         #print(eventdict)
         if eventdict['event'] == 'mouseDoubleClicked':
             #newReflection = np.array([1,1,1,self.imageno,eventdict['x'],eventdict['y']])
@@ -3570,6 +4239,25 @@ Do you want to continue without mask?""")
             self.reflectionSel.setReflectionActive(eventdict['label'])
 
     def intkey(self, coords):
+        """Create a center ROI key from detector pixel coordinates.
+
+        The returned key represents the clipped horizontal and vertical bounds
+        of the center ROI around ``coords``.
+
+        ROI sizes are read from the current ``hsize`` and ``vsize`` controls.
+        In non-fixed scan modes, advanced ROI options may replace those nominal
+        sizes with detector-inclination or projected-sample-size corrected
+        bounds before clipping to the detector.
+
+        :param numpy.ndarray coords:
+            ROI center coordinates ``(x, y)`` in detector pixels.
+        :returns:
+            ROI key ``(x_bounds, y_bounds)`` clipped to the detector extent.
+        :rtype: tuple[slice, slice]
+
+        .. note::
+           CLI-capable. ROI dimensions are read from GUI controls.
+        """
 
         vsize = int(self.scanSelector.vsize.value())
         hsize = int(self.scanSelector.hsize.value())
@@ -3626,6 +4314,27 @@ Do you want to continue without mask?""")
         return loc
 
     def bkgkeys(self, coords):
+        """Create background ROI keys around a center ROI.
+
+        Background keys are derived from the center ROI key returned by
+        :meth:`intkey`. The left and right background ROIs extend horizontally
+        beside the center ROI and keep the same vertical bounds. The top and
+        bottom background ROIs extend vertically above and below the center ROI
+        and keep the same horizontal bounds.
+
+        Background widths and heights are read from the current ``left``,
+        ``right``, ``top``, and ``bottom`` controls. All bounds are clipped to
+        the detector extent.
+
+        :param numpy.ndarray coords:
+            Center ROI coordinates ``(x, y)`` in detector pixels.
+        :returns:
+            Left, right, top, and bottom background ROI keys.
+        :rtype: tuple[tuple[slice, slice], tuple[slice, slice], tuple[slice, slice], tuple[slice, slice]]
+
+        .. note::
+           CLI-capable. Background sizes are read from GUI controls.
+        """
 
         left = int(self.scanSelector.left.value())
         right = int(self.scanSelector.right.value())
@@ -3646,6 +4355,7 @@ Do you want to continue without mask?""")
         return leftkey, rightkey, topkey, bottomkey
 
     def _onCenterGraph(self, xy):
+        """GUI/CLI hint: recenter the plot axes on detector pixel coordinates."""
         #img = self.centralPlot.getImage()
         #shape = img.shape if img is not None else (100,100)
 
@@ -3664,6 +4374,7 @@ Do you want to continue without mask?""")
 
 
     def closeEvent(self,event):
+        """GUI/CLI hint: close the database before the main window closes."""
         self.database.close()
         super().closeEvent(event)
 
@@ -3672,6 +4383,7 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
     sigKeyPressDelete = qt.pyqtSignal()
 
     def __init__(self,xyHKLConverter,parent=None,backend=None):
+        """GUI-only: initialize the image plot with hkl position readout."""
         self.xyHKLConverter = xyHKLConverter
 
 
@@ -3718,12 +4430,18 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
         self.sigActiveImageChanged.connect(self.__activeImageChanged)
 
     def keyPressEvent(self, event):
+        """GUI-only: emit delete-key signal for plot interactions."""
         key = event.key()
         if key == qt.Qt.Key_Delete and not event.isAutoRepeat():
             self.sigKeyPressDelete.emit()
         super().keyPressEvent(event)
 
     def setXyHKLconverter(self,xyHKLConverter):
+        """Set the pixel-to-hkl converter used by the plot readout.
+
+        .. note::
+           CLI-capable, but normally used by GUI plot setup.
+        """
         self.xyHKLConverter = xyHKLConverter
 
     def __activeImageChanged(self, previous, legend):
@@ -3795,6 +4513,7 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
         return value
 
     def _getImageDims(self, *args):
+        """GUI/CLI hint: return active-image dimensions for plot status text."""
         activeImage = self.getActiveImage()
         if (activeImage is not None and
                     activeImage.getData(copy=False) is not None):
@@ -3812,6 +4531,11 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
 
     #@deprecated(replacement="getProfilePlot", since_version="0.5.0")
     def getProfileWindow(self):
+        """Return the profile plot window.
+
+        .. note::
+           CLI-capable, but normally used by GUI profile tools.
+        """
         return self.getProfilePlot()
 
     def getProfilePlot(self):
@@ -3824,6 +4548,7 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
 class QImportScanCreator(qt.QDialog):
 
     def __init__(self,defaultMuTh, parent=None):
+        """GUI-only: initialize the raw-image import scan setup dialog."""
         qt.QDialog.__init__(self, parent)
         self.defaultMuTh = defaultMuTh
 
@@ -3882,6 +4607,7 @@ class QImportScanCreator(qt.QDialog):
         self.setLayout(layout)
 
     def onScanAxisChanged(self, index):
+        """GUI-only: update fixed-angle fields for the selected scan axis."""
         if index == 0:
             self.omstart.setValue(-90.)
             self.omend.setValue(90.)
@@ -3898,6 +4624,7 @@ class QImportScanCreator(qt.QDialog):
 class QPlotDeleteWindow(qt.QDialog):
 
     def __init__(self,curveList,hidden,parent=None):
+        """GUI-only: initialize a dialog for hiding or deleting curves."""
         qt.QDialog.__init__(self, parent)
         self.curves = curveList
         self.action = None
@@ -3937,14 +4664,17 @@ class QPlotDeleteWindow(qt.QDialog):
         self.setLayout(layout)
 
     def deleteClicked(self):
+        """GUI-only: accept the dialog with a delete-curves action."""
         self.action = 'delete'
         self.accept()
 
     def hideClicked(self):
+        """GUI-only: accept the dialog with a hide-curves action."""
         self.action = 'hide'
         self.accept()
 
     def checkOrUncheckAll(self):
+        """GUI-only: mirror the select-all checkbox to all curve checkboxes."""
         if self.selectAllPlotsCheckbox.isChecked() == True:
             for i in self.boxes:
                 i.blockSignals(True)
@@ -3960,6 +4690,7 @@ class QPlotDeleteWindow(qt.QDialog):
 class QScanCreator(qt.QDialog):
 
     def __init__(self,defaultMuTh, parent=None):
+        """GUI-only: initialize the simulation scan setup dialog."""
         qt.QDialog.__init__(self, parent)
         self.defaultMuTh = defaultMuTh
 
@@ -4013,6 +4744,7 @@ class QScanCreator(qt.QDialog):
         self.setLayout(layout)
 
     def onScanAxisChanged(self, index):
+        """GUI-only: update fixed-angle fields for the selected scan axis."""
         if index == 0:
             self.omstart.setValue(-90.)
             self.omend.setValue(90.)
@@ -4028,6 +4760,7 @@ class QScanCreator(qt.QDialog):
 
 class QDiffractometerImageDialog(qt.QDialog):
     def __init__(self, parent=None):
+        """GUI-only: initialize the diffraction-geometry image dialog."""
         qt.QDialog.__init__(self, parent)
         verticalLayout = qt.QVBoxLayout(self)
         verticalLayout.setContentsMargins(0, 0, 0, 0)
@@ -4051,6 +4784,7 @@ class QDiffractometerImageDialog(qt.QDialog):
 
 class AboutDialog(qt.QDialog):
     def __init__(self,version, msg='' ,parent=None):
+        """GUI-only: initialize the About dialog content."""
         qt.QDialog.__init__(self, parent)
         layout = qt.QVBoxLayout()
         self.setWindowTitle("About orGUI")
@@ -4065,7 +4799,7 @@ class AboutDialog(qt.QDialog):
         messageStr = "orGUI version %s" % version
         messageStr += msg
         messageStr += """<br> <br>
-Copyright (c) 2020-2024 Timo Fuchs, published under MIT License
+Copyright (c) 2020-2026 Timo Fuchs, published under MIT License
 <br> <br>
 orGUI: Orientation and Integration with 2D detectors.<br>
 Zenodo. <a href=\"https://doi.org/10.5281/zenodo.12592485\">https://doi.org/10.5281/zenodo.12592485</a> <br> <br> 
@@ -4093,6 +4827,7 @@ class UncaughtHook(qt.QObject):
     #_exception_caught = qt.Signal(object)
 
     def __init__(self, *args, **kwargs):
+        """GUI-only: install the Qt-aware uncaught exception hook."""
         super().__init__(*args, **kwargs)
 
         # this registers the exception_hook() function as hook with the Python interpreter
@@ -4104,11 +4839,18 @@ class UncaughtHook(qt.QObject):
         #self._exception_caught.connect(show_exception_box)
 
     def set_orgui(self,orgui):
+        """Attach the main window used for fatal-error recovery.
+
+        .. note::
+           GUI-only. The recovery path can show modal dialogs.
+        """
         self.orgui = orgui
 
     def exception_hook(self, exc_type, exc_value, exc_traceback):
-        """Function handling uncaught exceptions.
-        It is triggered each time an uncaught exception occurs. 
+        """Handle uncaught exceptions through the GUI fatal-error path.
+
+        .. note::
+           GUI-only. This path may show modal dialogs and terminate the process.
         """
         if issubclass(exc_type, KeyboardInterrupt):
             # ignore keyboard interrupt to support console applications
@@ -4152,6 +4894,14 @@ class UncaughtHook(qt.QObject):
             sys.exit(1)
 
 def main(configfile):
+    """Start a standalone GUI application for a config file.
+
+    :param configfile:
+        Path to the orGUI configuration file.
+
+    .. note::
+       GUI-only. CLI startup is handled by ``orgui.main``.
+    """
 
     a = qt.QApplication(['orGUI'])
 
