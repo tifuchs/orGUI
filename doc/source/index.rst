@@ -9,6 +9,8 @@ large 2D detectors.
    :caption: Contents:
 
    installation
+   entry_points
+   gui_overview
    geometry
    ub_matrix
    image_integration

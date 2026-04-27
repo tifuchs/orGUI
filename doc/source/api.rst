@@ -1,6 +1,14 @@
 API
 ===
 
+Application Entry Point
+-----------------------
+
+.. automodule:: orgui.main
+   :members:
+   :member-order: bysource
+   :show-inheritance:
+
 Main GUI
 --------
 
