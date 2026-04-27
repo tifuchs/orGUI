@@ -287,8 +287,11 @@ ub : gui for UB matrix and angle calculations
 
         logger.info("starting orGUI")
         if ipshell is not None:
-            ipshell(local_ns=namespace)
-            app.quit()
+            try:
+                ipshell(local_ns=namespace)
+            finally:
+                mainWindow.database.close()
+                app.quit()
     else:
         raise Exception("%s is no file" % options.configfile)
 

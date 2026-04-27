@@ -642,9 +642,9 @@ class DataBase(qt.QMainWindow):
                 raise Exception('Timeout on hdf5 model operation, This is probably a bug, or a very long writing operation occurs, please report if this is a long writing opertion')
             try:
                 self.nxfile.close()
-            except RuntimeError as e:
-                logger.error("Closing of database file failed. The database file might be corrupted!", exc_info=True)
+            except RuntimeError:
                 self.nxfile = None
+                logger.error("Closing of database file failed. The database file might be corrupted!", exc_info=True)
                 raise
 
             if hasattr(self, "temp_directory"):
