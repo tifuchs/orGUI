@@ -22,9 +22,9 @@
 #
 # ###########################################################################*/
 __author__ = "Timo Fuchs"
-__copyright__ = "Copyright 2024 Timo Fuchs"
+__copyright__ = "Copyright 2024-2026 Timo Fuchs"
 __license__ = "MIT License"
-__version__ = "1.2.0"
+__version__ = "1.4.1"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
@@ -53,7 +53,7 @@ class P3_Image:
         self.header_dict = header.header_dict
 
 # This is the backend, must implement `Scan`!
-class QM2_backend_2024(Scan):
+class QM2_backend_2026(Scan):
     def __init__(self, hdffilepath_orNode=None, scanno=None):
         data = None
         if hdffilepath_orNode is None:
@@ -105,17 +105,17 @@ class QM2_backend_2024(Scan):
 
 
         # motor conversion table:
-        motor_names =     ['phi2', 'chi', 'th', 'phi']
-        sixc_equivalent = ['omega',   'chi', 'alpha', 'omega']
-        sixc_sign =       [     -1,       1,      1,  1.]
-        sxic_offset =     [      0,    -270,      0,   0]
-
+        motor_names =     ['phi2', 'chi', 'th', 'phi',      'samz']
+        sixc_equivalent = ['omega',   'chi', 'alpha', 'omega', 'z']
+        sixc_sign =       [     -1,       1,      1,  1.,       1.]
+        sxic_offset =     [      0,    -270,      0,   0,       0.]
+        
 
         scanned_motors = {}
         for mot in motor_names:
             if mot in measurement_section:
                 scanned_motors[mot] = measurement_section[mot]
-
+                
         for mot, sixc_mot, sign, offset in zip(motor_names, sixc_equivalent, sixc_sign, sxic_offset):
             try:
                 val = sign * np.asarray(positioners_section[mot][()] + offset, dtype=np.float64) # values at start of scan
