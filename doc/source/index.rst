@@ -13,9 +13,11 @@ large 2D detectors.
    :caption: Contents:
 
    installation
-   entry_points
    gui_overview
+   startup_configuration
+   beamline_backends
    geometry
    ub_matrix
    image_integration
+   entry_points
    api

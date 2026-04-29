@@ -16,3 +16,13 @@ Main GUI
    :members:
    :member-order: bysource
    :show-inheritance:
+
+.. _backend-api:
+
+Backend API
+-----------
+
+.. automodule:: orgui.backend.scans
+   :members:
+   :member-order: bysource
+   :show-inheritance:

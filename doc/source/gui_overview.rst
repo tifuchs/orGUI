@@ -72,7 +72,8 @@ These controls select the data source and loader:
 ``Backend``
    Beamline/file-format loader used to interpret the selected scan. With
    ``auto detect`` enabled, orGUI tries to infer the backend from the selected
-   Nexus metadata. The ``...`` button loads a custom backend file.
+   Nexus metadata. The ``...`` button loads a custom backend file. See
+   :doc:`beamline_backends` for backend selection and custom backend files.
 
 4. Main Image Plot
 ------------------

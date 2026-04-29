@@ -42,7 +42,9 @@ Beamlines often use different counter names, metadata conventions, and image
 locations. orGUI therefore uses backend modules for beamline-specific loading.
 Current backends support ID31 at ESRF and P21.2 at DESY. Support for another
 beamline usually requires adding a backend in ``orgui/backend`` that normalizes
-the scan metadata into orGUI conventions.
+the scan metadata into orGUI conventions. See :doc:`beamline_backends` for
+backend usage from the GUI or config file and for the backend implementation
+structure.
 
 For simple image stacks without scan metadata, use
 ``File -> Generate scan from images``.
