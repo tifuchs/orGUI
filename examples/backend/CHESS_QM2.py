@@ -33,6 +33,9 @@ import numpy as np
 import re
 import fabio
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 import silx.io
 
