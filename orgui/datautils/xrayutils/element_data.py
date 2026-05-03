@@ -1,5 +1,5 @@
 # The data in these tables were taken from from
-# Cordero B, Gómez V, Platero-Prats AE, Revés M, Echeverría J, Cremades E, Barragán F, Alvarez S. 
+# Cordero B, Gómez V, Platero-Prats AE, Revés M, Echeverría J, Cremades E, Barragán F, Alvarez S.
 # Covalent radii revisited. Dalton Trans. 2008 Jun 7;(21):2832-8. doi: 10.1039/b801115j. Epub 2008 Apr 7. PMID: 18478144.
 import numpy as np
 cov_radii_array = np.array([

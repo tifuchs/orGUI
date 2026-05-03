@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2024 Timo Fuchs
@@ -46,7 +45,7 @@ except:
 
 
 class TestRWDetector2D_SXRD(unittest.TestCase):
-    
+
     def setUp(self):
         self.sxrddet = DetectorCalibration.Detector2D_SXRD()
         self.sxrddet.detector = pyFAI.detector_factory('Pilatus 2M CdTe')
@@ -65,18 +64,18 @@ class TestRWDetector2D_SXRD(unittest.TestCase):
         othersxrddet = DetectorCalibration.Detector2D_SXRD()
         othersxrddet.fromNXdict(nxdict)
         self.check_sxrd_equal(othersxrddet)
-        
+
     def check_sxrd_equal(self, other):
         self.assertDictEqual(self.sxrddet.getPyFAI(), other.getPyFAI())
         self.assertEqual(self.sxrddet._polFactor, other._polFactor)
         self.assertEqual(self.sxrddet._polAxis, other._polAxis)
         self.assertEqual(self.sxrddet._deltaChi, other._deltaChi)
-        
+
     @unittest.skipUnless(silx_avail, "silx not available")
     def test_write_nx(self):
         self._nxfilename = "./detcal_test.nx"
         self.addCleanup(self._destruct_file, self._nxfilename)
-        
+
         nxdict = self.sxrddet.toNXdict()
         dictdump.dicttonx(nxdict, self._nxfilename)
         self.assertTrue(os.path.isfile(self._nxfilename))
@@ -86,7 +85,7 @@ class TestRWDetector2D_SXRD(unittest.TestCase):
     def test_read_write_nx(self):
         self._nxfilename = "./detcal_test.nx"
         self.addCleanup(self._destruct_file, self._nxfilename)
-        
+
         nxdict = self.sxrddet.toNXdict()
         dictdump.dicttonx(nxdict, self._nxfilename)
 
@@ -94,18 +93,18 @@ class TestRWDetector2D_SXRD(unittest.TestCase):
         othersxrddet = DetectorCalibration.Detector2D_SXRD()
         othersxrddet.fromNXdict(read_dict)
         self.check_sxrd_equal(othersxrddet)
-        
+
         othersxrddet = DetectorCalibration.loadNXdict(read_dict)
         self.check_sxrd_equal(othersxrddet)
-        
+
         os.remove(self._nxfilename)
-    
-        
+
+
     def _destruct_file(self, filename):
         if os.path.exists(filename):
             os.remove(self._nxfilename)
-        
-    
+
+
 class TestAnglePixelConversion(unittest.TestCase):
 
     def setUp(self):
@@ -120,14 +119,14 @@ class TestAnglePixelConversion(unittest.TestCase):
         self.sxrddet.set_energy(15.)
         self.sxrddet.setAzimuthalReference(np.deg2rad(90.))
         self.sxrddet.setPolarization(np.deg2rad(90.), 0.75)
-        
+
         self.p1 = np.arange(self.sxrddet.detector.shape[1] ) + 0.5 # pixel center
         self.p2 = np.arange(self.sxrddet.detector.shape[0] ) + 0.5
-        self.p12 = np.moveaxis(np.array(np.meshgrid(self.p1,self.p2)),0, -1)[:,:,::-1] 
-        
+        self.p12 = np.moveaxis(np.array(np.meshgrid(self.p1,self.p2)),0, -1)[:,:,::-1]
+
         self.mu = np.deg2rad(0.1) # should be differed, but probably ok
-        
-    
+
+
     def assertPixelErrorSurfaceAnglesLessThan(self, abserr=1e-3, msg=""):
         gamma, delta = self.sxrddet.surfaceAngles(self.mu)
         p12_conv = self.sxrddet.pixelsSurfaceAngles(gamma, delta, self.mu)
@@ -135,7 +134,7 @@ class TestAnglePixelConversion(unittest.TestCase):
         if maxerror > abserr:
             warnings.warn("too large error: %.5f pixel coord from surface angles, %s" % (maxerror, msg))
         #self.assertLessEqual(maxerror, abserr,  "too large error pixel coord from surface angles, %s" % msg)
-        
+
     def assertPixelErrorTthChiLessThan(self, abserr=1e-3, msg=""):
         tth = self.sxrddet.twoThetaArray()
         chi = self.sxrddet.chiArray()
@@ -144,7 +143,7 @@ class TestAnglePixelConversion(unittest.TestCase):
         if maxerror > abserr:
             warnings.warn("too large error: %.5f pixel coord from tth and chi, %s" % (maxerror, msg))
         #self.assertLessEqual(maxerror, abserr, "too large error pixel coord from tth and chi, %s" % msg)
-        
+
     def assertGamDelRangeErrorLessThan(self, abserr=1e-3, msg=""):
         exact = self.sxrddet._rangegamdel_p_full_det
         corner = self.sxrddet.rangegamdel_p
@@ -154,7 +153,7 @@ class TestAnglePixelConversion(unittest.TestCase):
         if max_rel_diff > abserr:
             warnings.warn("too large error: %.5f approx det corners, %s" % (max_rel_diff, msg))
         #self.assertLessEqual(max_rel_diff, abserr, "too large error approx det corners, %s" % msg)
-    
+
     def assertQrangeValid(self):
         Q = self.sxrddet.qArray() / 10.
         Qmin = np.amin(Q)
@@ -164,7 +163,7 @@ class TestAnglePixelConversion(unittest.TestCase):
         # beam on detector ?
         if 0 <= f2d_cal['centerX'] <= self.sxrddet.detector.shape[1] and 0 <= f2d_cal['centerY'] <= self.sxrddet.detector.shape[0]:
             Qmin = 0.
-        
+
         self.assertTrue(np.allclose(Qmin, Qmin_fast, 1e-5))
         self.assertTrue(np.allclose(Qmax, Qmax_fast, 1e-5))
 
@@ -177,7 +176,7 @@ class TestAnglePixelConversion(unittest.TestCase):
             self.assertGamDelRangeErrorLessThan(msg=msg)
             self.assertQrangeValid()
         self.sxrddet.poni1 = 0.1
-    
+
     def test_poni2(self):
         for p1 in np.linspace(-3,3,5):
             self.sxrddet.poni2 = p1
@@ -187,7 +186,7 @@ class TestAnglePixelConversion(unittest.TestCase):
             self.assertGamDelRangeErrorLessThan(msg=msg)
             self.assertQrangeValid()
         self.sxrddet.poni2 = 0.1
-    
+
     def test_rot1(self):
         for p1 in np.linspace(0,np.pi,8):
             self.sxrddet.rot1 = p1
@@ -197,7 +196,7 @@ class TestAnglePixelConversion(unittest.TestCase):
             self.assertGamDelRangeErrorLessThan(msg=msg)
             self.assertQrangeValid()
         self.sxrddet.rot1 = np.pi/20
-    
+
     def test_rot2(self):
         for p1 in np.linspace(0,np.pi,8):
             self.sxrddet.rot2 = p1
@@ -207,7 +206,7 @@ class TestAnglePixelConversion(unittest.TestCase):
             self.assertGamDelRangeErrorLessThan(msg=msg)
             self.assertQrangeValid()
         self.sxrddet.rot2 = -np.pi/20
-        
+
     def test_rot3(self):
         for p1 in np.linspace(0,np.pi,8):
             self.sxrddet.rot3 = p1
@@ -217,7 +216,7 @@ class TestAnglePixelConversion(unittest.TestCase):
             self.assertGamDelRangeErrorLessThan(msg=msg)
             self.assertQrangeValid()
         self.sxrddet.rot3 = 0
-        
+
     def test_dist(self):
         for d in np.linspace(0.01,10,5):
             self.sxrddet.dist = d
@@ -227,10 +226,10 @@ class TestAnglePixelConversion(unittest.TestCase):
             self.assertGamDelRangeErrorLessThan(msg=msg)
             self.assertQrangeValid()
         self.sxrddet.dist = 1.5
-        
 
-        
-        
+
+
+
 """
 def test_del_gam_range():
     sxrddet = Detector2D_SXRD()

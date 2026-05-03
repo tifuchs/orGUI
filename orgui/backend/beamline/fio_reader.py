@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -43,15 +42,15 @@ dtypeConverter = {'STRING' : 'U32',
 
 
 
-class FioFile(object):
-    
+class FioFile:
+
     def __init__(self,filepath):
         _,filename = os.path.split(filepath)
         fnowithsuffix = filename.split('_')[-1]
         self.scanno = int(fnowithsuffix.split('.')[0])
-        
-        with open(filepath,'r') as fiof:
-            
+
+        with open(filepath) as fiof:
+
             prev = 0
             while(True):
                 line = fiof.readline()
@@ -80,7 +79,7 @@ class FioFile(object):
                     while(line.startswith(' Col') ):
                         splitline = line.split()
                         name = splitline[-2]
-                        self.names.append(name) 
+                        self.names.append(name)
                         dtype = dtypeConverter[splitline[-1]]
                         self.dtypes.append(dtype)
                         self.datacols.append((name,dtype))
@@ -88,16 +87,16 @@ class FioFile(object):
                         line = fiof.readline()
                     fiof.seek(prev)
                     break
-                
+
             # special cases:
             if "idrz1(encoder)" in self.names:
                 idx = self.names.index("idrz1(encoder)")
                 self.names[idx] = "idrz1"
-            
+
             self.data = np.loadtxt(fiof,dtype={'names' : tuple(self.names), 'formats' : tuple(self.dtypes)},comments="!")
             #print(self.data)
         self.parameter = {}
-        
+
         # make parameter section nicer, a bit dangerous like this:
         try:
             for line in self.parameters_str.splitlines():
@@ -105,6 +104,6 @@ class FioFile(object):
                 self.parameter[param] = value
         except Exception:
             warnings.warn("Cannot parse parameter section : %s" % traceback.format_exc())
-            
 
-        
+
+

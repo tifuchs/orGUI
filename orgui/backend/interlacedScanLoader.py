@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2024-2025 Finn Schroeter
@@ -28,14 +27,10 @@ __copyright__ = "Copyright 2024-2025 Finn Schroeter"
 __license__ = "MIT License"
 __version__ = "1.3.0"
 
-import re
-import os
-import fabio
 import numpy as np
 
-from .scans import h5_Image
 
-class InterlacedScan():
+class InterlacedScan:
 
     def __init__(self, scansegments, sort, ax):
         self.subscans = scansegments
@@ -70,7 +65,7 @@ class InterlacedScan():
             self.th = scan0.th # todo: check if all scans share the same th
             self.omega = -1*self.th
             self.axis = self.mu
-        
+
         if self.sort:
             if ax == 'mu':
                 self.indices = np.argsort(self.mu)
@@ -82,7 +77,7 @@ class InterlacedScan():
                 self.axis = self.th
         else:
             self.indices = None
-        
+
         self.title = "interlaced scan"
 
         self.nopoints = lensum
@@ -101,7 +96,7 @@ class InterlacedScan():
                     return k.get_raw_img(i-len_previous)
                 else:
                     len_previous += k.nopoints
-    
+
     def get_origin_scan_nr(self, i):
         len_previous = 0
         if self.sort:
@@ -109,7 +104,7 @@ class InterlacedScan():
                 if self.indices[i] < k.nopoints+len_previous:
                     try:
                         return k.scanname
-                    except Exception as e:
+                    except Exception:
                         return
                 else:
                     len_previous += k.nopoints
@@ -118,20 +113,20 @@ class InterlacedScan():
                 if i < k.nopoints+len_previous:
                     try:
                         return k.scanname
-                    except Exception as e:
+                    except Exception:
                         return
                 else:
                     len_previous += k.nopoints
 
     @property
     def auxillary_counters(self):
-        #todo: combine aux counters of all scan segments 
-        #return ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch','scaled_potv2f'] 
-        return [] 
+        #todo: combine aux counters of all scan segments
+        #return ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch','scaled_potv2f']
+        return []
 
     def __len__(self):
         return self.nopoints
-        
+
     @classmethod
     def parse_h5_node(cls, obj):
         ddict = dict()

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2024 Timo Fuchs
@@ -30,7 +29,7 @@ __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
 
-from numba import njit, prange
+from numba import njit
 
 import numpy as np
 
@@ -57,13 +56,13 @@ def unitcell_F_uc_bulk(h,k,l,atten,
     Q_para2 = np.sum(Q_cart2[:2],axis=0) #squared!!!
     Q_perp2 = Q_cart2[2] #squared!!!
     Q2 = Q_para2 + Q_perp2 #squared!!!
-    
+
     domainmatrix = np.empty((coherentDomainMatrix.shape[0],3,3))
     for i in range(coherentDomainMatrix.shape[0]):
         domainmatrix[i] = R_mat_inv @ coherentDomainMatrix[i,:,:-1] @ R_mat
-    
+
     #domainmatrix = [R_mat_inv @ mat[:,:-1] @ R_mat for mat in coherentDomainMatrix]
-    
+
     for i in range(basis.shape[0]):
         f[:] =  f_factors[i][10] + f_factors[i][11] + 1j*f_factors[i][12]
         for j in range(5):
@@ -76,7 +75,7 @@ def unitcell_F_uc_bulk(h,k,l,atten,
     return F/uc_area
 
 # returns the structure factor of the unit cell
-# h,k,l have to be 1d arrays 
+# h,k,l have to be 1d arrays
 @njit('c16[:](f8[::1], f8[::1], f8[::1], f8, f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)', nogil=True, cache=True)
 def unitcell_F_uc_bulk_direct(h,k,l,atten,
                         basis,
@@ -96,13 +95,13 @@ def unitcell_F_uc_bulk_direct(h,k,l,atten,
     Q_para2 = np.sum(Q_cart2[:2],axis=0) #squared!!!
     Q_perp2 = Q_cart2[2] #squared!!!
     Q2 = Q_para2 + Q_perp2 #squared!!!
-    
+
     domainmatrix = np.empty((coherentDomainMatrix.shape[0],3,3))
     for i in range(coherentDomainMatrix.shape[0]):
         domainmatrix[i] = R_mat_inv @ coherentDomainMatrix[i,:,:-1] @ R_mat
-    
+
     #domainmatrix = [R_mat_inv @ mat[:,:-1] @ R_mat for mat in coherentDomainMatrix]
-    
+
     for i in range(basis.shape[0]):
         f[:] =  f_factors[i][10] + f_factors[i][11] + 1j*f_factors[i][12]
         for j in range(5):
@@ -158,13 +157,13 @@ def unitcell_F_uc(h,k,l,
     Q_para2 = np.sum(Q_cart2[:2],axis=0) #squared!!!
     Q_perp2 = Q_cart2[2] #squared!!!
     Q2 = Q_para2 + Q_perp2 #squared!!!
-    
+
     domainmatrix = np.empty((coherentDomainMatrix.shape[0],3,3))
     for i in range(coherentDomainMatrix.shape[0]):
         domainmatrix[i] = R_mat_inv @ coherentDomainMatrix[i,:,:-1] @ R_mat
-    
+
     #domainmatrix = [R_mat_inv @ mat[:,:-1] @ R_mat for mat in coherentDomainMatrix]
-    
+
     for i in range(basis.shape[0]):
         f[:] =  f_factors[i][10] + f_factors[i][11] + 1j*f_factors[i][12]
         for j in range(5):
@@ -177,5 +176,4 @@ def unitcell_F_uc(h,k,l,
     return F/uc_area
 
 
-    
-    
+

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -39,7 +38,7 @@ _iconpath = os.path.join(os.path.dirname(__file__), "icons")
 def getQicon(name: str):
 
     return qt.QIcon(os.path.join(_iconpath, name))
-    
+
 def getSplashScreen(version_number=None):
     pixmap = qt.QPixmap(os.path.join(_iconpath, "logo"))
     if version_number is None:
@@ -50,10 +49,10 @@ def getSplashScreen(version_number=None):
         font.setPixelSize(30)
         painter.setFont(font)
         painter.drawText(720, 403, "version %s" % version_number)
-        return pixmap 
-    
+        return pixmap
+
 def getDiffractometerPath():
     return os.path.join(_iconpath, "diffractometer_v3.png")
-    
+
 def getPath(name):
     return os.path.join(_iconpath, name)

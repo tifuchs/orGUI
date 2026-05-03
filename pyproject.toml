@@ -29,13 +29,12 @@ classifiers = [
 ]
 
 dependencies = [
-	'numpy >= 1.12',
+	'numpy >= 1.16',
 	'scipy >= 1.0',
-	'matplotlib >= 1.2',
+	'matplotlib >= 3.6',
 	'fabio >= 0.7',
 	'silx >= 1.1',
-	'pyFAI >= 0.19',
-	'pymca >= 5.3',
+	'pyFAI >= 2023.3,!=2025.12.0,!=2025.12.1,!=2026.2.0',
 	'xraydb >= 4.0',
 	'pytz >= 2022'
 ]
@@ -45,6 +44,7 @@ console = ['qtconsole']
 speedup = ['numba']
 extendedfilesupport = ['ase', 'hdf5plugin']
 full = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin']
+full-devel = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin', 'ruff', 'pyupgrade']
 
 [build-system]
 requires = ["setuptools >= 80.0", "setuptools-scm>=8"]
@@ -68,3 +68,26 @@ include-package-data = false
 
 [tool.setuptools_scm]
 version_file = "orgui/_version.py"
+fallback_version = "1.4.2+nogit"
+
+[tool.ruff]
+# Target Python version for pyupgrade
+target-version = "py310"
+# Optional: autofix
+# fix = true
+
+[tool.ruff.lint]
+# Ruff 0.4+ uses this section for rule configuration
+# Enable linting for NumPy 2.x deprecations and general cleanup
+select = [
+    "E", "F", "W",          # Pyflakes / pycodestyle
+    "UP",                   # pyupgrade rules
+    "NPY",                  # NumPy-specific rules (NumPy 2.x)
+]
+ignore = [
+    # Add ignores here if needed
+]
+
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["NPY002"]  # Example: ignore certain NumPy rules in tests

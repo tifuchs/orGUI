@@ -1,0 +1,271 @@
+# -*- coding: utf-8 -*-
+# /*##########################################################################
+#
+# Copyright (c) 2026 Timo Fuchs
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+#
+# ###########################################################################*/
+"""Module descripiton
+
+"""
+__author__ = "Timo Fuchs"
+__copyright__ = "Copyright 2026 Timo Fuchs"
+__credits__ = []
+__license__ = "MIT License"
+__maintainer__ = "Timo Fuchs"
+__email__ = "tfuchs@cornell.edu"
+
+import os
+import sys
+import logging
+
+from . import __version__
+
+from silx.gui import qt
+from silx.gui import icons
+import numpy as np
+import traceback
+
+from abc import ABC, abstractmethod
+import inspect
+
+
+# Qt widgets, including modal message boxes, must be created and executed on
+# the Qt main thread. Logging can originate from worker threads, so GUI log
+# records pass through this dispatcher before showing dialogs.
+class _MessageBoxDispatcher(qt.QObject):
+    show_message = qt.Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.show_message.connect(self._show_message, qt.Qt.QueuedConnection)
+
+    def show(self, payload):
+        app = qt.QApplication.instance()
+        if app is None or qt.QThread.currentThread() == app.thread():
+            self._show_message(payload)
+        else:
+            self.show_message.emit(payload)
+
+    def _show_message(self, payload):
+        if payload["dialog_level"] >= logging.ERROR:
+            critical_detailed_message(
+                payload["parent"],
+                payload["title"],
+                payload["message"],
+                payload["detailed_text"],
+            )
+        elif payload["dialog_level"] >= logging.WARNING:
+            warning_detailed_message(
+                payload["parent"],
+                payload["title"],
+                payload["message"],
+                payload["detailed_text"],
+            )
+        elif payload["dialog_level"] >= logging.INFO:
+            information_detailed_message(
+                payload["parent"],
+                payload["title"],
+                payload["message"],
+                payload["detailed_text"],
+            )
+
+
+_MESSAGE_BOX_DISPATCHER = None
+
+
+def _get_message_box_dispatcher():
+    global _MESSAGE_BOX_DISPATCHER
+    if _MESSAGE_BOX_DISPATCHER is None:
+        _MESSAGE_BOX_DISPATCHER = _MessageBoxDispatcher()
+        app = qt.QApplication.instance()
+        if app is not None and _MESSAGE_BOX_DISPATCHER.thread() != app.thread():
+            _MESSAGE_BOX_DISPATCHER.moveToThread(app.thread())
+    return _MESSAGE_BOX_DISPATCHER
+
+
+class Progress(ABC):
+    def __init__(self, logger_name : str, total: int, title: str = "", **kwargs):
+        self.total = total
+        self.title = title
+
+    @abstractmethod
+    def update(self, value: int, message: str = ""):
+        pass
+
+    @abstractmethod
+    def finish(self):
+        pass
+        
+    def wasCanceled(self):
+        return False
+
+
+class LogProgress(Progress):
+    def __init__(self, logger_name : str, total: int, title: str = "", **kwargs):
+        super().__init__(logger_name, total, title)
+        self.logger = logging.getLogger(logger_name)
+        self.logger.info(f"Start {self.title}")
+        self.logevery = kwargs.get('logevery', 100)
+
+    def update(self, value: int, message: str = ""):
+        if not (value % self.logevery):
+            percent = (value / self.total) * 100
+            if message == '':
+                self.logger.info(f"PROGRESS:{self.title}:{percent:.1f}%")
+            else:
+                self.logger.info(f"PROGRESS:{self.title}:{percent:.1f}%:{message}")
+
+    def finish(self):
+        self.logger.info(f"PROGRESS:{self.title}:COMPLETED")
+
+
+class QtProgress(LogProgress):
+    def __init__(self, logger_name : str ,total: int, title: str = "", parent: qt.QWidget = None, **kwargs):
+        super().__init__(logger_name, total, title, **kwargs)
+        self.dialog = qt.QProgressDialog(title, "abort", 0, total, parent)
+        self.dialog.setWindowTitle(title)
+        self.dialog.setWindowModality(qt.Qt.WindowModal)
+        self.dialog.setValue(0)
+        self.dialog.show()
+
+    def update(self, value: int, message: str = ""):
+        super().update(value, message)
+        self.dialog.setValue(value)
+        if message:
+            self.dialog.setLabelText(message)
+
+    def finish(self):
+        super().finish()
+        self.dialog.setValue(self.total)
+        self.dialog.close()
+
+    def wasCanceled(self):
+        return self.dialog.wasCanceled()
+
+
+def messagebox_detailed_message(parent, title, text, detailed_text, icon, buttons=qt.QMessageBox.Ok):
+    diag = qt.QMessageBox(icon, title, text, buttons, parent)
+    if detailed_text != "":
+        diag.setDetailedText(detailed_text)
+    return diag.exec()
+
+def critical_detailed_message(parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok):
+    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Critical, buttons=buttons)
+    
+def warning_detailed_message(parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok):
+    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Warning, buttons=buttons)
+
+def information_detailed_message(parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok):
+    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Information, buttons=buttons)
+
+
+logger = logging.getLogger("orgui")
+logger.setLevel(logging.INFO)
+
+_LOGGING_CONTEXT = 'None'
+
+def get_logging_context():
+    global _LOGGING_CONTEXT
+    return _LOGGING_CONTEXT
+
+def set_logging_context(context):
+    global _LOGGING_CONTEXT, logger
+    if context == _LOGGING_CONTEXT:
+        return
+    for h in logger.handlers[:]:
+        if isinstance(h, (CLIExceptionHandler, MessageBoxHandler)):
+            logger.removeHandler(h)
+            h.close()
+    
+    if context.lower() == 'gui':
+        handler = MessageBoxHandler()
+        formatter = logging.Formatter("%(asctime)s: %(levelname)s: %(message)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        _LOGGING_CONTEXT = 'gui'
+    elif context.lower() == 'cli':
+        handler = CLIExceptionHandler()
+        formatter = logging.Formatter("%(asctime)s: %(levelname)s: %(message)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        _LOGGING_CONTEXT = 'cli'
+    else:
+        raise ValueError('Logging context %s is unknown.' % context)
+        
+def create_progress_logger(parent : qt.QWidget, total: int, title: str = "") -> Progress:
+    caller_module = inspect.getmodule(inspect.stack()[1][0]).__name__
+    context = get_logging_context()
+    if context == 'cli':
+        return LogProgress(caller_module, total, title)
+    elif context == 'gui':
+        return QtProgress(caller_module, total, title, parent)
+    else:
+        raise RuntimeError('Progress logger for context %s is unknown' % context)
+
+        
+
+class CLIExceptionHandler(logging.Handler):
+    def emit(self, record):
+        if record.levelno < logging.ERROR:
+            return # super().emit(record)
+        msg = self.format(record)
+
+        if record.levelno >= logging.ERROR:
+            if record.exc_info:
+                exc_type, exc_value, exc_tb = record.exc_info
+                if exc_value is not None:
+                    raise exc_value.with_traceback(exc_tb)
+            raise RuntimeError(msg)
+
+    
+class MessageBoxHandler(logging.Handler):
+    def emit(self, record):
+        show_dialog = getattr(record, "show_dialog", False) # only show dialog when explicitly requested
+        if not show_dialog:
+            return
+        msg = self.format(record)
+        defaulttitle =  f"{record.levelname} [{record.module}:{record.funcName}:{record.lineno}]"
+        title = getattr(record, "title", defaulttitle)
+        description = getattr(record, "description", "")
+        detailed_text = getattr(record, "detailed_text", "")
+        dialog_level = getattr(record, "dialog_level", record.levelno)
+        show_dialog = getattr(record, "show_dialog", False)
+        parent = getattr(record, "parent", None)
+        if description != "":
+            msg += '\n' + description
+            
+        if record.exc_info:
+            exc_text = "".join(traceback.format_exception(*record.exc_info))
+            detailed_text += exc_text
+
+        payload = {
+            "dialog_level": dialog_level,
+            "parent": parent,
+            "title": title,
+            "message": msg,
+            "detailed_text": detailed_text,
+        }
+        _get_message_box_dispatcher().show(payload)
+
+
+
+
+

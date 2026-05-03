@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -29,41 +28,20 @@ __version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
-from .HKLVlieg import Lattice, UBCalculator, VliegAngles, GeometryCorrection
 import numpy as np
-import numpy.linalg as LA
-from silx.io import dictdump
 from .. import util
-import xraydb
 import warnings
-import random
-import json
-import math
-from scipy.interpolate import interp1d
-from scipy.signal import savgol_filter
-from scipy.ndimage import gaussian_filter1d
 import os
-import re
-from scipy.special import erf
 #random.seed(45)
-from collections import OrderedDict
-import dataclasses
-from dataclasses import dataclass ,field
-import typing
-import enum
-import copy
 import errno
-import glob
 
-from .CTRutil import (special_elementcolors, ParameterType, Parameter,
-                     _ensure_contiguous, next_skip_comment, DWtoDisorder,
-                     readWaasmaier, readDispersion, atomic_number,
-                     estimateDispersionCompound)
+from .CTRutil import (ParameterType, Parameter,
+                     next_skip_comment)
 
 from .CTRuc import WaterModel, UnitCell
 from .CTRfilm import EpitaxyInterface, Film
 
-class SXRDCrystal(object):
+class SXRDCrystal:
 
     def __init__(self,uc_bulk,*uc_surface,**keyargs):
         self.uc_bulk = uc_bulk
@@ -74,7 +52,7 @@ class SXRDCrystal(object):
                 if isinstance(uc, (Film, EpitaxyInterface) ):
                     self.enable_uc_stacking = True
                     break
-        
+
         self.uc_stacking = keyargs.get('stacking', np.arange(len(self.uc_surface_list))[::-1])
         order = np.argsort(self.uc_stacking)
         self.uc_surface_list_ordered = np.array(self.uc_surface_list)[order]
@@ -83,7 +61,7 @@ class SXRDCrystal(object):
         self.atten = keyargs.get('atten', 0.01)
         self.specularRes = keyargs.get('spec_res', 0.0)
         self.name = keyargs.get('name', 'xtal')
-        
+
         self.weights = np.ones(len(self.uc_surface_list),dtype=np.float64)/len(self.uc_surface_list)
         self.weights_0 = np.copy(self.weights)
         self._weights_parvalues = None
@@ -96,23 +74,23 @@ class SXRDCrystal(object):
         }
         self._parIdNo = 0
         self.fit_metadata_cache = None
-        
+
     def parametersToDict(self):
         d = dict()
         d['weights_0'] = self.weights_0
         d['_parIdNo'] = self._parIdNo
-        
+
         for p in self.parameters:
             d[p] = dict()
             for i, param in enumerate(self.parameters[p]):
                 d[p]["%s_%s" % (i,param.name)] = param.asdict()
-        
+
         d['unitcells'] = dict()
         for uc in self.uc_surface_list:
             d['unitcells'][uc.name] = uc.parametersToDict()
         d['unitcells']['bulk'] = self.uc_bulk.parametersToDict()
         return d
-        
+
     def clearParameters(self):
         for p in self.parameters:
             self.parameters[p] = []
@@ -123,19 +101,19 @@ class SXRDCrystal(object):
         for uc in self.uc_surface_list:
             uc.clearParameters()
         self.uc_bulk.clearParameters()
-    
+
     def parametersFromDict(self, d, override_values=True):
         for p in self.parameters:
             self.parameters[p] = []
-            
+
         self.weights_0 = d['weights_0'].astype(np.float64)
-        self._parIdNo = int(d['_parIdNo']) 
+        self._parIdNo = int(d['_parIdNo'])
 
         for p in self.parameters:
             if p in d:
                 for dkey in sorted(d[p].keys()):
                     self.parameters[p].append(Parameter(**d[p][dkey]))
-        
+
         for uc in d['unitcells']:
             self[uc].parametersFromDict(d['unitcells'][uc], override_values)
 
@@ -143,10 +121,10 @@ class SXRDCrystal(object):
             try:
                 self.updateFromParameters()
             except Exception as e:
-                warnings.warn("Can not apply weight fit parameter values to this SXRDCrystal: %s" % e) 
+                warnings.warn("Can not apply weight fit parameter values to this SXRDCrystal: %s" % e)
         else:
             warnings.warn("Weight values not updated from Parameter values. This can cause a mismatch between weight and fitparameter values!")
-        
+
     def updateFromParameters(self):
         self.weights = np.copy(self.weights_0)
         self.werrors = np.full_like(self.weights,np.nan)
@@ -159,13 +137,13 @@ class SXRDCrystal(object):
                 raise ValueError("Can not set weight values from parameters. Value of Parameter %s is None." % par.name)
             if par.error is not None:
                 self.werrors[par.indices] += par.factors*par.error
-            else:   
+            else:
                 no_errors = True
         self._weights_parvalues = np.copy(self.weights)
         if not no_errors:
             self._werrors_parvalues = np.copy(self.werrors)
-        
-        
+
+
     def setGlobalReferenceUnitCell(self,uc_reference,rotMatrix=np.identity(3)):
         """   
         sets a global reference unit cell. 
@@ -183,13 +161,13 @@ class SXRDCrystal(object):
         """
         self.uc_bulk.setReferenceUnitCell(uc_reference,rotMatrix)
         [uc.setReferenceUnitCell(uc_reference,rotMatrix) for uc in self.uc_surface_list]
-    
+
     def F_surf(self,harray,karray,Larray):
         F = np.empty_like(Larray,dtype=np.complex128)
         for uc, weight in zip(self.uc_surface_list,self.weights):
             F += weight*uc.F_uc(harray,karray,Larray)
         return F
-    
+
     def apply_stacking(self):
         self.enable_uc_stacking = True
         hnew = 0.
@@ -213,8 +191,8 @@ class SXRDCrystal(object):
                 locnew = uc.loc_absolute
                 layer_number_new = uc.end_layer_number
 
-                
-    
+
+
     def F(self,harray,karray,Larray):
         F = self.uc_bulk.F_bulk(harray,karray,Larray,self.atten)
         hkl = np.vstack((harray,karray,Larray))
@@ -226,7 +204,7 @@ class SXRDCrystal(object):
                 hkl_n = np.dot(matrix,hkl)
                 F += occup*weight*uc.F_uc(hkl_n[0],hkl_n[1],hkl_n[2])
         return F
-    
+
 
     def setDomain(self,uc_no,domains):
         """
@@ -234,7 +212,7 @@ class SXRDCrystal(object):
         (rotmatrix, occupancy)
         """
         self.domains[uc_no] = domains
-    
+
     def addRelParameter(self,index0_or_name,indexneg_or_name=None,initial=None,limits=(-np.inf,np.inf),prior=None,**keyargs):
         """
         sets a new fit parameter for the weight w of a unit cell (Legacy API!, consider using addWeightParameter)
@@ -257,12 +235,12 @@ class SXRDCrystal(object):
         limits: list
             fit limits of w 
         """
-        
+
         index0 = self.getUcIndex(index0_or_name)
-        
+
         if initial is None:
             initial = self.weights[index0]
-        
+
         self.weights_0[index0] = 0.
         self.weights[index0] = initial
         if indexneg_or_name is not None:
@@ -274,12 +252,12 @@ class SXRDCrystal(object):
         else:
             names = np.array([index0])
             factors = np.array([1.])
-            
+
         keyargs['limits'] = limits
         keyargs['prior'] = prior
-        
+
         return self.addWeightParameter(names,factors,**keyargs)
-        
+
     def addWeightParameter(self,indices_or_names,factors,**keyargs):
         """
         sets a new fit parameter for the weight w of a unit cell
@@ -295,32 +273,32 @@ class SXRDCrystal(object):
         limits: list
             fit limits of w 
         """
-        
+
         prior = keyargs.get('prior', None)
         name = keyargs.get('name', "%s_weight_%s" % (self.name, self._parIdNo))
         limits = keyargs.get('limits', (-np.inf,np.inf))
         initial = keyargs.get('initial', None)
         basis_init = keyargs.get('basis_init', None)
-        
+
         indexarray = np.array([self.getUcIndex(ucn) for ucn in indices_or_names],dtype=np.intp)
-        
+
         factors = np.array(factors,dtype=np.float64)
-        
+
         if basis_init is not None:
             self.weights_0[indexarray] = basis_init
-            
+
         if initial is not None:
             self.weights[indexarray] = self.weights_0[indexarray] + factors*initial
         par = Parameter(name,indexarray, ParameterType.RELATIVE, limits, prior, keyargs, factors)
         self.parameters['weight'].append(par)
 
         self._parIdNo += 1
-        
+
         self.fit_metadata_cache = None
-        
+
         return par
-    
-    
+
+
     def addFitParameter(self,parameter,limits=(-np.inf,np.inf),**keyargs):
         """
         API for fitparameters:
@@ -341,15 +319,15 @@ class SXRDCrystal(object):
         name = keyargs.get('name', "%s_par_%s" % (self.name, self._parIdNo))
         keyargs['name'] = name
         keyargs['prior'] = prior
-        
-        
+
+
         ucnames = np.array(list(parameter.keys()))
         ucindices = np.array([self.getUcIndex(ucn) for ucn in ucnames])
         sidx = np.argsort(ucindices)
-        
+
         ucindices = ucindices[sidx]
         ucnames = ucnames[sidx]
-        
+
         if not isinstance(parameter[ucnames[0]], dict): #  legacy API fix!
             for uc_identifier in ucnames:
                 atoms, par = parameter[uc_identifier]
@@ -357,9 +335,9 @@ class SXRDCrystal(object):
                     'atoms' : atoms,
                     'par' : par
                 }
-        
+
         #children = []
-        
+
         partype = ParameterType(0)
         for uc_identifier in ucnames:
             par = parameter[uc_identifier]
@@ -379,15 +357,15 @@ class SXRDCrystal(object):
 
         self.parameters['coupled'].append(par)
         self._parIdNo += 1
-        
+
         self.fit_metadata_cache = None
 
         return par
-        
+
 
     def getSurfaceBasis(self):
         return np.concatenate([uc.basis for uc in self if isinstance(uc,UnitCell)])
-        
+
     def getSurfaceDWConstraintEnable(self):
         return np.concatenate([uc.dw_increase_constraint for uc in self if isinstance(uc,UnitCell)])
 
@@ -397,7 +375,7 @@ class SXRDCrystal(object):
             uc = self[ucn]
             s += "# %s %s\n" % (uc.__class__.__name__ ,uc.name)
             s += uc.fitparameterList(verbosity) + "\n"
-            
+
         s += "## UnitCell Weights\n"
         s += "{:10} {:10} {:10} {:10} {:10}\n".format("uc1","occup","uc2","occup","Limits")
         for [index0,indexneg,value], lim in zip(self.weightparameters, self.weightparameterLimits):
@@ -409,17 +387,17 @@ class SXRDCrystal(object):
             else:
                 uc2name = ""
                 uc2value = ""
-            s += "{:10} {:10} {:10} {:10} {:10}\n".format(str(uc1name),str(uc1value),str(uc2name),str(uc2value),str(lim))
-            
+            s += f"{str(uc1name):10} {str(uc1value):10} {str(uc2name):10} {str(uc2value):10} {str(lim):10}\n"
+
         return s
-        
+
     def __uc_fitparnames(self):
         names = []
-        names += self.uc_bulk.fitparnames 
+        names += self.uc_bulk.fitparnames
         for uc in self.uc_surface_list:
             names += uc.fitparnames
         return names
-                    
+
     @property
     def fitparnames(self):
         if self.fit_metadata_cache is None:
@@ -428,7 +406,7 @@ class SXRDCrystal(object):
         names += self.__uc_fitparnames()
         names = list(np.array(names)[self.fit_metadata_cache['par_mask']])
         return names
-    
+
     @property
     def priors(self):
         if self.fit_metadata_cache is None:
@@ -442,72 +420,72 @@ class SXRDCrystal(object):
                     priorlist.append(tuple(par.limits)) #has to be converted to correct distribution in CTROptimizer
             else:
                 priorlist.append(par.prior) # real prior distribution
-        
+
         priorlist += self.uc_bulk.priors
         for uc in self.uc_surface_list:
             priorlist += uc.priors
         priorlist = list(np.array(priorlist)[self.fit_metadata_cache['par_mask']])
         return priorlist
-    
+
     def parameter_list(self):
         if self.fit_metadata_cache is None:
             self.getStartParamAndLimits() # will generate metadata, if not yet done so.
         l = self.parameters['coupled'] + self.parameters['weight'] + self.parameters['domain']
-        l += self.uc_bulk.parameter_list() 
+        l += self.uc_bulk.parameter_list()
         for uc in self.uc_surface_list:
             l += uc.parameter_list()
         l = list(np.array(l)[self.fit_metadata_cache['par_mask']])
         return l
-        
-    
+
+
     def getInitialParameters(self, force_recalculate=False):
         p, _, _ = self.getStartParamAndLimits(force_recalculate)
-        return p    
-        
-    
+        return p
+
+
     def getStartParamAndLimits(self, force_recalculate=False):
         x0 = []; lower = []; higher = []
-        try: 
+        try:
             mismatch = not np.allclose(self._weights_parvalues, self.weights, equal_nan=True)
         except Exception:
             mismatch = True
         recalculate = force_recalculate or mismatch
-        
-        number_xtalpar = sum(len(p) for p in self.parameters.values()) 
-        
-        par_names = []    
+
+        number_xtalpar = sum(len(p) for p in self.parameters.values())
+
+        par_names = []
         for par in self.parameters['weight']:
-            if recalculate or par.value is None:  
+            if recalculate or par.value is None:
                 x0.append(np.mean( (self.weights[par.indices] - self.weights_0[par.indices]) / par.factors))
             else:
                 x0.append(par.value)
             lower.append(par.limits[0]); higher.append(par.limits[1])
             par_names.append(par.name)
-        
+
         for par in self.parameters['domain']:
             raise NotImplementedError("Domain fitting not yet implemented")
             lower.append(par.limits[0]); higher.append(par.limits[1])
             par_names.append(par.name)
-        
+
         uc_numberpars = []
         p, low, high = self.uc_bulk.getStartParamAndLimits()
         x0.extend(p); lower.extend(low); higher.extend(high)
-        
+
         uc_numberpars.append(len(p))
-        
+
         for uc in self.uc_surface_list:
             p, low, high = uc.getStartParamAndLimits()
             uc_numberpars.append(len(p))
             x0.extend(p); lower.extend(low); higher.extend(high)
-        
+
         par_names += self.__uc_fitparnames()
-        
+
         number_coupled = len(self.parameters['coupled'])
-        
+
         par_names = np.array(par_names)
         uc_par_idx = np.arange(par_names.size) + number_coupled
         uc_par_mask = np.ones(par_names.size,dtype=np.bool_)
-        
+
         x0_coupled = []; lower_coupled = []; higher_coupled = []
         idx = 0
         for par in self.parameters['coupled']:
@@ -515,16 +493,16 @@ class SXRDCrystal(object):
             x0_coupled.append(np.mean(np.array(x0)[paridx]))
             uc_par_idx[paridx] = idx
             uc_par_mask[paridx] = False
-            
+
             lower_coupled.append(par.limits[0]); higher_coupled.append(par.limits[1])
             idx += 1
-            
+
         uc_par_idx_trunc = uc_par_idx[uc_par_mask]
         uc_par_idx_trunc_idx = np.arange(uc_par_idx_trunc.size) + number_coupled
         uc_par_idx[uc_par_mask] = uc_par_idx_trunc_idx
-        
+
         par_idx_sortarray = np.concatenate((np.arange(number_coupled),uc_par_idx)).astype(np.intp)
-        
+
         self.fit_metadata_cache = {
             'par_idx_sortarray' : par_idx_sortarray,
             'par_mask' : np.concatenate((np.ones(number_coupled,dtype=np.bool_),uc_par_mask)),
@@ -532,15 +510,15 @@ class SXRDCrystal(object):
             'number_coupled' : number_coupled,
             'uc_numberpars' : uc_numberpars
         }
-        
+
         x0 = np.array(x0)[uc_par_mask]
         lower = np.array(lower)[uc_par_mask]
         higher = np.array(higher)[uc_par_mask]
 
         return np.concatenate((x0_coupled,x0)), np.concatenate((lower_coupled,lower)), np.concatenate((higher_coupled,higher))
-        
-        
-        
+
+
+
     """
     def _readFitparValues(self):
 
@@ -570,26 +548,26 @@ class SXRDCrystal(object):
         x_r = x[self.fit_metadata_cache['par_idx_sortarray']] # reorder fitpars, this handles coupled parameters
         x_ucs = x_r[self.fit_metadata_cache['number_xtalpar']:]
         uc_numberpars = self.fit_metadata_cache['uc_numberpars']
-        
+
         lower = 0
         for uc,noparam in zip([self.uc_bulk] + self.uc_surface_list,uc_numberpars):
             uc.setFitParameters(x_ucs[lower:noparam + lower])
             lower = noparam + lower
-        
+
         for i, par in enumerate(self.parameters['coupled']):
             par.value = x[i]
-        
+
         self.weights = np.copy(self.weights_0)
         idx = self.fit_metadata_cache['number_coupled']
         for par in self.parameters['weight']:
             self.weights[par.indices] += par.factors*x_r[idx]
             par.value = x_r[idx]
             idx += 1
-            
-        
+
+
         self._weights_parvalues = np.copy(self.weights)
-        
-        
+
+
     def setLimits(self,lim):
         """fit bounds.
         
@@ -602,24 +580,24 @@ class SXRDCrystal(object):
         x_r = lim[self.fit_metadata_cache['par_idx_sortarray']] # reorder fitpars, this handles coupled parameters
         x_ucs = x_r[self.fit_metadata_cache['number_xtalpar']:]
         uc_numberpars = self.fit_metadata_cache['uc_numberpars']
-        
+
         lower = 0
         for uc,noparam in zip([self.uc_bulk] + self.uc_surface_list,uc_numberpars):
             uc.setLimits(x_ucs[lower:noparam + lower])
             lower = noparam + lower
-        
+
         for i, par in enumerate(self.parameters['coupled']):
             if lim[i][0] > lim[i][1]:
                 raise ValueError("Upper fit bound of coupled par must be larger than the lower bound.")
             par.limits = (lim[i][0],lim[i][1])
-            
+
         idx = self.fit_metadata_cache['number_coupled']
         for par in self.parameters['weight']:
             if x_r[idx][0] > x_r[idx][1]:
                 raise ValueError("Upper fit bound of weight pars must be larger than the lower bound.")
             par.limits = (x_r[idx][0],x_r[idx][1])
             idx += 1
-        
+
     def setFitErrors(self,errors):
         if self.fit_metadata_cache is None:
             self.getStartParamAndLimits() # will generate metadata, if not yet done so.
@@ -627,63 +605,63 @@ class SXRDCrystal(object):
         errors_r = errors[self.fit_metadata_cache['par_idx_sortarray']] # reorder fitpars
         errors_ucs = errors_r[self.fit_metadata_cache['number_xtalpar']:]
         uc_numberpars = self.fit_metadata_cache['uc_numberpars']
-        
+
         lower = 0
         for uc,noparam in zip([self.uc_bulk] + self.uc_surface_list,uc_numberpars):
             uc.setFitErrors(errors_ucs[lower:noparam + lower])
             lower = noparam + lower
-        
+
         for i, par in enumerate(self.parameters['coupled']):
             par.error = errors[i]
-        
+
         self.werrors = np.full_like(self.weights,np.nan)
-        idx = 0            
+        idx = 0
         for par in self.parameters['weight']:
             self.werrors[par.indices] = np.nan_to_num(self.werrors[par.indices],nan=0.0)
             self.werrors[par.indices] += par.factors*errors_r[idx]
             par.error = errors_r[idx]
             idx += 1
         self._werrors_parvalues = np.copy(self.werrors)
-    
+
     def getFitErrors(self):
         if self.fit_metadata_cache is None:
             self.getStartParamAndLimits() # will generate metadata, if not yet done so.
         if self.werrors is None:
             raise ValueError("No errors for SXRDCrystal UnitCell weights have been set.")
-        try: 
+        try:
             mismatch = not np.allclose(self._werrors_parvalues, self.werrors, equal_nan=True)
         except Exception:
             mismatch = True
         err0 = []
 
-        number_xtalpar = sum(len(p) for p in self.parameters.values()) 
-        
-        par_names = []    
+        number_xtalpar = sum(len(p) for p in self.parameters.values())
+
+        par_names = []
         for par in self.parameters['weight']:
             if mismatch:
                 err0.append(np.mean(self.werrors[par.indices] / np.abs(par.factors)))
             else:
                 err0.append(par.error)
             par_names.append(par.name)
-        
+
         for par in self.parameters['domain']:
             raise NotImplementedError("Domain fitting not yet implemented")
             #lower.append(par.limits[0]); higher.append(par.limits[1])
             #par_names.append(par.name)
-        
+
         #uc_numberpars = []
         p = self.uc_bulk.getFitErrors()
         err0.extend(p)
-        
+
         #uc_numberpars.append(len(p))
-        
+
         for uc in self.uc_surface_list:
             p = uc.getFitErrors()
             #uc_numberpars.append(len(p))
             err0.extend(p)
-        
+
         par_names += self.__uc_fitparnames()
-        
+
         par_names = np.array(par_names)
 
         err0_coupled = []
@@ -695,13 +673,13 @@ class SXRDCrystal(object):
 
         return err
 
-    
+
     def setEnergy(self,E):
         for uc in self.uc_surface_list:
             uc.setEnergy(E)
         self.uc_bulk.setEnergy(E)
-        
-        
+
+
     def zDensity_G(self,z,h,k):
         if self.enable_uc_stacking:
             self.apply_stacking()
@@ -709,18 +687,18 @@ class SXRDCrystal(object):
         for uc,w in zip(self.uc_surface_list,self.weights):
             rho += uc.zDensity_G(z,h,k)*w
         return rho
-        
-        
+
+
     def toRODStr(self):
         s = "E = %.5f keV\n" % (self.uc_bulk._E*1e-3)
         for i,w,uc in zip(self.uc_stacking, self.weights,self.uc_surface_list):
             s += "# %s %s\n" % (uc.__class__.__name__ ,uc.name)
             s += "%04i %.5f\n" % (i,w)
             s += uc.toRODStr() + "\n"
-            
+
         s+= "# UnitCell bulk\n" + self.uc_bulk.toRODStr()
         return s
-    
+
     def toStr(self,showErrors=True):
         s = "E = %.5f keV\n" % (self.uc_bulk._E*1e-3)
         for i ,(no,w,uc) in enumerate(zip(self.uc_stacking,self.weights,self.uc_surface_list)):
@@ -730,17 +708,17 @@ class SXRDCrystal(object):
             else:
                 s += "%04i occupancy = %.5f\n" % (i,w)
             s += uc.toStr() + "\n"
-            
+
         s+= "# UnitCell bulk\n" + self.uc_bulk.toStr()
         return s
-    
+
     @staticmethod
     def fromStr(string,atten=0.01):
         weights = []
         werrors = []
         uc_suface = []
         uc_stacking = []
-        
+
         strio = util.StringIO(string)
         Estr = next_skip_comment(strio).split('=')[1].split('keV')[0]
         E = float(Estr)*1e3
@@ -752,7 +730,7 @@ class SXRDCrystal(object):
             lineprefix = splstring[i-1][splstring[i-1].rfind('\n'):] # get contents of line before '#'
             if '//' in lineprefix:
                 del unitCells[i-1] # index of unitCells is already shifted by 1 in "unitCells = splstring[1:]"
-        
+
         for ucstr in unitCells[:-1]:
             strio = util.StringIO(ucstr)
             line1 = next_skip_comment(strio)
@@ -794,7 +772,7 @@ class SXRDCrystal(object):
         xtal.werrors = np.array(werrors) if errors else None
         xtal.setGlobalReferenceUnitCell(xtal['bulk'])
         return xtal
-        
+
     def __getitem__(self,uc_name_or_index):
         if isinstance(uc_name_or_index,int):
             if uc_name_or_index == -1:
@@ -807,8 +785,8 @@ class SXRDCrystal(object):
             idx = namelist.index(uc_name_or_index)
             return self.uc_surface_list[idx]
         else:
-            raise ValueError("must be str or int, not {}".format(type(uc_name_or_index)) )
-            
+            raise ValueError(f"must be str or int, not {type(uc_name_or_index)}" )
+
     def getUcIndex(self,uc_name_or_index):
         if isinstance(uc_name_or_index,(int,np.integer)):
             return int(uc_name_or_index)
@@ -819,48 +797,48 @@ class SXRDCrystal(object):
             idx = namelist.index(uc_name_or_index)
             return idx
         else:
-            raise ValueError("must be str or int, not {}".format(type(uc_name_or_index)) )
-    
+            raise ValueError(f"must be str or int, not {type(uc_name_or_index)}" )
+
     def plot3d(self,ucx=2,ucy=2,ucz=-3,dwon=False,occuon=False,figure=None,translate=np.array([0.,0.,0.]), **keyargs):
         try:
             from mayavi import mlab
         except ImportError:
             warnings.warn("can not import mayavi: 3D plotting not supported")
             return
-        
+
         if figure is None:
             figure = mlab.figure()
-            
+
         for mat in self.uc_bulk.coherentDomainMatrix:
             self.uc_bulk.plot3d(ucx,ucy,ucz,dwon,occuon,figure,mat,**keyargs)
-            
+
         for uc in self.uc_surface_list:
             for mat in uc.coherentDomainMatrix:
                 uc.plot3d(ucx,ucy,1,dwon,occuon,figure,mat,**keyargs)
-        
-        
-            
+
+
+
     def getUcNames(self):
         return [uc.name for uc in self.uc_surface_list] + ['bulk']
-        
+
     def _ipython_key_completions_(self):
         return self.getUcNames()
 
     def toFile(self,filename):
         with open(filename,'w') as f:
             f.write(self.toStr())
-        
+
     def toRODFile(self,filename):
         with open(filename,'w') as f:
             f.write(self.toRODStr())
-    
+
     @staticmethod
     def fromFile(filename):
         f, ext = os.path.splitext(filename)
         if ext == '':
             for fext in [".xpr", '.xtal']:
                 if os.path.isfile(filename + fext):
-                    with open(filename + fext,'r') as f:
+                    with open(filename + fext) as f:
                         fstr = f.read()
                     xtal = SXRDCrystal.fromStr(fstr)
                     xtal.name = os.path.basename(filename + fext)
@@ -875,11 +853,11 @@ class SXRDCrystal(object):
                 except Exception as e:
                     warnings.warn("Fitsettings for SXRDCrystal %s seem to exist, but cannot be read: %s" % (os.path.basename(filename), e))
         else:
-            with open(filename,'r') as f:
+            with open(filename) as f:
                 fstr = f.read()
             xtal = SXRDCrystal.fromStr(fstr)
             xtal.name = os.path.basename(filename)
         return xtal
-    
+
     def __repr__(self):
         return self.toStr()

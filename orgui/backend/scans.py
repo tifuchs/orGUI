@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2020-2025 Timo Fuchs
@@ -38,7 +37,7 @@ class Scan(ABC):
 
     All methods in this class must be populated for a working backend. 
     """
-    
+
     @abstractmethod
     def __init__(self,hdffilepath_orNode=None, scanno=None):
         """Constructor of the class. 
@@ -68,16 +67,16 @@ class Scan(ABC):
         """
         self.axisname = None # either "th" or "mu", this defines the scan axis
         self.axis = None # value of either "th" or "mu"
-        
+
         self.th = 0. # or self.mu, depending on scanaxis
         self.omega = -self.th # = -1*th
         self.title = "generic_scan"
         # for mu-scan you must provide a value for omega/theta
-        
-        # optional: provide a unique identifier, which is used as key in h5 database to identify 
+
+        # optional: provide a unique identifier, which is used as key in h5 database to identify
         # the dataset
         # self.name = "identifier"
-    
+
     @property
     def auxillary_counters(self):
         """Optional: provide a list of counters or motor names, that should 
@@ -88,9 +87,9 @@ class Scan(ABC):
         after each integration, orGUI will search for these counter names in the Scan
         object and copy the entries into the database.
         """
-        return [] 
+        return []
 
-    @classmethod    
+    @classmethod
     @abstractmethod
     def parse_h5_node(cls, node):
         pass
@@ -108,16 +107,16 @@ class Scan(ABC):
         Only the image data is required as numpy array, accessible as h5_image.img
         """
         raise NotImplementedError()
-        
+
 
 
 class h5_Image:
-    
+
     def __init__(self, data):
         """Only the image data is required as numpy array.
         motors and counters do not need to be populated.
         """
-        self.img = data 
+        self.img = data
         self.motors = dict()
         self.counters = dict()
 
@@ -125,7 +124,7 @@ class h5_Image:
 class SimulationScan(Scan):
 
     def __init__(self, detshape, axismin, axismax, points, axis='th', fixed=0.):
-        
+
         self.shape = detshape
         self.axisname = axis
         self.axis = np.linspace(axismin,axismax,points)
@@ -140,20 +139,20 @@ class SimulationScan(Scan):
         else:
             raise ValueError("%s is not an implemented scan axis." % axis)
         self.nopoints = points
-        
+
         self.images = np.zeros((points,*detshape)) + 10
         self.title = "sim ascan %s %s %s %s" % (self.axisname,axismin,axismax,points)
-        
+
     def __len__(self):
         return self.nopoints
-        
+
     def get_raw_img(self, i):
         return h5_Image(self.images[i])
-        
+
     def set_raw_img(self, i, data): #for intensity simulation in the future.
         self.images[i] = data
-    
+
     def parse_h5_node(cls, node): # unused
         pass
-        
+
 
