@@ -11,12 +11,12 @@ This is a bugfix and maintenance release.
 
 *The last version to support python <=3.10 and NumPy 1.x.* 
 
-**Attention: pyFAI versions 2025.12.0, 2025.12.1 and 2026.2.0 cause a software crash when selecting a detector in the machine parameters.**
-
 Two ***critical bugs*** were fixed that affect physics calculations:
 
 - Allowed Bragg reflections close to the search bounds (usually high Q) were sometimes not found. This bug was present in all previous versions <v1.4.0.
 - The complex phase of the Fourier components rho_G of the electron density along z was incorrectly calculated (zDensity_G). This bug was present in all previous versions <v1.4.0.
+
+pyFAI versions 2025.12.0, 2025.12.1 and 2026.2.0 cause a software crash when selecting a detector in the machine parameters.
 
 ### Added
 
