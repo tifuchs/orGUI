@@ -356,7 +356,7 @@ def _start_GUI(options, ncpu):
                 app.quit()
                 return
         if hasattr(mainWindow, 'console_dockwidget'):
-            mainWindow.console_dockwidget.pushVariables(namespace)
+            mainWindow.console_dockwidget.ipyconsole.pushVariables(namespace)
         logger.info("starting orGUI")
         return app.exec()
     else:
