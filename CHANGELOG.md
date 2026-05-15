@@ -3,6 +3,69 @@
 This is the changelog for the software orGUI, written by Timo Fuchs
 
 
+## [1.5.0-rc.1] (2026-05-15)
+
+[532b60b](https://github.com/tifuchs/orGUI/commit/532b60bab3073ae9f0ff063a0e119aa9e9957857)...[7107429](https://github.com/tifuchs/orGUI/commit/7107429a2c81cf45d7a43ef394bb910731c09070)
+
+Release candidate for v1.5.0
+
+Adds a new command line interface mode of orGUI, which enables better scripting in headless configurations.
+
+The planned orGUI documentation is work in progress and a first version is now available on https://orgui.readthedocs.io/
+ 
+### Added
+
+- Add command line interface using Qt offscreen rendering and update logging ([9442123](https://github.com/tifuchs/orGUI/commit/94421236384dd5037e83a98274f2d9fe7a59d74a))
+- Add orCLI input prompt token in cli mode ([2de769a](https://github.com/tifuchs/orGUI/commit/2de769a92eb4a71f6ed5e0fca8c1879848826b5f))
+- Add batch scripting ([b1116ac](https://github.com/tifuchs/orGUI/commit/b1116ac914a8c2e3b4b6f0bc0eea3039180583ba))
+- Add Progress logging API ([0cb8246](https://github.com/tifuchs/orGUI/commit/0cb82464d5461db6ae61e21565bf1c31d722a3d0))
+- Add AGENTS.md for AI code review rules ([5df3d9d](https://github.com/tifuchs/orGUI/commit/5df3d9de9e817330dc2b412ff6056c375a89e7fd))
+- Add orGUI.py docstrings, minimal sphinx documentation ([cdc47d6](https://github.com/tifuchs/orGUI/commit/cdc47d6846ce32403c983f187f5a458b99931d2e))
+- Add .readthedocs.yaml ([b71d867](https://github.com/tifuchs/orGUI/commit/b71d86705acabd5a703314238ca2872017d0a9af))
+- Add PySide6 to docs requirements ([466e8d2](https://github.com/tifuchs/orGUI/commit/466e8d2750771f4e0b4030bd315237b961784dbe))
+- Add RTD import checker ([8fcce5b](https://github.com/tifuchs/orGUI/commit/8fcce5b7876121357cc6a97fffff121d998c47a5))
+- Add headless CLI and batch scripting support ([9f5db10](https://github.com/tifuchs/orGUI/commit/9f5db1079b224c7c9bc04c61f118812cb1722b89))
+- Add backend and configuration pages ([5efb16e](https://github.com/tifuchs/orGUI/commit/5efb16e112520c0178ad9911da45c66f47b09a94))
+- Add project links to pyproject.toml ([9c68924](https://github.com/tifuchs/orGUI/commit/9c68924abf055c6e8be74585ee4c33da09426814))
+- Add release.yml ([6582566](https://github.com/tifuchs/orGUI/commit/6582566ce3ea10e7dc9a5182c52d00340ea0e893))
+- Add release procedure and release notes ([7107429](https://github.com/tifuchs/orGUI/commit/7107429a2c81cf45d7a43ef394bb910731c09070))
+
+### Changed
+
+- Log files ([28ffb92](https://github.com/tifuchs/orGUI/commit/28ffb928d88610f9c4a45eef7fa1fd604af6d74a))
+- Limit deltaS to a median of 1 pixel ROI center distance ([43afb8c](https://github.com/tifuchs/orGUI/commit/43afb8cfe05753d1584ae0d3b9521bc091ca743a))
+- Use new logging API in UBCalculator.readConfig ([c2ea4c3](https://github.com/tifuchs/orGUI/commit/c2ea4c3b0b51c9caa25f6016abe35cc56b9bd895))
+- Set number of CPUs in main.py ([b6aeda6](https://github.com/tifuchs/orGUI/commit/b6aeda64d7b1285d875c2081bc7594cd950c9afe))
+- Multiple manual static rocking scans cli function ([7f4f5de](https://github.com/tifuchs/orGUI/commit/7f4f5de3694aae247630302f21321706f28420df))
+- Expand AGENTS.md guidance for CTR stack, logging modes, and public API docs ([cf87b88](https://github.com/tifuchs/orGUI/commit/cf87b885028a4b2a0f5ee0bec0b011d3b6217ae7))
+- Safeguard CLI logging and refactor anchor ROI I/O ([c178fdc](https://github.com/tifuchs/orGUI/commit/c178fdcda1d5aa97bd72feffd48245da800fb09a))
+- Increase verbosity of backend load errors ([3df9a16](https://github.com/tifuchs/orGUI/commit/3df9a162e68a0a4bba2802c590dffd5d50eb5a08))
+- Use dispatched MessageBox logging to ensure blocking UI calls are made from main thread ([e9dc755](https://github.com/tifuchs/orGUI/commit/e9dc7558347c931cb07ca79a9005121775820f69))
+- ImagePeakFinder.calc_image_range is now besteffort, ensure message_box_dispatcher running in correct thread ([2002811](https://github.com/tifuchs/orGUI/commit/20028111fc99e30a439d984c064c006b662af2b7))
+- OrGUI startup docs, GUI screenshot and explanations ([799335c](https://github.com/tifuchs/orGUI/commit/799335c9e2f6a34b55245ecf9be3db79c7f55052))
+- Install full target on readthedocs for autodoc ([515f108](https://github.com/tifuchs/orGUI/commit/515f1080e5e91a3942070871b347034fc2bf79c9))
+- README: rephrase some paragraphs, add PyPi badge ([38293e5](https://github.com/tifuchs/orGUI/commit/38293e5b0c3696a88cd8d7ca88f15e188d4e2517))
+- QM2/id4b add z motor to scanned motor list ([be77c1a](https://github.com/tifuchs/orGUI/commit/be77c1aab81be792c498b6eae15b80eed7e74a4f))
+- QM2 add log file parsing for accurate time stamps ([23bd0f7](https://github.com/tifuchs/orGUI/commit/23bd0f774cb58f5bdbb04621e3a0c4d49c725ddd))
+- Backend and configuration pages ([3417b2b](https://github.com/tifuchs/orGUI/commit/3417b2b41618ba39117c0566edbdb0f21e2a40f4))
+- Default NUMEXPR_MAX_THREADS=1 to avoid oversubscription ([3598f0d](https://github.com/tifuchs/orGUI/commit/3598f0d149b3fa0519166d32233a088def0a3a26))
+- Specify conventional commits in AGENTS.md ([5f3d214](https://github.com/tifuchs/orGUI/commit/5f3d214ba131ffec360d42aff9cbad8e676ed38d))
+
+### Fixed
+
+- Missing display of static ROI due to numpy 0-d array concatenation ([7654956](https://github.com/tifuchs/orGUI/commit/765495650fd09c4eca92afd4fed7630dc99209e1))
+- Restore shell init order, validate startup args, and harden integration errors ([7e9221f](https://github.com/tifuchs/orGUI/commit/7e9221fdfa8a2b2a9cde0cf9a51fc1052c0deb11))
+- Handle empty exceptions in logger, ROI I/O and UI symmetry ([991cba3](https://github.com/tifuchs/orGUI/commit/991cba39d8f37368176b951174b3d3b1016cc1c2))
+- Explicitly close database in cli mode ([5124656](https://github.com/tifuchs/orGUI/commit/5124656c09fb81188f70fc07c7bdcc80aa73a61d))
+- Apply mask to bg image and Carr ([2d22cfb](https://github.com/tifuchs/orGUI/commit/2d22cfb83635597b7beb3f11e6dae95b1c5827ef))
+- Resolve ipyconsole.pushVariables to the correct fun member ([a810dbf](https://github.com/tifuchs/orGUI/commit/a810dbfab33e4d98985de6abaf65d8180e1e5664))
+- Exclude masked pixels from rocking counters ([b5f752f](https://github.com/tifuchs/orGUI/commit/b5f752fb9986a68113193eba2f427cdb91a34d0f))
+
+### Removed
+
+- Remove old doc from README, which is now on RTD ([147e53b](https://github.com/tifuchs/orGUI/commit/147e53b68ae31918034c29357486fce0412d2d2b))
+
+
 ## [1.4.1] (2026-03-27)
 
 [260ab5d](https://github.com/tifuchs/orGUI/commit/260ab5d63d3e3cacbefdbc9f62eb640bb0d80e80)...[3f5ce1a](https://github.com/tifuchs/orGUI/commit/3f5ce1a77cfe8bde3f2551dba35d117fbe87f023)
@@ -620,6 +683,7 @@ in form of a README and a diffractometer image showing the geometry.
 - Remove old reflection spinbox edit, add toolbar buttons instead ([7854679](https://github.com/tifuchs/orGUI/commit/7854679ff96344e40fd9d88334672309f62be219))
 - Remove array index widget from ArrayTableWidget, as only 1D or 2D arrays are used ([25796e2](https://github.com/tifuchs/orGUI/commit/25796e21f103a2a6f9e4dd8544e941bd7886605d))
 
+[11.5.0-rc.1]: https://github.com/tifuchs/orGUI/compare/1.4.1..1.5.0-rc.1
 [1.4.1]: https://github.com/tifuchs/orGUI/compare/1.4.0..v1.4.1
 [1.4.0]: https://github.com/tifuchs/orGUI/compare/1.3.0..v1.4.0
 [1.3.0]: https://github.com/tifuchs/orGUI/compare/1.2.0..1.3.0

@@ -127,8 +127,8 @@ Test the Sphinx documentation build:
 
 .. code-block:: powershell
 
-   git diff -- CHANGELOG.md
-   git add CHANGELOG.md
+   git diff -- CHANGELOG.md doc\source\release_notes.rst
+   git add CHANGELOG.md doc\source\release_notes.rst
    git commit -m "docs: update changelog for vX.Y.Z"
    git tag -a vX.Y.Z -m "Release vX.Y.Z"
    git show --stat vX.Y.Z
