@@ -39,6 +39,14 @@ dependencies = [
 	'pytz >= 2022'
 ]
 
+[project.urls]
+Homepage = "https://github.com/tifuchs/orGUI"
+Source = "https://github.com/tifuchs/orGUI"
+Documentation = "https://orgui.readthedocs.io/en/latest/"
+Issues = "https://github.com/tifuchs/orGUI/issues"
+Changelog = "https://github.com/tifuchs/orGUI/blob/master/CHANGELOG.md"
+Citation = "https://doi.org/10.5281/zenodo.12592485"
+
 [project.optional-dependencies]
 console = ['qtconsole']
 speedup = ['numba']

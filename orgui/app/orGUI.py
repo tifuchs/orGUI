@@ -1158,6 +1158,7 @@ ub : gui for UB matrix and angle calculations
                 C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
             else:
                 C_arr = np.ones(image.img.shape, dtype=np.float64)
+            C_arr[mask] = np.nan
 
             roi_lists_numba = []
             for roiname in ['center', 'left', 'right', 'top', 'bottom']:
@@ -1168,6 +1169,7 @@ ub : gui for UB matrix and angle calculations
                 roi_lists_numba.append(roi_list)
             if background_image is not None and background_image.shape == image.img.shape:
                 bg = background_image.astype(np.float64, order='C', copy=True)
+                bg[mask] = np.nan
                 has_bg_img = True
                 def sumImage(i):
                     """CLI-safe worker: read and integrate one image with background."""
