@@ -732,7 +732,7 @@ class QUBCalculator(qt.QSplitter):
 
     def _onCalMiscut(self):
         om, chi, phi = self.angles.anglesOrientationAlpha([0,0,1], [0,0,1])
-        chi, phi = float(chi), float(phi)
+        chi, phi = float(chi[0]), float(phi[0])
         chi_displ = float(np.rad2deg(chi))
         phi_displ = float(np.rad2deg(phi))
         btn = qt.QMessageBox.question(self,"Miscut calcuated","The miscut is along\nphi = %.4f\nchi = %.4f\nReset chi and phi to negative these values?" % (phi_displ,chi_displ),qt.QMessageBox.Yes | qt.QMessageBox.No, qt.QMessageBox.No)
