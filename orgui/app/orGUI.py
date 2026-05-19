@@ -2353,9 +2353,17 @@ ub : gui for UB matrix and angle calculations
         if imageno is not None:
             if self.fscan.axisname == 'th':
                 mu = self.ubcalc.mu
-                om = -1 * np.deg2rad(self.imageNoToAxis(imageno))
+                axisValue = self.imageNoToAxis(imageno)
+                if axisValue is not None:
+                    om = -1 * np.deg2rad(self.imageNoToAxis(imageno))
+                else:
+                    om = 0
             elif self.fscan.axisname == 'mu':
-                mu = np.deg2rad(self.imageNoToAxis(imageno))
+                axisValue = self.imageNoToAxis(imageno)
+                if axisValue is not None:
+                    mu = np.deg2rad(self.imageNoToAxis(imageno))
+                else:
+                    mu = 0
                 om = -1 * np.deg2rad(self.fscan.th)
                 if len(np.asarray(om).shape) > 0:
                     om = om[0]
@@ -2407,15 +2415,19 @@ ub : gui for UB matrix and angle calculations
         :param int imageno:
             Image index in the active scan.
         :returns:
-            Omega angle in rad, or ``0.0`` when no scan is loaded.
+            Omega angle in rad, ``0.0`` when no scan is loaded or None if the image number is higher than the length of the scan.
 
         .. note::
            CLI-safe.
         """
-        if self.fscan is not None:
-            return np.deg2rad(self.fscan.omega[imageno])
-        else:
-            return 0.
+        try:
+            if self.fscan is not None:
+                return np.deg2rad(self.fscan.omega[imageno])
+            else:
+                return 0.
+        except IndexError as ieE:
+            print(ieE)
+            return None
 
     def imageNoToAxis(self,imageno):
         """Return the scan-axis value for an image index.
@@ -2428,10 +2440,14 @@ ub : gui for UB matrix and angle calculations
         .. note::
            CLI-safe.
         """
-        if self.fscan is not None:
-            return self.fscan.axis[imageno]
-        else:
-            return 0.
+        try:
+            if self.fscan is not None:
+                return self.fscan.axis[imageno]
+            else:
+                return 0.
+        except IndexError as ieE:
+            print(ieE)
+            return None
 
     def axisToImageNo(self,axisval):
         """Map a scan-axis value to the nearest image index.
