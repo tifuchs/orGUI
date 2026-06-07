@@ -29,6 +29,7 @@ __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
 import traceback
+import logging
 from silx.gui import qt
 from silx.gui import icons
 from .ArrayTableDialog import ArrayEditWidget
@@ -41,6 +42,8 @@ from ..datautils.xrayutils import HKLVlieg
 from .. import resources
 from . import qutils
 from . import imagePeakFinder
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class HKLReflection:
@@ -285,7 +288,14 @@ class QReflectionSelector(qt.QWidget):
     def anglesReflection(self, refl):
         if self.orparent.fscan is None:
             return np.array([np.nan,np.nan,np.nan, np.nan, np.nan, np.nan])
-        print(refl.imageno)
+        if not self.orparent.isValidImageNo(refl.imageno):
+            logger.warning(
+                "Skipping angle calculation for stale reflection %s with "
+                "image number %s outside the active scan range.",
+                refl.hkl,
+                refl.imageno,
+            )
+            return np.array([np.nan,np.nan,np.nan, np.nan, np.nan, np.nan])
         mu, om = self.orparent.getMuOm(refl.imageno)
 
         gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([refl.xy[1]]),np.array([refl.xy[0]]), mu)
@@ -381,7 +391,13 @@ class QReflectionSelector(qt.QWidget):
             try:
                 imageno1 = self.orparent.axisToImageNo(np.rad2deg(pos[angle_idx]) * sign)
             except Exception as e:
-                qutils.warning_detailed_message(self, "Error","Cannot calculate axis position:\n%s" % e, traceback.format_exc())
+                logger.warning(
+                    "Skipping Bragg reflection %s because its scan-axis "
+                    "position is outside the active scan range: %s",
+                    hkl,
+                    e,
+                )
+                continue
 
             self.reflBragg.append(HKLReflection(yxr[::-1], hkl, imageno1, identifier))
         if self.showBraggReflections:
