@@ -195,7 +195,9 @@ def main():
             ncpus = int(min(os.cpu_count(), 16)) if os.cpu_count() is not None else 1
             logger.info('Detected ncpus=%s. (capped to 16)' % ncpus)
     logger.info('Using ncpus=%s. (capped to 16)' % ncpus)
-
+    
+    if "NUMEXPR_MAX_THREADS" not in os.environ:
+        os.environ["NUMEXPR_MAX_THREADS"] = '1' # to avoid oversubscription
     
     if options.cli:
         logger_utils.set_logging_context('cli')
@@ -272,7 +274,7 @@ ub : gui for UB matrix and angle calculations
         if options.input:
             logger.info("Run batch script %s" % options.input)
             try:
-                runpy.run_path(options.input, init_globals=namespace)
+                namespace = runpy.run_path(options.input, init_globals=namespace)
             except:
                 mainWindow.database.close()
                 app.quit()
@@ -344,7 +346,7 @@ def _start_GUI(options, ncpu):
         if options.input:
             logger.info("Run batch script %s" % options.input)
             try:
-                runpy.run_path(options.input, init_globals=namespace)
+                namespace = runpy.run_path(options.input, init_globals=namespace)
             except:
                 raise
             logger.info("Completed batch script %s" % options.input)
@@ -353,6 +355,8 @@ def _start_GUI(options, ncpu):
                 mainWindow.database.close()
                 app.quit()
                 return
+        if hasattr(mainWindow, 'console_dockwidget'):
+            mainWindow.console_dockwidget.ipyconsole.pushVariables(namespace)
         logger.info("starting orGUI")
         return app.exec()
     else:

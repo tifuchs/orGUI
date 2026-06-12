@@ -245,6 +245,15 @@ If a change cannot be covered by an existing test, add at least one regression t
 
 Lint findings should be fixed when they are local to the change, but lint cleanup must not drive risky scientific refactors.
 
+## Commit message convention
+
+Use Conventional Commits for commit and merge messages, following the repository convention in issue #38. Prefer concise subjects such as `fix(phys): exclude masked pixels from rocking counters`.
+
+- Allowed types are `build`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `style`, and `test`.
+- Use the `phys` scope for any change that can affect measurement results, including counters, error propagation, physics math, or generated data.
+- Mark breaking changes with `!` and include a `BREAKING CHANGE:` footer when old post-processing scripts or generated data compatibility may be affected.
+- For merge commits, keep the subject conventional and add a short body only when it helps describe additional non-primary changes.
+
 ## Safe change strategy
 
 When working on a bug or feature:

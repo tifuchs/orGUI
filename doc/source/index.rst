@@ -20,4 +20,5 @@ large 2D detectors.
    ub_matrix
    image_integration
    entry_points
-   api
+   release_notes
+   developer

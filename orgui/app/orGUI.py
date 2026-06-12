@@ -1158,6 +1158,7 @@ ub : gui for UB matrix and angle calculations
                 C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
             else:
                 C_arr = np.ones(image.img.shape, dtype=np.float64)
+            C_arr[mask] = np.nan
 
             roi_lists_numba = []
             for roiname in ['center', 'left', 'right', 'top', 'bottom']:
@@ -1168,6 +1169,7 @@ ub : gui for UB matrix and angle calculations
                 roi_lists_numba.append(roi_list)
             if background_image is not None and background_image.shape == image.img.shape:
                 bg = background_image.astype(np.float64, order='C', copy=True)
+                bg[mask] = np.nan
                 has_bg_img = True
                 def sumImage(i):
                     """CLI-safe worker: read and integrate one image with background."""
@@ -2122,6 +2124,14 @@ ub : gui for UB matrix and angle calculations
         hkls = []
         angles = []
         for refl in self.reflectionSel.reflections:
+            if not self.isValidImageNo(refl.imageno):
+                logger.warning(
+                    "Skipping stale reflection %s with image number %s "
+                    "outside the active scan range.",
+                    refl.hkl,
+                    refl.imageno,
+                )
+                continue
             #print(refl.xy)
             gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(np.array([refl.xy[1]]),np.array([refl.xy[0]]),self.ubcalc.mu)
             delta = float(delta[0]); gamma = float(gamma[0])
@@ -2349,6 +2359,10 @@ ub : gui for UB matrix and angle calculations
            CLI-safe when a scan is loaded.
         """
         if imageno is not None:
+            if not self.isValidImageNo(imageno):
+                raise IndexError(
+                    "Image number %s is outside the active scan range." % imageno
+                )
             if self.fscan.axisname == 'th':
                 mu = self.ubcalc.mu
                 om = -1 * np.deg2rad(self.imageNoToAxis(imageno))
@@ -2399,19 +2413,46 @@ ub : gui for UB matrix and angle calculations
         else:
             raise Exception("No Scan selected")
 
+    def isValidImageNo(self, imageno):
+        """Return whether ``imageno`` addresses an image in the active scan.
+
+        :param int imageno:
+            Image index to validate.
+        :returns:
+            ``True`` when an active scan exists and ``imageno`` is an integer
+            index within ``[0, len(scan))``.
+        :rtype: bool
+
+        .. note::
+           CLI-safe.
+        """
+        if self.fscan is None:
+            return False
+        try:
+            image_index = int(imageno)
+        except (TypeError, ValueError):
+            return False
+        return image_index == imageno and 0 <= image_index < len(self.fscan)
+
     def imageNoToOmega(self,imageno):
         """Return omega for an image index.
 
         :param int imageno:
             Image index in the active scan.
         :returns:
-            Omega angle in rad, or ``0.0`` when no scan is loaded.
+            Omega angle in rad, ``0.0`` when no scan is loaded.
+        :raises IndexError:
+            If ``imageno`` is outside the active scan range.
 
         .. note::
            CLI-safe.
         """
         if self.fscan is not None:
-            return np.deg2rad(self.fscan.omega[imageno])
+            if not self.isValidImageNo(imageno):
+                raise IndexError(
+                    "Image number %s is outside the active scan range." % imageno
+                )
+            return np.deg2rad(self.fscan.omega[int(imageno)])
         else:
             return 0.
 
@@ -2422,12 +2463,18 @@ ub : gui for UB matrix and angle calculations
             Image index in the active scan.
         :returns:
             Scan-axis value in the scan's stored units, usually deg.
+        :raises IndexError:
+            If ``imageno`` is outside the active scan range.
 
         .. note::
            CLI-safe.
         """
         if self.fscan is not None:
-            return self.fscan.axis[imageno]
+            if not self.isValidImageNo(imageno):
+                raise IndexError(
+                    "Image number %s is outside the active scan range." % imageno
+                )
+            return self.fscan.axis[int(imageno)]
         else:
             return 0.
 
@@ -2912,6 +2959,13 @@ ub : gui for UB matrix and angle calculations
     def _onChangeImage(self,imageno):
         """GUI/CLI hint: switch the active image and replot it."""
         if self.fscan is not None:
+            if not self.isValidImageNo(imageno):
+                logger.warning(
+                    "Skipping request to display stale image number %s outside "
+                    "the active scan range.",
+                    imageno,
+                )
+                return
             self.scanSelector.slider.setValue(imageno)
             self.plotImage(self.scanSelector.slider.value())
 

@@ -3,6 +3,117 @@
 This is the changelog for the software orGUI, written by Timo Fuchs
 
 
+## [1.5.0] (2026-06-07)
+
+[532b60b](https://github.com/tifuchs/orGUI/commit/532b60bab3073ae9f0ff063a0e119aa9e9957857)...[c574bdf](https://github.com/tifuchs/orGUI/commit/c574bdf0bd5af6fa8258d108e7355c579bfef857)
+
+This is a feature release focused on scripted/headless operation, release
+infrastructure, documentation, and several GUI and integration robustness
+fixes.
+
+orGUI now has two startup modes. The default graphical user interface is still
+the normal interactive application for inspecting images, setting reference
+reflections, adjusting ROIs, and visually checking the experiment geometry. The
+new command line interface is selected with ``--cli``, ``--nogui``, or
+``--headless`` and is intended for scripting, batch jobs, and cluster use. In
+CLI mode users can run a Python startup script with ``-i`` / ``--input`` and
+work with the preloaded ``app``, ``orgui``, and ``ub`` objects instead of
+clicking through the GUI.
+
+Scientific and analysis-impacting fixes:
+
+- Masked pixels are now excluded from rocking-scan counters and the same mask
+  handling is applied to the static background image and correction arrays used
+  in rocking integration. Results from workflows that combine rocking
+  integration with masks, static background subtraction, or correction arrays
+  should be checked against the new behavior.
+- Fixes for NumPy 2.x compatibility.
+- Reference reflection tables with image numbers outside the currently loaded
+  scan no longer crash the GUI. Invalid image numbers are reported as warnings
+  and the reflection table is updated more defensively.
+
+CLI and scripting highlights:
+
+- ``orGUI --cli`` / ``--nogui`` / ``--headless`` start the headless path, and
+  ``-i`` / ``--input`` runs a Python startup script with ``app``, ``orgui``,
+  and ``ub`` already available.
+- ``--keep-running`` keeps the application alive after a startup script and can
+  drop into the embedded shell for interactive inspection.
+- ``--cpus``, ``--logfile``, ``--errorlog``, and HDF5 file-locking options make
+  batch and cluster runs easier to control.
+- CLI runs now print progress and errors to the terminal or selected log files,
+  so batch jobs can finish or fail without waiting for a hidden dialog.
+- Batch-oriented helpers were added for static and rocking ROI workflows,
+  including support for multiple manually defined static rocking scans.
+
+Documentation:
+
+- The orGUI documentation is now available on Read the Docs:
+  <https://orgui.readthedocs.io/>.
+- End-user release notes are available in this changelog and on the Read the
+  Docs release-notes page:
+  <https://orgui.readthedocs.io/en/latest/release_notes.html>.
+
+Other user-visible changes:
+
+- Log files can be written for normal and error output.
+- Backend load errors are more verbose.
+- CHESS QM2/id4b backend examples now include the z motor in the scanned motor
+  list, and QM2 log files can be parsed for more accurate timestamps.
+- ``NUMEXPR_MAX_THREADS`` defaults to 1 when not already set, avoiding
+  oversubscription during parallel or cluster runs.
+
+Thanks to Finn Schröter (Finnjek) for the NumPy 2.x miscut fix and Bragg
+reflection image-number crash fix.
+
+### Added
+
+- Add command line interface using Qt offscreen rendering and update logging ([9442123](https://github.com/tifuchs/orGUI/commit/94421236384dd5037e83a98274f2d9fe7a59d74a))
+- Add orCLI input prompt token in cli mode ([2de769a](https://github.com/tifuchs/orGUI/commit/2de769a92eb4a71f6ed5e0fca8c1879848826b5f))
+- Add batch scripting ([b1116ac](https://github.com/tifuchs/orGUI/commit/b1116ac914a8c2e3b4b6f0bc0eea3039180583ba))
+- Add Progress logging API ([0cb8246](https://github.com/tifuchs/orGUI/commit/0cb82464d5461db6ae61e21565bf1c31d722a3d0))
+- Add log file support ([28ffb92](https://github.com/tifuchs/orGUI/commit/28ffb928d88610f9c4a45eef7fa1fd604af6d74a))
+- Limit deltaS to a median of 1 pixel ROI center distance ([43afb8c](https://github.com/tifuchs/orGUI/commit/43afb8cfe05753d1584ae0d3b9521bc091ca743a))
+- Add multiple manual static rocking scans cli function ([7f4f5de](https://github.com/tifuchs/orGUI/commit/7f4f5de3694aae247630302f21321706f28420df))
+- Add headless CLI and batch scripting support ([9f5db10](https://github.com/tifuchs/orGUI/commit/9f5db1079b224c7c9bc04c61f118812cb1722b89))
+- QM2/id4b add z motor to scanned motor list ([be77c1a](https://github.com/tifuchs/orGUI/commit/be77c1aab81be792c498b6eae15b80eed7e74a4f))
+- QM2 add log file parsing for accurate time stamps ([23bd0f7](https://github.com/tifuchs/orGUI/commit/23bd0f774cb58f5bdbb04621e3a0c4d49c725ddd))
+- Publish the first orGUI documentation set on Read the Docs ([cdc47d6](https://github.com/tifuchs/orGUI/commit/cdc47d6846ce32403c983f187f5a458b99931d2e), [b71d867](https://github.com/tifuchs/orGUI/commit/b71d86705acabd5a703314238ca2872017d0a9af), [799335c](https://github.com/tifuchs/orGUI/commit/799335c9e2f6a34b55245ecf9be3db79c7f55052), [3417b2b](https://github.com/tifuchs/orGUI/commit/3417b2b41618ba39117c0566edbdb0f21e2a40f4), [5efb16e](https://github.com/tifuchs/orGUI/commit/5efb16e112520c0178ad9911da45c66f47b09a94), [7107429](https://github.com/tifuchs/orGUI/commit/7107429a2c81cf45d7a43ef394bb910731c09070))
+- Add GitHub release workflow ([6582566](https://github.com/tifuchs/orGUI/commit/6582566ce3ea10e7dc9a5182c52d00340ea0e893))
+
+### Changed
+
+- Improve messages, progress output, and error reporting in both GUI and CLI runs ([c2ea4c3](https://github.com/tifuchs/orGUI/commit/c2ea4c3b0b51c9caa25f6016abe35cc56b9bd895), [c178fdc](https://github.com/tifuchs/orGUI/commit/c178fdcda1d5aa97bd72feffd48245da800fb09a), [3df9a16](https://github.com/tifuchs/orGUI/commit/3df9a162e68a0a4bba2802c590dffd5d50eb5a08), [e9dc755](https://github.com/tifuchs/orGUI/commit/e9dc7558347c931cb07ca79a9005121775820f69), [2002811](https://github.com/tifuchs/orGUI/commit/20028111fc99e30a439d984c064c006b662af2b7))
+- Set the number of CPUs during startup and default ``NUMEXPR_MAX_THREADS=1`` when not already configured ([b6aeda6](https://github.com/tifuchs/orGUI/commit/b6aeda64d7b1285d875c2081bc7594cd950c9afe), [3598f0d](https://github.com/tifuchs/orGUI/commit/3598f0d149b3fa0519166d32233a088def0a3a26))
+- Preserve variables created by input scripts for the GUI console ([a810dbf](https://github.com/tifuchs/orGUI/commit/a810dbfab33e4d98985de6abaf65d8180e1e5664))
+- Refactor invalid reference reflection image-number handling into warnings and add regression tests ([c574bdf](https://github.com/tifuchs/orGUI/commit/c574bdf0bd5af6fa8258d108e7355c579bfef857))
+- Expand project guidance for CTR stack, logging modes, public API docs, and conventional commits ([5df3d9d](https://github.com/tifuchs/orGUI/commit/5df3d9de9e817330dc2b412ff6056c375a89e7fd), [cf87b88](https://github.com/tifuchs/orGUI/commit/cf87b885028a4b2a0f5ee0bec0b011d3b6217ae7), [5f3d214](https://github.com/tifuchs/orGUI/commit/5f3d214ba131ffec360d42aff9cbad8e676ed38d))
+
+### Fixed
+
+- Missing display of static ROI due to numpy 0-d array concatenation ([7654956](https://github.com/tifuchs/orGUI/commit/765495650fd09c4eca92afd4fed7630dc99209e1))
+- Restore shell init order, validate startup args, and harden integration errors ([7e9221f](https://github.com/tifuchs/orGUI/commit/7e9221fdfa8a2b2a9cde0cf9a51fc1052c0deb11))
+- Handle empty exceptions in logger, ROI I/O and UI symmetry ([991cba3](https://github.com/tifuchs/orGUI/commit/991cba39d8f37368176b951174b3d3b1016cc1c2))
+- Explicitly close database in cli mode ([5124656](https://github.com/tifuchs/orGUI/commit/5124656c09fb81188f70fc07c7bdcc80aa73a61d))
+- Apply mask to bg image and Carr in rocking integration ([2d22cfb](https://github.com/tifuchs/orGUI/commit/2d22cfb83635597b7beb3f11e6dae95b1c5827ef))
+- Exclude masked pixels from rocking counters ([b5f752f](https://github.com/tifuchs/orGUI/commit/b5f752fb9986a68113193eba2f427cdb91a34d0f))
+- Resolve ipyconsole.pushVariables to the correct fun member ([a810dbf](https://github.com/tifuchs/orGUI/commit/a810dbfab33e4d98985de6abaf65d8180e1e5664))
+- Fix miscut calculation for NumPy > 2.0 ([e2538d1](https://github.com/tifuchs/orGUI/commit/e2538d13e7c6b938ec27a2016df64805935e912f))
+- Avoid crashes when Bragg reference reflections have image numbers outside the loaded scan ([9680bee](https://github.com/tifuchs/orGUI/commit/9680bee49af408c9ddd71d6d04834d46ae3502e1))
+
+### Removed
+
+- Remove old doc from README, which is now on Read the Docs ([147e53b](https://github.com/tifuchs/orGUI/commit/147e53b68ae31918034c29357486fce0412d2d2b))
+
+
+## [1.5.0-rc.1] (2026-05-15)
+
+[532b60b](https://github.com/tifuchs/orGUI/commit/532b60bab3073ae9f0ff063a0e119aa9e9957857)...[7107429](https://github.com/tifuchs/orGUI/commit/7107429a2c81cf45d7a43ef394bb910731c09070)
+
+Release candidate for v1.5.0. The full user-facing release notes are included
+in the final [1.5.0](#150-2026-06-07) section above.
+
+
 ## [1.4.1] (2026-03-27)
 
 [260ab5d](https://github.com/tifuchs/orGUI/commit/260ab5d63d3e3cacbefdbc9f62eb640bb0d80e80)...[3f5ce1a](https://github.com/tifuchs/orGUI/commit/3f5ce1a77cfe8bde3f2551dba35d117fbe87f023)
@@ -11,12 +122,12 @@ This is a bugfix and maintenance release.
 
 *The last version to support python <=3.10 and NumPy 1.x.* 
 
-**Attention: pyFAI versions 2025.12.0, 2025.12.1 and 2026.2.0 cause a software crash when selecting a detector in the machine parameters.**
-
 Two ***critical bugs*** were fixed that affect physics calculations:
 
 - Allowed Bragg reflections close to the search bounds (usually high Q) were sometimes not found. This bug was present in all previous versions <v1.4.0.
 - The complex phase of the Fourier components rho_G of the electron density along z was incorrectly calculated (zDensity_G). This bug was present in all previous versions <v1.4.0.
+
+pyFAI versions 2025.12.0, 2025.12.1 and 2026.2.0 cause a software crash when selecting a detector in the machine parameters.
 
 ### Added
 
@@ -620,6 +731,8 @@ in form of a README and a diffractometer image showing the geometry.
 - Remove old reflection spinbox edit, add toolbar buttons instead ([7854679](https://github.com/tifuchs/orGUI/commit/7854679ff96344e40fd9d88334672309f62be219))
 - Remove array index widget from ArrayTableWidget, as only 1D or 2D arrays are used ([25796e2](https://github.com/tifuchs/orGUI/commit/25796e21f103a2a6f9e4dd8544e941bd7886605d))
 
+[1.5.0]: https://github.com/tifuchs/orGUI/compare/v1.4.1..v1.5.0
+[1.5.0-rc.1]: https://github.com/tifuchs/orGUI/compare/v1.4.1..v1.5.0-rc.1
 [1.4.1]: https://github.com/tifuchs/orGUI/compare/1.4.0..v1.4.1
 [1.4.0]: https://github.com/tifuchs/orGUI/compare/1.3.0..v1.4.0
 [1.3.0]: https://github.com/tifuchs/orGUI/compare/1.2.0..1.3.0
