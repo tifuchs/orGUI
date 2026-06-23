@@ -32,7 +32,7 @@ import numpy as np
 from .. import util
 import re
 #random.seed(45)
-from scipy.stats import skellam
+from scipy.stats import skellam, poisson
 
 
 from .CTRutil import (_ensure_contiguous, next_skip_comment, LinearFitFunctions)
@@ -873,5 +873,367 @@ class Film(LinearFitFunctions):
 
 
 
+class PoissonSurface(LinearFitFunctions):
+    parameterOrder = "Width/layers deltaW/layers"
 
+    parameterLookup = {'W' : 0, 'deltaW' : 1 }
+
+    parameterLookup_inv = dict(map(reversed, parameterLookup.items()))
+
+    def __init__(self,unitcell,**kwargs):
+        super().__init__()
+        self.type = type
+        self.set_ucs(unitcell, **kwargs)
+        self.basis = np.array([0., 0.])
+        self._basis_created = np.array([np.nan, np.nan])
+        self.basis_0 = np.array([0., 0.])
+        self.errors = None
+        if 'name' in kwargs:
+            self.name = kwargs['name']
+        else:
+            self.name = "unnamed"
+
+        self.below_loc = 0.
+        self.below_H = 0.
+        self.below_layer = -1.
+
+    def set_ucs(self, unitcell, **kwargs):
+        self.unitcell = unitcell
+        self.uc_layers = self.unitcell.split_in_layers()
+        self.layer_ucs = [self.uc_layers[uc] for uc in self.uc_layers]
+        self.layerpos = np.array([self.unitcell.layerpos[i] for i in self.uc_layers])
+
+    def setReferenceUnitCell(self,uc,rotMatrix=np.identity(3)):
+        """   
+        set reference unit cell. 
+        When any F_hkl is called, first hkl will be transformed from the reference 
+        lattice into the lattice of this unit cell,
+        using equation
+        B' * H' = O * B * H, where a ' indicates the entities in the frame of this
+        lattice. O is an optional rotation matrix, which describes the rotation of
+        this lattice with respect to the reference lattice.
+        
+        Equally the same applies to the relative coordinates of the respective 
+        lattices:
+        R' * x' = O * R * x
+        
+        !!! This has to be checked !!!
+        """
+        self.unitcell.setReferenceUnitCell(uc, rotMatrix)
+        #self._dirty = True
+
+    def setEnergy(self,E):
+        self.E = E
+        self.unitcell.setEnergy(E)
+
+
+    @property
+    def loc_absolute(self):
+        return self.pos_absolute
+
+    def set_below(self, loc, height):
+        self.below_loc = loc
+        self.below_H = height
+        self.createLayers()
+
+    @property
+    def height_absolute(self):
+        if np.any(self._basis_created != self.basis):
+            self.createLayers()
+        upper_layer_id = self.end_layer_number
+        upper_layer = self.uc_layers[upper_layer_id]
+        idx = self.layer_ucs.index(upper_layer)
+        pos = upper_layer.coherentDomainMatrix[-1][2,3]*upper_layer.a[2]
+        strain = upper_layer.coherentDomainMatrix[-1][2,2]
+        layerpos = self.unitcell.layerpos[upper_layer_id]
+        layer_space = np.diff(self.layerpos, append=self.layerpos[0]+1)
+        H = pos + strain*(layerpos + layer_space[idx])*upper_layer.a[2]
+        return H
+
+    @property
+    def pos_absolute(self):
+        if np.any(self._basis_created != self.basis):
+            self.createLayers()
+        H = self.layer_ucs[0].coherentDomainMatrix[0][2,3]*self.layer_ucs[0].a[2]
+        return H
+
+    @pos_absolute.setter
+    def pos_absolute(self, pos):
+        if np.any(self._basis_created != self.basis):
+            self.createLayers()
+        for l in self.layer_ucs:
+            l.pos_absolute = pos
+        self.below_H = pos
+
+    @property
+    def end_layer_number(self):
+        if np.any(self._basis_created != self.basis):
+            self.createLayers()
+        return self._end_layer_number
+
+    @property
+    def start_layer_number(self): # not implemented
+        return -1.
+
+    @start_layer_number.setter
+    def start_layer_number(self, ln): # not implemented
+        return
+
+    def createLayers(self):
+        n_layers_in_uc  = len(self.unitcell.layers)
+        scaled_width = (self.basis[0] + self.basis[1])
+        layers_to_create = int(round(scaled_width, 0))
+        if layers_to_create <= 0:
+            raise ValueError("Effective film width <= 0. Cannot create layers")
+        full_layers = layers_to_create // n_layers_in_uc
+        remaining = layers_to_create % n_layers_in_uc
+
+
+        for i, uc in enumerate(self.layer_ucs):
+            uc.coherentDomainMatrix = []
+            uc.coherentDomainOccupancy = []
+
+        mat_0 = np.vstack((np.identity(3).T,np.array([0,0,0]))).T
+        h = 0.
+        strain = self.unitcell.coherentDomainMatrix[0][2,2]
+        
+        probability_top = skellam.cdf(unitcells, mu1, mu2).reshape((-1, n_layers))
+        occup = self.unitcell.coherentDomainOccupancy[0]
+        
+        
+
+        for j in range(full_layers):
+
+            for i, uc in enumerate(self.layer_ucs):
+                mat_i = np.copy(mat_0)
+
+                mat_i[2,2] = strain
+                mat_i[2,3] = h * strain
+
+                uc.coherentDomainMatrix.append(mat_i)
+                uc.coherentDomainOccupancy.append(occup)
+
+            h += strain
+
+        top_layer = self.layer_ucs[-1].layers[0]
+        for j in range(remaining):
+            uc = self.layer_ucs[j]
+            mat_i = np.copy(mat_0)
+
+            mat_i[2,2] = strain
+            mat_i[2,3] = h * strain
+
+            uc.coherentDomainMatrix.append(mat_i)
+            uc.coherentDomainOccupancy.append(occup)
+
+
+        upper_layer = uc.basis[0,7]
+        self._end_layer_number = upper_layer
+        for l in self.layer_ucs:
+            l.pos_absolute = self.below_H
+
+        self._basis_created = np.copy(self.basis)
+
+
+    def F_uc(self,h,k,l):
+        if np.any(self._basis_created != self.basis):
+            self.createLayers()
+        if HAS_NUMBA_ACCEL:
+            h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
+        F = np.zeros_like(l, dtype=np.complex128)
+        for uc in self.layer_ucs:
+            F += uc.F_uc(h,k,l)
+        return F
+
+    def zDensity_G(self,z,h,k):
+        if np.any(self._basis_created != self.basis):
+            self.createLayers()
+        rho = np.zeros_like(z, dtype=np.complex128)
+        for uc in self.layer_ucs:
+            rho += uc.zDensity_G(z,h,k)
+        return rho
+
+    def addFitParameter(self,indexarray,limits=(-np.inf,np.inf),**kwarg):
+        """to assign multiple unitcells with the same fitparameter, provide list of
+        unitcell names as kwarg `unitcell`   
+        """
+        if len(np.array(indexarray).shape) < 2:
+            return super().addFitParameter(indexarray,limits,**kwarg)
+
+        return self.unitcell.addFitParameter(indexarray,limits,**kwarg)
+
+    def addRelParameter(self,indexarray,factors,limits=(-np.inf,np.inf),**kwarg):
+        """to assign multiple unitcells with the same fitparameter, provide list of
+        unitcell names as kwarg `unitcell`   
+        """
+        if len(np.array(indexarray).shape) < 2:
+            return super().addRelParameter(self,indexarray,factors,limits,**kwarg)
+        return self.unitcell.addRelParameter(indexarray,factors,limits,**kwarg)
+
+
+    def getStartParamAndLimits(self, force_recalculate=False):
+        #if self.basis_0 is None:
+        #    self.basis_0 = np.copy(self.basis)
+        x0, lower, upper = super().getStartParamAndLimits(force_recalculate) # absolute and relative
+        uc_x0, uc_lower, uc_upper = self.unitcell.getStartParamAndLimits(force_recalculate)
+        return (np.concatenate([x0, uc_x0]),
+               np.concatenate([lower, uc_lower]),
+               np.concatenate([upper, uc_upper]))
+
+    def setFitParameters(self,x):
+        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+        fp_no = len(self.unitcell.fitparnames)
+        super().setFitParameters(x[:abs_rel_no])
+        self.unitcell.setFitParameters(x[abs_rel_no: abs_rel_no+fp_no])
+
+    def setLimits(self,lim):
+        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+        fp_no = len(self.unitcell.fitparnames)
+        super().setLimits(lim[:abs_rel_no])
+        self.unitcell.setLimits(lim[abs_rel_no: abs_rel_no+fp_no])
+
+    def setFitErrors(self,errors):
+        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+        fp_no = len(self.unitcell.fitparnames)
+        super().setFitErrors(errors[:abs_rel_no])
+        self.unitcell.setFitErrors(errors[abs_rel_no: abs_rel_no+fp_no])
+
+    def getFitErrors(self):
+        err = super().getFitErrors()
+        err_uc = self.unitcell.getFitErrors()
+        return np.concatenate([err, err_uc])
+
+    @property
+    def fitparnames(self):
+        return super().fitparnames + self.unitcell.fitparnames
+
+    @property
+    def priors(self):
+        return super().priors + self.unitcell.priors
+
+    def parametersToDict(self):
+        d = super().parametersToDict()
+        d['unitcells'] = {}
+        d['unitcells']['unitcell'] = self.unitcell.parametersToDict()
+        return d
+
+    def clearParameters(self):
+        super().clearParameters()
+        self.unitcell.clearParameters()
+
+    def parametersFromDict(self, d, override_values=True):
+        self.unitcell.parametersFromDict(d['unitcells']['unitcell'], override_values)
+        super().parametersFromDict(d, override_values)
+
+    def updateFromParameters(self):
+        """Update basis from the values stored in the Parameters 
+        """
+        self.unitcell.updateFromParameters()
+        super().updateFromParameters()
+
+    def __getitem__(self,uc_name_or_index):
+        if isinstance(uc_name_or_index,str):
+            if uc_name_or_index.lower() in ['uc', 'unitcell', self.uc_top.name]:
+                return self.unitcell
+            else:
+                raise KeyError("No unit cell %s in EpitaxyInterface %s" % (uc_name_or_index, self.name))
+        else:
+            raise ValueError(f"must be str, not {type(uc_name_or_index)}" )
+
+    def parameter_list(self):
+        return super().parameter_list() + self.unitcell.parameter_list()
+
+    @classmethod
+    def fromStr(cls, string):
+        xprfile = False
+        with util.StringIO(string) as f:
+            # parse header
+            line = next_skip_comment(f).split()
+            #if line[0].lower() != 'type':
+            #    raise ValueError("You must specify a epitaxy type in line 1."
+            #    " Available are %s" % EpitaxyInterface.avail_types)
+            #if line[1].lower() not in EpitaxyInterface.avail_types:
+            #    raise ValueError("Expitaxy type %s is not valid."
+            #    " Must be one of %s" % (line[1], EpitaxyInterface.avail_types))
+            #ep_type = line[1].lower()
+
+            statistics = dict()
+            line = next_skip_comment(f)
+            while('Width' in line or '=' in line): # parameter header or statistics line
+                if '=' in line:
+                    try:
+                        splitted = [n.split(',') for n in line.split('=')]
+                        splitted = [item for sublist in splitted for item in sublist]
+                        for i in range(0,len(splitted),2):
+                            statistics[splitted[i].strip()] = float(splitted[i+1])
+                    except Exception:
+                        print("Cannot read statistics string: %s" % line)
+                line = next_skip_comment(f)
+            # epitaxy parameters
+            sline = line.split()
+            if '+-' in sline:
+                params = re.findall(r'\(([^)]+)',line)
+                params_array = np.array([np.array(p.split('+-'),dtype=np.float64) for p in params]).T
+                basis = params_array[0]
+                errors = params_array[1]
+            else:
+                basis = np.array(sline,dtype=np.float64)
+                errors = None
+
+        # very explicit searching for the lines containing TopUnitCell and BottomUnitCell:
+        sp_str = string.splitlines()
+        uc_pos = -1
+        for i, l in enumerate(sp_str):
+            if uc_pos == -1:
+                if 'UnitCell' in l:
+                    uc_pos = i # found it, and save line number
+            if uc_pos != -1:
+                break
+        else:
+            msg = "Cannot create Film. "
+            if uc_pos < 0:
+                msg += "No UnitCell provided. "
+            raise ValueError(msg)
+
+        uc_classname,uc_name = sp_str[uc_pos].split(maxsplit=1)
+
+        assert uc_classname == 'UnitCell'
+        uc_str = '\n'.join(sp_str[uc_pos+1:])
+
+        uc = UnitCell.fromStr(uc_str)
+
+        uc.name = uc_name
+
+        film = cls(uc)
+        film.statistics = statistics
+        film.basis = basis
+        film.basis_0 = np.copy(basis)
+        film.errors = errors
+        return film
+
+
+    def toStr(self):
+        #s = "type %s" % self.type
+        s = "\n" + PoissonSurface.parameterOrder + "\n" + self.filmToStr()
+        s += "\n\n"
+        s += "UnitCell %s\n" % self.unitcell.name
+        s += self.unitcell.toStr() + "\n"
+        return s
+
+    def __repr__(self):
+        return self.toStr()
+
+    def filmToStr(self,showErrors=True):
+        param = self.basis
+        if (self.errors is not None) and showErrors:
+            errors = self.errors
+            l = []
+            for p, err in zip(param,errors):
+                l.append("(%.5f +- %.5f)" % (p, err))
+            return "   ".join(l)
+        else:
+            l = []
+            for p in param:
+                l.append("%.5f " % p)
+            return "   ".join(l)
 
