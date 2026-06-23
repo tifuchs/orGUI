@@ -6,6 +6,7 @@ import pytest
 
 from orgui.app.orGUI import orGUI
 from orgui.app.QReflectionSelector import QReflectionSelector
+from orgui.app.QUBCalculator import QUBCalculator
 
 
 class FakeScan:
@@ -118,3 +119,139 @@ def test_bragg_reflection_list_skips_stale_image_numbers(caplog):
     assert selector.reflBragg[0].hkl.tolist() == [1.0, 0.0, 0.0]
     assert selector.reflBragg[0].imageno == 1
     assert "Skipping Bragg reflection" in caplog.text
+
+
+def test_reflection_mismatch_tolerates_table_update_in_progress():
+    class FakeModel:
+        def __init__(self, shape):
+            self.data = np.empty(shape)
+            self.colors = None
+
+        def getData(self):
+            return self.data
+
+        def setArrayColors(self, bgcolors=None, fgcolors=None):
+            self.colors = bgcolors
+
+    class FakeViewport:
+        def update(self):
+            pass
+
+    def fake_editor(shape):
+        return SimpleNamespace(
+            model=FakeModel(shape),
+            view=SimpleNamespace(viewport=lambda: FakeViewport()),
+        )
+
+    selector = QReflectionSelector.__new__(QReflectionSelector)
+    selector.reflections = [object(), object()]
+    selector.refleditor = fake_editor((2, 6))
+    selector.refleditor_angles = fake_editor((0, 9))
+    mismatch = {
+        "angle_mismatch": np.array([0.01, 0.02]),
+        "relative_norm_mismatch": np.array([0.03, 0.04]),
+    }
+
+    selector.setReflectionMismatch(mismatch)
+
+    assert selector.refleditor.model.colors.shape == (2, 6, 3)
+    assert selector.refleditor_angles.model.colors is None
+
+
+def test_set_reflections_synchronizes_both_tables():
+    selector = QReflectionSelector.__new__(QReflectionSelector)
+    selector.reflections = []
+    selector.activeReflection = None
+    selector.nextNo = 0
+    selector._showReferenceReflections = False
+    selector.plot = SimpleNamespace(removeMarker=lambda identifier: None)
+    update_calls = []
+    selector.updateEditor = lambda: update_calls.append(True)
+    reflections = [
+        SimpleNamespace(identifier="old-0"),
+        SimpleNamespace(identifier="old-1"),
+    ]
+
+    selector.setReflections(reflections)
+
+    assert update_calls == [True]
+    assert [refl.identifier for refl in selector.reflections] == [
+        "ref_0",
+        "ref_1",
+    ]
+
+
+def test_add_reflection_refreshes_mismatch_through_editor_update():
+    selector = QReflectionSelector.__new__(QReflectionSelector)
+    selector.reflections = []
+    selector.nextNo = 0
+    selector._showReferenceReflections = False
+    refresh_calls = []
+    selector.updateEditor = lambda: refresh_calls.append(True)
+    selector.setReflectionActive = lambda identifier: None
+
+    selector.addReflection(
+        {"x": 10.0, "y": 20.0},
+        imageno=3,
+        hkl=np.array([1.0, 0.0, 0.0]),
+    )
+
+    assert refresh_calls == [True]
+    assert len(selector.reflections) == 1
+
+
+def test_u_change_refreshes_mismatch():
+    calls = []
+    calculator = SimpleNamespace(
+        ubCal=SimpleNamespace(setU=lambda value: calls.append(("setU", value))),
+        updateReflectionMismatch=lambda: calls.append(("refresh", None)),
+        sigReplotRequest=SimpleNamespace(
+            emit=lambda value: calls.append(("replot", value))
+        ),
+    )
+    u_matrix = np.eye(3)
+
+    QUBCalculator._onUchanged(calculator, u_matrix)
+
+    assert calls[0][0] == "setU"
+    assert np.array_equal(calls[0][1], u_matrix)
+    assert calls[1:] == [("refresh", None), ("replot", True)]
+
+
+def test_lattice_change_refreshes_mismatch():
+    calls = []
+    lattice = object()
+    calculator = SimpleNamespace(
+        ubCal=SimpleNamespace(
+            setLattice=lambda value: calls.append(("setLattice", value))
+        ),
+        updateReflectionMismatch=lambda: calls.append(("refresh", None)),
+        sigReplotRequest=SimpleNamespace(
+            emit=lambda value: calls.append(("replot", value))
+        ),
+    )
+
+    QUBCalculator._onCrystalParamsChanged(calculator, lattice, 0.999)
+
+    assert calculator.crystal is lattice
+    assert calculator.n == 0.999
+    assert calls == [
+        ("setLattice", lattice),
+        ("refresh", None),
+        ("replot", True),
+    ]
+
+
+def test_setting_reflection_handler_refreshes_mismatch():
+    calls = []
+    calculator = SimpleNamespace(
+        updateReflectionMismatch=lambda: calls.append("refresh")
+    )
+
+    def reflection_handler():
+        return np.empty((0, 3)), np.empty((0, 6))
+
+    QUBCalculator.setReflectionHandler(calculator, reflection_handler)
+
+    assert calculator.reflections is reflection_handler
+    assert calls == ["refresh"]

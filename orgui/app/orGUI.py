@@ -263,6 +263,9 @@ class orGUI(qt.QMainWindow):
         self.reflectionSel.sigQueryImageChange.connect(self._onChangeImage)
         self.reflectionSel.sigQueryCenterPlot.connect(self._onCenterGraph)
 
+        self.ubcalc.sigReflectionMismatchChanged.connect(
+            self.reflectionSel.setReflectionMismatch
+        )
         self.ubcalc.setReflectionHandler(self.getReflections)
 
         self.ubcalc.sigPlottableMachineParamsChanged.connect(self._onPlotMachineParams)

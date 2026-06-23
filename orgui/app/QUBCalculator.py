@@ -96,6 +96,7 @@ class QUBCalculator(qt.QSplitter):
     sigNewReflection = qt.pyqtSignal(dict)
     sigPlottableMachineParamsChanged = qt.pyqtSignal()
     sigReplotRequest = qt.pyqtSignal(bool)
+    sigReflectionMismatchChanged = qt.pyqtSignal(object)
     #sigQueryImageChange = qt.pyqtSignal(int)
     #sigImagePathChanged = qt.pyqtSignal(object)
     #sigImageNoChanged = qt.pyqtSignal(object)
@@ -366,11 +367,13 @@ class QUBCalculator(qt.QSplitter):
 
     def _onUchanged(self, U):
         self.ubCal.setU(U)
+        self.updateReflectionMismatch()
         self.sigReplotRequest.emit(True)
 
     def _onResetU(self, func):
         func(self.ubCal)
         self.uedit.setU(self.ubCal.getU())
+        self.updateReflectionMismatch()
         self.sigReplotRequest.emit(True)
 
     def _onAlignU(self, ddict):
@@ -381,6 +384,7 @@ class QUBCalculator(qt.QSplitter):
         elif ddict['frame'] == 'lab':
             self.ubCal.alignU_lab(ddict['hkl'], pos, ddict['xyz'])
         self.uedit.setU(self.ubCal.getU())
+        self.updateReflectionMismatch()
         self.sigReplotRequest.emit(True)
 
     def _onCrystalParamsChanged(self,crystal,n):
@@ -391,6 +395,7 @@ class QUBCalculator(qt.QSplitter):
         self.n = n
         self.ubCal.setLattice(self.crystal)
         #self.ubCal.defaultU()
+        self.updateReflectionMismatch()
         self.sigReplotRequest.emit(True)
 
     def _onMachineParamsChanged(self,params):
@@ -412,6 +417,7 @@ class QUBCalculator(qt.QSplitter):
         angles_u = self.uedit.cached_angles
 
         self.uedit.setAngles(self.mu, self.chi, self.phi, angles_u[-1])
+        self.updateReflectionMismatch()
 
         try:
             self.sigPlottableMachineParamsChanged.emit()
@@ -437,7 +443,47 @@ class QUBCalculator(qt.QSplitter):
         self.readConfig(filename)
 
     def setReflectionHandler(self,refls):
+        """Set the callable that supplies current reference reflections.
+
+        :param collections.abc.Callable refls:
+            Callable returning ``(hkls, angles)`` for the current reflection
+            table.
+        """
         self.reflections = refls
+        self.updateReflectionMismatch()
+
+    def getReflectionMismatch(self, hkls=None, angles=None):
+        """Return mismatch parameters for reference reflections.
+
+        :param numpy.ndarray hkls:
+            Optional Miller indices in r.l.u. If omitted, the configured
+            reflection handler supplies them.
+        :param numpy.ndarray angles:
+            Optional Vlieg six-circle angles in rad. If omitted, the configured
+            reflection handler supplies them.
+        :returns:
+            Per-reflection mismatch dictionary from
+            :meth:`HKLVlieg.UBCalculator.getReflectionMismatch`.
+        :rtype: dict
+        """
+        if hkls is None or angles is None:
+            hkls, angles = self.reflections()
+        return self.ubCal.getReflectionMismatch(hkls, angles)
+
+    def updateReflectionMismatch(self):
+        """Refresh reflection quality indicators for the current UB matrix."""
+        if not hasattr(self, "reflections"):
+            return
+        hkls, angles = self.reflections()
+        if len(hkls) == 0:
+            mismatch = None
+        else:
+            try:
+                mismatch = self.getReflectionMismatch(hkls, angles)
+            except ValueError:
+                mismatch = None
+        self.ueditDialog.setReflectionMismatch(mismatch)
+        self.sigReflectionMismatchChanged.emit(mismatch)
 
     def readConfig(self,configfile):
         config = configparser.ConfigParser()
@@ -636,6 +682,7 @@ class QUBCalculator(qt.QSplitter):
                         
                         raise ValueError("Cannot find beamtime %s in the list of available backends" % beamtime)
             #self.machineParams.set_detector(self.detectorCal.detector)
+            self.updateReflectionMismatch()
             return True
         except Exception as e:
             logger.exception("Can not parse config", 
@@ -685,6 +732,7 @@ class QUBCalculator(qt.QSplitter):
         }
         self.crystalparams.setValues(self.crystal,self.n)
         self.machineParams.setValues(settings)
+        self.updateReflectionMismatch()
 
 
 
@@ -727,6 +775,7 @@ class QUBCalculator(qt.QSplitter):
             self.crystalparams.setValues(self.crystal,self.n)
         #print(self.ubCal.getU())
         self.uedit.setU(self.ubCal.getU())
+        self.updateReflectionMismatch()
         self.sigReplotRequest.emit(False)
         #self.Ueditor.setPlainText(str(self.ubCal.getU()))
 
@@ -1262,6 +1311,13 @@ class QUEditDialog(qt.QDialog):
         layout = qt.QVBoxLayout()
         layout.addWidget(uedit)
 
+        self.mismatchLabel = qt.QLabel("Mean reflection mismatch: unavailable")
+        self.mismatchLabel.setToolTip(
+            "Mean absolute disagreement between Q calculated from the "
+            "reference angles and Q calculated from UB."
+        )
+        layout.addWidget(self.mismatchLabel)
+
         self.savedU = self.uedit.getU()
 
         buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel | qt.QDialogButtonBox.Reset,
@@ -1277,6 +1333,31 @@ class QUEditDialog(qt.QDialog):
         resetbtn.clicked.connect(self.resetParameters)
 
         self.setLayout(layout)
+
+    def setReflectionMismatch(self, mismatch):
+        """Display mean absolute mismatch for the reference reflections.
+
+        :param dict mismatch:
+            Result from
+            :meth:`HKLVlieg.UBCalculator.getReflectionMismatch`, or ``None``
+            when no reflections are available.
+        """
+        if mismatch is None:
+            self.mismatchLabel.setText("Mean reflection mismatch: unavailable")
+            return
+
+        angle = np.asarray(mismatch["angle_mismatch"], dtype=float)
+        norm = np.asarray(mismatch["norm_mismatch"], dtype=float)
+        finite = np.isfinite(angle) & np.isfinite(norm)
+        if not np.any(finite):
+            self.mismatchLabel.setText("Mean reflection mismatch: unavailable")
+            return
+        mean_angle = np.rad2deg(np.mean(angle[finite]))
+        mean_norm = np.mean(norm[finite])
+        self.mismatchLabel.setText(
+            f"Mean reflection mismatch: angle {mean_angle:.4g} deg; "
+            f"|Q| {mean_norm:.4g} Angstrom^-1"
+        )
 
     def showEvent(self, event):
         if event.spontaneous():
@@ -1755,5 +1836,3 @@ class QCrystalParameterDialog(qt.QDialog):
     def onCancel(self):
         self.resetParameters()
         self.hide()
-
-

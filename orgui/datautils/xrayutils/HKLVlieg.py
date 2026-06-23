@@ -788,6 +788,65 @@ class UBCalculator:
         self.setU(U)
         return self._U
 
+    def getReflectionMismatch(self, hkl, angles):
+        """Calculate per-reflection disagreement with the current UB matrix.
+
+        The measured momentum-transfer vector is calculated from the Vlieg
+        six-circle angles. The expected vector is calculated as ``UB @ hkl``.
+
+        :param numpy.ndarray hkl:
+            Miller indices in r.l.u., shaped ``(N, 3)`` or ``(3,)``.
+        :param numpy.ndarray angles:
+            Diffractometer angles
+            ``[alpha, delta, gamma, omega, chi, phi]`` in rad, shaped
+            ``(N, 6)`` or ``(6,)``.
+        :returns:
+            Dictionary containing ``q_from_angles`` and ``q_from_ub`` in
+            Angstrom^-1, ``angle_mismatch`` in rad, ``norm_mismatch`` in
+            Angstrom^-1, and ``relative_norm_mismatch`` as a dimensionless
+            fraction.
+        :rtype: dict
+        :raises ValueError:
+            If the UB matrix is unset, input shapes differ, or a reflection
+            has zero calculated momentum transfer.
+        """
+        if self._UB is None:
+            raise ValueError("Cannot calculate reflection mismatch without a UB matrix")
+
+        hkl = np.atleast_2d(np.asarray(hkl, dtype=float))
+        angles = np.atleast_2d(np.asarray(angles, dtype=float))
+        if hkl.shape[1:] != (3,):
+            raise ValueError("hkl must have shape (N, 3)")
+        if angles.shape[1:] != (6,):
+            raise ValueError("angles must have shape (N, 6)")
+        if len(hkl) != len(angles):
+            raise ValueError(
+                "hkl and angles must contain the same number of reflections"
+            )
+
+        q_from_angles = np.array(
+            [calculate_q_phi(pos, self._K).flatten() for pos in angles]
+        )
+        q_from_ub = np.einsum("ij,nj->ni", self._UB, hkl)
+
+        angle_norm = np.linalg.norm(q_from_angles, axis=1)
+        ub_norm = np.linalg.norm(q_from_ub, axis=1)
+        if np.any(angle_norm == 0.0) or np.any(ub_norm == 0.0):
+            raise ValueError("Cannot compare reflections with zero momentum transfer")
+
+        cosine = np.einsum("ni,ni->n", q_from_angles, q_from_ub)
+        cosine /= angle_norm * ub_norm
+        angle_mismatch = np.arccos(np.clip(cosine, -1.0, 1.0))
+        norm_mismatch = np.abs(angle_norm - ub_norm)
+
+        return {
+            "q_from_angles": q_from_angles,
+            "q_from_ub": q_from_ub,
+            "angle_mismatch": angle_mismatch,
+            "norm_mismatch": norm_mismatch,
+            "relative_norm_mismatch": norm_mismatch / ub_norm,
+        }
+
     def getU(self):
         return self._U
 
@@ -1470,6 +1529,4 @@ if __name__ == "__main__":
     #delta = np.linspace(-np.pi/8,np.pi/8,1100)
     #gamma = np.linspace(-np.pi/8,np.pi/8,1600)
     h , k , l = angles.anglesToHklDetector(0.15,delta,gamma,0.1,0,0)
-
-
 

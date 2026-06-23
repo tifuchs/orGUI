@@ -284,6 +284,7 @@ class QReflectionSelector(qt.QWidget):
             self.setReflectionActive(identifier)
         else:
             self.redrawActiveReflection()
+        self.ubcalc.updateReflectionMismatch()
 
     def anglesReflection(self, refl):
         if self.orparent.fscan is None:
@@ -328,6 +329,7 @@ class QReflectionSelector(qt.QWidget):
             self.plot.addMarker(*refl.xy,legend=refl.identifier,text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='blue',selectable=True,draggable=True,symbol='.')
         self.reflections.insert(row, refl)
         self.setReflectionActive(refl.identifier)
+        self.ubcalc.updateReflectionMismatch()
 
     def _onRowsDeleted(self, rows):
         idents = []
@@ -450,7 +452,71 @@ class QReflectionSelector(qt.QWidget):
                 self.setReflectionActive(self.reflections[0].identifier)
             else:
                 self.activeReflection = None
-                return
+        self.ubcalc.updateReflectionMismatch()
+
+    def setReflectionMismatch(self, mismatch):
+        """Color reflection rows by their relative UB disagreement.
+
+        The best agreement is shown with a light green background and the
+        worst with a light red background. Angular and relative norm
+        disagreements are independently normalized across the current
+        reflections, then weighted equally.
+
+        :param dict mismatch:
+            Result from
+            :meth:`HKLVlieg.UBCalculator.getReflectionMismatch`, or ``None``
+            to clear the colors.
+        """
+        if mismatch is None:
+            self.refleditor.model.setArrayColors()
+            self.refleditor_angles.model.setArrayColors()
+            self.refleditor.view.viewport().update()
+            self.refleditor_angles.view.viewport().update()
+            return
+
+        angle = np.asarray(mismatch["angle_mismatch"], dtype=float)
+        norm = np.asarray(mismatch["relative_norm_mismatch"], dtype=float)
+        if len(angle) != len(self.reflections) or len(norm) != len(self.reflections):
+            self.refleditor.model.setArrayColors()
+            self.refleditor_angles.model.setArrayColors()
+            self.refleditor.view.viewport().update()
+            self.refleditor_angles.view.viewport().update()
+            return
+
+        def normalized(values):
+            finite = np.isfinite(values)
+            result = np.ones(values.shape, dtype=float)
+            if not np.any(finite):
+                return result
+            low = np.min(values[finite])
+            high = np.max(values[finite])
+            if np.isclose(low, high):
+                result[finite] = 0.0
+            else:
+                result[finite] = (values[finite] - low) / (high - low)
+            return result
+
+        score = normalized(0.5 * (normalized(angle) + normalized(norm)))
+        score = np.clip(score, 0.0, 1.0)
+        green = np.array([205.0, 245.0, 205.0])
+        red = np.array([255.0, 190.0, 190.0])
+        row_colors = (
+            green + score[:, np.newaxis] * (red - green)
+        ).astype(np.uint8)
+
+        def apply_colors(editor):
+            table_shape = editor.model.getData().shape
+            if len(table_shape) != 2 or table_shape[0] != len(row_colors):
+                editor.model.setArrayColors()
+            else:
+                colors = np.broadcast_to(
+                    row_colors[:, np.newaxis, :], table_shape + (3,)
+                ).copy()
+                editor.model.setArrayColors(bgcolors=colors)
+            editor.view.viewport().update()
+
+        apply_colors(self.refleditor)
+        apply_colors(self.refleditor_angles)
 
 
     def reflectionsFromEditor(self):
@@ -499,9 +565,7 @@ class QReflectionSelector(qt.QWidget):
 
             self.reflections.append(refl)
             self.nextNo += 1
-        if self.reflections:
-            newactive = self.reflections[0].identifier
-            self.setReflectionActive(newactive)
+        self.updateEditor()
 
     def addReflection(self,eventdict,imageno,hkl=np.array([np.nan,np.nan,np.nan])):
         identifier = 'ref_'+str(self.nextNo)
@@ -1017,5 +1081,3 @@ class PeakImgRangeDialog(qt.QDialog):
             qt.QMessageBox.warning(self, "Invalid input", str(e))
             return
         self.accept()
-
-
