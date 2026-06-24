@@ -2148,6 +2148,40 @@ ub : gui for UB matrix and angle calculations
             angles.append(pos)
         return np.array(hkls), np.array(angles)
 
+    def getReflectionFitData(self):
+        """Return reference reflections including detector pixel positions.
+
+        :returns:
+            ``(hkls, angles, xy)`` with HKL in r.l.u., Vlieg angles in rad,
+            and detector coordinates ``(x, y)`` in pixels.
+        :rtype: tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]
+        """
+        hkls = []
+        angles = []
+        xy = []
+        for refl in self.reflectionSel.reflections:
+            if not self.isValidImageNo(refl.imageno):
+                continue
+            mu, omega = self.getMuOm(refl.imageno)
+            gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(
+                np.array([refl.xy[1]]),
+                np.array([refl.xy[0]]),
+                mu,
+            )
+            hkls.append(refl.hkl)
+            angles.append(
+                [
+                    mu,
+                    float(delta[0]),
+                    float(gamma[0]),
+                    omega,
+                    self.ubcalc.chi,
+                    self.ubcalc.phi,
+                ]
+            )
+            xy.append(refl.xy)
+        return np.asarray(hkls), np.asarray(angles), np.asarray(xy)
+
 
     def _onPlotMachineParams(self, enable=None):
         """GUI/CLI hint: toggle detector center and azimuth plot markers."""

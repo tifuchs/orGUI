@@ -85,6 +85,27 @@ class TestLattice(unittest.TestCase):
 
 class TestUBCalculator(unittest.TestCase):
 
+    def testKabschOrientationFit(self):
+        q_crystal = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.0, 0.0, 3.0],
+                [1.0, 2.0, 3.0],
+            ]
+        )
+        expected_u = HKLVlieg.Rotation.from_euler(
+            "xyz", [0.2, -0.3, 0.4]
+        ).as_matrix()
+        q_phi = np.einsum("ij,nj->ni", expected_u, q_crystal)
+
+        fitted_u, rssd = HKLVlieg.UBCalculator.calc_U_kabsch(
+            q_phi, q_crystal
+        )
+
+        self.assertTrue(np.allclose(fitted_u, expected_u))
+        self.assertAlmostEqual(rssd, 0.0, places=7)
+
     def testReflectionMismatch(self):
         lattice = HKLVlieg.Lattice(
             [3.9242, 3.9242, 3.9242], [90.0, 90.0, 90.0]
@@ -148,4 +169,3 @@ class TestUBCalculator(unittest.TestCase):
             mismatch["relative_norm_mismatch"][0],
             abs(measured_norm - expected_norm) / expected_norm,
         )
-

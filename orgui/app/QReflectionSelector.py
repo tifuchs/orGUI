@@ -128,6 +128,16 @@ class QReflectionSelector(qt.QWidget):
         editorTabWidget.addTab(self.refleditor_angles, "SIXC angles")
 
         layout.addWidget(editorTabWidget)
+        self.mismatchLabel = qt.QLabel(
+            "Mismatch: unavailable"
+        )
+        self.mismatchLabel.setToolTip(
+            "Mean absolute mismatch across the reference reflections. "
+            "The first value is the angular difference between Q calculated "
+            "from the measured angles and Q calculated from UB, in degrees. "
+            "The second value is the difference in Q magnitude, in Å⁻¹."
+        )
+        layout.addWidget(self.mismatchLabel)
         #self.addWidget(editorTabWidget)
 
         self.controlToolbar = qt.QToolBar()
@@ -468,6 +478,9 @@ class QReflectionSelector(qt.QWidget):
             to clear the colors.
         """
         if mismatch is None:
+            self.mismatchLabel.setText(
+                "Mismatch: unavailable"
+            )
             self.refleditor.model.setArrayColors()
             self.refleditor_angles.model.setArrayColors()
             self.refleditor.view.viewport().update()
@@ -475,13 +488,32 @@ class QReflectionSelector(qt.QWidget):
             return
 
         angle = np.asarray(mismatch["angle_mismatch"], dtype=float)
+        absolute_norm = np.asarray(
+            mismatch["norm_mismatch"], dtype=float
+        )
         norm = np.asarray(mismatch["relative_norm_mismatch"], dtype=float)
         if len(angle) != len(self.reflections) or len(norm) != len(self.reflections):
+            self.mismatchLabel.setText(
+                "Mismatch: unavailable"
+            )
             self.refleditor.model.setArrayColors()
             self.refleditor_angles.model.setArrayColors()
             self.refleditor.view.viewport().update()
             self.refleditor_angles.view.viewport().update()
             return
+
+        finite = np.isfinite(angle) & np.isfinite(absolute_norm)
+        if np.any(finite):
+            mean_angle = np.rad2deg(np.mean(angle[finite]))
+            mean_norm = np.mean(absolute_norm[finite])
+            self.mismatchLabel.setText(
+                f"Mismatch: {mean_angle:.4g}°; "
+                f"{mean_norm:.4g} Å⁻¹"
+            )
+        else:
+            self.mismatchLabel.setText(
+                "Mismatch: unavailable"
+            )
 
         def normalized(values):
             finite = np.isfinite(values)

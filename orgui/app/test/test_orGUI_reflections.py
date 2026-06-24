@@ -1,4 +1,5 @@
 import logging
+import copy
 from types import SimpleNamespace
 
 import numpy as np
@@ -6,7 +7,12 @@ import pytest
 
 from orgui.app.orGUI import orGUI
 from orgui.app.QReflectionSelector import QReflectionSelector
-from orgui.app.QUBCalculator import QUBCalculator
+from orgui.app.QUBCalculator import (
+    QUBCalculator,
+    QUBFitDialog,
+    _DeprecatedFitOption,
+)
+from orgui.datautils.xrayutils import DetectorCalibration, HKLVlieg
 
 
 class FakeScan:
@@ -147,8 +153,13 @@ def test_reflection_mismatch_tolerates_table_update_in_progress():
     selector.reflections = [object(), object()]
     selector.refleditor = fake_editor((2, 6))
     selector.refleditor_angles = fake_editor((0, 9))
+    label = SimpleNamespace(text=None)
+    selector.mismatchLabel = SimpleNamespace(
+        setText=lambda text: setattr(label, "text", text)
+    )
     mismatch = {
         "angle_mismatch": np.array([0.01, 0.02]),
+        "norm_mismatch": np.array([0.1, 0.2]),
         "relative_norm_mismatch": np.array([0.03, 0.04]),
     }
 
@@ -156,6 +167,7 @@ def test_reflection_mismatch_tolerates_table_update_in_progress():
 
     assert selector.refleditor.model.colors.shape == (2, 6, 3)
     assert selector.refleditor_angles.model.colors is None
+    assert label.text.startswith("Mismatch:")
 
 
 def test_set_reflections_synchronizes_both_tables():
@@ -255,3 +267,237 @@ def test_setting_reflection_handler_refreshes_mismatch():
 
     assert calculator.reflections is reflection_handler
     assert calls == ["refresh"]
+
+
+def test_experiment_fit_recovers_detector_distance():
+    lattice = HKLVlieg.Lattice([3.9, 4.1, 5.2], [90.0, 90.0, 90.0])
+    detector = DetectorCalibration.Detector2D_SXRD()
+    detector.setFit2D(
+        1000.0, 500.0, 600.0, pixelX=100.0, pixelY=100.0
+    )
+    detector.wavelength = 12.39842 / 70.0 * 1e-10
+    xy = np.array(
+        [[300.0, 400.0], [700.0, 450.0],
+         [350.0, 800.0], [800.0, 900.0]]
+    )
+    expected_u = HKLVlieg.Rotation.from_euler(
+        "xyz", [0.1, -0.2, 0.3]
+    ).as_matrix()
+    wavevector = 2 * np.pi / (detector.wavelength * 1e10)
+    angles = []
+    q_phi = []
+    for index, (x, y) in enumerate(xy):
+        gamma, delta = detector.surfaceAnglesPoint(
+            np.array([y]), np.array([x]), 0.01
+        )
+        position = np.array(
+            [0.01, delta[0], gamma[0],
+             -0.3 + 0.15 * index, 0.02, -0.04]
+        )
+        angles.append(position)
+        q_phi.append(HKLVlieg.calculate_q_phi(position, wavevector))
+    angles = np.asarray(angles)
+    q_phi = np.asarray(q_phi)
+    hkls = np.linalg.solve(
+        expected_u @ lattice.B_mat, q_phi.T
+    ).T
+
+    starting_detector = copy.deepcopy(detector)
+    starting_detector.dist = 0.85
+    starting_detector.reset()
+    reset_calls = []
+    original_reset = starting_detector.reset
+
+    def counted_reset():
+        reset_calls.append(True)
+        original_reset()
+
+    starting_detector.reset = counted_reset
+    ub_calculator = HKLVlieg.UBCalculator(lattice, 70.0)
+    ub_calculator.setU(np.eye(3))
+    calculator = SimpleNamespace(
+        mainGui=SimpleNamespace(
+            getReflectionFitData=lambda: (hkls, angles, xy),
+            reflectionSel=SimpleNamespace(updateEditor=lambda: None),
+        ),
+        detectorCal=starting_detector,
+        crystal=lattice,
+        ubCal=ub_calculator,
+        n=1.0,
+        mu=0.01,
+        chi=0.02,
+        phi=-0.04,
+        crystalparams=SimpleNamespace(setValues=lambda *args: None),
+        machineParams=SimpleNamespace(setValues=lambda *args: None),
+        uedit=SimpleNamespace(setU=lambda *args: None),
+        updateReflectionMismatch=lambda: None,
+        sigReplotRequest=SimpleNamespace(emit=lambda *args: None),
+    )
+
+    rms = QUBCalculator.fitExperiment(calculator, {"dist"})
+
+    assert calculator.detectorCal.dist == pytest.approx(1.0)
+    assert calculator.ubCal.getU() == pytest.approx(expected_u)
+    assert rms < 1e-10
+    assert reset_calls == [True]
+
+
+def test_deprecated_lattice_fit_option_redirects_to_dialog():
+    modes = []
+    dialog = SimpleNamespace(
+        setLegacyLatticeMode=lambda mode: modes.append(mode),
+        legacyLatticeMode=lambda: modes[-1] if modes else "none",
+    )
+    calculator = SimpleNamespace(fitDialog=dialog)
+    option = _DeprecatedFitOption(calculator, "scale", "latscale")
+
+    with pytest.warns(DeprecationWarning):
+        option.setChecked(True)
+    with pytest.warns(DeprecationWarning):
+        assert option.isChecked()
+
+    assert modes == ["scale"]
+
+
+def test_legacy_scale_mode_routes_calc_u_to_new_fit_api():
+    fit_calls = []
+    calculator = SimpleNamespace(
+        reflections=lambda: (
+            np.ones((4, 3)),
+            np.ones((4, 6)),
+        ),
+        ubCal=SimpleNamespace(
+            calculateUFromReflections=lambda hkls, angles: None,
+            getU=lambda: np.eye(3),
+        ),
+        uedit=SimpleNamespace(setU=lambda value: None),
+        updateReflectionMismatch=lambda: None,
+        sigReplotRequest=SimpleNamespace(emit=lambda value: None),
+        fitDialog=SimpleNamespace(legacyLatticeMode=lambda: "scale"),
+        fitExperiment=lambda parameters: fit_calls.append(parameters),
+    )
+
+    QUBCalculator._onCalcU(calculator)
+
+    assert fit_calls == [{"lattice_scale"}]
+
+
+def test_lattice_only_fit_does_not_copy_trial_detector(monkeypatch):
+    true_lattice = HKLVlieg.Lattice(
+        [3.9, 4.1, 5.2], [90.0, 90.0, 90.0]
+    )
+    starting_lattice = HKLVlieg.Lattice(
+        true_lattice.a * 1.2, [90.0, 90.0, 90.0]
+    )
+    expected_u = HKLVlieg.Rotation.from_euler(
+        "xyz", [0.1, -0.2, 0.3]
+    ).as_matrix()
+    angles = np.deg2rad(
+        [
+            [0.2, 4.0, 2.0, 10.0, 1.0, -3.0],
+            [0.2, 7.0, -1.0, 15.0, 1.0, -3.0],
+            [0.2, 3.0, 5.0, 25.0, 1.0, -3.0],
+            [0.2, -2.0, 6.0, 35.0, 1.0, -3.0],
+        ]
+    )
+    energy = 70.0
+    wavevector = 2 * np.pi / (12.39842 / energy)
+    q_phi = np.array([
+        HKLVlieg.calculate_q_phi(position, wavevector)
+        for position in angles
+    ])
+    hkls = np.linalg.solve(
+        expected_u @ true_lattice.B_mat, q_phi.T
+    ).T
+
+    detector = SimpleNamespace(
+        dist=1.0,
+        poni1=0.0,
+        poni2=0.0,
+        rot1=0.0,
+        rot2=0.0,
+        rot3=0.0,
+        energy=energy,
+        reset=lambda: None,
+    )
+    ub_calculator = HKLVlieg.UBCalculator(starting_lattice, energy)
+    ub_calculator.setU(np.eye(3))
+    calculator = SimpleNamespace(
+        mainGui=SimpleNamespace(
+            getReflectionFitData=lambda: (
+                hkls, angles, np.zeros((len(hkls), 2))
+            ),
+            reflectionSel=SimpleNamespace(updateEditor=lambda: None),
+        ),
+        detectorCal=detector,
+        crystal=starting_lattice,
+        ubCal=ub_calculator,
+        n=1.0,
+        mu=0.01,
+        chi=0.0,
+        phi=0.0,
+        crystalparams=SimpleNamespace(setValues=lambda *args: None),
+        machineParams=SimpleNamespace(setValues=lambda *args: None),
+        uedit=SimpleNamespace(setU=lambda *args: None),
+        sigReplotRequest=SimpleNamespace(emit=lambda *args: None),
+    )
+    monkeypatch.setattr(
+        "orgui.app.QUBCalculator.copy.deepcopy",
+        lambda value: pytest.fail("lattice-only fit copied detector geometry"),
+    )
+
+    QUBCalculator.fitExperiment(calculator, {"lattice_scale"})
+
+    assert starting_lattice.a == pytest.approx(true_lattice.a)
+
+
+def test_fit_dialog_updates_mean_discrepancies():
+    class FakeLabel:
+        def __init__(self):
+            self.text = None
+
+        def setText(self, text):
+            self.text = text
+
+    dialog = SimpleNamespace(
+        calculator=SimpleNamespace(
+            getReflectionMismatch=lambda: {
+                "angle_mismatch": np.deg2rad([1.0, 3.0]),
+                "norm_mismatch": np.array([0.1, 0.3]),
+            }
+        ),
+        meanQLabel=FakeLabel(),
+        meanAngleLabel=FakeLabel(),
+    )
+
+    QUBFitDialog.updateDiscrepancy(dialog)
+
+    assert dialog.meanQLabel.text == (
+        "Mean Q discrepancy: 0.2 Angstrom^-1"
+    )
+    assert dialog.meanAngleLabel.text == (
+        "Mean angle discrepancy: 2 deg"
+    )
+
+
+def test_fit_dialog_reset_restores_opening_state():
+    calls = []
+    state = {"marker": "opening"}
+    dialog = SimpleNamespace(
+        _savedState=state,
+        _restoreState=lambda value: calls.append(("restore", value)),
+        setCurrentValues=lambda: calls.append(("values", None)),
+        updateDiscrepancy=lambda: calls.append(("discrepancy", None)),
+        rmsLabel=SimpleNamespace(
+            setText=lambda text: calls.append(("rms", text))
+        ),
+    )
+
+    QUBFitDialog.resetParameters(dialog)
+
+    assert calls == [
+        ("restore", state),
+        ("values", None),
+        ("discrepancy", None),
+        ("rms", "RMS relative Q discrepancy: unavailable"),
+    ]
