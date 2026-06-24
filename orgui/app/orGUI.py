@@ -111,6 +111,25 @@ except Exception:
 silx.config.DEFAULT_PLOT_SYMBOL = '.'
 
 
+def _display_roi_geometry(center, left, right, top, bottom):
+    """Convert detector-array ROI slices to plot rectangle geometry.
+
+    Detector row indices increase toward the displayed bottom, while plot
+    coordinates increase toward the displayed top. Therefore the array
+    ``bottom`` extent is the plot ``top`` extent and vice versa.
+    """
+    origin = (center[0].start, center[1].start)
+    size = (
+        center[0].stop - center[0].start,
+        center[1].stop - center[1].start,
+    )
+    left_size = left[0].stop - left[0].start
+    right_size = right[0].stop - right[0].start
+    top_size = bottom[1].stop - bottom[1].start
+    bottom_size = top[1].stop - top[1].start
+    return origin, size, left_size, right_size, top_size, bottom_size
+
+
 class orGUI(qt.QMainWindow):
     def __init__(self,configfile,parent=None):
         """Initialize the main orGUI window.
@@ -3286,13 +3305,9 @@ ub : gui for UB matrix and angle calculations
                 topkey = roi_keys['top'][int(i)]
                 bottomkey = roi_keys['bottom'][int(i)]
 
-                origin =(ckey[0].start, ckey[1].start)
-                size = (ckey[0].stop - ckey[0].start, ckey[1].stop - ckey[1].start)
-                #leftkey, rightkey, topkey, bottomkey
-                left = leftkey[0].stop - leftkey[0].start
-                right = rightkey[0].stop - rightkey[0].start
-                top = topkey[1].stop - topkey[1].start
-                bottom = bottomkey[1].stop - bottomkey[1].start
+                origin, size, left, right, top, bottom = _display_roi_geometry(
+                    ckey, leftkey, rightkey, topkey, bottomkey
+                )
                 self.rocking_rois[roino].setGeometry(origin=origin, size=size, left=left, right=right, top=top, bottom=bottom)
                 self.rocking_rois[roino].setVisible(True)
                 self.rocking_rois[roino].setEditable(False)
@@ -3349,13 +3364,9 @@ ub : gui for UB matrix and angle calculations
                 topkey = roi_keys['top'][int(i)]
                 bottomkey = roi_keys['bottom'][int(i)]
 
-                origin =(ckey[0].start, ckey[1].start)
-                size = (ckey[0].stop - ckey[0].start, ckey[1].stop - ckey[1].start)
-                #leftkey, rightkey, topkey, bottomkey
-                left = leftkey[0].stop - leftkey[0].start
-                right = rightkey[0].stop - rightkey[0].start
-                top = topkey[1].stop - topkey[1].start
-                bottom = bottomkey[1].stop - bottomkey[1].start
+                origin, size, left, right, top, bottom = _display_roi_geometry(
+                    ckey, leftkey, rightkey, topkey, bottomkey
+                )
                 self.rocking_rois[roino].setGeometry(origin=origin, size=size, left=left, right=right, top=top, bottom=bottom)
                 self.rocking_rois[roino].setVisible(True)
                 self.rocking_rois[roino].setEditable(True)
@@ -3568,14 +3579,9 @@ ub : gui for UB matrix and angle calculations
 
         #print([(roi, roi.isEditable()) for roi in self.rois])
 
-        #croi:
-        origin =(key[0].start, key[1].start)
-        size = (key[0].stop - key[0].start, key[1].stop - key[1].start)
-        #leftkey, rightkey, topkey, bottomkey
-        left = leftkey[0].stop - leftkey[0].start
-        right = rightkey[0].stop - rightkey[0].start
-        top = topkey[1].stop - topkey[1].start
-        bottom = bottomkey[1].stop - bottomkey[1].start
+        origin, size, left, right, top, bottom = _display_roi_geometry(
+            key, leftkey, rightkey, topkey, bottomkey
+        )
         roi.setGeometry(origin=origin, size=size, left=left, right=right, top=top, bottom=bottom)
         roi.setVisible(True)
         #self.roiManager._roisUpdated()

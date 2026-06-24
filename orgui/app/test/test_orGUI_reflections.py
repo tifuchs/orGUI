@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from orgui.app.orGUI import orGUI
+from orgui.app.orGUI import _display_roi_geometry, orGUI
 from orgui.app.QReflectionSelector import QReflectionSelector
 
 
@@ -118,3 +118,40 @@ def test_bragg_reflection_list_skips_stale_image_numbers(caplog):
     assert selector.reflBragg[0].hkl.tolist() == [1.0, 0.0, 0.0]
     assert selector.reflBragg[0].imageno == 1
     assert "Skipping Bragg reflection" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("center", "top", "bottom", "expected_top", "expected_bottom"),
+    [
+        (
+            (slice(2, 8), slice(0, 4)),
+            (slice(2, 8), slice(0, 0)),
+            (slice(2, 8), slice(4, 7)),
+            3,
+            0,
+        ),
+        (
+            (slice(2, 8), slice(6, 10)),
+            (slice(2, 8), slice(3, 6)),
+            (slice(2, 8), slice(10, 10)),
+            0,
+            3,
+        ),
+    ],
+)
+def test_display_roi_geometry_maps_clipped_detector_rows_to_plot_sides(
+    center, top, bottom, expected_top, expected_bottom
+):
+    left = (slice(0, 2), center[1])
+    right = (slice(8, 10), center[1])
+
+    geometry = _display_roi_geometry(center, left, right, top, bottom)
+
+    assert geometry == (
+        (center[0].start, center[1].start),
+        (6, 4),
+        2,
+        2,
+        expected_top,
+        expected_bottom,
+    )
