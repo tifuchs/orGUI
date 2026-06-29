@@ -2570,11 +2570,11 @@ ub : gui for UB matrix and angle calculations
         else:
             h5file = model.data(rootI, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE)
 
-        isID31 = self.scanSelector.btid.currentText() in ['ch5523','ch5700','ch5918','ch6392','ch7131','ch7149','ch7856','ch8153','id31_default']
+        backendcls = backends.fscans[self.scanSelector.btid.currentText()]
         kl_full = list(h5file.keys())
         kl = np.empty(0,dtype=int)
         for i in kl_full:
-            if isID31:
+            if 'BlissScan' in backendcls.__name__:
                 pattern = r'\.\d'
                 result = re.findall(pattern, i)[0][1:]
                 if result == '1':
@@ -2584,7 +2584,7 @@ ub : gui for UB matrix and angle calculations
                 kl = np.append(kl,i)
 
         # separate scan nr and delete duplicates suffixes
-        if isID31:
+        if 'BlissScan' in backendcls.__name__:
             # try to get the scan nr and '/title' from the hdf5 file
             nr = np.empty(0,dtype=int)
             name = np.empty(0,dtype=str)
@@ -2621,7 +2621,7 @@ ub : gui for UB matrix and angle calculations
             ithScanBox = qt.QCheckBox()
             scanBoxes.append(ithScanBox)
             #labels.append(qt.QLabel('Scan '+str(item)+':'+str(name[i][2:-1])))
-            if isID31:
+            if 'BlissScan' in backendcls.__name__:
                 b.addRow(qt.QLabel('Scan '+str(item)+': '+name[i].decode()),ithScanBox)
             else:
                 b.addRow(qt.QLabel('Scan '+str(item)+': '+name[i]),ithScanBox)
