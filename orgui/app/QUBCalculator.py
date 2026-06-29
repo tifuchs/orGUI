@@ -647,11 +647,11 @@ class QUBCalculator(qt.QSplitter):
             return False
 
     def toFallbackConfig(self):
-        sdd = 0.729 #m
-        E = 78.
-        pixelsize = 172e-6
-        cp = [731.0,1587.856]
-        self.mu = np.deg2rad(0.05)
+        sdd = 1.0 #m
+        E = 75.
+        pixelsize = 150e-6
+        cp = [1100.0,2020.0]
+        self.mu = np.deg2rad(0.08)
         self.chi = 0.
         self.phi = 0.
         self.n = 1 - 1.1415e-06
@@ -666,7 +666,7 @@ class QUBCalculator(qt.QSplitter):
         self.polfactor = 0
         self.azimuth = 0
         self.detectorCal = DetectorCalibration.Detector2D_SXRD()
-        self.detectorCal.detector = pyFAI.detector_factory("Pilatus2m")
+        self.detectorCal.detector = pyFAI.detector_factory("pilatus44mcdte")
         self.detectorCal.setFit2D(sdd*1e3,cp[0],cp[1],pixelX=pixelsize*1e6, pixelY=pixelsize*1e6)
         self.detectorCal.wavelength = self.ubCal.getLambda()*1e-10
         self.detectorCal.setAzimuthalReference(np.deg2rad(90.))
