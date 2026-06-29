@@ -229,7 +229,7 @@ class BlissScan_EBS(Fastscan):
             _,filename_noext = os.path.split(filepath)
             #filename_noext = filename.split('.')[0]
             self.filename_base = filename_noext #filename_noext[:filename_noext.rfind('_')]
-            with silx.io.open(hdffilepath_orNode) as f:
+            with silx.io.h5py_utils.File(hdffilepath_orNode) as f:
                 #print([d for d in f])
                 for d in f:
                     scansuffix = d.split('_')[-1]
@@ -558,7 +558,7 @@ class BlissScan_EBS_p4(Fastscan):
             _,filename_noext = os.path.split(filepath)
             #filename_noext = filename.split('.')[0]
             self.filename_base = filename_noext #filename_noext[:filename_noext.rfind('_')]
-            with silx.io.open(hdffilepath_orNode) as f:
+            with silx.io.h5py_utils.File(hdffilepath_orNode) as f:
                 #print([d for d in f])
                 for d in f:
                     scansuffix = d.split('_')[-1]

@@ -217,6 +217,7 @@ class orGUI(qt.QMainWindow):
 
 
 
+        self.scanSelector.sigRefreshH5.connect(self._onRefreshH5)
         self.scanSelector.sigImageNoChanged.connect(self._onSliderValueChanged)
 
         self.scanSelector.sigImagePathChanged.connect(self._onImagePathChanged)
@@ -462,6 +463,36 @@ ub : gui for UB matrix and angle calculations
 
         if configfile is not None:
             self.ubcalc.readConfig(configfile)
+
+    def _onRefreshH5(self):
+        ''' 
+        # manual way for console use to avoid broken nodes after update:
+        self.fscan = None
+        for i in self.centralPlot.getAllImages():
+            if 'scan' in i.getLegend():
+                self.centralPlot.removeImage(i)
+        self.currentAddImageLabel = None
+        '''
+        self.scanSelector._onDoRefresh() # update the treeview
+
+        autoload = self.autoLoadAct.isChecked()
+        bt_autodetect = self.scanSelector.bt_autodetect_enable.isChecked()
+        if autoload:
+            self.autoLoadAct.setChecked(False) # no other way to avoid re-generation of max/sum when loading scan
+        if bt_autodetect:
+            self.scanSelector.bt_autodetect_enable.setChecked(False)
+
+        self.scanSelector._onLoadScan() # very important! this seems to unlock the file somehow
+
+        # restore auto load and bt autodetect
+        if autoload:
+            self.autoLoadAct.setChecked(True) 
+        if bt_autodetect:
+            self.scanSelector.bt_autodetect_enable.setChecked(True)
+        
+        self.images_loaded = True
+        self.scanSelector.hdfTreeView.expandToDepth(0) # here the call is possible
+        # todo:restore all expanded branches as they were before
 
     def _removeAllIntegrPlotCurves(self):
         """CLI-capable: clear all integration curves from the plot widget."""
