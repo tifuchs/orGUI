@@ -2986,11 +2986,19 @@ ub : gui for UB matrix and angle calculations
                 )
                 return
             self.scanSelector.slider.setValue(imageno)
+            if self.scanSelector.showMaxAct.isChecked():
+                self.scanSelector.showMaxAct.setChecked(False)
+            if self.scanSelector.showSumAct.isChecked():
+                self.scanSelector.showSumAct.setChecked(False)
             self.plotImage(self.scanSelector.slider.value())
 
     def _onSliderValueChanged(self,value):
         """GUI/CLI hint: replot the image selected by the scan slider."""
         if self.fscan is not None:
+            if self.scanSelector.showMaxAct.isChecked():
+                self.scanSelector.showMaxAct.setChecked(False)
+            if self.scanSelector.showSumAct.isChecked():
+                self.scanSelector.showSumAct.setChecked(False)
             self.plotImage(value)
         #print(self.centralPlot._callback)
 
