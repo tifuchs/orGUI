@@ -3104,6 +3104,8 @@ ub : gui for UB matrix and angle calculations
                                                                replace=False,resetzoom=False,copy=True,z=1)
                 self.centralPlot.setActiveImage(self.currentAddImageLabel)
                 self.scanSelector.alphaslider.setLegend(self.currentAddImageLabel)
+                if not self.scanSelector.showMaxAct.isChecked():
+                    self.scanSelector.showMaxAct.setChecked(True)
             else:
                 self.scanSelector.showMaxAct.setChecked(False)
         else:
@@ -3133,6 +3135,8 @@ ub : gui for UB matrix and angle calculations
                                                                replace=False,resetzoom=False,copy=True,z=1)
                 self.centralPlot.setActiveImage(self.currentAddImageLabel)
                 self.scanSelector.alphaslider.setLegend(self.currentAddImageLabel)
+                if not self.scanSelector.showSumAct.isChecked():
+                    self.scanSelector.showSumAct.setChecked(True)
             else:
                 self.scanSelector.showSumAct.setChecked(False)
         else:
