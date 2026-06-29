@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # the box in the lower left corner in the gui and manually selecting
 # a backend
 
-default_beamtime = 'id31_default'
+default_beamtime = 'id31_default_p4'
 
 beamtimes = {'ch5523': (datetime(2018, 9, 22), datetime(2018, 10, 5)),
              '20190017': (datetime(2019, 12, 8), datetime(2019, 12, 24)),
@@ -89,6 +89,7 @@ fscans = {'ch5523': BlissScan,
              'P212_default' : H5Fastsweep,
              'ch7149' : BlissScan_EBS,
              'ch7856' : BlissScan_EBS,
+             'ch8153' : BlissScan_EBS_p4,
              'id31_default' : BlissScan_EBS,
              'id31_default_p4' : BlissScan_EBS_p4
              }
@@ -143,6 +144,12 @@ def openScan(btid, ddict):
             fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False, muoffset=0)
         else:
             fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=0)
+
+    elif btid == 'ch8153':
+        if 'node' in ddict:
+            fscan = fscancls(ddict['node'],ddict['scanno'], loadimg=False, muoffset=-2.31)
+        else:
+            fscan = fscancls(ddict['file'],ddict['scanno'], loadimg=False, muoffset=-2.31)
 
     else:
         try:
