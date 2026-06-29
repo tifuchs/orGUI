@@ -64,6 +64,11 @@ try:
 except:
     console = False
 
+from packaging.version import Version
+import pyFAI.version
+if Version(pyFAI.version) >= Version('2025.01'):
+    from pyFAI.integrator.fiber import FiberIntegrator
+
 import traceback
 
 from . import qutils, ROIutils
@@ -162,6 +167,10 @@ class orGUI(qt.QMainWindow):
         self.centralPlot.setCallback(self._graphCallback)
         toolbar = qt.QToolBar()
         toolbar.addAction(control_actions.OpenGLAction(parent=toolbar, plot=self.centralPlot))
+        self.plotAgainstQAct = qt.QAction("Q-plot",self)
+        self.plotAgainstQAct.setCheckable(True)
+        self.plotAgainstQAct.toggled.connect(self._convertImagetoQ)
+        toolbar.addAction(self.plotAgainstQAct)
         self.centralPlot.addToolBar(toolbar)
 
         self.currentImageLabel = None
@@ -3017,6 +3026,8 @@ ub : gui for UB matrix and angle calculations
                 )
                 return
             self.scanSelector.slider.setValue(imageno)
+            if self.plotAgainstQAct.isChecked():
+                self.plotAgainstQAct.setChecked(False)
             if self.scanSelector.showMaxAct.isChecked():
                 self.scanSelector.showMaxAct.setChecked(False)
             if self.scanSelector.showSumAct.isChecked():
@@ -3026,6 +3037,8 @@ ub : gui for UB matrix and angle calculations
     def _onSliderValueChanged(self,value):
         """GUI/CLI hint: replot the image selected by the scan slider."""
         if self.fscan is not None:
+            if self.plotAgainstQAct.isChecked():
+                self.plotAgainstQAct.setChecked(False)
             if self.scanSelector.showMaxAct.isChecked():
                 self.scanSelector.showMaxAct.setChecked(False)
             if self.scanSelector.showSumAct.isChecked():
@@ -3117,6 +3130,8 @@ ub : gui for UB matrix and angle calculations
 
     def _onMaxToggled(self,value):
         """GUI/CLI hint: toggle display of the precomputed maximum image."""
+        if self.plotAgainstQAct.isChecked():
+            self.plotAgainstQAct.setChecked(False)
         if self.scanSelector.showSumAct.isChecked():
             self.scanSelector.showSumAct.setChecked(False)
         if value:
@@ -3148,6 +3163,8 @@ ub : gui for UB matrix and angle calculations
 
     def _onSumToggled(self,value):
         """GUI/CLI hint: toggle display of the precomputed summed image."""
+        if self.plotAgainstQAct.isChecked():
+            self.plotAgainstQAct.setChecked(False)
         if self.scanSelector.showMaxAct.isChecked():
             self.scanSelector.showMaxAct.setChecked(False)
         if value:
@@ -3177,6 +3194,158 @@ ub : gui for UB matrix and angle calculations
                 self.currentAddImageLabel = None
 
 
+    def _convertImagetoQ(self,value):
+        if value:
+            # check if conversion possible
+            if Version(pyFAI.version) < Version('2025.1'):
+                print('conversion of image to Q not possible! Install pyFAI > 2025.1 !')
+                self.plotAgainstQAct.setChecked(False)
+                return
+            if self.fscan is None:
+                if logger_utils.get_logging_context() == 'gui':
+                    qt.QMessageBox.critical(self,
+                                        "Q conversion failed",
+                                        "Cannot convert image to Q\n"\
+                                        "No scan loaded!")
+                else:
+                    logger.exception('Q conversion failed', 
+                        extra={'title' : 'Cannot convert image to Q',
+                                'description' : 'No scan loaded!',
+                                'show_dialog' : False,
+                                "dialog_level" : logging.ERROR,
+                                'parent' : self})
+                self.plotAgainstQAct.setChecked(False)
+                return
+            if self.fscan.axisname == 'mu':
+                if logger_utils.get_logging_context() == 'gui':
+                    qt.QMessageBox.critical(self,
+                                        "Q conversion failed",
+                                        "Cannot convert image to Q\n"\
+                                        "Conversion not implemented for mu scans!")
+                else:
+                    logger.exception('Q conversion failed', 
+                        extra={'title' : 'Cannot convert image to Q',
+                                'description' : 'Conversion not implemented for mu scans!',
+                                'show_dialog' : False,
+                                "dialog_level" : logging.ERROR,
+                                'parent' : self})
+                self.plotAgainstQAct.setChecked(False)
+                return
+            
+            # hide scan image, remove max/sum image, get data for conversion
+            for i in self.centralPlot.getAllImages():
+                if i.getLegend() == "scan_image":
+                    self.centralPlot.hideCurve(i)
+                    if not self.scanSelector.showMaxAct.isChecked() and not self.scanSelector.showSumAct.isChecked():
+                        data = i.getData()
+                elif i.getLegend() != "scan_image":
+                    self.centralPlot.removeImage(i)
+            if self.scanSelector.showMaxAct.isChecked():
+                data = self.allimgmax
+            elif self.scanSelector.showSumAct.isChecked():
+                data = self.allimgsum
+
+            # determine sample orientation
+            azim = self.ubcalc.detectorCal.getAzimuthalReference()
+            if -np.pi/4 < azim < np.pi/4:
+                orientation = 7
+            elif np.pi/4 < azim < np.pi*3/4:
+                orientation = 4
+                if self.centralPlot.isYAxisInverted():
+                    self.centralPlot.setYAxisInverted(False)
+                else:
+                    self.centralPlot.setYAxisInverted(True)
+            elif np.pi*3/4 < azim < np.pi*5/4:
+                orientation = 8
+                if self.centralPlot.isXAxisInverted():
+                    self.centralPlot.setXAxisInverted(False)
+                else:
+                    self.centralPlot.setXAxisInverted(True)
+            elif np.pi*5/4 < azim < np.pi*7/4:
+                orientation = 1
+            else: 
+                orientation = 1
+            
+            # perform conversion into Q coordinates
+            fi = FiberIntegrator(dist=self.ubcalc.detectorCal.dist, poni1=self.ubcalc.detectorCal.poni1, poni2=self.ubcalc.detectorCal.poni2,
+                                wavelength=self.ubcalc.detectorCal.wavelength, 
+                                rot1=self.ubcalc.detectorCal.rot1, rot2=self.ubcalc.detectorCal.rot2, rot3=self.ubcalc.detectorCal.rot3,
+                                detector=self.ubcalc.detectorCal.detector,
+                                )
+            res2d = fi.integrate2d_grazing_incidence(data, sample_orientation=orientation, 
+                                                     incident_angle=self.ubcalc.mu,
+                                                     tilt_angle=0,
+                                                     unit_oop="qoop_A^-1",unit_ip="qip_A^-1")
+            
+            # plot generated image
+            oopmin, oopmax = np.min(res2d.outofplane), np.max(res2d.outofplane)
+            ipmin, ipmax = np.min(res2d.inplane), np.max(res2d.inplane)
+            orig_ip, orig_oop = res2d.inplane[0], res2d.outofplane[0]
+            if orientation in [1,4]: # specular axis on vertical detector axis
+                self.currentAddImageLabel = self.centralPlot.addImage(res2d.intensity,legend='qImage',replace=False,
+                                                                    resetzoom=False,copy=True,z=2,
+                                                                    xlabel=r"q$_\parallel / \, \AA^{-1}$",
+                                                                    ylabel=r"q$_\perp / \, \AA^{-1}$",
+                                                                    scale=((ipmax-ipmin)/1000,(oopmax-oopmin)/1000),
+                                                                    origin=(orig_ip,orig_oop),
+                                                                    )
+                # apply correct zoom
+                self.centralPlot.getXAxis().setLimits(ipmin,ipmax)
+                self.centralPlot.getYAxis().setLimits(oopmin,oopmax)
+            else: # specular axis on horizontal detector axis
+                self.currentAddImageLabel = self.centralPlot.addImage(res2d.intensity.T,legend='qImage',replace=False,
+                                                                    resetzoom=False,copy=True,z=2,
+                                                                    xlabel=r"q$_\perp / \, \AA^{-1}$",
+                                                                    ylabel=r"q$_\parallel / \, \AA^{-1}$",
+                                                                    scale=((oopmax-oopmin)/1000,(ipmax-ipmin)/1000),
+                                                                    origin=(orig_oop,orig_ip),
+                                                                    )
+                # apply correct zoom
+                self.centralPlot.getYAxis().setLimits(ipmin,ipmax)
+                self.centralPlot.getXAxis().setLimits(oopmin,oopmax)
+
+            # apply active plot settings
+            self.centralPlot.setActiveImage(self.currentAddImageLabel)
+            self.scanSelector.alphaslider.setLegend(self.currentAddImageLabel)
+
+        else:
+            # restore status from before
+            if self.currentAddImageLabel is not None:
+                # show scan image, delete qImage
+                for i in self.centralPlot.getAllImages():
+                    if i.getLegend() == "scan_image":
+                        self.centralPlot.hideCurve(i,False)
+                    elif i.getLegend() == 'qImage':
+                        self.centralPlot.removeImage(i)
+
+                # plot max/sum, set correct active image
+                if self.scanSelector.showMaxAct.isChecked() and self.allimgmax is not None:
+                    self.currentAddImageLabel = self.centralPlot.addImage(self.allimgmax,legend='special',replace=False,resetzoom=False,copy=True,z=1)
+                    self.centralPlot.setActiveImage(self.currentAddImageLabel)
+                elif self.scanSelector.showSumAct.isChecked() and self.allimgsum is not None:
+                    self.currentAddImageLabel = self.centralPlot.addImage(self.allimgsum,legend='special',replace=False,resetzoom=False,copy=True,z=1)
+                    self.centralPlot.setActiveImage(self.currentAddImageLabel)
+                else:
+                    self.currentAddImageLabel = None
+                    self.centralPlot.setActiveImage(self.currentImageLabel)
+
+                # restore status of xaxis and yaxis
+                if self.fscan is not None:
+                    if self.fscan.axisname != 'mu' and Version(pyFAI.version) > Version('2025.1'):
+                        azim = self.ubcalc.detectorCal.getAzimuthalReference()
+                        if np.pi/4 < azim < np.pi*3/4:
+                            if not self.centralPlot.isYAxisInverted():
+                                self.centralPlot.setYAxisInverted(True)
+                            else:
+                                self.centralPlot.setYAxisInverted(False)
+                        elif np.pi*3/4 < azim < np.pi*5/4:
+                            if not self.centralPlot.isXAxisInverted():
+                                self.centralPlot.setXAxisInverted(True)
+                            else:
+                                self.centralPlot.setXAxisInverted(False)
+                
+                # apply correct zoom for pixel coordinates
+                self.centralPlot.resetZoom()
 
 
     def plotImage(self,key=0):
