@@ -39,7 +39,6 @@ import runpy
 import argparse
 from argparse import ArgumentParser
 import logging 
-from . import logger_utils
 
 def existing_file(path):
     if not os.path.isfile(path):
@@ -200,17 +199,18 @@ def main():
         os.environ["NUMEXPR_MAX_THREADS"] = '1' # to avoid oversubscription
     
     if options.cli:
+        os.environ["QT_QPA_PLATFORM"] = "minimal" # "offscreen" # maybe use minimal instead
+        from . import logger_utils
         logger_utils.set_logging_context('cli')
         _start_CLI(options, ncpus)
         
     else:
+        from . import logger_utils
         logger_utils.set_logging_context('gui')
         _start_GUI(options, ncpus)
 
         
 def _start_CLI(options, ncpu):
-    
-    os.environ["QT_QPA_PLATFORM"] = "minimal" # "offscreen" # maybe use minimal instead
     # os.environ["QT_LOGGING_RULES"] = "*.warning=false"
     
     if os.path.isfile(options.configfile) or options.configfile == defaultconfigfile:
