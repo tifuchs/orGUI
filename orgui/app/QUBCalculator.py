@@ -996,6 +996,16 @@ class QUBCalculator(qt.QSplitter):
         self.sigReplotRequest.emit(False)
         return rms
 
+    def exportDetectorPoni(self, filename):
+        """Export the current detector geometry as a pyFAI PONI file.
+
+        :param str filename:
+            Output file path. The active :class:`Detector2D_SXRD` geometry is
+            saved using pyFAI units, with distances in m, rotations in rad,
+            and wavelength in m.
+        """
+        self.detectorCal.save(filename)
+
     def _onCalMiscut(self):
         om, chi, phi = self.angles.anglesOrientationAlpha([0,0,1], [0,0,1])
         chi, phi = float(chi[0]), float(phi[0])
@@ -1399,6 +1409,12 @@ class QUBFitDialog(qt.QDialog):
         self.fitButton = qt.QPushButton("Fit")
         self.fitButton.clicked.connect(self._onFit)
         fitting_layout.addWidget(self.fitButton)
+        self.exportPoniButton = qt.QPushButton("Export PONI...")
+        self.exportPoniButton.setToolTip(
+            "Save the current fitted detector geometry as a pyFAI PONI file"
+        )
+        self.exportPoniButton.clicked.connect(self._onExportPoni)
+        fitting_layout.addWidget(self.exportPoniButton)
         layout.addWidget(fitting)
 
         buttons = qt.QDialogButtonBox(
@@ -1602,6 +1618,36 @@ class QUBFitDialog(qt.QDialog):
             f"RMS relative Q discrepancy: {rms:.6g}"
         )
         self.updateDiscrepancy()
+
+    # GUI-only: user-triggered file-save dialog for pyFAI calibration export.
+    def _onExportPoni(self):
+        """Export the current detector geometry to a pyFAI PONI file.
+
+        .. note::
+           GUI-only. This path opens a blocking file-save dialog.
+        """
+        filename, _ = qt.QFileDialog.getSaveFileName(
+            self,
+            "Export pyFAI PONI file",
+            "",
+            "PyFAI PONI file (*.poni);;All files (*)",
+        )
+        if not filename:
+            return
+        if not filename.lower().endswith(".poni"):
+            filename += ".poni"
+        try:
+            self.calculator.exportDetectorPoni(filename)
+        except Exception:
+            logger.exception(
+                "Error exporting detector geometry to PONI file",
+                extra={
+                    "title": "Cannot export PONI file",
+                    "description": traceback.format_exc(),
+                    "show_dialog": True,
+                    "parent": self,
+                },
+            )
 
 
 class QUEdit(qt.QWidget):

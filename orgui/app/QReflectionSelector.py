@@ -45,6 +45,57 @@ from . import imagePeakFinder
 
 logger = logging.getLogger(__name__)
 
+
+def _reflection_mismatch_score(mismatch, angular_tolerance, norm_tolerance):
+    """Return absolute per-reflection mismatch scores.
+
+    A score of ``1`` corresponds to one detector-pixel-equivalent mismatch.
+
+    :param dict mismatch:
+        Reflection mismatch dictionary from
+        :meth:`HKLVlieg.UBCalculator.getReflectionMismatch`.
+    :param float angular_tolerance:
+        Angular tolerance in rad.
+    :param float norm_tolerance:
+        Q-norm tolerance in Angstrom^-1.
+    :returns:
+        Maximum of angular and Q-norm mismatch in tolerance units.
+    :rtype: numpy.ndarray
+    """
+    angle = np.asarray(mismatch["angle_mismatch"], dtype=float)
+    q_norm = np.asarray(mismatch["norm_mismatch"], dtype=float)
+    angular_tolerance = max(float(angular_tolerance), np.finfo(float).eps)
+    norm_tolerance = max(float(norm_tolerance), np.finfo(float).eps)
+    return np.maximum(angle / angular_tolerance, q_norm / norm_tolerance)
+
+
+def _relative_mismatch_score(angle, relative_norm):
+    """Return the old within-table relative mismatch score.
+
+    :param numpy.ndarray angle:
+        Angular reflection mismatch in rad.
+    :param numpy.ndarray relative_norm:
+        Relative Q-norm mismatch.
+    :returns:
+        Score normalized from best to worst current reflection.
+    :rtype: numpy.ndarray
+    """
+    def normalized(values):
+        finite = np.isfinite(values)
+        result = np.ones(values.shape, dtype=float)
+        if not np.any(finite):
+            return result
+        low = np.min(values[finite])
+        high = np.max(values[finite])
+        if np.isclose(low, high):
+            result[finite] = 0.0
+        else:
+            result[finite] = (values[finite] - low) / (high - low)
+        return result
+
+    return normalized(0.5 * (normalized(angle) + normalized(relative_norm)))
+
+
 @dataclass
 class HKLReflection:
     xy: np.ndarray
@@ -138,6 +189,25 @@ class QReflectionSelector(qt.QWidget):
             "The second value is the difference in Q magnitude, in Å⁻¹."
         )
         layout.addWidget(self.mismatchLabel)
+
+        pixelMismatchLayout = qt.QHBoxLayout()
+        pixelMismatchLayout.addWidget(qt.QLabel("Resolution limit:"))
+        self.pixelMismatchLimit = qt.QDoubleSpinBox()
+        self.pixelMismatchLimit.setDecimals(2)
+        self.pixelMismatchLimit.setRange(0.1, 20.0)
+        self.pixelMismatchLimit.setSingleStep(0.1)
+        self.pixelMismatchLimit.setValue(1.0)
+        self.pixelMismatchLimit.setSuffix(" px")
+        self.pixelMismatchLimit.setToolTip(
+            "Rows at or below this detector-pixel-equivalent mismatch are "
+            "colored blue; other rows use relative green-to-red coloring."
+        )
+        self.pixelMismatchLimit.valueChanged.connect(
+            lambda _value: self.ubcalc.updateReflectionMismatch()
+        )
+        pixelMismatchLayout.addWidget(self.pixelMismatchLimit)
+        pixelMismatchLayout.addStretch(1)
+        layout.addLayout(pixelMismatchLayout)
         #self.addWidget(editorTabWidget)
 
         self.controlToolbar = qt.QToolBar()
@@ -465,12 +535,11 @@ class QReflectionSelector(qt.QWidget):
         self.ubcalc.updateReflectionMismatch()
 
     def setReflectionMismatch(self, mismatch):
-        """Color reflection rows by their relative UB disagreement.
+        """Color reflection rows by UB disagreement.
 
-        The best agreement is shown with a light green background and the
-        worst with a light red background. Angular and relative norm
-        disagreements are independently normalized across the current
-        reflections, then weighted equally.
+        Rows that reach the detector-pixel-equivalent resolution threshold are
+        colored blue. Remaining rows use the old relative green-to-red ranking
+        across the current reference reflections.
 
         :param dict mismatch:
             Result from
@@ -491,8 +560,14 @@ class QReflectionSelector(qt.QWidget):
         absolute_norm = np.asarray(
             mismatch["norm_mismatch"], dtype=float
         )
-        norm = np.asarray(mismatch["relative_norm_mismatch"], dtype=float)
-        if len(angle) != len(self.reflections) or len(norm) != len(self.reflections):
+        relative_norm = np.asarray(
+            mismatch["relative_norm_mismatch"], dtype=float
+        )
+        if (
+            len(angle) != len(self.reflections)
+            or len(absolute_norm) != len(self.reflections)
+            or len(relative_norm) != len(self.reflections)
+        ):
             self.mismatchLabel.setText(
                 "Mismatch: unavailable"
             )
@@ -515,26 +590,32 @@ class QReflectionSelector(qt.QWidget):
                 "Mismatch: unavailable"
             )
 
-        def normalized(values):
-            finite = np.isfinite(values)
-            result = np.ones(values.shape, dtype=float)
-            if not np.any(finite):
-                return result
-            low = np.min(values[finite])
-            high = np.max(values[finite])
-            if np.isclose(low, high):
-                result[finite] = 0.0
-            else:
-                result[finite] = (values[finite] - low) / (high - low)
-            return result
-
-        score = normalized(0.5 * (normalized(angle) + normalized(norm)))
-        score = np.clip(score, 0.0, 1.0)
+        relative_score = np.clip(
+            _relative_mismatch_score(angle, relative_norm), 0.0, 1.0
+        )
+        relative_score[~np.isfinite(relative_score)] = 1.0
         green = np.array([205.0, 245.0, 205.0])
         red = np.array([255.0, 190.0, 190.0])
         row_colors = (
-            green + score[:, np.newaxis] * (red - green)
+            green + relative_score[:, np.newaxis] * (red - green)
         ).astype(np.uint8)
+        detector = self.ubcalc.detectorCal
+        pixel_size = max(float(detector.pixel1), float(detector.pixel2))
+        angular_tolerance = np.arctan2(pixel_size, float(detector.dist))
+        norm_tolerance = self.ubcalc.ubCal.getK() * angular_tolerance
+
+        # Convert the angular and Q-norm errors to detector-pixel-equivalent
+        # units. One pixel means the UB disagreement is at the instrumental
+        # angular resolution set by pixel size and sample-detector distance.
+        # This is an absolute "good enough" test, so only rows below the GUI
+        # threshold override the relative green-to-red ranking.
+        pixel_score = _reflection_mismatch_score(
+            mismatch, angular_tolerance, norm_tolerance
+        )
+        limit_widget = getattr(self, "pixelMismatchLimit", None)
+        pixel_limit = 1.0 if limit_widget is None else limit_widget.value()
+        resolved = np.isfinite(pixel_score) & (pixel_score <= pixel_limit)
+        row_colors[resolved] = np.array([185, 220, 255], dtype=np.uint8)
 
         def apply_colors(editor):
             table_shape = editor.model.getData().shape

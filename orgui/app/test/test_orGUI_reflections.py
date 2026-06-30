@@ -6,7 +6,10 @@ import numpy as np
 import pytest
 
 from orgui.app.orGUI import _display_roi_geometry, orGUI
-from orgui.app.QReflectionSelector import QReflectionSelector
+from orgui.app.QReflectionSelector import (
+    QReflectionSelector,
+    _reflection_mismatch_score,
+)
 from orgui.app.QUBCalculator import (
     QUBCalculator,
     QUBFitDialog,
@@ -153,6 +156,10 @@ def test_reflection_mismatch_tolerates_table_update_in_progress():
     selector.reflections = [object(), object()]
     selector.refleditor = fake_editor((2, 6))
     selector.refleditor_angles = fake_editor((0, 9))
+    selector.ubcalc = SimpleNamespace(
+        detectorCal=SimpleNamespace(pixel1=1e-4, pixel2=1e-4, dist=1.0),
+        ubCal=SimpleNamespace(getK=lambda: 35.0),
+    )
     label = SimpleNamespace(text=None)
     selector.mismatchLabel = SimpleNamespace(
         setText=lambda text: setattr(label, "text", text)
@@ -166,8 +173,70 @@ def test_reflection_mismatch_tolerates_table_update_in_progress():
     selector.setReflectionMismatch(mismatch)
 
     assert selector.refleditor.model.colors.shape == (2, 6, 3)
+    assert selector.refleditor.model.colors[0, 0].tolist() == [205, 245, 205]
+    assert selector.refleditor.model.colors[1, 0].tolist() == [255, 190, 190]
     assert selector.refleditor_angles.model.colors is None
     assert label.text.startswith("Mismatch:")
+
+
+def test_reflection_mismatch_colors_pixel_resolved_rows_blue():
+    class FakeModel:
+        def __init__(self):
+            self.data = np.empty((2, 6))
+            self.colors = None
+
+        def getData(self):
+            return self.data
+
+        def setArrayColors(self, bgcolors=None, fgcolors=None):
+            self.colors = bgcolors
+
+    class FakeViewport:
+        def update(self):
+            pass
+
+    selector = QReflectionSelector.__new__(QReflectionSelector)
+    selector.reflections = [object(), object()]
+    selector.refleditor = SimpleNamespace(
+        model=FakeModel(),
+        view=SimpleNamespace(viewport=lambda: FakeViewport()),
+    )
+    selector.refleditor_angles = SimpleNamespace(
+        model=SimpleNamespace(
+            getData=lambda: np.empty((0, 9)),
+            setArrayColors=lambda bgcolors=None, fgcolors=None: None,
+        ),
+        view=SimpleNamespace(viewport=lambda: FakeViewport()),
+    )
+    selector.ubcalc = SimpleNamespace(
+        detectorCal=SimpleNamespace(pixel1=1e-4, pixel2=1e-4, dist=1.0),
+        ubCal=SimpleNamespace(getK=lambda: 35.0),
+    )
+    selector.pixelMismatchLimit = SimpleNamespace(value=lambda: 1.0)
+    selector.mismatchLabel = SimpleNamespace(setText=lambda text: None)
+    mismatch = {
+        "angle_mismatch": np.array([5e-5, 0.02]),
+        "norm_mismatch": np.array([0.001, 0.2]),
+        "relative_norm_mismatch": np.array([0.0, 1.0]),
+    }
+
+    selector.setReflectionMismatch(mismatch)
+
+    assert selector.refleditor.model.colors[0, 0].tolist() == [185, 220, 255]
+    assert selector.refleditor.model.colors[1, 0].tolist() == [255, 190, 190]
+
+
+def test_reflection_mismatch_score_uses_pixel_absolute_thresholds():
+    mismatch = {
+        "angle_mismatch": np.array([0.5, 1.0, 3.0]) * 0.001,
+        "norm_mismatch": np.array([0.25, 2.0, 1.0]) * 0.01,
+    }
+
+    score = _reflection_mismatch_score(
+        mismatch, angular_tolerance=0.001, norm_tolerance=0.01
+    )
+
+    assert score == pytest.approx([0.5, 2.0, 3.0])
 
 
 def test_set_reflections_synchronizes_both_tables():
@@ -449,6 +518,16 @@ def test_lattice_only_fit_does_not_copy_trial_detector(monkeypatch):
     QUBCalculator.fitExperiment(calculator, {"lattice_scale"})
 
     assert starting_lattice.a == pytest.approx(true_lattice.a)
+
+
+def test_export_detector_poni_uses_current_detector_geometry():
+    calls = []
+    detector = SimpleNamespace(save=lambda filename: calls.append(filename))
+    calculator = SimpleNamespace(detectorCal=detector)
+
+    QUBCalculator.exportDetectorPoni(calculator, "refined.poni")
+
+    assert calls == ["refined.poni"]
 
 
 def test_fit_dialog_updates_mean_discrepancies():
