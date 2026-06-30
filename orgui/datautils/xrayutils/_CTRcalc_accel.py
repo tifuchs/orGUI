@@ -47,8 +47,9 @@ def unitcell_F_uc_bulk(h,k,l,atten,
                         R_mat_inv,
                         coherentDomainMatrix,
                         coherentDomainOccupancy,
-                        volume
+                        uc_area
                        ):
+    """Return one attenuated bulk-cell amplitude in electrons."""
     F = np.zeros(h.size,dtype=np.complex128)
     f = np.zeros(h.size,dtype=np.complex128)
     hkl = refHKLTransform @ np.vstack((h,k,l))
@@ -72,7 +73,7 @@ def unitcell_F_uc_bulk(h,k,l,atten,
         for mat, weight, eff_mat in zip(coherentDomainMatrix,coherentDomainOccupancy, domainmatrix):
             xyz_rel = eff_mat @ basis[i][1:4] + mat[:,-1]
             F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) ) * np.exp(atten*xyz_rel[2])
-    return F/volume
+    return F
 
 # returns the structure factor of the unit cell
 # h,k,l have to be 1d arrays
@@ -86,8 +87,9 @@ def unitcell_F_uc_bulk_direct(h,k,l,atten,
                         R_mat_inv,
                         coherentDomainMatrix,
                         coherentDomainOccupancy,
-                        volume
+                        uc_area
                        ):
+    """Return one bulk-cell amplitude in electrons without frame conversion."""
     F = np.zeros(h.size,dtype=np.complex128)
     f = np.zeros(h.size,dtype=np.complex128)
     hkl =  np.vstack((h,k,l))
@@ -111,7 +113,7 @@ def unitcell_F_uc_bulk_direct(h,k,l,atten,
         for mat, weight, eff_mat in zip(coherentDomainMatrix,coherentDomainOccupancy, domainmatrix):
             xyz_rel = eff_mat @ basis[i][1:4] + mat[:,-1]
             F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) ) * np.exp(atten*xyz_rel[2])
-    return F/volume
+    return F
 
 @njit('c16[:](f8[::1], f8[::1], f8[::1], f8, f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)', nogil=True, cache=True)
 def unitcell_F_bulk(h,k,l,atten,
@@ -123,8 +125,9 @@ def unitcell_F_bulk(h,k,l,atten,
                         R_mat_inv,
                         coherentDomainMatrix,
                         coherentDomainOccupancy,
-                        volume
+                        uc_area
                        ):
+    """Return a semi-infinite bulk amplitude in electrons."""
     hkl = refHKLTransform @ np.vstack((h,k,l))
     Fuc = unitcell_F_uc_bulk_direct(hkl[0], hkl[1], hkl[2],atten,
                         basis,
@@ -135,7 +138,7 @@ def unitcell_F_bulk(h,k,l,atten,
                         R_mat_inv,
                         coherentDomainMatrix,
                         coherentDomainOccupancy,
-                        volume)
+                        uc_area)
     return Fuc/(1- np.exp(- 2j*np.pi * l - atten ))
 
 @njit('c16[:](f8[::1], f8[::1], f8[::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)', nogil=True, cache=True)
@@ -148,8 +151,9 @@ def unitcell_F_uc(h,k,l,
                         R_mat_inv,
                         coherentDomainMatrix,
                         coherentDomainOccupancy,
-                        volume
+                        uc_area
                        ):
+    """Return an unnormalized unit-cell amplitude in electrons."""
     F = np.zeros(h.size,dtype=np.complex128)
     f = np.zeros(h.size,dtype=np.complex128)
     hkl = refHKLTransform @ np.vstack((h,k,l))
@@ -173,7 +177,7 @@ def unitcell_F_uc(h,k,l,
         for mat, weight, eff_mat in zip(coherentDomainMatrix,coherentDomainOccupancy, domainmatrix):
             xyz_rel = eff_mat @ basis[i][1:4] + mat[:,-1]
             F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) )
-    return F/volume
+    return F
 
 
 

@@ -157,7 +157,11 @@ class LinearFitFunctions(ABC):
             warnings.warn("Basis values not updated from Parameter values. This can cause a mismatch between basis and fitparameter values!")
 
     def updateFromParameters(self):
-        """Update basis from the values stored in the Parameters 
+        """Update basis and propagated errors from stored fit parameters.
+
+        Absolute parameters replace their selected basis values. Relative
+        parameters add ``factors * value`` to ``basis_0``. Stored parameter
+        errors are propagated with the absolute value of their factors.
         """
         no_errors = False
         self.basis = np.copy(self.basis_0)
@@ -171,14 +175,16 @@ class LinearFitFunctions(ABC):
                 self.errors[par.indices] = par.error
             else:
                 no_errors = True
-        for val, par in zip(x_r,self.parameters['relative']):
+        for par in self.parameters['relative']:
             if par.value is not None:
                 self.basis[par.indices] += par.factors*par.value
             else:
                 raise ValueError("Can not set basis values from parameters. Value of Parameter %s is None." % par.name)
             if par.error is not None:
                 self.errors[par.indices] = np.nan_to_num(self.errors[par.indices],nan=0.0)
-                self.errors[par.indices] += par.factors*par.error
+                self.errors[par.indices] += (
+                    np.abs(par.factors) * par.error
+                )
             else:
                 no_errors = True
 
@@ -366,7 +372,7 @@ class LinearFitFunctions(ABC):
             par.error = val
         for val, par in zip(err_r,self.parameters['relative']):
             self.errors[par.indices] = np.nan_to_num(self.errors[par.indices],nan=0.0)
-            self.errors[par.indices] += par.factors*val
+            self.errors[par.indices] += np.abs(par.factors)*val
             par.error = val
         self._errors_parvalues = np.copy(self.errors)
 

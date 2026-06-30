@@ -52,6 +52,12 @@ from .CTRutil import (special_elementcolors, ParameterType, Parameter,
                      _ensure_contiguous, next_skip_comment, DWtoDisorder,
                      readWaasmaier, readDispersion, atomic_number,
                      LinearFitFunctions)
+from .CTRstacking import (
+    LayerCycle,
+    LayerState,
+    LayerTransition,
+    resolve_upper_start,
+)
 
 try:
     from . import _CTRcalc_accel
@@ -114,20 +120,17 @@ class WaterModel(Lattice, LinearFitFunctions):
         self._pos_absolute = 0.
 
     def setReferenceUnitCell(self,uc,rotMatrix=np.identity(3)):
-        """   
-        set reference unit cell. 
-        When any F_hkl is called, first hkl will be transformed from the reference 
-        lattice into the lattice of this unit cell,
-        using equation
-        B' * H' = O * B * H, where a ' indicates the entities in the frame of this
-        lattice. O is an optional rotation matrix, which describes the rotation of
-        this lattice with respect to the reference lattice.
-        
-        Equally the same applies to the relative coordinates of the respective 
-        lattices:
-        R' * x' = O * R * x
-        
-        !!! This has to be checked !!!
+        """Set the reciprocal- and real-space reference coordinate system.
+
+        Input ``h``, ``k``, and ``l`` values are expressed in reciprocal
+        lattice units of ``uc`` and transformed into this object's lattice
+        before its structure factor is evaluated.
+
+        :param UnitCell uc:
+            Reference unit cell.
+        :param numpy.ndarray rotMatrix:
+            Optional 3-by-3 rotation from the reference crystal frame into
+            this object's crystal frame.
         """
         self.refRealTransform[:] = self.R_mat_inv @ rotMatrix @ uc.R_mat
         self.refHKLTransform[:] = self.B_mat_inv @ rotMatrix @ uc.B_mat
@@ -142,6 +145,23 @@ class WaterModel(Lattice, LinearFitFunctions):
 
 
     def F_uc(self,h,k,l):
+        """Return the water-model structure factor in electrons.
+
+        The result is the unnormalized scattering amplitude associated with
+        this model's lateral unit cell. Area conversion between heterogeneous
+        components is performed by
+        :meth:`~orgui.datautils.xrayutils.CTRcalc.SXRDCrystal.F`.
+
+        :param numpy.ndarray h:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray k:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray l:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :returns:
+            Complex structure-factor amplitude in electrons.
+        :rtype: numpy.ndarray
+        """
         mask = np.logical_and(np.isclose(h,0), np.isclose(k,0))
         if not np.any(mask):
             return np.zeros_like(l,dtype=np.complex128)
@@ -245,8 +265,8 @@ class WaterModel(Lattice, LinearFitFunctions):
 
         F_water = np.zeros_like(l,dtype=np.complex128)
         F_water[mask] = F_wat
-        return F_water/self.volume
-
+        return F_water
+    
     def setWaterParameters(self,zpos,layer_spacing,sigma_0,sigma_bar,A0):
         self.basis = np.array([zpos,layer_spacing,sigma_0,sigma_bar,A0])
 
@@ -427,8 +447,16 @@ class WaterModel(Lattice, LinearFitFunctions):
         return "return\n%s\n%.4f %.4f %.4f %.4f %.4f %.4f" % (self.type,*a,*np.rad2deg(alpha))
 
 
-    def parameterStr(self):
-        return self.waterModelToStr() + "\n"
+    def parameterStr(self, showErrors=True):
+        """Return water-model parameters as plain text.
+
+        :param bool showErrors:
+            Include propagated fit errors when available.
+        :returns:
+            Serialized parameter line.
+        :rtype: str
+        """
+        return self.waterModelToStr(showErrors=showErrors) + "\n"
 
     def parameterStrRod(self):
         return self.waterModelToStr(False) + "\n"
@@ -446,8 +474,22 @@ class WaterModel(Lattice, LinearFitFunctions):
     def toRODStr(self):
         return self.latticeRODStr() + "\n" + self.parameterStrRod()
 
-    def toStr(self):
-        return self.latticeRODStr() + "\n" + WaterModel.parameterOrder + "\n" + self.parameterStr()
+    def toStr(self, showErrors=True):
+        """Serialize the water model as plain text.
+
+        :param bool showErrors:
+            Include propagated fit errors when available.
+        :returns:
+            Plain-text water-model representation.
+        :rtype: str
+        """
+        return (
+            self.latticeRODStr()
+            + "\n"
+            + WaterModel.parameterOrder
+            + "\n"
+            + self.parameterStr(showErrors=showErrors)
+        )
 
     def pos(self):
         return self.basis[0]*self._a[2]
@@ -567,7 +609,18 @@ class UnitCell(Lattice):
             'absolute' : [],
             'relative' : []
         }
-        self.layer_behaviour = keyargs.get('layer_behaviour', 'ignore')
+        self.layer_behaviour = keyargs.get(
+            'layer_behavior',
+            keyargs.get('layer_behaviour', 'ignore'),
+        )
+        self._explicit_layer_cycle = keyargs.get('layer_cycle')
+        transition = keyargs.get('layer_transition')
+        if transition is not None and not isinstance(
+            transition, LayerTransition
+        ):
+            transition = LayerTransition(transition)
+        self.layer_transition = transition
+        self._start_layer = -1
         self.layerpos = {0.0 : 0.0}
         self.basis_0 = np.array([])
         self._basis_parvalues = None
@@ -652,20 +705,13 @@ class UnitCell(Lattice):
         self._errors_parvalues = None
 
     def setReferenceUnitCell(self,uc,rotMatrix=np.identity(3)):
-        """   
-        set reference unit cell. 
-        When any F_hkl is called, first hkl will be transformed from the reference 
-        lattice into the lattice of this unit cell,
-        using equation
-        B' * H' = O * B * H, where a ' indicates the entities in the frame of this
-        lattice. O is an optional rotation matrix, which describes the rotation of
-        this lattice with respect to the reference lattice.
-        
-        Equally the same applies to the relative coordinates of the respective 
-        lattices:
-        R' * x' = O * R * x
-        
-        !!! This has to be checked !!!
+        """Set the reciprocal- and real-space reference coordinate system.
+
+        :param UnitCell uc:
+            Unit cell defining input reciprocal lattice units.
+        :param numpy.ndarray rotMatrix:
+            Optional 3-by-3 rotation from the reference crystal frame into
+            this unit cell's crystal frame.
         """
         self.refRealTransform[:] = self.R_mat_inv @ rotMatrix @ uc.R_mat
         self.refHKLTransform[:] = self.B_mat_inv @ rotMatrix @ uc.B_mat
@@ -790,7 +836,15 @@ class UnitCell(Lattice):
         if len(layer_numbers) == 1:
             return layers
 
-        if ordered:
+        if self._explicit_layer_cycle is not None:
+            cycle = tuple(self._explicit_layer_cycle)
+            missing = set(layers) - set(cycle)
+            if missing:
+                raise ValueError(
+                    "layer_cycle omits unit-cell layers %r" % sorted(missing)
+                )
+            layers = OrderedDict((n, layers[n]) for n in cycle)
+        elif ordered:
             avg_height = []
             uc_nms = []
             for uc_l in layers:
@@ -810,12 +864,35 @@ class UnitCell(Lattice):
         return np.sort(np.unique(self.basis[:, 7]))
 
     @property
+    def layer_cycle(self):
+        """Return the ordered local structural-layer cycle."""
+        if self._explicit_layer_cycle is not None:
+            return LayerCycle(self._explicit_layer_cycle)
+        ordered_layers = self.split_in_layers(ordered=True)
+        return LayerCycle(tuple(ordered_layers))
+
+    @layer_cycle.setter
+    def layer_cycle(self, layers):
+        self._explicit_layer_cycle = tuple(layers)
+
+    @property
+    def layer_behavior(self):
+        """Return how layer selection is handled during crystal stacking."""
+        return self.layer_behaviour
+
+    @layer_behavior.setter
+    def layer_behavior(self, behavior):
+        self.layer_behaviour = behavior
+
+    @property
     def height_absolute(self):
         H = (self.coherentDomainMatrix[-1][2,3] +1)*self.a[2]
         return H
 
     @property
     def end_layer_number(self):
+        if self.layer_behavior == 'select' and self.start_layer_number != -1:
+            return self.start_layer_number
         idxmax = np.argmax(self.basis[:,3])
         return self.basis[idxmax][7]
 
@@ -833,15 +910,63 @@ class UnitCell(Lattice):
     def loc_absolute(self):
         return self.pos_absolute
 
-    @property
-    def start_layer_number(self): # not implemented
-        return -1.
+    def stack_on(
+        self, below_loc, below_height, below_layer=-1, below_state=None
+    ):
+        """Place this unit cell on the object below it.
 
+        :param float below_loc:
+            Absolute reference location of the object below in Angstrom.
+            Unit cells do not otherwise use this value.
+        :param float below_height:
+            Absolute top height of the object below in Angstrom.
+        :param float below_layer:
+            Top cyclic layer identifier of the object below.
+        """
+        if below_state is None:
+            below_state = LayerState(self.layer_cycle, below_layer)
+        if self.layer_behavior == 'select':
+            self._start_layer = resolve_upper_start(
+                below_state, self.layer_cycle, self.layer_transition
+            )
+        else:
+            self.start_layer_number = below_layer
+        self.pos_absolute = below_height
+
+    @property
+    def layer_state(self):
+        """Return the top structural-layer state of this unit cell."""
+        return LayerState(self.layer_cycle, self.end_layer_number)
+
+    @property
+    def stacking_height_absolute(self):
+        """Return the nominal height passed to the object above."""
+        return self.height_absolute
+
+    @property
+    def stacking_loc_absolute(self):
+        """Return the nominal reference location passed upward."""
+        return self.loc_absolute
+
+    @property
+    def start_layer_number(self):
+        return self._start_layer
+        
     @start_layer_number.setter
     def start_layer_number(self, ln):
-        if self.layer_behaviour == 'select':
-            pass
-
+        if self.layer_behavior != 'select':
+            return
+        if ln == -1:
+            self._start_layer = self.layers[0]
+            return
+        matches = np.flatnonzero(self.layers == ln)
+        if matches.size == 0:
+            raise ValueError(
+                "Layer %s does not exist in UnitCell %s."
+                % (ln, self.name)
+            )
+        self._start_layer = self.layers[(matches[0] + 1) % len(self.layers)]
+    
     # in eV
     def setEnergy(self,E):
         """
@@ -1128,25 +1253,61 @@ class UnitCell(Lattice):
             raise ValueError("Some errors are non-finite or not set.")
         return err0
 
+    def build_selected_basis(self):
+        if self.layer_behaviour == 'select':
+            if self.start_layer_number == -1.0:
+                warnings.warn(
+                    'Layer behaviour is >select<, but start number is -1 '
+                    '(undefined). Proceed with the first layer.'
+                )
+                ln = self.layers[0]
+            else:
+                ln = self.start_layer_number
+                
+            mask_layer = self.basis[:, 7] == ln
+            if not np.any(mask_layer):
+                raise ValueError('Layer %s does not exist in UnitCell.' % ln)
+            return self.basis[mask_layer], self.f[mask_layer], np.asarray(self.names)[mask_layer]
+            
+        elif self.layer_behaviour == 'ignore':
+            return self.basis, self.f, self.names
+        else:
+            warnings.warn('unknown layer behaviour %s: proceed calculating F while ignoring layer behaviour.' % self.layer_behaviour)
+            return self.basis, self.f, self.names
 
     # returns the structure factor of the unit cell
     # h,k,l have to be 1d arrays
     def F_uc_bulk(self,h,k,l,atten=0):
+        """Return one attenuated bulk unit-cell amplitude in electrons.
+
+        :param numpy.ndarray h:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray k:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray l:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param float atten:
+            Dimensionless attenuation exponent per unit-cell translation.
+        :returns:
+            Complex structure-factor amplitude in electrons.
+        :rtype: numpy.ndarray
+        """
+        basis, formf, names = self.build_selected_basis()
         if HAS_NUMBA_ACCEL:
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
             F = _CTRcalc_accel.unitcell_F_uc_bulk(h,
                     k,
                     l,
                     atten,
-                    self.basis,
-                    self.f,
+                    basis,
+                    formf,
                     self.refHKLTransform,
                     self.B_mat,
                     self.R_mat,
                     self.R_mat_inv,
                     np.asarray(self.coherentDomainMatrix),
                     np.asarray(self.coherentDomainOccupancy),
-                    self.volume)
+                    self.uc_area)
             return F
         else:
             F = np.zeros(h.size,dtype=np.complex128)
@@ -1159,20 +1320,37 @@ class UnitCell(Lattice):
 
             domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]
 
-            for i in range(len(self.basis)):
-                f[:] =  self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]
+            for i in range(len(basis)):
+                f[:] =  formf[i][10] + formf[i][11] + 1j*formf[i][12]
                 for j in range(5):
-                    f += self.f[i][j]*np.exp(- self.f[i][j+5]*Q2)
-                f *= np.exp(- (self.basis[i][4] * Q_para2 + self.basis[i][5] * Q_perp2)/ (16*np.pi**2))
-                f *= self.basis[i][6]
+                    f += formf[i][j]*np.exp(- formf[i][j+5]*Q2)
+                f *= np.exp(- (basis[i][4] * Q_para2 + basis[i][5] * Q_perp2)/ (16*np.pi**2))
+                f *= basis[i][6]
                 for mat, weight, eff_mat in zip(self.coherentDomainMatrix,self.coherentDomainOccupancy, domainmatrix):
-                    xyz_rel = np.dot(eff_mat,self.basis[i][1:4]) + mat[:,-1]
+                    xyz_rel = np.dot(eff_mat,basis[i][1:4]) + mat[:,-1]
                     F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) ) * math.exp(atten*xyz_rel[2])
-            return F/self.volume
+            return F
 
     # returns the structure factor of the unit cell
     # h,k,l have to be 1d arrays
     def F_uc_bulk_direct(self,h,k,l,atten=0):
+        """Return one bulk-cell amplitude without reference conversion.
+
+        The result is unnormalized and has units of electrons.
+
+        :param numpy.ndarray h:
+            Reciprocal coordinate in this unit cell's r.l.u.
+        :param numpy.ndarray k:
+            Reciprocal coordinate in this unit cell's r.l.u.
+        :param numpy.ndarray l:
+            Reciprocal coordinate in this unit cell's r.l.u.
+        :param float atten:
+            Dimensionless attenuation exponent.
+        :returns:
+            Complex structure-factor amplitude in electrons.
+        :rtype: numpy.ndarray
+        """
+        basis, formf, names = self.build_selected_basis()
         F = np.zeros(h.size,dtype=np.complex128)
         f = np.zeros(h.size,dtype=np.complex128)
         hkl =  np.vstack((h,k,l))
@@ -1181,34 +1359,50 @@ class UnitCell(Lattice):
         Q_perp2 = Q_cart2[2] #squared!!!
         Q2 = Q_para2 + Q_perp2 #squared!!!
 
-        domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]
-
-        for i in range(len(self.basis)):
-            f[:] =  self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]
+        domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]   
+        for i in range(len(basis)):
+            f[:] =  formf[i][10] + formf[i][11] + 1j*formf[i][12]
             for j in range(5):
-                f += self.f[i][j]*np.exp(- self.f[i][j+5]*Q2)
-            f *= np.exp(- (self.basis[i][4] * Q_para2 + self.basis[i][5] * Q_perp2)/ (16*np.pi**2))
-            f *= self.basis[i][6]
+                f += formf[i][j]*np.exp(- formf[i][j+5]*Q2)
+            f *= np.exp(- (basis[i][4] * Q_para2 + basis[i][5] * Q_perp2)/ (16*np.pi**2))
+            f *= basis[i][6]
             for mat, weight, eff_mat in zip(self.coherentDomainMatrix,self.coherentDomainOccupancy,domainmatrix):
-                xyz_rel = np.dot(eff_mat,self.basis[i][1:4]) + mat[:,-1]
+                xyz_rel = np.dot(eff_mat,basis[i][1:4]) + mat[:,-1]
                 F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) ) * math.exp(atten*xyz_rel[2])
-        return F/self.volume
+        return F
 
     def F_uc(self,h,k,l):
+        """Return the canonical unit-cell structure factor in electrons.
+
+        No unit-cell area or volume normalization is applied. Input reciprocal
+        coordinates are interpreted in the configured reference unit cell and
+        transformed into this unit cell before evaluation.
+
+        :param numpy.ndarray h:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray k:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray l:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :returns:
+            Complex structure-factor amplitude in electrons.
+        :rtype: numpy.ndarray
+        """
+        basis, formf, names = self.build_selected_basis()
         if HAS_NUMBA_ACCEL and not self._special_formfactors_present:
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
             F = _CTRcalc_accel.unitcell_F_uc(h,
                     k,
                     l,
-                    self.basis,
-                    self.f,
+                    basis,
+                    formf,
                     self.refHKLTransform,
                     self.B_mat,
                     self.R_mat,
                     self.R_mat_inv,
                     np.asarray(self.coherentDomainMatrix),
                     np.asarray(self.coherentDomainOccupancy),
-                    self.volume)
+                    self.uc_area)
             return F
         else:
             F = np.zeros(h.size,dtype=np.complex128)
@@ -1220,37 +1414,55 @@ class UnitCell(Lattice):
             Q2 = Q_para2 + Q_perp2 #squared!!!
 
             domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]
-
-            for i,name in zip(range(len(self.basis)),self.names):
+            for i,name in zip(range(len(basis)), names):
                 if name in UnitCell.special_formfactors:
-                    f[:] = UnitCell.special_formfactors[name][0](np.sqrt(Q2)) + self.f[i][11] + 1j*self.f[i][12]
+                    f[:] = UnitCell.special_formfactors[name][0](np.sqrt(Q2)) + formf[i][11] + 1j*formf[i][12]
                 else:
-                    f[:] =  self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]
+                    f[:] =  formf[i][10] + formf[i][11] + 1j*formf[i][12]
                     for j in range(5):
-                        f += self.f[i][j]*np.exp(- self.f[i][j+5]*Q2)
-                f *= np.exp(- (self.basis[i][4] * Q_para2 + self.basis[i][5] * Q_perp2)/ (16*np.pi**2))
-                f *= self.basis[i][6]
+                        f += formf[i][j]*np.exp(- formf[i][j+5]*Q2)
+                f *= np.exp(- (basis[i][4] * Q_para2 + basis[i][5] * Q_perp2)/ (16*np.pi**2))
+                f *= basis[i][6]
                 for mat, weight, eff_mat in zip(self.coherentDomainMatrix,self.coherentDomainOccupancy, domainmatrix):
-                    xyz_rel = np.dot(eff_mat,self.basis[i][1:4]) + mat[:,-1]
+                    xyz_rel = np.dot(eff_mat,basis[i][1:4]) + mat[:,-1]
                     F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) )
-            return F/self.volume
+            return F
+
 
     def F_bulk(self,h,k,l,atten=0):
+        """Return the semi-infinite bulk structure factor in electrons.
+
+        The amplitude represents one lateral bulk unit cell. The geometric
+        lattice sum is applied only along the out-of-plane direction.
+
+        :param numpy.ndarray h:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray k:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray l:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param float atten:
+            Dimensionless attenuation exponent per bulk unit cell.
+        :returns:
+            Complex bulk amplitude in electrons per lateral bulk cell.
+        :rtype: numpy.ndarray
+        """
+        basis, formf, names = self.build_selected_basis()
         if HAS_NUMBA_ACCEL:
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
             F = _CTRcalc_accel.unitcell_F_bulk(h,
                     k,
                     l,
                     atten,
-                    self.basis,
-                    self.f,
+                    basis,
+                    formf,
                     self.refHKLTransform,
                     self.B_mat,
                     self.R_mat,
                     self.R_mat_inv,
                     np.asarray(self.coherentDomainMatrix),
                     np.asarray(self.coherentDomainOccupancy),
-                    self.volume)
+                    self.uc_area)
             return F
         else:
             hkl = self.refHKLTransform @ np.vstack((h,k,l))
@@ -1283,6 +1495,8 @@ class UnitCell(Lattice):
             calculate the absolute value to get the electron density
 
         """
+        basis, formf, names = self.build_selected_basis()
+        
         hkl = (self.refHKLTransform @ np.array([h,k,0.])).flatten()
         Qpara2 = np.sum(np.dot(self.B_mat , hkl)**2)
         a,alpha,_,_ = self.getLatticeParameters()
@@ -1299,33 +1513,35 @@ class UnitCell(Lattice):
 
         domainmatrix = [self.R_mat_inv @ mat[:,:-1] @ self.R_mat for mat in self.coherentDomainMatrix]
 
-        for i,name in zip(range(len(self.basis)),self.names):
-            deltaZ2i = self.basis[i][5]/(8*(np.pi)**2)
-            deltaPara2i = self.basis[i][4]/(8*(np.pi)**2)
+        for i,name in zip(range(len(basis)),names):
+            deltaZ2i = basis[i][5]/(8*(np.pi)**2)
+            deltaPara2i = basis[i][4]/(8*(np.pi)**2)
             for mat, weight, eff_mat in zip(self.coherentDomainMatrix,self.coherentDomainOccupancy, domainmatrix):
-                xyz_rel = eff_mat @ self.basis[i][1:4] + mat[:,-1]
+                xyz_rel = eff_mat @ basis[i][1:4] + mat[:,-1]
                 z_i = xyz_rel[2]*self._a[2]
                 y_i_frac = xyz_rel[1]
                 x_i_frac = xyz_rel[0]
                 if name in UnitCell.special_eDensity:
-                    rho_i[:] = (self.f[i][11] + 1j*self.f[i][12])/ (np.sqrt(2*np.pi*deltaZ2i))
+                    rho_i[:] = (formf[i][11] + 1j*formf[i][12])/ (np.sqrt(2*np.pi*deltaZ2i))
                     rho_i *= np.exp( -0.5 *( deltaPara2i * Qpara2 +  ((z- z_i)**2)/deltaZ2i ))
                     rho_i += gaussian_filter1d(UnitCell.special_eDensity[name](z- z_i)*np.exp( -0.5 *( deltaPara2i * Qpara2)),np.sqrt(deltaZ2i)/ zstep_mean)
-                else:
-                    rho_i[:] = (self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]) / (np.sqrt(2*np.pi*deltaZ2i))
+                else:                
+                    rho_i[:] = (formf[i][10] + formf[i][11] + 1j*formf[i][12]) / (np.sqrt(2*np.pi*deltaZ2i))
                     rho_i *= np.exp( -0.5 *( deltaPara2i * Qpara2 +  ((z- z_i)**2)/deltaZ2i ))
                     for j in range(5):
-                        exp_dpara = self.f[i][j+5] + 0.5*deltaPara2i
-                        exp_dz = self.f[i][j+5] + 0.5*deltaZ2i
-                        rho_i += (self.f[i][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- exp_dpara * Qpara2  - (((z- z_i)**2)/(4*exp_dz))  )
-
+                        exp_dpara = formf[i][j+5] + 0.5*deltaPara2i
+                        exp_dz = formf[i][j+5] + 0.5*deltaZ2i
+                        rho_i += (formf[i][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- exp_dpara * Qpara2  - (((z- z_i)**2)/(4*exp_dz))  )
+                        
                 rho_i *= np.exp(-2j*np.pi*(h*x_i_frac + k*y_i_frac))
-                rho += rho_i*self.basis[i][6] * weight
-
+                rho += rho_i*basis[i][6] * weight
+        
         return rho/self.uc_area
 
 
     def zDensity_G_asbulk(self, z, h,k, noUC=30):
+        basis, formf, names = self.build_selected_basis()
+        
         hkl = (self.refHKLTransform @ np.array([h,k,0.])).flatten()
         Qpara2 = np.sum(np.dot(self.B_mat , hkl)**2)
         a,alpha,_,_ = self.getLatticeParameters()
@@ -1335,24 +1551,24 @@ class UnitCell(Lattice):
         rho_i = np.empty_like(z,dtype=np.complex128)
         for no in range(noUC):
             noA = no*self._a[2]
-            for i in range(len(self.basis)):
-                deltaZ2i = self.basis[i][5]/(8*(np.pi)**2)
-                deltaPara2i = self.basis[i][4]/(8*(np.pi)**2)
-                z_i = self.basis[i][3]*self._a[2]
-                y_i_frac = self.basis[i][2]
-                x_i_frac = self.basis[i][1]
-
-                rho_i[:] = (self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]) / (np.sqrt(2*np.pi*deltaZ2i))
+            for i in range(len(basis)):
+                deltaZ2i = basis[i][5]/(8*(np.pi)**2)
+                deltaPara2i = basis[i][4]/(8*(np.pi)**2)
+                z_i = basis[i][3]*self._a[2]
+                y_i_frac = basis[i][2]
+                x_i_frac = basis[i][1]
+                
+                rho_i[:] = (formf[i][10] + formf[i][11] + 1j*formf[i][12]) / (np.sqrt(2*np.pi*deltaZ2i))
                 rho_i *= np.exp( -0.5 *( deltaPara2i * Qpara2 +  ((z- z_i + noA)**2)/deltaZ2i ))
 
 
                 for j in range(5):
-                    exp_dpara = self.f[i][j+5] + 0.5*deltaPara2i
-                    exp_dz = self.f[i][j+5] + 0.5*deltaZ2i
-                    rho_i += (self.f[i][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- exp_dpara * Qpara2  - (((z- z_i + noA)**2)/(4*exp_dz))  )
-
+                    exp_dpara = formf[i][j+5] + 0.5*deltaPara2i
+                    exp_dz = formf[i][j+5] + 0.5*deltaZ2i
+                    rho_i += (formf[i][j]/(np.sqrt(4.*np.pi*exp_dz))) * np.exp(- exp_dpara * Qpara2  - (((z- z_i + noA)**2)/(4*exp_dz))  )
+                    
                 rho_i *= np.exp(-2j*np.pi*(h*x_i_frac + k*y_i_frac))
-                rho += rho_i*self.basis[i][6]
+                rho += rho_i*basis[i][6]
 
         return rho/self.uc_area
 
@@ -1381,7 +1597,10 @@ class UnitCell(Lattice):
 
         if figure is None:
             figure = mlab.figure()
-
+        if keyargs.get('useSelected', True):
+            basis, formf, names = self.build_selected_basis()
+        else:
+            basis, formf, names = self.basis, self.f, self.names
         if ucx == 0 or ucy == 0 or ucz == 0:
             raise ValueError("One of ucx,ucy or ucz is zero. Must plot at least one unit cell.")
 
@@ -1390,20 +1609,19 @@ class UnitCell(Lattice):
 
         elcolors = keyargs.get('color')
         if elcolors is None:
-            elcolors = [color_generator(name) for name in self.names]
+            elcolors = [color_generator(name) for name in names]
         elif isinstance(elcolors ,tuple):
-            elcolors = [elcolors for params in self.basis]
-
+            elcolors = [elcolors for params in basis]
+            
         resolution = keyargs.get('resolution')
         if resolution is None:
             resolution = 25
 
         mat = self.coherentDomainMatrix[domain]
         domainmatrix = self.R_mat_inv @ mat[:,:-1] @ self.R_mat
-
-        for i,params in enumerate(self.basis):
-
-            radius = cov_radii_array[atomic_number(self.names[i])-1][2]*2
+        for i,params in enumerate(basis):
+            
+            radius = cov_radii_array[atomic_number(names[i])-1][2]*2
             #elcolor_c = keyargs.get('color')
             #if elcolor_c is None:
             #    elcolor_c = elements.rgb(int(params[0]))
@@ -1552,15 +1770,33 @@ class UnitCell(Lattice):
         return "%.4f %.4f %.4f %.4f %.4f %.4f" % (*a,*np.rad2deg(alpha))
 
 
-    def parameterStr(self):
+    def parameterStr(self, showErrors=True):
+        """Return atom and layer parameters as plain text.
+
+        :param bool showErrors:
+            Include propagated fit errors when available.
+        :returns:
+            Serialized unit-cell parameter block.
+        :rtype: str
+        """
         st = ""
         for i in range(len(self.names)):
-            st += str(i).zfill(2) + "  " + self.atomToStr(i) + "\n"
-        st += "layerpos: "
-        for p in self.layerpos:
-            st += "%s = %s, " % (p,self.layerpos[p])
-        st = st[:-2] # remove last ', '
-        st += "\nlayer_behaviour: %s\n" % self.layer_behaviour
+            st += (
+                str(i).zfill(2)
+                + "  "
+                + self.atomToStr(i, showErrors)
+                + "\n"
+            )
+        layer_positions = ", ".join(
+            "%s = %s" % (p, self.layerpos[p])
+            for p in self.layerpos
+        )
+        st += "layerpos: %s\n" % layer_positions
+        st += "layer_behaviour: %s\n" % self.layer_behaviour
+        if self._explicit_layer_cycle is not None:
+            st += "layer_cycle: %s\n" % ", ".join(
+                str(layer) for layer in self._explicit_layer_cycle
+            )
         return st
 
     def parameterStrRod(self):
@@ -1582,8 +1818,24 @@ class UnitCell(Lattice):
     def toRODStr(self):
         return "return\n" + self.domainsToStr() + self.latticeRODStr() + "\n" + self.parameterStrRod()
 
-    def toStr(self):
-        return "return\n" + self.domainsToStr() + self.latticeRODStr() + "\n" + UnitCell.parameterOrder + "\n" + self.parameterStr()
+    def toStr(self, showErrors=True):
+        """Serialize the unit cell as plain text.
+
+        :param bool showErrors:
+            Include propagated fit errors when available.
+        :returns:
+            Plain-text unit-cell representation.
+        :rtype: str
+        """
+        return (
+            "return\n"
+            + self.domainsToStr()
+            + self.latticeRODStr()
+            + "\n"
+            + UnitCell.parameterOrder
+            + "\n"
+            + self.parameterStr(showErrors=showErrors)
+        )
 
     def toXYZfile(self,xyzfile, ucx=1,ucy=1,ucz=1,translate=np.array([0.,0.,0.])):
         xyz_array = self.pos_cart_all(ucx,ucy,ucz,translate)
@@ -1733,6 +1985,7 @@ class UnitCell(Lattice):
             statistics = dict()
             layerpos = dict()
             layer_behaviour = 'ignore'
+            layer_cycle = None
             for l in f:
                 line = l.rsplit('//')[0]
                 if line.startswith('layerpos:'):
@@ -1750,6 +2003,12 @@ class UnitCell(Lattice):
                     continue
                 if line.startswith('layer_behaviour:'):
                     layer_behaviour = line[len('layer_behaviour:'):].strip()
+                    continue
+                if line.startswith('layer_cycle:'):
+                    layer_cycle = tuple(
+                        float(value)
+                        for value in line.split(':', 1)[1].split(',')
+                    )
                     continue
 
                 try:
@@ -1825,6 +2084,7 @@ class UnitCell(Lattice):
         uc.statistics = statistics
         uc.layerpos = layerpos
         uc.layer_behaviour = layer_behaviour
+        uc._explicit_layer_cycle = layer_cycle
         #uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
         if len(basis) >= 2:
             basis = np.vstack(basis)
@@ -1946,5 +2206,3 @@ class UnitCell(Lattice):
 
         else:
             return uc
-
-

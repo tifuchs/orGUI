@@ -195,7 +195,7 @@ class CTROptimizer:
     def printStatistics(self,x):
         #chi2_result, chi2_red , pvalue, nodatapoints = self.evaluateStatistics(x)
         stat = self.statistics(x)
-        print("Chisqr = %.4f, Chisqr_red = %.4f, R-factor = %.4f ,p-value = %.6f, n_refl = %s" % (stat['Chisqr'],stat['Chisqr_red'],stat['Rfactor'],stat['pvalue'],stat['noparameters']))
+        print("Chisqr = %.4f, Chisqr_red = %.4f, R-factor = %.4f ,p-value = %.6f, n_refl = %s" % (stat['Chisqr'],stat['Chisqr_red'],stat['Rfactor'],stat['pvalue'],stat['nodatapoints']))
 
 
     def get_name(self):
