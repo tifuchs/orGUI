@@ -32,17 +32,222 @@ import numpy as np
 from .. import util
 import re
 #random.seed(45)
-from scipy.stats import skellam, poisson
 
 
 from .CTRutil import (_ensure_contiguous, next_skip_comment, LinearFitFunctions)
 
 from .CTRuc import UnitCell, HAS_NUMBA_ACCEL
+from .CTRdistributions import (
+    DEFAULT_TAIL_PROBABILITY,
+    PoissonProfile,
+    SkellamProfile,
+)
+from .CTRstacking import (
+    LayerCycle,
+    LayerState,
+    LayerTransition,
+    resolve_upper_start,
+)
+
+
+def _cyclic_layer_order(layer_ids, below_layer):
+    layer_ids = np.asarray(layer_ids)
+    if below_layer == -1:
+        start = 0
+    else:
+        matches = np.flatnonzero(layer_ids == below_layer)
+        if matches.size == 0:
+            raise ValueError(
+                "Layer %s is not present in cyclic layer sequence %s."
+                % (below_layer, layer_ids.tolist())
+            )
+        start = (matches[0] + 1) % len(layer_ids)
+    indices = np.roll(np.arange(len(layer_ids)), -start)
+    return layer_ids[indices], indices
+
+
+def _unwrapped_layer_positions(layer_positions, order):
+    positions = np.asarray(layer_positions)[order].astype(np.float64)
+    if positions.size == 0:
+        return positions
+    positions = np.copy(positions)
+    for i in range(1, len(positions)):
+        while positions[i] <= positions[i - 1]:
+            positions[i] += 1.0
+    return positions
+
+
+def _translate_domains(layers, height):
+    for layer in layers:
+        offset = height / layer.a[2]
+        for matrix in layer.coherentDomainMatrix:
+            matrix[2, 3] += offset
+
+
+def _move_domains(layers, delta_height):
+    for layer in layers:
+        offset = delta_height / layer.a[2]
+        for matrix in layer.coherentDomainMatrix:
+            matrix[2, 3] += offset
+
+
+class _LayerStackingMixin:
+    def _initialize_layer_stacking(self, kwargs):
+        self.layer_behavior = kwargs.get(
+            'layer_behavior',
+            kwargs.get('layer_behaviour', 'select'),
+        )
+        transition = kwargs.get('layer_transition')
+        if transition is not None and not isinstance(
+            transition, LayerTransition
+        ):
+            transition = LayerTransition(transition)
+        self.layer_transition = transition
+        self._start_layer_number = -1.
+        self.start_layer_number = -1.
+
+    @property
+    def layer_behavior(self):
+        """Return whether cyclic layer selection is applied."""
+        return self._layer_behavior
+
+    @layer_behavior.setter
+    def layer_behavior(self, behavior):
+        if behavior not in ('ignore', 'select'):
+            raise ValueError(
+                "layer_behavior must be 'ignore' or 'select', not %r"
+                % behavior
+            )
+        self._layer_behavior = behavior
+
+    @property
+    def layer_behaviour(self):
+        """Return the legacy spelling of :attr:`layer_behavior`."""
+        return self.layer_behavior
+
+    @layer_behaviour.setter
+    def layer_behaviour(self, behavior):
+        self.layer_behavior = behavior
+
+    @property
+    def start_layer_number(self):
+        """Return the first cyclic layer created by this object."""
+        return self._start_layer_number
+
+    @start_layer_number.setter
+    def start_layer_number(self, below_layer):
+        if self.layer_behavior == 'ignore':
+            below_layer = -1
+        layer_order, order = _cyclic_layer_order(
+            self._layer_ids, below_layer
+        )
+        self._start_layer_number = layer_order[0]
+        self._set_layer_order(layer_order, order)
+        self._basis_created = np.full_like(self.basis, np.nan)
+
+    @property
+    def layer_cycle(self):
+        """Return the ordered local structural-layer cycle."""
+        return LayerCycle(self._layer_ids)
+
+    @property
+    def layer_state(self):
+        """Return the top structural-layer state of this object."""
+        return LayerState(self.layer_cycle, self.end_layer_number)
+
+    @property
+    def stacking_height_absolute(self):
+        """Return the nominal height passed to the object above."""
+        return self.height_absolute
+
+    @property
+    def stacking_loc_absolute(self):
+        """Return the nominal reference location passed upward."""
+        return self.loc_absolute
+
+    def _set_start_layer(self, start_layer):
+        matches = np.flatnonzero(self._layer_ids == start_layer)
+        if matches.size == 0:
+            raise ValueError(
+                "Layer %s is not present in cyclic layer sequence %s."
+                % (start_layer, self._layer_ids.tolist())
+            )
+        start = matches[0]
+        indices = np.roll(np.arange(len(self._layer_ids)), -start)
+        layer_order = self._layer_ids[indices]
+        self._start_layer_number = layer_order[0]
+        self._set_layer_order(layer_order, indices)
+        self._basis_created = np.full_like(self.basis, np.nan)
+
+    def stack_on(
+        self, below_loc, below_height, below_layer=-1, below_state=None
+    ):
+        """Generate this object's layer order and height from the object below.
+
+        :param float below_loc:
+            Absolute reference location of the object below in Angstrom.
+        :param float below_height:
+            Absolute top height of the object below in Angstrom.
+        :param float below_layer:
+            Top cyclic layer identifier of the object below.
+        """
+        if below_state is None:
+            below_state = LayerState(self.layer_cycle, below_layer)
+        if self.layer_behavior == 'ignore':
+            self.start_layer_number = -1
+        else:
+            start_layer = resolve_upper_start(
+                below_state, self.layer_cycle, self.layer_transition
+            )
+            self._set_start_layer(start_layer)
+        self.set_below(below_loc, below_height)
+
+    def _stacking_metadata_to_str(self):
+        if self.layer_transition is None:
+            return ""
+        pairs = ", ".join(
+            "%s = %s" % pair
+            for pair in self.layer_transition.mapping.items()
+        )
+        return "layer_transition: %s\n" % pairs
+
+
+def _parse_layer_transition(string):
+    for line in string.splitlines():
+        if line.strip().lower().startswith("layer_transition:"):
+            values = line.split(":", 1)[1]
+            mapping = {}
+            for pair in values.split(","):
+                lower, upper = pair.split("=")
+                mapping[float(lower)] = float(upper)
+            return mapping
+    return None
+
+
+def _parse_float_metadata(string, name, default):
+    prefix = name.lower() + ":"
+    equals_prefix = name.lower() + "="
+    for line in string.splitlines():
+        normalized = line.strip().lower().replace(" ", "")
+        if normalized.startswith(prefix):
+            return float(normalized.split(":", 1)[1])
+        if normalized.startswith(equals_prefix):
+            return float(normalized.split("=", 1)[1])
+    return default
+
+
+def _parse_text_metadata(string, name, default=None):
+    prefix = name.lower() + ":"
+    for line in string.splitlines():
+        normalized = line.strip()
+        if normalized.lower().startswith(prefix):
+            return normalized.split(":", 1)[1].strip()
+    return default
 
 
 
 
-class EpitaxyInterface(LinearFitFunctions):
+class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
     parameterOrder = "Width/cells Skew/cells"
 
     parameterLookup = {'W' : 0, 'S' : 1}
@@ -63,11 +268,24 @@ class EpitaxyInterface(LinearFitFunctions):
         
         """
         super().__init__()
+        profile = kwargs.pop('profile', None)
+        if isinstance(type, SkellamProfile):
+            profile = type
+            type = 'skellam'
+        if profile is not None and not isinstance(profile, SkellamProfile):
+            raise TypeError("EpitaxyInterface profile must be SkellamProfile")
         self.type = type
+        self.profile = profile
+        self._legacy_support_cursor = kwargs.pop(
+            'legacy_support_cursor', profile is None
+        )
         self.sigma_calc = kwargs.get('sigma_calc', 3)
         self.fixed_ucs = kwargs.get('fixed_ucs', False)
         self.set_ucs(uc_top, uc_bottom, **kwargs)
-        self.basis = np.array([0., 0.])
+        if profile is None:
+            self.basis = np.array([0., 0.])
+        else:
+            self.basis = np.array([profile.width, profile.asymmetry])
         self._basis_created = np.array([np.nan, np.nan])
         self.basis_0 = np.array([0., 0.])
         self.errors = None
@@ -79,6 +297,7 @@ class EpitaxyInterface(LinearFitFunctions):
         self.below_loc = 0.
         self.below_H = 0.
         self.below_layer = -1.
+        self._initialize_layer_stacking(kwargs)
 
 
     def set_ucs(self, uc_top, uc_bottom, **kwargs):
@@ -94,35 +313,82 @@ class EpitaxyInterface(LinearFitFunctions):
         self.uc_layers_top = self.uc_top.split_in_layers()
         self.uc_layers_bottom = self.uc_bottom.split_in_layers()
 
+        self._layer_ids = np.array(list(self.uc_layers_top))
+        self._top_layers_base = [
+            self.uc_layers_top[uc] for uc in self._layer_ids
+        ]
+        self._bottom_layers_base = [
+            self.uc_layers_bottom[uc] for uc in self._layer_ids
+        ]
+        self._layerpos_base = np.array([
+            self.uc_top.layerpos[i] for i in self._layer_ids
+        ])
         self.top_layers = [self.uc_layers_top[uc] for uc in self.uc_layers_top]
         self.bottom_layers = [self.uc_layers_bottom[uc] for uc in self.uc_layers_bottom]
+        self.layerpos = np.copy(self._layerpos_base)
+
+    @property
+    def layers(self):
+        """Return the cyclic layer identifiers."""
+        return np.copy(self._layer_ids)
+
+    @property
+    def uc_area(self):
+        """Return the lower interface unit-cell area in Angstrom squared.
+
+        The lower unit cell defines the canonical lateral cell of the
+        interface structure factor.
+        """
+        return self.uc_bottom.uc_area
+
+    def _set_layer_order(self, layer_order, order):
+        self.layer_order = np.asarray(layer_order)
+        self._layer_order_indices = np.asarray(order)
+        self.top_layers = [self._top_layers_base[i] for i in order]
+        self.bottom_layers = [
+            self._bottom_layers_base[i] for i in order
+        ]
+        self.layerpos = _unwrapped_layer_positions(
+            self._layerpos_base, order
+        )
 
 
     def setReferenceUnitCell(self,uc,rotMatrix=np.identity(3)):
-        """   
-        set reference unit cell. 
-        When any F_hkl is called, first hkl will be transformed from the reference 
-        lattice into the lattice of this unit cell,
-        using equation
-        B' * H' = O * B * H, where a ' indicates the entities in the frame of this
-        lattice. O is an optional rotation matrix, which describes the rotation of
-        this lattice with respect to the reference lattice.
-        
-        Equally the same applies to the relative coordinates of the respective 
-        lattices:
-        R' * x' = O * R * x
-        
-        !!! This has to be checked !!!
+        """Set the reference frame on the interface and generated layers.
+
+        :param UnitCell uc:
+            Unit cell defining input reciprocal lattice units.
+        :param numpy.ndarray rotMatrix:
+            Optional 3-by-3 rotation from the reference frame into the
+            interface crystal frame.
         """
         self.uc_top.setReferenceUnitCell(uc, rotMatrix)
         self.uc_bottom.setReferenceUnitCell(uc, rotMatrix)
+        for layer in self._top_layers_base:
+            layer.setReferenceUnitCell(uc, rotMatrix)
+        for layer in self._bottom_layers_base:
+            layer.setReferenceUnitCell(uc, rotMatrix)
         self.reference_uc = uc
-        #self._dirty = True
 
     def setEnergy(self,E):
+        """Set X-ray energy for the source and generated unit cells.
+
+        :param float E:
+            X-ray energy in eV.
+        """
         self.E = E
         self.uc_top.setEnergy(E)
         self.uc_bottom.setEnergy(E)
+        for layer in self._top_layers_base:
+            layer.setEnergy(E)
+        for layer in self._bottom_layers_base:
+            layer.setEnergy(E)
+
+    def set_below(self, loc, height):
+        """Place the interface at the generated height of the object below."""
+        self.below_loc = loc
+        self.below_H = height
+        self.createInterfaceCells()
 
 
     @property
@@ -135,24 +401,41 @@ class EpitaxyInterface(LinearFitFunctions):
     def height_absolute(self):
         if np.any(self._basis_created != self.basis):
             self.createInterfaceCells()
-        H = (self.top_layers[-1].coherentDomainMatrix[-1][2,3] +1)*self.top_layers[-1].a[2]
+        upper_layer = self.top_layers[-1]
+        pos = upper_layer.coherentDomainMatrix[-1][2,3]
+        strain = upper_layer.coherentDomainMatrix[-1][2,2]
+        layer_id = self.layer_order[-1]
+        layer_space = np.diff(
+            self.layerpos, append=self.layerpos[0] + 1
+        )
+        H = (
+            pos
+            + strain * (
+                self.uc_top.layerpos[layer_id] + layer_space[-1]
+            )
+        ) * upper_layer.a[2]
         return H
 
     @property
     def pos_absolute(self):
         if np.any(self._basis_created != self.basis):
             self.createInterfaceCells()
-        H = self.top_layers[0].coherentDomainMatrix[0][2,3]*self.top_layers[0].a[2]
+        lower_layer = self.top_layers[0]
+        matrix = lower_layer.coherentDomainMatrix[0]
+        layer_id = self.layer_order[0]
+        H = (
+            matrix[2,3]
+            + matrix[2,2] * self.uc_top.layerpos[layer_id]
+        ) * lower_layer.a[2]
         return H
 
     @pos_absolute.setter
     def pos_absolute(self, pos):
         if np.any(self._basis_created != self.basis):
             self.createInterfaceCells()
-        for l in self.top_layers:
-            l.pos_absolute = pos
-        for l in self.bottom_layers:
-            l.pos_absolute = pos
+        delta_height = pos - self.pos_absolute
+        _move_domains(self.top_layers, delta_height)
+        _move_domains(self.bottom_layers, delta_height)
         self.below_H = pos
         self._loc_absolute = self._loc_absolute_ref + self.below_H
 
@@ -160,45 +443,79 @@ class EpitaxyInterface(LinearFitFunctions):
     def end_layer_number(self):
         if np.any(self._basis_created != self.basis):
             self.createInterfaceCells()
-        return self.top_layers[-1].basis[0,7]
+        return self._end_layer_number
 
     @property
-    def start_layer_number(self): # not implemented
-        return -1.
+    def stacking_height_absolute(self):
+        """Return the nominal interface boundary height in Angstrom."""
+        if self._legacy_support_cursor:
+            return self.height_absolute
+        return self.below_H
 
-    @start_layer_number.setter
-    def start_layer_number(self, ln): # not implemented
-        return
+    @property
+    def stacking_loc_absolute(self):
+        """Return the nominal interface boundary location in Angstrom."""
+        if self._legacy_support_cursor:
+            return self.loc_absolute
+        return self.below_H
+
+    @property
+    def layer_state(self):
+        """Return the nominal layer state at the upper side of the interface."""
+        if self._legacy_support_cursor:
+            return super().layer_state
+        layers = self.layer_cycle.layers
+        start = layers.index(self.start_layer_number)
+        return LayerState(self.layer_cycle, layers[start - 1])
 
     def createInterfaceCells(self):
         n_layers = len(self.uc_top.layers)
-        sigma = self.basis[0] * n_layers
-        if abs(self.basis[1]) > 1:
-            raise ValueError("skew must be between -1 and 1.")
-        if abs(self.basis[1]) == 1.:
-            skew = (self.basis[1] - np.sign(self.basis[1]) * 1e-6) / sigma
-        else:
-            skew = self.basis[1] / sigma #(len(self.top_layers))**2
-
         if self.type == 'skellam':
-            if abs(sigma * skew) > 1:
-                raise ValueError("abs(sigma * skew) must be smaller than one.")
-            mu1 = 0.5* sigma**2 * (1. + skew*sigma)
-            mu2 = sigma**2 - mu1
+            tail_probability = (
+                self.profile.tail_probability
+                if self.profile is not None
+                else DEFAULT_TAIL_PROBABILITY
+            )
+            profile = SkellamProfile(
+                self.basis[0], self.basis[1], tail_probability
+            )
+            mu1, mu2 = profile.parameters(n_layers)
 
             loc = mu1 - mu2
             loc_int = int(round(loc/n_layers,0))*n_layers
 
             if self.fixed_ucs:
                 uc_number = self.fixed_ucs
+                unitcells = np.arange(-uc_number, uc_number) + loc_int
+            elif self.profile is not None:
+                support_low, support_high = profile.support(n_layers)
+                first = (support_low // n_layers) * n_layers
+                stop = (
+                    (support_high // n_layers + 1) * n_layers
+                )
+                unitcells = np.arange(first, stop)
+                uc_number = -first
             else:
+                sigma = self.basis[0] * n_layers
                 uc_number = (int(np.ceil((self.sigma_calc*sigma) / n_layers)) + 1) * n_layers
                 uc_number = int(uc_number)
-            unitcells = np.arange(-uc_number, uc_number) + loc_int
+                unitcells = np.arange(-uc_number, uc_number) + loc_int
             assert unitcells.size % len(self.top_layers) == 0
 
-            probability_top = skellam.cdf(unitcells, mu1, mu2).reshape((-1, n_layers))
+            probability_top = profile.occupancy(
+                unitcells, n_layers
+            ).reshape((-1, n_layers))
             probability_bottom = 1. - probability_top
+            occupancy_top = probability_top
+            occupancy_bottom = probability_bottom
+            if not self._legacy_support_cursor:
+                sharp_top = (unitcells >= loc).astype(
+                    np.float64
+                ).reshape((-1, n_layers))
+                occupancy_top = probability_top - sharp_top
+                occupancy_bottom = (
+                    probability_bottom - (1.0 - sharp_top)
+                )
 
 
             a3_top = self.top_layers[0].a[2]
@@ -207,9 +524,13 @@ class EpitaxyInterface(LinearFitFunctions):
 
             for i, (uc_t, uc_b) in enumerate(zip(self.top_layers, self.bottom_layers)):
                 uc_t.coherentDomainMatrix = []
-                uc_t.coherentDomainOccupancy = np.ascontiguousarray(probability_top.T[i])
+                uc_t.coherentDomainOccupancy = np.ascontiguousarray(
+                    occupancy_top.T[i]
+                )
                 uc_b.coherentDomainMatrix = []
-                uc_b.coherentDomainOccupancy = np.ascontiguousarray(probability_bottom.T[i])
+                uc_b.coherentDomainOccupancy = np.ascontiguousarray(
+                    occupancy_bottom.T[i]
+                )
 
             mat_0 = np.vstack((np.identity(3).T,np.array([0,0,0]))).T
 
@@ -220,36 +541,65 @@ class EpitaxyInterface(LinearFitFunctions):
             h = 0.
 
             for p_t, p_b in zip(probability_top, probability_bottom):
+                top_strains = p_t + ratio_top * p_b
+                bottom_strains = ratio_bottom * p_t + p_b
+                physical_top_index = np.flatnonzero(
+                    self._layer_order_indices == n_layers - 1
+                )[0]
+                cell_height = (
+                    a3_top * top_strains[physical_top_index]
+                )
 
                 for i, (uc_t, uc_b) in enumerate(zip(self.top_layers, self.bottom_layers)):
                     mat_top_i = np.copy(mat_0)
-                    top_strain_and_h = 1.*p_t[i] + ratio_top*p_b[i]
+                    top_strain_and_h = top_strains[i]
                     mat_top_i[2,2] = top_strain_and_h
-                    mat_top_i[2,3] = h / a3_top
+                    relative_layer_position = (
+                        self.layerpos[i] - self.layerpos[0]
+                    )
+                    top_layer_offset = relative_layer_position - (
+                        self.uc_top.layerpos[self.layer_order[i]]
+                    )
+                    mat_top_i[2,3] = (
+                        h / a3_top
+                        + top_strain_and_h * top_layer_offset
+                    )
 
                     uc_t.coherentDomainMatrix.append(mat_top_i)
 
                     mat_bottom_i = np.copy(mat_0)
-                    bottom_strain_and_h = ratio_bottom*p_t[i] + 1.*p_b[i]
+                    bottom_strain_and_h = bottom_strains[i]
                     mat_bottom_i[2,2] = bottom_strain_and_h
-                    mat_bottom_i[2,3] = h / a3_bottom
+                    bottom_layer_offset = relative_layer_position - (
+                        self.uc_bottom.layerpos[self.layer_order[i]]
+                    )
+                    mat_bottom_i[2,3] = (
+                        h / a3_bottom
+                        + bottom_strain_and_h * bottom_layer_offset
+                    )
                     #h_bottom += bottom_strain_and_h
                     uc_b.coherentDomainMatrix.append(mat_bottom_i)
-                h += a3_top * top_strain_and_h
+                h += cell_height
                 #h_bottom += bottom_strain_and_h
                 #h_top += top_strain_and_h
 
-            loc_rescaled = loc - loc_int + uc_number
+            loc_rescaled = loc - unitcells[0]
             uc_no_loc = int(np.floor(loc_rescaled)) // n_layers
             layer_no_loc = int(np.floor(loc_rescaled)) % n_layers
             loc_remainder = (loc_rescaled % n_layers) % 1
             loc_mat = self.top_layers[layer_no_loc].coherentDomainMatrix[uc_no_loc]
             self._loc_absolute_ref = loc_mat[2,3]*a3_top + loc_remainder*loc_mat[2,2]*a3_top
-            for l in self.top_layers:
-                l.pos_absolute = self.below_H
-            for l in self.bottom_layers:
-                l.pos_absolute = self.below_H
-            self._loc_absolute = self._loc_absolute_ref + self.below_H
+            if self._legacy_support_cursor:
+                translation = self.below_H
+                self._loc_absolute = (
+                    self._loc_absolute_ref + self.below_H
+                )
+            else:
+                translation = self.below_H - self._loc_absolute_ref
+                self._loc_absolute = self.below_H
+            _translate_domains(self.top_layers, translation)
+            _translate_domains(self.bottom_layers, translation)
+            self._end_layer_number = self.layer_order[-1]
             #self._loc_absolute = self._loc_absolute_ref + self.below_H
 
 
@@ -258,14 +608,31 @@ class EpitaxyInterface(LinearFitFunctions):
             raise NotImplementedError("%s is not a valid interface model" % self.type)
 
     def F_uc(self,h,k,l):
+        """Return the interface structure factor in electrons.
+
+        Upper- and lower-material amplitudes are first converted to area
+        densities using their own :attr:`UnitCell.uc_area`, added, and then
+        multiplied by the lower unit-cell area. The returned amplitude
+        therefore corresponds to one lower lateral unit cell.
+
+        :param numpy.ndarray h:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray k:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray l:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :returns:
+            Complex interface amplitude in electrons.
+        :rtype: numpy.ndarray
+        """
         if np.any(self._basis_created != self.basis):
             self.createInterfaceCells()
         if HAS_NUMBA_ACCEL:
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
         F = np.zeros_like(l, dtype=np.complex128)
         for uc_t, uc_b in zip(self.top_layers, self.bottom_layers):
-            F += uc_t.F_uc(h,k,l)
-            F += uc_b.F_uc(h,k,l)
+            F += self.uc_area * uc_t.F_uc(h,k,l) / uc_t.uc_area
+            F += self.uc_area * uc_b.F_uc(h,k,l) / uc_b.uc_area
         return F
 
     def zDensity_G(self,z,h,k):
@@ -298,7 +665,9 @@ class EpitaxyInterface(LinearFitFunctions):
         unitcell names as kwarg `unitcell`   
         """
         if len(np.array(indexarray).shape) < 2:
-            return super().addRelParameter(self,indexarray,factors,limits,**kwarg)
+            return super().addRelParameter(
+                indexarray, factors, limits, **kwarg
+            )
         if 'unitcell' not in kwarg:
             raise ValueError("Missing unit cell name. Provide unit cell name as kwarg \'unitcell\'")
         if isinstance(kwarg['unitcell'], list):
@@ -325,6 +694,12 @@ class EpitaxyInterface(LinearFitFunctions):
         fp_top_no = len(self.uc_top.fitparnames)
         fp_bottom_no = len(self.uc_bottom.fitparnames)
         super().setFitParameters(x[:abs_rel_no])
+        if self.profile is not None:
+            self.profile = SkellamProfile(
+                self.basis[0],
+                self.basis[1],
+                self.profile.tail_probability,
+            )
         self.uc_top.setFitParameters(x[abs_rel_no: abs_rel_no+fp_top_no])
         self.uc_bottom.setFitParameters(x[abs_rel_no+fp_top_no: abs_rel_no+fp_top_no+fp_bottom_no])
 
@@ -381,6 +756,12 @@ class EpitaxyInterface(LinearFitFunctions):
         self.uc_top.updateFromParameters()
         self.uc_bottom.updateFromParameters()
         super().updateFromParameters()
+        if self.profile is not None:
+            self.profile = SkellamProfile(
+                self.basis[0],
+                self.basis[1],
+                self.profile.tail_probability,
+            )
 
     def __getitem__(self,uc_name_or_index):
         if isinstance(uc_name_or_index,str):
@@ -473,7 +854,25 @@ class EpitaxyInterface(LinearFitFunctions):
         uc_top.name = top_name
         uc_bottom.name = bottom_name
 
-        epit = cls(uc_top, uc_bottom, ep_type)
+        support_cursor = _parse_text_metadata(
+            string, 'support_cursor', 'legacy'
+        )
+        tail_probability = _parse_float_metadata(
+            string, 'tail_probability', DEFAULT_TAIL_PROBABILITY
+        )
+        profile = None
+        if support_cursor == 'nominal':
+            profile = SkellamProfile(
+                basis[0], basis[1], tail_probability
+            )
+        epit = cls(
+            uc_top,
+            uc_bottom,
+            ep_type,
+            profile=profile,
+            layer_transition=_parse_layer_transition(string),
+            legacy_support_cursor=(support_cursor != 'nominal'),
+        )
         epit.statistics = statistics
         epit.basis = basis
         epit.basis_0 = np.copy(basis)
@@ -481,14 +880,40 @@ class EpitaxyInterface(LinearFitFunctions):
         return epit
 
 
-    def toStr(self):
+    def toStr(self, showErrors=True):
+        """Serialize the interface as plain text.
+
+        :param bool showErrors:
+            Include propagated interface and nested unit-cell errors.
+        :returns:
+            Plain-text interface representation.
+        :rtype: str
+        """
         s = "type %s" % self.type
-        s += "\n" + EpitaxyInterface.parameterOrder + "\n" + self.epitToStr()
+        s += (
+            "\n"
+            + EpitaxyInterface.parameterOrder
+            + "\n"
+            + self.epitToStr(showErrors=showErrors)
+        )
+        if not self._legacy_support_cursor:
+            s += "\nsupport_cursor: nominal"
+            if (
+                self.profile is not None
+                and self.profile.tail_probability
+                != DEFAULT_TAIL_PROBABILITY
+            ):
+                s += "\ntail_probability: %.12g" % (
+                    self.profile.tail_probability
+                )
+        metadata = self._stacking_metadata_to_str()
+        if metadata:
+            s += "\n" + metadata.rstrip()
         s += "\n\n"
         s += "TopUnitCell %s\n" % self.uc_top.name
-        s += self.uc_top.toStr() + "\n\n"
+        s += self.uc_top.toStr(showErrors=showErrors) + "\n\n"
         s += "BottomUnitCell %s\n" % self.uc_bottom.name
-        s += self.uc_bottom.toStr() + "\n"
+        s += self.uc_bottom.toStr(showErrors=showErrors) + "\n"
         return s
 
     def __repr__(self):
@@ -511,7 +936,7 @@ class EpitaxyInterface(LinearFitFunctions):
 
 
 
-class Film(LinearFitFunctions):
+class Film(_LayerStackingMixin, LinearFitFunctions):
     parameterOrder = "Width/layers"
 
     parameterLookup = {'W' : 0}
@@ -534,35 +959,62 @@ class Film(LinearFitFunctions):
         self.below_loc = 0.
         self.below_H = 0.
         self.below_layer = -1.
+        self._initialize_layer_stacking(kwargs)
 
     def set_ucs(self, unitcell, **kwargs):
         self.unitcell = unitcell
         self.uc_layers = self.unitcell.split_in_layers()
-        self.layer_ucs = [self.uc_layers[uc] for uc in self.uc_layers]
-        self.layerpos = np.array([self.unitcell.layerpos[i] for i in self.uc_layers])
+        self._layer_ids = np.array(list(self.uc_layers))
+        self._layer_ucs_base = [
+            self.uc_layers[uc] for uc in self._layer_ids
+        ]
+        self._layerpos_base = np.array([
+            self.unitcell.layerpos[i] for i in self._layer_ids
+        ])
+        self.layer_ucs = list(self._layer_ucs_base)
+        self.layerpos = np.copy(self._layerpos_base)
+
+    @property
+    def layers(self):
+        """Return the cyclic layer identifiers."""
+        return np.copy(self._layer_ids)
+
+    @property
+    def uc_area(self):
+        """Return the Film lateral unit-cell area in Angstrom squared."""
+        return self.unitcell.uc_area
+
+    def _set_layer_order(self, layer_order, order):
+        self.layer_order = np.asarray(layer_order)
+        self._layer_order_indices = np.asarray(order)
+        self.layer_ucs = [self._layer_ucs_base[i] for i in order]
+        self.layerpos = _unwrapped_layer_positions(
+            self._layerpos_base, order
+        )
 
     def setReferenceUnitCell(self,uc,rotMatrix=np.identity(3)):
-        """   
-        set reference unit cell. 
-        When any F_hkl is called, first hkl will be transformed from the reference 
-        lattice into the lattice of this unit cell,
-        using equation
-        B' * H' = O * B * H, where a ' indicates the entities in the frame of this
-        lattice. O is an optional rotation matrix, which describes the rotation of
-        this lattice with respect to the reference lattice.
-        
-        Equally the same applies to the relative coordinates of the respective 
-        lattices:
-        R' * x' = O * R * x
-        
-        !!! This has to be checked !!!
+        """Set the reference frame on the Film and every generated layer.
+
+        :param UnitCell uc:
+            Unit cell defining input reciprocal lattice units.
+        :param numpy.ndarray rotMatrix:
+            Optional 3-by-3 rotation from the reference frame into the Film
+            crystal frame.
         """
         self.unitcell.setReferenceUnitCell(uc, rotMatrix)
-        #self._dirty = True
+        for layer in self._layer_ucs_base:
+            layer.setReferenceUnitCell(uc, rotMatrix)
 
     def setEnergy(self,E):
+        """Set X-ray energy for the Film and generated layers.
+
+        :param float E:
+            X-ray energy in eV.
+        """
         self.E = E
         self.unitcell.setEnergy(E)
+        for layer in self._layer_ucs_base:
+            layer.setEnergy(E)
 
 
     @property
@@ -592,15 +1044,21 @@ class Film(LinearFitFunctions):
     def pos_absolute(self):
         if np.any(self._basis_created != self.basis):
             self.createLayers()
-        H = self.layer_ucs[0].coherentDomainMatrix[0][2,3]*self.layer_ucs[0].a[2]
+        lower_layer = self.layer_ucs[0]
+        matrix = lower_layer.coherentDomainMatrix[0]
+        layer_id = self.layer_order[0]
+        H = (
+            matrix[2,3]
+            + matrix[2,2] * self.unitcell.layerpos[layer_id]
+        ) * lower_layer.a[2]
         return H
 
     @pos_absolute.setter
     def pos_absolute(self, pos):
         if np.any(self._basis_created != self.basis):
             self.createLayers()
-        for l in self.layer_ucs:
-            l.pos_absolute = pos
+        delta_height = pos - self.pos_absolute
+        _move_domains(self.layer_ucs, delta_height)
         self.below_H = pos
 
     @property
@@ -609,67 +1067,65 @@ class Film(LinearFitFunctions):
             self.createLayers()
         return self._end_layer_number
 
-    @property
-    def start_layer_number(self): # not implemented
-        return -1.
-
-    @start_layer_number.setter
-    def start_layer_number(self, ln): # not implemented
-        return
-
     def createLayers(self):
         n_layers_in_uc  = len(self.unitcell.layers)
         scaled_width = self.basis[0] - n_layers_in_uc*((self.below_H - self.below_loc) / self.unitcell.a[2])
         layers_to_create = int(round(scaled_width, 0))
         if layers_to_create <= 0:
             raise ValueError("Effective film width <= 0. Cannot create layers")
-        full_layers = layers_to_create // n_layers_in_uc
-        remaining = layers_to_create % n_layers_in_uc
-
-
         for i, uc in enumerate(self.layer_ucs):
             uc.coherentDomainMatrix = []
             uc.coherentDomainOccupancy = []
 
         mat_0 = np.vstack((np.identity(3).T,np.array([0,0,0]))).T
-        h = 0.
         strain = self.unitcell.coherentDomainMatrix[0][2,2]
         occup = self.unitcell.coherentDomainOccupancy[0]
 
-        for j in range(full_layers):
-
-            for i, uc in enumerate(self.layer_ucs):
-                mat_i = np.copy(mat_0)
-
-                mat_i[2,2] = strain
-                mat_i[2,3] = h * strain
-
-                uc.coherentDomainMatrix.append(mat_i)
-                uc.coherentDomainOccupancy.append(occup)
-
-            h += strain
-
-        top_layer = self.layer_ucs[-1].layers[0]
-        for j in range(remaining):
-            uc = self.layer_ucs[j]
+        for layer_index in range(layers_to_create):
+            order_index = layer_index % n_layers_in_uc
+            cycle_index = layer_index // n_layers_in_uc
+            uc = self.layer_ucs[order_index]
             mat_i = np.copy(mat_0)
+            layer_id = self.layer_order[order_index]
+            relative_layer_position = (
+                cycle_index
+                + self.layerpos[order_index]
+                - self.layerpos[0]
+            )
+            layer_offset = (
+                relative_layer_position
+                - self.unitcell.layerpos[layer_id]
+            )
 
             mat_i[2,2] = strain
-            mat_i[2,3] = h * strain
+            mat_i[2,3] = layer_offset * strain
 
             uc.coherentDomainMatrix.append(mat_i)
             uc.coherentDomainOccupancy.append(occup)
 
-
         upper_layer = uc.basis[0,7]
         self._end_layer_number = upper_layer
-        for l in self.layer_ucs:
-            l.pos_absolute = self.below_H
+        _translate_domains(self.layer_ucs, self.below_H)
 
         self._basis_created = np.copy(self.basis)
 
 
     def F_uc(self,h,k,l):
+        """Return the Film structure factor in electrons.
+
+        The result is the unnormalized sum over all generated Film layers and
+        corresponds to one lateral Film unit cell.
+
+        :param numpy.ndarray h:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray k:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray l:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :returns:
+            Complex Film amplitude in electrons.
+        :rtype: numpy.ndarray
+        """
         if np.any(self._basis_created != self.basis):
             self.createLayers()
         if HAS_NUMBA_ACCEL:
@@ -701,7 +1157,9 @@ class Film(LinearFitFunctions):
         unitcell names as kwarg `unitcell`   
         """
         if len(np.array(indexarray).shape) < 2:
-            return super().addRelParameter(self,indexarray,factors,limits,**kwarg)
+            return super().addRelParameter(
+                indexarray, factors, limits, **kwarg
+            )
         return self.unitcell.addRelParameter(indexarray,factors,limits,**kwarg)
 
 
@@ -838,7 +1296,9 @@ class Film(LinearFitFunctions):
 
         uc.name = uc_name
 
-        film = cls(uc)
+        film = cls(
+            uc, layer_transition=_parse_layer_transition(string)
+        )
         film.statistics = statistics
         film.basis = basis
         film.basis_0 = np.copy(basis)
@@ -846,12 +1306,28 @@ class Film(LinearFitFunctions):
         return film
 
 
-    def toStr(self):
+    def toStr(self, showErrors=True):
+        """Serialize the Film as plain text.
+
+        :param bool showErrors:
+            Include propagated Film and nested unit-cell errors.
+        :returns:
+            Plain-text Film representation.
+        :rtype: str
+        """
         #s = "type %s" % self.type
-        s = "\n" + Film.parameterOrder + "\n" + self.filmToStr()
+        s = (
+            "\n"
+            + Film.parameterOrder
+            + "\n"
+            + self.filmToStr(showErrors=showErrors)
+        )
+        metadata = self._stacking_metadata_to_str()
+        if metadata:
+            s += "\n" + metadata.rstrip()
         s += "\n\n"
         s += "UnitCell %s\n" % self.unitcell.name
-        s += self.unitcell.toStr() + "\n"
+        s += self.unitcell.toStr(showErrors=showErrors) + "\n"
         return s
 
     def __repr__(self):
@@ -873,18 +1349,41 @@ class Film(LinearFitFunctions):
 
 
 
-class PoissonSurface(LinearFitFunctions):
-    parameterOrder = "Width/layers deltaW/layers"
+class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
+    """Signed Poisson growth or etching at a nominal Film boundary.
 
-    parameterLookup = {'W' : 0, 'deltaW' : 1 }
+    For the current API, ``W`` is the signed Poisson mean in structural layers
+    and ``offset`` is a deterministic height offset. Positive ``W`` models
+    growth, negative ``W`` models dissolution or etching, and
+    ``offset = -W`` preserves the original mean Film height.
 
-    parameterLookup_inv = dict(map(reversed, parameterLookup.items()))
+    Legacy files using ``Width/layers deltaW/layers`` remain readable with
+    their historical absolute-width semantics.
+    """
+
+    parameterOrder = "W/layers offset/layers"
+
+    parameterLookup = {'W': 0, 'offset': 1, 'deltaW': 1}
+
+    parameterLookup_inv = {0: 'W', 1: 'offset'}
 
     def __init__(self,unitcell,**kwargs):
         super().__init__()
+        profile = kwargs.pop('profile', None)
+        if profile is not None and not isinstance(profile, PoissonProfile):
+            raise TypeError("PoissonSurface profile must be PoissonProfile")
+        self.profile = profile
+        self._legacy_absolute_width = kwargs.pop(
+            'legacy_absolute_width', profile is None
+        )
         self.type = type
         self.set_ucs(unitcell, **kwargs)
-        self.basis = np.array([0., 0.])
+        if profile is None:
+            self.basis = np.array([0., 0.])
+        else:
+            self.basis = np.array([
+                profile.mean_change, profile.offset
+            ])
         self._basis_created = np.array([np.nan, np.nan])
         self.basis_0 = np.array([0., 0.])
         self.errors = None
@@ -896,35 +1395,62 @@ class PoissonSurface(LinearFitFunctions):
         self.below_loc = 0.
         self.below_H = 0.
         self.below_layer = -1.
+        self._initialize_layer_stacking(kwargs)
 
     def set_ucs(self, unitcell, **kwargs):
         self.unitcell = unitcell
         self.uc_layers = self.unitcell.split_in_layers()
-        self.layer_ucs = [self.uc_layers[uc] for uc in self.uc_layers]
-        self.layerpos = np.array([self.unitcell.layerpos[i] for i in self.uc_layers])
+        self._layer_ids = np.array(list(self.uc_layers))
+        self._layer_ucs_base = [
+            self.uc_layers[uc] for uc in self._layer_ids
+        ]
+        self._layerpos_base = np.array([
+            self.unitcell.layerpos[i] for i in self._layer_ids
+        ])
+        self.layer_ucs = list(self._layer_ucs_base)
+        self.layerpos = np.copy(self._layerpos_base)
+
+    @property
+    def layers(self):
+        """Return the cyclic layer identifiers."""
+        return np.copy(self._layer_ids)
+
+    @property
+    def uc_area(self):
+        """Return the surface lateral unit-cell area in Angstrom squared."""
+        return self.unitcell.uc_area
+
+    def _set_layer_order(self, layer_order, order):
+        self.layer_order = np.asarray(layer_order)
+        self._layer_order_indices = np.asarray(order)
+        self.layer_ucs = [self._layer_ucs_base[i] for i in order]
+        self.layerpos = _unwrapped_layer_positions(
+            self._layerpos_base, order
+        )
 
     def setReferenceUnitCell(self,uc,rotMatrix=np.identity(3)):
-        """   
-        set reference unit cell. 
-        When any F_hkl is called, first hkl will be transformed from the reference 
-        lattice into the lattice of this unit cell,
-        using equation
-        B' * H' = O * B * H, where a ' indicates the entities in the frame of this
-        lattice. O is an optional rotation matrix, which describes the rotation of
-        this lattice with respect to the reference lattice.
-        
-        Equally the same applies to the relative coordinates of the respective 
-        lattices:
-        R' * x' = O * R * x
-        
-        !!! This has to be checked !!!
+        """Set the reference frame on the surface and generated layers.
+
+        :param UnitCell uc:
+            Unit cell defining input reciprocal lattice units.
+        :param numpy.ndarray rotMatrix:
+            Optional 3-by-3 rotation from the reference frame into the surface
+            crystal frame.
         """
         self.unitcell.setReferenceUnitCell(uc, rotMatrix)
-        #self._dirty = True
+        for layer in self._layer_ucs_base:
+            layer.setReferenceUnitCell(uc, rotMatrix)
 
     def setEnergy(self,E):
+        """Set X-ray energy for the surface and generated layers.
+
+        :param float E:
+            X-ray energy in eV.
+        """
         self.E = E
         self.unitcell.setEnergy(E)
+        for layer in self._layer_ucs_base:
+            layer.setEnergy(E)
 
 
     @property
@@ -954,15 +1480,21 @@ class PoissonSurface(LinearFitFunctions):
     def pos_absolute(self):
         if np.any(self._basis_created != self.basis):
             self.createLayers()
-        H = self.layer_ucs[0].coherentDomainMatrix[0][2,3]*self.layer_ucs[0].a[2]
+        lower_layer = self.layer_ucs[0]
+        matrix = lower_layer.coherentDomainMatrix[0]
+        layer_id = self.layer_order[0]
+        H = (
+            matrix[2,3]
+            + matrix[2,2] * self.unitcell.layerpos[layer_id]
+        ) * lower_layer.a[2]
         return H
 
     @pos_absolute.setter
     def pos_absolute(self, pos):
         if np.any(self._basis_created != self.basis):
             self.createLayers()
-        for l in self.layer_ucs:
-            l.pos_absolute = pos
+        delta_height = pos - self.pos_absolute
+        _move_domains(self.layer_ucs, delta_height)
         self.below_H = pos
 
     @property
@@ -972,77 +1504,142 @@ class PoissonSurface(LinearFitFunctions):
         return self._end_layer_number
 
     @property
-    def start_layer_number(self): # not implemented
-        return -1.
+    def stacking_height_absolute(self):
+        """Return the expected surface height in Angstrom."""
+        if self._legacy_absolute_width:
+            return self.height_absolute
+        return self.mean_height_absolute
 
-    @start_layer_number.setter
-    def start_layer_number(self, ln): # not implemented
-        return
+    @property
+    def stacking_loc_absolute(self):
+        """Return the nominal boundary location in Angstrom."""
+        return self.stacking_height_absolute
+
+    @property
+    def mean_height_absolute(self):
+        """Return the expected surface height in Angstrom."""
+        layer_height = (
+            self.unitcell.a[2] / len(self.unitcell.layers)
+        )
+        return self.below_H + layer_height * (
+            self.basis[0] + self.basis[1]
+        )
 
     def createLayers(self):
-        n_layers_in_uc  = len(self.unitcell.layers)
-        scaled_width = (self.basis[0] + self.basis[1])
-        layers_to_create = int(round(scaled_width, 0))
-        if layers_to_create <= 0:
-            raise ValueError("Effective film width <= 0. Cannot create layers")
-        full_layers = layers_to_create // n_layers_in_uc
-        remaining = layers_to_create % n_layers_in_uc
-
-
+        """Create layer domains and their Poisson surface occupancies."""
+        n_layers_in_uc = len(self.unitcell.layers)
+        tail_probability = (
+            self.profile.tail_probability
+            if self.profile is not None
+            else DEFAULT_TAIL_PROBABILITY
+        )
+        if self._legacy_absolute_width:
+            delta_width = self.basis[1]
+            if delta_width < 0:
+                raise ValueError(
+                    "legacy deltaW must be greater than or equal to zero"
+                )
+            profile = PoissonProfile(
+                mean_change=delta_width,
+                tail_probability=tail_probability,
+            )
+            mean_width = self.basis[0] - n_layers_in_uc * (
+                (self.below_H - self.below_loc) / self.unitcell.a[2]
+            )
+            scaled_width = mean_width + delta_width
+            layers_to_create = int(round(scaled_width, 0))
+            if layers_to_create <= 0:
+                raise ValueError(
+                    "Effective film width <= 0. Cannot create layers"
+                )
+            layer_numbers = np.arange(layers_to_create)
+            if delta_width == 0:
+                layer_occupancy = np.ones(layers_to_create)
+            else:
+                minimum_width = mean_width - delta_width
+                layer_occupancy = profile.occupancy(
+                    layer_numbers - minimum_width
+                )
+        else:
+            profile = PoissonProfile(
+                mean_change=self.basis[0],
+                offset=self.basis[1],
+                tail_probability=tail_probability,
+            )
+            support_low, support_high = profile.support()
+            layer_numbers = np.arange(support_low, support_high + 1)
+            layer_occupancy = profile.correction(layer_numbers)
+            represented = np.abs(layer_occupancy) > tail_probability
+            layer_numbers = layer_numbers[represented]
+            layer_occupancy = layer_occupancy[represented]
+            layers_to_create = len(layer_numbers)
         for i, uc in enumerate(self.layer_ucs):
             uc.coherentDomainMatrix = []
             uc.coherentDomainOccupancy = []
 
         mat_0 = np.vstack((np.identity(3).T,np.array([0,0,0]))).T
-        h = 0.
         strain = self.unitcell.coherentDomainMatrix[0][2,2]
-        
-        probability_top = skellam.cdf(unitcells, mu1, mu2).reshape((-1, n_layers))
         occup = self.unitcell.coherentDomainOccupancy[0]
-        
-        
 
-        for j in range(full_layers):
+        layer_occupancy *= occup
 
-            for i, uc in enumerate(self.layer_ucs):
-                mat_i = np.copy(mat_0)
-
-                mat_i[2,2] = strain
-                mat_i[2,3] = h * strain
-
-                uc.coherentDomainMatrix.append(mat_i)
-                uc.coherentDomainOccupancy.append(occup)
-
-            h += strain
-
-        top_layer = self.layer_ucs[-1].layers[0]
-        for j in range(remaining):
-            uc = self.layer_ucs[j]
+        for layer_index, layer_number in enumerate(layer_numbers):
+            order_index = layer_number % n_layers_in_uc
+            cycle_index = layer_number // n_layers_in_uc
+            uc = self.layer_ucs[order_index]
             mat_i = np.copy(mat_0)
+            layer_id = self.layer_order[order_index]
+            relative_layer_position = (
+                cycle_index
+                + self.layerpos[order_index]
+                - self.layerpos[0]
+            )
+            layer_offset = (
+                relative_layer_position
+                - self.unitcell.layerpos[layer_id]
+            )
 
             mat_i[2,2] = strain
-            mat_i[2,3] = h * strain
+            mat_i[2,3] = layer_offset * strain
 
             uc.coherentDomainMatrix.append(mat_i)
-            uc.coherentDomainOccupancy.append(occup)
+            uc.coherentDomainOccupancy.append(layer_occupancy[layer_index])
 
-
-        upper_layer = uc.basis[0,7]
-        self._end_layer_number = upper_layer
-        for l in self.layer_ucs:
-            l.pos_absolute = self.below_H
+        if layers_to_create:
+            upper_layer = uc.basis[0,7]
+            self._end_layer_number = upper_layer
+        else:
+            self._end_layer_number = self.start_layer_number
+        _translate_domains(self.layer_ucs, self.below_H)
 
         self._basis_created = np.copy(self.basis)
 
 
     def F_uc(self,h,k,l):
+        """Return the Poisson surface correction in electrons.
+
+        Positive occupancies add grown material and negative occupancies remove
+        etched material relative to the sharp Film boundary. The amplitude
+        corresponds to one lateral surface unit cell.
+
+        :param numpy.ndarray h:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray k:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray l:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :returns:
+            Complex surface-correction amplitude in electrons.
+        :rtype: numpy.ndarray
+        """
         if np.any(self._basis_created != self.basis):
             self.createLayers()
         if HAS_NUMBA_ACCEL:
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
         F = np.zeros_like(l, dtype=np.complex128)
         for uc in self.layer_ucs:
-            F += uc.F_uc(h,k,l)
+            if uc.coherentDomainMatrix:
+                F += uc.F_uc(h,k,l)
         return F
 
     def zDensity_G(self,z,h,k):
@@ -1050,7 +1647,8 @@ class PoissonSurface(LinearFitFunctions):
             self.createLayers()
         rho = np.zeros_like(z, dtype=np.complex128)
         for uc in self.layer_ucs:
-            rho += uc.zDensity_G(z,h,k)
+            if uc.coherentDomainMatrix:
+                rho += uc.zDensity_G(z,h,k)
         return rho
 
     def addFitParameter(self,indexarray,limits=(-np.inf,np.inf),**kwarg):
@@ -1067,7 +1665,7 @@ class PoissonSurface(LinearFitFunctions):
         unitcell names as kwarg `unitcell`   
         """
         if len(np.array(indexarray).shape) < 2:
-            return super().addRelParameter(self,indexarray,factors,limits,**kwarg)
+            return super().addRelParameter(indexarray,factors,limits,**kwarg)
         return self.unitcell.addRelParameter(indexarray,factors,limits,**kwarg)
 
 
@@ -1084,6 +1682,12 @@ class PoissonSurface(LinearFitFunctions):
         abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
         fp_no = len(self.unitcell.fitparnames)
         super().setFitParameters(x[:abs_rel_no])
+        if self.profile is not None:
+            self.profile = PoissonProfile(
+                mean_change=self.basis[0],
+                offset=self.basis[1],
+                tail_probability=self.profile.tail_probability,
+            )
         self.unitcell.setFitParameters(x[abs_rel_no: abs_rel_no+fp_no])
 
     def setLimits(self,lim):
@@ -1130,13 +1734,26 @@ class PoissonSurface(LinearFitFunctions):
         """
         self.unitcell.updateFromParameters()
         super().updateFromParameters()
+        if self.profile is not None:
+            self.profile = PoissonProfile(
+                mean_change=self.basis[0],
+                offset=self.basis[1],
+                tail_probability=self.profile.tail_probability,
+            )
 
     def __getitem__(self,uc_name_or_index):
         if isinstance(uc_name_or_index,str):
-            if uc_name_or_index.lower() in ['uc', 'unitcell', self.uc_top.name]:
+            if uc_name_or_index.lower() in [
+                'uc',
+                'unitcell',
+                self.unitcell.name.lower(),
+            ]:
                 return self.unitcell
             else:
-                raise KeyError("No unit cell %s in EpitaxyInterface %s" % (uc_name_or_index, self.name))
+                raise KeyError(
+                    "No unit cell %s in PoissonSurface %s"
+                    % (uc_name_or_index, self.name)
+                )
         else:
             raise ValueError(f"must be str, not {type(uc_name_or_index)}" )
 
@@ -1204,7 +1821,48 @@ class PoissonSurface(LinearFitFunctions):
 
         uc.name = uc_name
 
-        film = cls(uc)
+        tail_probability = _parse_float_metadata(
+            string, 'tail_probability', DEFAULT_TAIL_PROBABILITY
+        )
+        legacy_parameter_names = any(
+            'deltaW' in line for line in string.splitlines()
+        )
+        support_cursor = _parse_text_metadata(
+            string, 'support_cursor', None
+        )
+        legacy_absolute_width = (
+            legacy_parameter_names
+            if support_cursor is None
+            else support_cursor != 'nominal'
+        )
+        if legacy_absolute_width:
+            profile = PoissonProfile(
+                mean_change=basis[1],
+                tail_probability=tail_probability,
+            )
+        elif legacy_parameter_names:
+            # Migrate the short-lived nominal-cursor format where W was zero
+            # and deltaW was a positive, mean-preserving roughness parameter.
+            profile = PoissonProfile(
+                mean_change=basis[1],
+                offset=-basis[1],
+                tail_probability=tail_probability,
+            )
+            basis = np.array([
+                profile.mean_change, profile.offset
+            ])
+        else:
+            profile = PoissonProfile(
+                mean_change=basis[0],
+                offset=basis[1],
+                tail_probability=tail_probability,
+            )
+        film = cls(
+            uc,
+            profile=profile,
+            layer_transition=_parse_layer_transition(string),
+            legacy_absolute_width=legacy_absolute_width,
+        )
         film.statistics = statistics
         film.basis = basis
         film.basis_0 = np.copy(basis)
@@ -1212,12 +1870,41 @@ class PoissonSurface(LinearFitFunctions):
         return film
 
 
-    def toStr(self):
+    def toStr(self, showErrors=True):
+        """Serialize the Poisson surface as plain text.
+
+        :param bool showErrors:
+            Include propagated surface and nested unit-cell errors.
+        :returns:
+            Plain-text Poisson-surface representation.
+        :rtype: str
+        """
         #s = "type %s" % self.type
-        s = "\n" + PoissonSurface.parameterOrder + "\n" + self.filmToStr()
+        if self._legacy_absolute_width:
+            parameter_order = "Width/layers deltaW/layers"
+        else:
+            parameter_order = PoissonSurface.parameterOrder
+        s = (
+            "\n"
+            + parameter_order
+            + "\n"
+            + self.filmToStr(showErrors=showErrors)
+        )
+        if not self._legacy_absolute_width:
+            s += "\nsupport_cursor: nominal"
+        if (
+            self.profile is not None
+            and self.profile.tail_probability != DEFAULT_TAIL_PROBABILITY
+        ):
+            s += "\ntail_probability = %.12g" % (
+                self.profile.tail_probability
+            )
+        metadata = self._stacking_metadata_to_str()
+        if metadata:
+            s += "\n" + metadata.rstrip()
         s += "\n\n"
         s += "UnitCell %s\n" % self.unitcell.name
-        s += self.unitcell.toStr() + "\n"
+        s += self.unitcell.toStr(showErrors=showErrors) + "\n"
         return s
 
     def __repr__(self):
