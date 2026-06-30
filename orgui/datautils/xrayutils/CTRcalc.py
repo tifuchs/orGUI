@@ -39,17 +39,51 @@ from .CTRutil import (ParameterType, Parameter,
                      next_skip_comment)
 
 from .CTRuc import WaterModel, UnitCell
-from .CTRfilm import EpitaxyInterface, Film
+from .CTRfilm import EpitaxyInterface, Film, PoissonSurface
+from .CTRdistributions import PoissonProfile, SkellamProfile  # noqa: F401
+from .CTRstacking import (  # noqa: F401
+    LayerCycle,
+    LayerState,
+    LayerTransition,
+)
 
 class SXRDCrystal:
+    """Compose bulk and surface amplitudes on one reference lateral cell.
+
+    Every component ``F_uc`` method returns an unnormalized structure factor
+    in electrons for that component's own lateral unit cell. This class
+    converts each amplitude to the selected reference area using
+    ``reference_uc.uc_area / component.uc_area`` before adding it.
+
+    The bulk unit cell is the default reciprocal-coordinate and area reference.
+    No illuminated sample area, detector response, or experimental scale
+    factor is included.
+    """
 
     def __init__(self,uc_bulk,*uc_surface,**keyargs):
+        """Create a surface X-ray diffraction crystal model.
+
+        :param UnitCell uc_bulk:
+            Semi-infinite bulk unit cell. It is also the default reciprocal
+            coordinate and lateral-area reference.
+        :param uc_surface:
+            Ordered surface, interface, Film, or water components.
+        :param UnitCell reference_uc:
+            Optional reference unit cell. Defaults to ``uc_bulk``.
+        :param numpy.ndarray reference_rotation:
+            Optional 3-by-3 rotation from the reference crystal frame into each
+            component's frame. Defaults to the identity matrix.
+        :param numpy.ndarray stacking:
+            Integer stacking levels for the surface components.
+        :param float atten:
+            Dimensionless bulk attenuation exponent per unit cell.
+        """
         self.uc_bulk = uc_bulk
         self.uc_surface_list = list(uc_surface)
         self.enable_uc_stacking = keyargs.get('enable_stacking', False)
         if not self.enable_uc_stacking:
             for uc in self.uc_surface_list:
-                if isinstance(uc, (Film, EpitaxyInterface) ):
+                if isinstance(uc, (Film, PoissonSurface, EpitaxyInterface) ):
                     self.enable_uc_stacking = True
                     break
 
@@ -62,7 +96,22 @@ class SXRDCrystal:
         self.specularRes = keyargs.get('spec_res', 0.0)
         self.name = keyargs.get('name', 'xtal')
 
-        self.weights = np.ones(len(self.uc_surface_list),dtype=np.float64)/len(self.uc_surface_list)
+        if not self.uc_surface_list:
+            self.weights = np.array([], dtype=np.float64)
+        elif self.enable_uc_stacking:
+            # Stacked objects are additive material slices, not alternative
+            # surface domains. Their complete occupancies must therefore be
+            # included unless an explicit crystal weight is later assigned.
+            self.weights = np.ones(
+                len(self.uc_surface_list), dtype=np.float64
+            )
+        else:
+            self.weights = (
+                np.ones(
+                    len(self.uc_surface_list), dtype=np.float64
+                )
+                / len(self.uc_surface_list)
+            )
         self.weights_0 = np.copy(self.weights)
         self._weights_parvalues = None
         self.werrors = None
@@ -74,6 +123,13 @@ class SXRDCrystal:
         }
         self._parIdNo = 0
         self.fit_metadata_cache = None
+        reference_uc = keyargs.get('reference_uc', self.uc_bulk)
+        reference_rotation = keyargs.get(
+            'reference_rotation', np.identity(3)
+        )
+        self.setGlobalReferenceUnitCell(
+            reference_uc, reference_rotation
+        )
 
     def parametersToDict(self):
         d = dict()
@@ -145,64 +201,139 @@ class SXRDCrystal:
 
 
     def setGlobalReferenceUnitCell(self,uc_reference,rotMatrix=np.identity(3)):
-        """   
-        sets a global reference unit cell. 
-        When any F_hkl is called, first hkl will be transformed from the reference 
-        lattice into the lattice of this unit cell,
-        using equation
-        B' * H' = O * B * H, where a ' indicates the entities in the frame of this
-        lattice. O is an optional rotation matrix, which describes the rotation of
-        this lattice with respect to the reference lattice.
-        
-        Equally the same applies to the relative coordinates of the respective 
-        lattices:
-        R' * x' = O * R * x
-        
+        """Set the crystal-wide coordinate and lateral-area reference.
+
+        Reciprocal coordinates supplied to structure-factor methods are
+        interpreted in ``uc_reference`` reciprocal lattice units. The same
+        unit cell supplies the reference area used by :meth:`F`.
+
+        This method propagates the coordinate transform to bulk, source unit
+        cells, and all generated Film, interface, and surface layer cells.
+
+        :param UnitCell uc_reference:
+            Unit cell defining reciprocal lattice units and ``uc_area``.
+        :param numpy.ndarray rotMatrix:
+            Optional 3-by-3 rotation from the reference crystal frame into the
+            component crystal frames.
         """
+        self.reference_uc = uc_reference
+        self.reference_area = uc_reference.uc_area
+        self.reference_rotation = np.asarray(
+            rotMatrix, dtype=np.float64
+        )
         self.uc_bulk.setReferenceUnitCell(uc_reference,rotMatrix)
-        [uc.setReferenceUnitCell(uc_reference,rotMatrix) for uc in self.uc_surface_list]
+        for uc in self.uc_surface_list:
+            uc.setReferenceUnitCell(uc_reference,rotMatrix)
 
     def F_surf(self,harray,karray,Larray):
-        F = np.empty_like(Larray,dtype=np.complex128)
+        """Return the combined surface amplitude in electrons.
+
+        Each component amplitude is converted from its own lateral unit cell to
+        the configured reference lateral cell. The bulk contribution is not
+        included.
+
+        :param numpy.ndarray harray:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray karray:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray Larray:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :returns:
+            Complex surface amplitude in electrons per reference lateral cell.
+        :rtype: numpy.ndarray
+        """
+        F = np.zeros_like(Larray,dtype=np.complex128)
         for uc, weight in zip(self.uc_surface_list,self.weights):
-            F += weight*uc.F_uc(harray,karray,Larray)
+            area_scale = self.reference_area / uc.uc_area
+            F += area_scale * weight * uc.F_uc(
+                harray, karray, Larray
+            )
         return F
 
     def apply_stacking(self):
+        """Generate object positions and cyclic layers from bottom to top."""
         self.enable_uc_stacking = True
-        hnew = 0.
+        height_new = 0.
         i = 0
-        layer_number_new = -1
-        locnew = 0
-        for l in np.unique(self.uc_stacking_ordered):
-            h = hnew
-            layer_number = layer_number_new
-            loc = locnew
-            while(self.uc_stacking_ordered[i] == l):
+        layer_state_new = getattr(self.uc_bulk, 'layer_state', None)
+        layer_number_new = (
+            layer_state_new.layer if layer_state_new is not None else -1
+        )
+        loc_new = 0.
+        for stacking_level in np.unique(self.uc_stacking_ordered):
+            below_height = height_new
+            below_layer = layer_number_new
+            below_loc = loc_new
+            while self.uc_stacking_ordered[i] == stacking_level:
                 uc = self.uc_surface_list_ordered[i]
-                if isinstance(uc, Film):
-                    uc.set_below(loc, h)
-                uc.start_layer_number = layer_number
-                uc.pos_absolute = h
+                if hasattr(uc, 'stack_on'):
+                    uc.stack_on(
+                        below_loc,
+                        below_height,
+                        below_layer,
+                        below_state=layer_state_new,
+                    )
+                else:
+                    uc.start_layer_number = below_layer
+                    uc.pos_absolute = below_height
+                if hasattr(uc, 'stacking_height_absolute'):
+                    height_new = uc.stacking_height_absolute
+                else:
+                    height_new = uc.height_absolute
+                if hasattr(uc, 'stacking_loc_absolute'):
+                    loc_new = uc.stacking_loc_absolute
+                else:
+                    loc_new = uc.loc_absolute
+                layer_number_new = uc.end_layer_number
+                layer_state_new = getattr(uc, 'layer_state', None)
                 i += 1
                 if i == len(self.uc_stacking_ordered):
                     return
-                hnew = uc.height_absolute
-                locnew = uc.loc_absolute
-                layer_number_new = uc.end_layer_number
 
 
 
     def F(self,harray,karray,Larray):
-        F = self.uc_bulk.F_bulk(harray,karray,Larray,self.atten)
+        """Return the complete crystal structure factor in electrons.
+
+        The returned amplitude corresponds to one lateral unit cell of
+        :attr:`reference_uc`. For every component ``j``, the raw amplitude in
+        electrons is scaled by
+
+        ``reference_uc.uc_area / component.uc_area``.
+
+        Component weights, coherent-domain occupancies, and attenuation are
+        dimensionless. No illuminated footprint or experimental intensity
+        scale is included; calculated intensity is proportional to
+        ``abs(F)**2``.
+
+        :param numpy.ndarray harray:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray karray:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray Larray:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :returns:
+            Complex crystal amplitude in electrons per reference lateral cell.
+        :rtype: numpy.ndarray
+        """
+        bulk_scale = self.reference_area / self.uc_bulk.uc_area
+        F = bulk_scale * self.uc_bulk.F_bulk(
+            harray, karray, Larray, self.atten
+        )
         hkl = np.vstack((harray,karray,Larray))
         if self.enable_uc_stacking:
             self.apply_stacking()
 
         for uc, weight, domains in zip(self.uc_surface_list,self.weights,self.domains):
+            area_scale = self.reference_area / uc.uc_area
             for matrix, occup in domains:
                 hkl_n = np.dot(matrix,hkl)
-                F += occup*weight*uc.F_uc(hkl_n[0],hkl_n[1],hkl_n[2])
+                F += (
+                    area_scale
+                    * occup
+                    * weight
+                    * uc.F_uc(hkl_n[0],hkl_n[1],hkl_n[2])
+                )
         return F
 
 
@@ -300,20 +431,33 @@ class SXRDCrystal:
 
 
     def addFitParameter(self,parameter,limits=(-np.inf,np.inf),**keyargs):
-        """
-        API for fitparameters:
-        
-        par = {
-            'ucname1':
+        """Add a coupled fit parameter to crystal components.
+
+        ``parameter`` maps component names to dictionaries containing
+        ``atoms`` and ``par`` index selections. An optional ``factors`` entry
+        creates a relative parameter, and ``settings`` is forwarded to the
+        component fit-parameter constructor.
+
+        Example::
+
             {
-                'atoms' : (1, 2, 3), # atom index
-                'par' : ('z', 'oDW', 'iDW'), # structure parameter
-                'factors' : (1, -1, 1) # optional, if present, this will be a "relative" fit parameter
-                'settings' : optional, dict with keyargs passed to the unit cell fitparameter constructor 
+                "film": {
+                    "atoms": (1, 2, 3),
+                    "par": ("z", "oDW", "iDW"),
+                    "factors": (1, -1, 1),
+                    "settings": {"name": "film_relaxation"},
+                }
             }
-        }
-        
-        
+
+        :param dict parameter:
+            Component-specific fit-parameter definitions.
+        :param tuple limits:
+            Lower and upper fit limits.
+        :param keyargs:
+            Additional coupled-parameter settings.
+        :returns:
+            The created coupled parameter.
+        :rtype: Parameter
         """
         prior = keyargs.get('prior', None)
         name = keyargs.get('name', "%s_par_%s" % (self.name, self._parIdNo))
@@ -700,16 +844,27 @@ class SXRDCrystal:
         return s
 
     def toStr(self,showErrors=True):
+        """Serialize the complete crystal model as plain text.
+
+        :param bool showErrors:
+            Include propagated component, atom, and weight errors.
+        :returns:
+            Plain-text crystal representation.
+        :rtype: str
+        """
         s = "E = %.5f keV\n" % (self.uc_bulk._E*1e-3)
         for i ,(no,w,uc) in enumerate(zip(self.uc_stacking,self.weights,self.uc_surface_list)):
             s += "# %s %s\n" % (uc.__class__.__name__ ,uc.name)
             if showErrors and self.werrors is not None:
                 s += "%04i occupancy = %.5f +- %.5f\n" % (no,w,self.werrors[i])
             else:
-                s += "%04i occupancy = %.5f\n" % (i,w)
-            s += uc.toStr() + "\n"
+                s += "%04i occupancy = %.5f\n" % (no,w)
+            s += uc.toStr(showErrors=showErrors) + "\n"
 
-        s+= "# UnitCell bulk\n" + self.uc_bulk.toStr()
+        s += (
+            "# UnitCell bulk\n"
+            + self.uc_bulk.toStr(showErrors=showErrors)
+        )
         return s
 
     @staticmethod
@@ -756,6 +911,8 @@ class SXRDCrystal:
                 uc = EpitaxyInterface.fromStr(strio.read())
             elif classname == 'Film':
                 uc = Film.fromStr(strio.read())
+            elif classname == 'PoissonSurface':
+                uc = PoissonSurface.fromStr(strio.read())
             else:
                 raise NotImplementedError("class name not understood: %s" % classname)
             uc.name = name
@@ -770,7 +927,6 @@ class SXRDCrystal:
         xtal.weights = np.array(weights)
         xtal.weights_0 = np.copy(weights)
         xtal.werrors = np.array(werrors) if errors else None
-        xtal.setGlobalReferenceUnitCell(xtal['bulk'])
         return xtal
 
     def __getitem__(self,uc_name_or_index):
@@ -825,8 +981,24 @@ class SXRDCrystal:
         return self.getUcNames()
 
     def toFile(self,filename):
+        """Write a plain-text ``.xtal`` or ``.xpr`` model.
+
+        ``.xtal`` files store fitted values without propagated errors.
+        ``.xpr`` files additionally store propagated errors for weights,
+        CTRfilm parameters, and atom parameters.
+
+        :param str filename:
+            Output path ending in ``.xtal`` or ``.xpr``.
+        :raises ValueError:
+            If the filename has another extension.
+        """
+        extension = os.path.splitext(filename)[1].lower()
+        if extension not in ('.xtal', '.xpr'):
+            raise ValueError(
+                "CTR model filename must end in .xtal or .xpr"
+            )
         with open(filename,'w') as f:
-            f.write(self.toStr())
+            f.write(self.toStr(showErrors=extension == '.xpr'))
 
     def toRODFile(self,filename):
         with open(filename,'w') as f:
@@ -834,6 +1006,18 @@ class SXRDCrystal:
 
     @staticmethod
     def fromFile(filename):
+        """Read a plain-text ``.xtal`` or ``.xpr`` crystal model.
+
+        Values and propagated errors are reconstructed from the text. Fit
+        parameter definitions remain in the optional companion ``.h5`` file
+        used by the existing fitting workflow.
+
+        :param str filename:
+            Model path, or basename for automatic ``.xpr``/``.xtal`` lookup.
+        :returns:
+            Reconstructed crystal model.
+        :rtype: SXRDCrystal
+        """
         f, ext = os.path.splitext(filename)
         if ext == '':
             for fext in [".xpr", '.xtal']:
