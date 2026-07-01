@@ -129,7 +129,7 @@ jobs:
             assert CTRuc.HAS_CPP_ACCEL;
             CTRuc.set_ctr_accel_backend('cpp');
             print('CTR_ACCEL_BACKEND=', CTRuc.CTR_ACCEL_BACKEND)" &&
-            pytest {project}/orgui/datautils/xrayutils/test/test_CTRcalc.py
+            pytest --pyargs orgui.datautils.xrayutils.test.test_CTRcalc
           CIBW_TEST_SKIP: "*-manylinux_aarch64"
         with:
           output-dir: wheelhouse
