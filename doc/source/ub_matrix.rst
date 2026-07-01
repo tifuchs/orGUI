@@ -129,14 +129,16 @@ pixels:
    \boldsymbol{\theta}_{y,i}
       &= \boldsymbol{\theta}(x_i, y_i + 1),
 
-where :math:`\boldsymbol{\theta} = (\delta, \gamma)` in radians. The local
-angular size of one detector pixel is then
+where :math:`\boldsymbol{\theta} = (\delta, \gamma)` in radians. Because this
+absolute mismatch test reduces the detector response to a scalar score, the
+local angular size of one detector pixel uses the finer detector-axis
+resolution:
 
 .. math::
 
    \theta_{\mathrm{pix},i}
       =
-      \max\left(
+      \min\left(
          \left\lVert
             \boldsymbol{\theta}_{x,i} - \boldsymbol{\theta}_i
          \right\rVert,
@@ -144,6 +146,9 @@ angular size of one detector pixel is then
             \boldsymbol{\theta}_{y,i} - \boldsymbol{\theta}_i
          \right\rVert
       \right).
+
+This stricter choice avoids marking a reflection as pixel-resolved only because
+its mismatch fits within the coarser axis of a detector with non-square pixels.
 
 Using the incident wavevector magnitude :math:`K`, this local angular
 tolerance is converted to a Q-norm tolerance:

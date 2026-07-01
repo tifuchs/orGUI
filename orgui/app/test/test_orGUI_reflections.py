@@ -254,7 +254,71 @@ def test_local_detector_pixel_tolerance_uses_position_gradient():
         FakeLinearDetector(), xy, alpha_i
     )
 
-    assert tolerance == pytest.approx([2.0e-4, 2.0e-4])
+    assert tolerance == pytest.approx([1.0e-4, 1.0e-4])
+
+
+def test_local_detector_pixel_tolerance_uses_finer_axis_for_rectangular_pixels():
+    xy = np.array([[10.0, 20.0]])
+    alpha_i = np.array([0.0])
+
+    tolerance = _local_detector_pixel_angular_tolerance(
+        FakeLinearDetector(), xy, alpha_i
+    )
+
+    assert tolerance[0] == pytest.approx(1.0e-4)
+    assert tolerance[0] < 2.0e-4
+
+
+def test_reflection_mismatch_does_not_blue_rectangular_pixel_coarse_axis_only():
+    class FakeModel:
+        def __init__(self):
+            self.data = np.empty((2, 6))
+            self.colors = None
+
+        def getData(self):
+            return self.data
+
+        def setArrayColors(self, bgcolors=None, fgcolors=None):
+            self.colors = bgcolors
+
+    class FakeViewport:
+        def update(self):
+            pass
+
+    selector = QReflectionSelector.__new__(QReflectionSelector)
+    selector.orparent = None
+    selector.reflections = [
+        SimpleNamespace(xy=np.array([10.0, 20.0]), imageno=0),
+        SimpleNamespace(xy=np.array([30.0, 40.0]), imageno=1),
+    ]
+    selector.refleditor = SimpleNamespace(
+        model=FakeModel(),
+        view=SimpleNamespace(viewport=lambda: FakeViewport()),
+    )
+    selector.refleditor_angles = SimpleNamespace(
+        model=SimpleNamespace(
+            getData=lambda: np.empty((0, 9)),
+            setArrayColors=lambda bgcolors=None, fgcolors=None: None,
+        ),
+        view=SimpleNamespace(viewport=lambda: FakeViewport()),
+    )
+    selector.ubcalc = SimpleNamespace(
+        detectorCal=FakeLinearDetector(),
+        mu=0.0,
+        ubCal=SimpleNamespace(getK=lambda: 35.0),
+    )
+    selector.pixelMismatchLimit = SimpleNamespace(value=lambda: 1.0)
+    selector.mismatchLabel = SimpleNamespace(setText=lambda text: None)
+    mismatch = {
+        "angle_mismatch": np.array([1.5e-4, 5.0e-5]),
+        "norm_mismatch": np.array([35.0 * 1.5e-4, 35.0 * 5.0e-5]),
+        "relative_norm_mismatch": np.array([1.0, 0.0]),
+    }
+
+    selector.setReflectionMismatch(mismatch)
+
+    assert selector.refleditor.model.colors[0, 0].tolist() == [255, 190, 190]
+    assert selector.refleditor.model.colors[1, 0].tolist() == [185, 220, 255]
 
 
 def test_reflection_mismatch_score_uses_pixel_absolute_thresholds():

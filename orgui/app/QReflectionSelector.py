@@ -83,7 +83,10 @@ def _local_detector_pixel_angular_tolerance(detector, xy, alpha_i):
     :param numpy.ndarray alpha_i:
         Incidence angles in rad, shaped ``(N,)``.
     :returns:
-        Per-reflection angular size of one local detector pixel in rad.
+        Per-reflection angular size of the finer local detector pixel axis in
+        rad. The mismatch score is scalar, so rectangular pixels must use the
+        stricter axis to avoid accepting errors that exceed one pixel along the
+        higher-resolution detector direction.
     :rtype: numpy.ndarray
     """
     xy = np.atleast_2d(np.asarray(xy, dtype=float))
@@ -95,7 +98,7 @@ def _local_detector_pixel_angular_tolerance(detector, xy, alpha_i):
     gamma_y, delta_y = detector.surfaceAnglesPoint(y + 1.0, x, alpha_i)
     horizontal = np.hypot(delta_x - delta, gamma_x - gamma)
     vertical = np.hypot(delta_y - delta, gamma_y - gamma)
-    return np.maximum(horizontal, vertical)
+    return np.minimum(horizontal, vertical)
 
 
 def _relative_mismatch_score(angle, relative_norm):
