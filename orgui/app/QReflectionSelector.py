@@ -54,9 +54,9 @@ def _reflection_mismatch_score(mismatch, angular_tolerance, norm_tolerance):
     :param dict mismatch:
         Reflection mismatch dictionary from
         :meth:`HKLVlieg.UBCalculator.getReflectionMismatch`.
-    :param float angular_tolerance:
+    :param float or numpy.ndarray angular_tolerance:
         Angular tolerance in rad.
-    :param float norm_tolerance:
+    :param float or numpy.ndarray norm_tolerance:
         Q-norm tolerance in Angstrom^-1.
     :returns:
         Maximum of angular and Q-norm mismatch in tolerance units.
@@ -64,13 +64,42 @@ def _reflection_mismatch_score(mismatch, angular_tolerance, norm_tolerance):
     """
     angle = np.asarray(mismatch["angle_mismatch"], dtype=float)
     q_norm = np.asarray(mismatch["norm_mismatch"], dtype=float)
-    angular_tolerance = max(float(angular_tolerance), np.finfo(float).eps)
-    norm_tolerance = max(float(norm_tolerance), np.finfo(float).eps)
+    angular_tolerance = np.maximum(
+        np.asarray(angular_tolerance, dtype=float), np.finfo(float).eps
+    )
+    norm_tolerance = np.maximum(
+        np.asarray(norm_tolerance, dtype=float), np.finfo(float).eps
+    )
     return np.maximum(angle / angular_tolerance, q_norm / norm_tolerance)
 
 
+def _local_detector_pixel_angular_tolerance(detector, xy, alpha_i):
+    """Calculate local detector angular resolution at reflection pixels.
+
+    :param DetectorCalibration.Detector2D_SXRD detector:
+        Detector geometry used to convert pixels to surface angles.
+    :param numpy.ndarray xy:
+        Detector coordinates ``(x, y)`` in pixels, shaped ``(N, 2)``.
+    :param numpy.ndarray alpha_i:
+        Incidence angles in rad, shaped ``(N,)``.
+    :returns:
+        Per-reflection angular size of one local detector pixel in rad.
+    :rtype: numpy.ndarray
+    """
+    xy = np.atleast_2d(np.asarray(xy, dtype=float))
+    alpha_i = np.asarray(alpha_i, dtype=float)
+    x = xy[:, 0]
+    y = xy[:, 1]
+    gamma, delta = detector.surfaceAnglesPoint(y, x, alpha_i)
+    gamma_x, delta_x = detector.surfaceAnglesPoint(y, x + 1.0, alpha_i)
+    gamma_y, delta_y = detector.surfaceAnglesPoint(y + 1.0, x, alpha_i)
+    horizontal = np.hypot(delta_x - delta, gamma_x - gamma)
+    vertical = np.hypot(delta_y - delta, gamma_y - gamma)
+    return np.maximum(horizontal, vertical)
+
+
 def _relative_mismatch_score(angle, relative_norm):
-    """Return the old within-table relative mismatch score.
+    """Return the within-table relative mismatch score.
 
     :param numpy.ndarray angle:
         Angular reflection mismatch in rad.
@@ -538,8 +567,8 @@ class QReflectionSelector(qt.QWidget):
         """Color reflection rows by UB disagreement.
 
         Rows that reach the detector-pixel-equivalent resolution threshold are
-        colored blue. Remaining rows use the old relative green-to-red ranking
-        across the current reference reflections.
+        colored blue. Remaining rows use relative green-to-red ranking across
+        the current reference reflections.
 
         :param dict mismatch:
             Result from
@@ -599,16 +628,28 @@ class QReflectionSelector(qt.QWidget):
         row_colors = (
             green + relative_score[:, np.newaxis] * (red - green)
         ).astype(np.uint8)
-        detector = self.ubcalc.detectorCal
-        pixel_size = max(float(detector.pixel1), float(detector.pixel2))
-        angular_tolerance = np.arctan2(pixel_size, float(detector.dist))
-        norm_tolerance = self.ubcalc.ubCal.getK() * angular_tolerance
-
         # Convert the angular and Q-norm errors to detector-pixel-equivalent
-        # units. One pixel means the UB disagreement is at the instrumental
-        # angular resolution set by pixel size and sample-detector distance.
-        # This is an absolute "good enough" test, so only rows below the GUI
-        # threshold override the relative green-to-red ranking.
+        # units using the local detector-angle gradient at each reflection.
+        # One pixel means the UB disagreement is at the instrumental angular
+        # resolution for that detector position. This absolute "good enough"
+        # test only overrides the relative green-to-red ranking for rows below
+        # the GUI threshold.
+        xy = np.asarray([refl.xy for refl in self.reflections], dtype=float)
+        alpha_i = []
+        orparent = getattr(self, "orparent", None)
+        for refl in self.reflections:
+            if (
+                orparent is not None
+                and orparent.isValidImageNo(refl.imageno)
+            ):
+                mu, _omega = orparent.getMuOm(refl.imageno)
+            else:
+                mu = self.ubcalc.mu
+            alpha_i.append(mu)
+        angular_tolerance = _local_detector_pixel_angular_tolerance(
+            self.ubcalc.detectorCal, xy, np.asarray(alpha_i)
+        )
+        norm_tolerance = self.ubcalc.ubCal.getK() * angular_tolerance
         pixel_score = _reflection_mismatch_score(
             mismatch, angular_tolerance, norm_tolerance
         )

@@ -8,6 +8,7 @@ import pytest
 from orgui.app.orGUI import _display_roi_geometry, orGUI
 from orgui.app.QReflectionSelector import (
     QReflectionSelector,
+    _local_detector_pixel_angular_tolerance,
     _reflection_mismatch_score,
 )
 from orgui.app.QUBCalculator import (
@@ -16,6 +17,14 @@ from orgui.app.QUBCalculator import (
     _DeprecatedFitOption,
 )
 from orgui.datautils.xrayutils import DetectorCalibration, HKLVlieg
+
+
+class FakeLinearDetector:
+    def surfaceAnglesPoint(self, y, x, alpha_i):
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        alpha_i = np.asarray(alpha_i, dtype=float)
+        return 2.0e-4 * y + alpha_i, 1.0e-4 * x
 
 
 class FakeScan:
@@ -153,13 +162,19 @@ def test_reflection_mismatch_tolerates_table_update_in_progress():
         )
 
     selector = QReflectionSelector.__new__(QReflectionSelector)
-    selector.reflections = [object(), object()]
+    selector.orparent = None
+    selector.reflections = [
+        SimpleNamespace(xy=np.array([10.0, 20.0]), imageno=0),
+        SimpleNamespace(xy=np.array([30.0, 40.0]), imageno=1),
+    ]
     selector.refleditor = fake_editor((2, 6))
     selector.refleditor_angles = fake_editor((0, 9))
     selector.ubcalc = SimpleNamespace(
-        detectorCal=SimpleNamespace(pixel1=1e-4, pixel2=1e-4, dist=1.0),
+        detectorCal=FakeLinearDetector(),
+        mu=0.0,
         ubCal=SimpleNamespace(getK=lambda: 35.0),
     )
+    selector.pixelMismatchLimit = SimpleNamespace(value=lambda: 1.0)
     label = SimpleNamespace(text=None)
     selector.mismatchLabel = SimpleNamespace(
         setText=lambda text: setattr(label, "text", text)
@@ -196,7 +211,11 @@ def test_reflection_mismatch_colors_pixel_resolved_rows_blue():
             pass
 
     selector = QReflectionSelector.__new__(QReflectionSelector)
-    selector.reflections = [object(), object()]
+    selector.orparent = None
+    selector.reflections = [
+        SimpleNamespace(xy=np.array([10.0, 20.0]), imageno=0),
+        SimpleNamespace(xy=np.array([30.0, 40.0]), imageno=1),
+    ]
     selector.refleditor = SimpleNamespace(
         model=FakeModel(),
         view=SimpleNamespace(viewport=lambda: FakeViewport()),
@@ -209,7 +228,8 @@ def test_reflection_mismatch_colors_pixel_resolved_rows_blue():
         view=SimpleNamespace(viewport=lambda: FakeViewport()),
     )
     selector.ubcalc = SimpleNamespace(
-        detectorCal=SimpleNamespace(pixel1=1e-4, pixel2=1e-4, dist=1.0),
+        detectorCal=FakeLinearDetector(),
+        mu=0.0,
         ubCal=SimpleNamespace(getK=lambda: 35.0),
     )
     selector.pixelMismatchLimit = SimpleNamespace(value=lambda: 1.0)
@@ -224,6 +244,17 @@ def test_reflection_mismatch_colors_pixel_resolved_rows_blue():
 
     assert selector.refleditor.model.colors[0, 0].tolist() == [185, 220, 255]
     assert selector.refleditor.model.colors[1, 0].tolist() == [255, 190, 190]
+
+
+def test_local_detector_pixel_tolerance_uses_position_gradient():
+    xy = np.array([[10.0, 20.0], [30.0, 40.0]])
+    alpha_i = np.array([0.0, 0.01])
+
+    tolerance = _local_detector_pixel_angular_tolerance(
+        FakeLinearDetector(), xy, alpha_i
+    )
+
+    assert tolerance == pytest.approx([2.0e-4, 2.0e-4])
 
 
 def test_reflection_mismatch_score_uses_pixel_absolute_thresholds():

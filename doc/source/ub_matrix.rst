@@ -54,3 +54,118 @@ method adapted to the orGUI diffractometer geometry. The observed detector
 coordinates and scan angles define momentum-transfer vectors in the inner
 sample-circle frame; ``U`` is then obtained by matching those vectors to the
 corresponding reciprocal lattice vectors.
+
+Reference-Reflection Mismatch Coloring
+--------------------------------------
+
+The reference-reflection table reports the mean mismatch between the measured
+momentum-transfer vectors and the vectors calculated from the current ``UB``
+matrix. The angular mismatch :math:`\Delta\theta_i` is the angle between the
+two vectors for reflection :math:`i`. The Q-norm mismatch
+:math:`\Delta Q_i` is the absolute difference between their magnitudes, in
+:math:`\mathrm{\AA}^{-1}`.
+
+Rows are colored in two steps. First, orGUI computes a relative mismatch
+ranking across the currently selected reference reflections. The angular
+mismatch :math:`\Delta\theta_i` and the relative Q-norm mismatch
+:math:`\Delta Q_i / \lVert Q_{\mathrm{UB},i} \rVert` are normalized
+independently over the current table:
+
+.. math::
+
+   r_{\theta,i}
+      =
+      \frac{
+         \Delta\theta_i - \min_j(\Delta\theta_j)
+      }{
+         \max_j(\Delta\theta_j) - \min_j(\Delta\theta_j)
+      },
+
+.. math::
+
+   r_{Q,i}
+      =
+      \frac{
+         \Delta Q_i / \lVert Q_{\mathrm{UB},i} \rVert
+         -
+         \min_j\left(
+            \Delta Q_j / \lVert Q_{\mathrm{UB},j} \rVert
+         \right)
+      }{
+         \max_j\left(
+            \Delta Q_j / \lVert Q_{\mathrm{UB},j} \rVert
+         \right)
+         -
+         \min_j\left(
+            \Delta Q_j / \lVert Q_{\mathrm{UB},j} \rVert
+         \right)
+      }.
+
+If all finite values in one channel are equal, that normalized channel is set
+to zero for those finite rows. The relative color score is the mean of the two
+normalized channels:
+
+.. math::
+
+   r_i = \frac{1}{2}\left(r_{\theta,i} + r_{Q,i}\right).
+
+This score maps the best current agreement to green and the worst current
+agreement to red. It is a comparative diagnostic within the current reference
+set, so it remains useful when the fit is not yet limited by instrumental
+resolution.
+
+Second, orGUI checks whether an individual reflection is already within the
+local detector-pixel resolution. This is an absolute test, not a relative
+ranking. At the reflection pixel position :math:`(x_i, y_i)`, orGUI evaluates
+the detector angle transform at the center pixel and at the two neighboring
+pixels:
+
+.. math::
+
+   \boldsymbol{\theta}_i
+      &= \boldsymbol{\theta}(x_i, y_i), \\
+   \boldsymbol{\theta}_{x,i}
+      &= \boldsymbol{\theta}(x_i + 1, y_i), \\
+   \boldsymbol{\theta}_{y,i}
+      &= \boldsymbol{\theta}(x_i, y_i + 1),
+
+where :math:`\boldsymbol{\theta} = (\delta, \gamma)` in radians. The local
+angular size of one detector pixel is then
+
+.. math::
+
+   \theta_{\mathrm{pix},i}
+      =
+      \max\left(
+         \left\lVert
+            \boldsymbol{\theta}_{x,i} - \boldsymbol{\theta}_i
+         \right\rVert,
+         \left\lVert
+            \boldsymbol{\theta}_{y,i} - \boldsymbol{\theta}_i
+         \right\rVert
+      \right).
+
+Using the incident wavevector magnitude :math:`K`, this local angular
+tolerance is converted to a Q-norm tolerance:
+
+.. math::
+
+   Q_{\mathrm{pix},i} = K\,\theta_{\mathrm{pix},i}.
+
+The pixel-equivalent mismatch score is
+
+.. math::
+
+   s_i =
+   \max\left(
+      \frac{\Delta\theta_i}{\theta_{\mathrm{pix},i}},
+      \frac{\Delta Q_i}{Q_{\mathrm{pix},i}}
+   \right).
+
+Thus :math:`s_i \le 1` means that the reflection mismatch is within roughly one
+local detector pixel of the current instrumental angular resolution. The
+``Resolution limit`` control in the reference-reflection panel sets the maximum
+allowed value of :math:`s_i` for this absolute test. Reflections below that
+limit are marked blue to indicate that the agreement is resolution-limited.
+All other reflections keep the relative green-to-red coloring from
+:math:`r_i`.
