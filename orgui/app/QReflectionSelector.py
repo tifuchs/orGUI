@@ -45,6 +45,89 @@ from . import imagePeakFinder
 
 logger = logging.getLogger(__name__)
 
+
+def _reflection_mismatch_score(mismatch, angular_tolerance, norm_tolerance):
+    """Return absolute per-reflection mismatch scores.
+
+    A score of ``1`` corresponds to one detector-pixel-equivalent mismatch.
+
+    :param dict mismatch:
+        Reflection mismatch dictionary from
+        :meth:`HKLVlieg.UBCalculator.getReflectionMismatch`.
+    :param float or numpy.ndarray angular_tolerance:
+        Angular tolerance in rad.
+    :param float or numpy.ndarray norm_tolerance:
+        Q-norm tolerance in Angstrom^-1.
+    :returns:
+        Maximum of angular and Q-norm mismatch in tolerance units.
+    :rtype: numpy.ndarray
+    """
+    angle = np.asarray(mismatch["angle_mismatch"], dtype=float)
+    q_norm = np.asarray(mismatch["norm_mismatch"], dtype=float)
+    angular_tolerance = np.maximum(
+        np.asarray(angular_tolerance, dtype=float), np.finfo(float).eps
+    )
+    norm_tolerance = np.maximum(
+        np.asarray(norm_tolerance, dtype=float), np.finfo(float).eps
+    )
+    return np.maximum(angle / angular_tolerance, q_norm / norm_tolerance)
+
+
+def _local_detector_pixel_angular_tolerance(detector, xy, alpha_i):
+    """Calculate local detector angular resolution at reflection pixels.
+
+    :param DetectorCalibration.Detector2D_SXRD detector:
+        Detector geometry used to convert pixels to surface angles.
+    :param numpy.ndarray xy:
+        Detector coordinates ``(x, y)`` in pixels, shaped ``(N, 2)``.
+    :param numpy.ndarray alpha_i:
+        Incidence angles in rad, shaped ``(N,)``.
+    :returns:
+        Per-reflection angular size of the finer local detector pixel axis in
+        rad. The mismatch score is scalar, so rectangular pixels must use the
+        stricter axis to avoid accepting errors that exceed one pixel along the
+        higher-resolution detector direction.
+    :rtype: numpy.ndarray
+    """
+    xy = np.atleast_2d(np.asarray(xy, dtype=float))
+    alpha_i = np.asarray(alpha_i, dtype=float)
+    x = xy[:, 0]
+    y = xy[:, 1]
+    gamma, delta = detector.surfaceAnglesPoint(y, x, alpha_i)
+    gamma_x, delta_x = detector.surfaceAnglesPoint(y, x + 1.0, alpha_i)
+    gamma_y, delta_y = detector.surfaceAnglesPoint(y + 1.0, x, alpha_i)
+    horizontal = np.hypot(delta_x - delta, gamma_x - gamma)
+    vertical = np.hypot(delta_y - delta, gamma_y - gamma)
+    return np.minimum(horizontal, vertical)
+
+
+def _relative_mismatch_score(angle, relative_norm):
+    """Return the within-table relative mismatch score.
+
+    :param numpy.ndarray angle:
+        Angular reflection mismatch in rad.
+    :param numpy.ndarray relative_norm:
+        Relative Q-norm mismatch.
+    :returns:
+        Score normalized from best to worst current reflection.
+    :rtype: numpy.ndarray
+    """
+    def normalized(values):
+        finite = np.isfinite(values)
+        result = np.ones(values.shape, dtype=float)
+        if not np.any(finite):
+            return result
+        low = np.min(values[finite])
+        high = np.max(values[finite])
+        if np.isclose(low, high):
+            result[finite] = 0.0
+        else:
+            result[finite] = (values[finite] - low) / (high - low)
+        return result
+
+    return normalized(0.5 * (normalized(angle) + normalized(relative_norm)))
+
+
 @dataclass
 class HKLReflection:
     xy: np.ndarray
@@ -128,6 +211,35 @@ class QReflectionSelector(qt.QWidget):
         editorTabWidget.addTab(self.refleditor_angles, "SIXC angles")
 
         layout.addWidget(editorTabWidget)
+        self.mismatchLabel = qt.QLabel(
+            "Mismatch: unavailable"
+        )
+        self.mismatchLabel.setToolTip(
+            "Mean absolute mismatch across the reference reflections. "
+            "The first value is the angular difference between Q calculated "
+            "from the measured angles and Q calculated from UB, in degrees. "
+            "The second value is the difference in Q magnitude, in Å⁻¹."
+        )
+        layout.addWidget(self.mismatchLabel)
+
+        pixelMismatchLayout = qt.QHBoxLayout()
+        pixelMismatchLayout.addWidget(qt.QLabel("Resolution limit:"))
+        self.pixelMismatchLimit = qt.QDoubleSpinBox()
+        self.pixelMismatchLimit.setDecimals(2)
+        self.pixelMismatchLimit.setRange(0.1, 20.0)
+        self.pixelMismatchLimit.setSingleStep(0.1)
+        self.pixelMismatchLimit.setValue(1.0)
+        self.pixelMismatchLimit.setSuffix(" px")
+        self.pixelMismatchLimit.setToolTip(
+            "Rows at or below this detector-pixel-equivalent mismatch are "
+            "colored blue; other rows use relative green-to-red coloring."
+        )
+        self.pixelMismatchLimit.valueChanged.connect(
+            lambda _value: self.ubcalc.updateReflectionMismatch()
+        )
+        pixelMismatchLayout.addWidget(self.pixelMismatchLimit)
+        pixelMismatchLayout.addStretch(1)
+        layout.addLayout(pixelMismatchLayout)
         #self.addWidget(editorTabWidget)
 
         self.controlToolbar = qt.QToolBar()
@@ -284,6 +396,7 @@ class QReflectionSelector(qt.QWidget):
             self.setReflectionActive(identifier)
         else:
             self.redrawActiveReflection()
+        self.ubcalc.updateReflectionMismatch()
 
     def anglesReflection(self, refl):
         if self.orparent.fscan is None:
@@ -328,6 +441,7 @@ class QReflectionSelector(qt.QWidget):
             self.plot.addMarker(*refl.xy,legend=refl.identifier,text="(%0.1f,%0.1f,%0.1f)" % tuple(refl.hkl),color='blue',selectable=True,draggable=True,symbol='.')
         self.reflections.insert(row, refl)
         self.setReflectionActive(refl.identifier)
+        self.ubcalc.updateReflectionMismatch()
 
     def _onRowsDeleted(self, rows):
         idents = []
@@ -450,7 +564,116 @@ class QReflectionSelector(qt.QWidget):
                 self.setReflectionActive(self.reflections[0].identifier)
             else:
                 self.activeReflection = None
-                return
+        self.ubcalc.updateReflectionMismatch()
+
+    def setReflectionMismatch(self, mismatch):
+        """Color reflection rows by UB disagreement.
+
+        Rows that reach the detector-pixel-equivalent resolution threshold are
+        colored blue. Remaining rows use relative green-to-red ranking across
+        the current reference reflections.
+
+        :param dict mismatch:
+            Result from
+            :meth:`HKLVlieg.UBCalculator.getReflectionMismatch`, or ``None``
+            to clear the colors.
+        """
+        if mismatch is None:
+            self.mismatchLabel.setText(
+                "Mismatch: unavailable"
+            )
+            self.refleditor.model.setArrayColors()
+            self.refleditor_angles.model.setArrayColors()
+            self.refleditor.view.viewport().update()
+            self.refleditor_angles.view.viewport().update()
+            return
+
+        angle = np.asarray(mismatch["angle_mismatch"], dtype=float)
+        absolute_norm = np.asarray(
+            mismatch["norm_mismatch"], dtype=float
+        )
+        relative_norm = np.asarray(
+            mismatch["relative_norm_mismatch"], dtype=float
+        )
+        if (
+            len(angle) != len(self.reflections)
+            or len(absolute_norm) != len(self.reflections)
+            or len(relative_norm) != len(self.reflections)
+        ):
+            self.mismatchLabel.setText(
+                "Mismatch: unavailable"
+            )
+            self.refleditor.model.setArrayColors()
+            self.refleditor_angles.model.setArrayColors()
+            self.refleditor.view.viewport().update()
+            self.refleditor_angles.view.viewport().update()
+            return
+
+        finite = np.isfinite(angle) & np.isfinite(absolute_norm)
+        if np.any(finite):
+            mean_angle = np.rad2deg(np.mean(angle[finite]))
+            mean_norm = np.mean(absolute_norm[finite])
+            self.mismatchLabel.setText(
+                f"Mismatch: {mean_angle:.4g}°; "
+                f"{mean_norm:.4g} Å⁻¹"
+            )
+        else:
+            self.mismatchLabel.setText(
+                "Mismatch: unavailable"
+            )
+
+        relative_score = np.clip(
+            _relative_mismatch_score(angle, relative_norm), 0.0, 1.0
+        )
+        relative_score[~np.isfinite(relative_score)] = 1.0
+        green = np.array([205.0, 245.0, 205.0])
+        red = np.array([255.0, 190.0, 190.0])
+        row_colors = (
+            green + relative_score[:, np.newaxis] * (red - green)
+        ).astype(np.uint8)
+        # Convert the angular and Q-norm errors to detector-pixel-equivalent
+        # units using the local detector-angle gradient at each reflection.
+        # One pixel means the UB disagreement is at the instrumental angular
+        # resolution for that detector position. This absolute "good enough"
+        # test only overrides the relative green-to-red ranking for rows below
+        # the GUI threshold.
+        xy = np.asarray([refl.xy for refl in self.reflections], dtype=float)
+        alpha_i = []
+        orparent = getattr(self, "orparent", None)
+        for refl in self.reflections:
+            if (
+                orparent is not None
+                and orparent.isValidImageNo(refl.imageno)
+            ):
+                mu, _omega = orparent.getMuOm(refl.imageno)
+            else:
+                mu = self.ubcalc.mu
+            alpha_i.append(mu)
+        angular_tolerance = _local_detector_pixel_angular_tolerance(
+            self.ubcalc.detectorCal, xy, np.asarray(alpha_i)
+        )
+        norm_tolerance = self.ubcalc.ubCal.getK() * angular_tolerance
+        pixel_score = _reflection_mismatch_score(
+            mismatch, angular_tolerance, norm_tolerance
+        )
+        limit_widget = getattr(self, "pixelMismatchLimit", None)
+        pixel_limit = 1.0 if limit_widget is None else limit_widget.value()
+        resolved = np.isfinite(pixel_score) & (pixel_score <= pixel_limit)
+        row_colors[resolved] = np.array([185, 220, 255], dtype=np.uint8)
+
+        def apply_colors(editor):
+            table_shape = editor.model.getData().shape
+            if len(table_shape) != 2 or table_shape[0] != len(row_colors):
+                editor.model.setArrayColors()
+            else:
+                colors = np.broadcast_to(
+                    row_colors[:, np.newaxis, :], table_shape + (3,)
+                ).copy()
+                editor.model.setArrayColors(bgcolors=colors)
+            editor.view.viewport().update()
+
+        apply_colors(self.refleditor)
+        apply_colors(self.refleditor_angles)
 
 
     def reflectionsFromEditor(self):
@@ -499,9 +722,7 @@ class QReflectionSelector(qt.QWidget):
 
             self.reflections.append(refl)
             self.nextNo += 1
-        if self.reflections:
-            newactive = self.reflections[0].identifier
-            self.setReflectionActive(newactive)
+        self.updateEditor()
 
     def addReflection(self,eventdict,imageno,hkl=np.array([np.nan,np.nan,np.nan])):
         identifier = 'ref_'+str(self.nextNo)
@@ -1017,5 +1238,3 @@ class PeakImgRangeDialog(qt.QDialog):
             qt.QMessageBox.warning(self, "Invalid input", str(e))
             return
         self.accept()
-
-

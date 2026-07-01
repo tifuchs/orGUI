@@ -83,3 +83,89 @@ class TestLattice(unittest.TestCase):
         self.assertTrue(np.allclose(phase_lat, phase))
 
 
+class TestUBCalculator(unittest.TestCase):
+
+    def testKabschOrientationFit(self):
+        q_crystal = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.0, 0.0, 3.0],
+                [1.0, 2.0, 3.0],
+            ]
+        )
+        expected_u = HKLVlieg.Rotation.from_euler(
+            "xyz", [0.2, -0.3, 0.4]
+        ).as_matrix()
+        q_phi = np.einsum("ij,nj->ni", expected_u, q_crystal)
+
+        fitted_u, rssd = HKLVlieg.UBCalculator.calc_U_kabsch(
+            q_phi, q_crystal
+        )
+
+        self.assertTrue(np.allclose(fitted_u, expected_u))
+        self.assertAlmostEqual(rssd, 0.0, places=7)
+
+    def testReflectionMismatch(self):
+        lattice = HKLVlieg.Lattice(
+            [3.9242, 3.9242, 3.9242], [90.0, 90.0, 90.0]
+        )
+        ub = HKLVlieg.UBCalculator(lattice, 70.0)
+        ub.setU(np.eye(3))
+
+        angles = np.deg2rad(
+            [
+                [0.2, 4.0, 2.0, 10.0, 1.0, -3.0],
+                [0.2, 7.0, -1.0, 15.0, 1.0, -3.0],
+            ]
+        )
+        q_from_angles = np.array(
+            [
+                HKLVlieg.calculate_q_phi(pos, ub.getK()).flatten()
+                for pos in angles
+            ]
+        )
+        hkls = np.linalg.solve(ub.getUB(), q_from_angles.T).T
+
+        mismatch = ub.getReflectionMismatch(hkls, angles)
+
+        self.assertTrue(
+            np.allclose(mismatch["q_from_angles"], q_from_angles)
+        )
+        self.assertTrue(np.allclose(mismatch["q_from_ub"], q_from_angles))
+        self.assertTrue(np.allclose(mismatch["angle_mismatch"], 0.0))
+        self.assertTrue(np.allclose(mismatch["norm_mismatch"], 0.0))
+        self.assertTrue(
+            np.allclose(mismatch["relative_norm_mismatch"], 0.0)
+        )
+
+    def testReflectionMismatchDetectsAngleAndNormErrors(self):
+        lattice = HKLVlieg.Lattice(
+            [3.9242, 3.9242, 3.9242], [90.0, 90.0, 90.0]
+        )
+        ub = HKLVlieg.UBCalculator(lattice, 70.0)
+        ub.setU(np.eye(3))
+        angles = np.deg2rad([[0.2, 5.0, 2.0, 10.0, 1.0, -3.0]])
+        measured_q = HKLVlieg.calculate_q_phi(
+            angles[0], ub.getK()
+        ).flatten()
+        expected_q = 1.1 * measured_q
+        expected_q[0] += 0.05
+        hkl = np.linalg.solve(ub.getUB(), expected_q)
+
+        mismatch = ub.getReflectionMismatch(hkl, angles)
+        measured_norm = np.linalg.norm(measured_q)
+        expected_norm = np.linalg.norm(expected_q)
+        expected_angle = np.arccos(
+            np.dot(measured_q, expected_q) / (measured_norm * expected_norm)
+        )
+
+        self.assertAlmostEqual(mismatch["angle_mismatch"][0], expected_angle)
+        self.assertAlmostEqual(
+            mismatch["norm_mismatch"][0],
+            abs(measured_norm - expected_norm),
+        )
+        self.assertAlmostEqual(
+            mismatch["relative_norm_mismatch"][0],
+            abs(measured_norm - expected_norm) / expected_norm,
+        )

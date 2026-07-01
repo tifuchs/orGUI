@@ -764,6 +764,62 @@ class UBCalculator:
 
         return U, stats
 
+    @staticmethod
+    def calc_U_kabsch(Q_phi, Q_c):
+        """Fit an orientation matrix to corresponding Q vectors.
+
+        Both vector sets are normalized before fitting, so the result is a
+        pure rotation and every reflection has equal weight.
+
+        :param numpy.ndarray Q_phi:
+            Measured momentum-transfer vectors in the phi frame, in
+            Angstrom^-1 and shaped ``(N, 3)``.
+        :param numpy.ndarray Q_c:
+            Reciprocal-lattice vectors in the crystal frame, in Angstrom^-1
+            and shaped ``(N, 3)``.
+        :returns:
+            Orientation matrix and the root-sum-square directional residual.
+        :rtype: tuple[numpy.ndarray, float]
+        :raises ValueError:
+            If fewer than two valid vector pairs are supplied.
+        """
+        Q_phi = np.atleast_2d(np.asarray(Q_phi, dtype=float))
+        Q_c = np.atleast_2d(np.asarray(Q_c, dtype=float))
+        if Q_phi.shape != Q_c.shape or Q_phi.shape[1:] != (3,):
+            raise ValueError("Q vector arrays must both have shape (N, 3)")
+        if len(Q_phi) < 2:
+            raise ValueError("At least two vector pairs are required")
+        phi_norm = LA.norm(Q_phi, axis=1)
+        crystal_norm = LA.norm(Q_c, axis=1)
+        if np.any(phi_norm == 0.0) or np.any(crystal_norm == 0.0):
+            raise ValueError("Cannot fit zero-length Q vectors")
+        rotation, rssd = Rotation.align_vectors(
+            Q_phi / phi_norm[:, np.newaxis],
+            Q_c / crystal_norm[:, np.newaxis],
+        )
+        return rotation.as_matrix(), rssd
+
+    def calculateUFromReflections(self, hkl, angles):
+        """Fit U to multiple reference reflections using Kabsch alignment.
+
+        :param numpy.ndarray hkl:
+            Miller indices in r.l.u., shaped ``(N, 3)``.
+        :param numpy.ndarray angles:
+            Vlieg six-circle angles in rad, shaped ``(N, 6)``.
+        :returns:
+            Root-sum-square directional residual.
+        :rtype: float
+        """
+        hkl = np.atleast_2d(np.asarray(hkl, dtype=float))
+        angles = np.atleast_2d(np.asarray(angles, dtype=float))
+        q_phi = np.array(
+            [calculate_q_phi(pos, self._K).flatten() for pos in angles]
+        )
+        q_c = (self.lattice.B_mat @ hkl.T).T
+        U, rssd = self.calc_U_kabsch(q_phi, q_c)
+        self.setU(U)
+        return rssd
+
     def calculateU(self):
         """Calculate the orientation matrix ´U´ from the two reference reflections.
         
@@ -787,6 +843,65 @@ class UBCalculator:
 
         self.setU(U)
         return self._U
+
+    def getReflectionMismatch(self, hkl, angles):
+        """Calculate per-reflection disagreement with the current UB matrix.
+
+        The measured momentum-transfer vector is calculated from the Vlieg
+        six-circle angles. The expected vector is calculated as ``UB @ hkl``.
+
+        :param numpy.ndarray hkl:
+            Miller indices in r.l.u., shaped ``(N, 3)`` or ``(3,)``.
+        :param numpy.ndarray angles:
+            Diffractometer angles
+            ``[alpha, delta, gamma, omega, chi, phi]`` in rad, shaped
+            ``(N, 6)`` or ``(6,)``.
+        :returns:
+            Dictionary containing ``q_from_angles`` and ``q_from_ub`` in
+            Angstrom^-1, ``angle_mismatch`` in rad, ``norm_mismatch`` in
+            Angstrom^-1, and ``relative_norm_mismatch`` as a dimensionless
+            fraction.
+        :rtype: dict
+        :raises ValueError:
+            If the UB matrix is unset, input shapes differ, or a reflection
+            has zero calculated momentum transfer.
+        """
+        if self._UB is None:
+            raise ValueError("Cannot calculate reflection mismatch without a UB matrix")
+
+        hkl = np.atleast_2d(np.asarray(hkl, dtype=float))
+        angles = np.atleast_2d(np.asarray(angles, dtype=float))
+        if hkl.shape[1:] != (3,):
+            raise ValueError("hkl must have shape (N, 3)")
+        if angles.shape[1:] != (6,):
+            raise ValueError("angles must have shape (N, 6)")
+        if len(hkl) != len(angles):
+            raise ValueError(
+                "hkl and angles must contain the same number of reflections"
+            )
+
+        q_from_angles = np.array(
+            [calculate_q_phi(pos, self._K).flatten() for pos in angles]
+        )
+        q_from_ub = np.einsum("ij,nj->ni", self._UB, hkl)
+
+        angle_norm = np.linalg.norm(q_from_angles, axis=1)
+        ub_norm = np.linalg.norm(q_from_ub, axis=1)
+        if np.any(angle_norm == 0.0) or np.any(ub_norm == 0.0):
+            raise ValueError("Cannot compare reflections with zero momentum transfer")
+
+        cosine = np.einsum("ni,ni->n", q_from_angles, q_from_ub)
+        cosine /= angle_norm * ub_norm
+        angle_mismatch = np.arccos(np.clip(cosine, -1.0, 1.0))
+        norm_mismatch = np.abs(angle_norm - ub_norm)
+
+        return {
+            "q_from_angles": q_from_angles,
+            "q_from_ub": q_from_ub,
+            "angle_mismatch": angle_mismatch,
+            "norm_mismatch": norm_mismatch,
+            "relative_norm_mismatch": norm_mismatch / ub_norm,
+        }
 
     def getU(self):
         return self._U
@@ -1470,6 +1585,3 @@ if __name__ == "__main__":
     #delta = np.linspace(-np.pi/8,np.pi/8,1100)
     #gamma = np.linspace(-np.pi/8,np.pi/8,1600)
     h , k , l = angles.anglesToHklDetector(0.15,delta,gamma,0.1,0,0)
-
-
-

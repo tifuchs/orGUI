@@ -279,6 +279,51 @@ class Detector2D_SXRD(geometry.Geometry):
         delta = np.arcsin( (np.sin(delta_p)*np.cos(gamma_p))/np.cos(gamma) ) # evil, revise!!!
         return gamma, delta
 
+    def surfaceAnglesPointParam(self, x, y, alpha_i, param):
+        """Calculate surface-frame detector angles for trial geometry.
+
+        This follows the pyFAI refinement pattern by passing trial geometry
+        parameters directly into the coordinate calculation. It does not
+        modify this geometry object or reset its caches.
+
+        :param numpy.ndarray x:
+            Detector coordinates along pyFAI dimension 1, in pixels.
+        :param numpy.ndarray y:
+            Detector coordinates along pyFAI dimension 2, in pixels.
+        :param numpy.ndarray alpha_i:
+            Incidence angles in rad.
+        :param numpy.ndarray param:
+            Trial pyFAI geometry
+            ``[dist, poni1, poni2, rot1, rot2, rot3]`` in m and rad.
+        :returns:
+            ``(gamma, delta)`` surface-frame detector angles in rad.
+        :rtype: tuple[numpy.ndarray, numpy.ndarray]
+        """
+        t3, t1, t2 = self.calc_pos_zyx(
+            d1=np.asarray(x),
+            d2=np.asarray(y),
+            param=np.asarray(param, dtype=float),
+            do_parallax=True,
+        )
+        tth = np.arctan2(np.sqrt(t1 * t1 + t2 * t2), t3)
+        azimuth = np.arctan2(t1, t2) + self._deltaChi
+        delta_p = np.arctan2(
+            np.sin(tth) * np.sin(azimuth), np.cos(tth)
+        )
+        gamma_p = np.arctan2(
+            np.sin(tth) * np.cos(azimuth) * np.cos(delta_p),
+            np.cos(tth),
+        )
+        alpha_i = np.asarray(alpha_i)
+        gamma = np.arcsin(
+            np.cos(alpha_i) * np.sin(gamma_p)
+            - np.sin(alpha_i) * np.cos(delta_p) * np.cos(gamma_p)
+        )
+        delta = np.arcsin(
+            np.sin(delta_p) * np.cos(gamma_p) / np.cos(gamma)
+        )
+        return gamma, delta
+
     def crystalAnglesPoint(self,x,y,alpha_i,refraction_index):
         gamma, delta = self.surfaceAnglesPoint(x,y,alpha_i)
         gamma_cry = crystalAngles_singleArray(gamma,refraction_index)

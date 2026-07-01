@@ -126,6 +126,27 @@ class TestAnglePixelConversion(unittest.TestCase):
 
         self.mu = np.deg2rad(0.1) # should be differed, but probably ok
 
+    def test_surface_angles_trial_parameters_match_active_geometry(self):
+        d1 = np.array([100.0, 500.0, 1000.0])
+        d2 = np.array([200.0, 700.0, 1200.0])
+        alpha = np.full(3, self.mu)
+        param = np.array([
+            self.sxrddet.dist,
+            self.sxrddet.poni1,
+            self.sxrddet.poni2,
+            self.sxrddet.rot1,
+            self.sxrddet.rot2,
+            self.sxrddet.rot3,
+        ])
+
+        expected = self.sxrddet.surfaceAnglesPoint(d1, d2, alpha)
+        actual = self.sxrddet.surfaceAnglesPointParam(
+            d1, d2, alpha, param
+        )
+
+        self.assertTrue(np.allclose(actual[0], expected[0]))
+        self.assertTrue(np.allclose(actual[1], expected[1]))
+
 
     def assertPixelErrorSurfaceAnglesLessThan(self, abserr=1e-3, msg=""):
         gamma, delta = self.sxrddet.surfaceAngles(self.mu)

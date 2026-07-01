@@ -29,6 +29,8 @@ __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
 import logging
+import warnings
+from scipy import optimize
 from .. import logger_utils
 logger = logging.getLogger(__name__)
 
@@ -90,12 +92,49 @@ class LatIndex(Enum):
     A3 = auto()
 
 
+class _DeprecatedFitOption:
+    """Compatibility proxy for the removed lattice-fit radio buttons."""
+
+    def __init__(self, calculator, mode, attribute_name):
+        self._calculator = calculator
+        self._mode = mode
+        self._attribute_name = attribute_name
+
+    def _warn(self):
+        warnings.warn(
+            f"QUBCalculator.{self._attribute_name} is deprecated; use "
+            "QUBCalculator.fitDialog or fitExperiment() instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
+    def setChecked(self, checked):
+        """Select the corresponding lattice fitting mode."""
+        self._warn()
+        if checked:
+            self._calculator.fitDialog.setLegacyLatticeMode(self._mode)
+        elif self._calculator.fitDialog.legacyLatticeMode() == self._mode:
+            self._calculator.fitDialog.setLegacyLatticeMode("none")
+
+    def isChecked(self):
+        """Return whether the corresponding lattice fitting mode is active."""
+        self._warn()
+        return self._calculator.fitDialog.legacyLatticeMode() == self._mode
+
+    def checkState(self):
+        """Return a Qt-compatible check state."""
+        self._warn()
+        checked = self._calculator.fitDialog.legacyLatticeMode() == self._mode
+        return qt.Qt.Checked if checked else qt.Qt.Unchecked
+
+
 # reflectionhandler must implement the method getReflections
 
 class QUBCalculator(qt.QSplitter):
     sigNewReflection = qt.pyqtSignal(dict)
     sigPlottableMachineParamsChanged = qt.pyqtSignal()
     sigReplotRequest = qt.pyqtSignal(bool)
+    sigReflectionMismatchChanged = qt.pyqtSignal(object)
     #sigQueryImageChange = qt.pyqtSignal(int)
     #sigImagePathChanged = qt.pyqtSignal(object)
     #sigImageNoChanged = qt.pyqtSignal(object)
@@ -148,32 +187,29 @@ class QUBCalculator(qt.QSplitter):
 
         #self.Ueditor = qt.QTextEdit("")
         #umatrixsplitter.addWidget(self.Ueditor)
-        self.calUButton = qt.QPushButton("calculate U")
-        self.calUButton.setToolTip("calculate orientation matrix based on the given reflections")
+        self.calUButton = qt.QPushButton("Set U from reflections")
+        self.calUButton.setToolTip(
+            "<b>Calculate the crystal orientation matrix U</b><br>"
+            "1 reflection: use the Z-mode single-reflection solution.<br>"
+            "2 reflections: use the Busing-Levy two-reference-vector "
+            "solution.<br>"
+            "3 or more reflections: fit one rotation to all normalized "
+            "reflection vectors using the Kabsch algorithm.<br><br>"
+            "This button calculates U only. Use <i>Fit U / experiment</i> "
+            "to refine lattice or detector parameters."
+        )
 
         vertCalUSplitter = qt.QSplitter()
         vertCalUSplitter.setOrientation(qt.Qt.Vertical)
         vertCalUSplitter.setChildrenCollapsible(False)
-        fitUbox = qt.QGroupBox("fit options")
-        fitUbox.setToolTip("only available with enough reflections")
-
-        self.latnofit = qt.QRadioButton("don't fit lattice")
-        self.latnofit.setChecked(True)
-        self.latscale = qt.QRadioButton("fit scale of lattice")
-        self.latfitall = qt.QRadioButton("fit all lattice parameters")
-
-        fitUboxlayout = qt.QVBoxLayout()
-        fitUboxlayout.addWidget(self.latnofit)
-        fitUboxlayout.addWidget(self.latscale)
-        fitUboxlayout.addWidget(self.latfitall)
-        fitUboxlayout.addStretch(1)
-
-        fitUbox.setLayout(fitUboxlayout)
-
-
-        vertCalUSplitter.addWidget(fitUbox)
 
         vertCalUSplitter.addWidget(self.calUButton)
+
+        self.fitUButton = qt.QPushButton("fit U / experiment")
+        self.fitUButton.setToolTip(
+            "fit U and selected lattice or detector geometry parameters"
+        )
+        vertCalUSplitter.addWidget(self.fitUButton)
 
         self.calMiscutButton = qt.QPushButton("calculate miscut")
         self.calMiscutButton.setToolTip("calculate miscut based on deviation from ideal orientation matrix")
@@ -192,6 +228,7 @@ class QUBCalculator(qt.QSplitter):
 
 
         self.calUButton.clicked.connect(self._onCalcU)
+        self.fitUButton.clicked.connect(self._onShowFitDialog)
         self.calMiscutButton.clicked.connect(self._onCalMiscut)
 
         self.crystalparams = QCrystalParameter()
@@ -204,6 +241,16 @@ class QUBCalculator(qt.QSplitter):
 
         self.uedit = QUEdit()
         self.ueditDialog = QUEditDialog(self.uedit)
+        self.fitDialog = QUBFitDialog(self)
+        self.latnofit = _DeprecatedFitOption(
+            self, "none", "latnofit"
+        )
+        self.latscale = _DeprecatedFitOption(
+            self, "scale", "latscale"
+        )
+        self.latfitall = _DeprecatedFitOption(
+            self, "individual", "latfitall"
+        )
 
         self.uedit.sigResetRequest.connect(self._onResetU)
         self.uedit.sigAlignRequest.connect(self._onAlignU)
@@ -366,11 +413,13 @@ class QUBCalculator(qt.QSplitter):
 
     def _onUchanged(self, U):
         self.ubCal.setU(U)
+        self.updateReflectionMismatch()
         self.sigReplotRequest.emit(True)
 
     def _onResetU(self, func):
         func(self.ubCal)
         self.uedit.setU(self.ubCal.getU())
+        self.updateReflectionMismatch()
         self.sigReplotRequest.emit(True)
 
     def _onAlignU(self, ddict):
@@ -381,6 +430,7 @@ class QUBCalculator(qt.QSplitter):
         elif ddict['frame'] == 'lab':
             self.ubCal.alignU_lab(ddict['hkl'], pos, ddict['xyz'])
         self.uedit.setU(self.ubCal.getU())
+        self.updateReflectionMismatch()
         self.sigReplotRequest.emit(True)
 
     def _onCrystalParamsChanged(self,crystal,n):
@@ -391,6 +441,7 @@ class QUBCalculator(qt.QSplitter):
         self.n = n
         self.ubCal.setLattice(self.crystal)
         #self.ubCal.defaultU()
+        self.updateReflectionMismatch()
         self.sigReplotRequest.emit(True)
 
     def _onMachineParamsChanged(self,params):
@@ -412,6 +463,7 @@ class QUBCalculator(qt.QSplitter):
         angles_u = self.uedit.cached_angles
 
         self.uedit.setAngles(self.mu, self.chi, self.phi, angles_u[-1])
+        self.updateReflectionMismatch()
 
         try:
             self.sigPlottableMachineParamsChanged.emit()
@@ -437,7 +489,46 @@ class QUBCalculator(qt.QSplitter):
         self.readConfig(filename)
 
     def setReflectionHandler(self,refls):
+        """Set the callable that supplies current reference reflections.
+
+        :param collections.abc.Callable refls:
+            Callable returning ``(hkls, angles)`` for the current reflection
+            table.
+        """
         self.reflections = refls
+        self.updateReflectionMismatch()
+
+    def getReflectionMismatch(self, hkls=None, angles=None):
+        """Return mismatch parameters for reference reflections.
+
+        :param numpy.ndarray hkls:
+            Optional Miller indices in r.l.u. If omitted, the configured
+            reflection handler supplies them.
+        :param numpy.ndarray angles:
+            Optional Vlieg six-circle angles in rad. If omitted, the configured
+            reflection handler supplies them.
+        :returns:
+            Per-reflection mismatch dictionary from
+            :meth:`HKLVlieg.UBCalculator.getReflectionMismatch`.
+        :rtype: dict
+        """
+        if hkls is None or angles is None:
+            hkls, angles = self.reflections()
+        return self.ubCal.getReflectionMismatch(hkls, angles)
+
+    def updateReflectionMismatch(self):
+        """Refresh reflection quality indicators for the current UB matrix."""
+        if not hasattr(self, "reflections"):
+            return
+        hkls, angles = self.reflections()
+        if len(hkls) == 0:
+            mismatch = None
+        else:
+            try:
+                mismatch = self.getReflectionMismatch(hkls, angles)
+            except ValueError:
+                mismatch = None
+        self.sigReflectionMismatchChanged.emit(mismatch)
 
     def readConfig(self,configfile):
         config = configparser.ConfigParser()
@@ -636,6 +727,7 @@ class QUBCalculator(qt.QSplitter):
                         
                         raise ValueError("Cannot find beamtime %s in the list of available backends" % beamtime)
             #self.machineParams.set_detector(self.detectorCal.detector)
+            self.updateReflectionMismatch()
             return True
         except Exception as e:
             logger.exception("Can not parse config", 
@@ -685,6 +777,7 @@ class QUBCalculator(qt.QSplitter):
         }
         self.crystalparams.setValues(self.crystal,self.n)
         self.machineParams.setValues(settings)
+        self.updateReflectionMismatch()
 
 
 
@@ -701,34 +794,217 @@ class QUBCalculator(qt.QSplitter):
                 return
         else:
             try:
-                self.ubCal.setPrimaryReflection(angles[0],hkls[0])
-                self.ubCal.setSecondayReflection(angles[1],hkls[1])
-                self.ubCal.calculateU()
+                if len(hkls) == 2:
+                    self.ubCal.setPrimaryReflection(angles[0],hkls[0])
+                    self.ubCal.setSecondayReflection(angles[1],hkls[1])
+                    self.ubCal.calculateU()
+                else:
+                    self.ubCal.calculateUFromReflections(hkls, angles)
             except Exception:
                 qt.QMessageBox.critical(self,"Cannot calculate UB matrix","Error during UB matrix calculation:\n%s" % traceback.format_exc())
                 return
 
-        if len(hkls) > 2:
-            if self.latnofit.isChecked():
-                self.ubCal.refineU(hkls,angles)
-                #print(self.ubCal.getU())
-
-            if self.latscale.isChecked():
-                if len(hkls) > 3:
-                    self.ubCal.refineULattice(hkls,angles,'scale')
-                else:
-                    qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 4 reflections to fit lattice scale and U")
-            if self.latfitall.isChecked():
-                if len(hkls) > 5:
-                    self.ubCal.refineULattice(hkls,angles,'lat')
-                else:
-                    qt.QMessageBox.warning(self,"Not enough reflections","You must select at least 6 reflections to fit lattice and U")
-            #print(self.ubCal.getU())
-            self.crystalparams.setValues(self.crystal,self.n)
-        #print(self.ubCal.getU())
         self.uedit.setU(self.ubCal.getU())
+        self.updateReflectionMismatch()
         self.sigReplotRequest.emit(False)
-        #self.Ueditor.setPlainText(str(self.ubCal.getU()))
+
+        legacy_mode = self.fitDialog.legacyLatticeMode()
+        if legacy_mode == "scale":
+            if len(hkls) < 4:
+                qt.QMessageBox.warning(
+                    self,
+                    "Not enough reflections",
+                    "You must select at least 4 reflections to fit the "
+                    "lattice scale and U",
+                )
+            else:
+                self.fitExperiment({"lattice_scale"})
+        elif legacy_mode == "individual":
+            if len(hkls) < 6:
+                qt.QMessageBox.warning(
+                    self,
+                    "Not enough reflections",
+                    "You must select at least 6 reflections to fit the "
+                    "lattice parameters and U",
+                )
+            else:
+                self.fitExperiment({"a", "b", "c"})
+
+    # GUI-only: user-triggered experiment-fitting dialog.
+    def _onShowFitDialog(self):
+        """Open the experiment-parameter fitting dialog."""
+        self.fitDialog.setCurrentValues()
+        self.fitDialog.show()
+        self.fitDialog.raise_()
+
+    def fitExperiment(self, enabled_parameters):
+        """Fit U and selected lattice/detector parameters.
+
+        For every objective evaluation, detector angles are recalculated from
+        the reference pixels and trial pyFAI geometry. The trial B matrix is
+        calculated from the selected lattice lengths. U is then solved by
+        Kabsch alignment of normalized vectors, and the remaining relative Q
+        residual is minimized.
+
+        :param set[str] enabled_parameters:
+            Parameter names selected in :class:`QUBFitDialog`.
+        :returns:
+            Final RMS relative Q-vector discrepancy.
+        :rtype: float
+        """
+        hkls, base_angles, xy = self.mainGui.getReflectionFitData()
+        if len(hkls) < 3:
+            raise ValueError("At least 3 reflections are required for fitting")
+
+        geometry_names = ("dist", "poni1", "poni2", "rot1", "rot2", "rot3")
+        lattice_names = ("a", "b", "c")
+        fit_scale = "lattice_scale" in enabled_parameters
+        if fit_scale and any(
+            name in enabled_parameters for name in lattice_names
+        ):
+            raise ValueError(
+                "Common lattice scale and individual lattice lengths cannot "
+                "be fitted together"
+            )
+        fit_geometry = any(
+            name in enabled_parameters for name in geometry_names
+        )
+        initial_geometry = {name: float(getattr(self.detectorCal, name))
+                            for name in geometry_names}
+        initial_lattice = dict(zip(lattice_names, np.asarray(self.crystal.a)))
+        names = [name for name in (*lattice_names, *geometry_names)
+                 if name in enabled_parameters]
+        if fit_scale:
+            names.insert(0, "lattice_scale")
+        initial = {**initial_lattice, **initial_geometry}
+        initial["lattice_scale"] = 1.0
+        x0 = np.array([initial[name] for name in names], dtype=float)
+        lower = []
+        upper = []
+        for name in names:
+            if name in lattice_names:
+                lower.append(0.5 * initial[name])
+                upper.append(2.0 * initial[name])
+            elif name == "lattice_scale":
+                lower.append(0.5)
+                upper.append(2.0)
+            elif name == "dist":
+                lower.append(np.finfo(float).eps)
+                upper.append(35.0)
+            elif name == "poni1":
+                lower.append(-10000.0 * self.detectorCal.pixel1)
+                upper.append(15000.0 * self.detectorCal.pixel1)
+            elif name == "poni2":
+                lower.append(-10000.0 * self.detectorCal.pixel2)
+                upper.append(15000.0 * self.detectorCal.pixel2)
+            elif name.startswith("rot"):
+                lower.append(-np.pi)
+                upper.append(np.pi)
+            else:
+                lower.append(-np.inf)
+                upper.append(np.inf)
+
+        alpha_deg = np.rad2deg(self.crystal.alpha)
+        fixed_q_phi = None
+        if not fit_geometry:
+            fixed_q_phi = np.array([
+                HKLVlieg.calculate_q_phi(
+                    pos, self.ubCal.getK()
+                ).flatten()
+                for pos in base_angles
+            ])
+
+        def evaluate(values):
+            trial = initial.copy()
+            trial.update(zip(names, values))
+            if fit_scale:
+                scale = trial["lattice_scale"]
+                for name in lattice_names:
+                    trial[name] = initial[name] * scale
+            if fit_geometry:
+                geometry_param = np.array(
+                    [trial[name] for name in geometry_names]
+                )
+                gamma, delta = self.detectorCal.surfaceAnglesPointParam(
+                    xy[:, 1],
+                    xy[:, 0],
+                    base_angles[:, 0],
+                    geometry_param,
+                )
+                angles = base_angles.copy()
+                angles[:, 1] = delta
+                angles[:, 2] = gamma
+                q_phi = np.array([
+                    HKLVlieg.calculate_q_phi(
+                        pos, self.ubCal.getK()
+                    ).flatten()
+                    for pos in angles
+                ])
+            else:
+                q_phi = fixed_q_phi
+            lattice = HKLVlieg.Lattice(
+                [trial["a"], trial["b"], trial["c"]], alpha_deg
+            )
+            q_c = (lattice.B_mat @ hkls.T).T
+            U, _ = HKLVlieg.UBCalculator.calc_U_kabsch(q_phi, q_c)
+            expected = np.einsum("ij,nj->ni", U, q_c)
+            scale = np.linalg.norm(expected, axis=1)[:, np.newaxis]
+            residual = (q_phi - expected) / scale
+            return residual.ravel(), U, trial
+
+        initial_residual, initial_u, initial_values = evaluate(x0)
+        initial_rms = float(np.sqrt(np.mean(initial_residual**2)))
+        if names:
+            result = optimize.least_squares(
+                lambda values: evaluate(values)[0],
+                x0,
+                bounds=(np.asarray(lower), np.asarray(upper)),
+                x_scale="jac",
+                max_nfev=500,
+            )
+            residual, U, fitted = evaluate(result.x)
+        else:
+            residual, U, fitted = initial_residual, initial_u, initial_values
+
+        rms = float(np.sqrt(np.mean(residual**2)))
+        if not np.isfinite(rms) or rms >= initial_rms:
+            U = initial_u
+            fitted = initial_values
+            residual = initial_residual
+            rms = initial_rms
+
+        self.crystal.setLattice(
+            [fitted["a"], fitted["b"], fitted["c"]], alpha_deg
+        )
+        if fit_geometry:
+            for name in geometry_names:
+                if name in enabled_parameters:
+                    setattr(self.detectorCal, f"_{name}", fitted[name])
+            self.detectorCal.reset()
+        self.ubCal.setLattice(self.crystal)
+        self.ubCal.setU(U)
+        self.crystalparams.setValues(self.crystal, self.n)
+        self.machineParams.setValues({
+            "diffractometer": {
+                "mu": self.mu, "chi": self.chi, "phi": self.phi,
+            },
+            "source": {"E": self.detectorCal.energy},
+            "SXRD_geometry": self.detectorCal,
+        })
+        self.uedit.setU(U)
+        self.mainGui.reflectionSel.updateEditor()
+        self.sigReplotRequest.emit(False)
+        return rms
+
+    def exportDetectorPoni(self, filename):
+        """Export the current detector geometry as a pyFAI PONI file.
+
+        :param str filename:
+            Output file path. The active :class:`Detector2D_SXRD` geometry is
+            saved using pyFAI units, with distances in m, rotations in rad,
+            and wavelength in m.
+        """
+        self.detectorCal.save(filename)
 
     def _onCalMiscut(self):
         om, chi, phi = self.angles.anglesOrientationAlpha([0,0,1], [0,0,1])
@@ -1055,6 +1331,323 @@ class QCrystalParameter(qt.QWidget):
             self.sigCrystalParamsChanged.emit(newCrystal,n)
         except Exception as e:
             qt.QMessageBox.warning(self,"Can not calculate B Matrix","The B Matrix can not be calculated\nError: %s" % str(e))
+
+
+class QUBFitDialog(qt.QDialog):
+    """Configure and run UB, lattice, and detector-geometry refinement."""
+
+    PARAMETER_INFO = (
+        ("a", "Lattice a", " Angstrom"),
+        ("b", "Lattice b", " Angstrom"),
+        ("c", "Lattice c", " Angstrom"),
+        ("dist", "Distance", " m"),
+        ("poni1", "PONI1", " m"),
+        ("poni2", "PONI2", " m"),
+        ("rot1", "Rotation 1", " rad"),
+        ("rot2", "Rotation 2", " rad"),
+        ("rot3", "Rotation 3", " rad"),
+    )
+
+    def __init__(self, calculator):
+        super().__init__(calculator)
+        self.calculator = calculator
+        self.setWindowTitle("Refine UB and experiment settings")
+        layout = qt.QVBoxLayout(self)
+        self.controls = {}
+
+        for title, names in (
+            ("Lattice", ("a", "b", "c")),
+            ("Geometry", ("dist", "poni1", "poni2",
+                          "rot1", "rot2", "rot3")),
+        ):
+            group = qt.QGroupBox(title)
+            grid = qt.QGridLayout(group)
+            for row, (name, label, unit) in enumerate(
+                item for item in self.PARAMETER_INFO if item[0] in names
+            ):
+                value = qt.QDoubleSpinBox()
+                value.setDecimals(9)
+                value.setRange(-1e6, 1e6)
+                value.setSuffix(unit)
+                value.setReadOnly(True)
+                enabled = qt.QCheckBox("Fit")
+                enabled.setToolTip(f"Allow {label} to vary during refinement")
+                grid.addWidget(qt.QLabel(f"{label}:"), row, 0)
+                grid.addWidget(value, row, 1)
+                grid.addWidget(enabled, row, 2)
+                self.controls[name] = (value, enabled)
+            if title == "Lattice":
+                self.latticeScale = qt.QCheckBox(
+                    "Fit common scale of a, b, and c"
+                )
+                self.latticeScale.setToolTip(
+                    "Keep the a:b:c ratio fixed and fit one common scale"
+                )
+                grid.addWidget(self.latticeScale, len(names), 0, 1, 3)
+            layout.addWidget(group)
+
+        self.latticeScale.toggled.connect(
+            self._onLatticeScaleToggled
+        )
+        for name in ("a", "b", "c"):
+            self.controls[name][1].toggled.connect(
+                self._onIndividualLatticeToggled
+            )
+
+        fitting = qt.QGroupBox("Fitting")
+        fitting_layout = qt.QVBoxLayout(fitting)
+        self.rmsLabel = qt.QLabel("RMS relative Q discrepancy: unavailable")
+        self.meanQLabel = qt.QLabel(
+            "Mean Q discrepancy: unavailable"
+        )
+        self.meanAngleLabel = qt.QLabel(
+            "Mean angle discrepancy: unavailable"
+        )
+        fitting_layout.addWidget(self.rmsLabel)
+        fitting_layout.addWidget(self.meanQLabel)
+        fitting_layout.addWidget(self.meanAngleLabel)
+        self.fitButton = qt.QPushButton("Fit")
+        self.fitButton.clicked.connect(self._onFit)
+        fitting_layout.addWidget(self.fitButton)
+        self.exportPoniButton = qt.QPushButton("Export PONI...")
+        self.exportPoniButton.setToolTip(
+            "Save the current fitted detector geometry as a pyFAI PONI file"
+        )
+        self.exportPoniButton.clicked.connect(self._onExportPoni)
+        fitting_layout.addWidget(self.exportPoniButton)
+        layout.addWidget(fitting)
+
+        buttons = qt.QDialogButtonBox(
+            qt.QDialogButtonBox.Ok
+            | qt.QDialogButtonBox.Cancel
+            | qt.QDialogButtonBox.Reset
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        buttons.button(qt.QDialogButtonBox.Reset).clicked.connect(
+            self.resetParameters
+        )
+        layout.addWidget(buttons)
+        self._savedState = None
+
+    def setCurrentValues(self):
+        """Refresh displayed starting values from the active configuration."""
+        values = {
+            "a": self.calculator.crystal.a[0],
+            "b": self.calculator.crystal.a[1],
+            "c": self.calculator.crystal.a[2],
+            **{
+                name: getattr(self.calculator.detectorCal, name)
+                for name in ("dist", "poni1", "poni2",
+                             "rot1", "rot2", "rot3")
+            },
+        }
+        for name, value in values.items():
+            self.controls[name][0].setValue(float(value))
+
+    def updateDiscrepancy(self):
+        """Display mean Q-norm and angular reflection discrepancies."""
+        try:
+            mismatch = self.calculator.getReflectionMismatch()
+        except (AttributeError, ValueError):
+            mismatch = None
+        if mismatch is None:
+            self.meanQLabel.setText("Mean Q discrepancy: unavailable")
+            self.meanAngleLabel.setText(
+                "Mean angle discrepancy: unavailable"
+            )
+            return
+
+        angle = np.asarray(mismatch["angle_mismatch"], dtype=float)
+        q_norm = np.asarray(mismatch["norm_mismatch"], dtype=float)
+        finite = np.isfinite(angle) & np.isfinite(q_norm)
+        if not np.any(finite):
+            self.meanQLabel.setText("Mean Q discrepancy: unavailable")
+            self.meanAngleLabel.setText(
+                "Mean angle discrepancy: unavailable"
+            )
+            return
+
+        self.meanQLabel.setText(
+            "Mean Q discrepancy: "
+            f"{np.mean(q_norm[finite]):.6g} Angstrom^-1"
+        )
+        self.meanAngleLabel.setText(
+            "Mean angle discrepancy: "
+            f"{np.rad2deg(np.mean(angle[finite])):.6g} deg"
+        )
+
+    def _captureState(self):
+        return {
+            "lattice": np.asarray(self.calculator.crystal.a).copy(),
+            "lattice_angles": np.rad2deg(
+                self.calculator.crystal.alpha
+            ).copy(),
+            "geometry": {
+                name: float(getattr(self.calculator.detectorCal, name))
+                for name in ("dist", "poni1", "poni2",
+                             "rot1", "rot2", "rot3")
+            },
+            "U": np.asarray(self.calculator.ubCal.getU()).copy(),
+        }
+
+    def _restoreState(self, state):
+        self.calculator.crystal.setLattice(
+            state["lattice"], state["lattice_angles"]
+        )
+        for name, value in state["geometry"].items():
+            setattr(self.calculator.detectorCal, f"_{name}", value)
+        self.calculator.detectorCal.reset()
+        self.calculator.ubCal.setLattice(self.calculator.crystal)
+        self.calculator.ubCal.setU(state["U"])
+        self.calculator.crystalparams.setValues(
+            self.calculator.crystal, self.calculator.n
+        )
+        self.calculator.machineParams.setValues({
+            "diffractometer": {
+                "mu": self.calculator.mu,
+                "chi": self.calculator.chi,
+                "phi": self.calculator.phi,
+            },
+            "source": {"E": self.calculator.detectorCal.energy},
+            "SXRD_geometry": self.calculator.detectorCal,
+        })
+        self.calculator.uedit.setU(state["U"])
+        self.calculator.mainGui.reflectionSel.updateEditor()
+        self.calculator.sigReplotRequest.emit(False)
+
+    def showEvent(self, event):
+        """Snapshot parameters and calculate discrepancies when shown."""
+        if not event.spontaneous():
+            self._savedState = self._captureState()
+            self.setCurrentValues()
+            self.updateDiscrepancy()
+            self.rmsLabel.setText(
+                "RMS relative Q discrepancy: unavailable"
+            )
+        super().showEvent(event)
+
+    def resetParameters(self):
+        """Restore the parameters present when the dialog was opened."""
+        if self._savedState is None:
+            return
+        self._restoreState(self._savedState)
+        self.setCurrentValues()
+        self.updateDiscrepancy()
+        self.rmsLabel.setText(
+            "RMS relative Q discrepancy: unavailable"
+        )
+
+    def reject(self):
+        """Restore the opening state and close the dialog."""
+        self.resetParameters()
+        super().reject()
+
+    def enabledParameters(self):
+        """Return parameter names enabled for refinement."""
+        enabled = {
+            name for name, (_, enabled) in self.controls.items()
+            if enabled.isChecked()
+        }
+        if self.latticeScale.isChecked():
+            enabled.add("lattice_scale")
+        return enabled
+
+    def setLegacyLatticeMode(self, mode):
+        """Select a legacy-compatible lattice fitting mode.
+
+        :param str mode:
+            ``"none"``, ``"scale"``, or ``"individual"``.
+        """
+        if mode not in ("none", "scale", "individual"):
+            raise ValueError(f"Unknown lattice fitting mode {mode!r}")
+        with blockSignals(
+            [self.latticeScale]
+            + [self.controls[name][1] for name in ("a", "b", "c")]
+        ):
+            self.latticeScale.setChecked(mode == "scale")
+            for name in ("a", "b", "c"):
+                self.controls[name][1].setChecked(mode == "individual")
+
+    def legacyLatticeMode(self):
+        """Return the selected legacy-compatible lattice fitting mode."""
+        if self.latticeScale.isChecked():
+            return "scale"
+        if all(
+            self.controls[name][1].isChecked()
+            for name in ("a", "b", "c")
+        ):
+            return "individual"
+        if any(
+            self.controls[name][1].isChecked()
+            for name in ("a", "b", "c")
+        ):
+            return "custom"
+        return "none"
+
+    def _onLatticeScaleToggled(self, checked):
+        if checked:
+            with blockSignals(
+                [self.controls[name][1] for name in ("a", "b", "c")]
+            ):
+                for name in ("a", "b", "c"):
+                    self.controls[name][1].setChecked(False)
+
+    def _onIndividualLatticeToggled(self, checked):
+        if checked:
+            with blockSignals([self.latticeScale]):
+                self.latticeScale.setChecked(False)
+
+    # GUI-only: user-triggered fitting action with dialog error reporting.
+    def _onFit(self):
+        try:
+            rms = self.calculator.fitExperiment(self.enabledParameters())
+        except Exception:
+            logger.exception(
+                "Error during UB and experiment-parameter fitting",
+                extra={
+                    "title": "Cannot fit UB matrix",
+                    "description": traceback.format_exc(),
+                    "show_dialog": True,
+                    "parent": self,
+                },
+            )
+            return
+        self.setCurrentValues()
+        self.rmsLabel.setText(
+            f"RMS relative Q discrepancy: {rms:.6g}"
+        )
+        self.updateDiscrepancy()
+
+    # GUI-only: user-triggered file-save dialog for pyFAI calibration export.
+    def _onExportPoni(self):
+        """Export the current detector geometry to a pyFAI PONI file.
+
+        .. note::
+           GUI-only. This path opens a blocking file-save dialog.
+        """
+        filename, _ = qt.QFileDialog.getSaveFileName(
+            self,
+            "Export pyFAI PONI file",
+            "",
+            "PyFAI PONI file (*.poni);;All files (*)",
+        )
+        if not filename:
+            return
+        if not filename.lower().endswith(".poni"):
+            filename += ".poni"
+        try:
+            self.calculator.exportDetectorPoni(filename)
+        except Exception:
+            logger.exception(
+                "Error exporting detector geometry to PONI file",
+                extra={
+                    "title": "Cannot export PONI file",
+                    "description": traceback.format_exc(),
+                    "show_dialog": True,
+                    "parent": self,
+                },
+            )
 
 
 class QUEdit(qt.QWidget):
@@ -1755,5 +2348,3 @@ class QCrystalParameterDialog(qt.QDialog):
     def onCancel(self):
         self.resetParameters()
         self.hide()
-
-
