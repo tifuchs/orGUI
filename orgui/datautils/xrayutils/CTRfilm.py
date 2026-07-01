@@ -36,7 +36,7 @@ import re
 
 from .CTRutil import (_ensure_contiguous, next_skip_comment, LinearFitFunctions)
 
-from .CTRuc import UnitCell, HAS_NUMBA_ACCEL
+from .CTRuc import UnitCell, ctr_accel_enabled
 from .CTRdistributions import (
     DEFAULT_TAIL_PROBABILITY,
     PoissonProfile,
@@ -627,7 +627,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         """
         if np.any(self._basis_created != self.basis):
             self.createInterfaceCells()
-        if HAS_NUMBA_ACCEL:
+        if ctr_accel_enabled():
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
         F = np.zeros_like(l, dtype=np.complex128)
         for uc_t, uc_b in zip(self.top_layers, self.bottom_layers):
@@ -1128,7 +1128,7 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         """
         if np.any(self._basis_created != self.basis):
             self.createLayers()
-        if HAS_NUMBA_ACCEL:
+        if ctr_accel_enabled():
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
         F = np.zeros_like(l, dtype=np.complex128)
         for uc in self.layer_ucs:
@@ -1634,7 +1634,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         """
         if np.any(self._basis_created != self.basis):
             self.createLayers()
-        if HAS_NUMBA_ACCEL:
+        if ctr_accel_enabled():
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
         F = np.zeros_like(l, dtype=np.complex128)
         for uc in self.layer_ucs:
@@ -1923,4 +1923,3 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             for p in param:
                 l.append("%.5f " % p)
             return "   ".join(l)
-

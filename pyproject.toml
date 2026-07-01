@@ -2,7 +2,7 @@
 name = 'orGUI'
 dynamic = ['version',]
 license = "MIT"
-requires-python = '>=3.8'
+requires-python = '>=3.10'
 readme = 'README.rst'
 description = 'orGUI: Orientation and Integration with 2D detectors'
 
@@ -55,8 +55,8 @@ full = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin']
 full-devel = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin', 'ruff', 'pyupgrade']
 
 [build-system]
-requires = ["setuptools >= 80.0", "setuptools-scm>=8"]
-build-backend = "setuptools.build_meta"
+requires = ["meson-python", "pybind11", "setuptools-scm>=8", "numpy"]
+build-backend = "mesonpy"
 
 [tool.setuptools.packages.find]
 where = ["."]  
@@ -76,7 +76,7 @@ include-package-data = false
 
 [tool.setuptools_scm]
 version_file = "orgui/_version.py"
-fallback_version = "1.4.2+nogit"
+fallback_version = "1.5.0+nogit"
 
 [tool.ruff]
 # Target Python version for pyupgrade

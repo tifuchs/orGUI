@@ -136,14 +136,19 @@ Test the Sphinx documentation build:
    git push origin vX.Y.Z
 
 Use the version from the new ``CHANGELOG.md`` release section for ``vX.Y.Z``.
-The tag push starts ``.github/workflows/release.yml``.
+The tag push starts ``.github/workflows/release.yml``. That workflow builds
+the source distribution and the complete binary-wheel matrix before it creates
+the GitHub Release or publishes anything to PyPI.
 
 4. Verify the workflow
 ----------------------
 
 Check that GitHub Actions:
 
-* builds the wheel and source distribution
+* builds and publishes the source distribution from ``release.yml``
+* builds Linux, macOS, and Windows wheels for CPython 3.10 through 3.14
+* attaches the binary wheels and source distribution to the GitHub Release
+* publishes the binary wheels to PyPI
 * runs ``twine check``
 * extracts the release notes from ``CHANGELOG.md``
 * creates the GitHub release
@@ -151,6 +156,16 @@ Check that GitHub Actions:
 
 If publishing to PyPI has already succeeded, do not reuse the same version
 number for a fix.
+
+The ``Test binary wheels`` workflow can also be started manually to test the
+full wheel matrix without publishing. Manual runs never publish to PyPI and do
+not attach artifacts to a GitHub Release. Pushes to ``master`` run a smaller
+smoke matrix: Linux x86_64 on CPython 3.10 and 3.14, macOS arm64 on CPython
+3.14, and Windows x86_64 on CPython 3.14.
+
+Pull requests run the ``Tests`` workflow on the same limited Python/platform
+matrix. Configure branch protection for ``master`` to require the four
+``Tests`` jobs before merging PRs.
 
 5. Verify the published package
 -------------------------------

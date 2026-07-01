@@ -29,9 +29,133 @@ __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
 
+import math
+
 from numba import njit
 
 import numpy as np
+
+
+@njit(nogil=True, cache=True)
+def _unitcell_F_core(
+    h,
+    k,
+    l,
+    atten,
+    apply_reference_transform,
+    apply_attenuation,
+    apply_bulk_lattice_sum,
+    basis,
+    f_factors,
+    refHKLTransform,
+    B_mat,
+    R_mat,
+    R_mat_inv,
+    coherentDomainMatrix,
+    coherentDomainOccupancy,
+):
+    F = np.empty(h.size, dtype=np.complex128)
+
+    domainmatrix = np.empty((coherentDomainMatrix.shape[0], 3, 3))
+    for d in range(coherentDomainMatrix.shape[0]):
+        for row in range(3):
+            for col in range(3):
+                value = 0.0
+                for left in range(3):
+                    for right in range(3):
+                        value += (
+                            R_mat_inv[row, left]
+                            * coherentDomainMatrix[d, left, right]
+                            * R_mat[right, col]
+                        )
+                domainmatrix[d, row, col] = value
+
+    two_pi = 2.0 * math.pi
+    debye_waller_denominator = 16.0 * math.pi**2
+    for p in range(h.size):
+        if apply_reference_transform:
+            hh = (
+                refHKLTransform[0, 0] * h[p]
+                + refHKLTransform[0, 1] * k[p]
+                + refHKLTransform[0, 2] * l[p]
+            )
+            kk = (
+                refHKLTransform[1, 0] * h[p]
+                + refHKLTransform[1, 1] * k[p]
+                + refHKLTransform[1, 2] * l[p]
+            )
+            ll = (
+                refHKLTransform[2, 0] * h[p]
+                + refHKLTransform[2, 1] * k[p]
+                + refHKLTransform[2, 2] * l[p]
+            )
+        else:
+            hh = h[p]
+            kk = k[p]
+            ll = l[p]
+
+        qx = B_mat[0, 0] * hh + B_mat[0, 1] * kk + B_mat[0, 2] * ll
+        qy = B_mat[1, 0] * hh + B_mat[1, 1] * kk + B_mat[1, 2] * ll
+        qz = B_mat[2, 0] * hh + B_mat[2, 1] * kk + B_mat[2, 2] * ll
+        q_para2 = qx * qx + qy * qy
+        q_perp2 = qz * qz
+        q2 = q_para2 + q_perp2
+
+        amplitude = 0.0 + 0.0j
+        for i in range(basis.shape[0]):
+            form_factor = (
+                f_factors[i, 10]
+                + f_factors[i, 11]
+                + 1j * f_factors[i, 12]
+            )
+            for j in range(5):
+                form_factor += f_factors[i, j] * math.exp(
+                    -f_factors[i, j + 5] * q2
+                )
+            form_factor *= math.exp(
+                -(basis[i, 4] * q_para2 + basis[i, 5] * q_perp2)
+                / debye_waller_denominator
+            )
+            form_factor *= basis[i, 6]
+
+            x = basis[i, 1]
+            y = basis[i, 2]
+            z = basis[i, 3]
+            for d in range(coherentDomainMatrix.shape[0]):
+                x_rel = (
+                    domainmatrix[d, 0, 0] * x
+                    + domainmatrix[d, 0, 1] * y
+                    + domainmatrix[d, 0, 2] * z
+                    + coherentDomainMatrix[d, 0, 3]
+                )
+                y_rel = (
+                    domainmatrix[d, 1, 0] * x
+                    + domainmatrix[d, 1, 1] * y
+                    + domainmatrix[d, 1, 2] * z
+                    + coherentDomainMatrix[d, 1, 3]
+                )
+                z_rel = (
+                    domainmatrix[d, 2, 0] * x
+                    + domainmatrix[d, 2, 1] * y
+                    + domainmatrix[d, 2, 2] * z
+                    + coherentDomainMatrix[d, 2, 3]
+                )
+                phase = two_pi * (hh * x_rel + kk * y_rel + ll * z_rel)
+                domain_factor = coherentDomainOccupancy[d] * (
+                    math.cos(phase) + 1j * math.sin(phase)
+                )
+                if apply_attenuation:
+                    domain_factor *= math.exp(atten * z_rel)
+                amplitude += domain_factor * form_factor
+        if apply_bulk_lattice_sum:
+            denominator_phase = -two_pi * l[p]
+            denominator = 1.0 - math.exp(-atten) * (
+                math.cos(denominator_phase)
+                + 1j * math.sin(denominator_phase)
+            )
+            amplitude /= denominator
+        F[p] = amplitude
+    return F
 
 
 # returns the structure factor of the unit cell
@@ -50,30 +174,23 @@ def unitcell_F_uc_bulk(h,k,l,atten,
                         uc_area
                        ):
     """Return one attenuated bulk-cell amplitude in electrons."""
-    F = np.zeros(h.size,dtype=np.complex128)
-    f = np.zeros(h.size,dtype=np.complex128)
-    hkl = refHKLTransform @ np.vstack((h,k,l))
-    Q_cart2 = (B_mat @ hkl)**2
-    Q_para2 = np.sum(Q_cart2[:2],axis=0) #squared!!!
-    Q_perp2 = Q_cart2[2] #squared!!!
-    Q2 = Q_para2 + Q_perp2 #squared!!!
-
-    domainmatrix = np.empty((coherentDomainMatrix.shape[0],3,3))
-    for i in range(coherentDomainMatrix.shape[0]):
-        domainmatrix[i] = R_mat_inv @ coherentDomainMatrix[i,:,:-1] @ R_mat
-
-    #domainmatrix = [R_mat_inv @ mat[:,:-1] @ R_mat for mat in coherentDomainMatrix]
-
-    for i in range(basis.shape[0]):
-        f[:] =  f_factors[i][10] + f_factors[i][11] + 1j*f_factors[i][12]
-        for j in range(5):
-            f += f_factors[i][j]*np.exp(- f_factors[i][j+5]*Q2)
-        f *= np.exp(- (basis[i][4] * Q_para2 + basis[i][5] * Q_perp2)/ (16*np.pi**2))
-        f *= basis[i][6]
-        for mat, weight, eff_mat in zip(coherentDomainMatrix,coherentDomainOccupancy, domainmatrix):
-            xyz_rel = eff_mat @ basis[i][1:4] + mat[:,-1]
-            F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) ) * np.exp(atten*xyz_rel[2])
-    return F
+    return _unitcell_F_core(
+        h,
+        k,
+        l,
+        atten,
+        True,
+        True,
+        False,
+        basis,
+        f_factors,
+        refHKLTransform,
+        B_mat,
+        R_mat,
+        R_mat_inv,
+        coherentDomainMatrix,
+        coherentDomainOccupancy,
+    )
 
 # returns the structure factor of the unit cell
 # h,k,l have to be 1d arrays
@@ -90,30 +207,23 @@ def unitcell_F_uc_bulk_direct(h,k,l,atten,
                         uc_area
                        ):
     """Return one bulk-cell amplitude in electrons without frame conversion."""
-    F = np.zeros(h.size,dtype=np.complex128)
-    f = np.zeros(h.size,dtype=np.complex128)
-    hkl =  np.vstack((h,k,l))
-    Q_cart2 = (B_mat @ hkl)**2
-    Q_para2 = np.sum(Q_cart2[:2],axis=0) #squared!!!
-    Q_perp2 = Q_cart2[2] #squared!!!
-    Q2 = Q_para2 + Q_perp2 #squared!!!
-
-    domainmatrix = np.empty((coherentDomainMatrix.shape[0],3,3))
-    for i in range(coherentDomainMatrix.shape[0]):
-        domainmatrix[i] = R_mat_inv @ coherentDomainMatrix[i,:,:-1] @ R_mat
-
-    #domainmatrix = [R_mat_inv @ mat[:,:-1] @ R_mat for mat in coherentDomainMatrix]
-
-    for i in range(basis.shape[0]):
-        f[:] =  f_factors[i][10] + f_factors[i][11] + 1j*f_factors[i][12]
-        for j in range(5):
-            f += f_factors[i][j]*np.exp(- f_factors[i][j+5]*Q2)
-        f *= np.exp(- (basis[i][4] * Q_para2 + basis[i][5] * Q_perp2)/ (16*np.pi**2))
-        f *= basis[i][6]
-        for mat, weight, eff_mat in zip(coherentDomainMatrix,coherentDomainOccupancy, domainmatrix):
-            xyz_rel = eff_mat @ basis[i][1:4] + mat[:,-1]
-            F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) ) * np.exp(atten*xyz_rel[2])
-    return F
+    return _unitcell_F_core(
+        h,
+        k,
+        l,
+        atten,
+        False,
+        True,
+        False,
+        basis,
+        f_factors,
+        refHKLTransform,
+        B_mat,
+        R_mat,
+        R_mat_inv,
+        coherentDomainMatrix,
+        coherentDomainOccupancy,
+    )
 
 @njit('c16[:](f8[::1], f8[::1], f8[::1], f8, f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)', nogil=True, cache=True)
 def unitcell_F_bulk(h,k,l,atten,
@@ -128,18 +238,23 @@ def unitcell_F_bulk(h,k,l,atten,
                         uc_area
                        ):
     """Return a semi-infinite bulk amplitude in electrons."""
-    hkl = refHKLTransform @ np.vstack((h,k,l))
-    Fuc = unitcell_F_uc_bulk_direct(hkl[0], hkl[1], hkl[2],atten,
-                        basis,
-                        f_factors,
-                        refHKLTransform,
-                        B_mat,
-                        R_mat,
-                        R_mat_inv,
-                        coherentDomainMatrix,
-                        coherentDomainOccupancy,
-                        uc_area)
-    return Fuc/(1- np.exp(- 2j*np.pi * l - atten ))
+    return _unitcell_F_core(
+        h,
+        k,
+        l,
+        atten,
+        True,
+        True,
+        True,
+        basis,
+        f_factors,
+        refHKLTransform,
+        B_mat,
+        R_mat,
+        R_mat_inv,
+        coherentDomainMatrix,
+        coherentDomainOccupancy,
+    )
 
 @njit('c16[:](f8[::1], f8[::1], f8[::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)', nogil=True, cache=True)
 def unitcell_F_uc(h,k,l,
@@ -154,30 +269,20 @@ def unitcell_F_uc(h,k,l,
                         uc_area
                        ):
     """Return an unnormalized unit-cell amplitude in electrons."""
-    F = np.zeros(h.size,dtype=np.complex128)
-    f = np.zeros(h.size,dtype=np.complex128)
-    hkl = refHKLTransform @ np.vstack((h,k,l))
-    Q_cart2 = (B_mat @ hkl)**2
-    Q_para2 = np.sum(Q_cart2[:2],axis=0) #squared!!!
-    Q_perp2 = Q_cart2[2] #squared!!!
-    Q2 = Q_para2 + Q_perp2 #squared!!!
-
-    domainmatrix = np.empty((coherentDomainMatrix.shape[0],3,3))
-    for i in range(coherentDomainMatrix.shape[0]):
-        domainmatrix[i] = R_mat_inv @ coherentDomainMatrix[i,:,:-1] @ R_mat
-
-    #domainmatrix = [R_mat_inv @ mat[:,:-1] @ R_mat for mat in coherentDomainMatrix]
-
-    for i in range(basis.shape[0]):
-        f[:] =  f_factors[i][10] + f_factors[i][11] + 1j*f_factors[i][12]
-        for j in range(5):
-            f += f_factors[i][j]*np.exp(- f_factors[i][j+5]*Q2)
-        f *= np.exp(- (basis[i][4] * Q_para2 + basis[i][5] * Q_perp2)/ (16*np.pi**2))
-        f *= basis[i][6]
-        for mat, weight, eff_mat in zip(coherentDomainMatrix,coherentDomainOccupancy, domainmatrix):
-            xyz_rel = eff_mat @ basis[i][1:4] + mat[:,-1]
-            F += weight * f * np.exp(2j*np.pi * np.sum(hkl.T * xyz_rel,axis=1) )
-    return F
-
-
-
+    return _unitcell_F_core(
+        h,
+        k,
+        l,
+        0.0,
+        True,
+        False,
+        False,
+        basis,
+        f_factors,
+        refHKLTransform,
+        B_mat,
+        R_mat,
+        R_mat_inv,
+        coherentDomainMatrix,
+        coherentDomainOccupancy,
+    )

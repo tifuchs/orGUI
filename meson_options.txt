@@ -1,0 +1,6 @@
+option(
+  'native_optimization',
+  type: 'boolean',
+  value: false,
+  description: 'Build C++ CTR kernels with -march=native for local benchmarking'
+)

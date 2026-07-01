@@ -25,6 +25,7 @@ extensions = [
     "sphinx.ext.mathjax",
     "sphinx.ext.viewcode",
     "sphinx.ext.doctest",
+    "nbsphinx",
 ]
 
 autodoc_default_options = {
@@ -33,9 +34,13 @@ autodoc_default_options = {
     "show-inheritance": True,
 }
 autosummary_generate = True
+nbsphinx_execute = "never"
 
 templates_path = ["_templates"]
-exclude_patterns = []
+exclude_patterns = [
+    "**/.ipynb_checkpoints",
+    "**/.virtual_documents",
+]
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output

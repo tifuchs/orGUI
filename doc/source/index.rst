@@ -20,6 +20,7 @@ large 2D detectors.
    ub_matrix
    image_integration
    entry_points
+   benchmarks/ctr_accel_backends
    api
    release_notes
    developer

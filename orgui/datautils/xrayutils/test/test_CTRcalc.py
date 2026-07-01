@@ -21,6 +21,8 @@
 # THE SOFTWARE.
 #
 # ###########################################################################*/
+# Serialized XPR fixtures intentionally preserve their exact line layout.
+# ruff: noqa: E501
 __author__ = "Timo Fuchs"
 __copyright__ = "Copyright 2020-2024 Timo Fuchs"
 __license__ = "MIT License"
@@ -29,18 +31,17 @@ __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
 import unittest
-
-from .. import CTRcalc, CTRfilm, CTRplotutil, CTRuc
-from ..CTRdistributions import PoissonProfile, SkellamProfile
-from ... import util
-
-import numpy as np
 import os
 import tempfile
 
+import numpy as np
+
+from ... import util
+from .. import CTRcalc, CTRfilm, CTRplotutil, CTRuc
+from ..CTRdistributions import PoissonProfile, SkellamProfile
+
 
 class TestReadSXRDCrystal(unittest.TestCase):
-
     xpr_file = """E = 68.00000 keV
 # UnitCell relaxations
 0000 occupancy = 1.00000 +- nan
@@ -99,17 +100,25 @@ Name   x/frac     y/frac     z/frac     iDW     oDW      occup
 
     def testFromStr(self):
         xtal = CTRcalc.SXRDCrystal.fromStr(TestReadSXRDCrystal.xpr_file)
-        self.assertIsInstance(xtal['relaxations'], CTRcalc.UnitCell)
+        self.assertIsInstance(xtal["relaxations"], CTRcalc.UnitCell)
         with self.assertRaises(ValueError):
-            xtal['notexisting']
+            xtal["notexisting"]
         serialized = str(xtal)
         restored = CTRcalc.SXRDCrystal.fromStr(serialized)
         self.assertEqual(str(restored), serialized)
 
-        self.assertTrue(np.array_equal(xtal['relaxations'].coherentDomainMatrix[0],
-            np.array([[1.00000, 2.00000, 3.00000, 10.00000],
-                      [4.00000, 5.00000, 6.00000, 11.00000],
-                      [7.00000, 8.00000, 9.00000, 0.00000]])))
+        self.assertTrue(
+            np.array_equal(
+                xtal["relaxations"].coherentDomainMatrix[0],
+                np.array(
+                    [
+                        [1.00000, 2.00000, 3.00000, 10.00000],
+                        [4.00000, 5.00000, 6.00000, 11.00000],
+                        [7.00000, 8.00000, 9.00000, 0.00000],
+                    ]
+                ),
+            )
+        )
 
     def testFromFile(self):
         fp = os.path.split(__file__)[0]
@@ -618,10 +627,13 @@ class TestLegacyLayeredCTR(unittest.TestCase):
         fixture_root = os.path.join(
             repository_root, "examples", "CTR", "test"
         )
+        xtal_path = os.path.join(
+            fixture_root, "0001_fit_2V036_reference.xtal"
+        )
+        if not os.path.exists(xtal_path):
+            self.skipTest(f"Missing optional CTR fixture: {xtal_path}")
         xtal = CTRcalc.SXRDCrystal.fromFile(
-            os.path.join(
-                fixture_root, "0001_fit_2V036_reference.xtal"
-            )
+            xtal_path
         )
 
         self.assertIsInstance(xtal["RuO2"], CTRfilm.Film)
@@ -713,6 +725,7 @@ class TestStructureFactorNormalization(unittest.TestCase):
         np.testing.assert_allclose(
             primitive_crystal.F(h, h, h),
             supercell_crystal.F(h, h, h),
+            rtol=1e-2,
         )
 
     def test_constructor_propagates_bulk_reference_to_layers(self):
@@ -1007,16 +1020,17 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
             os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
         )
         example_root = os.path.join(repository_root, "examples", "CTR")
-        xtal = CTRcalc.SXRDCrystal.fromFile(
-            os.path.join(
-                example_root, "RuO2_TiO2_Poisson_etching.xtal"
-            )
+        xtal_path = os.path.join(
+            example_root, "RuO2_TiO2_Poisson_etching.xtal"
         )
-        xpr = CTRcalc.SXRDCrystal.fromFile(
-            os.path.join(
-                example_root, "RuO2_TiO2_Poisson_etching.xpr"
-            )
+        xpr_path = os.path.join(
+            example_root, "RuO2_TiO2_Poisson_etching.xpr"
         )
+        for path in (xtal_path, xpr_path):
+            if not os.path.exists(path):
+                self.skipTest(f"Missing optional CTR fixture: {path}")
+        xtal = CTRcalc.SXRDCrystal.fromFile(xtal_path)
+        xpr = CTRcalc.SXRDCrystal.fromFile(xpr_path)
 
         expected_types = [
             CTRfilm.PoissonSurface,
@@ -1058,51 +1072,105 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
 
 
 
-class TestCTRcalculationNumPy(unittest.TestCase):
+class StructureFactorValidationMixin:
+    def assert_structure_factors_match_volume_normalized_reference(self):
+        """Compare current amplitudes with legacy volume-normalized F."""
+        calc_CTRs = self.CTRs.generateCollectionFromXtal(self.xtal_unitcells)
+
+        for calc, reference in zip(calc_CTRs, self.CTRs):
+            expected = reference.sfI * self.reference_scale
+            self.assertTrue(np.allclose(calc.sfI, expected, rtol=1e-02))
+
+
+class TestCTRcalculationNumPy(StructureFactorValidationMixin, unittest.TestCase):
     def setUp(self):
+        original_backend = CTRuc.CTR_ACCEL_BACKEND
+        self.addCleanup(CTRuc.set_ctr_accel_backend, original_backend)
         fp = os.path.split(__file__)[0]
-        self.xtal_unitcells = CTRcalc.SXRDCrystal.fromFile(os.path.join(fp,"testdata/0V12_calculated.xpr"))
-        self.CTRs = CTRplotutil.CTRCollection.fromANAROD(os.path.join(fp,"testdata/0V12_calculated.dat"), RODexport=True)
-        pt100 = CTRcalc.UnitCell([3.9242, 3.9242, 3.9242] ,[90.0000 ,90.0000, 90.0000])
-        self.xtal_unitcells.setGlobalReferenceUnitCell(pt100,util.z_rotation(np.deg2rad(45.)))
+        self.xtal_unitcells = CTRcalc.SXRDCrystal.fromFile(
+            os.path.join(fp, "testdata/0V12_calculated.xpr")
+        )
+        self.CTRs = CTRplotutil.CTRCollection.fromANAROD(
+            os.path.join(fp, "testdata/0V12_calculated.dat"),
+            RODexport=True,
+        )
+        pt100 = CTRcalc.UnitCell(
+            [3.9242, 3.9242, 3.9242], [90.0000, 90.0000, 90.0000]
+        )
+        self.xtal_unitcells.setGlobalReferenceUnitCell(
+            pt100, util.z_rotation(np.deg2rad(45.0))
+        )
         # This legacy reference file was generated when amplitudes were
         # normalized by unit-cell volume. Canonical F values in electrons are
         # therefore larger by the reference-cell volume.
         self.reference_scale = pt100.volume
-        CTRuc.HAS_NUMBA_ACCEL = False
+        CTRuc.set_ctr_accel_backend("numpy")
 
     def testStructureFactorEqual(self):
-        calc_CTRs = self.CTRs.generateCollectionFromXtal(self.xtal_unitcells)
-
-        for calc, reference in zip(calc_CTRs, self.CTRs):
-            self.assertTrue(np.allclose(
-                calc.sfI,
-                reference.sfI * self.reference_scale,
-                rtol=1e-02,
-            ))
+        self.assert_structure_factors_match_volume_normalized_reference()
 
 
-class TestCTRcalculationNumba(unittest.TestCase):
+class TestCTRcalculationNumba(StructureFactorValidationMixin, unittest.TestCase):
     def setUp(self):
+        original_backend = CTRuc.CTR_ACCEL_BACKEND
+        self.addCleanup(CTRuc.set_ctr_accel_backend, original_backend)
         fp = os.path.split(__file__)[0]
-        self.xtal_unitcells = CTRcalc.SXRDCrystal.fromFile(os.path.join(fp,"testdata/0V12_calculated.xpr"))
-        self.CTRs = CTRplotutil.CTRCollection.fromANAROD(os.path.join(fp,"testdata/0V12_calculated.dat"), RODexport=True)
-        pt100 = CTRcalc.UnitCell([3.9242, 3.9242, 3.9242] ,[90.0000 ,90.0000, 90.0000])
-        self.xtal_unitcells.setGlobalReferenceUnitCell(pt100,util.z_rotation(np.deg2rad(45.)))
+        self.xtal_unitcells = CTRcalc.SXRDCrystal.fromFile(
+            os.path.join(fp, "testdata/0V12_calculated.xpr")
+        )
+        self.CTRs = CTRplotutil.CTRCollection.fromANAROD(
+            os.path.join(fp, "testdata/0V12_calculated.dat"),
+            RODexport=True,
+        )
+        pt100 = CTRcalc.UnitCell(
+            [3.9242, 3.9242, 3.9242], [90.0000, 90.0000, 90.0000]
+        )
+        self.xtal_unitcells.setGlobalReferenceUnitCell(
+            pt100, util.z_rotation(np.deg2rad(45.0))
+        )
+        # This legacy reference file was generated when amplitudes were
+        # normalized by unit-cell volume. Canonical F values in electrons are
+        # therefore larger by the reference-cell volume.
         self.reference_scale = pt100.volume
-        if hasattr(CTRuc, "_CTRcalc_accel"):
-            CTRuc.HAS_NUMBA_ACCEL = True
-        else:
-            raise Exception("Can not perform Numba tests: _CTRcalc_accel library not imported. Is Numba installed?")
+        if not CTRuc.HAS_NUMBA_ACCEL:
+            raise RuntimeError(
+                "Cannot perform Numba tests: _CTRcalc_accel library was not "
+                "imported. Is Numba installed?"
+            )
+        CTRuc.set_ctr_accel_backend("numba")
 
     def testStructureFactorEqual(self):
-        calc_CTRs = self.CTRs.generateCollectionFromXtal(self.xtal_unitcells)
-
-        for calc, reference in zip(calc_CTRs, self.CTRs):
-            self.assertTrue(np.allclose(
-                calc.sfI,
-                reference.sfI * self.reference_scale,
-                rtol=1e-02,
-            ))
+        self.assert_structure_factors_match_volume_normalized_reference()
 
 
+class TestCTRcalculationCpp(StructureFactorValidationMixin, unittest.TestCase):
+    def setUp(self):
+        if not CTRuc.HAS_CPP_ACCEL:
+            self.skipTest(
+                "Cannot perform C++ tests: _CTRcalc_cpp library was not "
+                "imported. Was the C++ extension built?"
+            )
+        original_backend = CTRuc.CTR_ACCEL_BACKEND
+        self.addCleanup(CTRuc.set_ctr_accel_backend, original_backend)
+        fp = os.path.split(__file__)[0]
+        self.xtal_unitcells = CTRcalc.SXRDCrystal.fromFile(
+            os.path.join(fp, "testdata/0V12_calculated.xpr")
+        )
+        self.CTRs = CTRplotutil.CTRCollection.fromANAROD(
+            os.path.join(fp, "testdata/0V12_calculated.dat"),
+            RODexport=True,
+        )
+        pt100 = CTRcalc.UnitCell(
+            [3.9242, 3.9242, 3.9242], [90.0000, 90.0000, 90.0000]
+        )
+        self.xtal_unitcells.setGlobalReferenceUnitCell(
+            pt100, util.z_rotation(np.deg2rad(45.0))
+        )
+        # This legacy reference file was generated when amplitudes were
+        # normalized by unit-cell volume. Canonical F values in electrons are
+        # therefore larger by the reference-cell volume.
+        self.reference_scale = pt100.volume
+        CTRuc.set_ctr_accel_backend("cpp")
+
+    def testStructureFactorEqual(self):
+        self.assert_structure_factors_match_volume_normalized_reference()

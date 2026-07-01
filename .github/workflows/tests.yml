@@ -1,0 +1,65 @@
+name: Tests
+
+"on":
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64 Python 3.10
+            os: ubuntu-latest
+            python-version: "3.10"
+          - name: Linux x86_64 Python 3.14
+            os: ubuntu-latest
+            python-version: "3.14"
+          - name: macOS arm64 Python 3.14
+            os: macos-14
+            python-version: "3.14"
+          - name: Windows x86_64 Python 3.14
+            os: windows-latest
+            python-version: "3.14"
+
+    env:
+      MPLBACKEND: Agg
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      QT_QPA_PLATFORM: minimal
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Install package
+        run: python -m pip install -e ".[speedup]"
+
+      - name: Run xrayutils tests
+        run: >-
+          pytest
+          orgui/datautils/xrayutils/test/test_HKLcalc.py
+          orgui/datautils/xrayutils/test/test_DetectorCalibration.py
+          orgui/datautils/xrayutils/test/test_CTRcalc.py

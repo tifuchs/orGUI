@@ -60,10 +60,63 @@ from .CTRstacking import (
 )
 
 try:
+    from . import _CTRcalc_cpp
+    HAS_CPP_ACCEL = True
+except Exception:
+    _CTRcalc_cpp = None
+    HAS_CPP_ACCEL = False
+
+try:
     from . import _CTRcalc_accel
     HAS_NUMBA_ACCEL = True
-except:
+except Exception:
+    _CTRcalc_accel = None
     HAS_NUMBA_ACCEL = False
+
+if HAS_CPP_ACCEL:
+    CTR_ACCEL_BACKEND = "cpp"
+elif HAS_NUMBA_ACCEL:
+    CTR_ACCEL_BACKEND = "numba"
+else:
+    CTR_ACCEL_BACKEND = "numpy"
+
+
+def set_ctr_accel_backend(backend):
+    """Select the CTR structure-factor acceleration backend.
+
+    :param str backend:
+        One of ``"cpp"``, ``"numba"``, or ``"numpy"``.
+    :raises ValueError:
+        If the requested backend is unknown or unavailable.
+    """
+    if backend not in {"cpp", "numba", "numpy"}:
+        raise ValueError(
+            "CTR acceleration backend must be 'cpp', 'numba', or 'numpy'"
+        )
+    if backend == "cpp" and not HAS_CPP_ACCEL:
+        raise ValueError("CTR C++ acceleration backend is not available")
+    if backend == "numba" and not HAS_NUMBA_ACCEL:
+        raise ValueError("CTR Numba acceleration backend is not available")
+    global CTR_ACCEL_BACKEND
+    CTR_ACCEL_BACKEND = backend
+
+
+def ctr_accel_enabled():
+    """Return whether CTR calculations use an accelerated backend."""
+    return CTR_ACCEL_BACKEND != "numpy"
+
+
+def _ctr_accel_module():
+    if CTR_ACCEL_BACKEND == "numpy":
+        return None
+    if CTR_ACCEL_BACKEND == "cpp":
+        return _CTRcalc_cpp
+    if CTR_ACCEL_BACKEND == "numba":
+        return _CTRcalc_accel
+    raise ValueError(
+        "CTR acceleration backend must be 'cpp', 'numba', or 'numpy'"
+    )
+
 
 class WaterModel(Lattice, LinearFitFunctions):
 
@@ -1293,9 +1346,10 @@ class UnitCell(Lattice):
         :rtype: numpy.ndarray
         """
         basis, formf, names = self.build_selected_basis()
-        if HAS_NUMBA_ACCEL:
+        if ctr_accel_enabled():
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
-            F = _CTRcalc_accel.unitcell_F_uc_bulk(h,
+            accel = _ctr_accel_module()
+            F = accel.unitcell_F_uc_bulk(h,
                     k,
                     l,
                     atten,
@@ -1389,9 +1443,10 @@ class UnitCell(Lattice):
         :rtype: numpy.ndarray
         """
         basis, formf, names = self.build_selected_basis()
-        if HAS_NUMBA_ACCEL and not self._special_formfactors_present:
+        if ctr_accel_enabled() and not self._special_formfactors_present:
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
-            F = _CTRcalc_accel.unitcell_F_uc(h,
+            accel = _ctr_accel_module()
+            F = accel.unitcell_F_uc(h,
                     k,
                     l,
                     basis,
@@ -1448,9 +1503,10 @@ class UnitCell(Lattice):
         :rtype: numpy.ndarray
         """
         basis, formf, names = self.build_selected_basis()
-        if HAS_NUMBA_ACCEL:
+        if ctr_accel_enabled():
             h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
-            F = _CTRcalc_accel.unitcell_F_bulk(h,
+            accel = _ctr_accel_module()
+            F = accel.unitcell_F_bulk(h,
                     k,
                     l,
                     atten,
