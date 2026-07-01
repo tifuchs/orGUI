@@ -1133,7 +1133,7 @@ class TestCTRcalculationNumba(StructureFactorValidationMixin, unittest.TestCase)
         # therefore larger by the reference-cell volume.
         self.reference_scale = pt100.volume
         if not CTRuc.HAS_NUMBA_ACCEL:
-            raise RuntimeError(
+            self.skipTest(
                 "Cannot perform Numba tests: _CTRcalc_accel library was not "
                 "imported. Is Numba installed?"
             )
