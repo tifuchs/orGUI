@@ -45,8 +45,6 @@ import warnings
 from math import *
 import os
 import copy
-import matplotlib.pyplot as plt
-from matplotlib import colors as colors
 import configparser
 try:
     from StringIO import StringIO
@@ -666,6 +664,9 @@ def lines_concatenated(x, m, x0, b0, **kwargs):
     return y
 
 def plotP3Image(image,vmin=0,vmax=None,cmap='jet',thresholdMarker=None,**keyargs):
+    import matplotlib.pyplot as plt
+    from matplotlib import colors as colors
+
     if 'figure' in keyargs:
         fig = keyargs['figure']
         ax = fig.add_subplot(111)
