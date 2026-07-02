@@ -21,9 +21,8 @@
 # THE SOFTWARE.
 #
 # ###########################################################################*/
-"""Module descripiton
+"""Module descripiton"""
 
-"""
 __author__ = "Timo Fuchs"
 __copyright__ = "Copyright 2020-2026 Timo Fuchs"
 __credits__ = []
@@ -31,13 +30,14 @@ __license__ = "MIT License"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
-__all__ = ['main', 'logger_settings']
+__all__ = ["main", "logger_settings"]
 
 import logging
+
 logger = logging.getLogger(__name__)
 
 try:
     from ._version import version as __version__
-except:
-    logger.info('orGUI is not installed. Version number will be incorrect!')
-    __version__ = '1.4.1-unknown'
+except Exception:
+    logger.info("orGUI is not installed. Version number will be incorrect!")
+    __version__ = "1.4.1-unknown"

@@ -34,55 +34,54 @@ import os
 import warnings
 import traceback
 
-dtypeConverter = {'STRING' : 'U32',
-                  'DOUBLE' : 'f8',
-                  'FLOAT' : 'f4',
-                  'INTEGER' : 'i8',
-                  'BOOLEAN' : '?'}
-
+dtypeConverter = {
+    "STRING": "U32",
+    "DOUBLE": "f8",
+    "FLOAT": "f4",
+    "INTEGER": "i8",
+    "BOOLEAN": "?",
+}
 
 
 class FioFile:
-
-    def __init__(self,filepath):
-        _,filename = os.path.split(filepath)
-        fnowithsuffix = filename.split('_')[-1]
-        self.scanno = int(fnowithsuffix.split('.')[0])
+    def __init__(self, filepath):
+        _, filename = os.path.split(filepath)
+        fnowithsuffix = filename.split("_")[-1]
+        self.scanno = int(fnowithsuffix.split(".")[0])
 
         with open(filepath) as fiof:
-
             prev = 0
-            while(True):
+            while True:
                 line = fiof.readline()
-                if line.startswith('!'):
+                if line.startswith("!"):
                     prev = fiof.tell()
                     continue
-                if line.startswith('%c'):
-                    self.comment = ''
+                if line.startswith("%c"):
+                    self.comment = ""
                     line = fiof.readline()
-                    while( not line.startswith('%') and not line.startswith('!')):
+                    while not line.startswith("%") and not line.startswith("!"):
                         self.comment += line
                         prev = fiof.tell()
                         line = fiof.readline()
-                if line.startswith('%p'):
-                    self.parameters_str = ''
+                if line.startswith("%p"):
+                    self.parameters_str = ""
                     line = fiof.readline()
-                    while( not line.startswith('%') and not line.startswith('!')):
+                    while not line.startswith("%") and not line.startswith("!"):
                         self.parameters_str += line
                         prev = fiof.tell()
                         line = fiof.readline()
-                if line.startswith('%d'):
+                if line.startswith("%d"):
                     self.datacols = []
                     self.names = []
                     self.dtypes = []
                     line = fiof.readline()
-                    while(line.startswith(' Col') ):
+                    while line.startswith(" Col"):
                         splitline = line.split()
                         name = splitline[-2]
                         self.names.append(name)
                         dtype = dtypeConverter[splitline[-1]]
                         self.dtypes.append(dtype)
-                        self.datacols.append((name,dtype))
+                        self.datacols.append((name, dtype))
                         prev = fiof.tell()
                         line = fiof.readline()
                     fiof.seek(prev)
@@ -93,17 +92,20 @@ class FioFile:
                 idx = self.names.index("idrz1(encoder)")
                 self.names[idx] = "idrz1"
 
-            self.data = np.loadtxt(fiof,dtype={'names' : tuple(self.names), 'formats' : tuple(self.dtypes)},comments="!")
-            #print(self.data)
+            self.data = np.loadtxt(
+                fiof,
+                dtype={"names": tuple(self.names), "formats": tuple(self.dtypes)},
+                comments="!",
+            )
+            # print(self.data)
         self.parameter = {}
 
         # make parameter section nicer, a bit dangerous like this:
         try:
             for line in self.parameters_str.splitlines():
-                param , value = line.split(' = ')
+                param, value = line.split(" = ")
                 self.parameter[param] = value
         except Exception:
-            warnings.warn("Cannot parse parameter section : %s" % traceback.format_exc())
-
-
-
+            warnings.warn(
+                f"Cannot parse parameter section : {traceback.format_exc()}"
+            )

@@ -50,9 +50,7 @@ class PoissonProfile:
             raise TypeError("provide mean_change or mean, not both")
         self.mean_change = float(mean_change)
         self.offset = float(offset)
-        self.tail_probability = _validate_tail_probability(
-            tail_probability
-        )
+        self.tail_probability = _validate_tail_probability(tail_probability)
 
     @property
     def mean(self):
@@ -74,11 +72,7 @@ class PoissonProfile:
         if self.rate == 0:
             process_low = process_high = self.offset
         else:
-            quantile = int(
-                poisson.ppf(
-                    1.0 - self.tail_probability, self.rate
-                )
-            )
+            quantile = int(poisson.ppf(1.0 - self.tail_probability, self.rate))
             if self.mean_change > 0:
                 process_low = self.offset
                 process_high = self.offset + quantile
