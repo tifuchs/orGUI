@@ -174,6 +174,8 @@ class QReflectionSelector(qt.QWidget):
         self.orparent = parent
         self.pkImgDiag = PeakImgRangeDialog([0, 360], 'NoAxis')
         self.peakReflDialog = PeakReflDialog(self)
+        self.autoBraggStatusDialog = AutoBraggStatusDialog(self)
+        self.autoBraggOptionsDialog = AutoBraggOptionsDialog(self)
 
         self.reflections = []
         self.reflBragg = []
@@ -242,12 +244,25 @@ class QReflectionSelector(qt.QWidget):
         layout.addLayout(pixelMismatchLayout)
         #self.addWidget(editorTabWidget)
 
-        self.controlToolbar = qt.QToolBar()
-        self.controlToolbar.setMovable(False)
-        self.controlToolbar.setOrientation(qt.Qt.Horizontal)
+        controlsLayout = qt.QHBoxLayout()
 
-        spacer_widget = qt.QWidget()
-        spacer_widget.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred)
+        self.editControlsGroup = qt.QGroupBox("Reflection edit")
+        editControlsLayout = qt.QHBoxLayout()
+        editControlsLayout.setContentsMargins(6, 3, 6, 3)
+        self.editToolbar = qt.QToolBar()
+        self.editToolbar.setMovable(False)
+        self.editToolbar.setOrientation(qt.Qt.Horizontal)
+        editControlsLayout.addWidget(self.editToolbar)
+        self.editControlsGroup.setLayout(editControlsLayout)
+
+        self.autoControlsGroup = qt.QGroupBox("Auto UB/Reflections")
+        autoControlsLayout = qt.QHBoxLayout()
+        autoControlsLayout.setContentsMargins(6, 3, 6, 3)
+        self.autoToolbar = qt.QToolBar()
+        self.autoToolbar.setMovable(False)
+        self.autoToolbar.setOrientation(qt.Qt.Horizontal)
+        autoControlsLayout.addWidget(self.autoToolbar)
+        self.autoControlsGroup.setLayout(autoControlsLayout)
 
         self.setImageAct = qt.QAction(resources.getQicon('select-image'), "select Image", self)
         self.setImageAct.setToolTip("set this image for the chosen reflection")
@@ -261,21 +276,97 @@ class QReflectionSelector(qt.QWidget):
         self.peakSearchInImage.setToolTip("perform peak search in the image")
         self.peakSearchInImage.triggered.connect(self._onSinglePeakSearch)
 
-        self.addBraggReflAct = qt.QAction( "add Bragg reflection",self)
+        self.addBraggReflAct = qt.QAction(
+            resources.getQicon("add-bragg-reflection"),
+            "add Bragg reflection",
+            self,
+        )
         self.addBraggReflAct.setToolTip("add the next Bragg reflection, which improves the U matrix the most")
         self.addBraggReflAct.triggered.connect(self._onAddBraggReflection)
 
-        self.controlToolbar.addAction(self.gotoImageAct)
-        self.controlToolbar.addSeparator()
-        self.controlToolbar.addAction(self.setImageAct)
-        self.controlToolbar.addAction(self.peakSearchInImage)
-        self.controlToolbar.addWidget(spacer_widget)
-        self.controlToolbar.addAction(self.addBraggReflAct)
+        self.autoBraggSeedAct = qt.QAction(
+            resources.getQicon("auto-bragg-ub"),
+            "auto Bragg/UB",
+            self,
+        )
+        self.autoBraggSeedAct.setToolTip(
+            "search scan images for Bragg peaks and seed the UB matrix"
+        )
+        self.autoBraggSeedAct.triggered.connect(self._onAutoBraggSeed)
 
+        self.autoBraggOptionsAct = qt.QAction(
+            resources.getQicon("auto-bragg-options"),
+            "auto Bragg options",
+            self,
+        )
+        self.autoBraggOptionsAct.setToolTip(
+            "configure automatic Bragg search tolerances and HKL assignment"
+        )
+        self.autoBraggOptionsAct.triggered.connect(
+            self.autoBraggOptionsDialog.show
+        )
 
-        layout.addWidget(self.controlToolbar)
+        self.editToolbar.addAction(self.gotoImageAct)
+        self.editToolbar.addSeparator()
+        self.editToolbar.addAction(self.setImageAct)
+        self.editToolbar.addAction(self.peakSearchInImage)
+
+        self.autoToolbar.addAction(self.autoBraggOptionsAct)
+        self.autoToolbar.addAction(self.autoBraggSeedAct)
+        self.autoToolbar.addAction(self.addBraggReflAct)
+
+        controlsLayout.addWidget(self.editControlsGroup)
+        controlsLayout.addStretch(1)
+        controlsLayout.addWidget(self.autoControlsGroup)
+        layout.addLayout(controlsLayout)
 
         self.setLayout(layout)
+
+    # GUI-only: user-triggered automatic Bragg search and UB seed.
+    def _onAutoBraggSeed(self):
+        """Search the active scan for a Bragg peak and seed U."""
+        self.autoBraggStatusDialog.reset()
+        self.autoBraggStatusDialog.show()
+        self.autoBraggStatusDialog.raise_()
+        try:
+            seed = self.orparent.autoFindBraggReference(
+                **self.autoBraggOptionsDialog.get_options(),
+                status_callback=self.autoBraggStatusDialog.add_status
+            )
+        except Exception as e:
+            self.autoBraggStatusDialog.add_status(
+                "error", message=f"Error: {e}"
+            )
+            qutils.warning_detailed_message(
+                self,
+                "Cannot auto-find Bragg reflection",
+                f"Cannot auto-find Bragg reflection:\n{e}",
+                traceback.format_exc(),
+            )
+            return
+        if seed is None:
+            self.autoBraggStatusDialog.add_status(
+                "failed", message="No reliable Bragg reflection found."
+            )
+            qutils.warning_detailed_message(
+                self,
+                "No Bragg reflection found",
+                "No reliable Bragg reflection candidate was found.",
+                "",
+            )
+        else:
+            self.autoBraggStatusDialog.add_status(
+                "accepted",
+                message=(
+                    "Accepted seed hkl=%s at image %s, xy=(%.2f, %.2f)"
+                    % (
+                        seed.hkl,
+                        seed.peak.imageno,
+                        seed.peak.xy[0],
+                        seed.peak.xy[1],
+                    )
+                ),
+            )
 
     def _onSinglePeakSearch(self):
 
@@ -918,6 +1009,535 @@ class QReflectionAnglesDialog(qt.QDialog):
     def copy_to_clipboard(self):
         app = qt.QApplication.instance()
         app.clipboard().setText(self.header + "\n" + self.datastr)
+
+
+class AutoBraggStatusDialog(qt.QDialog):
+    """Show live automatic Bragg-search status and summary statistics."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.refl_selector = parent
+        self.setWindowTitle("Automatic Bragg/UB search")
+        self.setModal(False)
+        self.stats = {}
+
+        layout = qt.QVBoxLayout()
+        self.summaryLabel = qt.QLabel("Automatic Bragg search not started.")
+        layout.addWidget(self.summaryLabel)
+
+        self.logText = qt.QPlainTextEdit()
+        self.logText.setReadOnly(True)
+        self.logText.setMinimumSize(520, 300)
+        layout.addWidget(self.logText)
+
+        add_layout = qt.QHBoxLayout()
+        add_layout.addWidget(qt.QLabel("Additional reflections:"))
+        self.additionalCount = qt.QSpinBox()
+        self.additionalCount.setRange(1, 100)
+        self.additionalCount.setValue(3)
+        self.additionalCount.setToolTip(
+            "Number of additional calculated Bragg reflections to validate "
+            "and add from the current UB matrix."
+        )
+        add_layout.addWidget(self.additionalCount)
+        self.addCalculatedBtn = qt.QPushButton("Add calculated")
+        self.addCalculatedBtn.setToolTip(
+            "Use the current UB matrix to predict Bragg reflections, refine "
+            "their real peak positions, validate mismatch and intensity, and "
+            "add accepted reflections."
+        )
+        self.addCalculatedBtn.clicked.connect(self._onAddCalculated)
+        add_layout.addWidget(self.addCalculatedBtn)
+        add_layout.addStretch(1)
+        layout.addLayout(add_layout)
+
+        buttons = qt.QDialogButtonBox(
+            qt.QDialogButtonBox.Reset | qt.QDialogButtonBox.Close
+        )
+        buttons.button(qt.QDialogButtonBox.Reset).clicked.connect(self.reset)
+        buttons.rejected.connect(self.hide)
+        buttons.button(qt.QDialogButtonBox.Close).clicked.connect(self.hide)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+    def reset(self):
+        """Clear previous search output."""
+        self.stats = {
+            "images": 0,
+            "candidates": 0,
+            "refined": 0,
+            "hkl_hypotheses": 0,
+            "confirmations": 0,
+            "rejected": 0,
+        }
+        self.logText.clear()
+        self.summaryLabel.setText("Automatic Bragg search running...")
+
+    def add_status(self, event, **fields):
+        """Append one automatic-search status event.
+
+        :param str event:
+            Short event name emitted by ``autoFindBraggReference``.
+        :param kwargs fields:
+            Event details to display in the dialog.
+        """
+        if "images_read" in fields:
+            self.stats["images"] = fields["images_read"]
+        if event == "candidate":
+            self.stats["candidates"] += 1
+        elif event == "refined":
+            self.stats["refined"] += 1
+        elif event == "hkl_hypotheses":
+            self.stats["hkl_hypotheses"] += fields.get("count", 0)
+        elif event == "confirmation":
+            self.stats["confirmations"] += 1
+        elif event in {"rejected", "failed", "error"}:
+            self.stats["rejected"] += 1
+
+        message = fields.pop("message", None)
+        if message is None:
+            details = ", ".join(
+                f"{key}={value}" for key, value in fields.items()
+            )
+            message = f"{event}: {details}" if details else event
+        self.logText.appendPlainText(message)
+        self.summaryLabel.setText(
+            "Images read: {images}; candidates: {candidates}; refined: "
+            "{refined}; HKL hypotheses: {hkl_hypotheses}; confirmations: "
+            "{confirmations}; rejected: {rejected}".format(**self.stats)
+        )
+        app = qt.QApplication.instance()
+        if app is not None:
+            app.processEvents()
+
+    # GUI-only: user-triggered automatic validation of calculated reflections.
+    def _onAddCalculated(self):
+        """Add calculated Bragg reflections using the current UB matrix."""
+        if self.refl_selector is None:
+            return
+        options_dialog = getattr(
+            self.refl_selector, "autoBraggOptionsDialog", None
+        )
+        options = {} if options_dialog is None else options_dialog.get_options()
+        self.addCalculatedBtn.setEnabled(False)
+        try:
+            added = self.refl_selector.orparent.autoAddCalculatedBraggReflections(
+                self.additionalCount.value(),
+                status_callback=self.add_status,
+                **options,
+            )
+        except Exception as e:
+            self.add_status("error", message=f"Error: {e}")
+            qutils.warning_detailed_message(
+                self,
+                "Cannot add calculated Bragg reflections",
+                f"Cannot add calculated Bragg reflections:\n{e}",
+                traceback.format_exc(),
+            )
+            return
+        finally:
+            self.addCalculatedBtn.setEnabled(True)
+        self.add_status(
+            "accepted",
+            message="Added %s calculated Bragg reflection(s)." % added,
+        )
+
+
+class AutoBraggOptionsDialog(qt.QDialog):
+    """Configure automatic Bragg-search tolerances."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Automatic Bragg options")
+        layout = qt.QGridLayout()
+
+        row = 0
+        layout.addWidget(qt.QLabel("HKL assignment:"), row, 0)
+        self.hklMode = qt.QComboBox()
+        self.hklMode.addItem("Detector position (fast)", "detector_position")
+        self.hklMode.addItem("Q norm shell (slower)", "qnorm")
+        self.hklMode.setToolTip(
+            "Detector position is the default. Q norm shell tests more HKL "
+            "hypotheses and can take longer."
+        )
+        layout.addWidget(self.hklMode, row, 1, 1, 3)
+
+        row += 1
+        self.qnormTolerance = self._add_double(
+            layout,
+            row,
+            "Q shell half-width:",
+            0.05,
+            0.0001,
+            10.0,
+            " Angstrom^-1",
+            "Allowed local Q-norm shell around the measured peak.",
+        )
+        row += 1
+        self.assignmentPixelTolerance = self._add_double(
+            layout,
+            row,
+            "Assignment pixel tolerance:",
+            30.0,
+            0.1,
+            10000.0,
+            " px",
+            "Maximum first-peak detector-position mismatch.",
+        )
+        row += 1
+        self.confirmationPixelTolerance = self._add_double(
+            layout,
+            row,
+            "Confirmation pixel tolerance:",
+            8.0,
+            0.1,
+            10000.0,
+            " px",
+            "Maximum second-peak detector-position mismatch.",
+        )
+        row += 1
+        self.confirmationImageTolerance = self._add_int(
+            layout,
+            row,
+            "Confirmation image tolerance:",
+            3,
+            0,
+            100000,
+            " images",
+            "Maximum image-index mismatch for second-peak confirmation.",
+        )
+        row += 1
+        self.adaptiveAfterCandidates = self._add_int(
+            layout,
+            row,
+            "Broaden after unmatched:",
+            5,
+            1,
+            100000,
+            " candidates",
+            "Switch to broader tolerances after this many refined candidates "
+            "fail HKL assignment or confirmation.",
+        )
+        row += 1
+        self.adaptiveQnormTolerance = self._add_double(
+            layout,
+            row,
+            "Broader Q shell half-width:",
+            0.25,
+            0.0001,
+            10.0,
+            " Angstrom^-1",
+            "Q-norm shell used after the unmatched-candidate threshold.",
+        )
+        row += 1
+        self.adaptiveAssignmentPixelTolerance = self._add_double(
+            layout,
+            row,
+            "Broader assignment tolerance:",
+            100.0,
+            0.1,
+            10000.0,
+            " px",
+            "First-peak delta/gamma detector-position tolerance used after "
+            "the unmatched-candidate threshold.",
+        )
+        row += 1
+        self.adaptiveConfirmationPixelTolerance = self._add_double(
+            layout,
+            row,
+            "Broader confirmation tolerance:",
+            30.0,
+            0.1,
+            10000.0,
+            " px",
+            "Second-peak delta/gamma detector-position tolerance used after "
+            "the unmatched-candidate threshold.",
+        )
+        row += 1
+        self.adaptiveConfirmationImageTolerance = self._add_int(
+            layout,
+            row,
+            "Broader confirmation image tolerance:",
+            8,
+            0,
+            100000,
+            " images",
+            "Second-peak image-index tolerance used after the "
+            "unmatched-candidate threshold.",
+        )
+        row += 1
+        layout.addWidget(qt.QLabel("Scale-fit detector filter:"), row, 0)
+        self.adaptiveScaleDetectorFilter = qt.QCheckBox("enabled")
+        self.adaptiveScaleDetectorFilter.setChecked(True)
+        self.adaptiveScaleDetectorFilter.setToolTip(
+            "For detector-position HKL assignment, estimate the Q scale only "
+            "from reflections whose current-U detector prediction lands near "
+            "the observed candidate peak."
+        )
+        layout.addWidget(self.adaptiveScaleDetectorFilter, row, 1)
+        self.adaptiveScaleDetectorFraction = self._add_double(
+            layout,
+            row,
+            "region half-size:",
+            0.25,
+            0.001,
+            10.0,
+            " detector",
+            "Half-width and half-height of the accepted detector region as a "
+            "fraction of detector size.",
+            column=2,
+        )
+        row += 1
+        self.adaptiveScaleOutlierQTolerance = self._add_double(
+            layout,
+            row,
+            "Scale-fit Q outlier tolerance:",
+            0.25,
+            0.0001,
+            10.0,
+            " Angstrom^-1",
+            "Maximum scaled Q-norm residual for provisional reflections used "
+            "in the adaptive scale-fit retry.",
+        )
+        self.adaptiveScaleOutlierAngleFraction = self._add_double(
+            layout,
+            row,
+            "delta/gamma fraction:",
+            0.25,
+            0.001,
+            10.0,
+            " detector",
+            "Maximum delta/gamma residual as a fraction of the detector "
+            "angular range for provisional scale-fit reflections.",
+            column=2,
+        )
+        row += 1
+        self.axisHalfWidth = self._add_double(
+            layout,
+            row,
+            "Peak search axis half-width:",
+            1.0,
+            0.001,
+            100000.0,
+            " deg",
+            "First-pass local 3D peak-search half-width on scan axis.",
+        )
+        row += 1
+        self.fineAxisHalfWidth = self._add_double(
+            layout,
+            row,
+            "Fine axis half-width:",
+            0.4,
+            0.001,
+            100000.0,
+            " deg",
+            "Second-pass local 3D peak-search half-width on scan axis.",
+        )
+        row += 1
+        self.roiVSize = self._add_int(
+            layout,
+            row,
+            "Peak search ROI vertical:",
+            80,
+            1,
+            100000,
+            " px",
+            "First-pass local peak-search vertical ROI size.",
+        )
+        self.roiHSize = self._add_int(
+            layout,
+            row,
+            "horizontal:",
+            80,
+            1,
+            100000,
+            " px",
+            "First-pass local peak-search horizontal ROI size.",
+            column=2,
+        )
+        row += 1
+        self.fineRoiVSize = self._add_int(
+            layout,
+            row,
+            "Fine ROI vertical:",
+            40,
+            1,
+            100000,
+            " px",
+            "Second-pass local peak-search vertical ROI size.",
+        )
+        self.fineRoiHSize = self._add_int(
+            layout,
+            row,
+            "horizontal:",
+            40,
+            1,
+            100000,
+            " px",
+            "Second-pass local peak-search horizontal ROI size.",
+            column=2,
+        )
+        row += 1
+        self.assignmentReflections = self._add_int(
+            layout,
+            row,
+            "Assignment reflections:",
+            40,
+            1,
+            100000,
+            "",
+            "Maximum first-peak HKL hypotheses from the local Q shell.",
+        )
+        row += 1
+        self.maxSeedHypotheses = self._add_int(
+            layout,
+            row,
+            "Seed hypotheses:",
+            12,
+            1,
+            100000,
+            "",
+            "Maximum seed HKL hypotheses sent to second-peak confirmation.",
+        )
+        row += 1
+        self.confirmationReflections = self._add_int(
+            layout,
+            row,
+            "Confirmation reflections:",
+            12,
+            1,
+            100000,
+            "",
+            "Maximum predicted strong reflections tested for confirmation.",
+        )
+        row += 1
+        layout.addWidget(qt.QLabel("Intensity validation:"), row, 0)
+        self.intensityRatioCheck = qt.QCheckBox("match calculated |F|^2 ratio")
+        self.intensityRatioCheck.setChecked(True)
+        self.intensityRatioCheck.setToolTip(
+            "When enabled, require seed/confirmation integrated rocking "
+            "intensity ratio to match the calculated structure-factor "
+            "intensity ratio within 50%."
+        )
+        layout.addWidget(self.intensityRatioCheck, row, 1)
+        self.confirmationProminenceThreshold = self._add_double(
+            layout,
+            row,
+            "prominence fallback:",
+            6.0,
+            0.0,
+            100000.0,
+            " z",
+            "If calculated intensity-ratio matching is disabled, require both "
+            "rocking curves to exceed this robust side-band prominence.",
+            column=2,
+        )
+
+        row += 1
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Close)
+        buttons.button(qt.QDialogButtonBox.Close).clicked.connect(self.hide)
+        layout.addWidget(buttons, row, 0, 1, 4)
+        self.setLayout(layout)
+
+    def _add_double(
+        self,
+        layout,
+        row,
+        label,
+        value,
+        minimum,
+        maximum,
+        suffix,
+        tooltip,
+        column=0,
+    ):
+        layout.addWidget(qt.QLabel(label), row, column)
+        box = qt.QDoubleSpinBox()
+        box.setDecimals(4)
+        box.setRange(minimum, maximum)
+        box.setValue(value)
+        box.setSuffix(suffix)
+        box.setToolTip(tooltip)
+        layout.addWidget(box, row, column + 1)
+        return box
+
+    def _add_int(
+        self,
+        layout,
+        row,
+        label,
+        value,
+        minimum,
+        maximum,
+        suffix,
+        tooltip,
+        column=0,
+    ):
+        layout.addWidget(qt.QLabel(label), row, column)
+        box = qt.QSpinBox()
+        box.setRange(minimum, maximum)
+        box.setValue(value)
+        box.setSuffix(suffix)
+        box.setToolTip(tooltip)
+        layout.addWidget(box, row, column + 1)
+        return box
+
+    def get_options(self):
+        """Return options for ``orGUI.autoFindBraggReference``."""
+        return {
+            "hkl_candidate_mode": self.hklMode.currentData(),
+            "qnorm_tolerance": self.qnormTolerance.value(),
+            "assignment_pixel_tolerance": (
+                self.assignmentPixelTolerance.value()
+            ),
+            "confirmation_pixel_tolerance": (
+                self.confirmationPixelTolerance.value()
+            ),
+            "confirmation_image_tolerance": (
+                self.confirmationImageTolerance.value()
+            ),
+            "adaptive_after_candidates": (
+                self.adaptiveAfterCandidates.value()
+            ),
+            "adaptive_qnorm_tolerance": (
+                self.adaptiveQnormTolerance.value()
+            ),
+            "adaptive_assignment_pixel_tolerance": (
+                self.adaptiveAssignmentPixelTolerance.value()
+            ),
+            "adaptive_confirmation_pixel_tolerance": (
+                self.adaptiveConfirmationPixelTolerance.value()
+            ),
+            "adaptive_confirmation_image_tolerance": (
+                self.adaptiveConfirmationImageTolerance.value()
+            ),
+            "adaptive_scale_detector_filter": (
+                self.adaptiveScaleDetectorFilter.isChecked()
+            ),
+            "adaptive_scale_detector_fraction": (
+                self.adaptiveScaleDetectorFraction.value()
+            ),
+            "adaptive_scale_outlier_q_tolerance": (
+                self.adaptiveScaleOutlierQTolerance.value()
+            ),
+            "adaptive_scale_outlier_angle_fraction": (
+                self.adaptiveScaleOutlierAngleFraction.value()
+            ),
+            "axis_half_width": self.axisHalfWidth.value(),
+            "fine_axis_half_width": self.fineAxisHalfWidth.value(),
+            "roi_size": (self.roiVSize.value(), self.roiHSize.value()),
+            "fine_roi_size": (
+                self.fineRoiVSize.value(),
+                self.fineRoiHSize.value(),
+            ),
+            "assignment_reflections": self.assignmentReflections.value(),
+            "max_seed_hypotheses": self.maxSeedHypotheses.value(),
+            "confirmation_reflections": self.confirmationReflections.value(),
+            "intensity_ratio_check": self.intensityRatioCheck.isChecked(),
+            "confirmation_prominence_threshold": (
+                self.confirmationProminenceThreshold.value()
+            ),
+        }
 
 
 
