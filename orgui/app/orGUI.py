@@ -224,8 +224,18 @@ class orGUI(qt.QMainWindow):
 
         self.scanSelector.showMaxAct.toggled.connect(self._onMaxToggled)
         self.scanSelector.showSumAct.toggled.connect(self._onSumToggled)
+        self.scanSelector.roiTrackingAct.toggled.connect(
+            self._onROITrackingChanged
+        )
+        self.scanSelector.roiTrackingS1Act.triggered.connect(
+            self._onROITrackingChanged
+        )
+        self.scanSelector.roiTrackingS2Act.triggered.connect(
+            self._onROITrackingChanged
+        )
 
         self.scanSelector.sigROIChanged.connect(self.updateROI)
+        self.scanSelector.sigROIChanged.connect(self._onROITrackingChanged)
         self.scanSelector.sigROIintegrate.connect(self.integrateROI)
         self.scanSelector.sigSearchHKL.connect(self.onSearchHKLforStaticROI)
 
@@ -5145,6 +5155,7 @@ ub : gui for UB matrix and angle calculations
             self.imageno = key
             self.reflectionSel.setImage(self.imageno)
             self.updateROI(image_changed=True)
+            self._centerTrackedROI(key)
             self.updateReflections()
 
             mu, om = self.getMuOm(self.imageno)
@@ -6430,6 +6441,30 @@ ub : gui for UB matrix and angle calculations
         y1_new = y1 - y_center + xy[1]
         y2_new = y2 - y_center + xy[1]
         self.centralPlot.getYAxis().setLimits(y1_new, y2_new)
+
+    def _onROITrackingChanged(self, *args):
+        """GUI-only: recenter the detector view after ROI tracking changes."""
+        self._centerTrackedROI(self.imageno)
+
+    def _centerTrackedROI(self, image_no):
+        """Center the detector view on the selected stationary ROI intersect."""
+        if not self.scanSelector.roiTrackingAct.isChecked():
+            return
+        if self.scanSelector.scanstab.currentIndex() not in [0, 1]:
+            return
+        try:
+            hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(image_no)
+            if self.scanSelector.roiTrackingS2Act.isChecked():
+                hkl_del_gam = hkl_del_gam_2
+            else:
+                hkl_del_gam = hkl_del_gam_1
+            if hkl_del_gam[0, -1]:
+                self._onCenterGraph(hkl_del_gam[0, 6:8])
+        except Exception:
+            logger.warning(
+                'Cannot center tracked ROI',
+                exc_info=True,
+            )
 
 
 

@@ -240,6 +240,40 @@ class QScanSelector(qt.QMainWindow):
         self.alpha_btn_act = qt.QWidgetAction(self)
         self.alpha_btn_act.setDefaultWidget(self.alpha_btn)
 
+        self.roiTrackingAct = qt.QAction(
+            resources.getQicon("roi-tracking"),
+            "ROI tracking",
+            self,
+        )
+        self.roiTrackingAct.setCheckable(True)
+        self.roiTrackingAct.setToolTip("Center the detector view on a ROI")
+
+        self.roiTrackingIntersectGrp = qt.QActionGroup(self)
+        self.roiTrackingIntersectGrp.setExclusive(True)
+        self.roiTrackingS1Act = self.roiTrackingIntersectGrp.addAction(
+            resources.getQicon("intersect_s1"),
+            "track intersect 1",
+        )
+        self.roiTrackingS2Act = self.roiTrackingIntersectGrp.addAction(
+            resources.getQicon("intersect_s2"),
+            "track intersect 2",
+        )
+        self.roiTrackingS1Act.setCheckable(True)
+        self.roiTrackingS2Act.setCheckable(True)
+        self.roiTrackingS1Act.setChecked(True)
+
+        self.roiTrackingMenu = qt.QMenu()
+        self.roiTrackingMenu.addAction(self.roiTrackingS1Act)
+        self.roiTrackingMenu.addAction(self.roiTrackingS2Act)
+
+        self.roiTrackingBtn = qt.QToolButton()
+        self.roiTrackingBtn.setDefaultAction(self.roiTrackingAct)
+        self.roiTrackingBtn.setPopupMode(qt.QToolButton.MenuButtonPopup)
+        self.roiTrackingBtn.setMenu(self.roiTrackingMenu)
+
+        self.roiTrackingBtnAct = qt.QWidgetAction(self)
+        self.roiTrackingBtnAct.setDefaultWidget(self.roiTrackingBtn)
+
 
         self.toolbar.addAction(self.showMaxAct)
         self.toolbar.addAction(self.showSumAct)
@@ -254,6 +288,7 @@ class QScanSelector(qt.QMainWindow):
         self.toolbar.addWidget(self.noSelector)
         self.toolbar.addWidget(self.axislabel)
         self.toolbar.addWidget(self.axisSelector)
+        self.toolbar.addAction(self.roiTrackingBtnAct)
 
         self.toolbar.addWidget(self.slider)
         decreaseImageNo = self.toolbar.addAction(icons.getQIcon("previous"),"previous image")
