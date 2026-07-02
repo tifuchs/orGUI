@@ -382,12 +382,18 @@ class orGUI(qt.QMainWindow):
         showBraggAct.setChecked(False)
         showBraggAct.toggled.connect(self.onShowBragg)
 
-        showROIAct = view_menu.addAction("show ROI")
-        showROIAct.setCheckable(True)
-        showROIAct.setChecked(False)
-        showROIAct.toggled.connect(self.onShowROI)
+        self.showROIAct = view_menu.addAction("show ROI")
+        self.showROIAct.setCheckable(True)
+        self.showROIAct.setChecked(False)
+        self.showROIAct.toggled.connect(self.onShowROI)
         self.roivisible = False
         #self.scanSelector.showROICheckBox.addAction(showROIAct)
+
+        self.showInterpolatedBgAct = view_menu.addAction("show interpolated bg")
+        self.showInterpolatedBgAct.setCheckable(True)
+        self.showInterpolatedBgAct.setChecked(False)
+        self.showInterpolatedBgAct.setEnabled(False)
+        self.showInterpolatedBgAct.toggled.connect(self.onShowInterpolatedBg)
 
         self.showCTRreflAct = view_menu.addAction("CTR reflections")
         self.showCTRreflAct.setCheckable(True)
@@ -1171,6 +1177,14 @@ ub : gui for UB matrix and angle calculations
 
         background_image = self.background_image
         has_bg_img = False
+        roioptions = self.scanSelector.roioptions.get_parameters()
+        use_fitted_background = bool(roioptions.get('FittedBackground', False))
+        fitted_background_order = int(roioptions.get('FittedBackgroundOrder', 1))
+        if use_fitted_background and not HAS_ACCEL:
+            logger.warning(
+                'Fitted local background requires the compiled ROI accelerator; '
+                'using summed background ROIs instead.'
+            )
         if HAS_ACCEL:
             if imgmask is not None:
                 mask = np.ascontiguousarray(imgmask, dtype=bool)
@@ -1182,14 +1196,19 @@ ub : gui for UB matrix and angle calculations
                 C_arr = np.ones(image.img.shape, dtype=np.float64)
             C_arr[mask] = np.nan
 
-            roi_lists_numba = []
+            roi_lists_accel = []
             for roiname in ['center', 'left', 'right', 'top', 'bottom']:
                 roi_list = []
                 for r in rois[roiname]:
                     roi_list.append(np.array([[r[0].start , r[0].stop], [r[1].start , r[1].stop]]))
                 roi_list = np.ascontiguousarray(np.stack(roi_list), dtype=np.int64)
-                roi_lists_numba.append(roi_list)
+                roi_lists_accel.append(roi_list)
             if background_image is not None and background_image.shape == image.img.shape:
+                if use_fitted_background:
+                    logger.warning(
+                        'Fitted local background is ignored when a background '
+                        'image is selected.'
+                    )
                 bg = background_image.astype(np.float64, order='C', copy=True)
                 bg[mask] = np.nan
                 has_bg_img = True
@@ -1197,19 +1216,22 @@ ub : gui for UB matrix and angle calculations
                     """CLI-safe worker: read and integrate one image with background."""
                     image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True) # unlocks gil during file read
 
-                    all_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
-                    Carr_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
-                    BgImg_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
-                    _roi_sum_accel.processImage_bg_Carr(image, bg, mask, C_arr, *roi_lists_numba, all_counters, Carr_counters, BgImg_counters) # numba nopython and nogil mode
+                    all_counters = np.zeros((roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    Carr_counters = np.zeros((roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    BgImg_counters = np.zeros((roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    _roi_sum_accel.processImage_bg_Carr(image, bg, mask, C_arr, *roi_lists_accel, all_counters, Carr_counters, BgImg_counters) # compiled accelerator releases the GIL
                     return all_counters, Carr_counters, BgImg_counters
             else:
                 def sumImage(i):
                     """CLI-safe worker: read and integrate one image."""
                     image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True) # unlocks gil during file read
 
-                    Carr_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
-                    all_counters = np.zeros((roi_lists_numba[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
-                    _roi_sum_accel.processImage_Carr(image, mask, C_arr, *roi_lists_numba, all_counters, Carr_counters) # numba nopython and nogil mode
+                    Carr_counters = np.zeros((roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    all_counters = np.zeros((roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    if use_fitted_background:
+                        _roi_sum_accel.processImage_polybg_Carr(image, mask, C_arr, *roi_lists_accel, all_counters, Carr_counters, fitted_background_order) # compiled accelerator releases the GIL
+                    else:
+                        _roi_sum_accel.processImage_Carr(image, mask, C_arr, *roi_lists_accel, all_counters, Carr_counters) # compiled accelerator releases the GIL
                     return all_counters, Carr_counters
 
         else:
@@ -1845,7 +1867,12 @@ ub : gui for UB matrix and angle calculations
     def onShowROI(self,visible):
         """GUI/CLI hint: toggle ROI display and refresh ROI graphics."""
         self.roivisible = visible
+        self.showInterpolatedBgAct.setEnabled(visible and HAS_ACCEL)
         try:
+            if self.showInterpolatedBgAct.isChecked():
+                self.plotImage(self.imageno)
+                self.updateROI()
+                return
             self.updateROI()
         except Exception:
             logger.exception('Cannot show ROI', 
@@ -1856,6 +1883,19 @@ ub : gui for UB matrix and angle calculations
                         'parent' : self})
             # qutils.warning_detailed_message(self, "Cannot show ROI", "Cannot show ROI", traceback.format_exc())
             #qt.QMessageBox.critical(self,"Cannot show ROI", "Cannot Cannot show ROI:\n%s" % traceback.format_exc())
+
+    def onShowInterpolatedBg(self, visible):
+        """GUI/CLI hint: toggle fitted-background preview in center ROIs."""
+        try:
+            self.plotImage(self.imageno)
+            self.updateROI()
+        except Exception:
+            logger.exception('Cannot show interpolated background',
+                extra={'title' : 'Cannot show interpolated background',
+                    'description' : 'Cannot show interpolated background',
+                    'show_dialog' : True,
+                    "dialog_level" : logging.WARNING,
+                    'parent' : self})
 
     def onShowCTRreflections(self,visible):
         """GUI/CLI hint: toggle CTR reflection overlays on the plot."""
@@ -4962,6 +5002,114 @@ ub : gui for UB matrix and angle calculations
 
 
 
+    def _roi_preview_enabled(self):
+        """Return whether fitted-background ROI preview should alter the image."""
+        return (
+            HAS_ACCEL
+            and self.roivisible
+            and getattr(self, 'showInterpolatedBgAct', None) is not None
+            and self.showInterpolatedBgAct.isChecked()
+        )
+
+    def _set_center_roi_preview_color(self, roi):
+        """Color a center ROI according to fitted-background preview state."""
+        roi.setColor('blue' if self._roi_preview_enabled() else 'red')
+        roi.setBgStyle('pink', '-', roi.getLineWidth())
+
+    def _roi_array_from_key(self, key):
+        """Convert one ROI slice key to the compiled ``(1, 2, 2)`` format."""
+        roi = np.array(
+            [[[key[0].start, key[0].stop], [key[1].start, key[1].stop]]],
+            dtype=np.int64,
+        )
+        return np.ascontiguousarray(roi)
+
+    def _current_preview_mask(self, image_shape):
+        """Return the detector mask used for fitted-background preview."""
+        if not self.scanSelector.useMaskBox.isChecked():
+            return np.zeros(image_shape, dtype=bool)
+        mask_widget = self.centralPlot.getMaskToolsDockWidget()
+        mask = mask_widget.getSelectionMask()
+        if mask is None or mask.shape != image_shape:
+            return np.zeros(image_shape, dtype=bool)
+        return np.ascontiguousarray(mask > 0.0, dtype=bool)
+
+    def _apply_interpolated_bg_patch(self, image, mask, ckey, bgkeys):
+        """Overwrite one center ROI in ``image`` with fitted background."""
+        roioptions = self.scanSelector.roioptions.get_parameters()
+        fit_order = int(roioptions.get('FittedBackgroundOrder', 1))
+        patch, stats = _roi_sum_accel.interpolate_polybg_croi(
+            image,
+            mask,
+            self._roi_array_from_key(ckey),
+            self._roi_array_from_key(bgkeys[0]),
+            self._roi_array_from_key(bgkeys[1]),
+            self._roi_array_from_key(bgkeys[2]),
+            self._roi_array_from_key(bgkeys[3]),
+            fit_order,
+        )
+        if stats["success"]:
+            image[ckey[::-1]] = patch
+        return stats
+
+    def _apply_interpolated_bg_preview(self, image, image_no):
+        """Overwrite visible center ROIs with local polynomial backgrounds."""
+        if not self._roi_preview_enabled():
+            return
+
+        mask = self._current_preview_mask(image.shape)
+        current_mode = self.scanSelector.scanstab.currentIndex()
+        if current_mode in [0, 1]:
+            hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(image_no)
+            for hkl_del_gam in [hkl_del_gam_1, hkl_del_gam_2]:
+                if hkl_del_gam[0, -1]:
+                    loc = hkl_del_gam[0, 6:8]
+                    self._apply_interpolated_bg_patch(
+                        image,
+                        mask,
+                        self.intkey(loc),
+                        self.bkgkeys(loc),
+                    )
+        elif current_mode == 2:
+            refldict = self.get_rocking_coordinates()
+            self._apply_interpolated_bg_preview_for_rocking(image, mask, refldict)
+        elif current_mode == 3:
+            refldict = self.get_Bragg_rocking_coordinates()
+            if len(refldict['xy_1']) > 0:
+                roi_keys = self.intbkgkeys_rocking(
+                    refldict,
+                    autovsize=False,
+                    autohsize=False,
+                    intersect=1,
+                )
+                self._apply_interpolated_bg_preview_for_keys(image, mask, roi_keys)
+
+    def _apply_interpolated_bg_preview_for_rocking(self, image, mask, refldict):
+        """Overwrite displayed rocking center ROIs with fitted backgrounds."""
+        roi_keys = self.intbkgkeys_rocking(refldict)
+        self._apply_interpolated_bg_preview_for_keys(image, mask, roi_keys)
+
+    def _apply_interpolated_bg_preview_for_keys(self, image, mask, roi_keys):
+        """Overwrite the same subset of center ROIs shown by ROI graphics."""
+        number_rois = len(roi_keys['center'])
+        divider = 1
+        if number_rois > self.maxROIs:
+            divider = np.ceil(number_rois / self.maxROIs)
+        no_rois_to_display = int(np.floor(number_rois / divider))
+        for i in np.arange(no_rois_to_display) * divider:
+            index = int(i)
+            self._apply_interpolated_bg_patch(
+                image,
+                mask,
+                roi_keys['center'][index],
+                (
+                    roi_keys['left'][index],
+                    roi_keys['right'][index],
+                    roi_keys['top'][index],
+                    roi_keys['bottom'][index],
+                ),
+            )
+
     def plotImage(self,key=0):
         """Plot one raw image from the active scan.
 
@@ -4979,6 +5127,13 @@ ub : gui for UB matrix and angle calculations
                     _roi_sum_accel.calcBgSub(image, bg)
                 else:
                     np.subtract(image, bg, out=image)
+            try:
+                self._apply_interpolated_bg_preview(image, key)
+            except Exception:
+                logger.warning(
+                    'Cannot apply interpolated background preview',
+                    exc_info=True,
+                )
             #if self.currentImageLabel is not None:
             #    self.centralPlot.removeImage(self.currentImageLabel)
 
@@ -5125,6 +5280,7 @@ ub : gui for UB matrix and angle calculations
                     self.roiManager.addRoi(roi,useManagerColor=False)
 
             for roino, i in enumerate(np.arange(no_rois_to_display)*divider):
+                self._set_center_roi_preview_color(self.rocking_rois[roino])
                 ckey = roi_keys['center'][int(i)]
                 leftkey = roi_keys['left'][int(i)]
                 rightkey = roi_keys['right'][int(i)]
@@ -5184,6 +5340,7 @@ ub : gui for UB matrix and angle calculations
                     self.roiManager.addRoi(roi,useManagerColor=False)
 
             for roino, i in enumerate(np.arange(no_rois_to_display)*divider):
+                self._set_center_roi_preview_color(self.rocking_rois[roino])
                 ckey = roi_keys['center'][int(i)]
                 leftkey = roi_keys['left'][int(i)]
                 rightkey = roi_keys['right'][int(i)]
@@ -5408,6 +5565,7 @@ ub : gui for UB matrix and angle calculations
         origin, size, left, right, top, bottom = _display_roi_geometry(
             key, leftkey, rightkey, topkey, bottomkey
         )
+        self._set_center_roi_preview_color(roi)
         roi.setGeometry(origin=origin, size=size, left=left, right=right, top=top, bottom=bottom)
         roi.setVisible(True)
         #self.roiManager._roisUpdated()
@@ -5570,6 +5728,14 @@ ub : gui for UB matrix and angle calculations
         progress = logger_utils.create_progress_logger(self, len(self.fscan), "Integrating stationary scan")
 
         has_bg_img = False
+        roioptions = self.scanSelector.roioptions.get_parameters()
+        use_fitted_background = bool(roioptions.get('FittedBackground', False))
+        fitted_background_order = int(roioptions.get('FittedBackgroundOrder', 1))
+        if use_fitted_background and not HAS_ACCEL:
+            logger.warning(
+                'Fitted local background requires the compiled ROI accelerator; '
+                'using summed background ROIs instead.'
+            )
 
         if imgmask is not None:
             mask = np.ascontiguousarray(imgmask, dtype=bool)
@@ -5595,7 +5761,7 @@ ub : gui for UB matrix and angle calculations
 
 
         if HAS_ACCEL:
-            roi_lists_numba = []
+            roi_lists_accel = []
             for i in range(len(self.fscan)):
                 roi_lists = [[], [], [], [], []]
                 if hkl_del_gam_1[i,-1]:
@@ -5619,31 +5785,39 @@ ub : gui for UB matrix and angle calculations
                     [l.append(np.array([[0 , 0], [0 , 0]])) for l in roi_lists[1:]] # will result in zeros, convert to np.nan later
                     roi_lists[0].append(np.array([[0 , 0], [0 , 0]]))
                 roi_lists = [np.ascontiguousarray(np.stack(l), dtype=np.int64) for l in roi_lists]
-                roi_lists_numba.append(roi_lists)
+                roi_lists_accel.append(roi_lists)
 
             if self.background_image is not None and self.background_image.shape == image.img.shape:
+                if use_fitted_background:
+                    logger.warning(
+                        'Fitted local background is ignored when a background '
+                        'image is selected.'
+                    )
                 has_bg_img = True
                 background_image = self.background_image.astype(np.float64, order='C', copy=True)
                 background_image[mask] = 0.
                 def sumImage(i):
                     """CLI-safe worker: integrate one stationary image with background."""
-                    all_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
-                    Carr_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
-                    BgImg_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    all_counters = np.zeros((roi_lists_accel[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    Carr_counters = np.zeros((roi_lists_accel[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    BgImg_counters = np.zeros((roi_lists_accel[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
                     if not dataavail[i]:
                         return all_counters, Carr_counters, BgImg_counters
                     image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True) # unlocks gil during file read
-                    _roi_sum_accel.processImage_bg_Carr(image, background_image, mask, C_arr, *roi_lists_numba[i], all_counters, Carr_counters, BgImg_counters) # numba nopython and nogil mode
+                    _roi_sum_accel.processImage_bg_Carr(image, background_image, mask, C_arr, *roi_lists_accel[i], all_counters, Carr_counters, BgImg_counters) # compiled accelerator releases the GIL
                     return all_counters, Carr_counters, BgImg_counters
             else:
                 def sumImage(i):
                     """CLI-safe worker: integrate one stationary image."""
-                    all_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
-                    Carr_counters = np.zeros((roi_lists_numba[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    all_counters = np.zeros((roi_lists_accel[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
+                    Carr_counters = np.zeros((roi_lists_accel[i][0].shape[0],) + (4,), dtype=np.float64) # need gil for python object creation
                     if not dataavail[i]:
                         return all_counters, Carr_counters
                     image = self.fscan.get_raw_img(i).img.astype(np.float64, order='C', copy=True) # unlocks gil during file read
-                    _roi_sum_accel.processImage_Carr(image, mask, C_arr, *roi_lists_numba[i], all_counters, Carr_counters) # numba nopython and nogil mode
+                    if use_fitted_background:
+                        _roi_sum_accel.processImage_polybg_Carr(image, mask, C_arr, *roi_lists_accel[i], all_counters, Carr_counters, fitted_background_order) # compiled accelerator releases the GIL
+                    else:
+                        _roi_sum_accel.processImage_Carr(image, mask, C_arr, *roi_lists_accel[i], all_counters, Carr_counters) # compiled accelerator releases the GIL
                     return all_counters, Carr_counters
 
         else: # not HAS_ACCEL

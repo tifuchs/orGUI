@@ -1320,9 +1320,29 @@ class ROIAdvancedOptions(qt.QWidget):
 
         self.factorGroup.setLayout(factorLayout)
 
+        self.backgroundFitGroup = qt.QGroupBox("Fitted local background:")
+        self.backgroundFitGroup.setCheckable(True)
+        self.backgroundFitGroup.setChecked(False)
+
+        backgroundFitLayout = qt.QGridLayout()
+        self._backgroundFitOrder = qt.QSpinBox()
+        self._backgroundFitOrder.setRange(0, 2)
+        self._backgroundFitOrder.setValue(1)
+        self._backgroundFitOrder.setToolTip(
+            "Polynomial order for the local background fit: "
+            "0=constant, 1=plane, 2=quadratic."
+        )
+        backgroundFitLayout.addWidget(qt.QLabel("Polynomial order:"), 0, 0)
+        backgroundFitLayout.addWidget(self._backgroundFitOrder, 0, 1)
+        self.backgroundFitGroup.setLayout(backgroundFitLayout)
+
+        self.backgroundFitGroup.toggled.connect(self._onAnyValueChanged)
+        self._backgroundFitOrder.valueChanged.connect(self._onAnyValueChanged)
+
         mainLayout.addWidget(self.sizeGroup)
         mainLayout.addWidget(self.inclinationBox)
         mainLayout.addWidget(self.factorGroup)
+        mainLayout.addWidget(self.backgroundFitGroup)
 
         mainLayout.addWidget(self.offsetGroup)
         self.setLayout(mainLayout)
@@ -1339,6 +1359,14 @@ class ROIAdvancedOptions(qt.QWidget):
 
     def hasROIsizeCorrection(self):
         return self.hasDetectorInclination() or self.hasProjectSampleSize()
+
+    def hasFittedBackground(self):
+        """Return whether local polynomial background fitting is enabled."""
+        return self.backgroundFitGroup.isChecked()
+
+    def get_background_fit_order(self):
+        """Return the local background polynomial order."""
+        return self._backgroundFitOrder.value()
 
     def get_offsets(self):
         if self.offsetGroup.isChecked():
@@ -1373,7 +1401,9 @@ class ROIAdvancedOptions(qt.QWidget):
             'sizeX' : sizes[0],
             'sizeY' : sizes[1],
             'sizeZ' : sizes[2],
-            'factor' : self.get_apply_factor()
+            'factor' : self.get_apply_factor(),
+            'FittedBackground' : self.hasFittedBackground(),
+            'FittedBackgroundOrder' : self.get_background_fit_order()
         }
 
         return ddict
@@ -1386,6 +1416,8 @@ class ROIAdvancedOptions(qt.QWidget):
             self.set_sample_size(ddict['sizeX'], ddict['sizeY'], ddict['sizeZ'])
             self.set_offsets(ddict['xoffset'], ddict['yoffset'])
             self.set_apply_factor(ddict['factor'])
+            self.backgroundFitGroup.setChecked(ddict.get('FittedBackground', False))
+            self._backgroundFitOrder.setValue(ddict.get('FittedBackgroundOrder', 1))
         except:
             raise
         finally:
