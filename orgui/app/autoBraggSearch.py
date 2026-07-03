@@ -268,9 +268,9 @@ def iter_sharp_peak_candidates(
             continue
 
         history_start = max(0, imageno - history)
-        baseline = np.array([
-            values.get(i, np.nan) for i in range(history_start, imageno)
-        ])
+        baseline = np.array(
+            [values.get(i, np.nan) for i in range(history_start, imageno)]
+        )
         baseline = baseline[np.isfinite(baseline)]
         if imageno < next_allowed or baseline.size < min_history:
             imageno += 1
@@ -298,9 +298,7 @@ def iter_sharp_peak_candidates(
             continue
 
         window = [maximum]
-        for look_idx in range(
-            imageno + 1, min(len(fscan), imageno + lookahead + 1)
-        ):
+        for look_idx in range(imageno + 1, min(len(fscan), imageno + lookahead + 1)):
             look_maximum = read_maximum(look_idx)
             if look_maximum is not None:
                 window.append(look_maximum)
@@ -383,7 +381,7 @@ def scan_image_maxima(
         if maximum.imageno < burn_in:
             continue
         start = max(0, maximum.imageno - history)
-        baseline_values = values[start:maximum.imageno]
+        baseline_values = values[start : maximum.imageno]
         baseline_values = baseline_values[np.isfinite(baseline_values)]
         if baseline_values.size < max(3, min(history, 5)):
             continue
@@ -574,20 +572,20 @@ def _deduplicate_structure_equivalent(hkls, structure_factor, norms, decimals=6)
     """
     if len(hkls) == 0:
         return hkls, structure_factor, norms
-    keys = np.column_stack([
-        np.round(np.abs(hkls), decimals),
-        np.round(np.real(structure_factor), decimals),
-        np.round(np.imag(structure_factor), decimals),
-        np.round(norms, decimals),
-    ])
+    keys = np.column_stack(
+        [
+            np.round(np.abs(hkls), decimals),
+            np.round(np.real(structure_factor), decimals),
+            np.round(np.imag(structure_factor), decimals),
+            np.round(norms, decimals),
+        ]
+    )
     _unique, idx = np.unique(keys, axis=0, return_index=True)
     idx = np.sort(idx)
     return hkls[idx], structure_factor[idx], norms[idx]
 
 
-def allowed_bragg_by_qnorm(
-    xtal, qnorm, tolerance, max_q=None, qnorm_scale=1.0
-):
+def allowed_bragg_by_qnorm(xtal, qnorm, tolerance, max_q=None, qnorm_scale=1.0):
     """Find allowed Bragg reflections with reciprocal-vector norm near ``qnorm``.
 
     :param CTRcalc.UnitCell or CTRcalc.SXRDCrystal xtal:
@@ -628,9 +626,7 @@ def allowed_bragg_by_qnorm(
     return hkls, norms
 
 
-def allowed_bragg_in_q_region(
-    xtal, qnorm, tolerance, max_q=None, qnorm_scale=1.0
-):
+def allowed_bragg_in_q_region(xtal, qnorm, tolerance, max_q=None, qnorm_scale=1.0):
     """Return allowed Bragg reflections in a small Q-norm shell.
 
     :param CTRcalc.UnitCell or CTRcalc.SXRDCrystal xtal:

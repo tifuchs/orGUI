@@ -22,7 +22,7 @@
 #
 # ###########################################################################*/
 __author__ = "Finn Schroeter"
-__credits__ = ['Finn Schroeter']
+__credits__ = ["Finn Schroeter"]
 __copyright__ = "Copyright 2024-2025 Finn Schroeter"
 __license__ = "MIT License"
 __version__ = "1.3.0"
@@ -31,7 +31,6 @@ import numpy as np
 
 
 class InterlacedScan:
-
     def __init__(self, scansegments, sort, ax):
         self.subscans = scansegments
 
@@ -41,37 +40,37 @@ class InterlacedScan:
 
         self.sort = sort
 
-        #self.axisname = scan0.axisname # todo: check if all scans have the same axis as selected in GUI window
+        # self.axisname = scan0.axisname # todo: check if all scans have the same axis as selected in GUI window  # noqa: E501
         self.axisname = ax
 
-        if ax == 'th':
+        if ax == "th":
             for i in scansegments:
                 lensum += i.nopoints
                 ax_area.append(i.th)
 
             self.th = np.concatenate(ax_area)
-            self.omega = -1*self.th
+            self.omega = -1 * self.th
 
-            self.mu = scan0.mu # todo: check if all scans share the same mu
+            self.mu = scan0.mu  # todo: check if all scans share the same mu
             self.axis = self.th
 
-        if ax == 'mu':
+        if ax == "mu":
             for i in scansegments:
                 lensum += i.nopoints
                 ax_area.append(i.mu)
 
             self.mu = np.concatenate(ax_area)
 
-            self.th = scan0.th # todo: check if all scans share the same th
-            self.omega = -1*self.th
+            self.th = scan0.th  # todo: check if all scans share the same th
+            self.omega = -1 * self.th
             self.axis = self.mu
 
         if self.sort:
-            if ax == 'mu':
+            if ax == "mu":
                 self.indices = np.argsort(self.mu)
                 self.mu = self.mu[self.indices]
                 self.axis = self.mu
-            elif ax == 'th':
+            elif ax == "th":
                 self.indices = np.argsort(self.th)
                 self.th = self.th[self.indices]
                 self.axis = self.th
@@ -86,14 +85,14 @@ class InterlacedScan:
         len_previous = 0
         if self.sort:
             for k in self.subscans:
-                if self.indices[i] < k.nopoints+len_previous:
-                    return k.get_raw_img(self.indices[i]-len_previous)
+                if self.indices[i] < k.nopoints + len_previous:
+                    return k.get_raw_img(self.indices[i] - len_previous)
                 else:
                     len_previous += k.nopoints
         else:
             for k in self.subscans:
-                if i < k.nopoints+len_previous:
-                    return k.get_raw_img(i-len_previous)
+                if i < k.nopoints + len_previous:
+                    return k.get_raw_img(i - len_previous)
                 else:
                     len_previous += k.nopoints
 
@@ -101,7 +100,7 @@ class InterlacedScan:
         len_previous = 0
         if self.sort:
             for k in self.subscans:
-                if self.indices[i] < k.nopoints+len_previous:
+                if self.indices[i] < k.nopoints + len_previous:
                     try:
                         return k.scanname
                     except Exception:
@@ -110,7 +109,7 @@ class InterlacedScan:
                     len_previous += k.nopoints
         else:
             for k in self.subscans:
-                if i < k.nopoints+len_previous:
+                if i < k.nopoints + len_previous:
                     try:
                         return k.scanname
                     except Exception:
@@ -120,8 +119,8 @@ class InterlacedScan:
 
     @property
     def auxillary_counters(self):
-        #todo: combine aux counters of all scan segments
-        #return ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch','scaled_potv2f']
+        # todo: combine aux counters of all scan segments
+        # return ['current', 'potential', 'exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch','scaled_potv2f']  # noqa: E501
         return []
 
     def __len__(self):

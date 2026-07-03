@@ -47,8 +47,6 @@ from silx.gui.plot.items._roi_base import RoiInteractionMode  # noqa
 logger = logging.getLogger(__name__)
 
 
-
-
 class RectangleBgROI(HandleBasedROI, items.LineMixIn):
     """A ROI identifying a rectangle in a 2D plot.
 
@@ -56,8 +54,8 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
     center to translate the full ROI.
     """
 
-    ICON = 'add-shape-rectangle'
-    NAME = 'rectangle with bg ROI'
+    ICON = "add-shape-rectangle"
+    NAME = "rectangle with bg ROI"
     SHORT_NAME = "rectangleBg"
     """Metadata for this kind of ROI"""
 
@@ -76,7 +74,7 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
 
         self.__bgshapes = {}
         self.__bgsize = {}
-        for n in ['left', 'right', 'top', 'bottom']:
+        for n in ["left", "right", "top", "bottom"]:
             shape = items.Shape("rectangle")
             shape.setPoints([[0, 0], [0, 0]])
             shape.setFill(False)
@@ -88,8 +86,8 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
             self.__bgsize[n] = 0
             self.addItem(shape)
 
-        self.centerMarker = items.Marker() #setPosition
-        self.centerMarker.setPosition(0,0)
+        self.centerMarker = items.Marker()  # setPosition
+        self.centerMarker.setPosition(0, 0)
         self.addItem(self.centerMarker)
 
         shape = items.Shape("rectangle")
@@ -102,11 +100,14 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
         self.__shape = shape
         self.addItem(shape)
 
-
     def _updated(self, event=None, checkVisibility=True):
         if event in [items.ItemChangedType.VISIBLE]:
-            self._updateItemProperty(event, self, [self.__shape, *self.__bgshapes.values(), self.centerMarker])
-            #self._updateItemProperty(event, self, self.__shape)
+            self._updateItemProperty(
+                event,
+                self,
+                [self.__shape, *self.__bgshapes.values(), self.centerMarker],
+            )
+            # self._updateItemProperty(event, self, self.__shape)
         super()._updated(event, checkVisibility)
 
     def _updatedStyle(self, event, style):
@@ -137,13 +138,13 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
 
     def setBgSize(self, left=None, right=None, top=None, bottom=None):
         if left is not None:
-            self.__bgsize['left'] = left
+            self.__bgsize["left"] = left
         if right is not None:
-            self.__bgsize['right'] = right
+            self.__bgsize["right"] = right
         if top is not None:
-            self.__bgsize['top'] = top
+            self.__bgsize["top"] = top
         if bottom is not None:
-            self.__bgsize['bottom'] = bottom
+            self.__bgsize["bottom"] = bottom
 
         origin = self.getOrigin()
         size = self.getSize()
@@ -151,13 +152,13 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
 
     def _setBgSize(self, left=None, right=None, top=None, bottom=None):
         if left is not None:
-            self.__bgsize['left'] = left
+            self.__bgsize["left"] = left
         if right is not None:
-            self.__bgsize['right'] = right
+            self.__bgsize["right"] = right
         if top is not None:
-            self.__bgsize['top'] = top
+            self.__bgsize["top"] = top
         if bottom is not None:
-            self.__bgsize['bottom'] = bottom
+            self.__bgsize["bottom"] = bottom
 
     def setBgStyle(self, color, linestyle, linewidth):
         for n in self.__bgshapes:
@@ -215,13 +216,22 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
         size = self.getSize()
         self.setGeometry(center=position, size=size)
 
-    def setGeometry(self, origin=None, size=None, center=None, left=None, right=None, top=None, bottom=None):
-        """Set the geometry of the ROI
-        """
-        if ((origin is None or numpy.array_equal(origin, self.getOrigin())) and
-                (center is None or numpy.array_equal(center, self.getCenter())) and
-                numpy.array_equal(size, self.getSize())):
-
+    def setGeometry(
+        self,
+        origin=None,
+        size=None,
+        center=None,
+        left=None,
+        right=None,
+        top=None,
+        bottom=None,
+    ):
+        """Set the geometry of the ROI"""
+        if (
+            (origin is None or numpy.array_equal(origin, self.getOrigin()))
+            and (center is None or numpy.array_equal(center, self.getCenter()))
+            and numpy.array_equal(size, self.getSize())
+        ):
             if left is None and right is None and top is None and bottom is None:
                 return  # Nothing has changed
 
@@ -256,21 +266,21 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
             self._handleLabel.setPosition(points[0, 0], points[0, 1])
 
         # left:
-        leftorigin = [points[0, 0] - self.__bgsize['left'], points[0, 1]]
+        leftorigin = [points[0, 0] - self.__bgsize["left"], points[0, 1]]
         leftcornerur = [points[0, 0], points[1, 1]]
-        self.__bgshapes['left'].setPoints(numpy.array([leftorigin, leftcornerur]))
-        #right:
-        rightorigin = [points[1, 0] , points[0, 1]]
-        rightcornerur = [points[1, 0] + self.__bgsize['right'], points[1, 1]]
-        self.__bgshapes['right'].setPoints(numpy.array([rightorigin, rightcornerur]))
-        #top:
-        toporigin = [points[0, 0] , points[1, 1] ]
-        topcornerur = [points[1, 0] , points[1, 1] + self.__bgsize['top']]
-        self.__bgshapes['top'].setPoints(numpy.array([toporigin, topcornerur]))
-        #bottom:
-        bottomorigin = [points[0, 0] , points[0, 1] - self.__bgsize['bottom'] ]
-        bottomcornerur = [points[1, 0] , points[0, 1] ]
-        self.__bgshapes['bottom'].setPoints(numpy.array([bottomorigin, bottomcornerur]))
+        self.__bgshapes["left"].setPoints(numpy.array([leftorigin, leftcornerur]))
+        # right:
+        rightorigin = [points[1, 0], points[0, 1]]
+        rightcornerur = [points[1, 0] + self.__bgsize["right"], points[1, 1]]
+        self.__bgshapes["right"].setPoints(numpy.array([rightorigin, rightcornerur]))
+        # top:
+        toporigin = [points[0, 0], points[1, 1]]
+        topcornerur = [points[1, 0], points[1, 1] + self.__bgsize["top"]]
+        self.__bgshapes["top"].setPoints(numpy.array([toporigin, topcornerur]))
+        # bottom:
+        bottomorigin = [points[0, 0], points[0, 1] - self.__bgsize["bottom"]]
+        bottomcornerur = [points[1, 0], points[0, 1]]
+        self.__bgshapes["bottom"].setPoints(numpy.array([bottomorigin, bottomcornerur]))
         self.__shape.setPoints(points)
 
         self.centerMarker.setPosition(*center)
@@ -279,7 +289,7 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
 
     @docstring(HandleBasedROI)
     def contains(self, position):
-        assert isinstance(position, (tuple, list, numpy.array))
+        assert isinstance(position, tuple | list | numpy.array)
         points = self.__shape.getPoints()
         bb1 = _BoundingBox.from_points(points)
         return bb1.contains(position)
@@ -301,17 +311,38 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
             points = numpy.array([current, current2])
 
             # Switch handles if they were crossed by interaction
-            if self._handleBottomLeft.getXPosition() > self._handleBottomRight.getXPosition():
-                self._handleBottomLeft, self._handleBottomRight = self._handleBottomRight, self._handleBottomLeft
+            if (
+                self._handleBottomLeft.getXPosition()
+                > self._handleBottomRight.getXPosition()
+            ):
+                self._handleBottomLeft, self._handleBottomRight = (
+                    self._handleBottomRight,
+                    self._handleBottomLeft,
+                )
 
             if self._handleTopLeft.getXPosition() > self._handleTopRight.getXPosition():
-                self._handleTopLeft, self._handleTopRight = self._handleTopRight, self._handleTopLeft
+                self._handleTopLeft, self._handleTopRight = (
+                    self._handleTopRight,
+                    self._handleTopLeft,
+                )
 
-            if self._handleBottomLeft.getYPosition() > self._handleTopLeft.getYPosition():
-                self._handleBottomLeft, self._handleTopLeft = self._handleTopLeft, self._handleBottomLeft
+            if (
+                self._handleBottomLeft.getYPosition()
+                > self._handleTopLeft.getYPosition()
+            ):
+                self._handleBottomLeft, self._handleTopLeft = (
+                    self._handleTopLeft,
+                    self._handleBottomLeft,
+                )
 
-            if self._handleBottomRight.getYPosition() > self._handleTopRight.getYPosition():
-                self._handleBottomRight, self._handleTopRight = self._handleTopRight, self._handleBottomRight
+            if (
+                self._handleBottomRight.getYPosition()
+                > self._handleTopRight.getYPosition()
+            ):
+                self._handleBottomRight, self._handleTopRight = (
+                    self._handleTopRight,
+                    self._handleBottomRight,
+                )
 
             self._setBound(points)
 
@@ -319,46 +350,46 @@ class RectangleBgROI(HandleBasedROI, items.LineMixIn):
         origin = self.getOrigin()
         w, h = self.getSize()
         params = origin[0], origin[1], w, h
-        params = 'origin: %f %f; width: %f; height: %f' % params
-        return "%s(%s)" % (self.__class__.__name__, params)
+        params = "origin: {:f} {:f}; width: {:f}; height: {:f}".format(*params)
+        return f"{self.__class__.__name__}({params})"
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     from silx.gui import qt
     from silx.gui.plot import Plot2D
     from silx.gui.plot.tools.roi import RegionOfInterestManager
+
     app = qt.QApplication([])
     import numpy as np
-    img = np.arange(100*100).reshape((100,100))
+
+    img = np.arange(100 * 100).reshape((100, 100))
     pt = Plot2D()
     pt.addImage(img)
 
     roiManager = RegionOfInterestManager(pt)
-    roiManager.setColor('pink')  # Set the color of ROI
+    roiManager.setColor("pink")  # Set the color of ROI
 
-    #self.roiTable = RegionOfInterestTableWidget()
-    #self.roiTable.setRegionOfInterestManager(self.roiManager)
+    # self.roiTable = RegionOfInterestTableWidget()
+    # self.roiTable.setRegionOfInterestManager(self.roiManager)
 
-    #roi order: left, top, right, bottom,  croi
+    # roi order: left, top, right, bottom,  croi
     rois = []
 
     roi = RectangleBgROI()
 
     roi.setGeometry(origin=(30, 30), size=(10, 10), left=5, right=6, top=7, bottom=8)
 
-    roi.setColor('red') # bg color
-
+    roi.setColor("red")  # bg color
 
     roi.setLineWidth(2)
-    roi.setLineStyle('-')
-    roi.setBgStyle('pink', '-', 2.)
+    roi.setLineStyle("-")
+    roi.setBgStyle("pink", "-", 2.0)
     roi.setVisible(True)
 
     roi.setEditable(True)
 
-    roiManager.addRoi(roi,useManagerColor=False)
+    roiManager.addRoi(roi, useManagerColor=False)
     rois.append(roi)
 
     pt.show()
     app.exec()
-

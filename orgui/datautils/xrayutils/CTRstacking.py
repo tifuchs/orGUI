@@ -34,8 +34,7 @@ class LayerCycle:
         doubled = self.layers + self.layers
         size = len(self.layers)
         return any(
-            doubled[start:start + size] == other.layers
-            for start in range(size)
+            doubled[start : start + size] == other.layers for start in range(size)
         )
 
 
@@ -62,8 +61,7 @@ class LayerTransition:
             return self.mapping[lower_layer]
         except KeyError as exc:
             raise ValueError(
-                "No layer transition is defined for lower layer "
-                f"{lower_layer!r}"
+                f"No layer transition is defined for lower layer {lower_layer!r}"
             ) from exc
 
 

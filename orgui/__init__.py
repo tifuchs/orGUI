@@ -21,9 +21,8 @@
 # THE SOFTWARE.
 #
 # ###########################################################################*/
-"""Module descripiton
+"""Module descripiton"""
 
-"""
 __author__ = "Timo Fuchs"
 __copyright__ = "Copyright 2020-2026 Timo Fuchs"
 __credits__ = []
@@ -31,35 +30,39 @@ __license__ = "MIT License"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
-__all__ = ['main', 'logger_settings']
+__all__ = ["main", "logger_settings"]
 
 import logging
+
 logger = logging.getLogger(__name__)
 
 
 def _get_version():
     try:
         from setuptools_scm import get_version
+
         return get_version(root="..", relative_to=__file__)
     except Exception:
         pass
 
     try:
         from importlib.metadata import version
+
         return version("orGUI")
     except Exception:
         pass
 
     try:
         from ._version import version
+
         return version
     except Exception:
-        logger.info('orGUI is not installed. Version number will be incorrect!')
-        return '1.4.1-unknown'
+        logger.info("orGUI is not installed. Version number will be incorrect!")
+        return "1.4.1-unknown"
 
 
 try:
     __version__ = _get_version()
 except Exception:
     logger.exception("Cannot determine orGUI version")
-    __version__ = '1.4.1-unknown'
+    __version__ = "1.4.1-unknown"
