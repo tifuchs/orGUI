@@ -32,19 +32,20 @@ __email__ = "tfuchs@cornell.edu"
 import numpy as np
 from abc import ABC, abstractmethod
 
+
 class Scan(ABC):
     """Base class for every backend.
 
-    All methods in this class must be populated for a working backend. 
+    All methods in this class must be populated for a working backend.
     """
 
     @abstractmethod
-    def __init__(self,hdffilepath_orNode=None, scanno=None):
-        """Constructor of the class. 
-        
+    def __init__(self, hdffilepath_orNode=None, scanno=None):
+        """Constructor of the class.
+
         hdffilepath_orNode is an either an object selected from the file browser,
-        where data scan be accessed, or a file path. Example on how to open 
-        
+        where data scan be accessed, or a file path. Example on how to open
+
         .. code-block:: python
             if isinstance(hdffilepath_orNode, str): # check if this is a file path or already an opened h5node
                 with silx.io.open(hdffilepath_orNode) as f: # file path, so we have to open the file manually
@@ -55,7 +56,7 @@ class Scan(ABC):
                 f = hdffilepath_orNode.file
                 self.th = f[scanno ,'th']
                 ...
-        
+
         A backend must populate the following entries
         *  axisname : 'th' or 'mu', defines the scan axis
         *  axis : data value of the axis (should be a numpy array)
@@ -63,27 +64,27 @@ class Scan(ABC):
         *  th : motor value (as array)
         *  om : = -th (just populate the value)
         *  mu : motor value
-        with actual data 
-        """
-        self.axisname = None # either "th" or "mu", this defines the scan axis
-        self.axis = None # value of either "th" or "mu"
+        with actual data
+        """  # noqa: E501
+        self.axisname = None  # either "th" or "mu", this defines the scan axis
+        self.axis = None  # value of either "th" or "mu"
 
-        self.th = 0. # or self.mu, depending on scanaxis
-        self.omega = -self.th # = -1*th
+        self.th = 0.0  # or self.mu, depending on scanaxis
+        self.omega = -self.th  # = -1*th
         self.title = "generic_scan"
         # for mu-scan you must provide a value for omega/theta
 
-        # optional: provide a unique identifier, which is used as key in h5 database to identify
+        # optional: provide a unique identifier, which is used as key in h5 database to identify  # noqa: E501
         # the dataset
         # self.name = "identifier"
 
     @property
     def auxillary_counters(self):
-        """Optional: provide a list of counters or motor names, that should 
+        """Optional: provide a list of counters or motor names, that should
         be copied into the orGUI data base for further processing.
-        
+
         e.g. return ['exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch']
-        
+
         after each integration, orGUI will search for these counter names in the Scan
         object and copy the entries into the database.
         """
@@ -96,22 +97,19 @@ class Scan(ABC):
 
     @abstractmethod
     def __len__(self):
-        """returns the number of entries in the scan.
-        """
+        """returns the number of entries in the scan."""
         raise NotImplementedError()
 
     @abstractmethod
     def get_raw_img(self, i):
         """This should return a populated image class such as h5_Image (see below)
-        
+
         Only the image data is required as numpy array, accessible as h5_image.img
         """
         raise NotImplementedError()
 
 
-
 class h5_Image:
-
     def __init__(self, data):
         """Only the image data is required as numpy array.
         motors and counters do not need to be populated.
@@ -122,26 +120,24 @@ class h5_Image:
 
 
 class SimulationScan(Scan):
-
-    def __init__(self, detshape, axismin, axismax, points, axis='th', fixed=0.):
-
+    def __init__(self, detshape, axismin, axismax, points, axis="th", fixed=0.0):
         self.shape = detshape
         self.axisname = axis
-        self.axis = np.linspace(axismin,axismax,points)
-        if axis == 'th':
+        self.axis = np.linspace(axismin, axismax, points)
+        if axis == "th":
             self.th = self.axis
-            self.omega = -1*self.th
+            self.omega = -1 * self.th
             self.mu = fixed
-        elif axis == 'mu':
+        elif axis == "mu":
             self.mu = self.axis
             self.th = fixed
-            self.omega = -1*self.th
+            self.omega = -1 * self.th
         else:
-            raise ValueError("%s is not an implemented scan axis." % axis)
+            raise ValueError(f"{axis} is not an implemented scan axis.")
         self.nopoints = points
 
-        self.images = np.zeros((points,*detshape)) + 10
-        self.title = "sim ascan %s %s %s %s" % (self.axisname,axismin,axismax,points)
+        self.images = np.zeros((points, *detshape)) + 10
+        self.title = f"sim ascan {self.axisname} {axismin} {axismax} {points}"
 
     def __len__(self):
         return self.nopoints
@@ -149,10 +145,8 @@ class SimulationScan(Scan):
     def get_raw_img(self, i):
         return h5_Image(self.images[i])
 
-    def set_raw_img(self, i, data): #for intensity simulation in the future.
+    def set_raw_img(self, i, data):  # for intensity simulation in the future.
         self.images[i] = data
 
-    def parse_h5_node(cls, node): # unused
+    def parse_h5_node(cls, node):  # unused
         pass
-
-

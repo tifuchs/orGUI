@@ -122,26 +122,23 @@ Name   x/frac     y/frac     z/frac     iDW     oDW      occup
 
     def testFromFile(self):
         fp = os.path.split(__file__)[0]
-        xtal = CTRcalc.SXRDCrystal.fromFile(os.path.join(fp,"testdata/0V12_calculated.xpr"))
+        xtal = CTRcalc.SXRDCrystal.fromFile(
+            os.path.join(fp, "testdata/0V12_calculated.xpr")
+        )
         serialized = str(xtal)
         restored = CTRcalc.SXRDCrystal.fromStr(serialized)
         self.assertEqual(str(restored), serialized)
 
 
 class TestPoissonSurface(unittest.TestCase):
-
     def setUp(self):
         self.unitcell = CTRcalc.UnitCell(
             [3.0, 3.0, 4.0],
             [90.0, 90.0, 90.0],
             name="layered",
         )
-        self.unitcell.addAtom(
-            "C", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0, layer=0
-        )
-        self.unitcell.addAtom(
-            "C", [0.0, 0.0, 0.5], 0.1, 0.1, 1.0, layer=1
-        )
+        self.unitcell.addAtom("C", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0, layer=0)
+        self.unitcell.addAtom("C", [0.0, 0.0, 0.5], 0.1, 0.1, 1.0, layer=1)
         self.unitcell.coherentDomainOccupancy = [0.75]
 
     def test_serialization_round_trip(self):
@@ -168,11 +165,13 @@ class TestPoissonSurface(unittest.TestCase):
 
         surface.set_below(0.0, self.unitcell.a[2])
 
-        expected = 0.75 * np.array([
-            1.0,
-            1.0 - np.exp(-1.0),
-            1.0 - 2.0 * np.exp(-1.0),
-        ])
+        expected = 0.75 * np.array(
+            [
+                1.0,
+                1.0 - np.exp(-1.0),
+                1.0 - 2.0 * np.exp(-1.0),
+            ]
+        )
         np.testing.assert_allclose(
             surface.layer_ucs[0].coherentDomainOccupancy,
             expected[[0, 2]],
@@ -192,9 +191,7 @@ class TestPoissonSurface(unittest.TestCase):
             offset=-1.0,
             tail_probability=1e-8,
         )
-        surface = CTRfilm.PoissonSurface(
-            self.unitcell, profile=profile
-        )
+        surface = CTRfilm.PoissonSurface(self.unitcell, profile=profile)
         surface.basis_0[:] = surface.basis
         surface.set_below(7.0, 11.0)
 
@@ -210,21 +207,15 @@ class TestPoissonSurface(unittest.TestCase):
         self.assertFalse(restored._legacy_absolute_width)
         self.assertAlmostEqual(restored.profile.mean_change, 1.0)
         self.assertAlmostEqual(restored.profile.offset, -1.0)
-        self.assertAlmostEqual(
-            restored.profile.tail_probability, 1e-8
-        )
+        self.assertAlmostEqual(restored.profile.tail_probability, 1e-8)
         self.assertEqual(restored.toStr(), surface.toStr())
 
     def test_distribution_support_bounds_omitted_tail(self):
         poisson_profile = PoissonProfile(2.5, tail_probability=1e-9)
         _, upper = poisson_profile.support()
-        self.assertLessEqual(
-            poisson_profile.occupancy([upper])[0], 1e-9
-        )
+        self.assertLessEqual(poisson_profile.occupancy([upper])[0], 1e-9)
 
-        skellam_profile = SkellamProfile(
-            0.35, asymmetry=0.0, tail_probability=1e-8
-        )
+        skellam_profile = SkellamProfile(0.35, asymmetry=0.0, tail_probability=1e-8)
         lower, upper = skellam_profile.support(layer_count=2)
         self.assertLess(lower, 0)
         self.assertGreater(upper, 0)
@@ -255,10 +246,9 @@ class TestPoissonSurface(unittest.TestCase):
             profile=PoissonProfile(mean_change=1.0),
         )
         growth.set_below(0.0, 8.0)
-        growth_occupancy = np.concatenate([
-            layer.coherentDomainOccupancy
-            for layer in growth.layer_ucs
-        ])
+        growth_occupancy = np.concatenate(
+            [layer.coherentDomainOccupancy for layer in growth.layer_ucs]
+        )
         self.assertTrue(np.all(growth_occupancy > 0))
         self.assertAlmostEqual(growth.mean_height_absolute, 10.0)
 
@@ -267,55 +257,44 @@ class TestPoissonSurface(unittest.TestCase):
             profile=PoissonProfile(mean_change=-1.0),
         )
         etching.set_below(0.0, 8.0)
-        etching_occupancy = np.concatenate([
-            layer.coherentDomainOccupancy
-            for layer in etching.layer_ucs
-        ])
+        etching_occupancy = np.concatenate(
+            [layer.coherentDomainOccupancy for layer in etching.layer_ucs]
+        )
         self.assertTrue(np.all(etching_occupancy < 0))
         self.assertAlmostEqual(etching.mean_height_absolute, 6.0)
 
         compensated = CTRfilm.PoissonSurface(
             self.unitcell,
-            profile=PoissonProfile(
-                mean_change=1.0, offset=-1.0
-            ),
+            profile=PoissonProfile(mean_change=1.0, offset=-1.0),
         )
         compensated.set_below(0.0, 8.0)
-        compensated_occupancy = np.concatenate([
-            layer.coherentDomainOccupancy
-            for layer in compensated.layer_ucs
-        ])
+        compensated_occupancy = np.concatenate(
+            [layer.coherentDomainOccupancy for layer in compensated.layer_ucs]
+        )
         self.assertTrue(np.any(compensated_occupancy < 0))
         self.assertTrue(np.any(compensated_occupancy > 0))
-        self.assertAlmostEqual(
-            compensated.mean_height_absolute, 8.0
-        )
+        self.assertAlmostEqual(compensated.mean_height_absolute, 8.0)
 
     def test_zero_width_poisson_surface_stacks_without_domains(self):
         surface = CTRfilm.PoissonSurface(
             self.unitcell,
             profile=PoissonProfile(mean_change=0.0),
         )
-        crystal = CTRcalc.SXRDCrystal(
-            self.unitcell, surface, stacking=np.array([1])
-        )
+        crystal = CTRcalc.SXRDCrystal(self.unitcell, surface, stacking=np.array([1]))
 
         crystal.apply_stacking()
 
         self.assertEqual(surface.stacking_height_absolute, 0.0)
-        self.assertTrue(all(
-            not layer.coherentDomainMatrix
-            for layer in surface.layer_ucs
-        ))
+        self.assertTrue(
+            all(not layer.coherentDomainMatrix for layer in surface.layer_ucs)
+        )
         h = np.zeros(3)
         ell = np.linspace(0.1, 0.3, 3)
         np.testing.assert_allclose(
             surface.F_uc(h, h, ell),
             0.0,
         )
-        self.assertTrue(np.all(np.isfinite(
-            crystal.F(h, h, ell)
-        )))
+        self.assertTrue(np.all(np.isfinite(crystal.F(h, h, ell))))
         np.testing.assert_allclose(
             surface.zDensity_G(np.linspace(-1.0, 1.0, 5), 0, 0),
             0.0,
@@ -337,14 +316,11 @@ class TestPoissonSurface(unittest.TestCase):
         restored = CTRfilm.PoissonSurface.fromStr(transitional)
 
         np.testing.assert_allclose(restored.basis, [1.0, -1.0])
-        self.assertAlmostEqual(
-            restored.profile.expected_height_change, 0.0
-        )
+        self.assertAlmostEqual(restored.profile.expected_height_change, 0.0)
         self.assertIn("W/layers offset/layers", restored.toStr())
 
 
 class TestLayerStacking(unittest.TestCase):
-
     @staticmethod
     def make_layered_unitcell(name="layered"):
         unitcell = CTRcalc.UnitCell(
@@ -353,9 +329,7 @@ class TestLayerStacking(unittest.TestCase):
             name=name,
         )
         for layer, z in zip((1, 2, 3), (0.0, 1 / 3, 2 / 3)):
-            unitcell.addAtom(
-                "C", [0.0, 0.0, z], 0.1, 0.1, 1.0, layer=layer
-            )
+            unitcell.addAtom("C", [0.0, 0.0, z], 0.1, 0.1, 1.0, layer=layer)
             unitcell.layerpos[float(layer)] = z
         return unitcell
 
@@ -384,9 +358,7 @@ class TestLayerStacking(unittest.TestCase):
         )
         self.assertAlmostEqual(film.height_absolute, 4.0)
 
-        surface = CTRfilm.PoissonSurface(
-            self.make_layered_unitcell("surface")
-        )
+        surface = CTRfilm.PoissonSurface(self.make_layered_unitcell("surface"))
         surface.basis[:] = [2, 0]
         surface.start_layer_number = 2
         surface.createLayers()
@@ -432,9 +404,7 @@ class TestLayerStacking(unittest.TestCase):
         upper.basis[0] = 4
         upper.pos_absolute = 100.0
 
-        surface = CTRfilm.PoissonSurface(
-            self.make_layered_unitcell("surface")
-        )
+        surface = CTRfilm.PoissonSurface(self.make_layered_unitcell("surface"))
         surface.name = "surface"
         surface.basis[:] = [5, 0]
 
@@ -452,19 +422,13 @@ class TestLayerStacking(unittest.TestCase):
         self.assertEqual(lower.end_layer_number, 2)
         self.assertEqual(upper.start_layer_number, 3)
         self.assertEqual(upper.end_layer_number, 1)
-        self.assertAlmostEqual(
-            upper.pos_absolute, lower.height_absolute
-        )
+        self.assertAlmostEqual(upper.pos_absolute, lower.height_absolute)
         self.assertAlmostEqual(
             upper.height_absolute,
             lower.height_absolute + 4.0,
         )
-        self.assertAlmostEqual(
-            surface.pos_absolute, upper.height_absolute
-        )
-        self.assertGreater(
-            surface.height_absolute, surface.pos_absolute
-        )
+        self.assertAlmostEqual(surface.pos_absolute, upper.height_absolute)
+        self.assertGreater(surface.height_absolute, surface.pos_absolute)
 
     def test_stacked_objects_default_to_full_crystal_weight(self):
         film = CTRfilm.Film(self.make_layered_unitcell("film"))
@@ -493,36 +457,22 @@ class TestLayerStacking(unittest.TestCase):
         np.testing.assert_allclose(alternatives.weights, [0.5, 0.5])
 
     def test_different_cycles_require_an_explicit_transition(self):
-        bulk = CTRcalc.UnitCell(
-            [3.0, 3.0, 4.0], [90.0, 90.0, 90.0], name="bulk"
-        )
-        bulk.addAtom(
-            "C", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0, layer=1
-        )
-        bulk.addAtom(
-            "C", [0.0, 0.0, 0.5], 0.1, 0.1, 1.0, layer=2
-        )
+        bulk = CTRcalc.UnitCell([3.0, 3.0, 4.0], [90.0, 90.0, 90.0], name="bulk")
+        bulk.addAtom("C", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0, layer=1)
+        bulk.addAtom("C", [0.0, 0.0, 0.5], 0.1, 0.1, 1.0, layer=2)
         bulk.layerpos = {1.0: 0.0, 2.0: 0.5}
 
         upper = CTRfilm.Film(self.make_layered_unitcell("upper"))
         upper.basis[0] = 2
-        crystal = CTRcalc.SXRDCrystal(
-            bulk, upper, stacking=np.array([1])
-        )
+        crystal = CTRcalc.SXRDCrystal(bulk, upper, stacking=np.array([1]))
 
         with self.assertRaisesRegex(ValueError, "layer_transition"):
             crystal.apply_stacking()
 
     def test_transition_maps_lower_termination_to_upper_start(self):
-        bulk = CTRcalc.UnitCell(
-            [3.0, 3.0, 4.0], [90.0, 90.0, 90.0], name="bulk"
-        )
-        bulk.addAtom(
-            "C", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0, layer=1
-        )
-        bulk.addAtom(
-            "C", [0.0, 0.0, 0.5], 0.1, 0.1, 1.0, layer=2
-        )
+        bulk = CTRcalc.UnitCell([3.0, 3.0, 4.0], [90.0, 90.0, 90.0], name="bulk")
+        bulk.addAtom("C", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0, layer=1)
+        bulk.addAtom("C", [0.0, 0.0, 0.5], 0.1, 0.1, 1.0, layer=2)
         bulk.layerpos = {1.0: 0.0, 2.0: 0.5}
 
         upper = CTRfilm.Film(
@@ -530,9 +480,7 @@ class TestLayerStacking(unittest.TestCase):
             layer_transition={1: 2, 2: 3},
         )
         upper.basis[0] = 2
-        crystal = CTRcalc.SXRDCrystal(
-            bulk, upper, stacking=np.array([1])
-        )
+        crystal = CTRcalc.SXRDCrystal(bulk, upper, stacking=np.array([1]))
         crystal.apply_stacking()
 
         self.assertEqual(bulk.end_layer_number, 2)
@@ -541,18 +489,14 @@ class TestLayerStacking(unittest.TestCase):
         self.assertEqual(upper.end_layer_number, 1)
 
         restored = CTRfilm.Film.fromStr(upper.toStr())
-        self.assertEqual(
-            restored.layer_transition.mapping, {1.0: 2.0, 2.0: 3.0}
-        )
+        self.assertEqual(restored.layer_transition.mapping, {1.0: 2.0, 2.0: 3.0})
 
     def test_rotated_cycle_is_compatible_without_transition(self):
         lower = self.make_layered_unitcell("lower")
         lower.layer_cycle = (2, 3, 1)
         upper = CTRfilm.Film(self.make_layered_unitcell("upper"))
         upper.basis[0] = 2
-        crystal = CTRcalc.SXRDCrystal(
-            lower, upper, stacking=np.array([1])
-        )
+        crystal = CTRcalc.SXRDCrystal(lower, upper, stacking=np.array([1]))
 
         crystal.apply_stacking()
 
@@ -581,9 +525,7 @@ class TestLayerStacking(unittest.TestCase):
         self.assertEqual(film.pos_absolute, 0.0)
         self.assertAlmostEqual(film.height_absolute, 6.0)
 
-        restored = CTRfilm.EpitaxyInterface.fromStr(
-            interface.toStr()
-        )
+        restored = CTRfilm.EpitaxyInterface.fromStr(interface.toStr())
         self.assertFalse(restored._legacy_support_cursor)
         self.assertIsInstance(restored.profile, SkellamProfile)
         np.testing.assert_allclose(restored.basis, interface.basis)
@@ -596,18 +538,18 @@ class TestLayerStacking(unittest.TestCase):
             profile=SkellamProfile(0.5),
         )
         interface.stack_on(
-            0.0, 0.0, unitcell.end_layer_number,
+            0.0,
+            0.0,
+            unitcell.end_layer_number,
             below_state=unitcell.layer_state,
         )
 
-        top_occupancy = np.concatenate([
-            layer.coherentDomainOccupancy
-            for layer in interface.top_layers
-        ])
-        bottom_occupancy = np.concatenate([
-            layer.coherentDomainOccupancy
-            for layer in interface.bottom_layers
-        ])
+        top_occupancy = np.concatenate(
+            [layer.coherentDomainOccupancy for layer in interface.top_layers]
+        )
+        bottom_occupancy = np.concatenate(
+            [layer.coherentDomainOccupancy for layer in interface.bottom_layers]
+        )
 
         self.assertTrue(np.any(top_occupancy < 0.0))
         self.assertTrue(np.any(bottom_occupancy < 0.0))
@@ -619,33 +561,20 @@ class TestLayerStacking(unittest.TestCase):
 
 
 class TestLegacyLayeredCTR(unittest.TestCase):
-
     def test_legacy_xtal_reconstructs_reference_interface(self):
         repository_root = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
         )
-        fixture_root = os.path.join(
-            repository_root, "examples", "CTR", "test"
-        )
-        xtal_path = os.path.join(
-            fixture_root, "0001_fit_2V036_reference.xtal"
-        )
+        fixture_root = os.path.join(repository_root, "examples", "CTR", "test")
+        xtal_path = os.path.join(fixture_root, "0001_fit_2V036_reference.xtal")
         if not os.path.exists(xtal_path):
             self.skipTest(f"Missing optional CTR fixture: {xtal_path}")
-        xtal = CTRcalc.SXRDCrystal.fromFile(
-            xtal_path
-        )
+        xtal = CTRcalc.SXRDCrystal.fromFile(xtal_path)
 
         self.assertIsInstance(xtal["RuO2"], CTRfilm.Film)
-        self.assertIsInstance(
-            xtal["TiO2toRuO2"], CTRfilm.EpitaxyInterface
-        )
-        np.testing.assert_allclose(
-            xtal["TiO2toRuO2"].basis, [0.35, 0.0]
-        )
-        self.assertTrue(
-            xtal["TiO2toRuO2"]._legacy_support_cursor
-        )
+        self.assertIsInstance(xtal["TiO2toRuO2"], CTRfilm.EpitaxyInterface)
+        np.testing.assert_allclose(xtal["TiO2toRuO2"].basis, [0.35, 0.0])
+        self.assertTrue(xtal["TiO2toRuO2"]._legacy_support_cursor)
 
         xtal["RuO2"].basis[0] = 17.0
         xtal["RuO2"].basis_0[0] = 17.0
@@ -672,7 +601,6 @@ class TestLegacyLayeredCTR(unittest.TestCase):
 
 
 class TestStructureFactorNormalization(unittest.TestCase):
-
     @staticmethod
     def make_carbon_cell(a, atoms, name):
         cell = CTRcalc.UnitCell(
@@ -681,45 +609,27 @@ class TestStructureFactorNormalization(unittest.TestCase):
             name=name,
         )
         for x in atoms:
-            cell.addAtom(
-                "C", [x, 0.0, 0.0], 0.1, 0.1, 1.0
-            )
+            cell.addAtom("C", [x, 0.0, 0.0], 0.1, 0.1, 1.0)
         cell.setEnergy(10000.0)
         return cell
 
     def test_raw_unitcell_factor_scales_with_supercell_area(self):
-        primitive = self.make_carbon_cell(
-            3.0, [0.0], "primitive"
-        )
-        supercell = self.make_carbon_cell(
-            6.0, [0.0, 0.5], "supercell"
-        )
+        primitive = self.make_carbon_cell(3.0, [0.0], "primitive")
+        supercell = self.make_carbon_cell(6.0, [0.0, 0.5], "supercell")
         h = np.zeros(1)
 
         primitive_factor = primitive.F_uc(h, h, h)
         supercell_factor = supercell.F_uc(h, h, h)
 
-        np.testing.assert_allclose(
-            supercell_factor, 2.0 * primitive_factor
-        )
-        self.assertAlmostEqual(
-            supercell.uc_area, 2.0 * primitive.uc_area
-        )
+        np.testing.assert_allclose(supercell_factor, 2.0 * primitive_factor)
+        self.assertAlmostEqual(supercell.uc_area, 2.0 * primitive.uc_area)
 
     def test_crystal_factor_is_invariant_to_lateral_supercell(self):
         bulk = self.make_carbon_cell(3.0, [0.0], "bulk")
-        primitive = self.make_carbon_cell(
-            3.0, [0.0], "primitive"
-        )
-        supercell = self.make_carbon_cell(
-            6.0, [0.0, 0.5], "supercell"
-        )
-        primitive_crystal = CTRcalc.SXRDCrystal(
-            bulk, primitive
-        )
-        supercell_crystal = CTRcalc.SXRDCrystal(
-            bulk, supercell
-        )
+        primitive = self.make_carbon_cell(3.0, [0.0], "primitive")
+        supercell = self.make_carbon_cell(6.0, [0.0, 0.5], "supercell")
+        primitive_crystal = CTRcalc.SXRDCrystal(bulk, primitive)
+        supercell_crystal = CTRcalc.SXRDCrystal(bulk, supercell)
         h = np.zeros(1)
 
         np.testing.assert_allclose(
@@ -730,15 +640,11 @@ class TestStructureFactorNormalization(unittest.TestCase):
 
     def test_constructor_propagates_bulk_reference_to_layers(self):
         bulk = self.make_carbon_cell(3.0, [0.0], "bulk")
-        film_cell = self.make_carbon_cell(
-            6.0, [0.0, 0.5], "film"
-        )
+        film_cell = self.make_carbon_cell(6.0, [0.0, 0.5], "film")
         film = CTRfilm.Film(film_cell)
         film.basis[0] = 1
 
-        crystal = CTRcalc.SXRDCrystal(
-            bulk, film, stacking=np.array([1])
-        )
+        crystal = CTRcalc.SXRDCrystal(bulk, film, stacking=np.array([1]))
 
         self.assertIs(crystal.reference_uc, bulk)
         self.assertEqual(crystal.reference_area, bulk.uc_area)
@@ -755,9 +661,7 @@ class TestStructureFactorNormalization(unittest.TestCase):
 
     def test_interface_uses_lower_unitcell_area(self):
         lower = self.make_carbon_cell(3.0, [0.0], "lower")
-        upper = self.make_carbon_cell(
-            6.0, [0.0, 0.5], "upper"
-        )
+        upper = self.make_carbon_cell(6.0, [0.0, 0.5], "upper")
         interface = CTRfilm.EpitaxyInterface(
             upper,
             lower,
@@ -770,15 +674,9 @@ class TestStructureFactorNormalization(unittest.TestCase):
         for top_layer, bottom_layer in zip(
             interface.top_layers, interface.bottom_layers
         ):
+            expected += lower.uc_area * top_layer.F_uc(h, h, h) / top_layer.uc_area
             expected += (
-                lower.uc_area
-                * top_layer.F_uc(h, h, h)
-                / top_layer.uc_area
-            )
-            expected += (
-                lower.uc_area
-                * bottom_layer.F_uc(h, h, h)
-                / bottom_layer.uc_area
+                lower.uc_area * bottom_layer.F_uc(h, h, h) / bottom_layer.uc_area
             )
 
         self.assertEqual(interface.uc_area, lower.uc_area)
@@ -786,7 +684,6 @@ class TestStructureFactorNormalization(unittest.TestCase):
 
 
 class TestCTRTextFilesAndFitParameters(unittest.TestCase):
-
     @staticmethod
     def make_layered_cell(name):
         cell = CTRcalc.UnitCell(
@@ -794,12 +691,8 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
             [90.0, 90.0, 90.0],
             name=name,
         )
-        cell.addAtom(
-            "C", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0, layer=1
-        )
-        cell.addAtom(
-            "C", [0.0, 0.0, 0.5], 0.1, 0.1, 1.0, layer=2
-        )
+        cell.addAtom("C", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0, layer=1)
+        cell.addAtom("C", [0.0, 0.0, 0.5], 0.1, 0.1, 1.0, layer=2)
         cell.layerpos = {1.0: 0.0, 2.0: 0.5}
         cell.setEnergy(10000.0)
         return cell
@@ -812,16 +705,12 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
             profile=SkellamProfile(0.35, 0.0),
             name="interface",
         )
-        film = CTRfilm.Film(
-            self.make_layered_cell("film_cell"), name="film"
-        )
+        film = CTRfilm.Film(self.make_layered_cell("film_cell"), name="film")
         film.basis[:] = [6.0]
         film.basis_0[:] = film.basis
         surface = CTRfilm.PoissonSurface(
             self.make_layered_cell("surface_cell"),
-            profile=PoissonProfile(
-                mean_change=1.5, offset=-1.5
-            ),
+            profile=PoissonProfile(mean_change=1.5, offset=-1.5),
             name="surface",
         )
         surface.basis_0[:] = surface.basis
@@ -829,9 +718,7 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         film.errors = np.array([0.2])
         interface.errors = np.array([0.03, 0.04])
         surface.errors = np.array([0.1, 0.15])
-        film.unitcell.errors = np.full_like(
-            film.unitcell.basis, np.nan
-        )
+        film.unitcell.errors = np.full_like(film.unitcell.basis, np.nan)
         film.unitcell.errors[:, 1:7] = 0.01
 
         crystal = CTRcalc.SXRDCrystal(
@@ -867,33 +754,21 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         self.assertIsNone(restored_xtal["film"].errors)
         self.assertIsNone(restored_xtal["interface"].errors)
         self.assertIsNone(restored_xtal["surface"].errors)
-        np.testing.assert_allclose(
-            restored_xpr.werrors, crystal.werrors
-        )
-        np.testing.assert_allclose(
-            restored_xpr["film"].errors, [0.2]
-        )
-        np.testing.assert_allclose(
-            restored_xpr["interface"].errors, [0.03, 0.04]
-        )
-        np.testing.assert_allclose(
-            restored_xpr["surface"].errors, [0.1, 0.15]
-        )
+        np.testing.assert_allclose(restored_xpr.werrors, crystal.werrors)
+        np.testing.assert_allclose(restored_xpr["film"].errors, [0.2])
+        np.testing.assert_allclose(restored_xpr["interface"].errors, [0.03, 0.04])
+        np.testing.assert_allclose(restored_xpr["surface"].errors, [0.1, 0.15])
         np.testing.assert_allclose(
             restored_xpr["film"].unitcell.errors[:, 1:7],
             crystal["film"].unitcell.errors[:, 1:7],
         )
 
     def test_ctrfilm_fit_parameters_and_errors(self):
-        film = CTRfilm.Film(
-            self.make_layered_cell("film_cell"), name="film"
-        )
+        film = CTRfilm.Film(self.make_layered_cell("film_cell"), name="film")
         film.basis[:] = [6.0]
         film.basis_0[:] = film.basis
         film.addFitParameter("W", limits=(1.0, 10.0))
-        np.testing.assert_allclose(
-            film.getStartParamAndLimits()[0], [6.0]
-        )
+        np.testing.assert_allclose(film.getStartParamAndLimits()[0], [6.0])
         film.setFitParameters([7.0])
         film.setFitErrors([0.25])
         np.testing.assert_allclose(film.basis, [7.0])
@@ -906,23 +781,17 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
             name="interface",
         )
         interface.basis_0[:] = interface.basis
-        interface.addRelParameter(
-            ("W", "S"), (1.0, -1.0), limits=(-0.2, 0.2)
-        )
+        interface.addRelParameter(("W", "S"), (1.0, -1.0), limits=(-0.2, 0.2))
         interface.setFitParameters([0.1])
         interface.setFitErrors([0.02])
         np.testing.assert_allclose(interface.basis, [0.45, -0.1])
-        np.testing.assert_allclose(
-            interface.errors, [0.02, 0.02]
-        )
+        np.testing.assert_allclose(interface.errors, [0.02, 0.02])
         self.assertAlmostEqual(interface.profile.width, 0.45)
         self.assertAlmostEqual(interface.profile.asymmetry, -0.1)
 
         surface = CTRfilm.PoissonSurface(
             self.make_layered_cell("surface_cell"),
-            profile=PoissonProfile(
-                mean_change=2.0, offset=-2.0
-            ),
+            profile=PoissonProfile(mean_change=2.0, offset=-2.0),
             name="surface",
         )
         surface.basis_0[:] = surface.basis
@@ -937,16 +806,12 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         np.testing.assert_allclose(surface.errors, [0.1, 0.1])
         self.assertAlmostEqual(surface.profile.mean_change, 2.5)
         self.assertAlmostEqual(surface.profile.offset, -2.5)
-        self.assertAlmostEqual(
-            surface.profile.expected_height_change, 0.0
-        )
+        self.assertAlmostEqual(surface.profile.expected_height_change, 0.0)
 
     def test_linear_fit_parameter_dictionary_round_trip(self):
         original = CTRfilm.PoissonSurface(
             self.make_layered_cell("surface_cell"),
-            profile=PoissonProfile(
-                mean_change=2.0, offset=-2.0
-            ),
+            profile=PoissonProfile(mean_change=2.0, offset=-2.0),
             name="surface",
         )
         original.basis_0[:] = original.basis
@@ -961,18 +826,14 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
 
         restored = CTRfilm.PoissonSurface(
             self.make_layered_cell("surface_cell"),
-            profile=PoissonProfile(
-                mean_change=2.0, offset=-2.0
-            ),
+            profile=PoissonProfile(mean_change=2.0, offset=-2.0),
             name="surface",
         )
         restored.parametersFromDict(original.parametersToDict())
 
         np.testing.assert_allclose(restored.basis, original.basis)
         np.testing.assert_allclose(restored.errors, original.errors)
-        np.testing.assert_allclose(
-            restored.getFitErrors(), original.getFitErrors()
-        )
+        np.testing.assert_allclose(restored.getFitErrors(), original.getFitErrors())
         self.assertEqual(restored.fitparnames, original.fitparnames)
         self.assertAlmostEqual(restored.profile.mean_change, 2.4)
         self.assertAlmostEqual(restored.profile.offset, -2.4)
@@ -982,50 +843,28 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         crystal["interface"].clearParameters()
         crystal["film"].clearParameters()
         crystal["surface"].clearParameters()
-        crystal["interface"].addFitParameter(
-            "W", limits=(0.0, 1.0)
-        )
-        crystal["film"].addFitParameter(
-            "W", limits=(1.0, 10.0)
-        )
-        crystal["surface"].addFitParameter(
-            "W", limits=(-5.0, 5.0)
-        )
+        crystal["interface"].addFitParameter("W", limits=(0.0, 1.0))
+        crystal["film"].addFitParameter("W", limits=(1.0, 10.0))
+        crystal["surface"].addFitParameter("W", limits=(-5.0, 5.0))
 
-        np.testing.assert_allclose(
-            crystal.getInitialParameters(), [0.35, 6.0, 1.5]
-        )
+        np.testing.assert_allclose(crystal.getInitialParameters(), [0.35, 6.0, 1.5])
         crystal.setParameters([0.4, 7.0, 2.0])
         crystal.setFitErrors([0.01, 0.2, 0.1])
 
-        np.testing.assert_allclose(
-            crystal["interface"].basis, [0.4, 0.0]
-        )
+        np.testing.assert_allclose(crystal["interface"].basis, [0.4, 0.0])
         np.testing.assert_allclose(crystal["film"].basis, [7.0])
-        np.testing.assert_allclose(
-            crystal["surface"].basis, [2.0, -1.5]
-        )
-        np.testing.assert_allclose(
-            crystal.getFitErrors(), [0.01, 0.2, 0.1]
-        )
-        self.assertAlmostEqual(
-            crystal["interface"].profile.width, 0.4
-        )
-        self.assertAlmostEqual(
-            crystal["surface"].profile.mean_change, 2.0
-        )
+        np.testing.assert_allclose(crystal["surface"].basis, [2.0, -1.5])
+        np.testing.assert_allclose(crystal.getFitErrors(), [0.01, 0.2, 0.1])
+        self.assertAlmostEqual(crystal["interface"].profile.width, 0.4)
+        self.assertAlmostEqual(crystal["surface"].profile.mean_change, 2.0)
 
     def test_example_xtal_and_xpr_describe_same_poisson_stack(self):
         repository_root = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
         )
         example_root = os.path.join(repository_root, "examples", "CTR")
-        xtal_path = os.path.join(
-            example_root, "RuO2_TiO2_Poisson_etching.xtal"
-        )
-        xpr_path = os.path.join(
-            example_root, "RuO2_TiO2_Poisson_etching.xpr"
-        )
+        xtal_path = os.path.join(example_root, "RuO2_TiO2_Poisson_etching.xtal")
+        xpr_path = os.path.join(example_root, "RuO2_TiO2_Poisson_etching.xpr")
         for path in (xtal_path, xpr_path):
             if not os.path.exists(path):
                 self.skipTest(f"Missing optional CTR fixture: {path}")
@@ -1049,27 +888,20 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         np.testing.assert_array_equal(xpr.uc_stacking, [3, 2, 1])
         np.testing.assert_allclose(xtal["TiO2toRuO2"].basis, [0.35, 0.0])
         np.testing.assert_allclose(xtal["RuO2"].basis, [17.0])
-        np.testing.assert_allclose(
-            xtal["RuO2surface"].basis, [-6.0, 0.0]
-        )
+        np.testing.assert_allclose(xtal["RuO2surface"].basis, [-6.0, 0.0])
         for name in ("TiO2toRuO2", "RuO2", "RuO2surface"):
-            np.testing.assert_allclose(
-                xtal[name].basis, xpr[name].basis
-            )
+            np.testing.assert_allclose(xtal[name].basis, xpr[name].basis)
 
-        l = np.linspace(0.05, 7.0, 200)
+        l = np.linspace(0.05, 7.0, 200)  # noqa: E741
         zeros = np.zeros_like(l)
         z = np.linspace(-20.0, 100.0, 1000)
-        np.testing.assert_allclose(
-            xtal.F(zeros, zeros, l), xpr.F(zeros, zeros, l)
-        )
+        np.testing.assert_allclose(xtal.F(zeros, zeros, l), xpr.F(zeros, zeros, l))
         np.testing.assert_allclose(
             xtal.zDensity_G(z, 0, 0),
             xpr.zDensity_G(z, 0, 0),
         )
         self.assertIsNone(xtal["RuO2"].unitcell.errors)
         self.assertIsNotNone(xpr["RuO2"].unitcell.errors)
-
 
 
 class StructureFactorValidationMixin:
@@ -1094,9 +926,7 @@ class TestCTRcalculationNumPy(StructureFactorValidationMixin, unittest.TestCase)
             os.path.join(fp, "testdata/0V12_calculated.dat"),
             RODexport=True,
         )
-        pt100 = CTRcalc.UnitCell(
-            [3.9242, 3.9242, 3.9242], [90.0000, 90.0000, 90.0000]
-        )
+        pt100 = CTRcalc.UnitCell([3.9242, 3.9242, 3.9242], [90.0000, 90.0000, 90.0000])
         self.xtal_unitcells.setGlobalReferenceUnitCell(
             pt100, util.z_rotation(np.deg2rad(45.0))
         )
@@ -1122,9 +952,7 @@ class TestCTRcalculationNumba(StructureFactorValidationMixin, unittest.TestCase)
             os.path.join(fp, "testdata/0V12_calculated.dat"),
             RODexport=True,
         )
-        pt100 = CTRcalc.UnitCell(
-            [3.9242, 3.9242, 3.9242], [90.0000, 90.0000, 90.0000]
-        )
+        pt100 = CTRcalc.UnitCell([3.9242, 3.9242, 3.9242], [90.0000, 90.0000, 90.0000])
         self.xtal_unitcells.setGlobalReferenceUnitCell(
             pt100, util.z_rotation(np.deg2rad(45.0))
         )
@@ -1160,9 +988,7 @@ class TestCTRcalculationCpp(StructureFactorValidationMixin, unittest.TestCase):
             os.path.join(fp, "testdata/0V12_calculated.dat"),
             RODexport=True,
         )
-        pt100 = CTRcalc.UnitCell(
-            [3.9242, 3.9242, 3.9242], [90.0000, 90.0000, 90.0000]
-        )
+        pt100 = CTRcalc.UnitCell([3.9242, 3.9242, 3.9242], [90.0000, 90.0000, 90.0000])
         self.xtal_unitcells.setGlobalReferenceUnitCell(
             pt100, util.z_rotation(np.deg2rad(45.0))
         )

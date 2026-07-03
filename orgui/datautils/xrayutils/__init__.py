@@ -28,18 +28,28 @@ __version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
-__all__ = ['CTRcalc','CTRplotutil', 'DetectorCalibration', 'HKLVlieg', 'id31_tools','P212_tools']
+__all__ = [
+    "CTRcalc",
+    "CTRplotutil",
+    "DetectorCalibration",
+    "HKLVlieg",
+    "id31_tools",
+    "P212_tools",
+]
 
 import importlib
 from warnings import warn
 
-deprecated_names = {"id31_tools_5" : "id31_tools"}
-backend_names = ["id31_tools" , "P212_tools"]
+deprecated_names = {"id31_tools_5": "id31_tools"}
+backend_names = ["id31_tools", "P212_tools"]
+
 
 def __getattr__(name):
     if name in deprecated_names:
         warn(f"{name} is deprecated and will be removed in the future", FutureWarning)
-        return importlib.import_module("...backend.beamline." + deprecated_names[name], __name__)
+        return importlib.import_module(
+            "...backend.beamline." + deprecated_names[name], __name__
+        )
     if name in backend_names:
         return importlib.import_module("...backend.beamline." + name, __name__)
     raise AttributeError(f"module {__name__} has no attribute {name}")

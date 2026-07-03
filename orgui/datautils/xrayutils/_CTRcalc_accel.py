@@ -40,7 +40,7 @@ import numpy as np
 def _unitcell_F_core(
     h,
     k,
-    l,
+    l,  # noqa: E741
     atten,
     apply_reference_transform,
     apply_attenuation,
@@ -103,15 +103,9 @@ def _unitcell_F_core(
 
         amplitude = 0.0 + 0.0j
         for i in range(basis.shape[0]):
-            form_factor = (
-                f_factors[i, 10]
-                + f_factors[i, 11]
-                + 1j * f_factors[i, 12]
-            )
+            form_factor = f_factors[i, 10] + f_factors[i, 11] + 1j * f_factors[i, 12]
             for j in range(5):
-                form_factor += f_factors[i, j] * math.exp(
-                    -f_factors[i, j + 5] * q2
-                )
+                form_factor += f_factors[i, j] * math.exp(-f_factors[i, j + 5] * q2)
             form_factor *= math.exp(
                 -(basis[i, 4] * q_para2 + basis[i, 5] * q_perp2)
                 / debye_waller_denominator
@@ -150,8 +144,7 @@ def _unitcell_F_core(
         if apply_bulk_lattice_sum:
             denominator_phase = -two_pi * l[p]
             denominator = 1.0 - math.exp(-atten) * (
-                math.cos(denominator_phase)
-                + 1j * math.sin(denominator_phase)
+                math.cos(denominator_phase) + 1j * math.sin(denominator_phase)
             )
             amplitude /= denominator
         F[p] = amplitude
@@ -161,18 +154,27 @@ def _unitcell_F_core(
 # returns the structure factor of the unit cell
 # h,k,l have to be 1d arrays
 
-@njit('c16[:](f8[::1], f8[::1], f8[::1], f8, f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)', nogil=True, cache=True)
-def unitcell_F_uc_bulk(h,k,l,atten,
-                        basis,
-                        f_factors,
-                        refHKLTransform,
-                        B_mat,
-                        R_mat,
-                        R_mat_inv,
-                        coherentDomainMatrix,
-                        coherentDomainOccupancy,
-                        uc_area
-                       ):
+
+@njit(
+    "c16[:](f8[::1], f8[::1], f8[::1], f8, f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)",  # noqa: E501
+    nogil=True,
+    cache=True,
+)
+def unitcell_F_uc_bulk(
+    h,
+    k,
+    l,  # noqa: E741
+    atten,
+    basis,
+    f_factors,
+    refHKLTransform,
+    B_mat,
+    R_mat,
+    R_mat_inv,
+    coherentDomainMatrix,
+    coherentDomainOccupancy,
+    uc_area,
+):
     """Return one attenuated bulk-cell amplitude in electrons."""
     return _unitcell_F_core(
         h,
@@ -192,20 +194,29 @@ def unitcell_F_uc_bulk(h,k,l,atten,
         coherentDomainOccupancy,
     )
 
+
 # returns the structure factor of the unit cell
 # h,k,l have to be 1d arrays
-@njit('c16[:](f8[::1], f8[::1], f8[::1], f8, f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)', nogil=True, cache=True)
-def unitcell_F_uc_bulk_direct(h,k,l,atten,
-                        basis,
-                        f_factors,
-                        refHKLTransform,
-                        B_mat,
-                        R_mat,
-                        R_mat_inv,
-                        coherentDomainMatrix,
-                        coherentDomainOccupancy,
-                        uc_area
-                       ):
+@njit(
+    "c16[:](f8[::1], f8[::1], f8[::1], f8, f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)",  # noqa: E501
+    nogil=True,
+    cache=True,
+)
+def unitcell_F_uc_bulk_direct(
+    h,
+    k,
+    l,  # noqa: E741
+    atten,
+    basis,
+    f_factors,
+    refHKLTransform,
+    B_mat,
+    R_mat,
+    R_mat_inv,
+    coherentDomainMatrix,
+    coherentDomainOccupancy,
+    uc_area,
+):
     """Return one bulk-cell amplitude in electrons without frame conversion."""
     return _unitcell_F_core(
         h,
@@ -225,18 +236,27 @@ def unitcell_F_uc_bulk_direct(h,k,l,atten,
         coherentDomainOccupancy,
     )
 
-@njit('c16[:](f8[::1], f8[::1], f8[::1], f8, f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)', nogil=True, cache=True)
-def unitcell_F_bulk(h,k,l,atten,
-                        basis,
-                        f_factors,
-                        refHKLTransform,
-                        B_mat,
-                        R_mat,
-                        R_mat_inv,
-                        coherentDomainMatrix,
-                        coherentDomainOccupancy,
-                        uc_area
-                       ):
+
+@njit(
+    "c16[:](f8[::1], f8[::1], f8[::1], f8, f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)",  # noqa: E501
+    nogil=True,
+    cache=True,
+)
+def unitcell_F_bulk(
+    h,
+    k,
+    l,  # noqa: E741
+    atten,
+    basis,
+    f_factors,
+    refHKLTransform,
+    B_mat,
+    R_mat,
+    R_mat_inv,
+    coherentDomainMatrix,
+    coherentDomainOccupancy,
+    uc_area,
+):
     """Return a semi-infinite bulk amplitude in electrons."""
     return _unitcell_F_core(
         h,
@@ -256,18 +276,26 @@ def unitcell_F_bulk(h,k,l,atten,
         coherentDomainOccupancy,
     )
 
-@njit('c16[:](f8[::1], f8[::1], f8[::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)', nogil=True, cache=True)
-def unitcell_F_uc(h,k,l,
-                        basis,
-                        f_factors,
-                        refHKLTransform,
-                        B_mat,
-                        R_mat,
-                        R_mat_inv,
-                        coherentDomainMatrix,
-                        coherentDomainOccupancy,
-                        uc_area
-                       ):
+
+@njit(
+    "c16[:](f8[::1], f8[::1], f8[::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,::1], f8[:,:,::1], f8[::1] , f8)",  # noqa: E501
+    nogil=True,
+    cache=True,
+)
+def unitcell_F_uc(
+    h,
+    k,
+    l,  # noqa: E741
+    basis,
+    f_factors,
+    refHKLTransform,
+    B_mat,
+    R_mat,
+    R_mat_inv,
+    coherentDomainMatrix,
+    coherentDomainOccupancy,
+    uc_area,
+):
     """Return an unnormalized unit-cell amplitude in electrons."""
     return _unitcell_F_core(
         h,

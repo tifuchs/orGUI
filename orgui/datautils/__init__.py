@@ -28,4 +28,4 @@ __version__ = "1.0.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
-__all__ = ['util']
+__all__ = ["util"]

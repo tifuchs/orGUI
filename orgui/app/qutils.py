@@ -33,25 +33,42 @@ from silx.gui import icons
 import numpy as np
 
 
-def messagebox_detailed_message(parent, title, text, detailed_text, icon, buttons=qt.QMessageBox.Ok):
+def messagebox_detailed_message(
+    parent, title, text, detailed_text, icon, buttons=qt.QMessageBox.Ok
+):
     diag = qt.QMessageBox(icon, title, text, buttons, parent)
     diag.setDetailedText(detailed_text)
     return diag.exec()
 
-def critical_detailed_message(parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok):
-    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Critical, buttons=buttons)
 
-def warning_detailed_message(parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok):
-    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Warning, buttons=buttons)
+def critical_detailed_message(
+    parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok
+):
+    return messagebox_detailed_message(
+        parent, title, text, detailed_text, qt.QMessageBox.Critical, buttons=buttons
+    )
 
-def information_detailed_message(parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok):
-    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Information, buttons=buttons)
+
+def warning_detailed_message(
+    parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok
+):
+    return messagebox_detailed_message(
+        parent, title, text, detailed_text, qt.QMessageBox.Warning, buttons=buttons
+    )
+
+
+def information_detailed_message(
+    parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok
+):
+    return messagebox_detailed_message(
+        parent, title, text, detailed_text, qt.QMessageBox.Information, buttons=buttons
+    )
 
 
 class AspectRatioPixmapLabel(qt.QLabel):
     def __init__(self, parent=None):
         qt.QLabel.__init__(self, parent)
-        self.setMinimumSize(1,1)
+        self.setMinimumSize(1, 1)
         self.setScaledContents(False)
         self.pix = None
 
@@ -60,29 +77,31 @@ class AspectRatioPixmapLabel(qt.QLabel):
         super().setPixmap(self.scaledPixmap())
 
     def scaledPixmap(self):
-        return self.pix.scaled(self.size(), qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+        return self.pix.scaled(
+            self.size(), qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation
+        )
 
     def heightForWidth(self, width):
         if self.pix is None:
             return self.height()
         else:
-            return int(( self.pix.height()* width) /self.pix.width())
+            return int((self.pix.height() * width) / self.pix.width())
 
     def sizeHint(self):
         app = qt.QApplication.instance()
         screenGeometry = app.primaryScreen().availableGeometry()
-        w = int(screenGeometry.width()/3)
+        w = int(screenGeometry.width() / 3)
         w_s = self.width()
-        return qt.QSize( max(w, w_s), self.heightForWidth(w))
+        return qt.QSize(max(w, w_s), self.heightForWidth(w))
 
-    def resizeEvent(self,e):
+    def resizeEvent(self, e):
         if self.pix is not None:
             super().setPixmap(self.scaledPixmap())
 
 
 class DataRangeSlider(qt.QWidget):
     """Slider widget, with 4 buttons/icons and a line edit to provide
-    a way of selecting a 
+    a way of selecting a
     """
 
     sigValueChanged = qt.pyqtSignal(object)
@@ -136,16 +155,16 @@ class DataRangeSlider(qt.QWidget):
             self.slider.setMaximum(data.size)
 
         self._lineEdit.setFixedWidth(
-            self._lineEdit.fontMetrics().boundingRect("%.5f" % last).width()
+            self._lineEdit.fontMetrics().boundingRect(f"{last:.5f}").width()
         )
         validator = AxisValidator(self._lineEdit)
         self._lineEdit.setValidator(validator)
         txt = self._lineEdit.validator().fixup(first)
         self._lineEdit.setText(txt)
         if unit is None:
-            self._label.setText("of %f" % last)
+            self._label.setText(f"of {last:f}")
         else:
-            self._label.setText("of %.5f %s" % (last, unit))
+            self._label.setText(f"of {last:.5f} {unit}")
 
         self._lineTxt = self._lineEdit.text()
 
@@ -158,11 +177,10 @@ class DataRangeSlider(qt.QWidget):
         self._lineEdit.editingFinished.connect(self._textChangedSlot)
         self.slider.valueChanged.connect(self._sliderChangedSlot)
 
-
     def setAxis(self, data, unit=None):
         self._data = np.copy(data)
         first, last = self._data[0], self._data[-1]
-        self.slider.setMaximum(self._data.size-1)
+        self.slider.setMaximum(self._data.size - 1)
 
         self._lineEdit.validator().setData(self._data)
         txt = self._lineEdit.validator().fixup(first)
@@ -170,9 +188,9 @@ class DataRangeSlider(qt.QWidget):
         self._lineTxt = self._lineEdit.text()
 
         if unit is None:
-            self._label.setText("of %.5f" % last)
+            self._label.setText(f"of {last:.5f}")
         else:
-            self._label.setText("of %.5f %s" % (last, unit))
+            self._label.setText(f"of {last:.5f} {unit}")
 
         self._textChangedSlot()
 
@@ -212,7 +230,7 @@ class DataRangeSlider(qt.QWidget):
         """Select last/highest frame number"""
         if self._data is None:
             return
-        self.setIndex(self.getRange()[1] -1)
+        self.setIndex(self.getRange()[1] - 1)
 
     def _textChangedSlot(self):
         """Select frame number typed in the line edit widget"""
@@ -228,8 +246,8 @@ class DataRangeSlider(qt.QWidget):
             "event": "indexChanged",
             "oldtxt": self._lineTxt,
             "newtxt": txt,
-            "idx" : idx,
-            "value" : self._data[idx],
+            "idx": idx,
+            "value": self._data[idx],
             "id": id(self),
         }
         self._lineTxt = txt
@@ -249,21 +267,19 @@ class DataRangeSlider(qt.QWidget):
             "event": "indexChanged",
             "oldtxt": self._lineTxt,
             "newtxt": txt,
-            "idx" : idx,
-            "value" : self._data[idx],
+            "idx": idx,
+            "value": self._data[idx],
             "id": id(self),
         }
         self._lineTxt = txt
         self.sigValueChanged.emit(ddict)
 
-
     def getRange(self):
-        """
-        """
+        """ """
         if self._data is None:
             return 0, 0
         else:
-            return 0, self._data.size -1
+            return 0, self._data.size - 1
 
     def getIndex(self):
         if self._data is None:
@@ -272,11 +288,10 @@ class DataRangeSlider(qt.QWidget):
 
     def setValue(self, value):
         if self._lineEdit.validator().validate(value, 0) == qt.QValidator.Invalid:
-            raise ValueError("Invalid value: %s" % value)
+            raise ValueError(f"Invalid value: {value}")
         txt = self._lineEdit.validator().fixup(value)
         self._lineEdit.setText(txt)
         self._textChangedSlot()
-
 
     def getValue(self):
         """Return current frame index"""
@@ -307,10 +322,9 @@ class DataRangeSlider(qt.QWidget):
         self._textChangedSlot()
 
 
-
-
-
-class AxisValidator(qt.QValidator): # each widget needs its own validator due to API issue.
+class AxisValidator(
+    qt.QValidator
+):  # each widget needs its own validator due to API issue.
     def __init__(self, lineedit, parent=None, data=None):
         qt.QValidator.__init__(self, parent)
         self.lineedit = lineedit
@@ -319,15 +333,15 @@ class AxisValidator(qt.QValidator): # each widget needs its own validator due to
     def validate(self, input_, pos):
         try:
             val = float(input_)
-        except:
+        except Exception:
             return qt.QValidator.Invalid, input_, pos
 
         if self._data is not None:
             if self._min <= val <= self._max:
                 idx = np.argmin(np.abs(self._data - val))
                 exactval = self._data[idx]
-                exactrepr = "%.5f" % exactval
-                if "%.5f" % val == exactrepr:
+                exactrepr = f"{exactval:.5f}"
+                if f"{val:.5f}" == exactrepr:
                     return qt.QValidator.Acceptable, input_, pos
             return qt.QValidator.Intermediate, input_, pos
         else:
@@ -335,7 +349,7 @@ class AxisValidator(qt.QValidator): # each widget needs its own validator due to
 
     def getIndex(self, input_):
         if self.validate(input_, 0) == qt.QValidator.Invalid:
-            raise ValueError("Invalid input: %s" % input_)
+            raise ValueError(f"Invalid input: {input_}")
         val = float(input_)
         idx = np.argmin(np.abs(self._data - val))
         return idx
@@ -351,16 +365,14 @@ class AxisValidator(qt.QValidator): # each widget needs its own validator due to
         else:
             self._data = None
 
-    def fixup(self, input_): # broken PyQt API - have to use workaround
-        """ Overrides LineEdit.text!!!!
-        
-        """
+    def fixup(self, input_):  # broken PyQt API - have to use workaround
+        """Overrides LineEdit.text!!!!"""
         val = float(input_)
         if self._data is not None:
             idx = np.argmin(np.abs(self._data - val))
             exactval = self._data[idx]
         else:
             exactval = val
-        exactrepr = "%.5f" % exactval
-        #self.lineedit.setText(exactrepr) # API workaround - this should not be required!
+        exactrepr = f"{exactval:.5f}"
+        # self.lineedit.setText(exactrepr) # API workaround - this should not be required!  # noqa: E501
         return exactrepr

@@ -151,9 +151,7 @@ def test_process_image_polybg_carr_fits_local_plane_under_center_roi():
     assert all_counters[0, 1] == 15.0
     assert all_counters[0, 3] == 32.0
     assert all_counters[0, 2] == pytest.approx(expected_background * 32.0 / 15.0)
-    scaled_background = (
-        all_counters[0, 2] * all_counters[0, 1] / all_counters[0, 3]
-    )
+    scaled_background = all_counters[0, 2] * all_counters[0, 1] / all_counters[0, 3]
     assert scaled_background == pytest.approx(expected_background)
     assert correction_counters[0, 0] == pytest.approx(15.0)
     assert correction_counters[0, 1] == 15.0
@@ -162,12 +160,7 @@ def test_process_image_polybg_carr_fits_local_plane_under_center_roi():
 def test_process_image_polybg_carr_fits_local_quadratic_under_center_roi():
     yy, xx = np.mgrid[:18, :18]
     background = (
-        3.0
-        + 0.2 * xx
-        - 0.4 * yy
-        + 0.03 * xx**2
-        + 0.01 * xx * yy
-        - 0.02 * yy**2
+        3.0 + 0.2 * xx - 0.4 * yy + 0.03 * xx**2 + 0.01 * xx * yy - 0.02 * yy**2
     )
     image = background.copy()
     center = _roi(7, 11, 7, 11)
@@ -202,9 +195,7 @@ def test_process_image_polybg_carr_fits_local_quadratic_under_center_roi():
     )
     assert all_counters[0, 3] == 48.0
     assert all_counters[0, 2] == pytest.approx(expected_background * 48.0 / 16.0)
-    scaled_background = (
-        all_counters[0, 2] * all_counters[0, 1] / all_counters[0, 3]
-    )
+    scaled_background = all_counters[0, 2] * all_counters[0, 1] / all_counters[0, 3]
     assert scaled_background == pytest.approx(expected_background)
 
 
@@ -244,9 +235,7 @@ def test_image_accumulation_helpers_match_numpy_operations():
 
     roi_sum.calcMaxSum(image, sum_image, max_image)
 
-    np.testing.assert_allclose(
-        sum_image, np.ones_like(image) + image, equal_nan=True
-    )
+    np.testing.assert_allclose(sum_image, np.ones_like(image) + image, equal_nan=True)
     np.testing.assert_allclose(
         max_image,
         np.maximum(image, [[0.0, 6.0], [2.0, 1.0]]),
@@ -254,15 +243,11 @@ def test_image_accumulation_helpers_match_numpy_operations():
     )
 
     roi_sum.calcBgSub(image, background)
-    np.testing.assert_allclose(
-        image, [[0.5, -1.0], [np.nan, 2.0]], equal_nan=True
-    )
+    np.testing.assert_allclose(image, [[0.5, -1.0], [np.nan, 2.0]], equal_nan=True)
 
     sum_bg = np.zeros((2, 2), dtype=np.float64)
     max_bg = np.zeros((2, 2), dtype=np.float64)
     roi_sum.calcMaxSum_bg(image, sum_bg, max_bg, background)
     expected = image - background
     np.testing.assert_allclose(sum_bg, expected, equal_nan=True)
-    np.testing.assert_allclose(
-        max_bg, np.maximum(expected, 0.0), equal_nan=True
-    )
+    np.testing.assert_allclose(max_bg, np.maximum(expected, 0.0), equal_nan=True)

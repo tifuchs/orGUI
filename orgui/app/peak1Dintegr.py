@@ -32,9 +32,6 @@ __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
 import logging
-logger = logging.getLogger(__name__)
-
-
 import sys
 import os
 from silx.gui import qt
@@ -42,13 +39,15 @@ import warnings
 from silx.gui import icons
 
 import weakref
-#from IPython import embed
+
+# from IPython import embed
 import silx.gui.plot
 
 
 import silx
 from silx.gui.plot.actions import control as control_actions
-#from silx.gui.widgets.TableWidget import TableWidget
+
+# from silx.gui.widgets.TableWidget import TableWidget
 from silx.gui.plot.CurvesROIWidget import ROITable, ROI, _FloatItem, _RoiMarkerHandler
 from silx.utils.weakref import WeakMethodProxy
 
@@ -64,7 +63,10 @@ from scipy import interpolate as interp
 
 from functools import partial
 
+from silx.io import dictdump
 from silx.io.dictdump import h5todict
+
+logger = logging.getLogger(__name__)
 
 
 QTVERSION = qt.qVersion()
@@ -72,11 +74,10 @@ DEBUG = 0
 
 MAX_ROIS_DISPLAY = 100
 
-if hasattr(np, "trapezoid"): # ToDo remove for orGUI release >1.5
-    _trapz_impl = np.trapezoid # numpy >= 2.0
+if hasattr(np, "trapezoid"):  # ToDo remove for orGUI release >1.5
+    _trapz_impl = np.trapezoid  # numpy >= 2.0
 else:
-    _trapz_impl = np.trapz # numpy < 2.0
-
+    _trapz_impl = np.trapezoid  # numpy < 2.0
 
 
 class RockingPeakIntegrator(qt.QMainWindow):
@@ -85,7 +86,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.database = database
         fontMetric = self.fontMetrics()
         iconSize = qt.QSize(fontMetric.height(), fontMetric.height())
-        self.filedialogdir = '.'
+        self.filedialogdir = "."
         self._currentRoInfo = {}
         self._idx = 0
 
@@ -93,11 +94,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
         self.dbside = qt.QMainWindow()
 
-        self._addRoiDialog = ROICreatorDialog(np.array([0,0]), "unknown")
-        self._addAllRoiDialog =  IntegrationEstimator(np.array([0,0]), "unknown")
+        self._addRoiDialog = ROICreatorDialog(np.array([0, 0]), "unknown")
+        self._addAllRoiDialog = IntegrationEstimator(np.array([0, 0]), "unknown")
 
         self.integrationCorrection = IntegrationCorrectionsDialog()
-
 
         self.dbview = silx.gui.hdf5.Hdf5TreeView()
         self.dbview.setSortingEnabled(True)
@@ -108,7 +108,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.dbside.setCentralWidget(self.dbview)
 
         dbdockwidget.setWidget(self.dbside)
-        self.addDockWidget(qt.Qt.RightDockWidgetArea,dbdockwidget)
+        self.addDockWidget(qt.Qt.RightDockWidgetArea, dbdockwidget)
 
         self.plotROIselect = silx.gui.plot.PlotWindow(
             parent=self,
@@ -128,11 +128,13 @@ class RockingPeakIntegrator(qt.QMainWindow):
             position=True,
             roi=False,
             mask=False,
-            fit=True
+            fit=True,
         )
 
         toolbar = qt.QToolBar()
-        toolbar.addAction(control_actions.OpenGLAction(parent=toolbar, plot=self.plotROIselect))
+        toolbar.addAction(
+            control_actions.OpenGLAction(parent=toolbar, plot=self.plotROIselect)
+        )
         self.plotROIselect.addToolBar(toolbar)
 
         self.curveSlider = qutils.DataRangeSlider()
@@ -140,17 +142,15 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.roiwidget = CurvesROIWidget(self, "ROIs", self.plotROIselect)
         self.roiwidget.roiTable.clear()
 
-        #self.roiwidget.sigROISignal
+        # self.roiwidget.sigROISignal
 
-        #self.plotROIselect.removeToolBar(self.plotROIselect.toolBar())
-        #self.plotROIselect.addToolBar(qt.Qt.LeftToolBarArea ,self.plotROIselect.toolBar())
+        # self.plotROIselect.removeToolBar(self.plotROIselect.toolBar())
+        # self.plotROIselect.addToolBar(qt.Qt.LeftToolBarArea ,self.plotROIselect.toolBar())  # noqa: E501
 
-        #self.plotROintegrated = silx.gui.plot.Plot1D(self)
+        # self.plotROintegrated = silx.gui.plot.Plot1D(self)
 
         self.layout = qt.QVBoxLayout()
         self.mainwidget = qt.QWidget()
-
-
 
         self.zoomslider = qt.QSlider()
         self.zoomslider.setOrientation(qt.Qt.Horizontal)
@@ -166,7 +166,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
         self.zoom_menu.addAction(self.zoomwidget)
 
-        #self.alpha_btn = qt.QToolButton(resources.getQicon("sum_image.png"),"slider")
+        # self.alpha_btn = qt.QToolButton(resources.getQicon("sum_image.png"),"slider")
         self.zoom_btn = qt.QToolButton()
         self.zoom_btn.setIcon(resources.getQicon("search"))
         self.zoom_btn.setToolTip("set automatic zoom factor")
@@ -185,8 +185,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         _plotlayout.addLayout(plotselecttools_bar)
 
         self.layout.addLayout(_plotlayout, 2)
-        #self.layout.addWidget(self.curveSlider, 1)
-
+        # self.layout.addWidget(self.curveSlider, 1)
 
         # ROIS
 
@@ -198,24 +197,22 @@ class RockingPeakIntegrator(qt.QMainWindow):
         anchorROIsGroup = qt.QGroupBox("Anchor ROIs")
         anchorROIsGroupLayout = qt.QHBoxLayout()
 
-        #self.anchorROIButton = qt.QPushButton()
-        #self.anchorROIButton.setIcon(resources.getQicon("anchor-ROI"))
-        #self.anchorROIButton.setIconSize(iconSize)
-        #self.anchorROIButton.setCheckable(True)
+        # self.anchorROIButton = qt.QPushButton()
+        # self.anchorROIButton.setIcon(resources.getQicon("anchor-ROI"))
+        # self.anchorROIButton.setIconSize(iconSize)
+        # self.anchorROIButton.setCheckable(True)
         #
-        #self.anchorROIButton.toggled.connect(self.onAnchorBtnToggled)
+        # self.anchorROIButton.toggled.connect(self.onAnchorBtnToggled)
 
         self.anchorLoadRoiBtn = qt.QPushButton()
         self.anchorLoadRoiBtn.setIcon(icons.getQIcon("document-open"))
         self.anchorLoadRoiBtn.setIconSize(iconSize)
         self.anchorLoadRoiBtn.clicked.connect(self.onAnchorLoadRoi)
 
-
         self.anchorSaveRoiBtn = qt.QPushButton()
         self.anchorSaveRoiBtn.setIcon(icons.getQIcon("document-save"))
         self.anchorSaveRoiBtn.setIconSize(iconSize)
         self.anchorSaveRoiBtn.clicked.connect(self.onAnchorSaveRoi)
-
 
         self.previousROIButton = qt.QPushButton()
         self.previousROIButton.setIcon(icons.getQIcon("previous"))
@@ -229,7 +226,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.fitAnchorsButton = qt.QPushButton("Fit between anchors")
         self.fitAnchorsButton.clicked.connect(self.fit_anchors_along_rod)
 
-        #anchorROIsGroupLayout.addWidget(self.anchorROIButton)
+        # anchorROIsGroupLayout.addWidget(self.anchorROIButton)
         anchorROIsGroupLayout.addWidget(self.fitAnchorsButton)
         anchorROIsGroupLayout.addStretch()
         anchorROIsGroupLayout.addWidget(self.anchorLoadRoiBtn)
@@ -247,21 +244,20 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.addAllROIButton = qt.QPushButton("Add All")
         self.addAllROIButton.clicked.connect(self.onAddAllROI)
 
-        #self.estimateROIButton.setIcon(icons.getQIcon("previous"))
-        #self.estimateROIButton.setIconSize(iconSize)
+        # self.estimateROIButton.setIcon(icons.getQIcon("previous"))
+        # self.estimateROIButton.setIconSize(iconSize)
 
         self.addROIButton = qt.QPushButton("Add")
         self.addROIButton.clicked.connect(self.onAddROI)
-        #self.addROIButton.setIcon(icons.getQIcon("previous"))
-        #self.addROIButton.setIconSize(iconSize)
+        # self.addROIButton.setIcon(icons.getQIcon("previous"))
+        # self.addROIButton.setIconSize(iconSize)
 
         self.deleteROIButton = qt.QPushButton("Delete")
         self.deleteROIButton.clicked.connect(self.onDeleteROI)
-        #self.deleteROIButton.setIcon(icons.getQIcon("previous"))
-        #self.deleteROIButton.setIconSize(iconSize)
+        # self.deleteROIButton.setIcon(icons.getQIcon("previous"))
+        # self.deleteROIButton.setIconSize(iconSize)
         self.deleteAllROIButton = qt.QPushButton("Delete All")
         self.deleteAllROIButton.clicked.connect(self.onDeleteAllROI)
-
 
         modifyROIsGroupLayout.addWidget(self.addAllROIButton)
         modifyROIsGroupLayout.addWidget(self.addROIButton)
@@ -280,7 +276,6 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.footprintOptionsButton = qt.QPushButton("options")
         self.footprintOptionsButton.clicked.connect(self.integrationCorrection.exec)
 
-
         integrateOptionsGroupLayout.addWidget(self.lorentzButton)
         integrateOptionsGroupLayout.addWidget(self.footprintButton)
         integrateOptionsGroupLayout.addWidget(self.footprintOptionsButton)
@@ -296,35 +291,35 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
         bottom_layout.addLayout(roi_edit_layout)
 
-
         self.layout.addLayout(bottom_layout, 1)
 
+        # self.zoom_btn_act = qt.QWidgetAction(self)
+        # self.zoom_btn_act.setDefaultWidget(self.zoom_btn)
 
+        # self.toolbar.addAction(self.showMaxAct)
+        # self.toolbar.addAction(self.showSumAct)
+        # self.toolbar.addAction(self.alpha_btn_act)
 
-        #self.zoom_btn_act = qt.QWidgetAction(self)
-        #self.zoom_btn_act.setDefaultWidget(self.zoom_btn)
-
-
-        #self.toolbar.addAction(self.showMaxAct)
-        #self.toolbar.addAction(self.showSumAct)
-        #self.toolbar.addAction(self.alpha_btn_act)
-
-
-
-        #self.layout.addWidget(self.plotROintegrated, 1)
+        # self.layout.addWidget(self.plotROintegrated, 1)
 
         self.mainwidget.setLayout(self.layout)
         self.setCentralWidget(self.mainwidget)
 
-        toolbar = qt.QToolBar("Database toolbar",self.dbside)
+        toolbar = qt.QToolBar("Database toolbar", self.dbside)
 
-        loadDatabaseAct = toolbar.addAction(icons.getQIcon("document-open"),"Open orgui database")
+        loadDatabaseAct = toolbar.addAction(
+            icons.getQIcon("document-open"), "Open orgui database"
+        )
         loadDatabaseAct.triggered.connect(self.database.onOpenDatabase)
 
-        savenewact = toolbar.addAction(icons.getQIcon("layer-nx"),"Select orgui database location")
+        savenewact = toolbar.addAction(
+            icons.getQIcon("layer-nx"), "Select orgui database location"
+        )
         savenewact.triggered.connect(self.database.onSaveNewDBFile)
 
-        saveact = toolbar.addAction(icons.getQIcon("document-save"),"Save orgui database")
+        saveact = toolbar.addAction(
+            icons.getQIcon("document-save"), "Save orgui database"
+        )
         saveact.triggered.connect(self.database.onSaveDBFile)
 
         self.database.sigChangeRockingScan.connect(self.onChangeRockingScan)
@@ -333,65 +328,77 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
         self.dbside.addToolBar(toolbar)
 
-        #self.curveSlider.setAxis(np.arange(100) / 10., "deg")
+        # self.curveSlider.setAxis(np.arange(100) / 10., "deg")
 
         self.curveSlider.sigValueChanged.connect(self.onSliderValueChanged)
-        #self.roiwidget.sigROISignal.connect(lambda d: print(d))
+        # self.roiwidget.sigROISignal.connect(lambda d: print(d))
 
     def _check_ro_present(self):
         if not self.database.nxfile:
             self._currentRoInfo = {}
-            raise OSError('No database available.')
-        if self._currentRoInfo and 'name' in self._currentRoInfo:
-            if self._currentRoInfo['name'] in self.database.nxfile:
+            raise OSError("No database available.")
+        if self._currentRoInfo and "name" in self._currentRoInfo:
+            if self._currentRoInfo["name"] in self.database.nxfile:
                 return True
             else:
-                n = self._currentRoInfo['name']
+                n = self._currentRoInfo["name"]
                 self._currentRoInfo = {}
-                raise ValueError('Scan %s is not in database.' % n)
+                raise ValueError(f"Scan {n} is not in database.")
         else:
-            raise ValueError('No rocking scan loaded.')
+            raise ValueError("No rocking scan loaded.")
 
     def onIntegrate(self):
         try:
             self._check_ro_present()
         except Exception as e:
-            logger.exception('Cannot integrate scan', 
-                                 extra={'title' : 'Cannot integrate scan',
-                                        'show_dialog' : True,
-                                        'description' : str(e),
-                                        'parent' : self,
-                                        'dialog_level' : logging.WARNING})
+            logger.exception(
+                "Cannot integrate scan",
+                extra={
+                    "title": "Cannot integrate scan",
+                    "show_dialog": True,
+                    "description": str(e),
+                    "parent": self,
+                    "dialog_level": logging.WARNING,
+                },
+            )
             return
         try:
             self.integrate()
         except ValueError as e:
-            if e.args[0] == 'No rocking scan selected.':
-                logger.error('No rocking scan selected.', exc_info=True)
+            if e.args[0] == "No rocking scan selected.":
+                logger.error("No rocking scan selected.", exc_info=True)
             else:
-                logger.exception('Error during scan integration', 
-                                 extra={'title' : 'Error during scan integration',
-                                        'show_dialog' : True,
-                                        'description' : str(e),
-                                        'parent' : self})
+                logger.exception(
+                    "Error during scan integration",
+                    extra={
+                        "title": "Error during scan integration",
+                        "show_dialog": True,
+                        "description": str(e),
+                        "parent": self,
+                    },
+                )
         except Exception as e:
-            logger.exception('Error during scan integration', 
-                             extra={'title' : 'Error during scan integration',
-                                    'show_dialog' : True,
-                                    'description' : str(e),
-                                    'parent' : self})
+            logger.exception(
+                "Error during scan integration",
+                extra={
+                    "title": "Error during scan integration",
+                    "show_dialog": True,
+                    "description": str(e),
+                    "parent": self,
+                },
+            )
             return
 
     def set_roscan(self, name):
         ro_info = self.get_rocking_scan_info(name)
-        #if ro_info['name'] + '/integration' not in self.database.nxfile:
+        # if ro_info['name'] + '/integration' not in self.database.nxfile:
         #    roi1D_info = self.estimate_roi1D_info(ro_info)
-        #    self.database.add_nxdict(roi1D_info, update_mode='modify', h5path=ro_info['name'] + '/integration')
+        #    self.database.add_nxdict(roi1D_info, update_mode='modify', h5path=ro_info['name'] + '/integration')  # noqa: E501
 
         self._currentRoInfo = ro_info
         self._idx = 0
 
-        self.curveSlider.setAxis(self._currentRoInfo['s'], "s")
+        self.curveSlider.setAxis(self._currentRoInfo["s"], "s")
         self.curveSlider.setIndex(0)
         self.plotRoCurve(0)
         self.plotROIselect.resetZoom()
@@ -403,20 +410,24 @@ class RockingPeakIntegrator(qt.QMainWindow):
         try:
             self._check_ro_present()
             self.saveAnchorROI(None)
-        except (ValueError, OSError) as e:
+        except (ValueError, OSError):
             logger.error(
-                'Cannot save roi locations',
+                "Cannot save roi locations",
                 extra={
-                    'title': 'Cannot save roi locations',
-                    'show_dialog': True,
-                    'description': 'Cannot save ROI locations:\nNo ROI information availabe',
-                    'parent': self,
-                    'dialog_level': logging.WARNING,
-                }
+                    "title": "Cannot save roi locations",
+                    "show_dialog": True,
+                    "description": "Cannot save ROI locations:\nNo ROI information availabe",  # noqa: E501
+                    "parent": self,
+                    "dialog_level": logging.WARNING,
+                },
             )
             return
 
-        fileTypeDictSave1D = {"Plain ascii file (*.dat)" : "dat", "CSV file (*.csv)" : "csv",  "NumPy format (*.npy)" : "ndarray"}
+        fileTypeDictSave1D = {
+            "Plain ascii file (*.dat)": "dat",
+            "CSV file (*.csv)": "csv",
+            "NumPy format (*.npy)": "ndarray",
+        }
 
         fileTypeDict = {**fileTypeDictSave1D}
 
@@ -424,10 +435,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
         for f in fileTypeDict:
             fileTypeFilter += f + ";;"
 
-        filename, filetype = qt.QFileDialog.getSaveFileName(self,"Save ROI to file",
-                                                  self.filedialogdir,
-                                                  fileTypeFilter[:-2])
-        if filename == '':
+        filename, filetype = qt.QFileDialog.getSaveFileName(
+            self, "Save ROI to file", self.filedialogdir, fileTypeFilter[:-2]
+        )
+        if filename == "":
             return
         self.filedialogdir = os.path.splitext(filename)[0]
 
@@ -437,14 +448,14 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 self.saveAnchorROI(filename, fileext)
             except Exception as e:
                 logger.exception(
-                    'Cannot save ROIs',
+                    "Cannot save ROIs",
                     extra={
-                        'title': 'Cannot save ROIs',
-                        'show_dialog': True,
-                        'description': 'Cannot save ROI locations: %s' % e,
-                        'detailed_text': traceback.format_exc(),
-                        'parent': self,
-                    }
+                        "title": "Cannot save ROIs",
+                        "show_dialog": True,
+                        "description": f"Cannot save ROI locations: {e}",
+                        "detailed_text": traceback.format_exc(),
+                        "parent": self,
+                    },
                 )
 
     def saveAnchorROI(self, filename=None, fileext=None):
@@ -464,41 +475,43 @@ class RockingPeakIntegrator(qt.QMainWindow):
             If the requested file format is unsupported.
         """
         self._check_ro_present()
-        integration_path = self._currentRoInfo['name'] + '/integration/'
+        integration_path = self._currentRoInfo["name"] + "/integration/"
         if integration_path not in self.database.nxfile:
-            raise ValueError('No ROI information availabe')
-        if integration_path + 'peakpos' not in self.database.nxfile:
-            raise ValueError('No ROI information availabe')
+            raise ValueError("No ROI information availabe")
+        if integration_path + "peakpos" not in self.database.nxfile:
+            raise ValueError("No ROI information availabe")
 
         if filename is None:
             return
 
         if fileext is None:
             _, inferred_ext = os.path.splitext(filename)
-            if inferred_ext == '.npy':
-                fileext = 'ndarray'
+            if inferred_ext == ".npy":
+                fileext = "ndarray"
             else:
-                fileext = inferred_ext.lstrip('.').lower()
+                fileext = inferred_ext.lstrip(".").lower()
 
         self.saveROI(filename, fileext)
 
     def saveROI(self, filename, fileext="dat"):
-        roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
+        roi_info = h5todict(
+            self.database.nxfile, self._currentRoInfo["name"] + "/integration/"
+        )
 
         fmt = "%.7g"
-        csvdelim=";"
+        csvdelim = ";"
 
         data = []
         header = ["peakpos"]
         data.append(roi_info["peakpos"])
 
         for k in list(roi_info.keys()):
-            if k.startswith('sig') or k.startswith('bg'):
-                header.append(k + '_from')
+            if k.startswith("sig") or k.startswith("bg"):
+                header.append(k + "_from")
                 data.append(roi_info[k]["from"])
-                header.append(k + '_to')
+                header.append(k + "_to")
                 data.append(roi_info[k]["to"])
-                header.append(k + '_anchor')
+                header.append(k + "_anchor")
                 data.append(roi_info[k]["anchor"].astype(float))
 
         data = np.vstack(data).T
@@ -512,26 +525,24 @@ class RockingPeakIntegrator(qt.QMainWindow):
         elif fileext == "ndarray":
             np.save(filename, {"header": header, "data": data})
         else:
-            raise Exception("No supported file type %s" % fileext)
+            raise Exception(f"No supported file type {fileext}")
 
-
-
-    #def onAnchorLoadRoi(self):
-        #datasetDialog = DataFileDialog.DataFileDialog(self)
-        #datasetDialog.setFilterMode(DataFileDialog.DataFileDialog.FilterMode.ExistingDataset)
-        #
-        #def customFilter(obj):
-        #    print(obj.basename)
-        #    return True
-        #
-        #    if "NX_class" in obj.attrs:
-        #        if 'orgui_meta' in obj.attrs and obj.attrs['orgui_meta'] == 'rocking':
-        #            if 'integration' in obj:
-        #                return True
-        #    return False
-        #
-        #if datasetDialog.exec():
-        #    print(datasetDialog.selectedUrl())
+    # def onAnchorLoadRoi(self):
+    # datasetDialog = DataFileDialog.DataFileDialog(self)
+    # datasetDialog.setFilterMode(DataFileDialog.DataFileDialog.FilterMode.ExistingDataset)  # noqa: E501
+    #
+    # def customFilter(obj):
+    #    print(obj.basename)
+    #    return True
+    #
+    #    if "NX_class" in obj.attrs:
+    #        if 'orgui_meta' in obj.attrs and obj.attrs['orgui_meta'] == 'rocking':
+    #            if 'integration' in obj:
+    #                return True
+    #    return False
+    #
+    # if datasetDialog.exec():
+    #    print(datasetDialog.selectedUrl())
 
     def onAnchorLoadRoi(self):
         # GUI-only: user-triggered open dialog path.
@@ -539,28 +550,32 @@ class RockingPeakIntegrator(qt.QMainWindow):
             self._check_ro_present()
         except Exception as e:
             logger.exception(
-                'Cannot load roi locations',
+                "Cannot load roi locations",
                 extra={
-                    'title': 'Cannot load roi locations',
-                    'show_dialog': True,
-                    'description': 'Cannot load ROI locations:\n%s' % e,
-                    'parent': self,
-                    'dialog_level': logging.WARNING,
-                }
+                    "title": "Cannot load roi locations",
+                    "show_dialog": True,
+                    "description": f"Cannot load ROI locations:\n{e}",
+                    "parent": self,
+                    "dialog_level": logging.WARNING,
+                },
             )
             return
         if self._currentRoInfo:
-            fileTypeDictSave1D = {"Plain ascii file (*.dat)" : "dat", "CSV file (*.csv)" : "csv", "NumPy format (*.npy)" : "ndarray"}
+            fileTypeDictSave1D = {
+                "Plain ascii file (*.dat)": "dat",
+                "CSV file (*.csv)": "csv",
+                "NumPy format (*.npy)": "ndarray",
+            }
             fileTypeDict = {**fileTypeDictSave1D}
 
             fileTypeFilter = ""
             for f in fileTypeDict:
                 fileTypeFilter += f + ";;"
 
-            filename, filetype = qt.QFileDialog.getOpenFileName(self,"Load ROI from file",
-                                                      self.filedialogdir,
-                                                      fileTypeFilter[:-2])
-            if filename == '':
+            filename, filetype = qt.QFileDialog.getOpenFileName(
+                self, "Load ROI from file", self.filedialogdir, fileTypeFilter[:-2]
+            )
+            if filename == "":
                 return
             self.filedialogdir = os.path.splitext(filename)[0]
 
@@ -568,14 +583,14 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 self.loadAnchorROI(filename)
             except Exception as e:
                 logger.exception(
-                    'Cannot load ROIs',
+                    "Cannot load ROIs",
                     extra={
-                        'title': 'Cannot load ROIs',
-                        'show_dialog': True,
-                        'description': 'Cannot apply ROI locations to rocking scan: %s' % e,
-                        'detailed_text': traceback.format_exc(),
-                        'parent': self,
-                    }
+                        "title": "Cannot load ROIs",
+                        "show_dialog": True,
+                        "description": f"Cannot apply ROI locations to rocking scan: {e}",  # noqa: E501
+                        "detailed_text": traceback.format_exc(),
+                        "parent": self,
+                    },
                 )
                 return
 
@@ -596,73 +611,105 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
     def setROIinfo(self, roi_info, interpolate=True, pktol=0.5):
         if self._currentRoInfo:
-            ro_info = self.get_rocking_scan_info(self._currentRoInfo['name'])
-            sc_h5 = self.database.nxfile[ro_info['name']]['rois']
-            if ro_info['axisname'] == 'mu':
-                pk_pos_exact = sc_h5['alpha_pk'][()]
-            elif ro_info['axisname'] == 'th':
-                pk_pos_exact = sc_h5['theta_pk'][()]
-            elif ro_info['axisname'] == 'chi':
-                pk_pos_exact = sc_h5['chi_pk'][()]
-            elif ro_info['axisname'] == 'phi':
-                pk_pos_exact = sc_h5['phi_pk'][()]
+            ro_info = self.get_rocking_scan_info(self._currentRoInfo["name"])
+            sc_h5 = self.database.nxfile[ro_info["name"]]["rois"]
+            if ro_info["axisname"] == "mu":
+                pk_pos_exact = sc_h5["alpha_pk"][()]
+            elif ro_info["axisname"] == "th":
+                pk_pos_exact = sc_h5["theta_pk"][()]
+            elif ro_info["axisname"] == "chi":
+                pk_pos_exact = sc_h5["chi_pk"][()]
+            elif ro_info["axisname"] == "phi":
+                pk_pos_exact = sc_h5["phi_pk"][()]
             else:
-                raise ValueError("Cannot estimate peak position: unknown scan axis %s" % ro_info['axisname'])
+                raise ValueError(
+                    "Cannot estimate peak position: unknown scan axis {}".format(
+                        ro_info["axisname"]
+                    )  # noqa: E501
+                )
 
             def _set_roi_info(roi_info):
-                if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
-                    del self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+                if (
+                    self._currentRoInfo["name"] + "/integration/"
+                    in self.database.nxfile
+                ):
+                    del self.database.nxfile[
+                        self._currentRoInfo["name"] + "/integration/"
+                    ]
 
                 for k in roi_info:
-                    if k.startswith(('sig', 'bg')):
+                    if k.startswith(("sig", "bg")):
                         roi_info[k]["@NX_class"] = "NXcollection"
-                        roi_info[k]['from'] = roi_info[k]['from'].astype(np.float64)
-                        roi_info[k]['to'] = roi_info[k]['to'].astype(np.float64)
-                        roi_info[k]['anchor'] = roi_info[k]['anchor'].astype(bool)
+                        roi_info[k]["from"] = roi_info[k]["from"].astype(np.float64)
+                        roi_info[k]["to"] = roi_info[k]["to"].astype(np.float64)
+                        roi_info[k]["anchor"] = roi_info[k]["anchor"].astype(bool)
 
                 roi_info["peakpos"] = roi_info["peakpos"].astype(np.float64)
                 roi_info["@NX_class"] = "NXcollection"
                 roi_info["@info"] = "ROI information for the rocking scan integration"
 
-                self.database.add_nxdict(roi_info, update_mode='modify', h5path=ro_info['name'] + '/integration')
+                self.database.add_nxdict(
+                    roi_info,
+                    update_mode="modify",
+                    h5path=ro_info["name"] + "/integration",
+                )
                 self.plotRoCurve(self._idx)
 
             pk_pos = roi_info["peakpos"]
 
             if pk_pos.size != pk_pos_exact.size:
                 if not interpolate:
-                    raise ValueError('Scan length mismatch: requires interpolation is: %s, supplied roi_info: %s' % (pk_pos_exact.size, pk_pos.size))
+                    raise ValueError(
+                        f"Scan length mismatch: requires interpolation is: {pk_pos_exact.size}, supplied roi_info: {pk_pos.size}"  # noqa: E501
+                    )
             elif not np.all(np.isclose(pk_pos, pk_pos_exact)):
                 if not interpolate:
-                    raise ValueError('Peak position mismatch: requires interpolation')
+                    raise ValueError("Peak position mismatch: requires interpolation")
             else:
                 _set_roi_info(roi_info)
                 return
 
-
             if np.abs(np.amax(pk_pos) - np.amax(pk_pos_exact)) >= pktol:
-                raise ValueError('peak position mismatch tolerance exceeded at max by %s' % (np.amax(pk_pos) - np.amax(pk_pos_exact)))
+                raise ValueError(
+                    "peak position mismatch tolerance exceeded at max by %s"
+                    % (np.amax(pk_pos) - np.amax(pk_pos_exact))
+                )
 
             if np.abs(np.amin(pk_pos) - np.amin(pk_pos_exact)) >= pktol:
-                raise ValueError('peak position mismatch tolerance exceeded at min by %s' % (np.amin(pk_pos) - np.amin(pk_pos_exact)))
+                raise ValueError(
+                    "peak position mismatch tolerance exceeded at min by %s"
+                    % (np.amin(pk_pos) - np.amin(pk_pos_exact))
+                )
 
             roi_info_interp = dict()
 
             roi_info_interp["peakpos"] = pk_pos_exact
             for k in roi_info:
-                if k.startswith(('sig', 'bg')):
+                if k.startswith(("sig", "bg")):
                     roi_info_interp[k] = dict()
-                    interfrom = interp.interp1d(roi_info["peakpos"],roi_info[k]['from'],fill_value="extrapolate")
-                    roi_info_interp[k]['from'] = interfrom(pk_pos_exact)
+                    interfrom = interp.interp1d(
+                        roi_info["peakpos"],
+                        roi_info[k]["from"],
+                        fill_value="extrapolate",
+                    )
+                    roi_info_interp[k]["from"] = interfrom(pk_pos_exact)
 
-                    interto = interp.interp1d(roi_info["peakpos"],roi_info[k]['to'],fill_value="extrapolate")
-                    roi_info_interp[k]['to'] = interto(pk_pos_exact)
+                    interto = interp.interp1d(
+                        roi_info["peakpos"], roi_info[k]["to"], fill_value="extrapolate"
+                    )
+                    roi_info_interp[k]["to"] = interto(pk_pos_exact)
 
-                    interanchor = interp.interp1d(roi_info["peakpos"],roi_info[k]['anchor'], kind='nearest',fill_value="extrapolate")
-                    roi_info_interp[k]['anchor'] = interanchor(pk_pos_exact).astype(bool)
+                    interanchor = interp.interp1d(
+                        roi_info["peakpos"],
+                        roi_info[k]["anchor"],
+                        kind="nearest",
+                        fill_value="extrapolate",
+                    )
+                    roi_info_interp[k]["anchor"] = interanchor(pk_pos_exact).astype(
+                        bool
+                    )
 
             _set_roi_info(roi_info_interp)
-
 
     def loadROIinfo(self, filename):
         """Load ROI information from a file.
@@ -682,12 +729,12 @@ class RockingPeakIntegrator(qt.QMainWindow):
             data = np.genfromtxt(filename, names=True)
             roi_info = self._load_roi_info_from_structured_array(data)
         elif fileext == ".csv":
-            data = np.genfromtxt(filename, names=True, delimiter=';')
+            data = np.genfromtxt(filename, names=True, delimiter=";")
             roi_info = self._load_roi_info_from_structured_array(data)
         elif fileext == ".npy":
             roi_info = self._load_roi_info_from_npy(filename)
         else:
-            raise Exception("Not supported file type %s" % fileext)
+            raise Exception(f"Not supported file type {fileext}")
         return roi_info
 
     def _load_roi_info_from_npy(self, filename):
@@ -704,22 +751,23 @@ class RockingPeakIntegrator(qt.QMainWindow):
         """
         payload = np.load(filename, allow_pickle=True)
         if not isinstance(payload, np.ndarray) or payload.shape != ():
-            raise ValueError("NumPy ROI file %s has unsupported payload shape" % filename)
+            raise ValueError(f"NumPy ROI file {filename} has unsupported payload shape")
 
         payload = payload.item()
         if not isinstance(payload, dict):
-            raise ValueError("NumPy ROI file %s does not contain a ROI payload dictionary" % filename)
+            raise ValueError(
+                f"NumPy ROI file {filename} does not contain a ROI payload dictionary"
+            )
         if "header" not in payload or "data" not in payload:
-            raise ValueError("NumPy ROI file %s is missing header or data" % filename)
+            raise ValueError(f"NumPy ROI file {filename} is missing header or data")
 
         header = tuple(payload["header"])
         data = np.asarray(payload["data"])
         if data.ndim != 2:
-            raise ValueError("NumPy ROI file %s data must be a 2D array" % filename)
+            raise ValueError(f"NumPy ROI file {filename} data must be a 2D array")
         if data.shape[1] != len(header):
             raise ValueError(
-                "NumPy ROI file %s column mismatch: data has %s columns, header has %s"
-                % (filename, data.shape[1], len(header))
+                f"NumPy ROI file {filename} column mismatch: data has {data.shape[1]} columns, header has {len(header)}"  # noqa: E501
             )
 
         structured = np.core.records.fromarrays(data.T, names=header)
@@ -742,32 +790,30 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
         roi_names = []
         for k in data.dtype.names:
-            if k.startswith(('sig', 'bg')):
-                k_sp = k.split('_')
+            if k.startswith(("sig", "bg")):
+                k_sp = k.split("_")
                 if len(k_sp) < 3:
                     continue
                 int(k_sp[1])
-                rname = k_sp[0] + '_' + k_sp[1]
+                rname = k_sp[0] + "_" + k_sp[1]
                 if rname not in roi_names:
                     roi_names.append(rname)
 
         roi_info = dict()
         roi_info["peakpos"] = data["peakpos"]
         for k in roi_names:
-            for suffix in ('_from', '_to', '_anchor'):
+            for suffix in ("_from", "_to", "_anchor"):
                 if k + suffix not in data.dtype.names:
-                    raise ValueError("ROI file is missing required column %s" % (k + suffix))
+                    raise ValueError(
+                        "ROI file is missing required column %s" % (k + suffix)
+                    )
             roi_info[k] = dict()
-            roi_info[k]['from'] = data[k + '_from']
-            roi_info[k]['to'] = data[k + '_to']
-            roi_info[k]['anchor'] = data[k + '_anchor'].astype(bool)
+            roi_info[k]["from"] = data[k + "_from"]
+            roi_info[k]["to"] = data[k + "_to"]
+            roi_info[k]["anchor"] = data[k + "_anchor"].astype(bool)
         return roi_info
 
-
-
-
-
-    #ddict = {
+    # ddict = {
     #        "event": "indexChanged",
     #        "oldtxt": self._lineTxt,
     #        "newtxt": txt,
@@ -779,15 +825,20 @@ class RockingPeakIntegrator(qt.QMainWindow):
     def onToNextAnchor(self):
         try:
             self._check_ro_present()
-        except Exception: # non essential: silent
+        except Exception:  # non essential: silent
             return
-        if self._currentRoInfo and self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
-            roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
+        if (
+            self._currentRoInfo
+            and self._currentRoInfo["name"] + "/integration/" in self.database.nxfile
+        ):
+            roi_info = h5todict(
+                self.database.nxfile, self._currentRoInfo["name"] + "/integration/"
+            )
             anchors_all = []
             for roikey in roi_info:
-                if roikey.startswith('sig') or roikey.startswith('bg'):
+                if roikey.startswith("sig") or roikey.startswith("bg"):
                     rdict = roi_info[roikey]
-                    anchors = np.nonzero(rdict['anchor'])[0]
+                    anchors = np.nonzero(rdict["anchor"])[0]
                     anchors_all.append(anchors)
             anchors_all = np.sort(np.unique(np.concatenate(anchors_all)))
 
@@ -798,15 +849,20 @@ class RockingPeakIntegrator(qt.QMainWindow):
     def onToPreviousAnchor(self):
         try:
             self._check_ro_present()
-        except Exception: # non essential: silent
+        except Exception:  # non essential: silent
             return
-        if self._currentRoInfo and self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
-            roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
+        if (
+            self._currentRoInfo
+            and self._currentRoInfo["name"] + "/integration/" in self.database.nxfile
+        ):
+            roi_info = h5todict(
+                self.database.nxfile, self._currentRoInfo["name"] + "/integration/"
+            )
             anchors_all = []
             for roikey in roi_info:
-                if roikey.startswith('sig') or roikey.startswith('bg'):
+                if roikey.startswith("sig") or roikey.startswith("bg"):
                     rdict = roi_info[roikey]
-                    anchors = np.nonzero(rdict['anchor'])[0]
+                    anchors = np.nonzero(rdict["anchor"])[0]
                     anchors_all.append(anchors)
             anchors_all = np.sort(np.unique(np.concatenate(anchors_all)))
 
@@ -814,54 +870,79 @@ class RockingPeakIntegrator(qt.QMainWindow):
             if anchors_prev.size > 0:
                 self.plotRoCurve(anchors_prev[-1])
 
-
-
-    #def get_anchors(self):
-
+    # def get_anchors(self):
 
     def fit_anchors_along_rod(self):
-        if self._currentRoInfo and self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
-            roih5grp = self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
-            roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
+        if (
+            self._currentRoInfo
+            and self._currentRoInfo["name"] + "/integration/" in self.database.nxfile
+        ):
+            roih5grp = self.database.nxfile[
+                self._currentRoInfo["name"] + "/integration/"
+            ]
+            roi_info = h5todict(
+                self.database.nxfile, self._currentRoInfo["name"] + "/integration/"
+            )
             pk_pos_exact = roi_info["peakpos"]
-            axis = self._currentRoInfo['axis']
-            s_array = self._currentRoInfo['s']
+            self._currentRoInfo["axis"]
+            s_array = self._currentRoInfo["s"]
             for roikey in roi_info:
-                if roikey.startswith('sig') or roikey.startswith('bg'):
+                if roikey.startswith("sig") or roikey.startswith("bg"):
                     rdict = roi_info[roikey]
-                    anchors = np.nonzero(rdict['anchor'])[0]
+                    anchors = np.nonzero(rdict["anchor"])[0]
                     if anchors.size == 0:
                         continue
-                    from_ar_anchors = rdict['from'][anchors] - pk_pos_exact[anchors]
-                    to_ar_anchors = rdict['to'][anchors] - pk_pos_exact[anchors]
+                    from_ar_anchors = rdict["from"][anchors] - pk_pos_exact[anchors]
+                    to_ar_anchors = rdict["to"][anchors] - pk_pos_exact[anchors]
 
-                    from_ar = np.zeros(rdict['from'].size)
-                    to_ar = np.zeros(rdict['to'].size)
+                    from_ar = np.zeros(rdict["from"].size)
+                    to_ar = np.zeros(rdict["to"].size)
 
                     # constant to first anchor
                     idx_prev = 0
-                    from_ar[:anchors[idx_prev]] = pk_pos_exact[:anchors[idx_prev]] + from_ar_anchors[idx_prev]
-                    to_ar[:anchors[idx_prev]] = pk_pos_exact[:anchors[idx_prev]] + to_ar_anchors[idx_prev]
+                    from_ar[: anchors[idx_prev]] = (
+                        pk_pos_exact[: anchors[idx_prev]] + from_ar_anchors[idx_prev]
+                    )
+                    to_ar[: anchors[idx_prev]] = (
+                        pk_pos_exact[: anchors[idx_prev]] + to_ar_anchors[idx_prev]
+                    )
                     if anchors.size > 0:
-                        for idx in range(1,anchors.size):
-                            slope = (from_ar_anchors[idx] - from_ar_anchors[idx_prev]) / ( s_array[anchors[idx]] - s_array[anchors[idx_prev]] )
-                            from_tmp = slope * (s_array[anchors[idx_prev]: anchors[idx]] - s_array[anchors[idx_prev]] )
-                            from_ar[anchors[idx_prev]: anchors[idx]] = (from_tmp + from_ar_anchors[idx_prev]) + pk_pos_exact[anchors[idx_prev]: anchors[idx]]
+                        for idx in range(1, anchors.size):
+                            slope = (
+                                from_ar_anchors[idx] - from_ar_anchors[idx_prev]
+                            ) / (s_array[anchors[idx]] - s_array[anchors[idx_prev]])
+                            from_tmp = slope * (
+                                s_array[anchors[idx_prev] : anchors[idx]]
+                                - s_array[anchors[idx_prev]]
+                            )
+                            from_ar[anchors[idx_prev] : anchors[idx]] = (
+                                from_tmp + from_ar_anchors[idx_prev]
+                            ) + pk_pos_exact[anchors[idx_prev] : anchors[idx]]
 
-                            slope = (to_ar_anchors[idx] - to_ar_anchors[idx_prev]) / ( s_array[anchors[idx]] - s_array[anchors[idx_prev]] )
-                            to_tmp = slope * (s_array[anchors[idx_prev]: anchors[idx]] - s_array[anchors[idx_prev]] )
-                            to_ar[anchors[idx_prev]: anchors[idx]] = (to_tmp + to_ar_anchors[idx_prev]) + pk_pos_exact[anchors[idx_prev]: anchors[idx]]
+                            slope = (to_ar_anchors[idx] - to_ar_anchors[idx_prev]) / (
+                                s_array[anchors[idx]] - s_array[anchors[idx_prev]]
+                            )
+                            to_tmp = slope * (
+                                s_array[anchors[idx_prev] : anchors[idx]]
+                                - s_array[anchors[idx_prev]]
+                            )
+                            to_ar[anchors[idx_prev] : anchors[idx]] = (
+                                to_tmp + to_ar_anchors[idx_prev]
+                            ) + pk_pos_exact[anchors[idx_prev] : anchors[idx]]
 
                             idx_prev = idx
 
-                    #constant from last anchor
-                    from_ar[anchors[idx_prev]:] = pk_pos_exact[anchors[idx_prev]:] + from_ar_anchors[idx_prev]
-                    to_ar[anchors[idx_prev]:] = pk_pos_exact[anchors[idx_prev]:] + to_ar_anchors[idx_prev]
+                    # constant from last anchor
+                    from_ar[anchors[idx_prev] :] = (
+                        pk_pos_exact[anchors[idx_prev] :] + from_ar_anchors[idx_prev]
+                    )
+                    to_ar[anchors[idx_prev] :] = (
+                        pk_pos_exact[anchors[idx_prev] :] + to_ar_anchors[idx_prev]
+                    )
 
-                    roih5grp[roikey]['from'][:] = from_ar
-                    roih5grp[roikey]['to'][:] = to_ar
+                    roih5grp[roikey]["from"][:] = from_ar
+                    roih5grp[roikey]["to"][:] = to_ar
             self.plotRoCurve(self._idx)
-
 
     def integrate(self):
         """Integrate rocking-scan ROIs.
@@ -871,39 +952,40 @@ class RockingPeakIntegrator(qt.QMainWindow):
         mode logs progress instead of opening modal dialogs.
         """
         if not self._currentRoInfo:
-            raise ValueError('No rocking scan selected.')
+            raise ValueError("No rocking scan selected.")
         curves = self.get_all_ro_curves()
-        name = self._currentRoInfo['name']
+        name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
         cnters = h5_obj["rois"]
 
+        s_array = cnters["s"][()]
+        alpha = np.deg2rad(cnters["alpha"][()])
+        # alpha_pk = cnters['alpha_pk'][()]
+        delta = np.deg2rad(cnters["delta"][()])
+        gamma = np.deg2rad(cnters["gamma"][()])
 
-        s_array = cnters['s'][()]
-        alpha = np.deg2rad(cnters['alpha'][()])
-        #alpha_pk = cnters['alpha_pk'][()]
-        delta = np.deg2rad(cnters['delta'][()])
-        gamma = np.deg2rad(cnters['gamma'][()])
-
-        axis = curves['axis']
+        axis = curves["axis"]
         scangroup = h5_obj.parent.parent
         aux = {}
-        if 'auxillary' in scangroup:
-            for aux_n in scangroup['auxillary']:
-                if scangroup['auxillary'][aux_n].shape == axis.shape:
-                    aux[aux_n] = scangroup['auxillary'][aux_n][()]
+        if "auxillary" in scangroup:
+            for aux_n in scangroup["auxillary"]:
+                if scangroup["auxillary"][aux_n].shape == axis.shape:
+                    aux[aux_n] = scangroup["auxillary"][aux_n][()]
 
-        if self.lorentzButton.isChecked(): # force Lorentz positive, sign of integrated intensities is forced positive.
-            if curves['axisname'] == 'mu':
-                C_Lor = np.abs(1/np.sin(2*alpha))
+        if (
+            self.lorentzButton.isChecked()
+        ):  # force Lorentz positive, sign of integrated intensities is forced positive.
+            if curves["axisname"] == "mu":
+                C_Lor = np.abs(1 / np.sin(2 * alpha))
                 C_rod = np.cos(gamma)
-            elif curves['axisname'] == 'th':
-                C_Lor = np.abs(1 /(np.sin(delta) * np.cos(alpha) * np.cos(gamma)))
+            elif curves["axisname"] == "th":
+                C_Lor = np.abs(1 / (np.sin(delta) * np.cos(alpha) * np.cos(gamma)))
                 C_rod = np.cos(gamma)
             else:
                 raise NotImplementedError()
         else:
-            C_Lor = 1.
-            C_rod = 1.
+            C_Lor = 1.0
+            C_rod = 1.0
 
         if self.footprintButton.isChecked():
 
@@ -911,103 +993,123 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 arg = ((L * np.sin(alpha_i)) / (np.sqrt(2) * sigma)) * 0.5
                 return (1 / 2) * (special.erf(arg) - special.erf(-arg))
 
-            L = self.integrationCorrection.L.value() * 1e-3 # sample size (mm)
-            beamsize = self.integrationCorrection.beam.value() * 1e-6 # FWHM (mum)
+            L = self.integrationCorrection.L.value() * 1e-3  # sample size (mm)
+            beamsize = self.integrationCorrection.beam.value() * 1e-6  # FWHM (mum)
 
-            sigma_beam = beamsize / (2*np.sqrt(2 * np.log(2)))
+            sigma_beam = beamsize / (2 * np.sqrt(2 * np.log(2)))
 
             C_flux_on_sample = total_flux_sample(alpha, L, sigma_beam)
 
-            C_illum_area = (np.sqrt(2 * np.pi)* sigma_beam * C_flux_on_sample) / (L * np.sin(alpha))
+            C_illum_area = (np.sqrt(2 * np.pi) * sigma_beam * C_flux_on_sample) / (
+                L * np.sin(alpha)
+            )
 
         else:
-            C_flux_on_sample = 1.
-            C_illum_area = 1.
+            C_flux_on_sample = 1.0
+            C_illum_area = 1.0
 
-
-
-
-
-        roih5grp = self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
-        roi_info = h5todict(self.database.nxfile, self._currentRoInfo['name'] + '/integration/')
+        self.database.nxfile[self._currentRoInfo["name"] + "/integration/"]
+        roi_info = h5todict(
+            self.database.nxfile, self._currentRoInfo["name"] + "/integration/"
+        )
 
         int_data = {}
         for roikey in roi_info:
-            if roikey.startswith('sig') or roikey.startswith('bg'):
+            if roikey.startswith("sig") or roikey.startswith("bg"):
                 int_data[roikey] = {
-                    'cnts' : [],
-                    'cnts_errors' : [],
-                    'raw_cnts' : [],
-                    'raw_cnts_errors' : [],
-                    'int_interval' : [],
-                    'C_Lor' : [],
-                    'C_rod' : [],
-                    'C_flux_on_sample' : [],
-                    'C_illum_area' : [],
-                    'auxillary' : dict((a, []) for a in aux),
-                    'auxillary_int' : dict((a, []) for a in aux),
-                    'auxillary_num' : dict((a, []) for a in aux)
+                    "cnts": [],
+                    "cnts_errors": [],
+                    "raw_cnts": [],
+                    "raw_cnts_errors": [],
+                    "int_interval": [],
+                    "C_Lor": [],
+                    "C_rod": [],
+                    "C_flux_on_sample": [],
+                    "C_illum_area": [],
+                    "auxillary": dict((a, []) for a in aux),
+                    "auxillary_int": dict((a, []) for a in aux),
+                    "auxillary_num": dict((a, []) for a in aux),
                 }
 
         # for error propagation of trapezoidal integral
         dx = np.diff(axis)
         deltaaxis = np.empty_like(axis)
-        deltaaxis[0]     = dx[0] / 2
-        deltaaxis[-1]    = dx[-1] / 2
-        deltaaxis[1:-1]  = (dx[:-1] + dx[1:]) / 2
+        deltaaxis[0] = dx[0] / 2
+        deltaaxis[-1] = dx[-1] / 2
+        deltaaxis[1:-1] = (dx[:-1] + dx[1:]) / 2
 
         # deltaaxis = np.gradient(axis) # wrong
-
 
         progress = logger_utils.create_progress_logger(
             self, s_array.size, "Integrating rocking scans"
         )
 
         for i, s in enumerate(s_array):
-            croibg = curves['croibg'][i]
-            croibg_errors = curves['croibg_errors'][i]
+            croibg = curves["croibg"][i]
+            croibg_errors = curves["croibg_errors"][i]
 
             for roikey in int_data:
                 roi = roi_info[roikey]
 
-                idx_from = np.argmin(np.abs(axis - roi['from'][i]))
-                idx_to = np.argmin(np.abs(axis - roi['to'][i]))
+                idx_from = np.argmin(np.abs(axis - roi["from"][i]))
+                idx_to = np.argmin(np.abs(axis - roi["to"][i]))
                 if idx_from > idx_to:
                     idx_from, idx_to = idx_to, idx_from
-                int_interval = np.abs(axis[idx_to] - axis[idx_from]) # can be negative!
-                sign_interval = np.sign(axis[idx_to] - axis[idx_from]) # we force integrals positive
-                int_data[roikey]['int_interval'].append(int_interval)
+                int_interval = np.abs(axis[idx_to] - axis[idx_from])  # can be negative!
+                sign_interval = np.sign(
+                    axis[idx_to] - axis[idx_from]
+                )  # we force integrals positive
+                int_data[roikey]["int_interval"].append(int_interval)
 
                 cnts = croibg[idx_from:idx_to]
                 cnts_errors = croibg_errors[idx_from:idx_to]
 
-                C_corr = np.ones(cnts.size,dtype=float)
+                C_corr = np.ones(cnts.size, dtype=float)
                 if self.lorentzButton.isChecked():
-                    int_data[roikey]['C_Lor'].append( np.mean(C_Lor[i][idx_from:idx_to]) )
-                    int_data[roikey]['C_rod'].append( np.mean(C_rod[i][idx_from:idx_to]) )
+                    int_data[roikey]["C_Lor"].append(np.mean(C_Lor[i][idx_from:idx_to]))
+                    int_data[roikey]["C_rod"].append(np.mean(C_rod[i][idx_from:idx_to]))
 
                 if self.footprintButton.isChecked():
-                    int_data[roikey]['C_flux_on_sample'].append( np.mean(C_flux_on_sample[i][idx_from:idx_to]) )
-                    int_data[roikey]['C_illum_area'].append( np.mean(C_illum_area[i][idx_from:idx_to]) )
-                    C_corr *= C_flux_on_sample[i][idx_from:idx_to] * C_illum_area[i][idx_from:idx_to]
+                    int_data[roikey]["C_flux_on_sample"].append(
+                        np.mean(C_flux_on_sample[i][idx_from:idx_to])
+                    )
+                    int_data[roikey]["C_illum_area"].append(
+                        np.mean(C_illum_area[i][idx_from:idx_to])
+                    )
+                    C_corr *= (
+                        C_flux_on_sample[i][idx_from:idx_to]
+                        * C_illum_area[i][idx_from:idx_to]
+                    )
 
-                I_raw = _trapz_impl(cnts, axis[idx_from:idx_to]) * sign_interval # we force integrals positive
-                I_corr = _trapz_impl(cnts / C_corr , axis[idx_from:idx_to]) * sign_interval # we force integrals positive
+                I_raw = (
+                    _trapz_impl(cnts, axis[idx_from:idx_to]) * sign_interval
+                )  # we force integrals positive
+                I_corr = (
+                    _trapz_impl(cnts / C_corr, axis[idx_from:idx_to]) * sign_interval
+                )  # we force integrals positive
 
-                I_raw_error = np.sqrt(np.sum((cnts_errors * deltaaxis[idx_from:idx_to])**2 )) # to be checked!
+                I_raw_error = np.sqrt(
+                    np.sum((cnts_errors * deltaaxis[idx_from:idx_to]) ** 2)
+                )  # to be checked!
                 I_corr_error = (I_raw_error / I_raw) * I_corr
 
-                int_data[roikey]['raw_cnts'].append(I_raw)
-                int_data[roikey]['raw_cnts_errors'].append(I_raw_error)
+                int_data[roikey]["raw_cnts"].append(I_raw)
+                int_data[roikey]["raw_cnts_errors"].append(I_raw_error)
 
-                int_data[roikey]['cnts'].append(I_corr)
-                int_data[roikey]['cnts_errors'].append(I_corr_error)
+                int_data[roikey]["cnts"].append(I_corr)
+                int_data[roikey]["cnts_errors"].append(I_corr_error)
 
                 for a in aux:
-                    int_data[roikey]['auxillary_int'][a].append(_trapz_impl(aux[a][idx_from:idx_to], axis[idx_from:idx_to])  * sign_interval) # we force integrals positive
-                    int_data[roikey]['auxillary'][a].append(np.sum(aux[a][idx_from:idx_to]))
-                    int_data[roikey]['auxillary_num'][a].append(float(aux[a][idx_from:idx_to].size))
-
+                    int_data[roikey]["auxillary_int"][a].append(
+                        _trapz_impl(aux[a][idx_from:idx_to], axis[idx_from:idx_to])
+                        * sign_interval
+                    )  # we force integrals positive
+                    int_data[roikey]["auxillary"][a].append(
+                        np.sum(aux[a][idx_from:idx_to])
+                    )
+                    int_data[roikey]["auxillary_num"][a].append(
+                        float(aux[a][idx_from:idx_to].size)
+                    )
 
             progress.update(i)
             if progress.wasCanceled():
@@ -1016,7 +1118,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
         for roikey in int_data:
             for d in list(int_data[roikey].keys()):
-                if not d.startswith('auxillary'):
+                if not d.startswith("auxillary"):
                     int_data[roikey][d] = np.array(int_data[roikey][d])
                 else:
                     for dd in list(int_data[roikey][d].keys()):
@@ -1024,221 +1126,243 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
         # signals:
 
-        croi = np.zeros(s_array.size,dtype=float)
-        croi_errors = np.zeros(s_array.size,dtype=float)
-        raw_croi = np.zeros(s_array.size,dtype=float)
-        raw_croi_errors = np.zeros(s_array.size,dtype=float)
-        sig_interval = np.zeros(s_array.size,dtype=float)
-        C_Lorentz = np.zeros(s_array.size,dtype=float)
-        C_rod_intersect = np.zeros(s_array.size,dtype=float)
-        aux_cnts_integral = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
-        aux_cnts_integral_mean = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
-        aux_cnts_sum = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
-        aux_cnts_mean = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
-        aux_cnts_num = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
+        croi = np.zeros(s_array.size, dtype=float)
+        croi_errors = np.zeros(s_array.size, dtype=float)
+        raw_croi = np.zeros(s_array.size, dtype=float)
+        raw_croi_errors = np.zeros(s_array.size, dtype=float)
+        sig_interval = np.zeros(s_array.size, dtype=float)
+        C_Lorentz = np.zeros(s_array.size, dtype=float)
+        C_rod_intersect = np.zeros(s_array.size, dtype=float)
+        aux_cnts_integral = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
+        aux_cnts_integral_mean = dict(
+            (a, np.zeros(s_array.size, dtype=float)) for a in aux
+        )
+        aux_cnts_sum = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
+        aux_cnts_mean = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
+        aux_cnts_num = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
 
         for roikey in int_data:
-            if roikey.startswith('sig'):
-                sig_interval += int_data[roikey]['int_interval']
+            if roikey.startswith("sig"):
+                sig_interval += int_data[roikey]["int_interval"]
                 for a in aux_cnts_num:
-                    aux_cnts_num[a] += int_data[roikey]['auxillary_num'][a]
+                    aux_cnts_num[a] += int_data[roikey]["auxillary_num"][a]
 
         for roikey in int_data:
-            if roikey.startswith('sig'):
-                croi += int_data[roikey]['cnts']
-                croi_errors += int_data[roikey]['cnts_errors']**2
-                raw_croi += int_data[roikey]['raw_cnts']
-                raw_croi_errors += int_data[roikey]['raw_cnts_errors']**2
+            if roikey.startswith("sig"):
+                croi += int_data[roikey]["cnts"]
+                croi_errors += int_data[roikey]["cnts_errors"] ** 2
+                raw_croi += int_data[roikey]["raw_cnts"]
+                raw_croi_errors += int_data[roikey]["raw_cnts_errors"] ** 2
                 for a in aux_cnts_sum:
-                    aux_cnts_sum[a] += int_data[roikey]['auxillary'][a]
-                    aux_cnts_mean[a] += int_data[roikey]['auxillary'][a] / aux_cnts_num[a]
-                    aux_cnts_integral[a] += int_data[roikey]['auxillary_int'][a]
-                    aux_cnts_integral_mean[a] += int_data[roikey]['auxillary_int'][a] / sig_interval
+                    aux_cnts_sum[a] += int_data[roikey]["auxillary"][a]
+                    aux_cnts_mean[a] += (
+                        int_data[roikey]["auxillary"][a] / aux_cnts_num[a]
+                    )
+                    aux_cnts_integral[a] += int_data[roikey]["auxillary_int"][a]
+                    aux_cnts_integral_mean[a] += (
+                        int_data[roikey]["auxillary_int"][a] / sig_interval
+                    )
                 if self.lorentzButton.isChecked():
-                    C_Lorentz += int_data[roikey]['C_Lor'] * (int_data[roikey]['int_interval'] / sig_interval)
-                    C_rod_intersect += int_data[roikey]['C_rod'] * (int_data[roikey]['int_interval'] / sig_interval)
+                    C_Lorentz += int_data[roikey]["C_Lor"] * (
+                        int_data[roikey]["int_interval"] / sig_interval
+                    )
+                    C_rod_intersect += int_data[roikey]["C_rod"] * (
+                        int_data[roikey]["int_interval"] / sig_interval
+                    )
 
         raw_croi_errors = np.sqrt(raw_croi_errors)
         croi_errors = np.sqrt(croi_errors)
 
-
-        bgroi = np.zeros(s_array.size,dtype=float)
-        bgroi_errors = np.zeros(s_array.size,dtype=float)
-        raw_bgroi = np.zeros(s_array.size,dtype=float)
-        raw_bgroi_errors = np.zeros(s_array.size,dtype=float)
-        bg_interval = np.zeros(s_array.size,dtype=float)
-        bgaux_cnts_integral = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
-        bgaux_cnts_integral_mean = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
-        bgaux_cnts_sum = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
-        bgaux_cnts_mean = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
-        bgaux_cnts_num = dict((a, np.zeros(s_array.size,dtype=float)) for a in aux)
+        bgroi = np.zeros(s_array.size, dtype=float)
+        bgroi_errors = np.zeros(s_array.size, dtype=float)
+        raw_bgroi = np.zeros(s_array.size, dtype=float)
+        raw_bgroi_errors = np.zeros(s_array.size, dtype=float)
+        bg_interval = np.zeros(s_array.size, dtype=float)
+        bgaux_cnts_integral = dict(
+            (a, np.zeros(s_array.size, dtype=float)) for a in aux
+        )
+        bgaux_cnts_integral_mean = dict(
+            (a, np.zeros(s_array.size, dtype=float)) for a in aux
+        )
+        bgaux_cnts_sum = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
+        bgaux_cnts_mean = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
+        bgaux_cnts_num = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
 
         for roikey in int_data:
-            if roikey.startswith('bg'):
-                bg_interval += int_data[roikey]['int_interval']
+            if roikey.startswith("bg"):
+                bg_interval += int_data[roikey]["int_interval"]
                 for a in bgaux_cnts_num:
-                    bgaux_cnts_num[a] += int_data[roikey]['auxillary_num'][a]
+                    bgaux_cnts_num[a] += int_data[roikey]["auxillary_num"][a]
 
         for roikey in int_data:
-            if roikey.startswith('bg'):
-                ratio = (sig_interval / bg_interval) * (int_data[roikey]['int_interval'] / bg_interval)
-                bgroi += int_data[roikey]['cnts'] * ratio
-                bgroi_errors += (int_data[roikey]['cnts_errors'] * ratio)**2 # should improve error propagation here!
-                raw_bgroi += int_data[roikey]['raw_cnts'] * ratio
-                raw_bgroi_errors += (int_data[roikey]['raw_cnts_errors'] * ratio)**2
+            if roikey.startswith("bg"):
+                ratio = (sig_interval / bg_interval) * (
+                    int_data[roikey]["int_interval"] / bg_interval
+                )
+                bgroi += int_data[roikey]["cnts"] * ratio
+                bgroi_errors += (
+                    int_data[roikey]["cnts_errors"] * ratio
+                ) ** 2  # should improve error propagation here!
+                raw_bgroi += int_data[roikey]["raw_cnts"] * ratio
+                raw_bgroi_errors += (int_data[roikey]["raw_cnts_errors"] * ratio) ** 2
                 for a in bgaux_cnts_sum:
-                    bgaux_cnts_sum[a] += int_data[roikey]['auxillary'][a]
-                    bgaux_cnts_mean[a] += int_data[roikey]['auxillary'][a] / bgaux_cnts_num[a]
-                    bgaux_cnts_integral[a] += int_data[roikey]['auxillary_int'][a]
-                    bgaux_cnts_integral_mean[a] += int_data[roikey]['auxillary_int'][a]  / bg_interval
-
-
+                    bgaux_cnts_sum[a] += int_data[roikey]["auxillary"][a]
+                    bgaux_cnts_mean[a] += (
+                        int_data[roikey]["auxillary"][a] / bgaux_cnts_num[a]
+                    )
+                    bgaux_cnts_integral[a] += int_data[roikey]["auxillary_int"][a]
+                    bgaux_cnts_integral_mean[a] += (
+                        int_data[roikey]["auxillary_int"][a] / bg_interval
+                    )
 
         raw_bgroi_errors = np.sqrt(raw_croi_errors)
         bgroi_errors = np.sqrt(croi_errors)
 
         # not divided by sig_interval - see issue #25
-        croibg = (croi - bgroi) # / sig_interval # already normalized bg
-        croibg_errors = np.sqrt(croi_errors**2 + bgroi_errors**2) # / sig_interval
+        croibg = croi - bgroi  # / sig_interval # already normalized bg
+        croibg_errors = np.sqrt(croi_errors**2 + bgroi_errors**2)  # / sig_interval
 
-        raw_croibg = raw_croi - raw_bgroi # already normalized bg
+        raw_croibg = raw_croi - raw_bgroi  # already normalized bg
         raw_croibg_errors = np.sqrt(raw_croi_errors**2 + raw_bgroi_errors**2)
 
         if self.lorentzButton.isChecked():
             F2_hkl = croibg / (C_Lorentz * C_rod_intersect)
             F2_hkl_errors = raw_croibg_errors / (C_Lorentz * C_rod_intersect)
 
-        auxil = {
-            "@NX_class": "NXcollection"
-        }
+        auxil = {"@NX_class": "NXcollection"}
         for a in aux_cnts_sum:
             auxil[a] = {
                 "@NX_class": "NXcollection",
-                'csum' : aux_cnts_sum[a],
-                'cmean' : aux_cnts_mean[a],
-                'cintegral' : aux_cnts_integral[a],
-                'cintegral_mean' : aux_cnts_integral_mean[a],
-                'bgsum' : bgaux_cnts_sum[a],
-                'bgmean' : bgaux_cnts_mean[a],
-                'bgintegral' : bgaux_cnts_integral[a],
-                'bgintegral_mean' : bgaux_cnts_integral_mean[a],
+                "csum": aux_cnts_sum[a],
+                "cmean": aux_cnts_mean[a],
+                "cintegral": aux_cnts_integral[a],
+                "cintegral_mean": aux_cnts_integral_mean[a],
+                "bgsum": bgaux_cnts_sum[a],
+                "bgmean": bgaux_cnts_mean[a],
+                "bgintegral": bgaux_cnts_integral[a],
+                "bgintegral_mean": bgaux_cnts_integral_mean[a],
             }
-
-
 
         int_data["@NX_class"] = "NXdetector"
 
-        if 'H_1' in cnters:
-            H_1 = cnters['H_1'][0][()]
-            H_0 = cnters['H_0'][0][()]
+        if "H_1" in cnters:
+            H_1 = cnters["H_1"][0][()]
+            H_0 = cnters["H_0"][0][()]
 
             traj1 = {
                 "@NX_class": "NXcollection",
-                "@direction" : " Integrated rocking scan along H_1*s + H_0 in reciprocal space",
-                "H_1"  : H_1,
-                "H_0" : H_0,
-                "s" : s_array
+                "@direction": " Integrated rocking scan along H_1*s + H_0 in reciprocal space",  # noqa: E501
+                "H_1": H_1,
+                "H_0": H_0,
+                "s": s_array,
             }
 
-            suffix = ''
+            suffix = ""
             i = 0
             name1 = str(H_1) + "*s1+" + str(H_0)
         else:
             traj1 = {
                 "@NX_class": "NXcollection",
-                "@direction" : " Integrated rocking intensity at fixed position",
-                "s" : s_array
+                "@direction": " Integrated rocking intensity at fixed position",
+                "s": s_array,
             }
 
-            suffix = ''
+            suffix = ""
             i = 0
-            name1 = 'static_rocking_scan'
+            name1 = "static_rocking_scan"
 
-        while(self._currentRoInfo['name'] + "/measurement/" + name1 + suffix in self.database.nxfile):
-            suffix = "_%s" % i
+        while (
+            self._currentRoInfo["name"] + "/measurement/" + name1 + suffix
+            in self.database.nxfile
+        ):
+            suffix = f"_{i}"
             i += 1
         availname1 = name1 + suffix
 
-        if cnters['x'].ndim > 1:
-            warnings.warn('You are using an old data base orGUI v1.3.0-alpha'
-                          'X and Y pixel coordinates of rocking scans will be incorrect')
-            x = cnters['x'][:, 0][()] # may provide fix of database here, if anyone asks
-            y = cnters['y'][:, 0][()] # may provide fix of database here, if anyone asks
+        if cnters["x"].ndim > 1:
+            warnings.warn(
+                "You are using an old data base orGUI v1.3.0-alpha"
+                "X and Y pixel coordinates of rocking scans will be incorrect"
+            )
+            x = cnters["x"][:, 0][
+                ()
+            ]  # may provide fix of database here, if anyone asks
+            y = cnters["y"][:, 0][
+                ()
+            ]  # may provide fix of database here, if anyone asks
         else:
-            x = cnters['x'][()]
-            y = cnters['y'][()]
+            x = cnters["x"][()]
+            y = cnters["y"][()]
 
         datas1 = {
             "@NX_class": "NXdata",
             "sixc_angles": {
                 "@NX_class": "NXpositioner",
-                "alpha" : cnters['alpha_pk'][()],
-                "omega" :  cnters['omega_pk'][()],
-                "theta" :  cnters['theta_pk'][()],
-                "delta" : cnters['delta_pk'][()],
-                "gamma" :  cnters['gamma_pk'][()],
-                "chi" :  cnters['chi_pk'][()],
-                "phi" :  cnters['phi_pk'][()],
-                "@unit" : "deg"
+                "alpha": cnters["alpha_pk"][()],
+                "omega": cnters["omega_pk"][()],
+                "theta": cnters["theta_pk"][()],
+                "delta": cnters["delta_pk"][()],
+                "gamma": cnters["gamma_pk"][()],
+                "chi": cnters["chi_pk"][()],
+                "phi": cnters["phi_pk"][()],
+                "@unit": "deg",
             },
             "hkl": {
                 "@NX_class": "NXcollection",
-                "h" :  cnters['HKL_pk'][:, 0][()],
-                "k" :  cnters['HKL_pk'][:, 1][()],
-                "l" : cnters['HKL_pk'][:, 2][()]
+                "h": cnters["HKL_pk"][:, 0][()],
+                "k": cnters["HKL_pk"][:, 1][()],
+                "l": cnters["HKL_pk"][:, 2][()],
             },
-            "counters":{
+            "counters": {
                 "@NX_class": "NXdetector",
-                "croibg"  : croibg,
-                "croibg_errors" :  croibg_errors,
-                "croi" :  croi,
-                "croi_errors" :  croi_errors,
-                "bgroi"  : bgroi,
-                "bgroi_errors"  : bgroi_errors,
-                "raw_croibg"  : raw_croibg,
-                "raw_croibg_errors" :  raw_croibg_errors,
-                "raw_croi" :  raw_croi,
-                "raw_croi_errors" :  raw_croi_errors,
-                "raw_bgroi"  : raw_bgroi,
-                "raw_bgroi_errors"  : raw_bgroi_errors,
-                "integrated": int_data
+                "croibg": croibg,
+                "croibg_errors": croibg_errors,
+                "croi": croi,
+                "croi_errors": croi_errors,
+                "bgroi": bgroi,
+                "bgroi_errors": bgroi_errors,
+                "raw_croibg": raw_croibg,
+                "raw_croibg_errors": raw_croibg_errors,
+                "raw_croi": raw_croi,
+                "raw_croi_errors": raw_croi_errors,
+                "raw_bgroi": raw_bgroi,
+                "raw_bgroi_errors": raw_bgroi_errors,
+                "integrated": int_data,
             },
-            "pixelcoord": {
-                "@NX_class": "NXdetector",
-                "x" : x,
-                "y"  : y
-            },
-            'auxillary' : auxil,
-            "trajectory" : traj1,
-            "@signal" : "counters/croibg",
+            "pixelcoord": {"@NX_class": "NXdetector", "x": x, "y": y},
+            "auxillary": auxil,
+            "trajectory": traj1,
+            "@signal": "counters/croibg",
             "@axes": "trajectory/s",
-            "@title": self._currentRoInfo['name'] + "_" + availname1,
-            "@orgui_meta": "roi"
+            "@title": self._currentRoInfo["name"] + "_" + availname1,
+            "@orgui_meta": "roi",
         }
 
-        measurement =  {
+        measurement = {
             "@NX_class": "NXentry",
-            "@default": availname1 ,
-            availname1 : datas1
+            "@default": availname1,
+            availname1: datas1,
         }
 
         if self.lorentzButton.isChecked():
-            measurement[availname1]['counters']['F2_hkl'] = F2_hkl
-            measurement[availname1]['counters']['F2_hkl_errors'] = F2_hkl_errors
-            measurement[availname1]['@signal'] = "counters/F2_hkl"
+            measurement[availname1]["counters"]["F2_hkl"] = F2_hkl
+            measurement[availname1]["counters"]["F2_hkl_errors"] = F2_hkl_errors
+            measurement[availname1]["@signal"] = "counters/F2_hkl"
 
-        self.database.add_nxdict(measurement, update_mode='modify', h5path=self._currentRoInfo['name'] + "/measurement")
-
+        self.database.add_nxdict(
+            measurement,
+            update_mode="modify",
+            h5path=self._currentRoInfo["name"] + "/measurement",
+        )
 
     def onSliderValueChanged(self, ddict):
         try:
-            self.plotRoCurve(ddict['idx'])
-        except Exception: # non essential: silent
+            self.plotRoCurve(ddict["idx"])
+        except Exception:  # non essential: silent
             try:
                 self._check_ro_present()
-            except:
+            except Exception:
                 return
-
 
     def onRoiChanged(self, roi):
         try:
@@ -1247,304 +1371,364 @@ class RockingPeakIntegrator(qt.QMainWindow):
             logger.exception(
                 "Cannot change roi limits",
                 extra={
-                    'title': 'Cannot change roi limits',
-                    'show_dialog': True,
-                    'description': str(e),
-                    'parent': self,
-                    'dialog_level': logging.WARNING,
-                }
+                    "title": "Cannot change roi limits",
+                    "show_dialog": True,
+                    "description": str(e),
+                    "parent": self,
+                    "dialog_level": logging.WARNING,
+                },
             )
             return
-        #roi_dict = self.get_roi1D_info(self._idx)
+        # roi_dict = self.get_roi1D_info(self._idx)
         roi_t = self.roiwidget.roiTable.roidict[roi]
         new_roi_dict = roi_t.toDict()
         if self._currentRoInfo:
-            #from IPython import embed; embed()
-            if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
-                h5grp = self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+            # from IPython import embed; embed()
+            if self._currentRoInfo["name"] + "/integration/" in self.database.nxfile:
+                h5grp = self.database.nxfile[
+                    self._currentRoInfo["name"] + "/integration/"
+                ]
                 if roi in h5grp:
-                    if h5grp[roi]['from'][self._idx] != new_roi_dict['from'] or h5grp[roi]['to'][self._idx] != new_roi_dict['to']:
-                        h5grp[roi]['from'][self._idx] = new_roi_dict['from']
-                        h5grp[roi]['to'][self._idx] = new_roi_dict['to']
-                        h5grp[roi]['anchor'][self._idx] = True
+                    if (
+                        h5grp[roi]["from"][self._idx] != new_roi_dict["from"]
+                        or h5grp[roi]["to"][self._idx] != new_roi_dict["to"]
+                    ):
+                        h5grp[roi]["from"][self._idx] = new_roi_dict["from"]
+                        h5grp[roi]["to"][self._idx] = new_roi_dict["to"]
+                        h5grp[roi]["anchor"][self._idx] = True
                         self.roiwidget.roiTable.isModelSetting = True
                         roi_t.setAnchor(True)
                         self.roiwidget.roiTable._updateRoiInfo(roi_t.getID())
                         self.roiwidget.roiTable.isModelSetting = False
-                        #print('set true: %s -> %s' % (h5grp[roi]['anchor'][self._idx], roi_t.isAnchor()))
+                        # print('set true: %s -> %s' % (h5grp[roi]['anchor'][self._idx], roi_t.isAnchor()))  # noqa: E501
                     else:
-                        if h5grp[roi]['anchor'][self._idx] != roi_t.isAnchor(): # toggled anchor
-                            #print('toggled: %s -> %s' % (h5grp[roi]['anchor'][self._idx], roi_t.isAnchor()))
-                            h5grp[roi]['anchor'][self._idx] = roi_t.isAnchor()
-                    #else:
+                        if (
+                            h5grp[roi]["anchor"][self._idx] != roi_t.isAnchor()
+                        ):  # toggled anchor
+                            # print('toggled: %s -> %s' % (h5grp[roi]['anchor'][self._idx], roi_t.isAnchor()))  # noqa: E501
+                            h5grp[roi]["anchor"][self._idx] = roi_t.isAnchor()
+                    # else:
                     #    print('New Anchor set: True')
                     #    h5grp[roi]['anchor'][self._idx] = True
                     #    roi_t.setAnchor(True)
-                        #roi_t.anchor_updating = False
+                    # roi_t.anchor_updating = False
 
-        #with qt.QSignalBlocker(self.anchorROIButton):
+        # with qt.QSignalBlocker(self.anchorROIButton):
         #    self.anchorROIButton.setChecked(True)
 
     def get_ro_curve(self, idx):
-        name = self._currentRoInfo['name']
+        name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
         cnters = h5_obj["rois"]
         curve = {
-            'axisname' : self._currentRoInfo['axisname'],
-            'axis' : self._currentRoInfo['axis'],
-            'croibg' : cnters['croibg'][idx][()],
-            'croibg_errors' : cnters['croibg_errors'][idx][()]
+            "axisname": self._currentRoInfo["axisname"],
+            "axis": self._currentRoInfo["axis"],
+            "croibg": cnters["croibg"][idx][()],
+            "croibg_errors": cnters["croibg_errors"][idx][()],
         }
         return curve
 
     def get_all_ro_curves(self):
-        name = self._currentRoInfo['name']
+        name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
         cnters = h5_obj["rois"]
         curve = {
-            'axisname' : self._currentRoInfo['axisname'],
-            'axis' : self._currentRoInfo['axis'],
-            'croibg' : cnters['croibg'][()],
-            'croibg_errors' : cnters['croibg_errors'][()]
+            "axisname": self._currentRoInfo["axisname"],
+            "axis": self._currentRoInfo["axis"],
+            "croibg": cnters["croibg"][()],
+            "croibg_errors": cnters["croibg_errors"][()],
         }
         return curve
 
-    #def onAnchorBtnToggled(self, state):
+    # def onAnchorBtnToggled(self, state):
     #    if self._currentRoInfo:
     #        if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
-    #            h5grp = self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+    #            h5grp = self.database.nxfile[self._currentRoInfo['name'] + '/integration/']  # noqa: E501
     #            for k in h5grp:
     #                if k.startswith('sig') or k.startswith('bg'):
     #                    h5grp[k]['anchor'][self._idx] = state
     #
     #    print(state)
 
-
     def onAddAllROI(self):
         try:
             self._check_ro_present()
-        except Exception as e: # non essential: silent
+        except Exception as e:  # non essential: silent
             logger.exception(
-                'Cannot add ROIs',
+                "Cannot add ROIs",
                 extra={
-                    'title': 'Cannot add ROIs',
-                    'show_dialog': True,
-                    'description': 'Cannot add ROIs:\n%s' % e,
-                    'parent': self,
-                    'dialog_level': logging.WARNING,
-                }
+                    "title": "Cannot add ROIs",
+                    "show_dialog": True,
+                    "description": f"Cannot add ROIs:\n{e}",
+                    "parent": self,
+                    "dialog_level": logging.WARNING,
+                },
             )
             return
         if self._currentRoInfo:
             try:
-                self._addAllRoiDialog.set_axis(self._currentRoInfo['axis'], self._currentRoInfo['axisname'])
+                self._addAllRoiDialog.set_axis(
+                    self._currentRoInfo["axis"], self._currentRoInfo["axisname"]
+                )
                 if self._addAllRoiDialog.exec() == qt.QDialog.Accepted:
                     roidict = self._addAllRoiDialog.get_ranges()
 
-                    if self._currentRoInfo['name'] + '/integration/' in self.database.nxfile:
-                        del self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+                    if (
+                        self._currentRoInfo["name"] + "/integration/"
+                        in self.database.nxfile
+                    ):
+                        del self.database.nxfile[
+                            self._currentRoInfo["name"] + "/integration/"
+                        ]
 
-                    ro_info = self.get_rocking_scan_info(self._currentRoInfo['name'])
-                    sc_h5 = self.database.nxfile[ro_info['name']]['rois']
-                    if ro_info['axisname'] == 'mu':
-                        pk_pos_exact = sc_h5['alpha_pk'][()]
-                    elif ro_info['axisname'] == 'th':
-                        pk_pos_exact = sc_h5['theta_pk'][()]
-                    elif ro_info['axisname'] == 'chi':
-                        pk_pos_exact = sc_h5['chi_pk'][()]
-                    elif ro_info['axisname'] == 'phi':
-                        pk_pos_exact = sc_h5['phi_pk'][()]
+                    ro_info = self.get_rocking_scan_info(self._currentRoInfo["name"])
+                    sc_h5 = self.database.nxfile[ro_info["name"]]["rois"]
+                    if ro_info["axisname"] == "mu":
+                        pk_pos_exact = sc_h5["alpha_pk"][()]
+                    elif ro_info["axisname"] == "th":
+                        pk_pos_exact = sc_h5["theta_pk"][()]
+                    elif ro_info["axisname"] == "chi":
+                        pk_pos_exact = sc_h5["chi_pk"][()]
+                    elif ro_info["axisname"] == "phi":
+                        pk_pos_exact = sc_h5["phi_pk"][()]
                     else:
-                        raise ValueError("Cannot estimate peak position: unknown scan axis %s" % ro_info['axisname'])
-
+                        raise ValueError(
+                            "Cannot estimate peak position: unknown scan axis {}".format(  # noqa: E501
+                                ro_info["axisname"]
+                            )  # noqa: E501
+                        )
 
                     roi1Ddict = {
                         "@NX_class": "NXcollection",
-                        "@info" : "ROI information for the rocking scan integration",
-                        "peakpos" : pk_pos_exact,
-                        'sig_1' : {
-                                "@NX_class": "NXcollection",
-                                'from' :  pk_pos_exact + roidict['sig_1']['from'],
-                                'to' : pk_pos_exact + roidict['sig_1']['to'],
-                                'anchor' : np.zeros_like(pk_pos_exact, dtype=bool)
-                            },
-                        'bg_1' : {
-                                "@NX_class": "NXcollection",
-                                'from' :  pk_pos_exact + roidict['bg_1']['from'],
-                                'to' : pk_pos_exact + roidict['bg_1']['to'],
-                                'anchor' : np.zeros_like(pk_pos_exact, dtype=bool)
-                            },
-                        'bg_2' : {
-                                "@NX_class": "NXcollection",
-                                'from' :  pk_pos_exact + roidict['bg_2']['from'],
-                                'to' : pk_pos_exact + roidict['bg_2']['to'],
-                                'anchor' : np.zeros_like(pk_pos_exact, dtype=bool)
-                            }
+                        "@info": "ROI information for the rocking scan integration",
+                        "peakpos": pk_pos_exact,
+                        "sig_1": {
+                            "@NX_class": "NXcollection",
+                            "from": pk_pos_exact + roidict["sig_1"]["from"],
+                            "to": pk_pos_exact + roidict["sig_1"]["to"],
+                            "anchor": np.zeros_like(pk_pos_exact, dtype=bool),
+                        },
+                        "bg_1": {
+                            "@NX_class": "NXcollection",
+                            "from": pk_pos_exact + roidict["bg_1"]["from"],
+                            "to": pk_pos_exact + roidict["bg_1"]["to"],
+                            "anchor": np.zeros_like(pk_pos_exact, dtype=bool),
+                        },
+                        "bg_2": {
+                            "@NX_class": "NXcollection",
+                            "from": pk_pos_exact + roidict["bg_2"]["from"],
+                            "to": pk_pos_exact + roidict["bg_2"]["to"],
+                            "anchor": np.zeros_like(pk_pos_exact, dtype=bool),
+                        },
                     }
 
-                    self.database.add_nxdict(roi1Ddict, update_mode='modify', h5path=ro_info['name'] + '/integration')
+                    self.database.add_nxdict(
+                        roi1Ddict,
+                        update_mode="modify",
+                        h5path=ro_info["name"] + "/integration",
+                    )
                     self.plotRoCurve(self._idx)
             except Exception as e:
                 logger.exception(
-                    'Cannot add ROI',
+                    "Cannot add ROI",
                     extra={
-                        'title': 'Cannot add ROI',
-                        'show_dialog': True,
-                        'description': 'Cannot add ROI: %s' % e,
-                        'detailed_text': traceback.format_exc(),
-                        'parent': self,
-                        'dialog_level': logging.WARNING,
-                    }
+                        "title": "Cannot add ROI",
+                        "show_dialog": True,
+                        "description": f"Cannot add ROI: {e}",
+                        "detailed_text": traceback.format_exc(),
+                        "parent": self,
+                        "dialog_level": logging.WARNING,
+                    },
                 )
 
     def onAddROI(self):
         try:
             self._check_ro_present()
-        except Exception as e: # non essential: silent
+        except Exception as e:  # non essential: silent
             logger.exception(
-                'Cannot add ROIs',
+                "Cannot add ROIs",
                 extra={
-                    'title': 'Cannot add ROIs',
-                    'show_dialog': True,
-                    'description': 'Cannot add ROIs:\n%s' % e,
-                    'parent': self,
-                    'dialog_level': logging.WARNING,
-                }
+                    "title": "Cannot add ROIs",
+                    "show_dialog": True,
+                    "description": f"Cannot add ROIs:\n{e}",
+                    "parent": self,
+                    "dialog_level": logging.WARNING,
+                },
             )
             return
         if self._currentRoInfo:
             try:
-                self._addRoiDialog.set_axis(self._currentRoInfo['axis'], self._currentRoInfo['axisname'])
+                self._addRoiDialog.set_axis(
+                    self._currentRoInfo["axis"], self._currentRoInfo["axisname"]
+                )
                 if self._addRoiDialog.exec() == qt.QDialog.Accepted:
                     roidict = self._addRoiDialog.get_roi()
-                    ro_info = self.get_rocking_scan_info(self._currentRoInfo['name'])
-                    sc_h5 = self.database.nxfile[ro_info['name']]['rois']
-                    if ro_info['axisname'] == 'mu':
-                        pk_pos_exact = sc_h5['alpha_pk'][()]
-                    elif ro_info['axisname'] == 'th':
-                        pk_pos_exact = sc_h5['theta_pk'][()]
-                    elif ro_info['axisname'] == 'chi':
-                        pk_pos_exact = sc_h5['chi_pk'][()]
-                    elif ro_info['axisname'] == 'phi':
-                        pk_pos_exact = sc_h5['phi_pk'][()]
+                    ro_info = self.get_rocking_scan_info(self._currentRoInfo["name"])
+                    sc_h5 = self.database.nxfile[ro_info["name"]]["rois"]
+                    if ro_info["axisname"] == "mu":
+                        pk_pos_exact = sc_h5["alpha_pk"][()]
+                    elif ro_info["axisname"] == "th":
+                        pk_pos_exact = sc_h5["theta_pk"][()]
+                    elif ro_info["axisname"] == "chi":
+                        pk_pos_exact = sc_h5["chi_pk"][()]
+                    elif ro_info["axisname"] == "phi":
+                        pk_pos_exact = sc_h5["phi_pk"][()]
                     else:
-                        raise ValueError("Cannot estimate peak position: unknown scan axis %s" % ro_info['axisname'])
+                        raise ValueError(
+                            "Cannot estimate peak position: unknown scan axis {}".format(  # noqa: E501
+                                ro_info["axisname"]
+                            )  # noqa: E501
+                        )
 
-                    roi_dict = self.get_roi1D_info(self._idx) # check existing ROIS
+                    roi_dict = self.get_roi1D_info(self._idx)  # check existing ROIS
 
-                    prefix = 'sig' if roidict['signal'] else 'bg'
+                    prefix = "sig" if roidict["signal"] else "bg"
                     no = 0
                     for k in roi_dict:
                         if k.startswith(prefix):
-                            no = max(no, int(k.split('_')[1]))
+                            no = max(no, int(k.split("_")[1]))
 
                     no += 1
 
                     roi1Ddict = {
                         "@NX_class": "NXcollection",
-                        "@info" : "ROI information for the rocking scan integration",
-                        "peakpos" : pk_pos_exact,
-                        '%s_%s' % (prefix, no) : {
-                                "@NX_class": "NXcollection",
-                                'from' :  pk_pos_exact + roidict['from'],
-                                'to' : pk_pos_exact + roidict['to'],
-                                'anchor' : np.zeros_like(pk_pos_exact, dtype=bool)
-                        }
+                        "@info": "ROI information for the rocking scan integration",
+                        "peakpos": pk_pos_exact,
+                        f"{prefix}_{no}": {
+                            "@NX_class": "NXcollection",
+                            "from": pk_pos_exact + roidict["from"],
+                            "to": pk_pos_exact + roidict["to"],
+                            "anchor": np.zeros_like(pk_pos_exact, dtype=bool),
+                        },
                     }
-                    self.database.add_nxdict(roi1Ddict, update_mode='modify', h5path=ro_info['name'] + '/integration')
+                    self.database.add_nxdict(
+                        roi1Ddict,
+                        update_mode="modify",
+                        h5path=ro_info["name"] + "/integration",
+                    )
                     self.plotRoCurve(self._idx)
             except Exception as e:
                 logger.exception(
-                    'Cannot add ROI',
+                    "Cannot add ROI",
                     extra={
-                        'title': 'Cannot add ROI',
-                        'show_dialog': True,
-                        'description': 'Cannot add ROI: %s' % e,
-                        'detailed_text': traceback.format_exc(),
-                        'parent': self,
-                        'dialog_level': logging.WARNING,
-                    }
+                        "title": "Cannot add ROI",
+                        "show_dialog": True,
+                        "description": f"Cannot add ROI: {e}",
+                        "detailed_text": traceback.format_exc(),
+                        "parent": self,
+                        "dialog_level": logging.WARNING,
+                    },
                 )
 
     def onDeleteROI(self):
         try:
             self._check_ro_present()
-        except Exception as e: # non essential: silent
-            logger.warning("Invalid rocking scan info", 
-                 extra={'title' : 'Cannot delete ROIs',
-                        'show_dialog' : True,
-                        'parent' : self,
-                        'description' : 'Cannot delete ROIs:\n%s' % e })
+        except Exception as e:  # non essential: silent
+            logger.warning(
+                "Invalid rocking scan info",
+                extra={
+                    "title": "Cannot delete ROIs",
+                    "show_dialog": True,
+                    "parent": self,
+                    "description": f"Cannot delete ROIs:\n{e}",
+                },
+            )
             return
         if self._currentRoInfo:
             roi_name = self.roiwidget.currentRoi.getName()
-            if qt.QMessageBox.Yes == qt.QMessageBox.question(self, "Delete ROI", "Are you sure you want to delete ROI %s?" % roi_name):
-                if self._currentRoInfo['name'] + '/integration/' + roi_name in self.database.nxfile:
-                    del self.database.nxfile[self._currentRoInfo['name'] + '/integration/' + roi_name]
+            if qt.QMessageBox.Yes == qt.QMessageBox.question(
+                self, "Delete ROI", f"Are you sure you want to delete ROI {roi_name}?"
+            ):
+                if (
+                    self._currentRoInfo["name"] + "/integration/" + roi_name
+                    in self.database.nxfile
+                ):
+                    del self.database.nxfile[
+                        self._currentRoInfo["name"] + "/integration/" + roi_name
+                    ]
                     self.plotRoCurve(self._idx)
                 else:
                     logger.error(
-                        'Cannot delete ROI',
+                        "Cannot delete ROI",
                         extra={
-                            'title': 'Cannot delete ROI',
-                            'show_dialog': True,
-                            'description': 'Cannot delete ROI: no such ROI in database',
-                            'parent': self,
-                            'dialog_level': logging.WARNING,
-                        }
+                            "title": "Cannot delete ROI",
+                            "show_dialog": True,
+                            "description": "Cannot delete ROI: no such ROI in database",
+                            "parent": self,
+                            "dialog_level": logging.WARNING,
+                        },
                     )
 
     def onDeleteAllROI(self):
         try:
             self._check_ro_present()
-        except Exception as e: # non essential: silent
-            logger.warning("Invalid rocking scan info", 
-                 extra={'title' : 'Cannot delete ROIs',
-                        'show_dialog' : True,
-                        'parent' : self,
-                        'description' : 'Cannot delete ROIs:\n%s' % e })
-            # qt.QMessageBox.warning(self,'Cannot delete ROIs', 'Cannot delete ROIs:\n%s' % e)
+        except Exception as e:  # non essential: silent
+            logger.warning(
+                "Invalid rocking scan info",
+                extra={
+                    "title": "Cannot delete ROIs",
+                    "show_dialog": True,
+                    "parent": self,
+                    "description": f"Cannot delete ROIs:\n{e}",
+                },
+            )
+            # qt.QMessageBox.warning(self,'Cannot delete ROIs', 'Cannot delete ROIs:\n%s' % e)  # noqa: E501
             return
         if self._currentRoInfo:
-            if qt.QMessageBox.Yes == qt.QMessageBox.question(self, "Delete All ROIs", "Are you sure you want to delete all ROIs?"):
-                if self._currentRoInfo['name'] + '/integration/'in self.database.nxfile:
-                    del self.database.nxfile[self._currentRoInfo['name'] + '/integration/']
+            if qt.QMessageBox.Yes == qt.QMessageBox.question(
+                self, "Delete All ROIs", "Are you sure you want to delete all ROIs?"
+            ):
+                if (
+                    self._currentRoInfo["name"] + "/integration/"
+                    in self.database.nxfile
+                ):
+                    del self.database.nxfile[
+                        self._currentRoInfo["name"] + "/integration/"
+                    ]
                     self.plotRoCurve(self._idx)
                 else:
                     logger.error(
-                        'Cannot delete ROIs',
+                        "Cannot delete ROIs",
                         extra={
-                            'title': 'Cannot delete ROIs',
-                            'show_dialog': True,
-                            'description': 'Cannot delete ROI: no ROIs in database',
-                            'parent': self,
-                            'dialog_level': logging.WARNING,
-                        }
+                            "title": "Cannot delete ROIs",
+                            "show_dialog": True,
+                            "description": "Cannot delete ROI: no ROIs in database",
+                            "parent": self,
+                            "dialog_level": logging.WARNING,
+                        },
                     )
-
 
     def plotRoCurve(self, idx):
         ro_curve = self.get_ro_curve(idx)
-        s = self._currentRoInfo['s'][idx]
-        if self._currentRoInfo['type'] == 'hklscan':
-            hkl = self._currentRoInfo['H_1'] * s + self._currentRoInfo['H_0']
-            title = "Rocking scan at s = %s, HKL = [%.2f %.2f %.2f]" % (s, *hkl)
+        s = self._currentRoInfo["s"][idx]
+        if self._currentRoInfo["type"] == "hklscan":
+            hkl = self._currentRoInfo["H_1"] * s + self._currentRoInfo["H_0"]
+            title = "Rocking scan at s = {}, HKL = [{:.2f} {:.2f} {:.2f}]".format(
+                s, *hkl
+            )  # noqa: E501
         else:
-            hkl = self._currentRoInfo['HKL_pk'][idx]
-            title = "Rocking scan at s = %s, HKL = [%.2f %.2f %.2f]" % (s, *hkl)
+            hkl = self._currentRoInfo["HKL_pk"][idx]
+            title = "Rocking scan at s = {}, HKL = [{:.2f} {:.2f} {:.2f}]".format(
+                s, *hkl
+            )  # noqa: E501
         self.plotROIselect.setGraphTitle(title)
-        #print('before table clear')
+        # print('before table clear')
         self.roiwidget.roiTable.clear()
-        #print('after table clear')
+        # print('after table clear')
 
-        #print('before plot clear')
+        # print('before plot clear')
         self.plotROIselect.clear()
-        #print('after plot clear')
+        # print('after plot clear')
 
-        lbl = self.plotROIselect.addCurve(ro_curve['axis'], ro_curve['croibg'], legend=title,
-                           xlabel="%s / deg" % self._currentRoInfo['axisname'],
-                           ylabel='center ROI background subtracted / cnts',
-                           yerror=ro_curve['croibg_errors'], resetzoom=False)
+        lbl = self.plotROIselect.addCurve(
+            ro_curve["axis"],
+            ro_curve["croibg"],
+            legend=title,
+            xlabel="{} / deg".format(self._currentRoInfo["axisname"]),
+            ylabel="center ROI background subtracted / cnts",
+            yerror=ro_curve["croibg_errors"],
+            resetzoom=False,
+        )
 
         self.plotROIselect.setActiveCurve(lbl)
         self._idx = idx
@@ -1552,9 +1736,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
         with qt.QSignalBlocker(self.curveSlider):
             self.curveSlider.setIndex(idx)
 
-
         roi_dict = self.get_roi1D_info(idx)
-        #with qt.QSignalBlocker(self.anchorROIButton):
+        # with qt.QSignalBlocker(self.anchorROIButton):
         #    for k in roi_dict:
         #        dk = roi_dict[k]
         #        if dk['anchor']:
@@ -1566,24 +1749,36 @@ class RockingPeakIntegrator(qt.QMainWindow):
         minfrom = np.inf
         maxto = -np.inf
         for key in roi_dict:
-            if key.startswith('sig'):
+            if key.startswith("sig"):
                 roi_d = roi_dict[key]
-                roi = AnchorROI(key, fromdata=roi_d['from'], todata=roi_d['to'], type_=str(roi_d['type']), anchor=roi_d['anchor'])
-                minfrom = min(minfrom, roi_d['from'])
-                maxto = max(maxto, roi_d['to'])
-                self.roiwidget.roiTable.isModelSetting = True # workaround for a signal loop, which resets anchor status to False
-                # took me 2 days to concede, do not try to fix this bug. Workaround is enough
+                roi = AnchorROI(
+                    key,
+                    fromdata=roi_d["from"],
+                    todata=roi_d["to"],
+                    type_=str(roi_d["type"]),
+                    anchor=roi_d["anchor"],
+                )
+                minfrom = min(minfrom, roi_d["from"])
+                maxto = max(maxto, roi_d["to"])
+                self.roiwidget.roiTable.isModelSetting = True  # workaround for a signal loop, which resets anchor status to False  # noqa: E501
+                # took me 2 days to concede, do not try to fix this bug. Workaround is enough  # noqa: E501
                 self.roiwidget.roiTable.addRoi(roi)
                 self.roiwidget.roiTable._updateRoiInfo(roi.getID())
                 roi.sigChanged.connect(partial(self.onRoiChanged, key))
                 self.roiwidget.roiTable.isModelSetting = False
-            elif key.startswith('bg'): # color?
+            elif key.startswith("bg"):  # color?
                 roi_d = roi_dict[key]
-                roi = AnchorROI(key, fromdata=roi_d['from'], todata=roi_d['to'], type_=str(roi_d['type']), anchor=roi_d['anchor'])
-                minfrom = min(minfrom, roi_d['from'])
-                maxto = max(maxto, roi_d['to'])
-                self.roiwidget.roiTable.isModelSetting = True # workaround for a signal loop, which resets anchor status to False
-                # took me 2 days to concede, do not try to fix this bug. Workaround is enough
+                roi = AnchorROI(
+                    key,
+                    fromdata=roi_d["from"],
+                    todata=roi_d["to"],
+                    type_=str(roi_d["type"]),
+                    anchor=roi_d["anchor"],
+                )
+                minfrom = min(minfrom, roi_d["from"])
+                maxto = max(maxto, roi_d["to"])
+                self.roiwidget.roiTable.isModelSetting = True  # workaround for a signal loop, which resets anchor status to False  # noqa: E501
+                # took me 2 days to concede, do not try to fix this bug. Workaround is enough  # noqa: E501
                 self.roiwidget.roiTable.addRoi(roi)
                 self.roiwidget.roiTable._updateRoiInfo(roi.getID())
                 roi.sigChanged.connect(partial(self.onRoiChanged, key))
@@ -1600,45 +1795,42 @@ class RockingPeakIntegrator(qt.QMainWindow):
             minfrom = np.inf
             maxto = -np.inf
             for key in roi_dict:
-                if key.startswith('sig'):
+                if key.startswith("sig"):
                     roi_d = roi_dict[key]
-                    minfrom = min(minfrom, roi_d['from'])
-                    maxto = max(maxto, roi_d['to'])
-                elif key.startswith('bg'): # color?
+                    minfrom = min(minfrom, roi_d["from"])
+                    maxto = max(maxto, roi_d["to"])
+                elif key.startswith("bg"):  # color?
                     roi_d = roi_dict[key]
-                    minfrom = min(minfrom, roi_d['from'])
-                    maxto = max(maxto, roi_d['to'])
+                    minfrom = min(minfrom, roi_d["from"])
+                    maxto = max(maxto, roi_d["to"])
             if np.all(np.isfinite([minfrom, maxto])):
-                add_rnge = (maxto - minfrom) * ((value**1.5)/100)
+                add_rnge = (maxto - minfrom) * ((value**1.5) / 100)
                 self.plotROIselect.setGraphXLimits(minfrom - add_rnge, maxto + add_rnge)
         except Exception:
             pass
-            #print("Cannot zoom:" , e)
+            # print("Cannot zoom:" , e)
             # can fail, add better error handling later!
 
-
-
-
     def get_roi1D_info(self, idx):
-        name = self._currentRoInfo['name']
-        if 'integration' in self.database.nxfile[name]:
-            h5_obj = self.database.nxfile[name]['integration']
+        name = self._currentRoInfo["name"]
+        if "integration" in self.database.nxfile[name]:
+            h5_obj = self.database.nxfile[name]["integration"]
 
             roi1Ddict = {}
             for k in h5_obj:
-                if k.startswith('sig') or k.startswith('bg') :
+                if k.startswith("sig") or k.startswith("bg"):
                     roi1Ddict[k] = {
-                        'name' : k,
-                        'from' : h5_obj[k]['from'][idx][()],
-                        'to' : h5_obj[k]['to'][idx][()],
-                        'type' : 'signal',
-                        'anchor' : h5_obj[k]['anchor'][idx][()]
+                        "name": k,
+                        "from": h5_obj[k]["from"][idx][()],
+                        "to": h5_obj[k]["to"][idx][()],
+                        "type": "signal",
+                        "anchor": h5_obj[k]["anchor"][idx][()],
                     }
         else:
             roi1Ddict = {}
         return roi1Ddict
 
-    #def estimate_roi1D_info(self, ro_info):
+    # def estimate_roi1D_info(self, ro_info):
     #    # ToDo make settings available from GUI
     #
     #    # estimate peak pos
@@ -1655,7 +1847,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
     #    elif ro_info['axisname'] == 'phi':
     #        pk_pos_exact = sc_h5['phi_pk'][()]
     #    else:
-    #        raise ValueError("Cannot estimate peak position: unknown scan axis %s" % ro_info['axisname'])
+    #        raise ValueError("Cannot estimate peak position: unknown scan axis %s" % ro_info['axisname'])  # noqa: E501
     #    #idx_pk = np.argmin(np.abs(sc_h5['axis'][()] - pk_pos_exact), axis=1)
     #
     #    # ToDo make settings available from GUI
@@ -1689,69 +1881,73 @@ class RockingPeakIntegrator(qt.QMainWindow):
     #
     #    return roi1Ddict
 
-
-
-    #def set_
+    # def set_
 
     def onChangeRockingScan(self, name):
         try:
             self.set_roscan(name)
         except Exception as e:
-            logger.exception("Invalid rocking scan info", 
-                 extra={'title' : 'Invalid rocking scan info',
-                        'show_dialog' : True,
-                        'parent' : self,
-                        'description' : 'Invalid or missig rocking scan info: %s.\n%s' % (name, e) })
+            logger.exception(
+                "Invalid rocking scan info",
+                extra={
+                    "title": "Invalid rocking scan info",
+                    "show_dialog": True,
+                    "parent": self,
+                    "description": f"Invalid or missig rocking scan info: {name}.\n{e}",
+                },
+            )
             return
-
 
     def get_rocking_scan_info(self, name):
         if name not in self.database.nxfile:
-            raise ValueError("scan %s is not in the database" % name)
+            raise ValueError(f"scan {name} is not in the database")
 
         h5_obj = self.database.nxfile[name]
-        if 'orgui_meta' not in h5_obj.attrs or h5_obj.attrs['orgui_meta'] != 'rocking':
-            raise ValueError("scan %s is not a valid rocking scan" % name)
-
+        if "orgui_meta" not in h5_obj.attrs or h5_obj.attrs["orgui_meta"] != "rocking":
+            raise ValueError(f"scan {name} is not a valid rocking scan")
 
         scangroup = h5_obj.parent.parent
-        positioners = scangroup['instrument/positioners']
+        positioners = scangroup["instrument/positioners"]
         if len(positioners) > 1:
-            raise NotImplementedError("Multiple positioner changes are not yet implemented")
+            raise NotImplementedError(
+                "Multiple positioner changes are not yet implemented"
+            )
 
         axisname = list(positioners.keys())[0]
         axis = positioners[axisname][()]
 
-        ddict = {
-            'name' : name,
-            'axisname' : axisname,
-            'axis' : axis
-        }
+        ddict = {"name": name, "axisname": axisname, "axis": axis}
 
-        if 'H_1' in h5_obj["rois"]:
+        if "H_1" in h5_obj["rois"]:
+            H_1 = h5_obj["rois"]["H_1"][()]
+            H_0 = h5_obj["rois"]["H_0"][()]
 
-            H_1 = h5_obj["rois"]['H_1'][()]
-            H_0 = h5_obj["rois"]['H_0'][()]
-
-            if not ( np.allclose(H_1.T[0], H_1.T[0][0]) and np.allclose(H_1.T[1], H_1.T[1][0]) and np.allclose(H_1.T[2], H_1.T[2][0]) ):
+            if not (
+                np.allclose(H_1.T[0], H_1.T[0][0])
+                and np.allclose(H_1.T[1], H_1.T[1][0])
+                and np.allclose(H_1.T[2], H_1.T[2][0])
+            ):
                 raise ValueError("Rocking scan H_1 mismatch: Are these multiple scans?")
 
-            if not ( np.allclose(H_0.T[0], H_0.T[0][0]) and np.allclose(H_0.T[1], H_0.T[1][0]) and np.allclose(H_0.T[2], H_0.T[2][0])):
+            if not (
+                np.allclose(H_0.T[0], H_0.T[0][0])
+                and np.allclose(H_0.T[1], H_0.T[1][0])
+                and np.allclose(H_0.T[2], H_0.T[2][0])
+            ):
                 raise ValueError("Rocking scan H_0 mismatch: Are these multiple scans?")
 
-            ddict['H_0'] = H_0[0]
-            ddict['H_1'] = H_1[0]
-            ddict['type'] = 'hklscan'
-            ddict['HKL_pk'] = h5_obj["rois"]['HKL_pk'][()]
-        elif 's' in h5_obj["rois"]:
-            ddict['type'] = 'static'
-            ddict['HKL_pk'] = h5_obj["rois"]['HKL_pk'][()]
+            ddict["H_0"] = H_0[0]
+            ddict["H_1"] = H_1[0]
+            ddict["type"] = "hklscan"
+            ddict["HKL_pk"] = h5_obj["rois"]["HKL_pk"][()]
+        elif "s" in h5_obj["rois"]:
+            ddict["type"] = "static"
+            ddict["HKL_pk"] = h5_obj["rois"]["HKL_pk"][()]
         else:
             raise ValueError("Invalid scan: scan has no parameter s")
 
-
-        s_array = h5_obj["rois"]['s'][()]
-        ddict['s'] = s_array
+        s_array = h5_obj["rois"]["s"][()]
+        ddict["s"] = s_array
         return ddict
 
 
@@ -1771,26 +1967,27 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         self._L_save = 5
         self._beam_save = 20
 
-        layout.addWidget(qt.QLabel("Sample size L:"),0, 0)
+        layout.addWidget(qt.QLabel("Sample size L:"), 0, 0)
 
         self.L = qt.QDoubleSpinBox()
         self.L.setRange(0.00001, 1000000)
         self.L.setDecimals(4)
         self.L.setSuffix(" mm")
         self.L.setValue(5)
-        layout.addWidget(self.L, 0,1)
+        layout.addWidget(self.L, 0, 1)
 
-        layout.addWidget(qt.QLabel("beam size (FWHM):"),1, 0)
+        layout.addWidget(qt.QLabel("beam size (FWHM):"), 1, 0)
         self.beam = qt.QDoubleSpinBox()
         self.beam.setRange(0.000001, 1000000)
         self.beam.setDecimals(4)
         self.beam.setSuffix(" microns")
         self.beam.setValue(20)
-        layout.addWidget(self.beam, 1,1)
+        layout.addWidget(self.beam, 1, 1)
 
-
-        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
-        layout.addWidget(buttons,2,0,1,-1)
+        buttons = qt.QDialogButtonBox(
+            qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
+        )
+        layout.addWidget(buttons, 2, 0, 1, -1)
 
         buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.onOk)
         buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.onCancel)
@@ -1810,162 +2007,176 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         self.reject()
 
 
-
 class IntegrationEstimator(qt.QDialog):
-
-
-    def __init__(self,axis, axisname, parent=None):
+    def __init__(self, axis, axisname, parent=None):
         qt.QDialog.__init__(self, parent)
 
         layout = qt.QGridLayout()
 
-        self._scan_label = qt.QLabel("%s-scan: from %s to %s\nroi ranges will be set relative to calculated peak position" % (axisname, axis[0], axis[-1]))
-        layout.addWidget(self._scan_label,0,0, 1, -1)
-        layout.addWidget(qt.QLabel("center roi:"),1, 0)
-        layout.addWidget(qt.QLabel("from (rel):"),1, 1)
-        layout.addWidget(qt.QLabel("to (rel):"),1, 3)
+        self._scan_label = qt.QLabel(
+            f"{axisname}-scan: from {axis[0]} to {axis[-1]}\nroi ranges will be set relative to calculated peak position"  # noqa: E501
+        )
+        layout.addWidget(self._scan_label, 0, 0, 1, -1)
+        layout.addWidget(qt.QLabel("center roi:"), 1, 0)
+        layout.addWidget(qt.QLabel("from (rel):"), 1, 1)
+        layout.addWidget(qt.QLabel("to (rel):"), 1, 3)
 
-        layout.addWidget(qt.QLabel("bg roi 1:"),2,0)
-        layout.addWidget(qt.QLabel("from (rel):"),2, 1)
-        layout.addWidget(qt.QLabel("to (rel):"),2, 3)
+        layout.addWidget(qt.QLabel("bg roi 1:"), 2, 0)
+        layout.addWidget(qt.QLabel("from (rel):"), 2, 1)
+        layout.addWidget(qt.QLabel("to (rel):"), 2, 3)
 
-        layout.addWidget(qt.QLabel("bg roi 2:"),3,0)
-        layout.addWidget(qt.QLabel("from (rel):"),3, 1)
-        layout.addWidget(qt.QLabel("to (rel):"),3, 3)
+        layout.addWidget(qt.QLabel("bg roi 2:"), 3, 0)
+        layout.addWidget(qt.QLabel("from (rel):"), 3, 1)
+        layout.addWidget(qt.QLabel("to (rel):"), 3, 3)
 
         self.croi_from = qt.QDoubleSpinBox()
         self.croi_from.setRange(-1000000, 1000000)
         self.croi_from.setDecimals(4)
         self.croi_from.setSuffix(" °")
         self.croi_from.setValue(-0.1)
-        layout.addWidget(self.croi_from, 1,2)
+        layout.addWidget(self.croi_from, 1, 2)
 
         self.croi_to = qt.QDoubleSpinBox()
         self.croi_to.setRange(-1000000, 1000000)
         self.croi_to.setDecimals(4)
         self.croi_to.setSuffix(" °")
         self.croi_to.setValue(0.1)
-        layout.addWidget(self.croi_to, 1,4)
+        layout.addWidget(self.croi_to, 1, 4)
 
         self.bgroi1_from = qt.QDoubleSpinBox()
         self.bgroi1_from.setRange(-1000000, 1000000)
         self.bgroi1_from.setDecimals(4)
         self.bgroi1_from.setSuffix(" °")
         self.bgroi1_from.setValue(-0.3)
-        layout.addWidget(self.bgroi1_from, 2,2)
+        layout.addWidget(self.bgroi1_from, 2, 2)
 
         self.bgroi1_to = qt.QDoubleSpinBox()
         self.bgroi1_to.setRange(-1000000, 1000000)
         self.bgroi1_to.setDecimals(4)
         self.bgroi1_to.setSuffix(" °")
         self.bgroi1_to.setValue(-0.12)
-        layout.addWidget(self.bgroi1_to, 2,4)
+        layout.addWidget(self.bgroi1_to, 2, 4)
 
         self.bgroi2_from = qt.QDoubleSpinBox()
         self.bgroi2_from.setRange(-1000000, 1000000)
         self.bgroi2_from.setDecimals(4)
         self.bgroi2_from.setSuffix(" °")
         self.bgroi2_from.setValue(0.12)
-        layout.addWidget(self.bgroi2_from, 3,2)
+        layout.addWidget(self.bgroi2_from, 3, 2)
 
         self.bgroi2_to = qt.QDoubleSpinBox()
         self.bgroi2_to.setRange(-1000000, 1000000)
         self.bgroi2_to.setDecimals(4)
         self.bgroi2_to.setSuffix(" °")
         self.bgroi2_to.setValue(0.3)
-        layout.addWidget(self.bgroi2_to, 3,4)
+        layout.addWidget(self.bgroi2_to, 3, 4)
 
+        layout.addWidget(
+            qt.QLabel("Attention: This will reset and override all existing ROIs!"),
+            4,
+            0,
+            1,
+            -1,
+        )
 
-        layout.addWidget(qt.QLabel("Attention: This will reset and override all existing ROIs!"),4,0, 1, -1)
-
-        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
-        layout.addWidget(buttons,5,0, 1,-1)
+        buttons = qt.QDialogButtonBox(
+            qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
+        )
+        layout.addWidget(buttons, 5, 0, 1, -1)
 
         buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.onOk)
         buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
 
         self.setLayout(layout)
 
-    def set_axis(self,axis, axisname):
-        self._scan_label.setText("%s-scan: from %s to %s, roi ranges will be set relative to calculated peak position" % (axisname, axis[0], axis[-1]))
+    def set_axis(self, axis, axisname):
+        self._scan_label.setText(
+            f"{axisname}-scan: from {axis[0]} to {axis[-1]}, roi ranges will be set relative to calculated peak position"  # noqa: E501
+        )
 
     def _verify_ranges(self):
         if self.croi_from.value() > self.croi_to.value():
-            raise ValueError("Invalid input of center roi: from %s > to %s" % (self.croi_from.value(),self.croi_to.value()) )
+            raise ValueError(
+                f"Invalid input of center roi: from {self.croi_from.value()} > to {self.croi_to.value()}"  # noqa: E501
+            )
         if self.bgroi1_from.value() > self.bgroi1_to.value():
-            raise ValueError("Invalid input of bg roi 1: from %s > to %s" % (self.bgroi1_from.value(),self.bgroi1_to.value()) )
+            raise ValueError(
+                f"Invalid input of bg roi 1: from {self.bgroi1_from.value()} > to {self.bgroi1_to.value()}"  # noqa: E501
+            )
         if self.bgroi2_from.value() > self.bgroi2_to.value():
-            raise ValueError("Invalid input of bg roi 2: from %s > to %s" % (self.bgroi2_from.value(),self.bgroi2_to.value()) )
+            raise ValueError(
+                f"Invalid input of bg roi 2: from {self.bgroi2_from.value()} > to {self.bgroi2_to.value()}"  # noqa: E501
+            )
         return True
 
     def get_ranges(self):
         self._verify_ranges()
         ddict = {
-            'sig_1' : {
-                'name' : 'sig_1',
-                'from' : self.croi_from.value(),
-                'to' : self.croi_to.value()
+            "sig_1": {
+                "name": "sig_1",
+                "from": self.croi_from.value(),
+                "to": self.croi_to.value(),
             },
-            'bg_1' : {
-                'name' : 'bg_1',
-                'from' : self.bgroi1_from.value(),
-                'to' : self.bgroi1_to.value()
+            "bg_1": {
+                "name": "bg_1",
+                "from": self.bgroi1_from.value(),
+                "to": self.bgroi1_to.value(),
             },
-            'bg_2' : {
-                'name' : 'bg_2',
-                'from' : self.bgroi2_from.value(),
-                'to' : self.bgroi2_to.value()
-            }
+            "bg_2": {
+                "name": "bg_2",
+                "from": self.bgroi2_from.value(),
+                "to": self.bgroi2_to.value(),
+            },
         }
         return ddict
-
 
     def onOk(self):
         try:
             self._verify_ranges()
         except Exception as e:
-            logger.exception("Invalid input", 
-                 extra={'title' : 'Invalid input',
-                        'show_dialog' : True,
-                        'parent' : self,
-                        'description' : str(e)})
+            logger.exception(
+                "Invalid input",
+                extra={
+                    "title": "Invalid input",
+                    "show_dialog": True,
+                    "parent": self,
+                    "description": str(e),
+                },
+            )
             return
         self.accept()
 
 
 class ROICreatorDialog(qt.QDialog):
-
-
-    def __init__(self,axis, axisname, parent=None):
+    def __init__(self, axis, axisname, parent=None):
         qt.QDialog.__init__(self, parent)
 
         layout = qt.QGridLayout()
 
-        self._scan_label = qt.QLabel("%s-scan: from %s to %s, roi ranges will be set relative to calculated peak position" % (axisname, axis[0], axis[-1]))
-        layout.addWidget(self._scan_label,0,0, 1, -1)
+        self._scan_label = qt.QLabel(
+            f"{axisname}-scan: from {axis[0]} to {axis[-1]}, roi ranges will be set relative to calculated peak position"  # noqa: E501
+        )
+        layout.addWidget(self._scan_label, 0, 0, 1, -1)
 
-
-
-        layout.addWidget(qt.QLabel("roi:"),1, 0)
-        layout.addWidget(qt.QLabel("from (rel):"),1, 1)
-        layout.addWidget(qt.QLabel("to (rel):"),1, 3)
+        layout.addWidget(qt.QLabel("roi:"), 1, 0)
+        layout.addWidget(qt.QLabel("from (rel):"), 1, 1)
+        layout.addWidget(qt.QLabel("to (rel):"), 1, 3)
 
         self.roi_from = qt.QDoubleSpinBox()
         self.roi_from.setRange(-1000000, 1000000)
         self.roi_from.setDecimals(4)
         self.roi_from.setSuffix(" °")
         self.roi_from.setValue(-0.1)
-        layout.addWidget(self.roi_from, 1,2)
+        layout.addWidget(self.roi_from, 1, 2)
 
         self.roi_to = qt.QDoubleSpinBox()
         self.roi_to.setRange(-1000000, 1000000)
         self.roi_to.setDecimals(4)
         self.roi_to.setSuffix(" °")
         self.roi_to.setValue(0.1)
-        layout.addWidget(self.roi_to, 1,4)
+        layout.addWidget(self.roi_to, 1, 4)
 
         checkboxlayout = qt.QHBoxLayout()
-
 
         self.signalCheckbox = qt.QCheckBox("Signal")
         self.backgroundCheckbox = qt.QCheckBox("Background")
@@ -1983,21 +2194,26 @@ class ROICreatorDialog(qt.QDialog):
 
         layout.addLayout(checkboxlayout, 2, 0, 1, -1)
 
-
-        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel)
-        layout.addWidget(buttons,3,0,1,-1)
+        buttons = qt.QDialogButtonBox(
+            qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
+        )
+        layout.addWidget(buttons, 3, 0, 1, -1)
 
         buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.onOk)
         buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.reject)
 
         self.setLayout(layout)
 
-    def set_axis(self,axis, axisname):
-        self._scan_label.setText("%s-scan: from %s to %s, roi ranges will be set relative to calculated peak position" % (axisname, axis[0], axis[-1]))
+    def set_axis(self, axis, axisname):
+        self._scan_label.setText(
+            f"{axisname}-scan: from {axis[0]} to {axis[-1]}, roi ranges will be set relative to calculated peak position"  # noqa: E501
+        )
 
     def _verify_ranges(self):
         if self.roi_from.value() > self.roi_to.value():
-            raise ValueError("Invalid input of roi: from %s > to %s" % (self.roi_from.value(),self.roi_to.value()) )
+            raise ValueError(
+                f"Invalid input of roi: from {self.roi_from.value()} > to {self.roi_to.value()}"  # noqa: E501
+            )
         return True
 
     def get_roi(self):
@@ -2005,29 +2221,31 @@ class ROICreatorDialog(qt.QDialog):
         signal = self.signalCheckbox.isChecked()
 
         ddict = {
-            'from' : self.roi_from.value(),
-            'to' : self.roi_to.value(),
-            'signal' : signal
+            "from": self.roi_from.value(),
+            "to": self.roi_to.value(),
+            "signal": signal,
         }
         return ddict
-
 
     def onOk(self):
         try:
             self._verify_ranges()
         except Exception as e:
-            logger.exception("Invalid input", 
-                 extra={'title' : 'Invalid input',
-                        'show_dialog' : True,
-                        'parent' : self,
-                        'description' : str(e)})
+            logger.exception(
+                "Invalid input",
+                extra={
+                    "title": "Invalid input",
+                    "show_dialog": True,
+                    "parent": self,
+                    "description": str(e),
+                },
+            )
             return
         self.accept()
 
 
 class AnchorROI(ROI):
-
-    #sigAnchorChanged = qt.Signal()
+    # sigAnchorChanged = qt.Signal()
 
     def __init__(self, name, fromdata=None, todata=None, type_=None, anchor=False):
         ROI.__init__(self, name, fromdata, todata, type_)
@@ -2038,11 +2256,10 @@ class AnchorROI(ROI):
         return self._anchor
 
     def setAnchor(self, anchor):
-        #print(self.getName(), self._anchor, anchor)
+        # print(self.getName(), self._anchor, anchor)
         if self._anchor != bool(anchor):
             self._anchor = bool(anchor)
             self.sigChanged.emit()
-
 
     def toDict(self):
         """
@@ -2050,7 +2267,7 @@ class AnchorROI(ROI):
         :return: dict containing the roi parameters
         """
         ddict = super().toDict()
-        ddict['anchor'] = self.isAnchor()
+        ddict["anchor"] = self.isAnchor()
         return ddict
 
     @staticmethod
@@ -2072,10 +2289,6 @@ class AnchorROI(ROI):
         return roi
 
 
-
-
-
-
 class SelectableROITable(ROITable):
     COLUMNS_INDEX = dict(
         [
@@ -2088,13 +2301,11 @@ class SelectableROITable(ROITable):
             ("Raw Counts", 6),
             ("Net Counts", 7),
             ("Raw Area", 8),
-            ("Net Area", 9)
+            ("Net Area", 9),
         ]
     )
 
     COLUMNS = list(COLUMNS_INDEX.keys())
-
-
 
     def __init__(self, parent=None, plot=None, rois=None):
         super().__init__(parent, plot, rois)
@@ -2110,19 +2321,18 @@ class SelectableROITable(ROITable):
         roi = self._roiDict[roiID]
         itemID = self._getItem(name="ID", roi=roi, row=None)
 
-        itemAnchor = self._getItem(name="Anchor", row=itemID.row(), roi=roi)
-        #print('update roi info: ', roi.getName(), roi.isAnchor())
+        self._getItem(name="Anchor", row=itemID.row(), roi=roi)
+        # print('update roi info: ', roi.getName(), roi.isAnchor())
         self.setAnchorState(roiID, roi.isAnchor())
 
-    def setAnchorState(self, roiID , anchor):
+    def setAnchorState(self, roiID, anchor):
         if roiID not in self._roiDict:
             return
         roi = self._roiDict[roiID]
         itemID = self._getItem(name="ID", roi=roi, row=None)
 
-
         itemAnchor = self._getItem(name="Anchor", row=itemID.row(), roi=roi)
-        #with qt.QSignalBlocker(self):
+        # with qt.QSignalBlocker(self):
         if anchor:
             itemAnchor.setCheckState(qt.Qt.Checked)
         else:
@@ -2142,7 +2352,6 @@ class SelectableROITable(ROITable):
         roi.sigChanged.connect(callback)
         # set it as the active one
         self.setActiveRoi(roi)
-
 
     def setRois(self, rois, order=None):
         """Set the ROIs by providing a dictionary of ROI information.
@@ -2195,7 +2404,6 @@ class SelectableROITable(ROITable):
             rois.append(AnchorROI._fromDict(roiDict))
 
         self.setRois(rois)
-
 
     def _getItem(self, name, row, roi):
         if row:
@@ -2278,14 +2486,13 @@ class SelectableROITable(ROITable):
 
         super()._itemChanged(item)
 
-
         self._userIsEditingRoi = True
         if not self.isModelSetting:
             if item.column() == self.COLUMNS_INDEX["Anchor"]:
                 roi = getRoi()
                 anchor = item.checkState() == qt.Qt.Checked
                 if anchor != roi.isAnchor():
-                    #print('anchor changed:', getRoi().getName() ,getRoi().getID())
+                    # print('anchor changed:', getRoi().getName() ,getRoi().getID())
                     roi.setAnchor(anchor)
 
         self._userIsEditingRoi = False
@@ -2326,7 +2533,7 @@ class CurvesROIWidget(qt.QWidget):
         """Store the last value emitted for the sigRoiSignal. In the case the
         active curve change we need to add this extra step in order to make
         sure we won't send twice the sigROISignal.
-        This come from the fact sigROISignal is connected to the 
+        This come from the fact sigROISignal is connected to the
         activeROIChanged signal which is emitted when raw and net counts
         values are changing but are not embed in the sigROISignal.
         """
@@ -2343,9 +2550,8 @@ class CurvesROIWidget(qt.QWidget):
         self.roiTable.setMinimumHeight(4 * rheight)
         layout.addWidget(self.roiTable)
         self._roiFileDir = qt.QDir.home().absolutePath()
-        #self._showAllCheckBox.toggled.connect(self.roiTable.showAllMarkers)
+        # self._showAllCheckBox.toggled.connect(self.roiTable.showAllMarkers)
         self.roiTable.showAllMarkers(True)
-
 
         self._isConnected = False  # True if connected to plot signals
         self._isInit = False
@@ -2359,10 +2565,6 @@ class CurvesROIWidget(qt.QWidget):
         :rtype: Union[~silx.gui.plot.PlotWidget,None]
         """
         return None if self._plotRef is None else self._plotRef()
-
-    def showEvent(self, event):
-        self._visibilityChangedHandler(visible=True)
-        qt.QWidget.showEvent(self, event)
 
     @property
     def roiFileDir(self):
@@ -2396,10 +2598,10 @@ class CurvesROIWidget(qt.QWidget):
                 return "ICR"
             else:
                 i = 1
-                newroi = "newroi %d" % i
+                newroi = f"newroi {i:d}"
                 while newroi in roisNames:
                     i += 1
-                    newroi = "newroi %d" % i
+                    newroi = f"newroi {i:d}"
                 return newroi
 
         roi = AnchorROI(name=getNextRoiName())
@@ -2510,7 +2712,7 @@ class CurvesROIWidget(qt.QWidget):
             except OSError:
                 msg = qt.QMessageBox(self)
                 msg.setIcon(qt.QMessageBox.Critical)
-                msg.setText("Input Output Error: %s" % (sys.exc_info()[1]))
+                msg.setText(f"Input Output Error: {sys.exc_info()[1]}")
                 msg.exec()
                 return
         self.roiFileDir = os.path.dirname(outputFile)
@@ -2599,22 +2801,17 @@ class CurvesROIWidget(qt.QWidget):
             self.__lastSigROISignal = ddict
             self.sigROISignal.emit(ddict)
 
-
     @property
     def currentRoi(self):
         return self.roiTable.activeRoi
 
-class _ColorRoiMarkerHandler(_RoiMarkerHandler):
 
+class _ColorRoiMarkerHandler(_RoiMarkerHandler):
     def __init__(self, roi, plot):
         super().__init__(roi, plot)
-        if roi.getName().startswith('sig'):
-            self._color = 'red'
-        elif roi.getName().startswith('bg'):
-            self._color = 'blue'
+        if roi.getName().startswith("sig"):
+            self._color = "red"
+        elif roi.getName().startswith("bg"):
+            self._color = "blue"
         else:
-            self._color = 'black'
-
-
-
-
+            self._color = "black"

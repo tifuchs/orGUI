@@ -32,4 +32,10 @@ __email__ = "fuchs@physik.uni-kiel.de"
 
 """
 
-__all__ = ['orGUI','QReflectionSelector','QSpecScanSelector','QUBCalculator','database']
+__all__ = [
+    "orGUI",
+    "QReflectionSelector",
+    "QSpecScanSelector",
+    "QUBCalculator",
+    "database",
+]

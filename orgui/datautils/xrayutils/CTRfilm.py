@@ -31,10 +31,10 @@ __email__ = "tfuchs@cornell.edu"
 import numpy as np
 from .. import util
 import re
-#random.seed(45)
+# random.seed(45)
 
 
-from .CTRutil import (_ensure_contiguous, next_skip_comment, LinearFitFunctions)
+from .CTRutil import _ensure_contiguous, next_skip_comment, LinearFitFunctions
 
 from .CTRuc import UnitCell, ctr_accel_enabled
 from .CTRdistributions import (
@@ -58,8 +58,7 @@ def _cyclic_layer_order(layer_ids, below_layer):
         matches = np.flatnonzero(layer_ids == below_layer)
         if matches.size == 0:
             raise ValueError(
-                "Layer %s is not present in cyclic layer sequence %s."
-                % (below_layer, layer_ids.tolist())
+                f"Layer {below_layer} is not present in cyclic layer sequence {layer_ids.tolist()}."  # noqa: E501
             )
         start = (matches[0] + 1) % len(layer_ids)
     indices = np.roll(np.arange(len(layer_ids)), -start)
@@ -94,17 +93,15 @@ def _move_domains(layers, delta_height):
 class _LayerStackingMixin:
     def _initialize_layer_stacking(self, kwargs):
         self.layer_behavior = kwargs.get(
-            'layer_behavior',
-            kwargs.get('layer_behaviour', 'select'),
+            "layer_behavior",
+            kwargs.get("layer_behaviour", "select"),
         )
-        transition = kwargs.get('layer_transition')
-        if transition is not None and not isinstance(
-            transition, LayerTransition
-        ):
+        transition = kwargs.get("layer_transition")
+        if transition is not None and not isinstance(transition, LayerTransition):
             transition = LayerTransition(transition)
         self.layer_transition = transition
-        self._start_layer_number = -1.
-        self.start_layer_number = -1.
+        self._start_layer_number = -1.0
+        self.start_layer_number = -1.0
 
     @property
     def layer_behavior(self):
@@ -113,10 +110,9 @@ class _LayerStackingMixin:
 
     @layer_behavior.setter
     def layer_behavior(self, behavior):
-        if behavior not in ('ignore', 'select'):
+        if behavior not in ("ignore", "select"):
             raise ValueError(
-                "layer_behavior must be 'ignore' or 'select', not %r"
-                % behavior
+                f"layer_behavior must be 'ignore' or 'select', not {behavior!r}"
             )
         self._layer_behavior = behavior
 
@@ -136,11 +132,9 @@ class _LayerStackingMixin:
 
     @start_layer_number.setter
     def start_layer_number(self, below_layer):
-        if self.layer_behavior == 'ignore':
+        if self.layer_behavior == "ignore":
             below_layer = -1
-        layer_order, order = _cyclic_layer_order(
-            self._layer_ids, below_layer
-        )
+        layer_order, order = _cyclic_layer_order(self._layer_ids, below_layer)
         self._start_layer_number = layer_order[0]
         self._set_layer_order(layer_order, order)
         self._basis_created = np.full_like(self.basis, np.nan)
@@ -169,8 +163,7 @@ class _LayerStackingMixin:
         matches = np.flatnonzero(self._layer_ids == start_layer)
         if matches.size == 0:
             raise ValueError(
-                "Layer %s is not present in cyclic layer sequence %s."
-                % (start_layer, self._layer_ids.tolist())
+                f"Layer {start_layer} is not present in cyclic layer sequence {self._layer_ids.tolist()}."  # noqa: E501
             )
         start = matches[0]
         indices = np.roll(np.arange(len(self._layer_ids)), -start)
@@ -179,9 +172,7 @@ class _LayerStackingMixin:
         self._set_layer_order(layer_order, indices)
         self._basis_created = np.full_like(self.basis, np.nan)
 
-    def stack_on(
-        self, below_loc, below_height, below_layer=-1, below_state=None
-    ):
+    def stack_on(self, below_loc, below_height, below_layer=-1, below_state=None):
         """Generate this object's layer order and height from the object below.
 
         :param float below_loc:
@@ -193,7 +184,7 @@ class _LayerStackingMixin:
         """
         if below_state is None:
             below_state = LayerState(self.layer_cycle, below_layer)
-        if self.layer_behavior == 'ignore':
+        if self.layer_behavior == "ignore":
             self.start_layer_number = -1
         else:
             start_layer = resolve_upper_start(
@@ -206,10 +197,9 @@ class _LayerStackingMixin:
         if self.layer_transition is None:
             return ""
         pairs = ", ".join(
-            "%s = %s" % pair
-            for pair in self.layer_transition.mapping.items()
+            "{} = {}".format(*pair) for pair in self.layer_transition.mapping.items()
         )
-        return "layer_transition: %s\n" % pairs
+        return f"layer_transition: {pairs}\n"
 
 
 def _parse_layer_transition(string):
@@ -245,84 +235,81 @@ def _parse_text_metadata(string, name, default=None):
     return default
 
 
-
-
 class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
     parameterOrder = "Width/cells Skew/cells"
 
-    parameterLookup = {'W' : 0, 'S' : 1}
+    parameterLookup = {"W": 0, "S": 1}
 
-    avail_types = ['skellam']
+    avail_types = ["skellam"]
 
     parameterLookup_inv = dict(map(reversed, parameterLookup.items()))
 
-    def __init__(self,uc_top, uc_bottom, type='skellam' ,**kwargs):
+    def __init__(self, uc_top, uc_bottom, type="skellam", **kwargs):
         """
         sigma_calc : automatic selection of number of unitcells for calculation of interface
                      this will shift the location of the interface.
         fixed_ucs : create interface with fixed number of unitcells. Location of interface
                     will only change if skew != 0
                     total number of uc will be fixed_ucs*2 +1
-        
 
-        
-        """
+
+
+        """  # noqa: E501
         super().__init__()
-        profile = kwargs.pop('profile', None)
+        profile = kwargs.pop("profile", None)
         if isinstance(type, SkellamProfile):
             profile = type
-            type = 'skellam'
+            type = "skellam"
         if profile is not None and not isinstance(profile, SkellamProfile):
             raise TypeError("EpitaxyInterface profile must be SkellamProfile")
         self.type = type
         self.profile = profile
         self._legacy_support_cursor = kwargs.pop(
-            'legacy_support_cursor', profile is None
+            "legacy_support_cursor", profile is None
         )
-        self.sigma_calc = kwargs.get('sigma_calc', 3)
-        self.fixed_ucs = kwargs.get('fixed_ucs', False)
+        self.sigma_calc = kwargs.get("sigma_calc", 3)
+        self.fixed_ucs = kwargs.get("fixed_ucs", False)
         self.set_ucs(uc_top, uc_bottom, **kwargs)
         if profile is None:
-            self.basis = np.array([0., 0.])
+            self.basis = np.array([0.0, 0.0])
         else:
             self.basis = np.array([profile.width, profile.asymmetry])
         self._basis_created = np.array([np.nan, np.nan])
-        self.basis_0 = np.array([0., 0.])
+        self.basis_0 = np.array([0.0, 0.0])
         self.errors = None
-        if 'name' in kwargs:
-            self.name = kwargs['name']
+        if "name" in kwargs:
+            self.name = kwargs["name"]
         else:
             self.name = "unnamed"
 
-        self.below_loc = 0.
-        self.below_H = 0.
-        self.below_layer = -1.
+        self.below_loc = 0.0
+        self.below_H = 0.0
+        self.below_layer = -1.0
         self._initialize_layer_stacking(kwargs)
-
 
     def set_ucs(self, uc_top, uc_bottom, **kwargs):
         if not np.all(uc_top.layers == uc_bottom.layers):
-            raise ValueError("Top and bottom layer numbers must be equal. "
-            "Is Top: %s, Bottom: %s" % (uc_top.layers, uc_bottom.layers))
+            raise ValueError(
+                "Top and bottom layer numbers must be equal. "
+                f"Is Top: {uc_top.layers}, Bottom: {uc_bottom.layers}"
+            )
         self.uc_top = uc_top
         self.uc_bottom = uc_bottom
         self.reference_uc = self.uc_bottom
 
-        self.uc_top.setReferenceUnitCell(self.uc_bottom, kwargs.get('rot', np.identity(3)))
+        self.uc_top.setReferenceUnitCell(
+            self.uc_bottom, kwargs.get("rot", np.identity(3))
+        )
 
         self.uc_layers_top = self.uc_top.split_in_layers()
         self.uc_layers_bottom = self.uc_bottom.split_in_layers()
 
         self._layer_ids = np.array(list(self.uc_layers_top))
-        self._top_layers_base = [
-            self.uc_layers_top[uc] for uc in self._layer_ids
-        ]
-        self._bottom_layers_base = [
-            self.uc_layers_bottom[uc] for uc in self._layer_ids
-        ]
-        self._layerpos_base = np.array([
-            self.uc_top.layerpos[i] for i in self._layer_ids
-        ])
+        self._top_layers_base = [self.uc_layers_top[uc] for uc in self._layer_ids]
+        self._bottom_layers_base = [self.uc_layers_bottom[uc] for uc in self._layer_ids]
+        self._layerpos_base = np.array(
+            [self.uc_top.layerpos[i] for i in self._layer_ids]
+        )
         self.top_layers = [self.uc_layers_top[uc] for uc in self.uc_layers_top]
         self.bottom_layers = [self.uc_layers_bottom[uc] for uc in self.uc_layers_bottom]
         self.layerpos = np.copy(self._layerpos_base)
@@ -345,15 +332,10 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         self.layer_order = np.asarray(layer_order)
         self._layer_order_indices = np.asarray(order)
         self.top_layers = [self._top_layers_base[i] for i in order]
-        self.bottom_layers = [
-            self._bottom_layers_base[i] for i in order
-        ]
-        self.layerpos = _unwrapped_layer_positions(
-            self._layerpos_base, order
-        )
+        self.bottom_layers = [self._bottom_layers_base[i] for i in order]
+        self.layerpos = _unwrapped_layer_positions(self._layerpos_base, order)
 
-
-    def setReferenceUnitCell(self,uc,rotMatrix=np.identity(3)):
+    def setReferenceUnitCell(self, uc, rotMatrix=np.identity(3)):
         """Set the reference frame on the interface and generated layers.
 
         :param UnitCell uc:
@@ -370,7 +352,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             layer.setReferenceUnitCell(uc, rotMatrix)
         self.reference_uc = uc
 
-    def setEnergy(self,E):
+    def setEnergy(self, E):
         """Set X-ray energy for the source and generated unit cells.
 
         :param float E:
@@ -390,7 +372,6 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         self.below_H = height
         self.createInterfaceCells()
 
-
     @property
     def loc_absolute(self):
         if np.any(self._basis_created != self.basis):
@@ -402,17 +383,12 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         if np.any(self._basis_created != self.basis):
             self.createInterfaceCells()
         upper_layer = self.top_layers[-1]
-        pos = upper_layer.coherentDomainMatrix[-1][2,3]
-        strain = upper_layer.coherentDomainMatrix[-1][2,2]
+        pos = upper_layer.coherentDomainMatrix[-1][2, 3]
+        strain = upper_layer.coherentDomainMatrix[-1][2, 2]
         layer_id = self.layer_order[-1]
-        layer_space = np.diff(
-            self.layerpos, append=self.layerpos[0] + 1
-        )
+        layer_space = np.diff(self.layerpos, append=self.layerpos[0] + 1)
         H = (
-            pos
-            + strain * (
-                self.uc_top.layerpos[layer_id] + layer_space[-1]
-            )
+            pos + strain * (self.uc_top.layerpos[layer_id] + layer_space[-1])
         ) * upper_layer.a[2]
         return H
 
@@ -424,8 +400,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         matrix = lower_layer.coherentDomainMatrix[0]
         layer_id = self.layer_order[0]
         H = (
-            matrix[2,3]
-            + matrix[2,2] * self.uc_top.layerpos[layer_id]
+            matrix[2, 3] + matrix[2, 2] * self.uc_top.layerpos[layer_id]
         ) * lower_layer.a[2]
         return H
 
@@ -470,19 +445,17 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
     def createInterfaceCells(self):
         n_layers = len(self.uc_top.layers)
-        if self.type == 'skellam':
+        if self.type == "skellam":
             tail_probability = (
                 self.profile.tail_probability
                 if self.profile is not None
                 else DEFAULT_TAIL_PROBABILITY
             )
-            profile = SkellamProfile(
-                self.basis[0], self.basis[1], tail_probability
-            )
+            profile = SkellamProfile(self.basis[0], self.basis[1], tail_probability)
             mu1, mu2 = profile.parameters(n_layers)
 
             loc = mu1 - mu2
-            loc_int = int(round(loc/n_layers,0))*n_layers
+            loc_int = int(round(loc / n_layers, 0)) * n_layers
 
             if self.fixed_ucs:
                 uc_number = self.fixed_ucs
@@ -490,55 +463,47 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             elif self.profile is not None:
                 support_low, support_high = profile.support(n_layers)
                 first = (support_low // n_layers) * n_layers
-                stop = (
-                    (support_high // n_layers + 1) * n_layers
-                )
+                stop = (support_high // n_layers + 1) * n_layers
                 unitcells = np.arange(first, stop)
                 uc_number = -first
             else:
                 sigma = self.basis[0] * n_layers
-                uc_number = (int(np.ceil((self.sigma_calc*sigma) / n_layers)) + 1) * n_layers
+                uc_number = (
+                    int(np.ceil((self.sigma_calc * sigma) / n_layers)) + 1
+                ) * n_layers
                 uc_number = int(uc_number)
                 unitcells = np.arange(-uc_number, uc_number) + loc_int
             assert unitcells.size % len(self.top_layers) == 0
 
-            probability_top = profile.occupancy(
-                unitcells, n_layers
-            ).reshape((-1, n_layers))
-            probability_bottom = 1. - probability_top
+            probability_top = profile.occupancy(unitcells, n_layers).reshape(
+                (-1, n_layers)
+            )
+            probability_bottom = 1.0 - probability_top
             occupancy_top = probability_top
             occupancy_bottom = probability_bottom
             if not self._legacy_support_cursor:
-                sharp_top = (unitcells >= loc).astype(
-                    np.float64
-                ).reshape((-1, n_layers))
-                occupancy_top = probability_top - sharp_top
-                occupancy_bottom = (
-                    probability_bottom - (1.0 - sharp_top)
+                sharp_top = (
+                    (unitcells >= loc).astype(np.float64).reshape((-1, n_layers))
                 )
-
+                occupancy_top = probability_top - sharp_top
+                occupancy_bottom = probability_bottom - (1.0 - sharp_top)
 
             a3_top = self.top_layers[0].a[2]
             a3_bottom = self.bottom_layers[0].a[2]
 
-
             for i, (uc_t, uc_b) in enumerate(zip(self.top_layers, self.bottom_layers)):
                 uc_t.coherentDomainMatrix = []
-                uc_t.coherentDomainOccupancy = np.ascontiguousarray(
-                    occupancy_top.T[i]
-                )
+                uc_t.coherentDomainOccupancy = np.ascontiguousarray(occupancy_top.T[i])
                 uc_b.coherentDomainMatrix = []
                 uc_b.coherentDomainOccupancy = np.ascontiguousarray(
                     occupancy_bottom.T[i]
                 )
 
-            mat_0 = np.vstack((np.identity(3).T,np.array([0,0,0]))).T
+            mat_0 = np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
 
-            ratio_top = (a3_bottom/a3_top)
-            ratio_bottom = 1/ratio_top
-            h_top = 0.
-            h_bottom = 0.
-            h = 0.
+            ratio_top = a3_bottom / a3_top
+            ratio_bottom = 1 / ratio_top
+            h = 0.0
 
             for p_t, p_b in zip(probability_top, probability_bottom):
                 top_strains = p_t + ratio_top * p_b
@@ -546,68 +511,63 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 physical_top_index = np.flatnonzero(
                     self._layer_order_indices == n_layers - 1
                 )[0]
-                cell_height = (
-                    a3_top * top_strains[physical_top_index]
-                )
+                cell_height = a3_top * top_strains[physical_top_index]
 
-                for i, (uc_t, uc_b) in enumerate(zip(self.top_layers, self.bottom_layers)):
+                for i, (uc_t, uc_b) in enumerate(
+                    zip(self.top_layers, self.bottom_layers)
+                ):
                     mat_top_i = np.copy(mat_0)
                     top_strain_and_h = top_strains[i]
-                    mat_top_i[2,2] = top_strain_and_h
-                    relative_layer_position = (
-                        self.layerpos[i] - self.layerpos[0]
+                    mat_top_i[2, 2] = top_strain_and_h
+                    relative_layer_position = self.layerpos[i] - self.layerpos[0]
+                    top_layer_offset = (
+                        relative_layer_position
+                        - (self.uc_top.layerpos[self.layer_order[i]])
                     )
-                    top_layer_offset = relative_layer_position - (
-                        self.uc_top.layerpos[self.layer_order[i]]
-                    )
-                    mat_top_i[2,3] = (
-                        h / a3_top
-                        + top_strain_and_h * top_layer_offset
-                    )
+                    mat_top_i[2, 3] = h / a3_top + top_strain_and_h * top_layer_offset
 
                     uc_t.coherentDomainMatrix.append(mat_top_i)
 
                     mat_bottom_i = np.copy(mat_0)
                     bottom_strain_and_h = bottom_strains[i]
-                    mat_bottom_i[2,2] = bottom_strain_and_h
-                    bottom_layer_offset = relative_layer_position - (
-                        self.uc_bottom.layerpos[self.layer_order[i]]
+                    mat_bottom_i[2, 2] = bottom_strain_and_h
+                    bottom_layer_offset = (
+                        relative_layer_position
+                        - (self.uc_bottom.layerpos[self.layer_order[i]])
                     )
-                    mat_bottom_i[2,3] = (
-                        h / a3_bottom
-                        + bottom_strain_and_h * bottom_layer_offset
+                    mat_bottom_i[2, 3] = (
+                        h / a3_bottom + bottom_strain_and_h * bottom_layer_offset
                     )
-                    #h_bottom += bottom_strain_and_h
+                    # h_bottom += bottom_strain_and_h
                     uc_b.coherentDomainMatrix.append(mat_bottom_i)
                 h += cell_height
-                #h_bottom += bottom_strain_and_h
-                #h_top += top_strain_and_h
+                # h_bottom += bottom_strain_and_h
+                # h_top += top_strain_and_h
 
             loc_rescaled = loc - unitcells[0]
             uc_no_loc = int(np.floor(loc_rescaled)) // n_layers
             layer_no_loc = int(np.floor(loc_rescaled)) % n_layers
             loc_remainder = (loc_rescaled % n_layers) % 1
             loc_mat = self.top_layers[layer_no_loc].coherentDomainMatrix[uc_no_loc]
-            self._loc_absolute_ref = loc_mat[2,3]*a3_top + loc_remainder*loc_mat[2,2]*a3_top
+            self._loc_absolute_ref = (
+                loc_mat[2, 3] * a3_top + loc_remainder * loc_mat[2, 2] * a3_top
+            )
             if self._legacy_support_cursor:
                 translation = self.below_H
-                self._loc_absolute = (
-                    self._loc_absolute_ref + self.below_H
-                )
+                self._loc_absolute = self._loc_absolute_ref + self.below_H
             else:
                 translation = self.below_H - self._loc_absolute_ref
                 self._loc_absolute = self.below_H
             _translate_domains(self.top_layers, translation)
             _translate_domains(self.bottom_layers, translation)
             self._end_layer_number = self.layer_order[-1]
-            #self._loc_absolute = self._loc_absolute_ref + self.below_H
-
+            # self._loc_absolute = self._loc_absolute_ref + self.below_H
 
             self._basis_created = np.copy(self.basis)
         else:
-            raise NotImplementedError("%s is not a valid interface model" % self.type)
+            raise NotImplementedError(f"{self.type} is not a valid interface model")
 
-    def F_uc(self,h,k,l):
+    def F_uc(self, h, k, l):  # noqa: E741
         """Return the interface structure factor in electrons.
 
         Upper- and lower-material amplitudes are first converted to area
@@ -628,69 +588,82 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         if np.any(self._basis_created != self.basis):
             self.createInterfaceCells()
         if ctr_accel_enabled():
-            h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
+            h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
         F = np.zeros_like(l, dtype=np.complex128)
         for uc_t, uc_b in zip(self.top_layers, self.bottom_layers):
-            F += self.uc_area * uc_t.F_uc(h,k,l) / uc_t.uc_area
-            F += self.uc_area * uc_b.F_uc(h,k,l) / uc_b.uc_area
+            F += self.uc_area * uc_t.F_uc(h, k, l) / uc_t.uc_area
+            F += self.uc_area * uc_b.F_uc(h, k, l) / uc_b.uc_area
         return F
 
-    def zDensity_G(self,z,h,k):
+    def zDensity_G(self, z, h, k):
         if np.any(self._basis_created != self.basis):
             self.createInterfaceCells()
         rho = np.zeros_like(z, dtype=np.complex128)
         for uc_t, uc_b in zip(self.top_layers, self.bottom_layers):
-            rho += uc_t.zDensity_G(z,h,k)
-            rho += uc_b.zDensity_G(z,h,k)
+            rho += uc_t.zDensity_G(z, h, k)
+            rho += uc_b.zDensity_G(z, h, k)
         return rho
 
-    def addFitParameter(self,indexarray,limits=(-np.inf,np.inf),**kwarg):
+    def addFitParameter(self, indexarray, limits=(-np.inf, np.inf), **kwarg):
         """to assign multiple unitcells with the same fitparameter, provide list of
-        unitcell names as kwarg `unitcell`   
+        unitcell names as kwarg `unitcell`
         """
         if len(np.array(indexarray).shape) < 2:
-            return super().addFitParameter(indexarray,limits,**kwarg)
-        if 'unitcell' not in kwarg:
-            raise ValueError("Missing unit cell name. Provide unit cell name as kwarg \'unitcell\'")
-        if isinstance(kwarg['unitcell'], list):
+            return super().addFitParameter(indexarray, limits, **kwarg)
+        if "unitcell" not in kwarg:
+            raise ValueError(
+                "Missing unit cell name. Provide unit cell name as kwarg 'unitcell'"
+            )
+        if isinstance(kwarg["unitcell"], list):
             fp = []
-            for ucn in kwarg['unitcell']:
-                fp.append(self[ucn].addFitParameter(indexarray,limits,**kwarg))
+            for ucn in kwarg["unitcell"]:
+                fp.append(self[ucn].addFitParameter(indexarray, limits, **kwarg))
             return fp
         else:
-            return self[kwarg['unitcell']].addFitParameter(indexarray,limits,**kwarg)
+            return self[kwarg["unitcell"]].addFitParameter(indexarray, limits, **kwarg)
 
-    def addRelParameter(self,indexarray,factors,limits=(-np.inf,np.inf),**kwarg):
+    def addRelParameter(self, indexarray, factors, limits=(-np.inf, np.inf), **kwarg):
         """to assign multiple unitcells with the same fitparameter, provide list of
-        unitcell names as kwarg `unitcell`   
+        unitcell names as kwarg `unitcell`
         """
         if len(np.array(indexarray).shape) < 2:
-            return super().addRelParameter(
+            return super().addRelParameter(indexarray, factors, limits, **kwarg)
+        if "unitcell" not in kwarg:
+            raise ValueError(
+                "Missing unit cell name. Provide unit cell name as kwarg 'unitcell'"
+            )
+        if isinstance(kwarg["unitcell"], list):
+            fp = []
+            for ucn in kwarg["unitcell"]:
+                fp.append(
+                    self[ucn].addRelParameter(indexarray, factors, limits, **kwarg)
+                )
+            return fp
+        else:
+            return self[kwarg["unitcell"]].addRelParameter(
                 indexarray, factors, limits, **kwarg
             )
-        if 'unitcell' not in kwarg:
-            raise ValueError("Missing unit cell name. Provide unit cell name as kwarg \'unitcell\'")
-        if isinstance(kwarg['unitcell'], list):
-            fp = []
-            for ucn in kwarg['unitcell']:
-                fp.append(self[ucn].addRelParameter(indexarray,factors,limits,**kwarg))
-            return fp
-        else:
-            return self[kwarg['unitcell']].addRelParameter(indexarray,factors,limits,**kwarg)
-
 
     def getStartParamAndLimits(self, force_recalculate=False):
-        #if self.basis_0 is None:
+        # if self.basis_0 is None:
         #    self.basis_0 = np.copy(self.basis)
-        x0, lower, upper = super().getStartParamAndLimits(force_recalculate) # absolute and relative
-        top_x0, top_lower, top_upper = self.uc_top.getStartParamAndLimits(force_recalculate)
-        bottom_x0, bottom_lower, bottom_upper = self.uc_bottom.getStartParamAndLimits(force_recalculate)
-        return (np.concatenate([x0, top_x0, bottom_x0]),
-               np.concatenate([lower, top_lower, bottom_lower]),
-               np.concatenate([upper, top_upper, bottom_upper]))
+        x0, lower, upper = super().getStartParamAndLimits(
+            force_recalculate
+        )  # absolute and relative
+        top_x0, top_lower, top_upper = self.uc_top.getStartParamAndLimits(
+            force_recalculate
+        )
+        bottom_x0, bottom_lower, bottom_upper = self.uc_bottom.getStartParamAndLimits(
+            force_recalculate
+        )
+        return (
+            np.concatenate([x0, top_x0, bottom_x0]),
+            np.concatenate([lower, top_lower, bottom_lower]),
+            np.concatenate([upper, top_upper, bottom_upper]),
+        )
 
-    def setFitParameters(self,x):
-        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+    def setFitParameters(self, x):
+        abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         fp_top_no = len(self.uc_top.fitparnames)
         fp_bottom_no = len(self.uc_bottom.fitparnames)
         super().setFitParameters(x[:abs_rel_no])
@@ -700,24 +673,30 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 self.basis[1],
                 self.profile.tail_probability,
             )
-        self.uc_top.setFitParameters(x[abs_rel_no: abs_rel_no+fp_top_no])
-        self.uc_bottom.setFitParameters(x[abs_rel_no+fp_top_no: abs_rel_no+fp_top_no+fp_bottom_no])
+        self.uc_top.setFitParameters(x[abs_rel_no : abs_rel_no + fp_top_no])
+        self.uc_bottom.setFitParameters(
+            x[abs_rel_no + fp_top_no : abs_rel_no + fp_top_no + fp_bottom_no]
+        )
 
-    def setLimits(self,lim):
-        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+    def setLimits(self, lim):
+        abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         fp_top_no = len(self.uc_top.fitparnames)
         fp_bottom_no = len(self.uc_bottom.fitparnames)
         super().setLimits(lim[:abs_rel_no])
-        self.uc_top.setLimits(lim[abs_rel_no: abs_rel_no+fp_top_no])
-        self.uc_bottom.setLimits(lim[abs_rel_no+fp_top_no: abs_rel_no+fp_top_no+fp_bottom_no])
+        self.uc_top.setLimits(lim[abs_rel_no : abs_rel_no + fp_top_no])
+        self.uc_bottom.setLimits(
+            lim[abs_rel_no + fp_top_no : abs_rel_no + fp_top_no + fp_bottom_no]
+        )
 
-    def setFitErrors(self,errors):
-        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+    def setFitErrors(self, errors):
+        abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         fp_top_no = len(self.uc_top.fitparnames)
         fp_bottom_no = len(self.uc_bottom.fitparnames)
         super().setFitErrors(errors[:abs_rel_no])
-        self.uc_top.setFitErrors(errors[abs_rel_no: abs_rel_no+fp_top_no])
-        self.uc_bottom.setFitErrors(errors[abs_rel_no+fp_top_no: abs_rel_no+fp_top_no+fp_bottom_no])
+        self.uc_top.setFitErrors(errors[abs_rel_no : abs_rel_no + fp_top_no])
+        self.uc_bottom.setFitErrors(
+            errors[abs_rel_no + fp_top_no : abs_rel_no + fp_top_no + fp_bottom_no]
+        )
 
     def getFitErrors(self):
         err = super().getFitErrors()
@@ -727,7 +706,9 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
     @property
     def fitparnames(self):
-        return super().fitparnames + self.uc_top.fitparnames + self.uc_bottom.fitparnames
+        return (
+            super().fitparnames + self.uc_top.fitparnames + self.uc_bottom.fitparnames
+        )
 
     @property
     def priors(self):
@@ -735,9 +716,9 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
     def parametersToDict(self):
         d = super().parametersToDict()
-        d['unitcells'] = {}
-        d['unitcells']['top'] = self.uc_top.parametersToDict()
-        d['unitcells']['bottom'] = self.uc_bottom.parametersToDict()
+        d["unitcells"] = {}
+        d["unitcells"]["top"] = self.uc_top.parametersToDict()
+        d["unitcells"]["bottom"] = self.uc_bottom.parametersToDict()
         return d
 
     def clearParameters(self):
@@ -746,13 +727,12 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         self.uc_bottom.clearParameters()
 
     def parametersFromDict(self, d, override_values=True):
-        self.uc_top.parametersFromDict(d['unitcells']['top'], override_values)
-        self.uc_bottom.parametersFromDict(d['unitcells']['bottom'], override_values)
+        self.uc_top.parametersFromDict(d["unitcells"]["top"], override_values)
+        self.uc_bottom.parametersFromDict(d["unitcells"]["bottom"], override_values)
         super().parametersFromDict(d, override_values)
 
     def updateFromParameters(self):
-        """Update basis from the values stored in the Parameters 
-        """
+        """Update basis from the values stored in the Parameters"""
         self.uc_top.updateFromParameters()
         self.uc_bottom.updateFromParameters()
         super().updateFromParameters()
@@ -763,68 +743,84 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 self.profile.tail_probability,
             )
 
-    def __getitem__(self,uc_name_or_index):
-        if isinstance(uc_name_or_index,str):
-            if uc_name_or_index.lower() in ['top', 't', 'upper', self.uc_top.name]:
+    def __getitem__(self, uc_name_or_index):
+        if isinstance(uc_name_or_index, str):
+            if uc_name_or_index.lower() in ["top", "t", "upper", self.uc_top.name]:
                 return self.uc_top
-            elif uc_name_or_index.lower() in ['bottom', 'b', 'lower', self.uc_bottom.name]:
+            elif uc_name_or_index.lower() in [
+                "bottom",
+                "b",
+                "lower",
+                self.uc_bottom.name,
+            ]:
                 return self.uc_bottom
             else:
-                raise KeyError("No unit cell %s in EpitaxyInterface %s" % (uc_name_or_index, self.name))
+                raise KeyError(
+                    f"No unit cell {uc_name_or_index} in EpitaxyInterface {self.name}"
+                )
         else:
-            raise ValueError(f"must be str, not {type(uc_name_or_index)}" )
+            raise ValueError(f"must be str, not {type(uc_name_or_index)}")
 
     def parameter_list(self):
-        return super().parameter_list() + self.uc_top.parameter_list() + self.uc_bottom.parameter_list()
+        return (
+            super().parameter_list()
+            + self.uc_top.parameter_list()
+            + self.uc_bottom.parameter_list()
+        )
 
     @classmethod
     def fromStr(cls, string):
-        xprfile = False
         with util.StringIO(string) as f:
             # parse header
             line = next_skip_comment(f).split()
-            if line[0].lower() != 'type':
-                raise ValueError("You must specify a epitaxy type in line 1."
-                " Available are %s" % EpitaxyInterface.avail_types)
+            if line[0].lower() != "type":
+                raise ValueError(
+                    "You must specify a epitaxy type in line 1."
+                    f" Available are {EpitaxyInterface.avail_types}"
+                )
             if line[1].lower() not in EpitaxyInterface.avail_types:
-                raise ValueError("Expitaxy type %s is not valid."
-                " Must be one of %s" % (line[1], EpitaxyInterface.avail_types))
+                raise ValueError(
+                    f"Expitaxy type {line[1]} is not valid."
+                    f" Must be one of {EpitaxyInterface.avail_types}"
+                )
             ep_type = line[1].lower()
 
             statistics = dict()
             line = next_skip_comment(f)
-            while('Width' in line or '=' in line): # parameter header or statistics line
-                if '=' in line:
+            while "Width" in line or "=" in line:  # parameter header or statistics line
+                if "=" in line:
                     try:
-                        splitted = [n.split(',') for n in line.split('=')]
+                        splitted = [n.split(",") for n in line.split("=")]
                         splitted = [item for sublist in splitted for item in sublist]
-                        for i in range(0,len(splitted),2):
-                            statistics[splitted[i].strip()] = float(splitted[i+1])
+                        for i in range(0, len(splitted), 2):
+                            statistics[splitted[i].strip()] = float(splitted[i + 1])
                     except Exception:
-                        print("Cannot read statistics string: %s" % line)
+                        print(f"Cannot read statistics string: {line}")
                 line = next_skip_comment(f)
             # epitaxy parameters
             sline = line.split()
-            if '+-' in sline:
-                params = re.findall(r'\(([^)]+)',line)
-                params_array = np.array([np.array(p.split('+-'),dtype=np.float64) for p in params]).T
+            if "+-" in sline:
+                params = re.findall(r"\(([^)]+)", line)
+                params_array = np.array(
+                    [np.array(p.split("+-"), dtype=np.float64) for p in params]
+                ).T
                 basis = params_array[0]
                 errors = params_array[1]
             else:
-                basis = np.array(sline,dtype=np.float64)
+                basis = np.array(sline, dtype=np.float64)
                 errors = None
 
-        # very explicit searching for the lines containing TopUnitCell and BottomUnitCell:
+        # very explicit searching for the lines containing TopUnitCell and BottomUnitCell:  # noqa: E501
         sp_str = string.splitlines()
         top_pos = -1
         bottom_pos = -1
-        for i, l in enumerate(sp_str):
+        for i, l in enumerate(sp_str):  # noqa: E741
             if top_pos == -1:
-                if 'TopUnitCell' in l:
-                    top_pos = i # found it, and save line number
+                if "TopUnitCell" in l:
+                    top_pos = i  # found it, and save line number
             if bottom_pos == -1:
-                if 'BottomUnitCell' in l:
-                    bottom_pos = i # found it, and save line number
+                if "BottomUnitCell" in l:
+                    bottom_pos = i  # found it, and save line number
             if top_pos != -1 and bottom_pos != -1:
                 break
         else:
@@ -835,18 +831,18 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 msg += "No BottomUnitCell provided."
             raise ValueError(msg)
 
-        classname_top,top_name = sp_str[top_pos].split(maxsplit=1)
-        classname_bottom,bottom_name = sp_str[bottom_pos].split(maxsplit=1)
+        classname_top, top_name = sp_str[top_pos].split(maxsplit=1)
+        classname_bottom, bottom_name = sp_str[bottom_pos].split(maxsplit=1)
 
-        assert classname_top == 'TopUnitCell'
-        assert classname_bottom == 'BottomUnitCell'
+        assert classname_top == "TopUnitCell"
+        assert classname_bottom == "BottomUnitCell"
 
         if top_pos < bottom_pos:
-            top_uc_str = '\n'.join(sp_str[top_pos+1:bottom_pos])
-            bottom_uc_str = '\n'.join(sp_str[bottom_pos+1:])
+            top_uc_str = "\n".join(sp_str[top_pos + 1 : bottom_pos])
+            bottom_uc_str = "\n".join(sp_str[bottom_pos + 1 :])
         else:
-            top_uc_str = '\n'.join(sp_str[top_pos+1:])
-            bottom_uc_str = '\n'.join(sp_str[bottom_pos+1:top_pos])
+            top_uc_str = "\n".join(sp_str[top_pos + 1 :])
+            bottom_uc_str = "\n".join(sp_str[bottom_pos + 1 : top_pos])
 
         uc_top = UnitCell.fromStr(top_uc_str)
         uc_bottom = UnitCell.fromStr(bottom_uc_str)
@@ -854,31 +850,26 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         uc_top.name = top_name
         uc_bottom.name = bottom_name
 
-        support_cursor = _parse_text_metadata(
-            string, 'support_cursor', 'legacy'
-        )
+        support_cursor = _parse_text_metadata(string, "support_cursor", "legacy")
         tail_probability = _parse_float_metadata(
-            string, 'tail_probability', DEFAULT_TAIL_PROBABILITY
+            string, "tail_probability", DEFAULT_TAIL_PROBABILITY
         )
         profile = None
-        if support_cursor == 'nominal':
-            profile = SkellamProfile(
-                basis[0], basis[1], tail_probability
-            )
+        if support_cursor == "nominal":
+            profile = SkellamProfile(basis[0], basis[1], tail_probability)
         epit = cls(
             uc_top,
             uc_bottom,
             ep_type,
             profile=profile,
             layer_transition=_parse_layer_transition(string),
-            legacy_support_cursor=(support_cursor != 'nominal'),
+            legacy_support_cursor=(support_cursor != "nominal"),
         )
         epit.statistics = statistics
         epit.basis = basis
         epit.basis_0 = np.copy(basis)
         epit.errors = errors
         return epit
-
 
     def toStr(self, showErrors=True):
         """Serialize the interface as plain text.
@@ -889,7 +880,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             Plain-text interface representation.
         :rtype: str
         """
-        s = "type %s" % self.type
+        s = f"type {self.type}"
         s += (
             "\n"
             + EpitaxyInterface.parameterOrder
@@ -900,77 +891,70 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             s += "\nsupport_cursor: nominal"
             if (
                 self.profile is not None
-                and self.profile.tail_probability
-                != DEFAULT_TAIL_PROBABILITY
+                and self.profile.tail_probability != DEFAULT_TAIL_PROBABILITY
             ):
-                s += "\ntail_probability: %.12g" % (
-                    self.profile.tail_probability
-                )
+                s += f"\ntail_probability: {self.profile.tail_probability:.12g}"
         metadata = self._stacking_metadata_to_str()
         if metadata:
             s += "\n" + metadata.rstrip()
         s += "\n\n"
-        s += "TopUnitCell %s\n" % self.uc_top.name
+        s += f"TopUnitCell {self.uc_top.name}\n"
         s += self.uc_top.toStr(showErrors=showErrors) + "\n\n"
-        s += "BottomUnitCell %s\n" % self.uc_bottom.name
+        s += f"BottomUnitCell {self.uc_bottom.name}\n"
         s += self.uc_bottom.toStr(showErrors=showErrors) + "\n"
         return s
 
     def __repr__(self):
         return self.toStr()
 
-    def epitToStr(self,showErrors=True):
+    def epitToStr(self, showErrors=True):
         param = self.basis
         if (self.errors is not None) and showErrors:
             errors = self.errors
-            l = []
-            for p, err in zip(param,errors):
-                l.append("(%.5f +- %.5f)" % (p, err))
+            l = []  # noqa: E741
+            for p, err in zip(param, errors):
+                l.append(f"({p:.5f} +- {err:.5f})")
             return "   ".join(l)
         else:
-            l = []
+            l = []  # noqa: E741
             for p in param:
-                l.append("%.5f " % p)
+                l.append(f"{p:.5f} ")
             return "   ".join(l)
-
-
 
 
 class Film(_LayerStackingMixin, LinearFitFunctions):
     parameterOrder = "Width/layers"
 
-    parameterLookup = {'W' : 0}
+    parameterLookup = {"W": 0}
 
     parameterLookup_inv = dict(map(reversed, parameterLookup.items()))
 
-    def __init__(self,unitcell,**kwargs):
+    def __init__(self, unitcell, **kwargs):
         super().__init__()
         self.type = type
         self.set_ucs(unitcell, **kwargs)
-        self.basis = np.array([0.])
+        self.basis = np.array([0.0])
         self._basis_created = np.array([np.nan])
-        self.basis_0 = np.array([0.])
+        self.basis_0 = np.array([0.0])
         self.errors = None
-        if 'name' in kwargs:
-            self.name = kwargs['name']
+        if "name" in kwargs:
+            self.name = kwargs["name"]
         else:
             self.name = "unnamed"
 
-        self.below_loc = 0.
-        self.below_H = 0.
-        self.below_layer = -1.
+        self.below_loc = 0.0
+        self.below_H = 0.0
+        self.below_layer = -1.0
         self._initialize_layer_stacking(kwargs)
 
     def set_ucs(self, unitcell, **kwargs):
         self.unitcell = unitcell
         self.uc_layers = self.unitcell.split_in_layers()
         self._layer_ids = np.array(list(self.uc_layers))
-        self._layer_ucs_base = [
-            self.uc_layers[uc] for uc in self._layer_ids
-        ]
-        self._layerpos_base = np.array([
-            self.unitcell.layerpos[i] for i in self._layer_ids
-        ])
+        self._layer_ucs_base = [self.uc_layers[uc] for uc in self._layer_ids]
+        self._layerpos_base = np.array(
+            [self.unitcell.layerpos[i] for i in self._layer_ids]
+        )
         self.layer_ucs = list(self._layer_ucs_base)
         self.layerpos = np.copy(self._layerpos_base)
 
@@ -988,11 +972,9 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         self.layer_order = np.asarray(layer_order)
         self._layer_order_indices = np.asarray(order)
         self.layer_ucs = [self._layer_ucs_base[i] for i in order]
-        self.layerpos = _unwrapped_layer_positions(
-            self._layerpos_base, order
-        )
+        self.layerpos = _unwrapped_layer_positions(self._layerpos_base, order)
 
-    def setReferenceUnitCell(self,uc,rotMatrix=np.identity(3)):
+    def setReferenceUnitCell(self, uc, rotMatrix=np.identity(3)):
         """Set the reference frame on the Film and every generated layer.
 
         :param UnitCell uc:
@@ -1005,7 +987,7 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         for layer in self._layer_ucs_base:
             layer.setReferenceUnitCell(uc, rotMatrix)
 
-    def setEnergy(self,E):
+    def setEnergy(self, E):
         """Set X-ray energy for the Film and generated layers.
 
         :param float E:
@@ -1015,7 +997,6 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         self.unitcell.setEnergy(E)
         for layer in self._layer_ucs_base:
             layer.setEnergy(E)
-
 
     @property
     def loc_absolute(self):
@@ -1033,11 +1014,11 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         upper_layer_id = self.end_layer_number
         upper_layer = self.uc_layers[upper_layer_id]
         idx = self.layer_ucs.index(upper_layer)
-        pos = upper_layer.coherentDomainMatrix[-1][2,3]*upper_layer.a[2]
-        strain = upper_layer.coherentDomainMatrix[-1][2,2]
+        pos = upper_layer.coherentDomainMatrix[-1][2, 3] * upper_layer.a[2]
+        strain = upper_layer.coherentDomainMatrix[-1][2, 2]
         layerpos = self.unitcell.layerpos[upper_layer_id]
-        layer_space = np.diff(self.layerpos, append=self.layerpos[0]+1)
-        H = pos + strain*(layerpos + layer_space[idx])*upper_layer.a[2]
+        layer_space = np.diff(self.layerpos, append=self.layerpos[0] + 1)
+        H = pos + strain * (layerpos + layer_space[idx]) * upper_layer.a[2]
         return H
 
     @property
@@ -1048,8 +1029,7 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         matrix = lower_layer.coherentDomainMatrix[0]
         layer_id = self.layer_order[0]
         H = (
-            matrix[2,3]
-            + matrix[2,2] * self.unitcell.layerpos[layer_id]
+            matrix[2, 3] + matrix[2, 2] * self.unitcell.layerpos[layer_id]
         ) * lower_layer.a[2]
         return H
 
@@ -1068,8 +1048,10 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         return self._end_layer_number
 
     def createLayers(self):
-        n_layers_in_uc  = len(self.unitcell.layers)
-        scaled_width = self.basis[0] - n_layers_in_uc*((self.below_H - self.below_loc) / self.unitcell.a[2])
+        n_layers_in_uc = len(self.unitcell.layers)
+        scaled_width = self.basis[0] - n_layers_in_uc * (
+            (self.below_H - self.below_loc) / self.unitcell.a[2]
+        )
         layers_to_create = int(round(scaled_width, 0))
         if layers_to_create <= 0:
             raise ValueError("Effective film width <= 0. Cannot create layers")
@@ -1077,8 +1059,8 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
             uc.coherentDomainMatrix = []
             uc.coherentDomainOccupancy = []
 
-        mat_0 = np.vstack((np.identity(3).T,np.array([0,0,0]))).T
-        strain = self.unitcell.coherentDomainMatrix[0][2,2]
+        mat_0 = np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
+        strain = self.unitcell.coherentDomainMatrix[0][2, 2]
         occup = self.unitcell.coherentDomainOccupancy[0]
 
         for layer_index in range(layers_to_create):
@@ -1088,29 +1070,23 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
             mat_i = np.copy(mat_0)
             layer_id = self.layer_order[order_index]
             relative_layer_position = (
-                cycle_index
-                + self.layerpos[order_index]
-                - self.layerpos[0]
+                cycle_index + self.layerpos[order_index] - self.layerpos[0]
             )
-            layer_offset = (
-                relative_layer_position
-                - self.unitcell.layerpos[layer_id]
-            )
+            layer_offset = relative_layer_position - self.unitcell.layerpos[layer_id]
 
-            mat_i[2,2] = strain
-            mat_i[2,3] = layer_offset * strain
+            mat_i[2, 2] = strain
+            mat_i[2, 3] = layer_offset * strain
 
             uc.coherentDomainMatrix.append(mat_i)
             uc.coherentDomainOccupancy.append(occup)
 
-        upper_layer = uc.basis[0,7]
+        upper_layer = uc.basis[0, 7]
         self._end_layer_number = upper_layer
         _translate_domains(self.layer_ucs, self.below_H)
 
         self._basis_created = np.copy(self.basis)
 
-
-    def F_uc(self,h,k,l):
+    def F_uc(self, h, k, l):  # noqa: E741
         """Return the Film structure factor in electrons.
 
         The result is the unnormalized sum over all generated Film layers and
@@ -1129,66 +1105,69 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         if np.any(self._basis_created != self.basis):
             self.createLayers()
         if ctr_accel_enabled():
-            h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
+            h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
         F = np.zeros_like(l, dtype=np.complex128)
         for uc in self.layer_ucs:
-            F += uc.F_uc(h,k,l)
+            F += uc.F_uc(h, k, l)
         return F
 
-    def zDensity_G(self,z,h,k):
+    def zDensity_G(self, z, h, k):
         if np.any(self._basis_created != self.basis):
             self.createLayers()
         rho = np.zeros_like(z, dtype=np.complex128)
         for uc in self.layer_ucs:
-            rho += uc.zDensity_G(z,h,k)
+            rho += uc.zDensity_G(z, h, k)
         return rho
 
-    def addFitParameter(self,indexarray,limits=(-np.inf,np.inf),**kwarg):
+    def addFitParameter(self, indexarray, limits=(-np.inf, np.inf), **kwarg):
         """to assign multiple unitcells with the same fitparameter, provide list of
-        unitcell names as kwarg `unitcell`   
+        unitcell names as kwarg `unitcell`
         """
         if len(np.array(indexarray).shape) < 2:
-            return super().addFitParameter(indexarray,limits,**kwarg)
+            return super().addFitParameter(indexarray, limits, **kwarg)
 
-        return self.unitcell.addFitParameter(indexarray,limits,**kwarg)
+        return self.unitcell.addFitParameter(indexarray, limits, **kwarg)
 
-    def addRelParameter(self,indexarray,factors,limits=(-np.inf,np.inf),**kwarg):
+    def addRelParameter(self, indexarray, factors, limits=(-np.inf, np.inf), **kwarg):
         """to assign multiple unitcells with the same fitparameter, provide list of
-        unitcell names as kwarg `unitcell`   
+        unitcell names as kwarg `unitcell`
         """
         if len(np.array(indexarray).shape) < 2:
-            return super().addRelParameter(
-                indexarray, factors, limits, **kwarg
-            )
-        return self.unitcell.addRelParameter(indexarray,factors,limits,**kwarg)
-
+            return super().addRelParameter(indexarray, factors, limits, **kwarg)
+        return self.unitcell.addRelParameter(indexarray, factors, limits, **kwarg)
 
     def getStartParamAndLimits(self, force_recalculate=False):
-        #if self.basis_0 is None:
+        # if self.basis_0 is None:
         #    self.basis_0 = np.copy(self.basis)
-        x0, lower, upper = super().getStartParamAndLimits(force_recalculate) # absolute and relative
-        uc_x0, uc_lower, uc_upper = self.unitcell.getStartParamAndLimits(force_recalculate)
-        return (np.concatenate([x0, uc_x0]),
-               np.concatenate([lower, uc_lower]),
-               np.concatenate([upper, uc_upper]))
+        x0, lower, upper = super().getStartParamAndLimits(
+            force_recalculate
+        )  # absolute and relative
+        uc_x0, uc_lower, uc_upper = self.unitcell.getStartParamAndLimits(
+            force_recalculate
+        )
+        return (
+            np.concatenate([x0, uc_x0]),
+            np.concatenate([lower, uc_lower]),
+            np.concatenate([upper, uc_upper]),
+        )
 
-    def setFitParameters(self,x):
-        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+    def setFitParameters(self, x):
+        abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         fp_no = len(self.unitcell.fitparnames)
         super().setFitParameters(x[:abs_rel_no])
-        self.unitcell.setFitParameters(x[abs_rel_no: abs_rel_no+fp_no])
+        self.unitcell.setFitParameters(x[abs_rel_no : abs_rel_no + fp_no])
 
-    def setLimits(self,lim):
-        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+    def setLimits(self, lim):
+        abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         fp_no = len(self.unitcell.fitparnames)
         super().setLimits(lim[:abs_rel_no])
-        self.unitcell.setLimits(lim[abs_rel_no: abs_rel_no+fp_no])
+        self.unitcell.setLimits(lim[abs_rel_no : abs_rel_no + fp_no])
 
-    def setFitErrors(self,errors):
-        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+    def setFitErrors(self, errors):
+        abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         fp_no = len(self.unitcell.fitparnames)
         super().setFitErrors(errors[:abs_rel_no])
-        self.unitcell.setFitErrors(errors[abs_rel_no: abs_rel_no+fp_no])
+        self.unitcell.setFitErrors(errors[abs_rel_no : abs_rel_no + fp_no])
 
     def getFitErrors(self):
         err = super().getFitErrors()
@@ -1205,8 +1184,8 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
 
     def parametersToDict(self):
         d = super().parametersToDict()
-        d['unitcells'] = {}
-        d['unitcells']['unitcell'] = self.unitcell.parametersToDict()
+        d["unitcells"] = {}
+        d["unitcells"]["unitcell"] = self.unitcell.parametersToDict()
         return d
 
     def clearParameters(self):
@@ -1214,71 +1193,73 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         self.unitcell.clearParameters()
 
     def parametersFromDict(self, d, override_values=True):
-        self.unitcell.parametersFromDict(d['unitcells']['unitcell'], override_values)
+        self.unitcell.parametersFromDict(d["unitcells"]["unitcell"], override_values)
         super().parametersFromDict(d, override_values)
 
     def updateFromParameters(self):
-        """Update basis from the values stored in the Parameters 
-        """
+        """Update basis from the values stored in the Parameters"""
         self.unitcell.updateFromParameters()
         super().updateFromParameters()
 
-    def __getitem__(self,uc_name_or_index):
-        if isinstance(uc_name_or_index,str):
-            if uc_name_or_index.lower() in ['uc', 'unitcell', self.uc_top.name]:
+    def __getitem__(self, uc_name_or_index):
+        if isinstance(uc_name_or_index, str):
+            if uc_name_or_index.lower() in ["uc", "unitcell", self.uc_top.name]:
                 return self.unitcell
             else:
-                raise KeyError("No unit cell %s in EpitaxyInterface %s" % (uc_name_or_index, self.name))
+                raise KeyError(
+                    f"No unit cell {uc_name_or_index} in EpitaxyInterface {self.name}"
+                )
         else:
-            raise ValueError(f"must be str, not {type(uc_name_or_index)}" )
+            raise ValueError(f"must be str, not {type(uc_name_or_index)}")
 
     def parameter_list(self):
         return super().parameter_list() + self.unitcell.parameter_list()
 
     @classmethod
     def fromStr(cls, string):
-        xprfile = False
         with util.StringIO(string) as f:
             # parse header
             line = next_skip_comment(f).split()
-            #if line[0].lower() != 'type':
+            # if line[0].lower() != 'type':
             #    raise ValueError("You must specify a epitaxy type in line 1."
             #    " Available are %s" % EpitaxyInterface.avail_types)
-            #if line[1].lower() not in EpitaxyInterface.avail_types:
+            # if line[1].lower() not in EpitaxyInterface.avail_types:
             #    raise ValueError("Expitaxy type %s is not valid."
             #    " Must be one of %s" % (line[1], EpitaxyInterface.avail_types))
-            #ep_type = line[1].lower()
+            # ep_type = line[1].lower()
 
             statistics = dict()
             line = next_skip_comment(f)
-            while('Width' in line or '=' in line): # parameter header or statistics line
-                if '=' in line:
+            while "Width" in line or "=" in line:  # parameter header or statistics line
+                if "=" in line:
                     try:
-                        splitted = [n.split(',') for n in line.split('=')]
+                        splitted = [n.split(",") for n in line.split("=")]
                         splitted = [item for sublist in splitted for item in sublist]
-                        for i in range(0,len(splitted),2):
-                            statistics[splitted[i].strip()] = float(splitted[i+1])
+                        for i in range(0, len(splitted), 2):
+                            statistics[splitted[i].strip()] = float(splitted[i + 1])
                     except Exception:
-                        print("Cannot read statistics string: %s" % line)
+                        print(f"Cannot read statistics string: {line}")
                 line = next_skip_comment(f)
             # epitaxy parameters
             sline = line.split()
-            if '+-' in sline:
-                params = re.findall(r'\(([^)]+)',line)
-                params_array = np.array([np.array(p.split('+-'),dtype=np.float64) for p in params]).T
+            if "+-" in sline:
+                params = re.findall(r"\(([^)]+)", line)
+                params_array = np.array(
+                    [np.array(p.split("+-"), dtype=np.float64) for p in params]
+                ).T
                 basis = params_array[0]
                 errors = params_array[1]
             else:
-                basis = np.array(sline,dtype=np.float64)
+                basis = np.array(sline, dtype=np.float64)
                 errors = None
 
-        # very explicit searching for the lines containing TopUnitCell and BottomUnitCell:
+        # very explicit searching for the lines containing TopUnitCell and BottomUnitCell:  # noqa: E501
         sp_str = string.splitlines()
         uc_pos = -1
-        for i, l in enumerate(sp_str):
+        for i, l in enumerate(sp_str):  # noqa: E741
             if uc_pos == -1:
-                if 'UnitCell' in l:
-                    uc_pos = i # found it, and save line number
+                if "UnitCell" in l:
+                    uc_pos = i  # found it, and save line number
             if uc_pos != -1:
                 break
         else:
@@ -1287,24 +1268,21 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
                 msg += "No UnitCell provided. "
             raise ValueError(msg)
 
-        uc_classname,uc_name = sp_str[uc_pos].split(maxsplit=1)
+        uc_classname, uc_name = sp_str[uc_pos].split(maxsplit=1)
 
-        assert uc_classname == 'UnitCell'
-        uc_str = '\n'.join(sp_str[uc_pos+1:])
+        assert uc_classname == "UnitCell"
+        uc_str = "\n".join(sp_str[uc_pos + 1 :])
 
         uc = UnitCell.fromStr(uc_str)
 
         uc.name = uc_name
 
-        film = cls(
-            uc, layer_transition=_parse_layer_transition(string)
-        )
+        film = cls(uc, layer_transition=_parse_layer_transition(string))
         film.statistics = statistics
         film.basis = basis
         film.basis_0 = np.copy(basis)
         film.errors = errors
         return film
-
 
     def toStr(self, showErrors=True):
         """Serialize the Film as plain text.
@@ -1315,38 +1293,32 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
             Plain-text Film representation.
         :rtype: str
         """
-        #s = "type %s" % self.type
-        s = (
-            "\n"
-            + Film.parameterOrder
-            + "\n"
-            + self.filmToStr(showErrors=showErrors)
-        )
+        # s = "type %s" % self.type
+        s = "\n" + Film.parameterOrder + "\n" + self.filmToStr(showErrors=showErrors)
         metadata = self._stacking_metadata_to_str()
         if metadata:
             s += "\n" + metadata.rstrip()
         s += "\n\n"
-        s += "UnitCell %s\n" % self.unitcell.name
+        s += f"UnitCell {self.unitcell.name}\n"
         s += self.unitcell.toStr(showErrors=showErrors) + "\n"
         return s
 
     def __repr__(self):
         return self.toStr()
 
-    def filmToStr(self,showErrors=True):
+    def filmToStr(self, showErrors=True):
         param = self.basis
         if (self.errors is not None) and showErrors:
             errors = self.errors
-            l = []
-            for p, err in zip(param,errors):
-                l.append("(%.5f +- %.5f)" % (p, err))
+            l = []  # noqa: E741
+            for p, err in zip(param, errors):
+                l.append(f"({p:.5f} +- {err:.5f})")
             return "   ".join(l)
         else:
-            l = []
+            l = []  # noqa: E741
             for p in param:
-                l.append("%.5f " % p)
+                l.append(f"{p:.5f} ")
             return "   ".join(l)
-
 
 
 class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
@@ -1363,50 +1335,46 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
     parameterOrder = "W/layers offset/layers"
 
-    parameterLookup = {'W': 0, 'offset': 1, 'deltaW': 1}
+    parameterLookup = {"W": 0, "offset": 1, "deltaW": 1}
 
-    parameterLookup_inv = {0: 'W', 1: 'offset'}
+    parameterLookup_inv = {0: "W", 1: "offset"}
 
-    def __init__(self,unitcell,**kwargs):
+    def __init__(self, unitcell, **kwargs):
         super().__init__()
-        profile = kwargs.pop('profile', None)
+        profile = kwargs.pop("profile", None)
         if profile is not None and not isinstance(profile, PoissonProfile):
             raise TypeError("PoissonSurface profile must be PoissonProfile")
         self.profile = profile
         self._legacy_absolute_width = kwargs.pop(
-            'legacy_absolute_width', profile is None
+            "legacy_absolute_width", profile is None
         )
         self.type = type
         self.set_ucs(unitcell, **kwargs)
         if profile is None:
-            self.basis = np.array([0., 0.])
+            self.basis = np.array([0.0, 0.0])
         else:
-            self.basis = np.array([
-                profile.mean_change, profile.offset
-            ])
+            self.basis = np.array([profile.mean_change, profile.offset])
         self._basis_created = np.array([np.nan, np.nan])
-        self.basis_0 = np.array([0., 0.])
+        self.basis_0 = np.array([0.0, 0.0])
         self.errors = None
-        if 'name' in kwargs:
-            self.name = kwargs['name']
+        if "name" in kwargs:
+            self.name = kwargs["name"]
         else:
             self.name = "unnamed"
 
-        self.below_loc = 0.
-        self.below_H = 0.
-        self.below_layer = -1.
+        self.below_loc = 0.0
+        self.below_H = 0.0
+        self.below_layer = -1.0
         self._initialize_layer_stacking(kwargs)
 
     def set_ucs(self, unitcell, **kwargs):
         self.unitcell = unitcell
         self.uc_layers = self.unitcell.split_in_layers()
         self._layer_ids = np.array(list(self.uc_layers))
-        self._layer_ucs_base = [
-            self.uc_layers[uc] for uc in self._layer_ids
-        ]
-        self._layerpos_base = np.array([
-            self.unitcell.layerpos[i] for i in self._layer_ids
-        ])
+        self._layer_ucs_base = [self.uc_layers[uc] for uc in self._layer_ids]
+        self._layerpos_base = np.array(
+            [self.unitcell.layerpos[i] for i in self._layer_ids]
+        )
         self.layer_ucs = list(self._layer_ucs_base)
         self.layerpos = np.copy(self._layerpos_base)
 
@@ -1424,11 +1392,9 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         self.layer_order = np.asarray(layer_order)
         self._layer_order_indices = np.asarray(order)
         self.layer_ucs = [self._layer_ucs_base[i] for i in order]
-        self.layerpos = _unwrapped_layer_positions(
-            self._layerpos_base, order
-        )
+        self.layerpos = _unwrapped_layer_positions(self._layerpos_base, order)
 
-    def setReferenceUnitCell(self,uc,rotMatrix=np.identity(3)):
+    def setReferenceUnitCell(self, uc, rotMatrix=np.identity(3)):
         """Set the reference frame on the surface and generated layers.
 
         :param UnitCell uc:
@@ -1441,7 +1407,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         for layer in self._layer_ucs_base:
             layer.setReferenceUnitCell(uc, rotMatrix)
 
-    def setEnergy(self,E):
+    def setEnergy(self, E):
         """Set X-ray energy for the surface and generated layers.
 
         :param float E:
@@ -1451,7 +1417,6 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         self.unitcell.setEnergy(E)
         for layer in self._layer_ucs_base:
             layer.setEnergy(E)
-
 
     @property
     def loc_absolute(self):
@@ -1469,11 +1434,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         upper_layer_id = self.end_layer_number
         upper_layer = self.uc_layers[upper_layer_id]
         idx = self.layer_ucs.index(upper_layer)
-        pos = upper_layer.coherentDomainMatrix[-1][2,3]*upper_layer.a[2]
-        strain = upper_layer.coherentDomainMatrix[-1][2,2]
+        pos = upper_layer.coherentDomainMatrix[-1][2, 3] * upper_layer.a[2]
+        strain = upper_layer.coherentDomainMatrix[-1][2, 2]
         layerpos = self.unitcell.layerpos[upper_layer_id]
-        layer_space = np.diff(self.layerpos, append=self.layerpos[0]+1)
-        H = pos + strain*(layerpos + layer_space[idx])*upper_layer.a[2]
+        layer_space = np.diff(self.layerpos, append=self.layerpos[0] + 1)
+        H = pos + strain * (layerpos + layer_space[idx]) * upper_layer.a[2]
         return H
 
     @property
@@ -1484,8 +1449,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         matrix = lower_layer.coherentDomainMatrix[0]
         layer_id = self.layer_order[0]
         H = (
-            matrix[2,3]
-            + matrix[2,2] * self.unitcell.layerpos[layer_id]
+            matrix[2, 3] + matrix[2, 2] * self.unitcell.layerpos[layer_id]
         ) * lower_layer.a[2]
         return H
 
@@ -1518,12 +1482,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
     @property
     def mean_height_absolute(self):
         """Return the expected surface height in Angstrom."""
-        layer_height = (
-            self.unitcell.a[2] / len(self.unitcell.layers)
-        )
-        return self.below_H + layer_height * (
-            self.basis[0] + self.basis[1]
-        )
+        layer_height = self.unitcell.a[2] / len(self.unitcell.layers)
+        return self.below_H + layer_height * (self.basis[0] + self.basis[1])
 
     def createLayers(self):
         """Create layer domains and their Poisson surface occupancies."""
@@ -1536,9 +1496,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         if self._legacy_absolute_width:
             delta_width = self.basis[1]
             if delta_width < 0:
-                raise ValueError(
-                    "legacy deltaW must be greater than or equal to zero"
-                )
+                raise ValueError("legacy deltaW must be greater than or equal to zero")
             profile = PoissonProfile(
                 mean_change=delta_width,
                 tail_probability=tail_probability,
@@ -1549,17 +1507,13 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             scaled_width = mean_width + delta_width
             layers_to_create = int(round(scaled_width, 0))
             if layers_to_create <= 0:
-                raise ValueError(
-                    "Effective film width <= 0. Cannot create layers"
-                )
+                raise ValueError("Effective film width <= 0. Cannot create layers")
             layer_numbers = np.arange(layers_to_create)
             if delta_width == 0:
                 layer_occupancy = np.ones(layers_to_create)
             else:
                 minimum_width = mean_width - delta_width
-                layer_occupancy = profile.occupancy(
-                    layer_numbers - minimum_width
-                )
+                layer_occupancy = profile.occupancy(layer_numbers - minimum_width)
         else:
             profile = PoissonProfile(
                 mean_change=self.basis[0],
@@ -1577,8 +1531,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             uc.coherentDomainMatrix = []
             uc.coherentDomainOccupancy = []
 
-        mat_0 = np.vstack((np.identity(3).T,np.array([0,0,0]))).T
-        strain = self.unitcell.coherentDomainMatrix[0][2,2]
+        mat_0 = np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
+        strain = self.unitcell.coherentDomainMatrix[0][2, 2]
         occup = self.unitcell.coherentDomainOccupancy[0]
 
         layer_occupancy *= occup
@@ -1590,23 +1544,18 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             mat_i = np.copy(mat_0)
             layer_id = self.layer_order[order_index]
             relative_layer_position = (
-                cycle_index
-                + self.layerpos[order_index]
-                - self.layerpos[0]
+                cycle_index + self.layerpos[order_index] - self.layerpos[0]
             )
-            layer_offset = (
-                relative_layer_position
-                - self.unitcell.layerpos[layer_id]
-            )
+            layer_offset = relative_layer_position - self.unitcell.layerpos[layer_id]
 
-            mat_i[2,2] = strain
-            mat_i[2,3] = layer_offset * strain
+            mat_i[2, 2] = strain
+            mat_i[2, 3] = layer_offset * strain
 
             uc.coherentDomainMatrix.append(mat_i)
             uc.coherentDomainOccupancy.append(layer_occupancy[layer_index])
 
         if layers_to_create:
-            upper_layer = uc.basis[0,7]
+            upper_layer = uc.basis[0, 7]
             self._end_layer_number = upper_layer
         else:
             self._end_layer_number = self.start_layer_number
@@ -1614,8 +1563,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
         self._basis_created = np.copy(self.basis)
 
-
-    def F_uc(self,h,k,l):
+    def F_uc(self, h, k, l):  # noqa: E741
         """Return the Poisson surface correction in electrons.
 
         Positive occupancies add grown material and negative occupancies remove
@@ -1635,51 +1583,56 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         if np.any(self._basis_created != self.basis):
             self.createLayers()
         if ctr_accel_enabled():
-            h,k,l = _ensure_contiguous(h,k,l, testOnly=False, astype=np.float64)
+            h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
         F = np.zeros_like(l, dtype=np.complex128)
         for uc in self.layer_ucs:
             if uc.coherentDomainMatrix:
-                F += uc.F_uc(h,k,l)
+                F += uc.F_uc(h, k, l)
         return F
 
-    def zDensity_G(self,z,h,k):
+    def zDensity_G(self, z, h, k):
         if np.any(self._basis_created != self.basis):
             self.createLayers()
         rho = np.zeros_like(z, dtype=np.complex128)
         for uc in self.layer_ucs:
             if uc.coherentDomainMatrix:
-                rho += uc.zDensity_G(z,h,k)
+                rho += uc.zDensity_G(z, h, k)
         return rho
 
-    def addFitParameter(self,indexarray,limits=(-np.inf,np.inf),**kwarg):
+    def addFitParameter(self, indexarray, limits=(-np.inf, np.inf), **kwarg):
         """to assign multiple unitcells with the same fitparameter, provide list of
-        unitcell names as kwarg `unitcell`   
+        unitcell names as kwarg `unitcell`
         """
         if len(np.array(indexarray).shape) < 2:
-            return super().addFitParameter(indexarray,limits,**kwarg)
+            return super().addFitParameter(indexarray, limits, **kwarg)
 
-        return self.unitcell.addFitParameter(indexarray,limits,**kwarg)
+        return self.unitcell.addFitParameter(indexarray, limits, **kwarg)
 
-    def addRelParameter(self,indexarray,factors,limits=(-np.inf,np.inf),**kwarg):
+    def addRelParameter(self, indexarray, factors, limits=(-np.inf, np.inf), **kwarg):
         """to assign multiple unitcells with the same fitparameter, provide list of
-        unitcell names as kwarg `unitcell`   
+        unitcell names as kwarg `unitcell`
         """
         if len(np.array(indexarray).shape) < 2:
-            return super().addRelParameter(indexarray,factors,limits,**kwarg)
-        return self.unitcell.addRelParameter(indexarray,factors,limits,**kwarg)
-
+            return super().addRelParameter(indexarray, factors, limits, **kwarg)
+        return self.unitcell.addRelParameter(indexarray, factors, limits, **kwarg)
 
     def getStartParamAndLimits(self, force_recalculate=False):
-        #if self.basis_0 is None:
+        # if self.basis_0 is None:
         #    self.basis_0 = np.copy(self.basis)
-        x0, lower, upper = super().getStartParamAndLimits(force_recalculate) # absolute and relative
-        uc_x0, uc_lower, uc_upper = self.unitcell.getStartParamAndLimits(force_recalculate)
-        return (np.concatenate([x0, uc_x0]),
-               np.concatenate([lower, uc_lower]),
-               np.concatenate([upper, uc_upper]))
+        x0, lower, upper = super().getStartParamAndLimits(
+            force_recalculate
+        )  # absolute and relative
+        uc_x0, uc_lower, uc_upper = self.unitcell.getStartParamAndLimits(
+            force_recalculate
+        )
+        return (
+            np.concatenate([x0, uc_x0]),
+            np.concatenate([lower, uc_lower]),
+            np.concatenate([upper, uc_upper]),
+        )
 
-    def setFitParameters(self,x):
-        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+    def setFitParameters(self, x):
+        abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         fp_no = len(self.unitcell.fitparnames)
         super().setFitParameters(x[:abs_rel_no])
         if self.profile is not None:
@@ -1688,19 +1641,19 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 offset=self.basis[1],
                 tail_probability=self.profile.tail_probability,
             )
-        self.unitcell.setFitParameters(x[abs_rel_no: abs_rel_no+fp_no])
+        self.unitcell.setFitParameters(x[abs_rel_no : abs_rel_no + fp_no])
 
-    def setLimits(self,lim):
-        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+    def setLimits(self, lim):
+        abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         fp_no = len(self.unitcell.fitparnames)
         super().setLimits(lim[:abs_rel_no])
-        self.unitcell.setLimits(lim[abs_rel_no: abs_rel_no+fp_no])
+        self.unitcell.setLimits(lim[abs_rel_no : abs_rel_no + fp_no])
 
-    def setFitErrors(self,errors):
-        abs_rel_no = len(self.parameters['absolute']) + len(self.parameters['relative'])
+    def setFitErrors(self, errors):
+        abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         fp_no = len(self.unitcell.fitparnames)
         super().setFitErrors(errors[:abs_rel_no])
-        self.unitcell.setFitErrors(errors[abs_rel_no: abs_rel_no+fp_no])
+        self.unitcell.setFitErrors(errors[abs_rel_no : abs_rel_no + fp_no])
 
     def getFitErrors(self):
         err = super().getFitErrors()
@@ -1717,8 +1670,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
     def parametersToDict(self):
         d = super().parametersToDict()
-        d['unitcells'] = {}
-        d['unitcells']['unitcell'] = self.unitcell.parametersToDict()
+        d["unitcells"] = {}
+        d["unitcells"]["unitcell"] = self.unitcell.parametersToDict()
         return d
 
     def clearParameters(self):
@@ -1726,12 +1679,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         self.unitcell.clearParameters()
 
     def parametersFromDict(self, d, override_values=True):
-        self.unitcell.parametersFromDict(d['unitcells']['unitcell'], override_values)
+        self.unitcell.parametersFromDict(d["unitcells"]["unitcell"], override_values)
         super().parametersFromDict(d, override_values)
 
     def updateFromParameters(self):
-        """Update basis from the values stored in the Parameters 
-        """
+        """Update basis from the values stored in the Parameters"""
         self.unitcell.updateFromParameters()
         super().updateFromParameters()
         if self.profile is not None:
@@ -1741,69 +1693,69 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 tail_probability=self.profile.tail_probability,
             )
 
-    def __getitem__(self,uc_name_or_index):
-        if isinstance(uc_name_or_index,str):
+    def __getitem__(self, uc_name_or_index):
+        if isinstance(uc_name_or_index, str):
             if uc_name_or_index.lower() in [
-                'uc',
-                'unitcell',
+                "uc",
+                "unitcell",
                 self.unitcell.name.lower(),
             ]:
                 return self.unitcell
             else:
                 raise KeyError(
-                    "No unit cell %s in PoissonSurface %s"
-                    % (uc_name_or_index, self.name)
+                    f"No unit cell {uc_name_or_index} in PoissonSurface {self.name}"
                 )
         else:
-            raise ValueError(f"must be str, not {type(uc_name_or_index)}" )
+            raise ValueError(f"must be str, not {type(uc_name_or_index)}")
 
     def parameter_list(self):
         return super().parameter_list() + self.unitcell.parameter_list()
 
     @classmethod
     def fromStr(cls, string):
-        xprfile = False
         with util.StringIO(string) as f:
             # parse header
             line = next_skip_comment(f).split()
-            #if line[0].lower() != 'type':
+            # if line[0].lower() != 'type':
             #    raise ValueError("You must specify a epitaxy type in line 1."
             #    " Available are %s" % EpitaxyInterface.avail_types)
-            #if line[1].lower() not in EpitaxyInterface.avail_types:
+            # if line[1].lower() not in EpitaxyInterface.avail_types:
             #    raise ValueError("Expitaxy type %s is not valid."
             #    " Must be one of %s" % (line[1], EpitaxyInterface.avail_types))
-            #ep_type = line[1].lower()
+            # ep_type = line[1].lower()
 
             statistics = dict()
             line = next_skip_comment(f)
-            while('Width' in line or '=' in line): # parameter header or statistics line
-                if '=' in line:
+            while "Width" in line or "=" in line:  # parameter header or statistics line
+                if "=" in line:
                     try:
-                        splitted = [n.split(',') for n in line.split('=')]
+                        splitted = [n.split(",") for n in line.split("=")]
                         splitted = [item for sublist in splitted for item in sublist]
-                        for i in range(0,len(splitted),2):
-                            statistics[splitted[i].strip()] = float(splitted[i+1])
+                        for i in range(0, len(splitted), 2):
+                            statistics[splitted[i].strip()] = float(splitted[i + 1])
                     except Exception:
-                        print("Cannot read statistics string: %s" % line)
+                        print(f"Cannot read statistics string: {line}")
                 line = next_skip_comment(f)
             # epitaxy parameters
             sline = line.split()
-            if '+-' in sline:
-                params = re.findall(r'\(([^)]+)',line)
-                params_array = np.array([np.array(p.split('+-'),dtype=np.float64) for p in params]).T
+            if "+-" in sline:
+                params = re.findall(r"\(([^)]+)", line)
+                params_array = np.array(
+                    [np.array(p.split("+-"), dtype=np.float64) for p in params]
+                ).T
                 basis = params_array[0]
                 errors = params_array[1]
             else:
-                basis = np.array(sline,dtype=np.float64)
+                basis = np.array(sline, dtype=np.float64)
                 errors = None
 
-        # very explicit searching for the lines containing TopUnitCell and BottomUnitCell:
+        # very explicit searching for the lines containing TopUnitCell and BottomUnitCell:  # noqa: E501
         sp_str = string.splitlines()
         uc_pos = -1
-        for i, l in enumerate(sp_str):
+        for i, l in enumerate(sp_str):  # noqa: E741
             if uc_pos == -1:
-                if 'UnitCell' in l:
-                    uc_pos = i # found it, and save line number
+                if "UnitCell" in l:
+                    uc_pos = i  # found it, and save line number
             if uc_pos != -1:
                 break
         else:
@@ -1812,28 +1764,24 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 msg += "No UnitCell provided. "
             raise ValueError(msg)
 
-        uc_classname,uc_name = sp_str[uc_pos].split(maxsplit=1)
+        uc_classname, uc_name = sp_str[uc_pos].split(maxsplit=1)
 
-        assert uc_classname == 'UnitCell'
-        uc_str = '\n'.join(sp_str[uc_pos+1:])
+        assert uc_classname == "UnitCell"
+        uc_str = "\n".join(sp_str[uc_pos + 1 :])
 
         uc = UnitCell.fromStr(uc_str)
 
         uc.name = uc_name
 
         tail_probability = _parse_float_metadata(
-            string, 'tail_probability', DEFAULT_TAIL_PROBABILITY
+            string, "tail_probability", DEFAULT_TAIL_PROBABILITY
         )
-        legacy_parameter_names = any(
-            'deltaW' in line for line in string.splitlines()
-        )
-        support_cursor = _parse_text_metadata(
-            string, 'support_cursor', None
-        )
+        legacy_parameter_names = any("deltaW" in line for line in string.splitlines())
+        support_cursor = _parse_text_metadata(string, "support_cursor", None)
         legacy_absolute_width = (
             legacy_parameter_names
             if support_cursor is None
-            else support_cursor != 'nominal'
+            else support_cursor != "nominal"
         )
         if legacy_absolute_width:
             profile = PoissonProfile(
@@ -1848,9 +1796,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 offset=-basis[1],
                 tail_probability=tail_probability,
             )
-            basis = np.array([
-                profile.mean_change, profile.offset
-            ])
+            basis = np.array([profile.mean_change, profile.offset])
         else:
             profile = PoissonProfile(
                 mean_change=basis[0],
@@ -1869,7 +1815,6 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         film.errors = errors
         return film
 
-
     def toStr(self, showErrors=True):
         """Serialize the Poisson surface as plain text.
 
@@ -1879,47 +1824,40 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             Plain-text Poisson-surface representation.
         :rtype: str
         """
-        #s = "type %s" % self.type
+        # s = "type %s" % self.type
         if self._legacy_absolute_width:
             parameter_order = "Width/layers deltaW/layers"
         else:
             parameter_order = PoissonSurface.parameterOrder
-        s = (
-            "\n"
-            + parameter_order
-            + "\n"
-            + self.filmToStr(showErrors=showErrors)
-        )
+        s = "\n" + parameter_order + "\n" + self.filmToStr(showErrors=showErrors)
         if not self._legacy_absolute_width:
             s += "\nsupport_cursor: nominal"
         if (
             self.profile is not None
             and self.profile.tail_probability != DEFAULT_TAIL_PROBABILITY
         ):
-            s += "\ntail_probability = %.12g" % (
-                self.profile.tail_probability
-            )
+            s += f"\ntail_probability = {self.profile.tail_probability:.12g}"
         metadata = self._stacking_metadata_to_str()
         if metadata:
             s += "\n" + metadata.rstrip()
         s += "\n\n"
-        s += "UnitCell %s\n" % self.unitcell.name
+        s += f"UnitCell {self.unitcell.name}\n"
         s += self.unitcell.toStr(showErrors=showErrors) + "\n"
         return s
 
     def __repr__(self):
         return self.toStr()
 
-    def filmToStr(self,showErrors=True):
+    def filmToStr(self, showErrors=True):
         param = self.basis
         if (self.errors is not None) and showErrors:
             errors = self.errors
-            l = []
-            for p, err in zip(param,errors):
-                l.append("(%.5f +- %.5f)" % (p, err))
+            l = []  # noqa: E741
+            for p, err in zip(param, errors):
+                l.append(f"({p:.5f} +- {err:.5f})")
             return "   ".join(l)
         else:
-            l = []
+            l = []  # noqa: E741
             for p in param:
-                l.append("%.5f " % p)
+                l.append(f"{p:.5f} ")
             return "   ".join(l)

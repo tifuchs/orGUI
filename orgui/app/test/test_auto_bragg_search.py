@@ -21,9 +21,7 @@ def test_scan_image_maxima_ranks_sharp_post_burn_in_peak():
         scan.images[i] = np.full((8, 8), 10.0 + i)
     scan.images[7, 3, 4] = 500.0
 
-    maxima = autoBraggSearch.scan_image_maxima(
-        scan, burn_in=3, history=4
-    )
+    maxima = autoBraggSearch.scan_image_maxima(scan, burn_in=3, history=4)
 
     assert maxima[0].imageno == 7
     np.testing.assert_allclose(maxima[0].xy, [4.0, 3.0])
@@ -196,28 +194,30 @@ def test_allowed_bragg_same_q_returns_full_same_norm_group():
 
 
 def test_deduplicate_only_merges_sign_inverted_equal_f_and_q():
-    hkls = np.array([
-        [-1.0, 1.0, 1.0],
-        [1.0, 1.0, 1.0],
-        [1.0, -1.0, 1.0],
-        [1.0, 2.0, 0.0],
-        [2.0, 1.0, 0.0],
-        [1.0, 1.0, 1.0],
-    ])
-    structure_factor = np.array([
-        2.0 + 0.0j,
-        2.0 + 0.0j,
-        3.0 + 0.0j,
-        2.0 + 0.0j,
-        2.0 + 0.0j,
-        2.0 + 0.0j,
-    ])
+    hkls = np.array(
+        [
+            [-1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 2.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+        ]
+    )
+    structure_factor = np.array(
+        [
+            2.0 + 0.0j,
+            2.0 + 0.0j,
+            3.0 + 0.0j,
+            2.0 + 0.0j,
+            2.0 + 0.0j,
+            2.0 + 0.0j,
+        ]
+    )
     norms = np.array([1.5, 1.5, 1.5, 2.0, 2.0, 1.6])
 
     deduped_hkls, _structure_factor, deduped_norms = (
-        autoBraggSearch._deduplicate_structure_equivalent(
-            hkls, structure_factor, norms
-        )
+        autoBraggSearch._deduplicate_structure_equivalent(hkls, structure_factor, norms)
     )
 
     assert len(deduped_hkls) == 5
@@ -237,24 +237,18 @@ def test_allowed_bragg_in_q_region_accepts_reciprocal_scale():
     xtal = CTRcalc.UnitCell([4.0, 4.0, 4.0], [90.0, 90.0, 90.0])
     xtal.addAtom("Pt", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0)
     xtal.setEnergy(70000.0)
-    configured_qnorm = np.linalg.norm(
-        xtal.B_mat @ np.array([1.0, 0.0, 0.0])
-    )
+    configured_qnorm = np.linalg.norm(xtal.B_mat @ np.array([1.0, 0.0, 0.0]))
     measured_qnorm = 1.08 * configured_qnorm
 
-    hkls_without_scale, _intensity, _norms = (
-        autoBraggSearch.allowed_bragg_in_q_region(
-            xtal, measured_qnorm, 1e-6, max_q=3.0
-        )
+    hkls_without_scale, _intensity, _norms = autoBraggSearch.allowed_bragg_in_q_region(
+        xtal, measured_qnorm, 1e-6, max_q=3.0
     )
-    hkls_with_scale, _intensity, norms = (
-        autoBraggSearch.allowed_bragg_in_q_region(
-            xtal,
-            measured_qnorm,
-            1e-6,
-            max_q=3.0,
-            qnorm_scale=1.08,
-        )
+    hkls_with_scale, _intensity, norms = autoBraggSearch.allowed_bragg_in_q_region(
+        xtal,
+        measured_qnorm,
+        1e-6,
+        max_q=3.0,
+        qnorm_scale=1.08,
     )
 
     assert len(hkls_without_scale) == 0
@@ -268,13 +262,9 @@ def test_estimate_qnorm_scale_reports_direct_lattice_scale():
     xtal.setEnergy(70000.0)
     ub = HKLVlieg.UBCalculator(xtal, 70.0)
     ub.defaultU()
-    configured_qnorm = np.linalg.norm(
-        xtal.B_mat @ np.array([1.0, 0.0, 0.0])
-    )
+    configured_qnorm = np.linalg.norm(xtal.B_mat @ np.array([1.0, 0.0, 0.0]))
     reciprocal_scale = 1.08
-    delta = 2.0 * np.arcsin(
-        reciprocal_scale * configured_qnorm / (2.0 * ub.getK())
-    )
+    delta = 2.0 * np.arcsin(reciprocal_scale * configured_qnorm / (2.0 * ub.getK()))
 
     class FakeDetector:
         def surfaceAnglesPoint(self, y, x, mu):
@@ -306,12 +296,8 @@ def test_estimate_qnorm_scale_reports_direct_lattice_scale():
     )
 
     assert estimate is not None
-    np.testing.assert_allclose(
-        estimate["qnorm_scale"], reciprocal_scale, rtol=1e-12
-    )
-    np.testing.assert_allclose(
-        estimate["direct_lattice_scale"], 1.0 / reciprocal_scale
-    )
+    np.testing.assert_allclose(estimate["qnorm_scale"], reciprocal_scale, rtol=1e-12)
+    np.testing.assert_allclose(estimate["direct_lattice_scale"], 1.0 / reciprocal_scale)
 
 
 def test_estimate_rocking_intensity_reports_prominence_z():
