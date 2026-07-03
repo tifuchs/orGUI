@@ -21,6 +21,7 @@ large 2D detectors.
    image_integration
    entry_points
    benchmarks/ctr_accel_backends
+   benchmarks/roi_sum_accel
    api
    release_notes
    developer
