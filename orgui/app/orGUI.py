@@ -83,8 +83,8 @@ from .. import resources
 try:
     from . import _roi_sum_accel
     HAS_ACCEL = True
-except:
-    print(traceback.format_exc())
+except Exception as exc:
+    logger.debug("ROI sum accelerator unavailable: %s", exc)
     HAS_ACCEL = False
 
 import numpy as np

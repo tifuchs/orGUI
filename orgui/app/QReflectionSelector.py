@@ -290,7 +290,7 @@ class QReflectionSelector(qt.QWidget):
             self,
         )
         self.autoBraggSeedAct.setToolTip(
-            "search scan images for Bragg peaks and seed the UB matrix"
+            "open automatic UB/reflection controls"
         )
         self.autoBraggSeedAct.triggered.connect(self._onAutoBraggSeed)
 
@@ -324,49 +324,9 @@ class QReflectionSelector(qt.QWidget):
 
     # GUI-only: user-triggered automatic Bragg search and UB seed.
     def _onAutoBraggSeed(self):
-        """Search the active scan for a Bragg peak and seed U."""
-        self.autoBraggStatusDialog.reset()
+        """Open automatic UB/reflection controls."""
         self.autoBraggStatusDialog.show()
         self.autoBraggStatusDialog.raise_()
-        try:
-            seed = self.orparent.autoFindBraggReference(
-                **self.autoBraggOptionsDialog.get_options(),
-                status_callback=self.autoBraggStatusDialog.add_status
-            )
-        except Exception as e:
-            self.autoBraggStatusDialog.add_status(
-                "error", message=f"Error: {e}"
-            )
-            qutils.warning_detailed_message(
-                self,
-                "Cannot auto-find Bragg reflection",
-                f"Cannot auto-find Bragg reflection:\n{e}",
-                traceback.format_exc(),
-            )
-            return
-        if seed is None:
-            self.autoBraggStatusDialog.add_status(
-                "failed", message="No reliable Bragg reflection found."
-            )
-            qutils.warning_detailed_message(
-                self,
-                "No Bragg reflection found",
-                "No reliable Bragg reflection candidate was found.",
-                "",
-            )
-        else:
-            self.autoBraggStatusDialog.add_status(
-                "accepted",
-                message=(
-                    "Accepted seed hkl=%s at image %s, xy=(%.2f, %.2f)"
-                    % (
-                        seed.hkl,
-                        seed.peak.imageno,
-                        seed.peak.xy[0],
-                        seed.peak.xy[1],
-                    )
-                ),
-            )
 
     def _onSinglePeakSearch(self):
 
@@ -1030,16 +990,41 @@ class AutoBraggStatusDialog(qt.QDialog):
         self.logText.setMinimumSize(520, 300)
         layout.addWidget(self.logText)
 
+        seed_layout = qt.QHBoxLayout()
+        self.seedUBBtn = qt.QPushButton("seed UB")
+        self.seedUBBtn.setToolTip(
+            "Search scan images for a Bragg peak, seed the UB matrix, and "
+            "confirm it with a second Bragg peak."
+        )
+        self.seedUBBtn.clicked.connect(self._onSeedUB)
+        seed_layout.addWidget(self.seedUBBtn)
+        self.autoAddAfterSeed = qt.QCheckBox("add calculated after seed")
+        self.autoAddAfterSeed.setChecked(True)
+        self.autoAddAfterSeed.setToolTip(
+            "After UB seeding succeeds, automatically run the calculated "
+            "Bragg-reflection add pass below."
+        )
+        seed_layout.addWidget(self.autoAddAfterSeed)
+        seed_layout.addStretch(1)
+        layout.addLayout(seed_layout)
+
         add_layout = qt.QHBoxLayout()
         add_layout.addWidget(qt.QLabel("Additional reflections:"))
         self.additionalCount = qt.QSpinBox()
-        self.additionalCount.setRange(1, 100)
-        self.additionalCount.setValue(3)
+        self.additionalCount.setRange(1, 100000)
+        self.additionalCount.setValue(50)
         self.additionalCount.setToolTip(
             "Number of additional calculated Bragg reflections to validate "
             "and add from the current UB matrix."
         )
         add_layout.addWidget(self.additionalCount)
+        self.addAllBragg = qt.QCheckBox("add all Bragg")
+        self.addAllBragg.setToolTip(
+            "Ignore the number field and keep adding calculated Bragg "
+            "reflections until no more candidates pass validation."
+        )
+        self.addAllBragg.toggled.connect(self.additionalCount.setDisabled)
+        add_layout.addWidget(self.addAllBragg)
         self.addCalculatedBtn = qt.QPushButton("Add calculated")
         self.addCalculatedBtn.setToolTip(
             "Use the current UB matrix to predict Bragg reflections, refine "
@@ -1110,6 +1095,94 @@ class AutoBraggStatusDialog(qt.QDialog):
         if app is not None:
             app.processEvents()
 
+    def _calculated_count(self):
+        """Return requested number of calculated Bragg reflections."""
+        if self.addAllBragg.isChecked():
+            return 100000
+        return self.additionalCount.value()
+
+    # GUI-only: user-triggered automatic Bragg search and UB seed.
+    def _onSeedUB(self):
+        """Search the active scan for a Bragg peak and seed U."""
+        if self.refl_selector is None:
+            return
+        options_dialog = getattr(
+            self.refl_selector, "autoBraggOptionsDialog", None
+        )
+        options = {} if options_dialog is None else options_dialog.get_options()
+        self.reset()
+        self.seedUBBtn.setEnabled(False)
+        self.addCalculatedBtn.setEnabled(False)
+        try:
+            seed = self.refl_selector.orparent.autoFindBraggReference(
+                **options,
+                status_callback=self.add_status,
+            )
+        except Exception as e:
+            self.add_status("error", message=f"Error: {e}")
+            qutils.warning_detailed_message(
+                self,
+                "Cannot auto-find Bragg reflection",
+                f"Cannot auto-find Bragg reflection:\n{e}",
+                traceback.format_exc(),
+            )
+            return
+        finally:
+            self.seedUBBtn.setEnabled(True)
+            self.addCalculatedBtn.setEnabled(True)
+        if seed is None:
+            self.add_status(
+                "failed", message="No reliable Bragg reflection found."
+            )
+            qutils.warning_detailed_message(
+                self,
+                "No Bragg reflection found",
+                "No reliable Bragg reflection candidate was found.",
+                "",
+            )
+            return
+        self.add_status(
+            "accepted",
+            message=(
+                "Accepted seed hkl=%s at image %s, xy=(%.2f, %.2f)"
+                % (
+                    seed.hkl,
+                    seed.peak.imageno,
+                    seed.peak.xy[0],
+                    seed.peak.xy[1],
+                )
+            ),
+        )
+        if self.autoAddAfterSeed.isChecked():
+            self.seedUBBtn.setEnabled(False)
+            self.addCalculatedBtn.setEnabled(False)
+            try:
+                self._addCalculatedFromDialog(options)
+            except Exception as e:
+                self.add_status("error", message=f"Error: {e}")
+                qutils.warning_detailed_message(
+                    self,
+                    "Cannot add calculated Bragg reflections",
+                    f"Cannot add calculated Bragg reflections:\n{e}",
+                    traceback.format_exc(),
+                )
+            finally:
+                self.seedUBBtn.setEnabled(True)
+                self.addCalculatedBtn.setEnabled(True)
+
+    def _addCalculatedFromDialog(self, options):
+        """Run calculated Bragg-reflection addition from dialog controls."""
+        added = self.refl_selector.orparent.autoAddCalculatedBraggReflections(
+            self._calculated_count(),
+            status_callback=self.add_status,
+            **options,
+        )
+        self.add_status(
+            "accepted",
+            message="Added %s calculated Bragg reflection(s)." % added,
+        )
+        return added
+
     # GUI-only: user-triggered automatic validation of calculated reflections.
     def _onAddCalculated(self):
         """Add calculated Bragg reflections using the current UB matrix."""
@@ -1120,12 +1193,9 @@ class AutoBraggStatusDialog(qt.QDialog):
         )
         options = {} if options_dialog is None else options_dialog.get_options()
         self.addCalculatedBtn.setEnabled(False)
+        self.seedUBBtn.setEnabled(False)
         try:
-            added = self.refl_selector.orparent.autoAddCalculatedBraggReflections(
-                self.additionalCount.value(),
-                status_callback=self.add_status,
-                **options,
-            )
+            self._addCalculatedFromDialog(options)
         except Exception as e:
             self.add_status("error", message=f"Error: {e}")
             qutils.warning_detailed_message(
@@ -1137,10 +1207,7 @@ class AutoBraggStatusDialog(qt.QDialog):
             return
         finally:
             self.addCalculatedBtn.setEnabled(True)
-        self.add_status(
-            "accepted",
-            message="Added %s calculated Bragg reflection(s)." % added,
-        )
+            self.seedUBBtn.setEnabled(True)
 
 
 class AutoBraggOptionsDialog(qt.QDialog):
