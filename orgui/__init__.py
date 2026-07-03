@@ -36,8 +36,30 @@ __all__ = ['main', 'logger_settings']
 import logging
 logger = logging.getLogger(__name__)
 
+
+def _get_version():
+    try:
+        from setuptools_scm import get_version
+        return get_version(root="..", relative_to=__file__)
+    except Exception:
+        pass
+
+    try:
+        from importlib.metadata import version
+        return version("orGUI")
+    except Exception:
+        pass
+
+    try:
+        from ._version import version
+        return version
+    except Exception:
+        logger.info('orGUI is not installed. Version number will be incorrect!')
+        return '1.4.1-unknown'
+
+
 try:
-    from ._version import version as __version__
-except:
-    logger.info('orGUI is not installed. Version number will be incorrect!')
+    __version__ = _get_version()
+except Exception:
+    logger.exception("Cannot determine orGUI version")
     __version__ = '1.4.1-unknown'

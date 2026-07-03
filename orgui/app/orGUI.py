@@ -183,6 +183,19 @@ class orGUI(qt.QMainWindow):
         ubWidget = qt.QWidget()
         self.ubcalc = QUBCalculator(None, self)
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
+        self.ubcalc.sigViewReflection.connect(self.onViewCalculatedReflection)
+        self.ubcalc.viewReflectionS1Act.toggled.connect(
+            lambda checked: checked and self.scanSelector.roiTrackingS1Act.setChecked(True)
+        )
+        self.ubcalc.viewReflectionS2Act.toggled.connect(
+            lambda checked: checked and self.scanSelector.roiTrackingS2Act.setChecked(True)
+        )
+        self.scanSelector.roiTrackingS1Act.toggled.connect(
+            lambda checked: checked and self.ubcalc.viewReflectionS1Act.setChecked(True)
+        )
+        self.scanSelector.roiTrackingS2Act.toggled.connect(
+            lambda checked: checked and self.ubcalc.viewReflectionS2Act.setChecked(True)
+        )
 
 
         self.resetIntegrPlotCurves = qt.QAction("Reset plot",self)
@@ -4164,46 +4177,60 @@ ub : gui for UB matrix and angle calculations
         self.scanSelector.set_xy_static_loc(xy[0], xy[1])
 
 
-    def _onNewReflection(self,refldict):
-        """GUI-only: prompt the user to add calculated reflection candidates."""
+    def _setCalculatedReflectionImageInfo(self, refldict):
         axisname = self.fscan.axisname
         dc = self.ubcalc.detectorCal
 
-        if self.fscan.axisname == 'mu':
+        if axisname == 'mu':
             angle_idx = 0
             sign = 1.
-        elif self.fscan.axisname == 'th':
+        elif axisname == 'th':
             angle_idx = 3
             sign = -1.
         else:
             qt.QMessageBox.warning(self,"Cannot calculate reflection","Cannot calculate reflection.\n%s is no supported scan axis." % self.fscan.axisname)
+            return False
+
+        for intersect in (1, 2):
+            try:
+                imageno = self.axisToImageNo(np.rad2deg(refldict['angles_%s' % intersect][angle_idx]) * sign)
+                refldict['imageno_%s' % intersect] = imageno
+                xy = refldict['xy_%s' % intersect]
+                onDetector = (xy[0] >= 0 and xy[0] < dc.detector.shape[1]) and \
+                             (xy[1] >= 0 and xy[1] < dc.detector.shape[0])
+                refldict['selectable_%s' % intersect] = onDetector
+            except:
+                refldict['selectable_%s' % intersect] = False
+        return True
+
+    def onViewCalculatedReflection(self, refldict, intersect):
+        """GUI-only: switch to a calculated reflection and center the plot."""
+        if not self._setCalculatedReflectionImageInfo(refldict):
             return
-        try:
-            imageno1 = self.axisToImageNo(np.rad2deg(refldict['angles_1'][angle_idx]) * sign)
-            refldict['imageno_1'] = imageno1
-            xy = refldict['xy_1']
-            onDetector = (xy[0] >= 0 and xy[0] < dc.detector.shape[1]) and \
-                         (xy[1] >= 0 and xy[1] < dc.detector.shape[0])
-            if onDetector:
-                refldict['selectable_1'] = True
-            else:
-                refldict['selectable_1'] = False
-        except:
-            imageno1 = None
-            refldict['selectable_1'] = False
-        try:
-            imageno2 = self.axisToImageNo(np.rad2deg(refldict['angles_2'][angle_idx]) * sign)
-            refldict['imageno_2'] = imageno2
-            xy = refldict['xy_2']
-            onDetector = (xy[0] >= 0 and xy[0] < dc.detector.shape[1]) and \
-                         (xy[1] >= 0 and xy[1] < dc.detector.shape[0])
-            if onDetector:
-                refldict['selectable_2'] = True
-            else:
-                refldict['selectable_2'] = False
-        except:
-            imageno2 = None
-            refldict['selectable_2'] = False
+        if not refldict.get("selectable_%s" % intersect, False):
+            qutils.warning_detailed_message(
+                self,
+                "Reflection is not on detector",
+                "The selected reflection intersect is not on the detector.",
+                "",
+            )
+            return
+        imageno = refldict.get("imageno_%s" % intersect)
+        if imageno is None:
+            qutils.warning_detailed_message(
+                self,
+                "Reflection image is not in scan",
+                "The selected reflection intersect is not in the scan range.",
+                "",
+            )
+            return
+        self._onChangeImage(imageno)
+        self._onCenterGraph(refldict["xy_%s" % intersect])
+
+    def _onNewReflection(self,refldict):
+        """GUI-only: prompt the user to add calculated reflection candidates."""
+        if not self._setCalculatedReflectionImageInfo(refldict):
+            return
 
         refl_dialog = QReflectionAnglesDialog(refldict,"Select reflections to add into list of reference reflections", self)
         if qt.QDialog.Accepted == refl_dialog.exec():

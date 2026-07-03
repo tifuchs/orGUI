@@ -132,6 +132,7 @@ class _DeprecatedFitOption:
 
 class QUBCalculator(qt.QSplitter):
     sigNewReflection = qt.pyqtSignal(dict)
+    sigViewReflection = qt.pyqtSignal(dict, int)
     sigPlottableMachineParamsChanged = qt.pyqtSignal()
     sigReplotRequest = qt.pyqtSignal(bool)
     sigReflectionMismatchChanged = qt.pyqtSignal(object)
@@ -172,12 +173,58 @@ class QUBCalculator(qt.QSplitter):
         self.Lbox.setRange(-100,100)
         self.Lbox.setDecimals(3)
         self.reflectionWidget.addWidget(self.Lbox)
-        searchReflAct = qt.QAction(resources.getQicon('search'), "search reflection", self)
-        self.reflectionWidget.addAction(searchReflAct)
-        #applyButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
-        searchReflAct.setToolTip("calculate position of the reflection with given HKL")
+        hkl_width = self.Hbox.fontMetrics().horizontalAdvance("-00.000") + 24
+        for spinbox in (self.Hbox, self.Kbox, self.Lbox):
+            spinbox.setFixedWidth(hkl_width)
 
-        searchReflAct.triggered.connect(self._onCalcReflection)
+        addReflAct = qt.QAction(
+            resources.getQicon("add-bragg-reflection"),
+            "add reflection",
+            self,
+        )
+        self.reflectionWidget.addAction(addReflAct)
+        #applyButton.setSizePolicy(qt.QSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Minimum))
+        addReflAct.setToolTip("calculate and add the reflection with given HKL")
+
+        addReflAct.triggered.connect(self._onCalcReflection)
+
+        self.viewReflectionS1Act = qt.QAction(
+            resources.getQicon("intersect_s1"),
+            "view intersect 1",
+            self,
+        )
+        self.viewReflectionS2Act = qt.QAction(
+            resources.getQicon("intersect_s2"),
+            "view intersect 2",
+            self,
+        )
+        self.viewReflectionIntersectGrp = qt.QActionGroup(self)
+        self.viewReflectionIntersectGrp.setExclusive(True)
+        for action in (self.viewReflectionS1Act, self.viewReflectionS2Act):
+            action.setCheckable(True)
+            self.viewReflectionIntersectGrp.addAction(action)
+        self.viewReflectionS1Act.setChecked(True)
+
+        self.viewReflectionMenu = qt.QMenu()
+        self.viewReflectionMenu.addAction(self.viewReflectionS1Act)
+        self.viewReflectionMenu.addAction(self.viewReflectionS2Act)
+
+        self.viewReflAct = qt.QAction(
+            resources.getQicon("search"),
+            "find reflection",
+            self,
+        )
+        self.viewReflAct.setToolTip(
+            "calculate the reflection with given HKL, change to its image, "
+            "and center the detector view"
+        )
+        self.viewReflAct.triggered.connect(self._onViewReflection)
+
+        self.viewReflButton = qt.QToolButton()
+        self.viewReflButton.setDefaultAction(self.viewReflAct)
+        self.viewReflButton.setPopupMode(qt.QToolButton.MenuButtonPopup)
+        self.viewReflButton.setMenu(self.viewReflectionMenu)
+        self.reflectionWidget.addWidget(self.viewReflButton)
 
         self.addWidget(self.reflectionWidget)
 
@@ -401,6 +448,7 @@ class QUBCalculator(qt.QSplitter):
 
 
     def _onCalcReflection(self):
+        """Calculate the requested hkl and ask the GUI to add it."""
         hkl = [self.Hbox.value(),self.Kbox.value(),self.Lbox.value()]
         try:
             refl = self.calcReflection(hkl)
@@ -410,6 +458,24 @@ class QUBCalculator(qt.QSplitter):
                                             traceback.format_exc())
             return
         self.sigNewReflection.emit(refl)
+
+    def _onViewReflection(self):
+        """Calculate the requested hkl and ask the GUI to center on it."""
+        hkl = [self.Hbox.value(), self.Kbox.value(), self.Lbox.value()]
+        try:
+            refl = self.calcReflection(hkl)
+        except Exception as e:
+            qutils.warning_detailed_message(self, "Cannot calculate reflection",
+                                            "Cannot calculate reflection:\n%s" % e,
+                                            traceback.format_exc())
+            return
+        self.sigViewReflection.emit(refl, self.viewReflectionIntersect())
+
+    def viewReflectionIntersect(self):
+        """Return the selected calculated-reflection view intersect."""
+        if self.viewReflectionS2Act.isChecked():
+            return 2
+        return 1
 
     def _onUchanged(self, U):
         self.ubCal.setU(U)
