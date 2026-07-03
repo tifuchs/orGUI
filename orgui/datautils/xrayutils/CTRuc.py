@@ -40,6 +40,9 @@ import math
 from scipy.ndimage import gaussian_filter1d
 import os
 import re
+import importlib
+import importlib.util
+from pathlib import Path
 from scipy.special import erf
 #random.seed(45)
 from collections import OrderedDict
@@ -59,29 +62,80 @@ from .CTRstacking import (
     resolve_upper_start,
 )
 
+def _import_cpp_accel():
+    try:
+        return importlib.import_module("orgui.datautils.xrayutils._CTRcalc_cpp")
+    except ModuleNotFoundError as package_error:
+        repo_root = Path(__file__).resolve().parents[3]
+        candidates = sorted((repo_root / "build").glob("cp*/_CTRcalc_cpp*.so"))
+        if not candidates:
+            raise package_error
+        extension_path = candidates[-1]
+        spec = importlib.util.spec_from_file_location(
+            "_CTRcalc_cpp",
+            extension_path,
+        )
+        if spec is None or spec.loader is None:
+            raise package_error
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
 try:
-    from . import _CTRcalc_cpp
+    _CTRcalc_cpp = _import_cpp_accel()
     HAS_CPP_ACCEL = True
 except Exception:
     _CTRcalc_cpp = None
     HAS_CPP_ACCEL = False
 
-try:
-    from . import _CTRcalc_accel
-    HAS_NUMBA_ACCEL = True
-except Exception:
-    _CTRcalc_accel = None
-    HAS_NUMBA_ACCEL = False
+_CTRcalc_accel = None
+_ACCEL_BACKEND_ENV_VAR = "ORGUI_ACCEL_BACKEND"
+_NUMBA_ACCEL_IMPORT_ATTEMPTED = False
+_NUMBA_ACCEL_IMPORT_ERROR = None
+HAS_NUMBA_ACCEL = False
 
 if HAS_CPP_ACCEL:
     CTR_ACCEL_BACKEND = "cpp"
-elif HAS_NUMBA_ACCEL:
-    CTR_ACCEL_BACKEND = "numba"
 else:
     CTR_ACCEL_BACKEND = "numpy"
 
 
-def set_ctr_accel_backend(backend):
+def _load_numba_accel():
+    global _CTRcalc_accel
+    global _NUMBA_ACCEL_IMPORT_ATTEMPTED
+    global _NUMBA_ACCEL_IMPORT_ERROR
+    global HAS_NUMBA_ACCEL
+
+    if not _NUMBA_ACCEL_IMPORT_ATTEMPTED:
+        _NUMBA_ACCEL_IMPORT_ATTEMPTED = True
+        try:
+            _CTRcalc_accel = importlib.import_module(
+                "._CTRcalc_accel", package=__package__
+            )
+            _NUMBA_ACCEL_IMPORT_ERROR = None
+            HAS_NUMBA_ACCEL = True
+        except Exception as exc:
+            _CTRcalc_accel = None
+            _NUMBA_ACCEL_IMPORT_ERROR = exc
+            HAS_NUMBA_ACCEL = False
+    return _CTRcalc_accel
+
+
+def ctr_numba_accel_available():
+    """Return whether the optional CTR Numba backend can be loaded.
+
+    Calling this function imports the optional Numba backend when it has not
+    already been probed.
+
+    :returns:
+        ``True`` when the environment opt-in is set and the backend imports.
+    :rtype: bool
+    """
+    return _load_numba_accel() is not None
+
+
+def set_accel_backend(backend):
     """Select the CTR structure-factor acceleration backend.
 
     :param str backend:
@@ -95,10 +149,20 @@ def set_ctr_accel_backend(backend):
         )
     if backend == "cpp" and not HAS_CPP_ACCEL:
         raise ValueError("CTR C++ acceleration backend is not available")
-    if backend == "numba" and not HAS_NUMBA_ACCEL:
-        raise ValueError("CTR Numba acceleration backend is not available")
+    if backend == "numba" and _load_numba_accel() is None:
+        message = (
+            "CTR Numba acceleration backend is not available."
+        )
+        if _NUMBA_ACCEL_IMPORT_ERROR is not None:
+            message += f" Import failed: {_NUMBA_ACCEL_IMPORT_ERROR}"
+        raise ValueError(message)
     global CTR_ACCEL_BACKEND
     CTR_ACCEL_BACKEND = backend
+
+
+_requested_backend = os.environ.get(_ACCEL_BACKEND_ENV_VAR)
+if _requested_backend is not None:
+    set_accel_backend(_requested_backend.strip().lower())
 
 
 def ctr_accel_enabled():
@@ -112,7 +176,7 @@ def _ctr_accel_module():
     if CTR_ACCEL_BACKEND == "cpp":
         return _CTRcalc_cpp
     if CTR_ACCEL_BACKEND == "numba":
-        return _CTRcalc_accel
+        return _load_numba_accel()
     raise ValueError(
         "CTR acceleration backend must be 'cpp', 'numba', or 'numpy'"
     )

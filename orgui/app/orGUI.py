@@ -82,7 +82,7 @@ from .. import resources
 
 try:
     from . import _roi_sum_accel
-    HAS_ACCEL = True
+    HAS_ACCEL = _roi_sum_accel.HAS_ACCEL_BACKEND
 except Exception as exc:
     logger.debug("ROI sum accelerator unavailable: %s", exc)
     HAS_ACCEL = False

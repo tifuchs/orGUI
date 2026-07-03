@@ -31,6 +31,7 @@ __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
 import unittest
+from unittest import mock
 import os
 import tempfile
 
@@ -630,8 +631,10 @@ class TestLegacyLayeredCTR(unittest.TestCase):
         xtal_path = os.path.join(
             fixture_root, "0001_fit_2V036_reference.xtal"
         )
-        if not os.path.exists(xtal_path):
-            self.skipTest(f"Missing optional CTR fixture: {xtal_path}")
+        reference_path = os.path.join(fixture_root, "CTRs_reference.dat")
+        for path in (xtal_path, reference_path):
+            if not os.path.exists(path):
+                self.skipTest(f"Missing optional CTR fixture: {path}")
         xtal = CTRcalc.SXRDCrystal.fromFile(
             xtal_path
         )
@@ -651,7 +654,7 @@ class TestLegacyLayeredCTR(unittest.TestCase):
         xtal["RuO2"].basis_0[0] = 17.0
         xtal.atten = 0.01
         reference = np.loadtxt(
-            os.path.join(fixture_root, "CTRs_reference.dat"),
+            reference_path,
             skiprows=1,
             max_rows=8,
         )
@@ -1082,10 +1085,48 @@ class StructureFactorValidationMixin:
             self.assertTrue(np.allclose(calc.sfI, expected, rtol=1e-02))
 
 
+class TestCTRAccelerationBackendSelection(unittest.TestCase):
+    def setUp(self):
+        self.original_backend = CTRuc.CTR_ACCEL_BACKEND
+        self.addCleanup(CTRuc.set_accel_backend, self.original_backend)
+        self.addCleanup(self._reset_numba_probe)
+        self._reset_numba_probe()
+
+    @staticmethod
+    def _reset_numba_probe():
+        CTRuc._CTRcalc_accel = None
+        CTRuc._NUMBA_ACCEL_IMPORT_ATTEMPTED = False
+        CTRuc._NUMBA_ACCEL_IMPORT_ERROR = None
+        CTRuc.HAS_NUMBA_ACCEL = False
+
+    def testDefaultBackendIsValid(self):
+        self.assertIn(CTRuc.CTR_ACCEL_BACKEND, {"cpp", "numba", "numpy"})
+
+    def testNumbaBackendImportsLazilyWhenSelected(self):
+        numba_backend = object()
+        with mock.patch.object(
+            CTRuc.importlib,
+            "import_module",
+            return_value=numba_backend,
+        ) as import_module:
+            CTRuc.set_accel_backend("numba")
+
+        import_module.assert_called_once_with(
+            "._CTRcalc_accel",
+            package=CTRuc.__package__,
+        )
+        self.assertIs(CTRuc._CTRcalc_accel, numba_backend)
+        self.assertTrue(CTRuc.HAS_NUMBA_ACCEL)
+
+    def testSetAccelBackendCanSelectNumpy(self):
+        CTRuc.set_accel_backend("numpy")
+        self.assertEqual(CTRuc.CTR_ACCEL_BACKEND, "numpy")
+
+
 class TestCTRcalculationNumPy(StructureFactorValidationMixin, unittest.TestCase):
     def setUp(self):
         original_backend = CTRuc.CTR_ACCEL_BACKEND
-        self.addCleanup(CTRuc.set_ctr_accel_backend, original_backend)
+        self.addCleanup(CTRuc.set_accel_backend, original_backend)
         fp = os.path.split(__file__)[0]
         self.xtal_unitcells = CTRcalc.SXRDCrystal.fromFile(
             os.path.join(fp, "testdata/0V12_calculated.xpr")
@@ -1104,7 +1145,7 @@ class TestCTRcalculationNumPy(StructureFactorValidationMixin, unittest.TestCase)
         # normalized by unit-cell volume. Canonical F values in electrons are
         # therefore larger by the reference-cell volume.
         self.reference_scale = pt100.volume
-        CTRuc.set_ctr_accel_backend("numpy")
+        CTRuc.set_accel_backend("numpy")
 
     def testStructureFactorEqual(self):
         self.assert_structure_factors_match_volume_normalized_reference()
@@ -1113,7 +1154,7 @@ class TestCTRcalculationNumPy(StructureFactorValidationMixin, unittest.TestCase)
 class TestCTRcalculationNumba(StructureFactorValidationMixin, unittest.TestCase):
     def setUp(self):
         original_backend = CTRuc.CTR_ACCEL_BACKEND
-        self.addCleanup(CTRuc.set_ctr_accel_backend, original_backend)
+        self.addCleanup(CTRuc.set_accel_backend, original_backend)
         fp = os.path.split(__file__)[0]
         self.xtal_unitcells = CTRcalc.SXRDCrystal.fromFile(
             os.path.join(fp, "testdata/0V12_calculated.xpr")
@@ -1132,12 +1173,12 @@ class TestCTRcalculationNumba(StructureFactorValidationMixin, unittest.TestCase)
         # normalized by unit-cell volume. Canonical F values in electrons are
         # therefore larger by the reference-cell volume.
         self.reference_scale = pt100.volume
-        if not CTRuc.HAS_NUMBA_ACCEL:
+        if not CTRuc.ctr_numba_accel_available():
             self.skipTest(
                 "Cannot perform Numba tests: _CTRcalc_accel library was not "
                 "imported. Is Numba installed?"
             )
-        CTRuc.set_ctr_accel_backend("numba")
+        CTRuc.set_accel_backend("numba")
 
     def testStructureFactorEqual(self):
         self.assert_structure_factors_match_volume_normalized_reference()
@@ -1151,7 +1192,7 @@ class TestCTRcalculationCpp(StructureFactorValidationMixin, unittest.TestCase):
                 "imported. Was the C++ extension built?"
             )
         original_backend = CTRuc.CTR_ACCEL_BACKEND
-        self.addCleanup(CTRuc.set_ctr_accel_backend, original_backend)
+        self.addCleanup(CTRuc.set_accel_backend, original_backend)
         fp = os.path.split(__file__)[0]
         self.xtal_unitcells = CTRcalc.SXRDCrystal.fromFile(
             os.path.join(fp, "testdata/0V12_calculated.xpr")
@@ -1170,7 +1211,7 @@ class TestCTRcalculationCpp(StructureFactorValidationMixin, unittest.TestCase):
         # normalized by unit-cell volume. Canonical F values in electrons are
         # therefore larger by the reference-cell volume.
         self.reference_scale = pt100.volume
-        CTRuc.set_ctr_accel_backend("cpp")
+        CTRuc.set_accel_backend("cpp")
 
     def testStructureFactorEqual(self):
         self.assert_structure_factors_match_volume_normalized_reference()

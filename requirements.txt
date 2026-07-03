@@ -12,4 +12,3 @@ qtconsole
 ase 
 hdf5plugin
 PyOpenGL
-numba

@@ -50,6 +50,10 @@ because the rocking dimension helps separate the CTR signal from broad or
 environmental background. It is more computationally expensive than stationary
 integration.
 
+ROI summing uses the C++ acceleration backend by default. See
+:doc:`acceleration_backends` for the process-global backend selector and the
+optional Numba ROI backend.
+
 Rocking Bragg Integration
 -------------------------
 

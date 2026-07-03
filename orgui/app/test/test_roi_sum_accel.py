@@ -1,5 +1,8 @@
 import numpy as np
+import os
 import pytest
+import subprocess
+import sys
 
 roi_sum = pytest.importorskip("orgui.app._roi_sum_accel")
 
@@ -18,6 +21,75 @@ def _nansum_region(data, roi):
 
 def _count_unmasked(mask, roi):
     return np.sum(~mask[roi[1, 0] : roi[1, 1], roi[0, 0] : roi[0, 1]])
+
+
+def test_default_import_uses_cpp_without_loading_numba():
+    script = (
+        "import sys; "
+        "import orgui.app._roi_sum_accel as roi_sum; "
+        "print(roi_sum.ROI_ACCEL_BACKEND); "
+        "print('numba' in sys.modules); "
+        "print(hasattr(roi_sum, 'processImage_polybg_Carr'))"
+    )
+    env = os.environ.copy()
+    env.pop("ORGUI_ACCEL_BACKEND", None)
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+    assert result.stdout.splitlines() == ["cpp", "False", "True"]
+
+
+def test_numba_backend_is_explicit_opt_in():
+    script = (
+        "import sys; "
+        "import orgui.app._roi_sum_accel as roi_sum; "
+        "print(roi_sum.ROI_ACCEL_BACKEND); "
+        "print('numba' in sys.modules); "
+        "print(hasattr(roi_sum, 'processImage_polybg_Carr'))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "ORGUI_ACCEL_BACKEND": "numba"},
+        text=True,
+    )
+    assert result.stdout.splitlines() == ["numba", "True", "True"]
+
+
+def test_numpy_backend_is_explicit_selectable():
+    script = (
+        "import sys; "
+        "import orgui.app._roi_sum_accel as roi_sum; "
+        "print(roi_sum.ROI_ACCEL_BACKEND); "
+        "print('numba' in sys.modules); "
+        "print(roi_sum.HAS_ACCEL_BACKEND); "
+        "print(hasattr(roi_sum, 'processImage_polybg_Carr'))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "ORGUI_ACCEL_BACKEND": "numpy"},
+        text=True,
+    )
+    assert result.stdout.splitlines() == ["numpy", "False", "False", "True"]
+
+
+def test_set_accel_backend_switches_process_backend():
+    original_backend = roi_sum.ROI_ACCEL_BACKEND
+    try:
+        roi_sum.set_accel_backend("numpy")
+        assert roi_sum.ROI_ACCEL_BACKEND == "numpy"
+        assert roi_sum.HAS_ACCEL_BACKEND is False
+        roi_sum.set_accel_backend(original_backend)
+        assert roi_sum.ROI_ACCEL_BACKEND == original_backend
+    finally:
+        roi_sum.set_accel_backend(original_backend)
 
 
 def _expected(data, mask, correction, rois):
