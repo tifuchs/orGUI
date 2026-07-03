@@ -181,7 +181,9 @@ class ConfigData(qt.QObject):
                 qt.QMessageBox.warning(
                     self,
                     "Did not find crystal",
-                    "Can not find crystal <{}> \nException occured during read of configfile {},\nException:\n{}".format(lattice["crystal"], filename, traceback.format_exc()),  # noqa: E501
+                    "Can not find crystal <{}> \nException occured during read of configfile {},\nException:\n{}".format(  # noqa: E501
+                        lattice["crystal"], filename, traceback.format_exc()
+                    ),  # noqa: E501
                 )
             else:
                 self.crystalparams.crystalComboBox.setCurrentIndex(idx)
@@ -660,7 +662,9 @@ class DataBase(qt.QMainWindow):
         btn = qt.QMessageBox.question(
             self,
             "Delete scan?",
-            "Are you sure that you want to delete {} from the orgui database?".format(obj.name.split("/")[-1]),  # noqa: E501
+            "Are you sure that you want to delete {} from the orgui database?".format(
+                obj.name.split("/")[-1]
+            ),  # noqa: E501
         )
         if btn == qt.QMessageBox.Yes:
             self.delete_node(obj)

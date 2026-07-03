@@ -598,7 +598,9 @@ class WaterModel(Lattice, LinearFitFunctions):
             for t in zip(param, err):
                 [l.append(ti) for ti in t]
             return (
-                "Water layer  ({:.5f} +- {:.5f})  ({:.5f} +- {:.5f})  ({:.5f} +- {:.5f})  ({:.4f} +- {:.4f})  ({:.4f} +- {:.4f})".format(*tuple(l))  # noqa: E501
+                "Water layer  ({:.5f} +- {:.5f})  ({:.5f} +- {:.5f})  ({:.5f} +- {:.5f})  ({:.4f} +- {:.4f})  ({:.4f} +- {:.4f})".format(  # noqa: E501
+                    *tuple(l)
+                )  # noqa: E501
             )
         else:
             return "{:.5f}     {:.5f}     {:.5f}  {:.5f}  {:.5f}".format(*tuple(param))
@@ -1019,9 +1021,7 @@ class UnitCell(Lattice):
             where = (self.basis[:, 7] == l).nonzero()[0]
             idx_low = where[0]
             idx_high = where[-1] + 1
-            uc = UnitCell(
-                self.a, np.rad2deg(self.alpha), name=self.name + f"_layer{l}"
-            )
+            uc = UnitCell(self.a, np.rad2deg(self.alpha), name=self.name + f"_layer{l}")
             uc.basis = self.basis[idx_low:idx_high]
             if self.errors is not None:
                 uc.errors = self.errors[idx_low:idx_high]
@@ -1159,9 +1159,7 @@ class UnitCell(Lattice):
             return
         matches = np.flatnonzero(self.layers == ln)
         if matches.size == 0:
-            raise ValueError(
-                f"Layer {ln} does not exist in UnitCell {self.name}."
-            )
+            raise ValueError(f"Layer {ln} does not exist in UnitCell {self.name}.")
         self._start_layer = self.layers[(matches[0] + 1) % len(self.layers)]
 
     # in eV
@@ -2167,7 +2165,9 @@ class UnitCell(Lattice):
             for t in zip(param, err):
                 [l.append(ti) for ti in t]
             return (
-                "{}  ({:.5f} +- {:.5f})  ({:.5f} +- {:.5f})  ({:.5f} +- {:.5f})  ({:.4f} +- {:.4f})  ({:.4f} +- {:.4f})  ({:.4f} +- {:.4f}) ({:.0f} +- {:.0f})".format(name, *l)  # noqa: E501
+                "{}  ({:.5f} +- {:.5f})  ({:.5f} +- {:.5f})  ({:.5f} +- {:.5f})  ({:.4f} +- {:.4f})  ({:.4f} +- {:.4f})  ({:.4f} +- {:.4f}) ({:.0f} +- {:.0f})".format(  # noqa: E501
+                    name, *l
+                )  # noqa: E501
             )
         else:
             return "{}     {:.5f}     {:.5f}     {:.5f}  {:.4f}  {:.4f}  {:.4f} {:.0f}".format(  # noqa: E501
@@ -2192,7 +2192,9 @@ class UnitCell(Lattice):
 
     def latticeRODStr(self):
         a, alpha, _, _ = self.getLatticeParameters()
-        return "{:.4f} {:.4f} {:.4f} {:.4f} {:.4f} {:.4f}".format(*a, *np.rad2deg(alpha))  # noqa: E501
+        return "{:.4f} {:.4f} {:.4f} {:.4f} {:.4f} {:.4f}".format(
+            *a, *np.rad2deg(alpha)
+        )  # noqa: E501
 
     def parameterStr(self, showErrors=True):
         """Return atom and layer parameters as plain text.
@@ -2206,15 +2208,13 @@ class UnitCell(Lattice):
         st = ""
         for i in range(len(self.names)):
             st += str(i).zfill(2) + "  " + self.atomToStr(i, showErrors) + "\n"
-        layer_positions = ", ".join(
-            f"{p} = {self.layerpos[p]}" for p in self.layerpos
-        )
+        layer_positions = ", ".join(f"{p} = {self.layerpos[p]}" for p in self.layerpos)
         st += f"layerpos: {layer_positions}\n"
         st += f"layer_behaviour: {self.layer_behaviour}\n"
         if self._explicit_layer_cycle is not None:
-            st += "layer_cycle: {}\n".format(", ".join(
-                str(layer) for layer in self._explicit_layer_cycle
-            ))
+            st += "layer_cycle: {}\n".format(
+                ", ".join(str(layer) for layer in self._explicit_layer_cycle)
+            )
         return st
 
     def parameterStrRod(self):

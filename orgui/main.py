@@ -216,12 +216,16 @@ def main():
         else:
             os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
     if str(os.environ["HDF5_USE_FILE_LOCKING"]).lower() in ["y", "true", "1", "yes"]:
-        logger.info("HDF5_USE_FILE_LOCKING={}".format(os.environ["HDF5_USE_FILE_LOCKING"]))
+        logger.info(
+            "HDF5_USE_FILE_LOCKING={}".format(os.environ["HDF5_USE_FILE_LOCKING"])
+        )
         logger.info(
             "Save hdf5 mode, if you encounter hdf5 file read issues, try starting orGUI with the option -nl"  # noqa: E501
         )
     else:
-        logger.info("HDF5_USE_FILE_LOCKING={}".format(os.environ["HDF5_USE_FILE_LOCKING"]))
+        logger.info(
+            "HDF5_USE_FILE_LOCKING={}".format(os.environ["HDF5_USE_FILE_LOCKING"])
+        )
         logger.info(
             "No hdf5 locking. This is potentially dangerous and can cause file corruption. Especially if orGUI crashes."  # noqa: E501
         )

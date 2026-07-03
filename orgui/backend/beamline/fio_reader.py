@@ -106,6 +106,4 @@ class FioFile:
                 param, value = line.split(" = ")
                 self.parameter[param] = value
         except Exception:
-            warnings.warn(
-                f"Cannot parse parameter section : {traceback.format_exc()}"
-            )
+            warnings.warn(f"Cannot parse parameter section : {traceback.format_exc()}")

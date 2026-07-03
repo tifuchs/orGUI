@@ -761,7 +761,9 @@ class CTR:
 
     def __repr__(self):
         # return "<CTR %s ctrtype %s at %016X>" % (tuple(np.around(self.hk,2)), self.ctrtype , id(self))  # noqa: E501
-        return f"<CTR<{self.name}> {tuple(np.around(self.hk, 2))} ctrtype {self.ctrtype}>"  # noqa: E501
+        return (
+            f"<CTR<{self.name}> {tuple(np.around(self.hk, 2))} ctrtype {self.ctrtype}>"  # noqa: E501
+        )
 
 
 class CTRCollection(list):

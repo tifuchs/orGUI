@@ -254,6 +254,40 @@ class QScanSelector(qt.QMainWindow):
         self.alpha_btn_act = qt.QWidgetAction(self)
         self.alpha_btn_act.setDefaultWidget(self.alpha_btn)
 
+        self.roiTrackingAct = qt.QAction(
+            resources.getQicon("roi-tracking"),
+            "ROI tracking",
+            self,
+        )
+        self.roiTrackingAct.setCheckable(True)
+        self.roiTrackingAct.setToolTip("Center the detector view on a ROI")
+
+        self.roiTrackingIntersectGrp = qt.QActionGroup(self)
+        self.roiTrackingIntersectGrp.setExclusive(True)
+        self.roiTrackingS1Act = self.roiTrackingIntersectGrp.addAction(
+            resources.getQicon("intersect_s1"),
+            "track intersect 1",
+        )
+        self.roiTrackingS2Act = self.roiTrackingIntersectGrp.addAction(
+            resources.getQicon("intersect_s2"),
+            "track intersect 2",
+        )
+        self.roiTrackingS1Act.setCheckable(True)
+        self.roiTrackingS2Act.setCheckable(True)
+        self.roiTrackingS1Act.setChecked(True)
+
+        self.roiTrackingMenu = qt.QMenu()
+        self.roiTrackingMenu.addAction(self.roiTrackingS1Act)
+        self.roiTrackingMenu.addAction(self.roiTrackingS2Act)
+
+        self.roiTrackingBtn = qt.QToolButton()
+        self.roiTrackingBtn.setDefaultAction(self.roiTrackingAct)
+        self.roiTrackingBtn.setPopupMode(qt.QToolButton.MenuButtonPopup)
+        self.roiTrackingBtn.setMenu(self.roiTrackingMenu)
+
+        self.roiTrackingBtnAct = qt.QWidgetAction(self)
+        self.roiTrackingBtnAct.setDefaultWidget(self.roiTrackingBtn)
+
         self.toolbar.addAction(self.showMaxAct)
         self.toolbar.addAction(self.showSumAct)
         self.toolbar.addAction(self.alpha_btn_act)
@@ -267,6 +301,7 @@ class QScanSelector(qt.QMainWindow):
         self.toolbar.addWidget(self.noSelector)
         self.toolbar.addWidget(self.axislabel)
         self.toolbar.addWidget(self.axisSelector)
+        self.toolbar.addAction(self.roiTrackingBtnAct)
 
         self.toolbar.addWidget(self.slider)
         decreaseImageNo = self.toolbar.addAction(
@@ -1426,9 +1461,29 @@ class ROIAdvancedOptions(qt.QWidget):
 
         self.factorGroup.setLayout(factorLayout)
 
+        self.backgroundFitGroup = qt.QGroupBox("Fitted local background:")
+        self.backgroundFitGroup.setCheckable(True)
+        self.backgroundFitGroup.setChecked(False)
+
+        backgroundFitLayout = qt.QGridLayout()
+        self._backgroundFitOrder = qt.QSpinBox()
+        self._backgroundFitOrder.setRange(0, 2)
+        self._backgroundFitOrder.setValue(1)
+        self._backgroundFitOrder.setToolTip(
+            "Polynomial order for the local background fit: "
+            "0=constant, 1=plane, 2=quadratic."
+        )
+        backgroundFitLayout.addWidget(qt.QLabel("Polynomial order:"), 0, 0)
+        backgroundFitLayout.addWidget(self._backgroundFitOrder, 0, 1)
+        self.backgroundFitGroup.setLayout(backgroundFitLayout)
+
+        self.backgroundFitGroup.toggled.connect(self._onAnyValueChanged)
+        self._backgroundFitOrder.valueChanged.connect(self._onAnyValueChanged)
+
         mainLayout.addWidget(self.sizeGroup)
         mainLayout.addWidget(self.inclinationBox)
         mainLayout.addWidget(self.factorGroup)
+        mainLayout.addWidget(self.backgroundFitGroup)
 
         mainLayout.addWidget(self.offsetGroup)
         self.setLayout(mainLayout)
@@ -1444,6 +1499,14 @@ class ROIAdvancedOptions(qt.QWidget):
 
     def hasROIsizeCorrection(self):
         return self.hasDetectorInclination() or self.hasProjectSampleSize()
+
+    def hasFittedBackground(self):
+        """Return whether local polynomial background fitting is enabled."""
+        return self.backgroundFitGroup.isChecked()
+
+    def get_background_fit_order(self):
+        """Return the local background polynomial order."""
+        return self._backgroundFitOrder.value()
 
     def get_offsets(self):
         if self.offsetGroup.isChecked():
@@ -1478,6 +1541,8 @@ class ROIAdvancedOptions(qt.QWidget):
             "sizeY": sizes[1],
             "sizeZ": sizes[2],
             "factor": self.get_apply_factor(),
+            "FittedBackground": self.hasFittedBackground(),
+            "FittedBackgroundOrder": self.get_background_fit_order(),
         }
 
         return ddict
@@ -1490,6 +1555,8 @@ class ROIAdvancedOptions(qt.QWidget):
             self.set_sample_size(ddict["sizeX"], ddict["sizeY"], ddict["sizeZ"])
             self.set_offsets(ddict["xoffset"], ddict["yoffset"])
             self.set_apply_factor(ddict["factor"])
+            self.backgroundFitGroup.setChecked(ddict.get("FittedBackground", False))
+            self._backgroundFitOrder.setValue(ddict.get("FittedBackgroundOrder", 1))
         except Exception:
             raise
         finally:

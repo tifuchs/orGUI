@@ -225,17 +225,29 @@ def vacAngles_singleArray(angle, refraction_index):
 def printPos(pos, phichi=False):
     pos = np.rad2deg(pos)
     if phichi:
-        print("alp={:.2f}, del={:.2f}, gam={:.2f}, om={:.2f}, phi={:.2f}, chi={:.2f}".format(*tuple(pos)))  # noqa: E501
+        print(
+            "alp={:.2f}, del={:.2f}, gam={:.2f}, om={:.2f}, phi={:.2f}, chi={:.2f}".format(  # noqa: E501
+                *tuple(pos)
+            )
+        )  # noqa: E501
     else:
-        print("alp={:.2f}, del={:.2f}, gam={:.2f}, om={:.2f}".format(*tuple(np.array(pos)[:-2])))  # noqa: E501
+        print(
+            "alp={:.2f}, del={:.2f}, gam={:.2f}, om={:.2f}".format(
+                *tuple(np.array(pos)[:-2])
+            )
+        )  # noqa: E501
 
 
 def strPos(pos, phichi=False):
     pos = np.rad2deg(pos)
     if phichi:
-        spos = "alp={:.2f}, del={:.2f}, gam={:.2f}, om={:.2f}, phi={:.2f}, chi={:.2f}".format(*tuple(pos))  # noqa: E501
+        spos = "alp={:.2f}, del={:.2f}, gam={:.2f}, om={:.2f}, phi={:.2f}, chi={:.2f}".format(  # noqa: E501
+            *tuple(pos)
+        )  # noqa: E501
     else:
-        spos = "alp={:.2f}, del={:.2f}, gam={:.2f}, om={:.2f}".format(*tuple(np.array(pos)[:-2]))  # noqa: E501
+        spos = "alp={:.2f}, del={:.2f}, gam={:.2f}, om={:.2f}".format(
+            *tuple(np.array(pos)[:-2])
+        )  # noqa: E501
     return spos
 
 
@@ -1791,7 +1803,12 @@ class GeometryCorrection:
         return P * Carea
 
     def correctDatasetZmode(
-        self, hkl, I, fixedangle, fixed="in", polarization_horiz=1.0  # noqa: E741
+        self,
+        hkl,
+        I,  # noqa: E741
+        fixedangle,
+        fixed="in",
+        polarization_horiz=1.0,  # noqa: E741
     ):
         corr = np.empty_like(I)
         for i in range(I.size):

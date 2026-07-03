@@ -623,7 +623,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 pk_pos_exact = sc_h5["phi_pk"][()]
             else:
                 raise ValueError(
-                    "Cannot estimate peak position: unknown scan axis {}".format(ro_info["axisname"])  # noqa: E501
+                    "Cannot estimate peak position: unknown scan axis {}".format(
+                        ro_info["axisname"]
+                    )  # noqa: E501
                 )
 
             def _set_roi_info(roi_info):
@@ -749,9 +751,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         """
         payload = np.load(filename, allow_pickle=True)
         if not isinstance(payload, np.ndarray) or payload.shape != ():
-            raise ValueError(
-                f"NumPy ROI file {filename} has unsupported payload shape"
-            )
+            raise ValueError(f"NumPy ROI file {filename} has unsupported payload shape")
 
         payload = payload.item()
         if not isinstance(payload, dict):
@@ -1493,7 +1493,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
                         pk_pos_exact = sc_h5["phi_pk"][()]
                     else:
                         raise ValueError(
-                            "Cannot estimate peak position: unknown scan axis {}".format(ro_info["axisname"])  # noqa: E501
+                            "Cannot estimate peak position: unknown scan axis {}".format(  # noqa: E501
+                                ro_info["axisname"]
+                            )  # noqa: E501
                         )
 
                     roi1Ddict = {
@@ -1573,7 +1575,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
                         pk_pos_exact = sc_h5["phi_pk"][()]
                     else:
                         raise ValueError(
-                            "Cannot estimate peak position: unknown scan axis {}".format(ro_info["axisname"])  # noqa: E501
+                            "Cannot estimate peak position: unknown scan axis {}".format(  # noqa: E501
+                                ro_info["axisname"]
+                            )  # noqa: E501
                         )
 
                     roi_dict = self.get_roi1D_info(self._idx)  # check existing ROIS
@@ -1699,10 +1703,14 @@ class RockingPeakIntegrator(qt.QMainWindow):
         s = self._currentRoInfo["s"][idx]
         if self._currentRoInfo["type"] == "hklscan":
             hkl = self._currentRoInfo["H_1"] * s + self._currentRoInfo["H_0"]
-            title = "Rocking scan at s = {}, HKL = [{:.2f} {:.2f} {:.2f}]".format(s, *hkl)  # noqa: E501
+            title = "Rocking scan at s = {}, HKL = [{:.2f} {:.2f} {:.2f}]".format(
+                s, *hkl
+            )  # noqa: E501
         else:
             hkl = self._currentRoInfo["HKL_pk"][idx]
-            title = "Rocking scan at s = {}, HKL = [{:.2f} {:.2f} {:.2f}]".format(s, *hkl)  # noqa: E501
+            title = "Rocking scan at s = {}, HKL = [{:.2f} {:.2f} {:.2f}]".format(
+                s, *hkl
+            )  # noqa: E501
         self.plotROIselect.setGraphTitle(title)
         # print('before table clear')
         self.roiwidget.roiTable.clear()

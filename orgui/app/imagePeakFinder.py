@@ -145,7 +145,29 @@ def calc_image_range(fscan, axis_range, **kargs):
 
 
 def find_COM_Image(xy_start, xsize, ysize, fscan, axis_range, **kargs):
+    """Find detector and rocking-curve center of mass for a local peak.
+
+    :param xy_start:
+        Initial detector coordinate ``(x, y)`` in pixels.
+    :param int xsize:
+        Horizontal ROI size in pixels.
+    :param int ysize:
+        Vertical ROI size in pixels.
+    :param fscan:
+        Active scan object.
+    :param axis_range:
+        Two scan-axis values bounding the local rocking search.
+    :param bool return_rocking_curve:
+        If ``True``, include ``rocking_curve`` and ``rocking_axis`` in the
+        returned dictionary. The curve is the ROI-summed trace already
+        calculated during the search.
+    :returns:
+        Dictionary with ``xy``, ``axis_com``, and ``axis_peak``. Optionally
+        includes ``rocking_curve`` and ``rocking_axis``.
+    :rtype: dict
+    """
     kargs["rocking_curve"] = {"xy_start": xy_start, "xsize": xsize, "ysize": ysize}
+    return_rocking_curve = kargs.pop("return_rocking_curve", False)
     images = calc_image_range(fscan, axis_range, **kargs)
 
     img_max = images["max"]
@@ -184,4 +206,8 @@ def find_COM_Image(xy_start, xsize, ysize, fscan, axis_range, **kargs):
     peak_idx = np.nanargmax(ro_curve)
     axis_peak = images["rocking_axis"][peak_idx]
 
-    return {"xy": yxcenter[::-1], "axis_com": axis_com, "axis_peak": axis_peak}
+    result = {"xy": yxcenter[::-1], "axis_com": axis_com, "axis_peak": axis_peak}
+    if return_rocking_curve:
+        result["rocking_curve"] = images["rocking_curve"]
+        result["rocking_axis"] = images["rocking_axis"]
+    return result

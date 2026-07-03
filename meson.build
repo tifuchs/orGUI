@@ -33,6 +33,14 @@ py.extension_module(
   subdir: 'orgui/datautils/xrayutils'
 )
 
+py.extension_module(
+  '_roi_sum_cpp',
+  files('orgui/app/cpp/roi_sum_cpp.cpp'),
+  dependencies: [pybind11_dep],
+  install: true,
+  subdir: 'orgui/app'
+)
+
 install_subdir(
   'orgui',
   install_dir: py.get_install_dir(),
