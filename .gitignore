@@ -12,6 +12,8 @@ dist/
 build/
 orgui.egg-info/
 orgui/_version.py
+benchmarks/roi_sum_results.json
+**/.ipynb_checkpoints/
 
 # Packages #
 ############
