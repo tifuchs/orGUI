@@ -30,7 +30,7 @@ __license__ = "MIT License"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
-__all__ = ["main", "logger_settings"]
+__all__ = ["main", "logger_settings", "BUILD_CONFIG", "get_build_config"]
 
 import logging
 
@@ -66,3 +66,22 @@ try:
 except Exception:
     logger.exception("Cannot determine orGUI version")
     __version__ = "1.4.1-unknown"
+
+
+def get_build_config():
+    """Return Meson build settings recorded in the installed package.
+
+    :returns:
+        A dictionary with compiler, host, and native optimization settings.
+        Source-tree imports before a Meson build return ``{"available": False}``.
+    :rtype: dict
+    """
+    try:
+        from ._build_config import BUILD_CONFIG
+
+        return dict(BUILD_CONFIG, available=True)
+    except Exception:
+        return {"available": False}
+
+
+BUILD_CONFIG = get_build_config()
