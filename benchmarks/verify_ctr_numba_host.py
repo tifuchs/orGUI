@@ -1,20 +1,21 @@
 """Compare CTR NumPy and Numba timings on the current host.
 
-Run from the repository root:
+Run from the ``benchmarks/`` directory with orGUI already installed in the
+active Python environment:
 
-    python benchmarks/verify_ctr_numba_host.py
+    python verify_ctr_numba_host.py
 
 For host-to-host comparisons, run the same command on each machine. To avoid
 reusing stale compiled kernels across machines, set a host-local cache first:
 
     export NUMBA_CACHE_DIR=/tmp/numba-cache-$USER-$(hostname)
     rm -rf "$NUMBA_CACHE_DIR"
-    python benchmarks/verify_ctr_numba_host.py
+    python verify_ctr_numba_host.py
 
 To check whether host-specific CPU code generation is responsible for timing
 differences, also test with:
 
-    NUMBA_CPU_NAME=generic python benchmarks/verify_ctr_numba_host.py
+    NUMBA_CPU_NAME=generic python verify_ctr_numba_host.py
 """
 
 from __future__ import annotations
@@ -23,27 +24,13 @@ import os
 import platform
 import statistics
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 import numpy as np
 
 
-def find_repo_root() -> Path:
-    """Return the repository root containing ``orgui`` and ``pyproject.toml``."""
-    path = Path(__file__).resolve()
-    for candidate in (path.parent, *path.parents):
-        if (candidate / "orgui").is_dir() and (
-            candidate / "pyproject.toml"
-        ).exists():
-            return candidate
-    raise RuntimeError("Could not find the orGUI repository root")
-
-
-REPO_ROOT = find_repo_root()
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 os.environ.setdefault(
     "MPLCONFIGDIR",
     f"/tmp/matplotlib-{os.environ.get('USER', 'orgui')}",
@@ -84,15 +71,7 @@ def median_time(func, repeats: int) -> float:
 
 def load_crystal():
     """Load the bundled CTR regression crystal."""
-    xpr_path = (
-        REPO_ROOT
-        / "orgui"
-        / "datautils"
-        / "xrayutils"
-        / "test"
-        / "testdata"
-        / "0V12_calculated.xpr"
-    )
+    xpr_path = FIXTURE_DIR / "0V12_calculated.xpr"
     xtal = CTRcalc.SXRDCrystal.fromFile(xpr_path)
     pt100 = CTRcalc.UnitCell(
         [3.9242, 3.9242, 3.9242],
@@ -116,7 +95,7 @@ def print_environment() -> None:
     print("host", platform.node())
     print("platform", platform.platform())
     print("python", platform.python_version())
-    print("repo", REPO_ROOT)
+    print("fixture_dir", FIXTURE_DIR)
 
     print("\n=== CPU ===")
     print_command_output(

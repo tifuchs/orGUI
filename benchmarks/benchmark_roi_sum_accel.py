@@ -11,14 +11,14 @@ The synthetic detector defaults to a Pilatus 6M ``(2527, 2463)`` image with
 10 to 100 pixels, and four background strips are generated around each ROI
 with strip widths sampled from 5 to 50 pixels.
 
-Run from the repository root after building the C++ extension:
+Run from the ``benchmarks/`` directory with orGUI already installed in the
+active Python environment:
 
-    meson compile -C build/cp313
-    python benchmarks/benchmark_roi_sum_accel.py
-    python benchmarks/benchmark_roi_sum_accel.py --disk-images 16 --threads 4
+    python benchmark_roi_sum_accel.py
+    python benchmark_roi_sum_accel.py --disk-images 16 --threads 4
 
-For installed packages, the script imports ``orgui.app._roi_sum_cpp`` directly.
-For an in-tree Meson build, it also looks for ``build/cp*/_roi_sum_cpp*.so``.
+The script imports ``orgui.app._roi_sum_cpp`` from the active Python
+environment; if orGUI is not installed, the import fails.
 """
 
 from __future__ import annotations
@@ -26,12 +26,10 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import importlib
-import importlib.util
 import json
 import platform
 import tempfile
 import statistics
-import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,45 +40,16 @@ import numpy as np
 PILATUS_6M_SHAPE = (2527, 2463)
 
 
-def find_repo_root() -> Path:
-    """Return the repository root containing ``orgui`` and ``pyproject.toml``."""
-    path = Path(__file__).resolve()
-    for candidate in (path.parent, *path.parents):
-        if (candidate / "orgui").is_dir() and (
-            candidate / "pyproject.toml"
-        ).exists():
-            return candidate
-    raise RuntimeError("Could not find the orGUI repository root")
-
-
-REPO_ROOT = find_repo_root()
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-
 def import_cpp_backend():
-    """Import the C++ ROI backend from an installed package or Meson build."""
+    """Import the C++ ROI backend from the active Python environment."""
     try:
         return importlib.import_module("orgui.app._roi_sum_cpp")
     except Exception as package_error:
-        candidates = sorted((REPO_ROOT / "build").glob("cp*/_roi_sum_cpp*.so"))
-        if not candidates:
-            raise RuntimeError(
-                "Could not import orgui.app._roi_sum_cpp and no "
-                "build/cp*/_roi_sum_cpp*.so file was found. Build first with "
-                "`meson compile -C build/cp313` or run from an installed "
-                "package."
-            ) from package_error
-        extension_path = candidates[-1]
-        spec = importlib.util.spec_from_file_location(
-            "_roi_sum_cpp",
-            extension_path,
-        )
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Could not load {extension_path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
+        raise RuntimeError(
+            "Could not import orgui.app._roi_sum_cpp from the active Python "
+            "environment. Install orGUI with the C++ extension before running "
+            "this benchmark."
+        ) from package_error
 
 
 def try_build_numba_backend():
