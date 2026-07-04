@@ -77,7 +77,7 @@ MAX_ROIS_DISPLAY = 100
 if hasattr(np, "trapezoid"):  # ToDo remove for orGUI release >1.5
     _trapz_impl = np.trapezoid  # numpy >= 2.0
 else:
-    _trapz_impl = np.trapezoid  # numpy < 2.0
+    _trapz_impl = np.trapz  # numpy < 2.0
 
 
 class RockingPeakIntegrator(qt.QMainWindow):
