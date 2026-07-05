@@ -15,33 +15,6 @@ class CountingScan(SimulationScan):
         return super().get_raw_img(i)
 
 
-def test_scan_image_maxima_ranks_sharp_post_burn_in_peak():
-    scan = SimulationScan((8, 8), 0.0, 9.0, 10)
-    for i in range(len(scan)):
-        scan.images[i] = np.full((8, 8), 10.0 + i)
-    scan.images[7, 3, 4] = 500.0
-
-    maxima = autoBraggSearch.scan_image_maxima(scan, burn_in=3, history=4)
-
-    assert maxima[0].imageno == 7
-    np.testing.assert_allclose(maxima[0].xy, [4.0, 3.0])
-    assert maxima[0].sharpness > 100.0
-
-
-def test_scan_image_maxima_rejects_pixels_near_mask():
-    scan = SimulationScan((8, 8), 0.0, 9.0, 10)
-    scan.images[7, 3, 4] = 500.0
-    scan.images[8, 6, 6] = 400.0
-    mask = np.zeros((8, 8), dtype=bool)
-    mask[3, 5] = True
-
-    maxima = autoBraggSearch.scan_image_maxima(
-        scan, mask=mask, burn_in=1, history=4, mask_distance=1
-    )
-
-    assert all(maximum.imageno != 7 for maximum in maxima)
-
-
 def test_iter_sharp_peak_candidates_yields_before_scan_end():
     scan = CountingScan((8, 8), 0.0, 19.0, 20)
     scan.images[:] = 10.0
@@ -63,6 +36,90 @@ def test_iter_sharp_peak_candidates_yields_before_scan_end():
     np.testing.assert_allclose(candidate.xy, [4.0, 3.0])
     assert max(scan.read_images) == 8
     assert 9 not in scan.read_images
+
+
+def test_iter_sharp_peak_candidates_threaded_matches_single_thread():
+    scan = SimulationScan((8, 8), 0.0, 19.0, 20)
+    scan.images[:] = 10.0
+    scan.images[7, 3, 4] = 500.0
+    scan.images[12, 5, 6] = 700.0
+
+    kwargs = {
+        "burn_in": 3,
+        "history": 4,
+        "min_history": 4,
+        "level_z": 6.0,
+        "derivative_z": 6.0,
+        "lookahead": 1,
+        "refractory": 1,
+    }
+
+    single = list(autoBraggSearch.iter_sharp_peak_candidates(scan, **kwargs))
+    threaded = list(
+        autoBraggSearch.iter_sharp_peak_candidates(scan, max_workers=4, **kwargs)
+    )
+
+    assert [candidate.imageno for candidate in threaded] == [
+        candidate.imageno for candidate in single
+    ]
+    for threaded_candidate, single_candidate in zip(threaded, single):
+        np.testing.assert_allclose(threaded_candidate.xy, single_candidate.xy)
+        assert threaded_candidate.value == single_candidate.value
+
+
+def test_iter_sharp_peak_candidates_subtracts_background_image():
+    scan = SimulationScan((8, 8), 0.0, 19.0, 20)
+    scan.images[:] = 10.0
+    scan.images[7, 3, 4] = 500.0
+    scan.images[12, 5, 6] = 450.0
+    background = np.zeros((8, 8), dtype=float)
+    background[3, 4] = 495.0
+
+    candidates = autoBraggSearch.iter_sharp_peak_candidates(
+        scan,
+        background_image=background,
+        burn_in=3,
+        history=4,
+        min_history=4,
+        level_z=6.0,
+        derivative_z=6.0,
+        lookahead=1,
+        refractory=1,
+    )
+
+    candidate = next(candidates)
+
+    assert candidate.imageno == 12
+    np.testing.assert_allclose(candidate.xy, [6.0, 5.0])
+    assert candidate.value == 450.0
+
+
+def test_iter_sharp_peak_candidates_rejects_image_when_maximum_near_mask():
+    scan = SimulationScan((8, 8), 0.0, 19.0, 20)
+    scan.images[:] = 10.0
+    scan.images[7, 3, 4] = 500.0
+    scan.images[7, 6, 6] = 450.0
+    scan.images[12, 5, 6] = 700.0
+    mask = np.zeros((8, 8), dtype=bool)
+    mask[3, 5] = True
+
+    candidates = autoBraggSearch.iter_sharp_peak_candidates(
+        scan,
+        mask=mask,
+        burn_in=3,
+        history=4,
+        min_history=4,
+        level_z=6.0,
+        derivative_z=6.0,
+        lookahead=1,
+        refractory=1,
+        mask_distance=1,
+    )
+
+    candidate = next(candidates)
+
+    assert candidate.imageno == 12
+    np.testing.assert_allclose(candidate.xy, [6.0, 5.0])
 
 
 def test_iter_sharp_peak_candidates_can_continue_after_rejected_candidate():

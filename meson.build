@@ -209,6 +209,14 @@ py.extension_module(
   subdir: 'orgui/app'
 )
 
+py.extension_module(
+  '_peak_search_cpp',
+  files('orgui/app/cpp/peak_search_cpp.cpp'),
+  dependencies: [pybind11_dep],
+  install: true,
+  subdir: 'orgui/app'
+)
+
 install_subdir(
   'orgui',
   install_dir: py.get_install_dir(),

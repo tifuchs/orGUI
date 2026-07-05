@@ -488,6 +488,7 @@ class AutoBraggWorkflow:
         candidates = autoBraggSearch.iter_sharp_peak_candidates(
             self.fscan,
             mask=mask,
+            background_image=self.background_image,
             excluded_images=excluded_images,
             burn_in=burn_in,
             history=history,
@@ -498,6 +499,7 @@ class AutoBraggWorkflow:
             min_prominence_z=min_prominence_sharpness,
             refractory=refractory,
             mask_distance=mask_distance,
+            max_workers=self.numberthreads,
         )
         for maximum in candidates:
             report(
@@ -531,6 +533,7 @@ class AutoBraggWorkflow:
                     fine_axis_half_width=fine_axis_half_width,
                     fine_roi_size=fine_roi_size,
                     mask=mask,
+                    background_image=self.background_image,
                     excluded_images=excluded_images,
                     max_workers=self.numberthreads,
                 )
@@ -1205,6 +1208,7 @@ class AutoBraggWorkflow:
             fine_axis_half_width=fine_axis_half_width,
             fine_roi_size=fine_roi_size,
             mask=mask,
+            background_image=self.background_image,
             excluded_images=self.excludedImagesDialog.getData(),
             max_workers=self.numberthreads,
         )
@@ -1341,6 +1345,7 @@ class AutoBraggWorkflow:
                         fine_axis_half_width=fine_axis_half_width,
                         fine_roi_size=fine_roi_size,
                         mask=mask,
+                        background_image=self.background_image,
                         excluded_images=self.excludedImagesDialog.getData(),
                         max_workers=self.numberthreads,
                     )
@@ -1563,6 +1568,7 @@ class AutoBraggWorkflow:
                             fine_axis_half_width=fine_axis_half_width,
                             fine_roi_size=fine_roi_size,
                             mask=mask,
+                            background_image=self.background_image,
                             excluded_images=excluded_images,
                             max_workers=self.numberthreads,
                         )

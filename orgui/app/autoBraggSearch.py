@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import copy
 from dataclasses import dataclass
 import logging
@@ -32,6 +33,7 @@ import logging
 import numpy as np
 
 from ..datautils.xrayutils import HKLVlieg, ReciprocalNavigation as rn
+from . import _peak_search_accel
 from . import imagePeakFinder
 
 logger = logging.getLogger(__name__)
@@ -137,6 +139,15 @@ def _masked_maximum(img, mask=None):
     return float(arr[y, x]), np.array([x, y], dtype=float)
 
 
+def _compatible_background(background_image, image_shape):
+    """Return a background image only when it matches ``image_shape``."""
+    if background_image is None:
+        return None
+    if np.shape(background_image) != tuple(image_shape):
+        return None
+    return background_image
+
+
 def far_from_mask(mask, xy, distance):
     """Return whether ``xy`` is at least ``distance`` pixels from masked pixels.
 
@@ -186,6 +197,7 @@ def _robust_z(value, values):
 def iter_sharp_peak_candidates(
     fscan,
     mask=None,
+    background_image=None,
     excluded_images=(),
     burn_in=5,
     history=20,
@@ -196,6 +208,8 @@ def iter_sharp_peak_candidates(
     min_prominence_z=4.0,
     refractory=3,
     mask_distance=3,
+    max_workers=1,
+    prefetch=None,
 ):
     """Yield sharp max-trace peak candidates while reading images sequentially.
 
@@ -210,6 +224,9 @@ def iter_sharp_peak_candidates(
         Active scan object.
     :param numpy.ndarray mask:
         Optional boolean mask where ``True`` pixels are invalid.
+    :param numpy.ndarray background_image:
+        Optional static detector background image. If its shape matches each
+        scan image, candidate maxima are calculated from ``image - background``.
     :param excluded_images:
         Iterable of image indices to skip.
     :param int burn_in:
@@ -231,174 +248,123 @@ def iter_sharp_peak_candidates(
         candidates from one broad peak.
     :param int mask_distance:
         Reject maxima within this many pixels of a masked pixel.
+    :param int max_workers:
+        Worker count used for bounded image-read prefetch.
+    :param int prefetch:
+        Maximum number of queued images. Defaults to
+        ``max(lookahead + 1, max_workers)``.
     :yields:
         :class:`ImageMaximum` candidates ordered by acquisition.
     """
     excluded = {int(i) for i in np.atleast_1d(excluded_images)}
-    values = {}
-    maxima = {}
-    next_allowed = int(burn_in)
-    imageno = 0
+    n_images = len(fscan)
+    detector = _peak_search_accel.PeakCandidateDetector(
+        n_images,
+        int(burn_in),
+        int(history),
+        int(min_history),
+        float(level_z),
+        float(derivative_z),
+        int(lookahead),
+        float(min_prominence_z),
+        int(refractory),
+    )
+    max_workers = max(1, int(max_workers))
+    if prefetch is None:
+        prefetch = max(int(lookahead) + 1, max_workers)
+    prefetch = max(1, int(prefetch))
 
     def read_maximum(index):
-        if index in values:
-            return maxima.get(index)
         if index in excluded:
-            values[index] = np.nan
-            return None
-        image = fscan.get_raw_img(index).img
+            return index, False, np.nan, np.nan, np.nan
         try:
-            value, xy = _masked_maximum(image, mask)
-        except ValueError:
-            logger.warning("Skipping image %s without finite pixels.", index)
-            values[index] = np.nan
-            return None
-        if not np.isfinite(value) or not far_from_mask(mask, xy, mask_distance):
-            values[index] = np.nan
-            return None
-        maximum = ImageMaximum(index, xy, value)
-        values[index] = value
-        maxima[index] = maximum
-        return maximum
-
-    while imageno < len(fscan):
-        maximum = read_maximum(imageno)
-        if maximum is None:
-            imageno += 1
-            continue
-
-        history_start = max(0, imageno - history)
-        baseline = np.array(
-            [values.get(i, np.nan) for i in range(history_start, imageno)]
-        )
-        baseline = baseline[np.isfinite(baseline)]
-        if imageno < next_allowed or baseline.size < min_history:
-            imageno += 1
-            continue
-
-        diffs = np.diff(baseline)
-        previous = [
-            values.get(i, np.nan)
-            for i in range(history_start, imageno)
-            if np.isfinite(values.get(i, np.nan))
-        ]
-        current_diff = maximum.value - previous[-1]
-        level_score = _robust_z(maximum.value, baseline)
-        diff_score = _robust_z(current_diff, diffs)
-        maximum.sharpness = level_score
-        maximum.derivative_sharpness = diff_score
-
-        if (
-            not np.isfinite(level_score)
-            or not np.isfinite(diff_score)
-            or level_score < level_z
-            or diff_score < derivative_z
-        ):
-            imageno += 1
-            continue
-
-        window = [maximum]
-        for look_idx in range(imageno + 1, min(len(fscan), imageno + lookahead + 1)):
-            look_maximum = read_maximum(look_idx)
-            if look_maximum is not None:
-                window.append(look_maximum)
-
-        if not window:
-            imageno += 1
-            continue
-        candidate = max(window, key=lambda item: item.value)
-        median, scale = _robust_location_scale(baseline)
-        if not np.isfinite(scale) or scale <= np.finfo(float).eps:
-            scale = np.std(baseline)
-        if not np.isfinite(scale) or scale <= np.finfo(float).eps:
-            scale = np.finfo(float).eps
-        prominence = candidate.value - median
-        candidate.prominence = float(prominence)
-        if prominence / scale >= min_prominence_z:
-            candidate.sharpness = _robust_z(candidate.value, baseline)
-            prev_values = [
-                values.get(i, np.nan)
-                for i in range(history_start, candidate.imageno)
-                if np.isfinite(values.get(i, np.nan))
-            ]
-            prev_value = prev_values[-1]
-            candidate.derivative_sharpness = _robust_z(
-                candidate.value - prev_value, diffs
+            image = fscan.get_raw_img(index).img
+            background = _compatible_background(background_image, image.shape)
+            maximum = _peak_search_accel.masked_maximum(
+                image,
+                mask,
+                background,
+                0,
             )
-            yield candidate
-            next_allowed = candidate.imageno + refractory + 1
+        except Exception:
+            logger.warning(
+                "Skipping image %s without finite pixels.",
+                index,
+                exc_info=True,
+            )
+            return index, False, np.nan, np.nan, np.nan
+        if not maximum.valid or not np.isfinite(maximum.value):
+            return index, False, np.nan, np.nan, np.nan
+        if not far_from_mask(mask, np.array([maximum.x, maximum.y]), mask_distance):
+            return index, False, np.nan, np.nan, np.nan
+        return index, True, maximum.value, maximum.x, maximum.y
 
-        imageno = max(imageno + 1, candidate.imageno + 1)
+    def candidates_from_result(result, finish=False):
+        index, valid, value, x, y = result
+        for candidate in detector.push(index, valid, value, x, y, finish):
+            yield ImageMaximum(
+                int(candidate.index),
+                np.array([candidate.x, candidate.y], dtype=float),
+                float(candidate.value),
+                float(candidate.sharpness),
+                float(candidate.derivative_sharpness),
+                float(candidate.prominence),
+            )
 
+    if max_workers == 1:
+        for imageno in range(n_images):
+            yield from candidates_from_result(read_maximum(imageno))
+        for candidate in detector.finish():
+            yield ImageMaximum(
+                int(candidate.index),
+                np.array([candidate.x, candidate.y], dtype=float),
+                float(candidate.value),
+                float(candidate.sharpness),
+                float(candidate.derivative_sharpness),
+                float(candidate.prominence),
+            )
+        return
 
-def scan_image_maxima(
-    fscan,
-    mask=None,
-    excluded_images=(),
-    burn_in=5,
-    history=20,
-    mask_distance=3,
-):
-    """Read scan images once and calculate the max-pixel trace.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        completed = {}
+        submit_index = 0
+        consume_index = 0
 
-    The returned candidates are sorted by robust sharp-increase score. The
-    image data are accessed exactly once in this pass.
+        def submit_until_full():
+            nonlocal submit_index
+            while submit_index < n_images and len(futures) < prefetch:
+                future = executor.submit(read_maximum, submit_index)
+                futures[future] = submit_index
+                submit_index += 1
 
-    :param orgui.backend.scans.Scan fscan:
-        Active scan object.
-    :param numpy.ndarray mask:
-        Optional boolean mask where ``True`` pixels are invalid.
-    :param excluded_images:
-        Iterable of image indices to skip.
-    :param int burn_in:
-        Number of initial images excluded from candidate selection.
-    :param int history:
-        Number of preceding max values used for robust baseline estimation.
-    :param int mask_distance:
-        Reject maxima within this many pixels of a masked pixel.
-    :returns:
-        Sorted maxima.
-    :rtype: list[ImageMaximum]
-    """
-    excluded = {int(i) for i in np.atleast_1d(excluded_images)}
-    maxima = []
-    values = np.full(len(fscan), np.nan, dtype=float)
-    for imageno in range(len(fscan)):
-        if imageno in excluded:
-            continue
-        image = fscan.get_raw_img(imageno).img
-        try:
-            value, xy = _masked_maximum(image, mask)
-        except ValueError:
-            logger.warning("Skipping image %s without finite pixels.", imageno)
-            continue
-        if not np.isfinite(value) or not far_from_mask(mask, xy, mask_distance):
-            continue
-        values[imageno] = value
-        maxima.append(ImageMaximum(imageno, xy, value))
+        submit_until_full()
+        while consume_index < n_images:
+            if consume_index not in completed:
+                done, _pending = concurrent.futures.wait(
+                    futures,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    futures.pop(future)
+                    result = future.result()
+                    completed[result[0]] = result
+                submit_until_full()
+            while consume_index in completed:
+                result = completed.pop(consume_index)
+                yield from candidates_from_result(result)
+                consume_index += 1
+                submit_until_full()
 
-    for maximum in maxima:
-        if maximum.imageno < burn_in:
-            continue
-        start = max(0, maximum.imageno - history)
-        baseline_values = values[start : maximum.imageno]
-        baseline_values = baseline_values[np.isfinite(baseline_values)]
-        if baseline_values.size < max(3, min(history, 5)):
-            continue
-        median = np.median(baseline_values)
-        mad = np.median(np.abs(baseline_values - median))
-        maximum.sharpness = (maximum.value - median) / (
-            1.4826 * mad + np.finfo(float).eps
-        )
-
-    return sorted(
-        maxima,
-        key=lambda item: (
-            np.nan_to_num(item.sharpness, nan=-np.inf),
-            item.value,
-        ),
-        reverse=True,
-    )
+        for candidate in detector.finish():
+            yield ImageMaximum(
+                int(candidate.index),
+                np.array([candidate.x, candidate.y], dtype=float),
+                float(candidate.value),
+                float(candidate.sharpness),
+                float(candidate.derivative_sharpness),
+                float(candidate.prominence),
+            )
 
 
 def refine_peak_3d(
@@ -409,6 +375,7 @@ def refine_peak_3d(
     fine_axis_half_width=0.4,
     fine_roi_size=(40, 40),
     mask=None,
+    background_image=None,
     excluded_images=(),
     max_workers=1,
 ):
@@ -430,6 +397,9 @@ def refine_peak_3d(
         Second-pass ``(vertical, horizontal)`` ROI size in pixels.
     :param numpy.ndarray mask:
         Optional boolean mask where ``True`` pixels are invalid.
+    :param numpy.ndarray background_image:
+        Optional static detector background image subtracted from scan images
+        when its shape matches the detector image shape.
     :param excluded_images:
         Iterable of image indices to skip.
     :param int max_workers:
@@ -444,6 +414,8 @@ def refine_peak_3d(
     }
     if mask is not None:
         kwargs["mask"] = mask
+    if background_image is not None:
+        kwargs["background_image"] = background_image
     axis0 = float(fscan.axis[candidate.imageno])
     result = imagePeakFinder.find_COM_Image(
         candidate.xy,

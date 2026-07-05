@@ -33,6 +33,8 @@ import concurrent.futures
 import threading
 import numpy as np
 
+from . import _peak_search_accel
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,6 +80,7 @@ def roiCoords(yxcenter, yxsize, det_shape):
 def calc_image_range(fscan, axis_range, **kargs):
     max_workers = kargs.get("max_workers", 1)
     excluded_images = kargs.get("excluded_images", [])
+    background_image = kargs.get("background_image", None)
 
     idx_1 = np.argmin(np.abs(fscan.axis - axis_range[0]))
     idx_2 = np.argmin(np.abs(fscan.axis - axis_range[1]))
@@ -93,8 +96,8 @@ def calc_image_range(fscan, axis_range, **kargs):
     image = fscan.get_raw_img(0)
     # global imgsum
     # global imgmax
-    imgsum = np.zeros_like(image.img)
-    imgmax = np.zeros_like(image.img)
+    imgsum = np.zeros_like(image.img, dtype=np.float64)
+    imgmax = np.zeros_like(image.img, dtype=np.float64)
     rocking_curve = np.full(len(list(range(idx_min, idx_max + 1))), np.nan, dtype=float)
     rocking_axis = fscan.axis[idx_min : idx_max + 1]
     lock = threading.Lock()
@@ -108,23 +111,29 @@ def calc_image_range(fscan, axis_range, **kargs):
             if imgno in excluded_images:  # skip if excluded
                 return imgno
             image = fscan.get_raw_img(imgno)  # here speedup during file read
+            img = image.img.astype(np.float64, order="C", copy=False)
+            background = None
+            if background_image is not None and background_image.shape == img.shape:
+                background = background_image
+                img = img.astype(np.float64, order="C", copy=True)
+                np.subtract(img, background, out=img)
             with lock:
-                imgsum[:] += image.img
-                np.maximum(imgmax, image.img, out=imgmax)
+                imgsum[:] += img
+                np.maximum(imgmax, img, out=imgmax)
                 if "rocking_curve" in kargs:
                     ro_params = kargs["rocking_curve"]
                     yxsizestart = np.array([ro_params["ysize"], ro_params["xsize"]])
                     yxcenter = np.array(ro_params["xy_start"])[::-1]
                     yxcoords = roiCoords(yxcenter, yxsizestart, imgmax.shape)
-                    subimage = np.copy(
-                        image.img[slice(*yxcoords[0]), slice(*yxcoords[1])]
+                    rocking_curve[idx] = _peak_search_accel.masked_roi_sum(
+                        image.img,
+                        kargs.get("mask", None),
+                        background,
+                        int(yxcoords[0][0]),
+                        int(yxcoords[0][1]),
+                        int(yxcoords[1][0]),
+                        int(yxcoords[1][1]),
                     )
-                    if "mask" in kargs:
-                        submask = kargs["mask"][
-                            slice(*yxcoords[0]), slice(*yxcoords[1])
-                        ]
-                        subimage[submask] = 0
-                    rocking_curve[idx] = np.nansum(subimage)
 
             return imgno
 
@@ -161,6 +170,9 @@ def find_COM_Image(xy_start, xsize, ysize, fscan, axis_range, **kargs):
         If ``True``, include ``rocking_curve`` and ``rocking_axis`` in the
         returned dictionary. The curve is the ROI-summed trace already
         calculated during the search.
+    :param numpy.ndarray background_image:
+        Optional static detector background image subtracted from scan images
+        when its shape matches the detector image shape.
     :returns:
         Dictionary with ``xy``, ``axis_com``, and ``axis_peak``. Optionally
         includes ``rocking_curve`` and ``rocking_axis``.
