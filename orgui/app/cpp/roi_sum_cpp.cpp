@@ -1,8 +1,11 @@
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 #include <limits>
+#include <queue>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -11,6 +14,7 @@ namespace py = pybind11;
 
 using Array2D = py::array_t<double, py::array::c_style>;
 using BoolArray2D = py::array_t<bool, py::array::c_style>;
+using IntArray2D = py::array_t<std::int32_t, py::array::c_style>;
 using RoiArray3D = py::array_t<std::int64_t, py::array::c_style>;
 
 void require_ndim(
@@ -72,6 +76,10 @@ inline const bool *bool_ptr(const py::buffer_info &info) {
     return static_cast<const bool *>(info.ptr);
 }
 
+inline const std::int32_t *int32_ptr(const py::buffer_info &info) {
+    return static_cast<const std::int32_t *>(info.ptr);
+}
+
 inline const std::int64_t *roi_ptr(const py::buffer_info &info) {
     return static_cast<const std::int64_t *>(info.ptr);
 }
@@ -114,6 +122,287 @@ struct PolyFitResult {
     double sample_count = 0.0;
     double coefficients[6] = {0.0};
 };
+
+struct RepairResult {
+    bool success = false;
+    double value = 0.0;
+};
+
+void require_intervals_shape(const py::buffer_info &intervals, const char *name) {
+    require_ndim(intervals, 2, name);
+    if (intervals.shape[1] != 2) {
+        throw py::value_error(std::string(name) + " must have shape (N, 2)");
+    }
+}
+
+bool in_or_touching_interval(
+    const std::int32_t *intervals,
+    const py::buffer_info &info,
+    const std::int64_t value
+) {
+    for (py::ssize_t i = 0; i < info.shape[0]; ++i) {
+        const std::int32_t start = intervals[i * info.shape[1]];
+        const std::int32_t stop = intervals[i * info.shape[1] + 1];
+        if (value >= static_cast<std::int64_t>(start) - 1
+            && value <= static_cast<std::int64_t>(stop)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool touches_gap(
+    const std::vector<py::ssize_t> &component,
+    const py::ssize_t image_width,
+    const std::int32_t *row_gaps,
+    const py::buffer_info &row_gap_info,
+    const std::int32_t *col_gaps,
+    const py::buffer_info &col_gap_info
+) {
+    for (const py::ssize_t idx : component) {
+        const std::int64_t y = idx / image_width;
+        const std::int64_t x = idx % image_width;
+        if (in_or_touching_interval(row_gaps, row_gap_info, y)
+            || in_or_touching_interval(col_gaps, col_gap_info, x)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+RepairResult repair_component_value(
+    const double *image_data,
+    const bool *mask_data,
+    const py::buffer_info &image_info,
+    const std::vector<py::ssize_t> &component,
+    const int max_component_pixels,
+    const int max_span,
+    const int radius,
+    const int min_valid_neighbors
+) {
+    RepairResult result;
+    if (component.empty()
+        || static_cast<int>(component.size()) > max_component_pixels) {
+        return result;
+    }
+    const py::ssize_t width = image_info.shape[1];
+    std::int64_t y_min = image_info.shape[0];
+    std::int64_t y_max = -1;
+    std::int64_t x_min = image_info.shape[1];
+    std::int64_t x_max = -1;
+    for (const py::ssize_t idx : component) {
+        const std::int64_t y = idx / width;
+        const std::int64_t x = idx % width;
+        y_min = std::min(y_min, y);
+        y_max = std::max(y_max, y);
+        x_min = std::min(x_min, x);
+        x_max = std::max(x_max, x);
+    }
+    if ((y_max - y_min + 1) > max_span || (x_max - x_min + 1) > max_span) {
+        return result;
+    }
+
+    std::vector<double> values;
+    std::vector<double> weights;
+    bool has_left = false;
+    bool has_right = false;
+    bool has_top = false;
+    bool has_bottom = false;
+    for (std::int64_t y = std::max<std::int64_t>(0, y_min - radius);
+         y <= std::min<std::int64_t>(image_info.shape[0] - 1, y_max + radius);
+         ++y) {
+        const py::ssize_t row_offset = y * width;
+        for (std::int64_t x = std::max<std::int64_t>(0, x_min - radius);
+             x <= std::min<std::int64_t>(image_info.shape[1] - 1, x_max + radius);
+             ++x) {
+            const py::ssize_t idx = row_offset + x;
+            if (mask_data[idx]) {
+                continue;
+            }
+            const double value = image_data[idx];
+            if (std::isnan(value)) {
+                continue;
+            }
+            double min_dist2 = std::numeric_limits<double>::infinity();
+            for (const py::ssize_t cidx : component) {
+                const double cy = static_cast<double>(cidx / width);
+                const double cx = static_cast<double>(cidx % width);
+                const double dy = static_cast<double>(y) - cy;
+                const double dx = static_cast<double>(x) - cx;
+                min_dist2 = std::min(min_dist2, dy * dy + dx * dx);
+            }
+            if (min_dist2 <= 0.0 || min_dist2 > radius * radius) {
+                continue;
+            }
+            values.push_back(value);
+            weights.push_back(1.0 / min_dist2);
+            has_left = has_left || x < x_min;
+            has_right = has_right || x > x_max;
+            has_top = has_top || y < y_min;
+            has_bottom = has_bottom || y > y_max;
+        }
+    }
+    const int sides = static_cast<int>(has_left) + static_cast<int>(has_right)
+        + static_cast<int>(has_top) + static_cast<int>(has_bottom);
+    if (static_cast<int>(values.size()) < min_valid_neighbors || sides < 2) {
+        return result;
+    }
+    result.success = true;
+    if (component.size() == 1) {
+        std::sort(values.begin(), values.end());
+        const std::size_t mid = values.size() / 2;
+        if (values.size() % 2 == 0) {
+            result.value = 0.5 * (values[mid - 1] + values[mid]);
+        } else {
+            result.value = values[mid];
+        }
+    } else {
+        double numerator = 0.0;
+        double denominator = 0.0;
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            numerator += values[i] * weights[i];
+            denominator += weights[i];
+        }
+        result.value = numerator / denominator;
+    }
+    return result;
+}
+
+void repair_masked_pixels_inplace(
+    Array2D image,
+    const BoolArray2D mask,
+    const IntArray2D row_gaps,
+    const IntArray2D col_gaps,
+    BoolArray2D repaired,
+    const int max_component_pixels,
+    const int max_span,
+    const int radius,
+    const int min_valid_neighbors
+) {
+    auto image_info = image.request();
+    auto mask_info = mask.request();
+    auto row_gap_info = row_gaps.request();
+    auto col_gap_info = col_gaps.request();
+    auto repaired_info = repaired.request();
+    require_ndim(image_info, 2, "image");
+    require_same_image_shape(image_info, mask_info, "mask");
+    require_same_image_shape(image_info, repaired_info, "repaired");
+    require_intervals_shape(row_gap_info, "row_gaps");
+    require_intervals_shape(col_gap_info, "col_gaps");
+    if (max_component_pixels < 1 || max_span < 1 || radius < 1
+        || min_valid_neighbors < 1) {
+        throw py::value_error("repair settings must be positive");
+    }
+    double *image_data = mutable_double_ptr(image_info);
+    const bool *mask_data = bool_ptr(mask_info);
+    const std::int32_t *row_gap_data = int32_ptr(row_gap_info);
+    const std::int32_t *col_gap_data = int32_ptr(col_gap_info);
+    bool *repaired_data = static_cast<bool *>(repaired_info.ptr);
+    const py::ssize_t height = image_info.shape[0];
+    const py::ssize_t width = image_info.shape[1];
+    std::vector<unsigned char> visited(image_info.size, 0);
+    py::gil_scoped_release release;
+    for (py::ssize_t idx = 0; idx < image_info.size; ++idx) {
+        if (visited[idx] || !mask_data[idx]) {
+            continue;
+        }
+        std::vector<py::ssize_t> component;
+        std::queue<py::ssize_t> queue;
+        visited[idx] = 1;
+        queue.push(idx);
+        while (!queue.empty()) {
+            const py::ssize_t current = queue.front();
+            queue.pop();
+            component.push_back(current);
+            const py::ssize_t y = current / width;
+            const py::ssize_t x = current % width;
+            const py::ssize_t neighbors[4][2] = {
+                {y - 1, x},
+                {y + 1, x},
+                {y, x - 1},
+                {y, x + 1},
+            };
+            for (const auto &neighbor : neighbors) {
+                const py::ssize_t ny = neighbor[0];
+                const py::ssize_t nx = neighbor[1];
+                if (ny < 0 || nx < 0 || ny >= height || nx >= width) {
+                    continue;
+                }
+                const py::ssize_t nidx = ny * width + nx;
+                if (!visited[nidx] && mask_data[nidx]) {
+                    visited[nidx] = 1;
+                    queue.push(nidx);
+                }
+            }
+        }
+        if (touches_gap(component, width, row_gap_data, row_gap_info,
+                        col_gap_data, col_gap_info)) {
+            continue;
+        }
+        const RepairResult value = repair_component_value(
+            image_data,
+            mask_data,
+            image_info,
+            component,
+            max_component_pixels,
+            max_span,
+            radius,
+            min_valid_neighbors
+        );
+        if (!value.success) {
+            continue;
+        }
+        for (const py::ssize_t cidx : component) {
+            image_data[cidx] = value.value;
+            repaired_data[cidx] = true;
+        }
+    }
+}
+
+RoiSums sum_roi_with_mask(
+    const double *image_data,
+    const double *correction_data,
+    const double *background_data,
+    const bool *mask_data,
+    const bool *repaired_data,
+    const bool include_repaired,
+    const py::ssize_t image_width,
+    const std::int64_t *roi,
+    const py::buffer_info &roi_info,
+    const py::ssize_t n
+) {
+    const std::int64_t x0 = roi_value(roi, roi_info, n, 0, 0);
+    const std::int64_t x1 = roi_value(roi, roi_info, n, 0, 1);
+    const std::int64_t y0 = roi_value(roi, roi_info, n, 1, 0);
+    const std::int64_t y1 = roi_value(roi, roi_info, n, 1, 1);
+    RoiSums sums;
+    for (std::int64_t y = y0; y < y1; ++y) {
+        const py::ssize_t row_offset = y * image_width;
+        for (std::int64_t x = x0; x < x1; ++x) {
+            const py::ssize_t idx = row_offset + x;
+            const bool valid = !mask_data[idx]
+                || (include_repaired && repaired_data[idx]);
+            if (valid) {
+                sums.pixels += 1.0;
+                const double image_value = image_data[idx];
+                if (!std::isnan(image_value)) {
+                    sums.image += image_value;
+                }
+                const double correction_value = correction_data[idx];
+                if (!std::isnan(correction_value)) {
+                    sums.correction += correction_value;
+                }
+            }
+            if (background_data != nullptr && !mask_data[idx]) {
+                const double background_value = background_data[idx];
+                if (!std::isnan(background_value)) {
+                    sums.background += background_value;
+                }
+            }
+        }
+    }
+    return sums;
+}
 
 int polynomial_terms(const int order) {
     if (order <= 0) {
@@ -774,6 +1063,196 @@ void processImage_bg_Carr(
     );
 }
 
+void processImage_repair_Carr(
+    Array2D image,
+    const BoolArray2D mask,
+    const Array2D correction,
+    const RoiArray3D center_roi,
+    const RoiArray3D left_roi,
+    const RoiArray3D right_roi,
+    const RoiArray3D top_roi,
+    const RoiArray3D bottom_roi,
+    const IntArray2D row_gaps,
+    const IntArray2D col_gaps,
+    Array2D all_counters,
+    Array2D correction_counters,
+    const int max_component_pixels,
+    const int max_span,
+    const int radius,
+    const int min_valid_neighbors
+) {
+    py::array_t<bool, py::array::c_style> repaired(mask.request().shape);
+    auto repaired_info = repaired.request();
+    bool *repaired_data = static_cast<bool *>(repaired_info.ptr);
+    for (py::ssize_t i = 0; i < repaired_info.size; ++i) {
+        repaired_data[i] = false;
+    }
+    repair_masked_pixels_inplace(
+        image,
+        mask,
+        row_gaps,
+        col_gaps,
+        repaired,
+        max_component_pixels,
+        max_span,
+        radius,
+        min_valid_neighbors
+    );
+
+    auto image_info = image.request();
+    auto mask_info = mask.request();
+    auto correction_info = correction.request();
+    auto center_info = center_roi.request();
+    auto left_info = left_roi.request();
+    auto right_info = right_roi.request();
+    auto top_info = top_roi.request();
+    auto bottom_info = bottom_roi.request();
+    auto all_info = all_counters.request();
+    auto correction_counter_info = correction_counters.request();
+    require_ndim(image_info, 2, "image");
+    require_same_image_shape(image_info, mask_info, "mask");
+    require_same_image_shape(image_info, correction_info, "C_corr");
+    require_roi_shape(center_info, "croi");
+    require_roi_shape(left_info, "leftroi");
+    require_roi_shape(right_info, "rightroi");
+    require_roi_shape(top_info, "toproi");
+    require_roi_shape(bottom_info, "bottomroi");
+    const py::ssize_t n_rois = center_info.shape[0];
+    if (
+        left_info.shape[0] != n_rois
+        || right_info.shape[0] != n_rois
+        || top_info.shape[0] != n_rois
+        || bottom_info.shape[0] != n_rois
+    ) {
+        throw py::value_error("all ROI arrays must have the same length");
+    }
+    require_counter_shape(all_info, center_info.shape[0], "all_counters");
+    require_counter_shape(correction_counter_info, center_info.shape[0], "all_Carr");
+
+    const py::ssize_t width = image_info.shape[1];
+    double *all_data = mutable_double_ptr(all_info);
+    double *corr_data = mutable_double_ptr(correction_counter_info);
+    const double *image_data = double_ptr(image_info);
+    const double *correction_data = double_ptr(correction_info);
+    const bool *mask_data = bool_ptr(mask_info);
+    repaired_data = static_cast<bool *>(repaired_info.ptr);
+    py::gil_scoped_release release;
+    for (py::ssize_t i = 0; i < n_rois; ++i) {
+        const RoiSums center = sum_roi_with_mask(
+            image_data, correction_data, nullptr, mask_data, repaired_data, true,
+            width, roi_ptr(center_info), center_info, i
+        );
+        const RoiSums left = sum_roi_with_mask(
+            image_data, correction_data, nullptr, mask_data, repaired_data, false,
+            width, roi_ptr(left_info), left_info, i
+        );
+        const RoiSums right = sum_roi_with_mask(
+            image_data, correction_data, nullptr, mask_data, repaired_data, false,
+            width, roi_ptr(right_info), right_info, i
+        );
+        const RoiSums top = sum_roi_with_mask(
+            image_data, correction_data, nullptr, mask_data, repaired_data, false,
+            width, roi_ptr(top_info), top_info, i
+        );
+        const RoiSums bottom = sum_roi_with_mask(
+            image_data, correction_data, nullptr, mask_data, repaired_data, false,
+            width, roi_ptr(bottom_info), bottom_info, i
+        );
+        all_data[i * all_info.shape[1] + 0] = center.image;
+        all_data[i * all_info.shape[1] + 1] = center.pixels;
+        all_data[i * all_info.shape[1] + 2] = (
+            left.image + right.image + top.image + bottom.image
+        );
+        all_data[i * all_info.shape[1] + 3] = (
+            left.pixels + right.pixels + top.pixels + bottom.pixels
+        );
+        corr_data[i * correction_counter_info.shape[1] + 0] = center.correction;
+        corr_data[i * correction_counter_info.shape[1] + 1] = center.pixels;
+        corr_data[i * correction_counter_info.shape[1] + 2] = (
+            left.correction + right.correction + top.correction + bottom.correction
+        );
+        corr_data[i * correction_counter_info.shape[1] + 3] = (
+            left.pixels + right.pixels + top.pixels + bottom.pixels
+        );
+    }
+}
+
+void processImage_repair_bg_Carr(
+    Array2D image,
+    const Array2D background,
+    const BoolArray2D mask,
+    const Array2D correction,
+    const RoiArray3D center_roi,
+    const RoiArray3D left_roi,
+    const RoiArray3D right_roi,
+    const RoiArray3D top_roi,
+    const RoiArray3D bottom_roi,
+    const IntArray2D row_gaps,
+    const IntArray2D col_gaps,
+    Array2D all_counters,
+    Array2D correction_counters,
+    Array2D background_counters,
+    const int max_component_pixels,
+    const int max_span,
+    const int radius,
+    const int min_valid_neighbors
+) {
+    processImage_repair_Carr(
+        image, mask, correction, center_roi, left_roi, right_roi, top_roi,
+        bottom_roi, row_gaps, col_gaps, all_counters, correction_counters,
+        max_component_pixels, max_span, radius, min_valid_neighbors
+    );
+    auto image_info = image.request();
+    auto background_info = background.request();
+    auto mask_info = mask.request();
+    auto center_info = center_roi.request();
+    auto left_info = left_roi.request();
+    auto right_info = right_roi.request();
+    auto top_info = top_roi.request();
+    auto bottom_info = bottom_roi.request();
+    auto background_counter_info = background_counters.request();
+    require_same_image_shape(image_info, background_info, "bg");
+    require_counter_shape(background_counter_info, center_info.shape[0], "all_Bgimg");
+    const py::ssize_t n_rois = center_info.shape[0];
+    const py::ssize_t width = image_info.shape[1];
+    const bool *mask_data = bool_ptr(mask_info);
+    const double *background_data = double_ptr(background_info);
+    double *bg_data = mutable_double_ptr(background_counter_info);
+    const double *dummy_correction = double_ptr(background_info);
+    const bool *repaired_data = mask_data;
+    py::gil_scoped_release release;
+    for (py::ssize_t i = 0; i < n_rois; ++i) {
+        const RoiSums center = sum_roi_with_mask(
+            background_data, dummy_correction, background_data, mask_data,
+            repaired_data, false, width, roi_ptr(center_info), center_info, i
+        );
+        const RoiSums left = sum_roi_with_mask(
+            background_data, dummy_correction, background_data, mask_data,
+            repaired_data, false, width, roi_ptr(left_info), left_info, i
+        );
+        const RoiSums right = sum_roi_with_mask(
+            background_data, dummy_correction, background_data, mask_data,
+            repaired_data, false, width, roi_ptr(right_info), right_info, i
+        );
+        const RoiSums top = sum_roi_with_mask(
+            background_data, dummy_correction, background_data, mask_data,
+            repaired_data, false, width, roi_ptr(top_info), top_info, i
+        );
+        const RoiSums bottom = sum_roi_with_mask(
+            background_data, dummy_correction, background_data, mask_data,
+            repaired_data, false, width, roi_ptr(bottom_info), bottom_info, i
+        );
+        bg_data[i * background_counter_info.shape[1] + 0] = center.image;
+        bg_data[i * background_counter_info.shape[1] + 1] = center.pixels;
+        bg_data[i * background_counter_info.shape[1] + 2] = (
+            left.image + right.image + top.image + bottom.image
+        );
+        bg_data[i * background_counter_info.shape[1] + 3] = (
+            left.pixels + right.pixels + top.pixels + bottom.pixels
+        );
+    }
+}
+
 void processImage_polybg_Carr(
     const Array2D image,
     const BoolArray2D mask,
@@ -1208,6 +1687,61 @@ PYBIND11_MODULE(_roi_sum_cpp, module) {
     module.doc() = "CPU C++ acceleration kernels for ROI image summing.";
     module.def("processImage_Carr", &processImage_Carr);
     module.def("processImage_bg_Carr", &processImage_bg_Carr);
+    module.def(
+        "repair_masked_pixels_inplace",
+        &repair_masked_pixels_inplace,
+        py::arg("image"),
+        py::arg("mask"),
+        py::arg("row_gaps"),
+        py::arg("col_gaps"),
+        py::arg("repaired"),
+        py::arg("max_component_pixels") = 4,
+        py::arg("max_span") = 3,
+        py::arg("radius") = 2,
+        py::arg("min_valid_neighbors") = 6
+    );
+    module.def(
+        "processImage_repair_Carr",
+        &processImage_repair_Carr,
+        py::arg("image"),
+        py::arg("mask"),
+        py::arg("C_corr"),
+        py::arg("croi"),
+        py::arg("leftroi"),
+        py::arg("rightroi"),
+        py::arg("toproi"),
+        py::arg("bottomroi"),
+        py::arg("row_gaps"),
+        py::arg("col_gaps"),
+        py::arg("all_counters"),
+        py::arg("all_Carr"),
+        py::arg("max_component_pixels") = 4,
+        py::arg("max_span") = 3,
+        py::arg("radius") = 2,
+        py::arg("min_valid_neighbors") = 6
+    );
+    module.def(
+        "processImage_repair_bg_Carr",
+        &processImage_repair_bg_Carr,
+        py::arg("image"),
+        py::arg("bg"),
+        py::arg("mask"),
+        py::arg("C_corr"),
+        py::arg("croi"),
+        py::arg("leftroi"),
+        py::arg("rightroi"),
+        py::arg("toproi"),
+        py::arg("bottomroi"),
+        py::arg("row_gaps"),
+        py::arg("col_gaps"),
+        py::arg("all_counters"),
+        py::arg("all_Carr"),
+        py::arg("all_Bgimg"),
+        py::arg("max_component_pixels") = 4,
+        py::arg("max_span") = 3,
+        py::arg("radius") = 2,
+        py::arg("min_valid_neighbors") = 6
+    );
     module.def(
         "processImage_polybg_Carr",
         &processImage_polybg_Carr,

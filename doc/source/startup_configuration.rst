@@ -45,6 +45,14 @@ The main sections are:
 ``[Settings]``
    GUI startup behavior and output database compression.
 
+``[Mask]``
+   Optional invalid/dead-pixel mask. Nonzero pixels are treated as invalid.
+
+``[Mask.PixelRepair]``
+   Optional conservative repair settings for tiny masked defects during ROI
+   summing. Repair is disabled when this section is missing or
+   ``enabled = False``.
+
 Full Configuration Example
 --------------------------
 
@@ -122,6 +130,23 @@ crystal unit cell, a backend file for scan loading, and explicit GUI settings.
    # Output database compression. Raw is the most portable option.
    # Other filters require the corresponding HDF5/plugin support.
    compression = Raw
+
+   [Mask]
+   # Optional invalid/dead-pixel mask. Path may be absolute or relative to this
+   # config file. Masks are loaded with FabIO, so EDF, NumPy .npy, and other
+   # FabIO-readable 2D image formats are supported.
+   mask = ./masks/dead_pixels.edf
+
+   [Mask.PixelRepair]
+   # Optional conservative repair of tiny masked defects during ROI summing.
+   # Missing section or enabled=False disables repair.
+   enabled = False
+   max_component_pixels = 4
+   max_span = 3
+   radius = 2
+   min_valid_neighbors = 6
+   use_pyfai_gaps = True
+   gap_size_px = 6
 
 Machine Section
 ---------------
@@ -235,6 +260,86 @@ interactive browsing, but can be slow for large scans.
 ``Raw`` is always the safest portable choice. Other choices, such as
 ``Blosc-lz4-Shuffle-5``, require matching HDF5/plugin support in the runtime
 environment.
+
+Mask Sections
+-------------
+
+The optional ``[Mask]`` section configures an invalid/dead-pixel detector mask.
+The mask file is loaded with FabIO, matching the image-format handling used by
+the pyFAI/silx mask tooling. EDF, NumPy ``.npy``, and other FabIO-readable 2D
+image formats are supported.
+
+Mask values are interpreted as a boolean invalid-pixel mask:
+
+* zero or ``False``: valid detector pixel
+* nonzero or ``True``: invalid detector pixel
+
+Relative mask paths are resolved relative to the config file:
+
+.. code-block:: ini
+
+   [Mask]
+   mask = ./masks/dead_pixels.edf
+
+If ``[Mask]`` is missing, or ``mask`` is omitted, no config mask is loaded.
+The GUI mask editor can still be used interactively.
+
+Pixel Repair Settings
+~~~~~~~~~~~~~~~~~~~~~
+
+``[Mask.PixelRepair]`` enables conservative repair of tiny masked defects
+during ROI summing. It is optional. Missing ``[Mask.PixelRepair]`` or
+``enabled = False`` disables repair.
+
+Pixel repair requires the C++ ROI backend. If repair is enabled in the config
+but the C++ backend is unavailable, orGUI logs a warning and continues without
+repair.
+
+.. code-block:: ini
+
+   [Mask.PixelRepair]
+   enabled = True
+   max_component_pixels = 4
+   max_span = 3
+   radius = 2
+   min_valid_neighbors = 6
+   use_pyfai_gaps = True
+   gap_size_px = 6
+
+``enabled``
+   Enables repair when set to ``True``. Repair is only applied in C++ ROI
+   summing paths and only for eligible masked defects.
+
+``max_component_pixels``
+   Maximum connected masked component size, in pixels, that may be repaired.
+   Larger connected masked regions remain masked.
+
+``max_span``
+   Maximum row span or column span, in pixels, for a repairable component. This
+   rejects elongated defects even when the total component size is small.
+
+``radius``
+   Local search radius, in pixels, used to find original-valid neighboring
+   pixels for interpolation.
+
+``min_valid_neighbors``
+   Minimum number of original-valid neighboring pixels required inside
+   ``radius``. The neighbors must also be distributed on enough sides of the
+   defect; a one-sided neighborhood is rejected.
+
+``use_pyfai_gaps``
+   When ``True``, analytical detector gaps from pyFAI are excluded from repair.
+   orGUI asks the pyFAI detector for its analytical mask and reduces full-row
+   and full-column masked stripes to ``[start, stop)`` gap intervals.
+
+``gap_size_px``
+   Fallback detector-gap width, in pixels, for the module-metadata path. This
+   is used only when pyFAI cannot provide a useful analytical gap mask, detector
+   module positions are known, and the detector metadata do not provide the gap
+   width. It is not a mask dilation radius.
+
+For the repair algorithm and the exact accounting rules for repaired pixels,
+see :ref:`pixel-repair-algorithm`.
 
 Crystal File Options
 --------------------

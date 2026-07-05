@@ -565,7 +565,8 @@ class QUBCalculator(qt.QSplitter):
         if filename == "":
             return
         self.configdir = os.path.splitext(filename)[0]
-        self.readConfig(filename)
+        if self.readConfig(filename) and hasattr(self.mainGui, "_loadMaskConfig"):
+            self.mainGui._loadMaskConfig(filename)
 
     def setReflectionHandler(self, refls):
         """Set the callable that supplies current reference reflections.

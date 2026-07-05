@@ -22,6 +22,9 @@ class _NoAccelerationBackend:
     calcBgSub = _unavailable
     calcMaxSum = _unavailable
     calcMaxSum_bg = _unavailable
+    processImage_repair_Carr = _unavailable
+    processImage_repair_bg_Carr = _unavailable
+    repair_masked_pixels_inplace = _unavailable
     processImage_Carr = _unavailable
     processImage_bg_Carr = _unavailable
 
@@ -112,6 +115,9 @@ def _bind_backend(name, backend):
     global calcBgSub
     global calcMaxSum
     global calcMaxSum_bg
+    global processImage_repair_Carr
+    global processImage_repair_bg_Carr
+    global repair_masked_pixels_inplace
     global processImage_Carr
     global processImage_bg_Carr
 
@@ -123,6 +129,15 @@ def _bind_backend(name, backend):
     calcMaxSum_bg = backend.calcMaxSum_bg
     processImage_Carr = backend.processImage_Carr
     processImage_bg_Carr = backend.processImage_bg_Carr
+    processImage_repair_Carr = getattr(
+        backend, "processImage_repair_Carr", _NoAccelerationBackend._unavailable
+    )
+    processImage_repair_bg_Carr = getattr(
+        backend, "processImage_repair_bg_Carr", _NoAccelerationBackend._unavailable
+    )
+    repair_masked_pixels_inplace = getattr(
+        backend, "repair_masked_pixels_inplace", _NoAccelerationBackend._unavailable
+    )
 
 
 def set_accel_backend(backend):

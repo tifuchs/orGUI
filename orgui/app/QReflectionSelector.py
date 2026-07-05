@@ -394,14 +394,9 @@ class QReflectionSelector(qt.QWidget):
             "excluded_images": self.orparent.excludedImagesDialog.getData(),
             "max_workers": self.orparent.numberthreads,
         }
-        if (
-            self.orparent.centralPlot.getMaskToolsDockWidget().getSelectionMask()
-            is not None
-        ):
-            kwargs["mask"] = (
-                self.orparent.centralPlot.getMaskToolsDockWidget().getSelectionMask()
-                > 0.0
-            )
+        mask = self.orparent.get_detector_mask()
+        if mask is not None:
+            kwargs["mask"] = mask
         com_d = imagePeakFinder.find_COM_Image(
             xy_start, vsize, hsize, self.orparent.fscan, ax_range, **kwargs
         )

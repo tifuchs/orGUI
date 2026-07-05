@@ -177,6 +177,97 @@ def test_process_image_bg_carr_fills_background_counters():
     np.testing.assert_allclose(background_counters, expected_bg)
 
 
+def test_repair_masked_pixels_repairs_isolated_defect():
+    image = np.arange(25, dtype=np.float64).reshape(5, 5)
+    mask = np.zeros_like(image, dtype=bool)
+    mask[2, 2] = True
+    repaired = np.zeros_like(mask)
+    row_gaps = np.empty((0, 2), dtype=np.int32)
+    col_gaps = np.empty((0, 2), dtype=np.int32)
+
+    roi_sum.repair_masked_pixels_inplace(
+        image,
+        mask,
+        row_gaps,
+        col_gaps,
+        repaired,
+        4,
+        3,
+        2,
+        6,
+    )
+
+    assert repaired[2, 2]
+    assert image[2, 2] == pytest.approx(np.median([6, 7, 8, 11, 13, 16, 17, 18]))
+
+
+def test_repair_masked_pixels_never_repairs_gap_pixels():
+    image = np.arange(25, dtype=np.float64).reshape(5, 5)
+    mask = np.zeros_like(image, dtype=bool)
+    mask[2, 2] = True
+    repaired = np.zeros_like(mask)
+    row_gaps = np.array([[2, 3]], dtype=np.int32)
+    col_gaps = np.empty((0, 2), dtype=np.int32)
+
+    roi_sum.repair_masked_pixels_inplace(
+        image,
+        mask,
+        row_gaps,
+        col_gaps,
+        repaired,
+        4,
+        3,
+        2,
+        6,
+    )
+
+    assert not repaired[2, 2]
+
+
+def test_repaired_pixels_contribute_to_signal_not_background():
+    image = np.arange(36, dtype=np.float64).reshape(6, 6)
+    image[2, 2] = 100.0
+    image[1, 1] = 50.0
+    mask = np.zeros_like(image, dtype=bool)
+    mask[2, 2] = True
+    mask[1, 1] = True
+    correction = np.ones_like(image)
+    rois = [
+        _roi_stack(_roi(1, 4, 1, 4)),
+        _roi_stack(_roi(0, 2, 0, 2)),
+        _roi_stack(_roi(4, 6, 0, 2)),
+        _roi_stack(_roi(0, 2, 4, 6)),
+        _roi_stack(_roi(4, 6, 4, 6)),
+    ]
+    all_counters = np.zeros((1, 4), dtype=np.float64)
+    correction_counters = np.zeros((1, 4), dtype=np.float64)
+
+    roi_sum.processImage_repair_Carr(
+        image,
+        mask,
+        correction,
+        *rois,
+        np.empty((0, 2), dtype=np.int32),
+        np.empty((0, 2), dtype=np.int32),
+        all_counters,
+        correction_counters,
+        4,
+        3,
+        2,
+        6,
+    )
+
+    assert all_counters[0, 1] == 9.0
+    assert correction_counters[0, 0] == 9.0
+    assert all_counters[0, 3] == 15.0
+    assert all_counters[0, 2] == pytest.approx(
+        np.nansum(np.where(mask, np.nan, image)[0:2, 0:2])
+        + np.nansum(image[0:2, 4:6])
+        + np.nansum(image[4:6, 0:2])
+        + np.nansum(image[4:6, 4:6])
+    )
+
+
 def test_process_image_polybg_carr_fits_local_plane_under_center_roi():
     yy, xx = np.mgrid[:12, :14]
     background = 7.0 + 0.5 * xx - 0.25 * yy

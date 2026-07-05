@@ -157,11 +157,8 @@ class AutoBraggWorkflow:
         roi_size = kwargs.get("roi_size", (80, 80))
         fine_roi_size = kwargs.get("fine_roi_size", (40, 40))
 
-        mask = None
-        mask_widget = self.centralPlot.getMaskToolsDockWidget()
-        if mask_widget.getSelectionMask() is not None:
-            mask = mask_widget.getSelectionMask() > 0.0
-        else:
+        mask = self.get_detector_mask()
+        if mask is None:
             if logger_utils.get_logging_context() == "gui":
                 # GUI-only: user-triggered automatic Bragg search confirmation.
                 btn = qt.QMessageBox.question(
@@ -1267,11 +1264,8 @@ class AutoBraggWorkflow:
             kwargs.get("confirmation_image_tolerance", 3),
         )
 
-        mask = None
-        mask_widget = self.centralPlot.getMaskToolsDockWidget()
-        if mask_widget.getSelectionMask() is not None:
-            mask = mask_widget.getSelectionMask() > 0.0
-        else:
+        mask = self.get_detector_mask()
+        if mask is None:
             logger.warning(
                 "Adding calculated Bragg reflections without a detector mask."
             )

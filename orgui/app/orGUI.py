@@ -65,8 +65,10 @@ from .QReflectionSelector import QReflectionSelector, QReflectionAnglesDialog
 from .QUBCalculator import QUBCalculator
 from .peak1Dintegr import RockingPeakIntegrator
 from .ArrayTableDialog import ArrayTableDialog
+from .MaskConfigDialog import MaskConfigDialog
 from .bgroi import RectangleBgROI
 from .database import DataBase, FILTERS
+from .mask_config import MaskManager
 from ..backend.scans import SimulationScan
 from ..backend import backends
 from ..backend import universalScanLoader
@@ -173,6 +175,8 @@ class orGUI(qt.QMainWindow):
             control_actions.OpenGLAction(parent=toolbar, plot=self.centralPlot)
         )
         self.centralPlot.addToolBar(toolbar)
+        self.maskManager = MaskManager()
+        self.maskConfigDialog = MaskConfigDialog(self.maskManager, self)
 
         self.currentImageLabel = None
         self.currentAddImageLabel = None
@@ -394,6 +398,8 @@ class orGUI(qt.QMainWindow):
 
         self.dbCompressionAct = qt.QAction("Database compression", self)
         self.dbCompressionAct.triggered.connect(self._onChangeDBCompression)
+        self.maskConfigAct = qt.QAction("Mask", self)
+        self.maskConfigAct.triggered.connect(self._onShowMaskConfig)
 
         config_menu.addAction(loadConfigAct)
         # config_menu.addAction(loadXtalAct)
@@ -403,6 +409,7 @@ class orGUI(qt.QMainWindow):
         config_menu.addSeparator()
         config_menu.addAction(cpucountAct)
         config_menu.addAction(self.dbCompressionAct)
+        config_menu.addAction(self.maskConfigAct)
         config_menu.addAction(self.autoLoadAct)
         config_menu.addSeparator()
         config_menu.addAction(self.showExcludedImagesAct)
@@ -518,6 +525,62 @@ ub : gui for UB matrix and angle calculations
 
         if configfile is not None:
             self.ubcalc.readConfig(configfile)
+            self._loadMaskConfig(configfile)
+
+    def _loadMaskConfig(self, configfile):
+        """Load optional detector mask settings from a config file."""
+
+        try:
+            mask = self.maskManager.load_config(configfile)
+        except Exception:
+            logger.warning("Unable to load detector mask configuration.", exc_info=True)
+            return
+        self.maskConfigDialog.refresh()
+        if mask is not None:
+            self.centralPlot.setSelectionMask(
+                np.ascontiguousarray(mask, dtype=np.uint8)
+            )
+
+    # GUI-only: user-triggered mask configuration dialog.
+    def _onShowMaskConfig(self):
+        """Open the detector mask configuration dialog."""
+
+        self.maskConfigDialog.refresh()
+        self.maskConfigDialog.show()
+        self.maskConfigDialog.raise_()
+
+    def get_detector_mask(self, image_shape=None):
+        """Return the current invalid-pixel detector mask.
+
+        The silx mask editor remains the GUI source for interactive edits. The
+        returned mask is mirrored into :class:`MaskManager` so non-GUI code can
+        use the same centralized API.
+        """
+
+        plot_mask = self.centralPlot.getSelectionMask()
+        if plot_mask is not None and np.asarray(plot_mask).size > 0:
+            self.maskManager.set_mask(plot_mask)
+        return self.maskManager.get_mask(image_shape)
+
+    def _repair_config_for_image(self, image_shape):
+        """Return repair settings and detector gap intervals for an image."""
+
+        if not HAS_ACCEL:
+            return False, None, None, None
+        use_repair = self.maskManager.repair_enabled(
+            getattr(_roi_sum_accel, "HAS_CPP_BACKEND", False)
+        )
+        if not use_repair:
+            return False, None, None, None
+        repair = self.maskManager.settings.pixel_repair
+        row_gaps, col_gaps = self.maskManager.pyfai_gap_intervals(
+            getattr(self.ubcalc.detectorCal, "detector", None)
+        )
+        if row_gaps.size == 0:
+            row_gaps = np.empty((0, 2), dtype=np.int32)
+        if col_gaps.size == 0:
+            col_gaps = np.empty((0, 2), dtype=np.int32)
+        return use_repair, repair, row_gaps, col_gaps
 
     def _removeAllIntegrPlotCurves(self):
         """CLI-capable: clear all integration curves from the plot widget."""
@@ -1294,7 +1357,8 @@ ub : gui for UB matrix and angle calculations
         imgmask = None
 
         if self.scanSelector.useMaskBox.isChecked():
-            if self.centralPlot.getMaskToolsDockWidget().getSelectionMask() is None:
+            imgmask = self.get_detector_mask(image.img.shape)
+            if imgmask is None:
                 if logger_utils.get_logging_context() == "gui":
                     btn = qt.QMessageBox.question(
                         self,
@@ -1308,10 +1372,6 @@ ub : gui for UB matrix and angle calculations
                             "message": "Reason: no mask selected",
                         }
                 logger.warn("No mask was selected with the masking tool.")
-            else:
-                imgmask = (
-                    self.centralPlot.getMaskToolsDockWidget().getSelectionMask() > 0.0
-                )
 
         corr = (
             self.scanSelector.useSolidAngleBox.isChecked()
@@ -1403,6 +1463,15 @@ ub : gui for UB matrix and angle calculations
                 "using summed background ROIs instead."
             )
         if HAS_ACCEL:
+            repair_enabled, repair, row_gaps, col_gaps = self._repair_config_for_image(
+                image.img.shape
+            )
+            if repair_enabled and use_fitted_background:
+                logger.warning(
+                    "Pixel repair is disabled for fitted local background; "
+                    "using the original mask for this integration."
+                )
+                repair_enabled = False
             if imgmask is not None:
                 mask = np.ascontiguousarray(imgmask, dtype=bool)
             else:
@@ -1411,7 +1480,8 @@ ub : gui for UB matrix and angle calculations
                 C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
             else:
                 C_arr = np.ones(image.img.shape, dtype=np.float64)
-            C_arr[mask] = np.nan
+            if not repair_enabled:
+                C_arr[mask] = np.nan
 
             roi_lists_accel = []
             for roiname in ["center", "left", "right", "top", "bottom"]:
@@ -1450,16 +1520,34 @@ ub : gui for UB matrix and angle calculations
                     BgImg_counters = np.zeros(
                         (roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64
                     )  # need gil for python object creation
-                    _roi_sum_accel.processImage_bg_Carr(
-                        image,
-                        bg,
-                        mask,
-                        C_arr,
-                        *roi_lists_accel,
-                        all_counters,
-                        Carr_counters,
-                        BgImg_counters,
-                    )  # compiled accelerator releases the GIL
+                    if repair_enabled:
+                        _roi_sum_accel.processImage_repair_bg_Carr(
+                            image,
+                            bg,
+                            mask,
+                            C_arr,
+                            *roi_lists_accel,
+                            row_gaps,
+                            col_gaps,
+                            all_counters,
+                            Carr_counters,
+                            BgImg_counters,
+                            repair.max_component_pixels,
+                            repair.max_span,
+                            repair.radius,
+                            repair.min_valid_neighbors,
+                        )  # compiled accelerator releases the GIL
+                    else:
+                        _roi_sum_accel.processImage_bg_Carr(
+                            image,
+                            bg,
+                            mask,
+                            C_arr,
+                            *roi_lists_accel,
+                            all_counters,
+                            Carr_counters,
+                            BgImg_counters,
+                        )  # compiled accelerator releases the GIL
                     return all_counters, Carr_counters, BgImg_counters
             else:
 
@@ -1484,6 +1572,21 @@ ub : gui for UB matrix and angle calculations
                             all_counters,
                             Carr_counters,
                             fitted_background_order,
+                        )  # compiled accelerator releases the GIL
+                    elif repair_enabled:
+                        _roi_sum_accel.processImage_repair_Carr(
+                            image,
+                            mask,
+                            C_arr,
+                            *roi_lists_accel,
+                            row_gaps,
+                            col_gaps,
+                            all_counters,
+                            Carr_counters,
+                            repair.max_component_pixels,
+                            repair.max_span,
+                            repair.radius,
+                            repair.min_valid_neighbors,
                         )  # compiled accelerator releases the GIL
                     else:
                         _roi_sum_accel.processImage_Carr(
@@ -3894,11 +3997,10 @@ ub : gui for UB matrix and angle calculations
         """Return the detector mask used for fitted-background preview."""
         if not self.scanSelector.useMaskBox.isChecked():
             return np.zeros(image_shape, dtype=bool)
-        mask_widget = self.centralPlot.getMaskToolsDockWidget()
-        mask = mask_widget.getSelectionMask()
-        if mask is None or mask.shape != image_shape:
+        mask = self.get_detector_mask(image_shape)
+        if mask is None:
             return np.zeros(image_shape, dtype=bool)
-        return np.ascontiguousarray(mask > 0.0, dtype=bool)
+        return np.ascontiguousarray(mask, dtype=bool)
 
     def _apply_interpolated_bg_patch(self, image, mask, ckey, bgkeys):
         """Overwrite one center ROI in ``image`` with fitted background."""
@@ -4589,7 +4691,8 @@ ub : gui for UB matrix and angle calculations
         imgmask = None
 
         if self.scanSelector.useMaskBox.isChecked():
-            if self.centralPlot.getMaskToolsDockWidget().getSelectionMask() is None:
+            imgmask = self.get_detector_mask(image.img.shape)
+            if imgmask is None:
                 if logger_utils.get_logging_context() == "gui":
                     btn = qt.QMessageBox.question(
                         self,
@@ -4604,10 +4707,6 @@ ub : gui for UB matrix and angle calculations
                         }
                 logger.warn(
                     "No mask was selected with the masking tool. Continue without mask."
-                )
-            else:
-                imgmask = (
-                    self.centralPlot.getMaskToolsDockWidget().getSelectionMask() > 0.0
                 )
 
         corr = (
@@ -4692,6 +4791,15 @@ ub : gui for UB matrix and angle calculations
                 "Fitted local background requires the compiled ROI accelerator; "
                 "using summed background ROIs instead."
             )
+        repair_enabled, repair, row_gaps, col_gaps = self._repair_config_for_image(
+            image.img.shape
+        )
+        if repair_enabled and use_fitted_background:
+            logger.warning(
+                "Pixel repair is disabled for fitted local background; "
+                "using the original mask for this integration."
+            )
+            repair_enabled = False
 
         if imgmask is not None:
             mask = np.ascontiguousarray(imgmask, dtype=bool)
@@ -4699,9 +4807,9 @@ ub : gui for UB matrix and angle calculations
             mask = np.zeros(image.img.shape, dtype=bool)
         if corr:
             C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
-            C_arr[mask] = 0.0
         else:
             C_arr = np.ones(image.img.shape, dtype=np.float64)
+        if not repair_enabled:
             C_arr[mask] = 0.0
 
         for i in range(len(self.fscan)):
@@ -4790,16 +4898,34 @@ ub : gui for UB matrix and angle calculations
                     image = self.fscan.get_raw_img(i).img.astype(
                         np.float64, order="C", copy=True
                     )  # unlocks gil during file read
-                    _roi_sum_accel.processImage_bg_Carr(
-                        image,
-                        background_image,
-                        mask,
-                        C_arr,
-                        *roi_lists_accel[i],
-                        all_counters,
-                        Carr_counters,
-                        BgImg_counters,
-                    )  # compiled accelerator releases the GIL
+                    if repair_enabled:
+                        _roi_sum_accel.processImage_repair_bg_Carr(
+                            image,
+                            background_image,
+                            mask,
+                            C_arr,
+                            *roi_lists_accel[i],
+                            row_gaps,
+                            col_gaps,
+                            all_counters,
+                            Carr_counters,
+                            BgImg_counters,
+                            repair.max_component_pixels,
+                            repair.max_span,
+                            repair.radius,
+                            repair.min_valid_neighbors,
+                        )  # compiled accelerator releases the GIL
+                    else:
+                        _roi_sum_accel.processImage_bg_Carr(
+                            image,
+                            background_image,
+                            mask,
+                            C_arr,
+                            *roi_lists_accel[i],
+                            all_counters,
+                            Carr_counters,
+                            BgImg_counters,
+                        )  # compiled accelerator releases the GIL
                     return all_counters, Carr_counters, BgImg_counters
             else:
 
@@ -4825,6 +4951,21 @@ ub : gui for UB matrix and angle calculations
                             all_counters,
                             Carr_counters,
                             fitted_background_order,
+                        )  # compiled accelerator releases the GIL
+                    elif repair_enabled:
+                        _roi_sum_accel.processImage_repair_Carr(
+                            image,
+                            mask,
+                            C_arr,
+                            *roi_lists_accel[i],
+                            row_gaps,
+                            col_gaps,
+                            all_counters,
+                            Carr_counters,
+                            repair.max_component_pixels,
+                            repair.max_span,
+                            repair.radius,
+                            repair.min_valid_neighbors,
                         )  # compiled accelerator releases the GIL
                     else:
                         _roi_sum_accel.processImage_Carr(
