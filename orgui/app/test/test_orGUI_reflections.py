@@ -4,9 +4,12 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from silx.gui import qt
 
 from orgui.app.orGUI import _display_roi_geometry, orGUI
 from orgui.app.QReflectionSelector import (
+    AutoBraggOptionsDialog,
+    AutoBraggStatusDialog,
     QReflectionSelector,
     _local_detector_pixel_angular_tolerance,
     _reflection_mismatch_score,
@@ -61,6 +64,96 @@ def make_gui(reflections=None):
     )
     gui.reflectionSel = SimpleNamespace(reflections=reflections or [])
     return gui
+
+
+def test_auto_bragg_options_dialog_groups_follow_workflow_order():
+    app = qt.QApplication.instance() or qt.QApplication([])
+    dialog = AutoBraggOptionsDialog()
+
+    group_titles = []
+    for index in range(dialog.layout().count()):
+        widget = dialog.layout().itemAt(index).widget()
+        if widget is not None and hasattr(widget, "title"):
+            title = widget.title()
+            if title:
+                group_titles.append(title)
+
+    assert group_titles == [
+        "1. Find and assign first Bragg peak",
+        "2. Confirm trial UB with second peak",
+        "3. Broaden matching if early candidates fail",
+        "4. Estimate Q-scale during broad retry",
+        "5. Refine each candidate peak",
+        "6. Validate intensities",
+    ]
+
+    options = dialog.get_options()
+    assert set(options) == {
+        "hkl_candidate_mode",
+        "qnorm_tolerance",
+        "assignment_pixel_tolerance",
+        "confirmation_pixel_tolerance",
+        "confirmation_image_tolerance",
+        "adaptive_after_candidates",
+        "adaptive_qnorm_tolerance",
+        "adaptive_assignment_pixel_tolerance",
+        "adaptive_confirmation_pixel_tolerance",
+        "adaptive_confirmation_image_tolerance",
+        "adaptive_scale_detector_filter",
+        "adaptive_scale_detector_fraction",
+        "adaptive_scale_outlier_q_tolerance",
+        "adaptive_scale_outlier_angle_fraction",
+        "axis_half_width",
+        "fine_axis_half_width",
+        "roi_size",
+        "fine_roi_size",
+        "assignment_reflections",
+        "max_seed_hypotheses",
+        "confirmation_reflections",
+        "intensity_ratio_check",
+        "confirmation_prominence_threshold",
+    }
+    assert options["hkl_candidate_mode"] == "detector_position"
+    assert options["qnorm_tolerance"] == pytest.approx(0.05)
+    assert options["assignment_pixel_tolerance"] == pytest.approx(30.0)
+    assert options["confirmation_pixel_tolerance"] == pytest.approx(8.0)
+    assert options["confirmation_image_tolerance"] == 3
+    assert options["roi_size"] == (80, 80)
+    assert options["fine_roi_size"] == (40, 40)
+    assert options["assignment_reflections"] == 40
+    assert options["max_seed_hypotheses"] == 12
+    assert options["confirmation_reflections"] == 12
+    assert options["intensity_ratio_check"] is True
+    app.processEvents()
+    dialog.close()
+
+
+def test_auto_bragg_add_calculated_error_initializes_status(monkeypatch):
+    app = qt.QApplication.instance() or qt.QApplication([])
+
+    class FakeParent:
+        autoBraggOptionsDialog = None
+
+        class orparent:
+            @staticmethod
+            def autoAddCalculatedBraggReflections(*args, **kwargs):
+                raise ValueError("No scan loaded")
+
+    warnings = []
+    monkeypatch.setattr(
+        "orgui.app.QReflectionSelector.qutils.warning_detailed_message",
+        lambda *args: warnings.append(args),
+    )
+
+    dialog = AutoBraggStatusDialog()
+    dialog.refl_selector = FakeParent()
+    dialog._onAddCalculated()
+
+    assert dialog.stats["rejected"] == 1
+    assert "No scan loaded" in dialog.logText.toPlainText()
+    assert warnings
+    app.processEvents()
+    dialog.close()
 
 
 def test_image_number_converters_reject_stale_indices():

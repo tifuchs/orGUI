@@ -1134,7 +1134,7 @@ class AutoBraggStatusDialog(qt.QDialog):
         self.refl_selector = parent
         self.setWindowTitle("Automatic Bragg/UB search")
         self.setModal(False)
-        self.stats = {}
+        self.stats = self._empty_stats()
 
         layout = qt.QVBoxLayout()
         self.summaryLabel = qt.QLabel("Automatic Bragg search not started.")
@@ -1202,7 +1202,13 @@ class AutoBraggStatusDialog(qt.QDialog):
 
     def reset(self):
         """Clear previous search output."""
-        self.stats = {
+        self.stats = self._empty_stats()
+        self.logText.clear()
+        self.summaryLabel.setText("Automatic Bragg search running...")
+
+    def _empty_stats(self):
+        """Return empty automatic Bragg status counters."""
+        return {
             "images": 0,
             "candidates": 0,
             "refined": 0,
@@ -1210,8 +1216,6 @@ class AutoBraggStatusDialog(qt.QDialog):
             "confirmations": 0,
             "rejected": 0,
         }
-        self.logText.clear()
-        self.summaryLabel.setText("Automatic Bragg search running...")
 
     def add_status(self, event, **fields):
         """Append one automatic-search status event.
@@ -1221,6 +1225,7 @@ class AutoBraggStatusDialog(qt.QDialog):
         :param kwargs fields:
             Event details to display in the dialog.
         """
+        self.stats = {**self._empty_stats(), **self.stats}
         if "images_read" in fields:
             self.stats["images"] = fields["images_read"]
         if event == "candidate":
@@ -1357,10 +1362,13 @@ class AutoBraggOptionsDialog(qt.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Automatic Bragg options")
-        layout = qt.QGridLayout()
+        layout = qt.QVBoxLayout()
 
+        first_peak_group, first_peak_layout = self._add_group(
+            layout, "1. Find and assign first Bragg peak"
+        )
         row = 0
-        layout.addWidget(qt.QLabel("HKL assignment:"), row, 0)
+        first_peak_layout.addWidget(qt.QLabel("HKL assignment:"), row, 0)
         self.hklMode = qt.QComboBox()
         self.hklMode.addItem("Detector position (fast)", "detector_position")
         self.hklMode.addItem("Q norm shell (slower)", "qnorm")
@@ -1368,11 +1376,11 @@ class AutoBraggOptionsDialog(qt.QDialog):
             "Detector position is the default. Q norm shell tests more HKL "
             "hypotheses and can take longer."
         )
-        layout.addWidget(self.hklMode, row, 1, 1, 3)
+        first_peak_layout.addWidget(self.hklMode, row, 1, 1, 3)
 
         row += 1
         self.qnormTolerance = self._add_double(
-            layout,
+            first_peak_layout,
             row,
             "Q shell half-width:",
             0.05,
@@ -1383,7 +1391,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
         )
         row += 1
         self.assignmentPixelTolerance = self._add_double(
-            layout,
+            first_peak_layout,
             row,
             "Assignment pixel tolerance:",
             30.0,
@@ -1393,8 +1401,36 @@ class AutoBraggOptionsDialog(qt.QDialog):
             "Maximum first-peak detector-position mismatch.",
         )
         row += 1
+        self.assignmentReflections = self._add_int(
+            first_peak_layout,
+            row,
+            "Assignment reflections:",
+            40,
+            1,
+            100000,
+            "",
+            "Maximum first-peak HKL hypotheses from the local Q shell.",
+        )
+        row += 1
+        self.maxSeedHypotheses = self._add_int(
+            first_peak_layout,
+            row,
+            "Seed hypotheses:",
+            12,
+            1,
+            100000,
+            "",
+            "Maximum seed HKL hypotheses sent to second-peak confirmation.",
+        )
+        first_peak_layout.setColumnStretch(3, 1)
+        layout.addWidget(first_peak_group)
+
+        confirmation_group, confirmation_layout = self._add_group(
+            layout, "2. Confirm trial UB with second peak"
+        )
+        row = 0
         self.confirmationPixelTolerance = self._add_double(
-            layout,
+            confirmation_layout,
             row,
             "Confirmation pixel tolerance:",
             8.0,
@@ -1405,7 +1441,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
         )
         row += 1
         self.confirmationImageTolerance = self._add_int(
-            layout,
+            confirmation_layout,
             row,
             "Confirmation image tolerance:",
             3,
@@ -1415,8 +1451,25 @@ class AutoBraggOptionsDialog(qt.QDialog):
             "Maximum image-index mismatch for second-peak confirmation.",
         )
         row += 1
+        self.confirmationReflections = self._add_int(
+            confirmation_layout,
+            row,
+            "Confirmation reflections:",
+            12,
+            1,
+            100000,
+            "",
+            "Maximum predicted strong reflections tested for confirmation.",
+        )
+        confirmation_layout.setColumnStretch(3, 1)
+        layout.addWidget(confirmation_group)
+
+        adaptive_group, adaptive_layout = self._add_group(
+            layout, "3. Broaden matching if early candidates fail"
+        )
+        row = 0
         self.adaptiveAfterCandidates = self._add_int(
-            layout,
+            adaptive_layout,
             row,
             "Broaden after unmatched:",
             5,
@@ -1428,7 +1481,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
         )
         row += 1
         self.adaptiveQnormTolerance = self._add_double(
-            layout,
+            adaptive_layout,
             row,
             "Broader Q shell half-width:",
             0.25,
@@ -1439,7 +1492,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
         )
         row += 1
         self.adaptiveAssignmentPixelTolerance = self._add_double(
-            layout,
+            adaptive_layout,
             row,
             "Broader assignment tolerance:",
             100.0,
@@ -1451,7 +1504,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
         )
         row += 1
         self.adaptiveConfirmationPixelTolerance = self._add_double(
-            layout,
+            adaptive_layout,
             row,
             "Broader confirmation tolerance:",
             30.0,
@@ -1463,7 +1516,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
         )
         row += 1
         self.adaptiveConfirmationImageTolerance = self._add_int(
-            layout,
+            adaptive_layout,
             row,
             "Broader confirmation image tolerance:",
             8,
@@ -1473,8 +1526,14 @@ class AutoBraggOptionsDialog(qt.QDialog):
             "Second-peak image-index tolerance used after the "
             "unmatched-candidate threshold.",
         )
-        row += 1
-        layout.addWidget(qt.QLabel("Scale-fit detector filter:"), row, 0)
+        adaptive_layout.setColumnStretch(3, 1)
+        layout.addWidget(adaptive_group)
+
+        scale_group, scale_layout = self._add_group(
+            layout, "4. Estimate Q-scale during broad retry"
+        )
+        row = 0
+        scale_layout.addWidget(qt.QLabel("Scale-fit detector filter:"), row, 0)
         self.adaptiveScaleDetectorFilter = qt.QCheckBox("enabled")
         self.adaptiveScaleDetectorFilter.setChecked(True)
         self.adaptiveScaleDetectorFilter.setToolTip(
@@ -1482,9 +1541,9 @@ class AutoBraggOptionsDialog(qt.QDialog):
             "from reflections whose current-U detector prediction lands near "
             "the observed candidate peak."
         )
-        layout.addWidget(self.adaptiveScaleDetectorFilter, row, 1)
+        scale_layout.addWidget(self.adaptiveScaleDetectorFilter, row, 1)
         self.adaptiveScaleDetectorFraction = self._add_double(
-            layout,
+            scale_layout,
             row,
             "region half-size:",
             0.25,
@@ -1497,7 +1556,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
         )
         row += 1
         self.adaptiveScaleOutlierQTolerance = self._add_double(
-            layout,
+            scale_layout,
             row,
             "Scale-fit Q outlier tolerance:",
             0.25,
@@ -1508,7 +1567,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
             "in the adaptive scale-fit retry.",
         )
         self.adaptiveScaleOutlierAngleFraction = self._add_double(
-            layout,
+            scale_layout,
             row,
             "delta/gamma fraction:",
             0.25,
@@ -1519,9 +1578,15 @@ class AutoBraggOptionsDialog(qt.QDialog):
             "angular range for provisional scale-fit reflections.",
             column=2,
         )
-        row += 1
+        scale_layout.setColumnStretch(3, 1)
+        layout.addWidget(scale_group)
+
+        refinement_group, refinement_layout = self._add_group(
+            layout, "5. Refine each candidate peak"
+        )
+        row = 0
         self.axisHalfWidth = self._add_double(
-            layout,
+            refinement_layout,
             row,
             "Peak search axis half-width:",
             1.0,
@@ -1532,7 +1597,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
         )
         row += 1
         self.fineAxisHalfWidth = self._add_double(
-            layout,
+            refinement_layout,
             row,
             "Fine axis half-width:",
             0.4,
@@ -1543,7 +1608,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
         )
         row += 1
         self.roiVSize = self._add_int(
-            layout,
+            refinement_layout,
             row,
             "Peak search ROI vertical:",
             80,
@@ -1553,7 +1618,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
             "First-pass local peak-search vertical ROI size.",
         )
         self.roiHSize = self._add_int(
-            layout,
+            refinement_layout,
             row,
             "horizontal:",
             80,
@@ -1565,7 +1630,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
         )
         row += 1
         self.fineRoiVSize = self._add_int(
-            layout,
+            refinement_layout,
             row,
             "Fine ROI vertical:",
             40,
@@ -1575,7 +1640,7 @@ class AutoBraggOptionsDialog(qt.QDialog):
             "Second-pass local peak-search vertical ROI size.",
         )
         self.fineRoiHSize = self._add_int(
-            layout,
+            refinement_layout,
             row,
             "horizontal:",
             40,
@@ -1585,41 +1650,14 @@ class AutoBraggOptionsDialog(qt.QDialog):
             "Second-pass local peak-search horizontal ROI size.",
             column=2,
         )
-        row += 1
-        self.assignmentReflections = self._add_int(
-            layout,
-            row,
-            "Assignment reflections:",
-            40,
-            1,
-            100000,
-            "",
-            "Maximum first-peak HKL hypotheses from the local Q shell.",
+        refinement_layout.setColumnStretch(3, 1)
+        layout.addWidget(refinement_group)
+
+        intensity_group, intensity_layout = self._add_group(
+            layout, "6. Validate intensities"
         )
-        row += 1
-        self.maxSeedHypotheses = self._add_int(
-            layout,
-            row,
-            "Seed hypotheses:",
-            12,
-            1,
-            100000,
-            "",
-            "Maximum seed HKL hypotheses sent to second-peak confirmation.",
-        )
-        row += 1
-        self.confirmationReflections = self._add_int(
-            layout,
-            row,
-            "Confirmation reflections:",
-            12,
-            1,
-            100000,
-            "",
-            "Maximum predicted strong reflections tested for confirmation.",
-        )
-        row += 1
-        layout.addWidget(qt.QLabel("Intensity validation:"), row, 0)
+        row = 0
+        intensity_layout.addWidget(qt.QLabel("Intensity validation:"), row, 0)
         self.intensityRatioCheck = qt.QCheckBox("match calculated |F|^2 ratio")
         self.intensityRatioCheck.setChecked(True)
         self.intensityRatioCheck.setToolTip(
@@ -1627,9 +1665,9 @@ class AutoBraggOptionsDialog(qt.QDialog):
             "intensity ratio to match the calculated structure-factor "
             "intensity ratio within 50%."
         )
-        layout.addWidget(self.intensityRatioCheck, row, 1)
+        intensity_layout.addWidget(self.intensityRatioCheck, row, 1)
         self.confirmationProminenceThreshold = self._add_double(
-            layout,
+            intensity_layout,
             row,
             "prominence fallback:",
             6.0,
@@ -1640,12 +1678,19 @@ class AutoBraggOptionsDialog(qt.QDialog):
             "rocking curves to exceed this robust side-band prominence.",
             column=2,
         )
+        intensity_layout.setColumnStretch(3, 1)
+        layout.addWidget(intensity_group)
 
-        row += 1
         buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Close)
         buttons.button(qt.QDialogButtonBox.Close).clicked.connect(self.hide)
-        layout.addWidget(buttons, row, 0, 1, 4)
+        layout.addWidget(buttons)
         self.setLayout(layout)
+
+    def _add_group(self, layout, title):
+        group = qt.QGroupBox(title)
+        group_layout = qt.QGridLayout()
+        group.setLayout(group_layout)
+        return group, group_layout
 
     def _add_double(
         self,
