@@ -872,6 +872,7 @@ class UnitCell(Lattice):
         self.coherentDomainOccupancy = [1.0]
         self.dw_increase_constraint = np.array([], dtype=np.bool_)
         self._special_formfactors_present = False
+        self.symmetry_metadata = keyargs.get("symmetry_metadata", None)
 
     def parametersToDict(self):
         d = dict()
@@ -1376,6 +1377,137 @@ class UnitCell(Lattice):
         )
         self.parameters["relative"].append(par)
         return par
+
+    def wyckoff_sites(self):
+        """Return Wyckoff site metadata for this unit cell.
+
+        :returns:
+            List of site dictionaries. The list is empty when no symmetry
+            metadata is attached.
+        :rtype:
+            list
+        """
+        if self.symmetry_metadata is None:
+            return []
+        return self.symmetry_metadata.wyckoff_sites(self.parameters)
+
+    def wyckoff_couplings(self, site_id=None):
+        """Return symmetry couplings for generated Wyckoff atom coordinates.
+
+        :param str site_id:
+            Optional site identifier. If omitted, all couplings are returned.
+        :returns:
+            List of coordinate coupling metadata objects.
+        :rtype:
+            list
+        """
+        if self.symmetry_metadata is None:
+            return []
+        return self.symmetry_metadata.wyckoff_couplings(site_id)
+
+    def atom_wyckoff_metadata(self, atom_index):
+        """Return symmetry metadata for one atom.
+
+        :param int atom_index:
+            Index in ``basis``.
+        :returns:
+            Atom metadata or ``None`` when no metadata is available.
+        :rtype:
+            object or None
+        """
+        if self.symmetry_metadata is None:
+            return None
+        return self.symmetry_metadata.atom_wyckoff_metadata(atom_index)
+
+    def addWyckoffParameter(
+        self,
+        site_id,
+        variable,
+        limits=(-np.inf, np.inf),
+        absolute_limits=None,
+        **keyargs,
+    ):
+        """Add a symmetry-preserving relative fit parameter for a Wyckoff variable.
+
+        The stored fit value is the change in the Wyckoff variable from the
+        generated coordinates. For example, fitting rutile oxygen ``u`` adds
+        ``factor * delta_u`` to every generated coordinate that depends on
+        ``u``.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :param str variable:
+            Wyckoff variable name, for example ``"u"``.
+        :param tuple limits:
+            Fit limits for the variable change in fractional units.
+        :param tuple absolute_limits:
+            Optional absolute variable limits. These are converted to change
+            limits around the metadata variable value.
+        :returns:
+            Created relative fit parameter.
+        :rtype:
+            CTRutil.Parameter
+        :raises ValueError:
+            If no matching affine couplings exist.
+        """
+        if self.symmetry_metadata is None:
+            raise ValueError(f"UnitCell {self.name} has no symmetry metadata.")
+        if absolute_limits is not None:
+            if limits != (-np.inf, np.inf):
+                raise ValueError("Use either limits or absolute_limits, not both.")
+            site = next(
+                (
+                    site
+                    for site in self.wyckoff_sites()
+                    if site["site_id"] == site_id
+                ),
+                None,
+            )
+            if site is None or variable not in site["variables"]:
+                raise ValueError(
+                    f"Wyckoff site {site_id} has no variable {variable}."
+                )
+            variable_value = site["variables"][variable]
+            limits = (
+                absolute_limits[0] - variable_value,
+                absolute_limits[1] - variable_value,
+            )
+
+        couplings = [
+            coupling
+            for coupling in self.wyckoff_couplings(site_id)
+            if coupling.variable == variable
+        ]
+        if not couplings:
+            raise ValueError(
+                f"No affine couplings found for Wyckoff site {site_id} "
+                f"and variable {variable}."
+            )
+        atoms = np.asarray(
+            [coupling.atom_index for coupling in couplings],
+            dtype=np.intp,
+        )
+        coordinates = tuple(coupling.coordinate for coupling in couplings)
+        factors = np.asarray(
+            [coupling.factor for coupling in couplings],
+            dtype=np.float64,
+        )
+
+        keyargs.setdefault("name", f"{self.name} {site_id}_{variable}_wyckoff")
+        settings = keyargs.setdefault("wyckoff", {})
+        settings.update(
+            {
+                "site_id": site_id,
+                "variable": variable,
+                "value_kind": "delta",
+            }
+        )
+        return self.addRelParameter(
+            (atoms, coordinates),
+            factors,
+            limits=limits,
+            **keyargs,
+        )
 
     def showFitparameters(self):
         print(self.fitparameterList())
@@ -2279,6 +2411,10 @@ class UnitCell(Lattice):
             st += "layer_cycle: {}\n".format(
                 ", ".join(str(layer) for layer in self._explicit_layer_cycle)
             )
+        if self.symmetry_metadata is not None:
+            from .CTRsymmetry import symmetry_metadata_to_lines
+
+            st += "\n".join(symmetry_metadata_to_lines(self.symmetry_metadata)) + "\n"
         return st
 
     def parameterStrRod(self):
@@ -2537,8 +2673,25 @@ class UnitCell(Lattice):
             layerpos = dict()
             layer_behaviour = "ignore"
             layer_cycle = None
+            symmetry_lines = []
+            reading_symmetry = False
             for l in f:  # noqa: E741
                 line = l.rsplit("//")[0]
+                stripped = line.strip()
+                if reading_symmetry or stripped.startswith(
+                    (
+                        "spacegroup:",
+                        "surface_transform:",
+                        "surface_origin:",
+                        "wyckoff_sites:",
+                        "wyckoff_atoms:",
+                        "wyckoff_couplings:",
+                    )
+                ):
+                    reading_symmetry = True
+                    if stripped:
+                        symmetry_lines.append(stripped)
+                    continue
                 if line.startswith("layerpos:"):
                     if "=" in line:
                         try:
@@ -2704,6 +2857,13 @@ class UnitCell(Lattice):
             uc.basis_0 = np.copy(uc.basis)
             uc.dw_increase_constraint = np.ones(uc.basis.shape[0], dtype=np.bool_)
             uc._test_special_formfactors()
+            if symmetry_lines:
+                from .CTRsymmetry import symmetry_metadata_from_lines
+
+                uc.symmetry_metadata = symmetry_metadata_from_lines(
+                    symmetry_lines,
+                    uc,
+                )
             return uc
         elif len(basis) == 1:
             if (
@@ -2725,6 +2885,13 @@ class UnitCell(Lattice):
             uc.basis_0 = np.copy(uc.basis)
             uc.dw_increase_constraint = np.ones(uc.basis.shape[0], dtype=np.bool_)
             uc._test_special_formfactors()
+            if symmetry_lines:
+                from .CTRsymmetry import symmetry_metadata_from_lines
+
+                uc.symmetry_metadata = symmetry_metadata_from_lines(
+                    symmetry_lines,
+                    uc,
+                )
             return uc
         else:
             raise ValueError(
