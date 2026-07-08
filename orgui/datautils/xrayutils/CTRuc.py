@@ -37,6 +37,8 @@ import xraydb
 import warnings
 import random
 import math
+import copy
+import dataclasses
 from scipy.ndimage import gaussian_filter1d
 import os
 import re
@@ -1139,6 +1141,242 @@ class UnitCell(Lattice):
     @layer_cycle.setter
     def layer_cycle(self, layers):
         self._explicit_layer_cycle = tuple(layers)
+
+    @staticmethod
+    def _translation_from_affine_input(translation):
+        translation = np.asarray(translation, dtype=np.float64)
+        if translation.shape == (3,):
+            return translation
+        if translation.shape == (3, 4):
+            linear = translation[:, :3]
+            vector = translation[:, 3]
+        elif translation.shape == (4, 4):
+            if not np.allclose(translation[3], [0.0, 0.0, 0.0, 1.0]):
+                raise ValueError(
+                    "Homogeneous affine transforms must end with "
+                    "[0, 0, 0, 1]."
+                )
+            linear = translation[:3, :3]
+            vector = translation[:3, 3]
+        else:
+            raise ValueError(
+                "translation must be a vector with shape (3,), "
+                "a 3-by-4 matrix, or a homogeneous 4-by-4 matrix."
+            )
+        if not np.allclose(linear, np.identity(3)):
+            raise ValueError(
+                "UnitCell.translate_layered currently supports "
+                "translations only; the affine linear part must be identity."
+            )
+        return vector
+
+    @staticmethod
+    def _remap_parameter_atom_indices(parameter, old_to_new):
+        if not isinstance(parameter.indices, tuple):
+            return
+        atoms, parindexes = parameter.indices
+        atoms = np.asarray(atoms, dtype=np.intp)
+        parameter.indices = (old_to_new[atoms], parindexes)
+
+    @staticmethod
+    def _translate_symmetry_metadata(metadata, old_to_new, layer_map, coordinate_shift):
+        if metadata is None:
+            return None
+        metadata = copy.deepcopy(metadata)
+        coordinate_index = {"x": 0, "y": 1, "z": 2}
+        atoms = []
+        for atom in metadata.atoms:
+            couplings = []
+            for coupling in atom.couplings:
+                couplings.append(
+                    dataclasses.replace(
+                        coupling,
+                        atom_index=int(old_to_new[coupling.atom_index]),
+                        constant=(
+                            coupling.constant
+                            + coordinate_shift[coordinate_index[coupling.coordinate]]
+                        ),
+                    )
+                )
+            atoms.append(
+                dataclasses.replace(
+                    atom,
+                    atom_index=int(old_to_new[atom.atom_index]),
+                    surface_fractional=(
+                        np.asarray(atom.surface_fractional, dtype=np.float64)
+                        + coordinate_shift
+                    ),
+                    layer=layer_map[atom.layer],
+                    couplings=tuple(couplings),
+                )
+            )
+        metadata.atoms = sorted(atoms, key=lambda atom: atom.atom_index)
+        return metadata
+
+    def translate_layered(self, translation, name=None):
+        """Return a translated copy with cyclic z-layer wrapping.
+
+        The translation is expressed in unit-cell fractional coordinates. The
+        ``x`` and ``y`` translations must be integer unit-cell offsets, and
+        ``z`` is an integer number of structural-layer steps. Atom fractional
+        z coordinates and layer origins are shifted by ``z / len(layer_cycle)``
+        while layer identifiers are reassigned through the ordered
+        :class:`CTRstacking.LayerCycle`. A positive z step moves lower layers
+        upward and wraps the former top layer to the bottom.
+
+        Symmetry metadata is copied only when atom ordering is unchanged. When
+        layer cycling regroups atom rows, generated Wyckoff metadata is dropped
+        because it describes the pre-transform atom indices.
+
+        :param translation:
+            Translation vector with shape ``(3,)``, affine matrix with shape
+            ``(3, 4)``, or homogeneous affine matrix with shape ``(4, 4)``.
+        :param str name:
+            Optional name for the returned unit cell. Defaults to this unit
+            cell's name.
+        :returns:
+            Transformed unit-cell copy.
+        :rtype:
+            UnitCell
+        :raises ValueError:
+            If the affine linear part is not identity or any requested
+            translation is not an integer.
+        """
+        translation = self._translation_from_affine_input(translation)
+        xy_translation = translation[:2]
+        if not np.allclose(xy_translation, np.rint(xy_translation)):
+            raise ValueError("x and y affine translations must be integers.")
+        if not np.isclose(translation[2], np.rint(translation[2])):
+            raise ValueError("z affine translation must be an integer layer step.")
+
+        xy_translation = np.rint(xy_translation).astype(np.float64)
+        z_steps = int(np.rint(translation[2]))
+
+        transformed = copy.deepcopy(self)
+        if name is not None:
+            transformed.name = name
+
+        if self.basis.size == 0:
+            if z_steps:
+                raise ValueError("Cannot cyclically shift layers in an empty UnitCell.")
+            return transformed
+
+        cycle = self.layer_cycle.layers
+        layer_count = len(cycle)
+        z_steps_effective = z_steps % layer_count
+        z_translation = z_steps / layer_count
+
+        if z_steps_effective == 0 and np.all(xy_translation == 0):
+            if z_steps == 0:
+                return transformed
+        if z_steps_effective == 0:
+            transformed.basis[:, 1:3] += xy_translation
+            transformed.basis[:, 3] += z_translation
+            transformed.basis_0[:, 1:3] += xy_translation
+            transformed.basis_0[:, 3] += z_translation
+            if transformed._basis_parvalues is not None:
+                transformed._basis_parvalues[:, 1:3] += xy_translation
+                transformed._basis_parvalues[:, 3] += z_translation
+            for layer in cycle:
+                layer_key = float(layer)
+                if layer_key not in transformed.layerpos:
+                    where = self.basis[:, 7] == layer
+                    transformed.layerpos[layer_key] = float(
+                        np.mean(self.basis[where, 3])
+                    )
+                transformed.layerpos[layer_key] += z_translation
+            coordinate_shift = np.array(
+                [xy_translation[0], xy_translation[1], z_translation],
+                dtype=np.float64,
+            )
+            old_to_new = np.arange(self.basis.shape[0], dtype=np.intp)
+            layer_map = {layer: layer for layer in cycle}
+            transformed.symmetry_metadata = self._translate_symmetry_metadata(
+                self.symmetry_metadata,
+                old_to_new,
+                layer_map,
+                coordinate_shift,
+            )
+            return transformed
+
+        layer_positions = {
+            layer: float(self.layerpos.get(float(layer), np.nan)) for layer in cycle
+        }
+        for layer, position in layer_positions.items():
+            if np.isnan(position):
+                where = self.basis[:, 7] == layer
+                layer_positions[layer] = float(np.mean(self.basis[where, 3]))
+
+        layer_map = {
+            layer: cycle[(index + z_steps_effective) % layer_count]
+            for index, layer in enumerate(cycle)
+        }
+
+        def transform_basis_values(values):
+            if values is None or values.size == 0:
+                return values
+            values_new = np.array(values, copy=True)
+            values_new[:, 1:3] += xy_translation
+            values_new[:, 3] += z_translation
+            for layer in cycle:
+                where = values[:, 7] == layer
+                if not np.any(where):
+                    continue
+                new_layer = layer_map[layer]
+                values_new[where, 7] = new_layer
+            return values_new
+
+        basis = transform_basis_values(self.basis)
+        basis_0 = transform_basis_values(self.basis_0)
+        basis_parvalues = transform_basis_values(self._basis_parvalues)
+
+        order_lookup = {layer: index for index, layer in enumerate(cycle)}
+        row_order = np.array(
+            sorted(range(basis.shape[0]), key=lambda i: (order_lookup[basis[i, 7]], i)),
+            dtype=np.intp,
+        )
+        old_to_new = np.empty_like(row_order)
+        old_to_new[row_order] = np.arange(row_order.size)
+
+        transformed.basis = basis[row_order]
+        transformed.basis_0 = basis_0[row_order]
+        if basis_parvalues is not None:
+            transformed._basis_parvalues = basis_parvalues[row_order]
+        if self.errors is not None:
+            transformed.errors = np.array(self.errors, copy=True)[row_order]
+        if self._errors_parvalues is not None:
+            transformed._errors_parvalues = np.array(
+                self._errors_parvalues, copy=True
+            )[row_order]
+        transformed.names = [self.names[i] for i in row_order]
+        transformed.dw_increase_constraint = self.dw_increase_constraint[row_order]
+        if hasattr(self, "f"):
+            transformed.f = self.f[row_order]
+
+        for parameters in transformed.parameters.values():
+            for parameter in parameters:
+                self._remap_parameter_atom_indices(parameter, old_to_new)
+
+        transformed.layerpos = copy.deepcopy(self.layerpos)
+        for layer in cycle:
+            new_layer = layer_map[layer]
+            transformed.layerpos[float(new_layer)] = (
+                layer_positions[layer] + z_translation
+            )
+        if transformed._explicit_layer_cycle is not None:
+            transformed._explicit_layer_cycle = tuple(cycle)
+        coordinate_shift = np.array(
+            [xy_translation[0], xy_translation[1], z_translation],
+            dtype=np.float64,
+        )
+        transformed.symmetry_metadata = self._translate_symmetry_metadata(
+            self.symmetry_metadata,
+            old_to_new,
+            layer_map,
+            coordinate_shift,
+        )
+        transformed._test_special_formfactors()
+        return transformed
 
     @property
     def layer_behavior(self):

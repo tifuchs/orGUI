@@ -38,7 +38,7 @@ import tempfile
 import numpy as np
 
 from ... import util
-from .. import CTRcalc, CTRfilm, CTRplotutil, CTRuc
+from .. import CTRcalc, CTRfilm, CTRplotutil, CTRsymmetry, CTRuc
 from ..CTRdistributions import PoissonProfile, SkellamProfile
 
 
@@ -343,6 +343,231 @@ class TestLayerStacking(unittest.TestCase):
         self.assertEqual(unitcell.start_layer_number, 1)
         self.assertEqual(unitcell.end_layer_number, 1)
         self.assertEqual(unitcell.layer_behaviour, "select")
+
+    def test_unitcell_translate_layered_cycles_top_to_bottom(self):
+        unitcell = self.make_layered_unitcell()
+        unitcell.basis[:, 1] = [0.1, 0.2, 0.3]
+        unitcell.basis[:, 3] += 0.05
+        unitcell.basis_0[:] = unitcell.basis
+
+        transformed = unitcell.translate_layered([0, 0, 1])
+
+        np.testing.assert_allclose(transformed.basis[:, 1], [0.3, 0.1, 0.2])
+        np.testing.assert_allclose(
+            transformed.basis[:, 3],
+            [1.0 + 0.05, 1 / 3 + 0.05, 2 / 3 + 0.05],
+        )
+        np.testing.assert_array_equal(transformed.basis[:, 7], [1, 2, 3])
+        self.assertEqual(
+            transformed.layerpos,
+            {0.0: 0.0, 1.0: 1.0, 2.0: 1 / 3, 3.0: 2 / 3},
+        )
+        self.assertTrue(transformed.layer_cycle.is_rotation_of(unitcell.layer_cycle))
+
+    def test_unitcell_translate_layered_cycles_bottom_to_top(self):
+        unitcell = self.make_layered_unitcell()
+        unitcell.basis[:, 1] = [0.1, 0.2, 0.3]
+        unitcell.basis[:, 3] += 0.05
+        unitcell.basis_0[:] = unitcell.basis
+
+        transformed = unitcell.translate_layered([0, 0, -1])
+
+        np.testing.assert_allclose(transformed.basis[:, 1], [0.2, 0.3, 0.1])
+        np.testing.assert_allclose(
+            transformed.basis[:, 3],
+            [0.05, 1 / 3 + 0.05, -1 / 3 + 0.05],
+        )
+        np.testing.assert_array_equal(transformed.basis[:, 7], [1, 2, 3])
+
+    def test_unitcell_translate_layered_preserves_noop_metadata(self):
+        unitcell = self.make_layered_unitcell()
+
+        transformed = unitcell.translate_layered([0, 0, 0])
+
+        self.assertIsNot(transformed, unitcell)
+        np.testing.assert_allclose(transformed.basis, unitcell.basis)
+        np.testing.assert_allclose(transformed.basis_0, unitcell.basis_0)
+        self.assertEqual(transformed.layerpos, unitcell.layerpos)
+        self.assertEqual(transformed.toStr(), unitcell.toStr())
+
+    def test_unitcell_translate_layered_translates_full_two_layer_cycle(self):
+        unitcell = CTRcalc.UnitCell(
+            [3.0, 3.0, 6.0],
+            [90.0, 90.0, 90.0],
+            name="two_layer",
+        )
+        for layer, z in zip((1, 2), (0.0, 0.5)):
+            unitcell.addAtom("C", [0.0, 0.0, z], 0.1, 0.1, 1.0, layer=layer)
+            unitcell.layerpos[float(layer)] = z
+
+        transformed = unitcell.translate_layered([0, 0, -2])
+
+        np.testing.assert_allclose(transformed.basis[:, 3], [-1.0, -0.5])
+        np.testing.assert_allclose(transformed.basis_0[:, 3], [-1.0, -0.5])
+        np.testing.assert_array_equal(transformed.basis[:, 7], unitcell.basis[:, 7])
+        self.assertEqual(
+            transformed.layerpos,
+            {0.0: 0.0, 1.0: -1.0, 2.0: -0.5},
+        )
+
+    def test_unitcell_translate_layered_preserves_full_cycle_symmetry_metadata(self):
+        unitcell = CTRcalc.UnitCell(
+            [3.0, 3.0, 6.0],
+            [90.0, 90.0, 90.0],
+            name="two_layer_reversed",
+        )
+        unitcell.addAtom("C", [0.0, 0.0, 0.5], 0.1, 0.1, 1.0, layer=2)
+        unitcell.layerpos[2.0] = 0.5
+        unitcell.addAtom("C", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0, layer=1)
+        unitcell.layerpos[1.0] = 0.0
+        unitcell.symmetry_metadata = CTRsymmetry.SurfaceSymmetryModel(
+            CTRsymmetry.SurfaceCellSpec(
+                (3.0, 3.0, 6.0),
+                (90.0, 90.0, 90.0),
+                np.identity(3),
+            ),
+            (),
+            atoms=[
+                CTRsymmetry.GeneratedWyckoffAtom(
+                    atom_index=0,
+                    element="C",
+                    site_id="C_0",
+                    wyckoff_label="1a",
+                    parent_fractional=np.array([0.0, 0.0, 0.5]),
+                    surface_fractional=np.array([0.0, 0.0, 0.5]),
+                    layer=2,
+                    couplings=(
+                        CTRsymmetry.WyckoffCoupling(
+                            atom_index=0,
+                            coordinate="z",
+                            variable="u",
+                            constant=0.5,
+                            factor=1.0,
+                            site_id="C_0",
+                        ),
+                    ),
+                ),
+                CTRsymmetry.GeneratedWyckoffAtom(
+                    atom_index=1,
+                    element="C",
+                    site_id="C_1",
+                    wyckoff_label="1a",
+                    parent_fractional=np.array([0.0, 0.0, 0.0]),
+                    surface_fractional=np.array([0.0, 0.0, 0.0]),
+                    layer=1,
+                ),
+            ],
+        )
+
+        transformed = unitcell.translate_layered([0, 0, -2])
+
+        np.testing.assert_array_equal(transformed.basis[:, 7], [2, 1])
+        np.testing.assert_allclose(transformed.basis[:, 3], [-0.5, -1.0])
+        self.assertEqual(transformed.layerpos[2.0], -0.5)
+        self.assertEqual(transformed.layerpos[1.0], -1.0)
+        self.assertIsNotNone(transformed.symmetry_metadata)
+        atom = transformed.atom_wyckoff_metadata(0)
+        self.assertEqual(atom.layer, 2)
+        np.testing.assert_allclose(atom.surface_fractional, [0.0, 0.0, -0.5])
+        self.assertEqual(atom.couplings[0].atom_index, 0)
+        self.assertAlmostEqual(atom.couplings[0].constant, -0.5)
+
+    def test_unitcell_translate_layered_translates_in_plane(self):
+        unitcell = self.make_layered_unitcell()
+        original_basis = np.copy(unitcell.basis)
+        affine = np.array(
+            [
+                [1.0, 0.0, 0.0, 2.0],
+                [0.0, 1.0, 0.0, -1.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+        transformed = unitcell.translate_layered(affine, name="shifted")
+
+        np.testing.assert_allclose(transformed.basis[:, 1], original_basis[:, 1] + 2)
+        np.testing.assert_allclose(transformed.basis[:, 2], original_basis[:, 2] - 1)
+        np.testing.assert_array_equal(transformed.basis[:, 7], original_basis[:, 7])
+        np.testing.assert_allclose(unitcell.basis, original_basis)
+        self.assertEqual(transformed.name, "shifted")
+
+    def test_unitcell_translate_layered_remaps_fit_parameter_atoms(self):
+        unitcell = self.make_layered_unitcell()
+        unitcell.addFitParameter(([2], "x"), name="top_x")
+
+        transformed = unitcell.translate_layered([0, 0, 1])
+
+        atoms, parameters = transformed.parameters["absolute"][0].indices
+        np.testing.assert_array_equal(atoms, [0])
+        np.testing.assert_array_equal(parameters, [1])
+
+    def test_unitcell_translate_layered_remaps_symmetry_metadata_atoms(self):
+        unitcell = self.make_layered_unitcell()
+        unitcell.symmetry_metadata = CTRsymmetry.SurfaceSymmetryModel(
+            CTRsymmetry.SurfaceCellSpec(
+                (3.0, 3.0, 6.0),
+                (90.0, 90.0, 90.0),
+                np.identity(3),
+            ),
+            (),
+            atoms=[
+                CTRsymmetry.GeneratedWyckoffAtom(
+                    atom_index=2,
+                    element="C",
+                    site_id="C_2",
+                    wyckoff_label="1a",
+                    parent_fractional=np.array([0.0, 0.0, 2 / 3]),
+                    surface_fractional=np.array([0.0, 0.0, 2 / 3]),
+                    layer=3,
+                    couplings=(
+                        CTRsymmetry.WyckoffCoupling(
+                            atom_index=2,
+                            coordinate="z",
+                            variable="u",
+                            constant=2 / 3,
+                            factor=1.0,
+                            site_id="C_2",
+                        ),
+                    ),
+                ),
+            ],
+        )
+
+        transformed = unitcell.translate_layered([0, 0, 1])
+
+        atom = transformed.atom_wyckoff_metadata(0)
+        self.assertIsNotNone(atom)
+        self.assertEqual(atom.layer, 1)
+        np.testing.assert_allclose(atom.surface_fractional, [0.0, 0.0, 1.0])
+        self.assertEqual(atom.couplings[0].atom_index, 0)
+        self.assertAlmostEqual(atom.couplings[0].constant, 1.0)
+
+    def test_unitcell_translate_layered_rejects_unsupported_affines(self):
+        unitcell = self.make_layered_unitcell()
+
+        with self.assertRaisesRegex(ValueError, "x and y"):
+            unitcell.translate_layered([0.5, 0, 0])
+        with self.assertRaisesRegex(ValueError, "linear part"):
+            unitcell.translate_layered(
+                np.array(
+                    [
+                        [0.0, -1.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0],
+                    ]
+                )
+            )
+
+    def test_unitcell_translate_layered_stacks_with_existing_layers(self):
+        transformed = self.make_layered_unitcell().translate_layered([0, 0, 1])
+        film = CTRfilm.Film(transformed)
+        film.basis[0] = 2
+        film.start_layer_number = 1
+        film.createLayers()
+
+        self.assertEqual(film.start_layer_number, 2)
+        self.assertEqual(film.end_layer_number, 3)
+        np.testing.assert_array_equal(film.layer_order, [2, 3, 1])
 
     def test_film_and_poisson_rotate_cyclic_layer_order(self):
         film = CTRfilm.Film(self.make_layered_unitcell("film"))
