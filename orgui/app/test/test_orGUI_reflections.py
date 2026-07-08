@@ -53,6 +53,52 @@ class FakeBraggParent:
         raise ValueError("axis outside scan")
 
 
+class FakeAction:
+    def __init__(self, checked=False):
+        self._checked = checked
+
+    def isChecked(self):
+        return self._checked
+
+    def setChecked(self, checked):
+        self._checked = checked
+
+
+class FakeLabel:
+    def __init__(self):
+        self.text = None
+        self.style = None
+
+    def setText(self, text):
+        self.text = text
+
+    def setStyleSheet(self, style):
+        self.style = style
+
+
+class FakePlotAxis:
+    def __init__(self, limits):
+        self.limits = limits
+
+    def getLimits(self):
+        return self.limits
+
+    def setLimits(self, low, high):
+        self.limits = (low, high)
+
+
+class FakeCentralPlot:
+    def __init__(self, xlimits=(0.0, 100.0), ylimits=(0.0, 100.0)):
+        self.xaxis = FakePlotAxis(xlimits)
+        self.yaxis = FakePlotAxis(ylimits)
+
+    def getXAxis(self):
+        return self.xaxis
+
+    def getYAxis(self):
+        return self.yaxis
+
+
 def make_gui(reflections=None):
     gui = orGUI.__new__(orGUI)
     gui.fscan = FakeScan()
@@ -64,6 +110,38 @@ def make_gui(reflections=None):
     )
     gui.reflectionSel = SimpleNamespace(reflections=reflections or [])
     return gui
+
+
+def make_auto_intersect_gui():
+    gui = orGUI.__new__(orGUI)
+    gui.fscan = SimpleNamespace(axisname="th")
+    gui.ubcalc = SimpleNamespace(
+        detectorCal=SimpleNamespace(detector=np.zeros((100, 100))),
+        viewReflectionAutoAct=FakeAction(True),
+        set_resolved_view_reflection_intersect=lambda intersect: None,
+    )
+    gui.scanSelector = SimpleNamespace(
+        roiTrackingAutoAct=FakeAction(True),
+        set_resolved_roi_tracking_intersect=lambda intersect: None,
+    )
+    gui.centralPlot = FakeCentralPlot()
+    gui._last_reflection_intersect = None
+    gui.axisToImageNo = lambda axisval: int(round(axisval))
+    gui.changed_images = []
+    gui.centered_xy = []
+    gui._onChangeImage = lambda imageno: gui.changed_images.append(imageno)
+    gui._onCenterGraph = lambda xy: gui.centered_xy.append(tuple(xy))
+    return gui
+
+
+def reflection_dict(xy_1, xy_2):
+    angles = np.zeros(6)
+    return {
+        "angles_1": angles.copy(),
+        "angles_2": angles.copy(),
+        "xy_1": np.array(xy_1, dtype=float),
+        "xy_2": np.array(xy_2, dtype=float),
+    }
 
 
 def test_auto_bragg_options_dialog_groups_follow_workflow_order():
@@ -208,6 +286,76 @@ def test_change_image_skips_stale_image_numbers(caplog):
         gui._onChangeImage(4)
 
     assert "Skipping request to display stale image number" in caplog.text
+
+
+def test_auto_view_reflection_uses_only_selectable_intersect():
+    gui = make_auto_intersect_gui()
+    refldict = reflection_dict((-1.0, 20.0), (40.0, 50.0))
+
+    orGUI.onViewCalculatedReflection(gui, refldict, 0)
+
+    assert gui._last_reflection_intersect == 2
+    assert gui.changed_images == [0]
+    assert gui.centered_xy == [(40.0, 50.0)]
+
+
+def test_auto_view_reflection_uses_previous_when_both_selectable():
+    gui = make_auto_intersect_gui()
+    gui._last_reflection_intersect = 2
+    refldict = reflection_dict((10.0, 20.0), (40.0, 50.0))
+
+    orGUI.onViewCalculatedReflection(gui, refldict, 0)
+
+    assert gui._last_reflection_intersect == 2
+    assert gui.centered_xy == [(40.0, 50.0)]
+
+
+def test_auto_view_reflection_uses_nearest_center_without_previous():
+    gui = make_auto_intersect_gui()
+    refldict = reflection_dict((49.0, 50.0), (90.0, 90.0))
+
+    orGUI.onViewCalculatedReflection(gui, refldict, 0)
+
+    assert gui._last_reflection_intersect == 1
+    assert gui.centered_xy == [(49.0, 50.0)]
+
+
+def test_auto_roi_tracking_uses_previous_when_both_visible():
+    gui = make_auto_intersect_gui()
+    gui._last_reflection_intersect = 1
+    gui.scanSelector.scanstab = SimpleNamespace(currentIndex=lambda: 0)
+    gui.scanSelector.roiTrackingAct = FakeAction(True)
+    gui.scanSelector.roiTrackingS1Act = FakeAction(False)
+    gui.scanSelector.roiTrackingS2Act = FakeAction(False)
+    gui.imageno = 0
+    gui.getROIloc = lambda image_no: (
+        np.array([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 12.0, 15.0, True]]),
+        np.array([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 80.0, 85.0, True]]),
+    )
+
+    orGUI._centerTrackedROI(gui, 0)
+
+    assert gui._last_reflection_intersect == 1
+    assert gui.centered_xy == [(12.0, 15.0)]
+
+
+def test_view_reflection_intersect_returns_auto_mode():
+    calculator = QUBCalculator.__new__(QUBCalculator)
+    calculator.viewReflectionAutoAct = FakeAction(True)
+    calculator.viewReflectionS1Act = FakeAction(False)
+    calculator.viewReflectionS2Act = FakeAction(False)
+
+    assert QUBCalculator.viewReflectionIntersect(calculator) == 0
+
+
+def test_view_reflection_unresolved_auto_label_shows_sx():
+    calculator = QUBCalculator.__new__(QUBCalculator)
+    calculator.viewReflectionLabel = FakeLabel()
+
+    QUBCalculator._set_view_reflection_label(calculator, None)
+
+    assert calculator.viewReflectionLabel.text == "SX"
+    assert "#555555" in calculator.viewReflectionLabel.style
 
 
 def test_bragg_reflection_list_skips_stale_image_numbers(caplog):

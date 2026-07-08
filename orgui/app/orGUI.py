@@ -192,6 +192,7 @@ class orGUI(qt.QMainWindow):
 
         self.imagepath = ""
         self.imageno = 0
+        self._last_reflection_intersect = None
 
         # ubWidget = qt.QSplitter(qt.Qt.Vertical)
         # ubWidget.setChildrenCollapsible(False)
@@ -200,19 +201,25 @@ class orGUI(qt.QMainWindow):
         self.ubcalc = QUBCalculator(None, self)
         self.ubcalc.sigNewReflection.connect(self._onNewReflection)
         self.ubcalc.sigViewReflection.connect(self.onViewCalculatedReflection)
-        self.ubcalc.viewReflectionS1Act.toggled.connect(
+        self.ubcalc.viewReflectionAutoAct.toggled.connect(
             lambda checked: checked
-            and self.scanSelector.roiTrackingS1Act.setChecked(True)
+            and self.scanSelector.roiTrackingAutoAct.setChecked(True)
+        )
+        self.ubcalc.viewReflectionS1Act.toggled.connect(
+            lambda checked: checked and self._onReflectionS1ModeSelected()
         )
         self.ubcalc.viewReflectionS2Act.toggled.connect(
+            lambda checked: checked and self._onReflectionS2ModeSelected()
+        )
+        self.scanSelector.roiTrackingAutoAct.toggled.connect(
             lambda checked: checked
-            and self.scanSelector.roiTrackingS2Act.setChecked(True)
+            and self.ubcalc.viewReflectionAutoAct.setChecked(True)
         )
         self.scanSelector.roiTrackingS1Act.toggled.connect(
-            lambda checked: checked and self.ubcalc.viewReflectionS1Act.setChecked(True)
+            lambda checked: checked and self._onTrackingS1ModeSelected()
         )
         self.scanSelector.roiTrackingS2Act.toggled.connect(
-            lambda checked: checked and self.ubcalc.viewReflectionS2Act.setChecked(True)
+            lambda checked: checked and self._onTrackingS2ModeSelected()
         )
 
         self.resetIntegrPlotCurves = qt.QAction("Reset plot", self)
@@ -257,6 +264,9 @@ class orGUI(qt.QMainWindow):
         self.scanSelector.showMaxAct.toggled.connect(self._onMaxToggled)
         self.scanSelector.showSumAct.toggled.connect(self._onSumToggled)
         self.scanSelector.roiTrackingAct.toggled.connect(self._onROITrackingChanged)
+        self.scanSelector.roiTrackingAutoAct.triggered.connect(
+            self._onROITrackingChanged
+        )
         self.scanSelector.roiTrackingS1Act.triggered.connect(self._onROITrackingChanged)
         self.scanSelector.roiTrackingS2Act.triggered.connect(self._onROITrackingChanged)
 
@@ -2991,7 +3001,17 @@ ub : gui for UB matrix and angle calculations
         """GUI-only: switch to a calculated reflection and center the plot."""
         if not self._setCalculatedReflectionImageInfo(refldict):
             return
-        if not refldict.get(f"selectable_{intersect}", False):
+        resolved_intersect = self._resolve_reflection_intersect(
+            intersect,
+            {
+                1: refldict.get("selectable_1", False),
+                2: refldict.get("selectable_2", False),
+            },
+            {1: refldict["xy_1"], 2: refldict["xy_2"]},
+        )
+        if resolved_intersect is None or not refldict.get(
+            f"selectable_{resolved_intersect}", False
+        ):
             qutils.warning_detailed_message(
                 self,
                 "Reflection is not on detector",
@@ -2999,7 +3019,7 @@ ub : gui for UB matrix and angle calculations
                 "",
             )
             return
-        imageno = refldict.get(f"imageno_{intersect}")
+        imageno = refldict.get(f"imageno_{resolved_intersect}")
         if imageno is None:
             qutils.warning_detailed_message(
                 self,
@@ -3008,8 +3028,9 @@ ub : gui for UB matrix and angle calculations
                 "",
             )
             return
+        self._set_resolved_reflection_intersect(resolved_intersect)
         self._onChangeImage(imageno)
-        self._onCenterGraph(refldict[f"xy_{intersect}"])
+        self._onCenterGraph(refldict[f"xy_{resolved_intersect}"])
 
     def _onNewReflection(self, refldict):
         """GUI-only: prompt the user to add calculated reflection candidates."""
@@ -5730,6 +5751,56 @@ ub : gui for UB matrix and angle calculations
         y2_new = y2 - y_center + xy[1]
         self.centralPlot.getYAxis().setLimits(y1_new, y2_new)
 
+    def _onReflectionS1ModeSelected(self):
+        self._last_reflection_intersect = 1
+        self.scanSelector.roiTrackingS1Act.setChecked(True)
+
+    def _onReflectionS2ModeSelected(self):
+        self._last_reflection_intersect = 2
+        self.scanSelector.roiTrackingS2Act.setChecked(True)
+
+    def _onTrackingS1ModeSelected(self):
+        self._last_reflection_intersect = 1
+        self.ubcalc.viewReflectionS1Act.setChecked(True)
+
+    def _onTrackingS2ModeSelected(self):
+        self._last_reflection_intersect = 2
+        self.ubcalc.viewReflectionS2Act.setChecked(True)
+
+    def _detector_view_center(self):
+        x1, x2 = self.centralPlot.getXAxis().getLimits()
+        y1, y2 = self.centralPlot.getYAxis().getLimits()
+        return np.array([(x1 + x2) / 2, (y1 + y2) / 2], dtype=float)
+
+    def _resolve_reflection_intersect(self, requested, selectable, xy):
+        if requested in (1, 2):
+            return requested
+
+        available = [
+            intersect for intersect in (1, 2) if selectable.get(intersect, False)
+        ]
+        if len(available) == 1:
+            return available[0]
+        if len(available) != 2:
+            return None
+        if self._last_reflection_intersect in available:
+            return self._last_reflection_intersect
+
+        view_center = self._detector_view_center()
+        return min(
+            available,
+            key=lambda intersect: np.linalg.norm(
+                np.asarray(xy[intersect], dtype=float) - view_center
+            ),
+        )
+
+    def _set_resolved_reflection_intersect(self, intersect):
+        self._last_reflection_intersect = intersect
+        if self.scanSelector.roiTrackingAutoAct.isChecked():
+            self.scanSelector.set_resolved_roi_tracking_intersect(intersect)
+        if self.ubcalc.viewReflectionAutoAct.isChecked():
+            self.ubcalc.set_resolved_view_reflection_intersect(intersect)
+
     def _onROITrackingChanged(self, *args):
         """GUI-only: recenter the detector view after ROI tracking changes."""
         self._centerTrackedROI(self.imageno)
@@ -5743,10 +5814,24 @@ ub : gui for UB matrix and angle calculations
         try:
             hkl_del_gam_1, hkl_del_gam_2 = self.getROIloc(image_no)
             if self.scanSelector.roiTrackingS2Act.isChecked():
+                requested_intersect = 2
+            elif self.scanSelector.roiTrackingS1Act.isChecked():
+                requested_intersect = 1
+            else:
+                requested_intersect = 0
+            resolved_intersect = self._resolve_reflection_intersect(
+                requested_intersect,
+                {1: hkl_del_gam_1[0, -1], 2: hkl_del_gam_2[0, -1]},
+                {1: hkl_del_gam_1[0, 6:8], 2: hkl_del_gam_2[0, 6:8]},
+            )
+            if resolved_intersect == 1:
+                hkl_del_gam = hkl_del_gam_1
+            elif resolved_intersect == 2:
                 hkl_del_gam = hkl_del_gam_2
             else:
-                hkl_del_gam = hkl_del_gam_1
+                return
             if hkl_del_gam[0, -1]:
+                self._set_resolved_reflection_intersect(resolved_intersect)
                 self._onCenterGraph(hkl_del_gam[0, 6:8])
         except Exception:
             logger.warning(

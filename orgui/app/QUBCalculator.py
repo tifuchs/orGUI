@@ -194,6 +194,10 @@ class QUBCalculator(qt.QSplitter):
 
         addReflAct.triggered.connect(self._onCalcReflection)
 
+        self.viewReflectionAutoAct = qt.QAction(
+            "auto",
+            self,
+        )
         self.viewReflectionS1Act = qt.QAction(
             resources.getQicon("intersect_s1"),
             "view intersect 1",
@@ -206,12 +210,26 @@ class QUBCalculator(qt.QSplitter):
         )
         self.viewReflectionIntersectGrp = qt.QActionGroup(self)
         self.viewReflectionIntersectGrp.setExclusive(True)
-        for action in (self.viewReflectionS1Act, self.viewReflectionS2Act):
+        for action in (
+            self.viewReflectionAutoAct,
+            self.viewReflectionS1Act,
+            self.viewReflectionS2Act,
+        ):
             action.setCheckable(True)
             self.viewReflectionIntersectGrp.addAction(action)
-        self.viewReflectionS1Act.setChecked(True)
+        self.viewReflectionAutoAct.setChecked(True)
+        self.viewReflectionAutoAct.toggled.connect(
+            lambda checked: checked and self._update_view_reflection_label()
+        )
+        self.viewReflectionS1Act.toggled.connect(
+            lambda checked: checked and self._update_view_reflection_label()
+        )
+        self.viewReflectionS2Act.toggled.connect(
+            lambda checked: checked and self._update_view_reflection_label()
+        )
 
         self.viewReflectionMenu = qt.QMenu()
+        self.viewReflectionMenu.addAction(self.viewReflectionAutoAct)
         self.viewReflectionMenu.addAction(self.viewReflectionS1Act)
         self.viewReflectionMenu.addAction(self.viewReflectionS2Act)
 
@@ -231,6 +249,12 @@ class QUBCalculator(qt.QSplitter):
         self.viewReflButton.setPopupMode(qt.QToolButton.MenuButtonPopup)
         self.viewReflButton.setMenu(self.viewReflectionMenu)
         self.reflectionWidget.addWidget(self.viewReflButton)
+        self.viewReflectionLabel = qt.QLabel("SX")
+        self.viewReflectionLabel.setMinimumWidth(
+            self.viewReflectionLabel.fontMetrics().horizontalAdvance("S2") + 8
+        )
+        self._set_view_reflection_label(None)
+        self.reflectionWidget.addWidget(self.viewReflectionLabel)
 
         self.addWidget(self.reflectionWidget)
 
@@ -469,6 +493,33 @@ class QUBCalculator(qt.QSplitter):
             return
         self.sigNewReflection.emit(refl)
 
+    def _set_view_reflection_label(self, intersect):
+        if intersect == 1:
+            text = "S1"
+            color = "#d62728"
+        elif intersect == 2:
+            text = "S2"
+            color = "#1f77b4"
+        else:
+            text = "SX"
+            color = "#555555"
+        self.viewReflectionLabel.setText(text)
+        self.viewReflectionLabel.setStyleSheet(
+            f"font-weight: bold; font-size: 16px; color: {color};"
+        )
+
+    def _update_view_reflection_label(self):
+        if self.viewReflectionS1Act.isChecked():
+            self._set_view_reflection_label(1)
+        elif self.viewReflectionS2Act.isChecked():
+            self._set_view_reflection_label(2)
+        else:
+            self._set_view_reflection_label(None)
+
+    def set_resolved_view_reflection_intersect(self, intersect):
+        """Display the intersect selected by auto reflection lookup."""
+        self._set_view_reflection_label(intersect)
+
     def _onViewReflection(self):
         """Calculate the requested hkl and ask the GUI to center on it."""
         hkl = [self.Hbox.value(), self.Kbox.value(), self.Lbox.value()]
@@ -488,6 +539,10 @@ class QUBCalculator(qt.QSplitter):
         """Return the selected calculated-reflection view intersect."""
         if self.viewReflectionS2Act.isChecked():
             return 2
+        if self.viewReflectionS1Act.isChecked():
+            return 1
+        if self.viewReflectionAutoAct.isChecked():
+            return 0
         return 1
 
     def _onUchanged(self, U):

@@ -264,6 +264,9 @@ class QScanSelector(qt.QMainWindow):
 
         self.roiTrackingIntersectGrp = qt.QActionGroup(self)
         self.roiTrackingIntersectGrp.setExclusive(True)
+        self.roiTrackingAutoAct = self.roiTrackingIntersectGrp.addAction(
+            "auto",
+        )
         self.roiTrackingS1Act = self.roiTrackingIntersectGrp.addAction(
             resources.getQicon("intersect_s1"),
             "track intersect 1",
@@ -272,11 +275,22 @@ class QScanSelector(qt.QMainWindow):
             resources.getQicon("intersect_s2"),
             "track intersect 2",
         )
+        self.roiTrackingAutoAct.setCheckable(True)
         self.roiTrackingS1Act.setCheckable(True)
         self.roiTrackingS2Act.setCheckable(True)
-        self.roiTrackingS1Act.setChecked(True)
+        self.roiTrackingAutoAct.setChecked(True)
+        self.roiTrackingAutoAct.toggled.connect(
+            lambda checked: checked and self._update_roi_tracking_label()
+        )
+        self.roiTrackingS1Act.toggled.connect(
+            lambda checked: checked and self._update_roi_tracking_label()
+        )
+        self.roiTrackingS2Act.toggled.connect(
+            lambda checked: checked and self._update_roi_tracking_label()
+        )
 
         self.roiTrackingMenu = qt.QMenu()
+        self.roiTrackingMenu.addAction(self.roiTrackingAutoAct)
         self.roiTrackingMenu.addAction(self.roiTrackingS1Act)
         self.roiTrackingMenu.addAction(self.roiTrackingS2Act)
 
@@ -284,6 +298,12 @@ class QScanSelector(qt.QMainWindow):
         self.roiTrackingBtn.setDefaultAction(self.roiTrackingAct)
         self.roiTrackingBtn.setPopupMode(qt.QToolButton.MenuButtonPopup)
         self.roiTrackingBtn.setMenu(self.roiTrackingMenu)
+
+        self.roiTrackingLabel = qt.QLabel("SX")
+        self.roiTrackingLabel.setMinimumWidth(
+            self.roiTrackingLabel.fontMetrics().horizontalAdvance("S2") + 8
+        )
+        self._set_roi_tracking_label(None)
 
         self.roiTrackingBtnAct = qt.QWidgetAction(self)
         self.roiTrackingBtnAct.setDefaultWidget(self.roiTrackingBtn)
@@ -302,6 +322,7 @@ class QScanSelector(qt.QMainWindow):
         self.toolbar.addWidget(self.axislabel)
         self.toolbar.addWidget(self.axisSelector)
         self.toolbar.addAction(self.roiTrackingBtnAct)
+        self.toolbar.addWidget(self.roiTrackingLabel)
 
         self.toolbar.addWidget(self.slider)
         decreaseImageNo = self.toolbar.addAction(
@@ -876,6 +897,33 @@ class QScanSelector(qt.QMainWindow):
         else:
             hkl = [h.value() for h in self.hkl_static]
             self.sigSearchHKL.emit(hkl)
+
+    def _set_roi_tracking_label(self, intersect):
+        if intersect == 1:
+            text = "S1"
+            color = "#d62728"
+        elif intersect == 2:
+            text = "S2"
+            color = "#1f77b4"
+        else:
+            text = "SX"
+            color = "#555555"
+        self.roiTrackingLabel.setText(text)
+        self.roiTrackingLabel.setStyleSheet(
+            f"font-weight: bold; font-size: 16px; color: {color};"
+        )
+
+    def _update_roi_tracking_label(self):
+        if self.roiTrackingS1Act.isChecked():
+            self._set_roi_tracking_label(1)
+        elif self.roiTrackingS2Act.isChecked():
+            self._set_roi_tracking_label(2)
+        else:
+            self._set_roi_tracking_label(None)
+
+    def set_resolved_roi_tracking_intersect(self, intersect):
+        """Display the intersect selected by auto ROI tracking."""
+        self._set_roi_tracking_label(intersect)
 
     def _onIntersectChanged(self, checked):
         self.intersect_btn.setIcon(self.intersectgrp.checkedAction().icon())
