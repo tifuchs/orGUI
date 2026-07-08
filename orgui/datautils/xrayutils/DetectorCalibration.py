@@ -53,6 +53,16 @@ def loadNXdict(nxdict):
     return det
 
 
+def _nx_to_python(value):
+    if isinstance(value, dict):
+        return {key: _nx_to_python(item) for key, item in value.items()}
+    if isinstance(value, np.ndarray) and value.shape == ():
+        return _nx_to_python(value.item())
+    if isinstance(value, bytes):
+        return value.decode()
+    return value
+
+
 """
 
 Attention!!!!
@@ -75,11 +85,22 @@ class Detector2D_SXRD(geometry.Geometry):
         to save and load the data from any nexus file.
 
         """
-        pyFAI_dict = self.getPyFAI()
+        pyFAI_dict = _nx_to_python(self.get_config())
+        detector_config = dict(pyFAI_dict.get("detector_config", {}))
+        orientation = detector_config.get("orientation")
+        if hasattr(orientation, "value"):
+            detector_config["orientation"] = int(orientation.value)
+        pyFAI_dict["detector_config"] = detector_config
 
         if hasattr(self, "_roi"):
             pyFAI_dict["poni1"] = self.poni1_max
             pyFAI_dict["poni2"] = self.poni2_max
+        if self.detector.shape is not None:
+            pyFAI_dict["shape"] = np.asarray(self.detector.shape, dtype=np.int64)
+        if self.detector.max_shape is not None:
+            pyFAI_dict["max_shape"] = np.asarray(
+                self.detector.max_shape, dtype=np.int64
+            )
 
         nxdict = {
             "detector_SXRD": {
@@ -110,16 +131,23 @@ class Detector2D_SXRD(geometry.Geometry):
             detdict = nxdict["detector_SXRD"]
         else:
             detdict = nxdict
-        for entry in list(detdict["config"]):
+        config = _nx_to_python(dict(detdict["config"]))
+        for entry in list(config):
             if entry.startswith("@"):
-                del detdict["config"][entry]
-        detdict["config"]["detector"] = str(detdict["config"]["detector"])
-        detdict["config"]["max_shape"] = tuple(detdict["config"]["max_shape"])
-        self.setPyFAI(**detdict["config"])
+                del config[entry]
+        shape = config.pop("shape", None)
+        max_shape = config.pop("max_shape", None)
+        if "detector" in config:
+            config["detector"] = str(config["detector"])
+        self.set_config(config)
+        if max_shape is not None:
+            self.detector.max_shape = tuple(max_shape)
+        if shape is not None:
+            self.detector.shape = tuple(shape)
         self.setAzimuthalReference(detdict["azimuth"])
         self.setPolarization(detdict["polarization_axis"], detdict["polarization"])
         if "binning" in detdict:
-            self.detector.set_binning(tuple(detdict["binning"]))
+            self.detector.binning = tuple(detdict["binning"])
         if "roi" in detdict:
             roi = detdict["roi"]
             self.set_roi(list(roi[0]), list(roi[1]))
@@ -139,7 +167,7 @@ class Detector2D_SXRD(geometry.Geometry):
         new_det.poni2_max = new_det.poni2
         new_det.detector.pixel1 *= binns[0]
         new_det.detector.pixel2 *= binns[1]
-        new_det.detector.set_binning((1, 1))
+        new_det.detector.binning = (1, 1)
         new_det.set_roi([0, new_det.detector.shape[0]], [0, new_det.detector.shape[1]])
         new_det.reset()
         return new_det
@@ -168,9 +196,6 @@ class Detector2D_SXRD(geometry.Geometry):
             self.poni2_max = self.poni2
         self.poni1 = self.poni1_max - offset1 * self.detector.pixel1
         self.poni2 = self.poni2_max - offset2 * self.detector.pixel2
-        binns = self.detector.binning
-        self.detector.set_binning((1, 1))
-        self.detector.set_binning(binns)  # reset shape
         self.detector.shape = (range1[1] - range1[0], range2[1] - range2[0])
         self.reset()
 

@@ -54,6 +54,7 @@ from silx.utils.weakref import WeakMethodProxy
 import traceback
 
 from . import qutils
+from .config_data import ConfigData
 from .. import resources
 from .. import logger_utils
 
@@ -77,7 +78,7 @@ MAX_ROIS_DISPLAY = 100
 if hasattr(np, "trapezoid"):  # ToDo remove for orGUI release >1.5
     _trapz_impl = np.trapezoid  # numpy >= 2.0
 else:
-    _trapz_impl = np.trapz  # numpy < 2.0
+    _trapz_impl = np.trapz  # noqa: NPY201  # numpy < 2.0
 
 
 class RockingPeakIntegrator(qt.QMainWindow):
@@ -1338,11 +1339,16 @@ class RockingPeakIntegrator(qt.QMainWindow):
             "@orgui_meta": "roi",
         }
 
+        config_target = self.database.config_target
+        config_snapshot = ConfigData.from_gui(config_target)
         measurement = {
             "@NX_class": "NXentry",
             "@default": availname1,
             availname1: datas1,
         }
+        measurement[availname1]["configuration"] = config_snapshot.to_nxdict(
+            role="integration", source="integration_save"
+        )
 
         if self.lorentzButton.isChecked():
             measurement[availname1]["counters"]["F2_hkl"] = F2_hkl

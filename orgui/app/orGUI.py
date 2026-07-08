@@ -69,6 +69,7 @@ from .MaskConfigDialog import MaskConfigDialog
 from .bgroi import RectangleBgROI
 from .database import DataBase, FILTERS
 from .mask_config import MaskManager
+from .config_data import ConfigData
 from ..backend.scans import SimulationScan
 from ..backend import backends
 from ..backend import universalScanLoader
@@ -239,6 +240,8 @@ class orGUI(qt.QMainWindow):
         self.integrdataPlot.addDockWidget(qt.Qt.RightDockWidgetArea, legendwidget)
         legendwidget.show()
         self.database = DataBase(self.integrdataPlot)
+        self.database.config_target = self
+        self.database.config_handler.gui = self
         dbdockwidget = qt.QDockWidget("Integrated data")
         dbdockwidget.setWidget(self.database)
 
@@ -1757,6 +1760,7 @@ ub : gui for UB matrix and angle calculations
         if len(np.asarray(mu).shape) == 0:
             mu = np.full_like(om, mu)
 
+        config_snapshot = ConfigData.from_gui(self)
         data = {
             self.activescanname: {  # legacy, to be removed!
                 "instrument": {
@@ -1782,6 +1786,9 @@ ub : gui for UB matrix and angle calculations
                     },
                 },
                 "title": f"{title}",
+                "configuration": config_snapshot.to_nxdict(
+                    role="scan", source="scan_import"
+                ),
                 "@NX_class": "NXentry",
                 "@default": f"measurement/{name}",
                 "@orgui_meta": "scan",
@@ -1979,6 +1986,9 @@ ub : gui for UB matrix and angle calculations
                 "@axes": "trajectory/axis",
                 "@title": self.activescanname + "_" + availname1,
                 "@orgui_meta": "roi rocking",
+                "configuration": config_snapshot.to_nxdict(
+                    role="integration", source="integration_save"
+                ),
             }
 
             data[self.activescanname]["measurement"][name]["rois"]["@default"] = (
@@ -2019,9 +2029,15 @@ ub : gui for UB matrix and angle calculations
                         "@NX_class": "NXentry",
                         "@default": "rois",
                         "@orgui_meta": "rocking",
+                        "configuration": config_snapshot.to_nxdict(
+                            role="integration", source="integration_save"
+                        ),
                     },
                 },
                 "title": f"{title}",
+                "configuration": config_snapshot.to_nxdict(
+                    role="scan", source="scan_import"
+                ),
                 "@NX_class": "NXentry",
                 "@default": f"measurement/{name}",
                 "@orgui_meta": "scan",
@@ -5470,6 +5486,7 @@ ub : gui for UB matrix and angle calculations
             "@orgui_meta": "roi",
         }
 
+        config_snapshot = ConfigData.from_gui(self)
         data = {
             self.activescanname: {
                 "instrument": {
@@ -5485,6 +5502,9 @@ ub : gui for UB matrix and angle calculations
                     "@default": availname1 if defaultS1 else availname2,
                 },
                 "title": f"{title}",
+                "configuration": config_snapshot.to_nxdict(
+                    role="scan", source="scan_import"
+                ),
                 "@NX_class": "NXentry",
                 "@default": "measurement/%s"
                 % (availname1 if defaultS1 else availname2),
@@ -5505,6 +5525,9 @@ ub : gui for UB matrix and angle calculations
             )
 
             data[self.activescanname]["measurement"][availname1] = datas1
+            data[self.activescanname]["measurement"][availname1]["configuration"] = (
+                config_snapshot.to_nxdict(role="integration", source="integration_save")
+            )
             names_to_log += availname1
         if np.any(cpixel2_a > 0.0):
             self.integrdataPlot.addCurve(
@@ -5517,6 +5540,9 @@ ub : gui for UB matrix and angle calculations
             )
 
             data[self.activescanname]["measurement"][availname2] = datas2
+            data[self.activescanname]["measurement"][availname2]["configuration"] = (
+                config_snapshot.to_nxdict(role="integration", source="integration_save")
+            )
 
             names_to_log += availname2
 

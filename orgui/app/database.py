@@ -28,7 +28,6 @@ __version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
-import numpy as np
 import silx.gui.hdf5
 from silx.gui import icons
 from silx.gui.data import DataViewerFrame
@@ -44,11 +43,9 @@ import datetime
 import os
 import traceback
 import time
-import configparser
 
-from ..datautils.xrayutils import HKLVlieg, CTRcalc
-from ..datautils.xrayutils import DetectorCalibration
 from .. import resources
+from .config_data import ConfigData, ConfigHandler
 
 import logging
 from silx.io.dictdump import dicttonx, nxtodict
@@ -119,121 +116,6 @@ except Exception:
     )
 
 
-class ConfigData(qt.QObject):
-    def __init__(self, config=None):
-        self.detector = DetectorCalibration.Detector2D_SXRD()
-
-        pass
-
-    # @classmethod
-    def readConfig(self, filename):
-        config = configparser.ConfigParser()
-        config.read(filename)
-
-        machine = config["Machine"]
-        lattice = config["Lattice"]
-        diffrac = config["Diffractometer"]
-
-        self.azimuth = np.deg2rad(diffrac.getfloat("azimuthal_reference", 0))
-        self.polaxis = np.deg2rad(diffrac.getfloat("polarization_axis", 90))
-        self.polfactor = diffrac.getfloat("polarization_factor", 0)
-
-        sdd = machine.getfloat("SDD", 0.729)  # m
-        E = machine.getfloat("E", 78.0)  # keV
-        pixelsize = machine.getfloat("pixelsize", 172e-6)  # m
-        cpx = machine.getfloat("cpx", 731)
-        cpy = machine.getfloat("cpy", 1587)
-
-        self.mu = np.deg2rad(diffrac.getfloat("mu", 0.05))
-        self.chi = np.deg2rad(diffrac.getfloat("chi", 0.0))
-        self.phi = np.deg2rad(diffrac.getfloat("phi", 0.0))
-
-        a1 = lattice.getfloat("a1", -1)
-        a2 = lattice.getfloat("a2", -1)
-        a3 = lattice.getfloat("a3", -1)
-        alpha1 = lattice.getfloat("alpha1", -1)
-        alpha2 = lattice.getfloat("alpha2", -1)
-        alpha3 = lattice.getfloat("alpha3", -1)
-        self.n = 1 - lattice.getfloat("refractionindex", 0.0)
-
-        lat = np.array([a1, a2, a3])
-
-        latticeoverride = True
-        latangle = np.array([alpha1, alpha2, alpha3])
-        if np.any(lat < 0.0) or np.any(latangle < 0):
-            latticeoverride = False
-            a1 = a2 = a3 = 1.0
-            alpha1 = alpha2 = alpha3 = 90.0
-
-        self.crystal = CTRcalc.UnitCell([a1, a2, a3], [alpha1, alpha2, alpha3])
-        self.crystal.addAtom("Pt", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0)
-        self.crystal.setEnergy(E * 1e3)
-
-        self.ubCal = HKLVlieg.UBCalculator(self.crystal, E)
-        self.ubCal.defaultU()
-        self.angles = HKLVlieg.VliegAngles(self.ubCal)
-
-        if "crystal" in lattice:
-            idx = self.crystalparams.crystalComboBox.findText(
-                lattice["crystal"], qt.Qt.MatchFixedString
-            )
-            if idx == -1:
-                qt.QMessageBox.warning(
-                    self,
-                    "Did not find crystal",
-                    "Can not find crystal <{}> \nException occured during read of configfile {},\nException:\n{}".format(  # noqa: E501
-                        lattice["crystal"], filename, traceback.format_exc()
-                    ),  # noqa: E501
-                )
-            else:
-                self.crystalparams.crystalComboBox.setCurrentIndex(idx)
-                self.crystalparams.onSwitchCrystal(idx)
-                # self.crystal = self.crystalparams.getCrystal()
-
-        if latticeoverride:
-            print("foo")
-            self.crystal.setLattice([a1, a2, a3], [alpha1, alpha2, alpha3])
-
-        if "poni" in machine:
-            if machine["poni"]:
-                self.detectorCal.load(machine["poni"])
-                self.ubCal.setLambda(self.detectorCal.get_wavelength() * 1e10)
-
-            else:
-                self.detectorCal.setFit2D(
-                    sdd * 1e3, cpx, cpy, pixelX=pixelsize * 1e6, pixelY=pixelsize * 1e6
-                )
-                self.detectorCal.set_wavelength(self.ubCal.getLambda() * 1e-10)
-                self.detectorCal.detector.shape = (2880, 2880)  # Perkin
-
-        else:
-            self.detectorCal.setFit2D(
-                sdd * 1e3, cpx, cpy, pixelX=pixelsize * 1e6, pixelY=pixelsize * 1e6
-            )
-            self.detectorCal.set_wavelength(self.ubCal.getLambda() * 1e-10)
-            self.detectorCal.detector.shape = (2880, 2880)
-
-        self.detectorCal.setAzimuthalReference(self.azimuth)
-        self.detectorCal.setPolarization(self.polaxis, self.polfactor)
-
-        fit2dCal = self.detectorCal.getFit2D()
-
-        paramlist = [
-            self.ubCal.getEnergy(),
-            self.mu,
-            fit2dCal["directDist"] / 1e3,
-            fit2dCal["pixelX"] * 1e-6,
-            [fit2dCal["centerX"], fit2dCal["centerY"]],
-            self.polaxis,
-            self.polfactor,
-            self.azimuth,
-            self.chi,
-            self.phi,
-        ]
-        self.crystalparams.setValues(self.crystal, self.n)
-        self.machineParams.setValues(paramlist)
-
-
 class DataBase(qt.QMainWindow):
     compression = FILTERS["Raw"]
 
@@ -244,6 +126,10 @@ class DataBase(qt.QMainWindow):
         self.nxfile = None
         self.filedialogdir = os.getcwd()
         self.plot = plot
+        self.config_target = parent
+        self.config_handler = ConfigHandler(
+            parent, create_dataset_args={"compression": self.compression}
+        )
 
         self.view = silx.gui.hdf5.Hdf5TreeView()
         self.view.setSortingEnabled(True)
@@ -384,7 +270,12 @@ class DataBase(qt.QMainWindow):
 
         if obj.ntype is h5py.Group:
             meta = obj.h5py_object.attrs.get("orgui_meta", False)
-            if meta and "roi" in meta:
+            if ConfigHandler.is_config_group(obj.h5py_object):
+                action = qt.QAction("Load configuration", menu)
+                action.triggered.connect(lambda: self.onLoadConfig(obj.h5py_object))
+                menu.addAction(action)
+
+            elif meta and "roi" in meta:
                 if "rocking" in meta:
                     action = qt.QAction("Show in rocking integration", menu)
                     action.triggered.connect(lambda: self.onShowRoIntegrate(obj))
@@ -412,12 +303,21 @@ class DataBase(qt.QMainWindow):
                 action.triggered.connect(lambda: self.onDeleteScan(obj.h5py_object))
                 menu.addAction(action)
 
-        """
-        if obj.ntype is h5py.File:
-            action = qt.QAction("remove", menu)
-            action.triggered.connect(lambda:  self._onCloseFile())
-            menu.addAction(action)
-        """
+    def onLoadConfig(self, obj):
+        """Apply a selected stored configuration to the configured GUI target."""
+        try:
+            self.config_handler.apply_config_group(obj, self.config_target)
+        except Exception:
+            logger.exception(
+                "Cannot load configuration from database.",
+                extra={
+                    "title": "Cannot load configuration",
+                    "description": f"Cannot load configuration group {obj.name}",
+                    "show_dialog": True,
+                    "dialog_level": logging.WARNING,
+                    "parent": self,
+                },
+            )
 
     def plot_signal_callback(self, roi_node, dataset):
         try:
@@ -657,6 +557,22 @@ class DataBase(qt.QMainWindow):
             time.sleep(0.01)
         self.hdf5model.synchronizeH5pyObject(self.nxfile)
         self.view.expandToDepth(0)
+
+    def write_scan_config(self, scan_name, config=None):
+        """Write the default config group for a scan."""
+        if config is None:
+            config = ConfigData.from_gui(self.config_target)
+        group = self.nxfile[scan_name]
+        self.config_handler.create_dataset_args = {"compression": self.compression}
+        return self.config_handler.write_scan_config(group, config)
+
+    def write_integration_config(self, integration_path, config=None):
+        """Write the config group used for an integration result."""
+        if config is None:
+            config = ConfigData.from_gui(self.config_target)
+        group = self.nxfile[integration_path]
+        self.config_handler.create_dataset_args = {"compression": self.compression}
+        return self.config_handler.write_integration_config(group, config)
 
     def onDeleteScan(self, obj):
         btn = qt.QMessageBox.question(
