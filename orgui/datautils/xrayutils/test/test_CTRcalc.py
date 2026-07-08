@@ -569,6 +569,201 @@ class TestLayerStacking(unittest.TestCase):
         self.assertEqual(film.end_layer_number, 3)
         np.testing.assert_array_equal(film.layer_order, [2, 3, 1])
 
+    def test_unitcell_affine_layer_transform_wraps_layers_to_unit_cell(self):
+        unitcell = self.make_layered_unitcell()
+        unitcell.basis[:, 1] = [0.1, 0.2, 0.3]
+        unitcell.basis[:, 3] += 0.05
+        unitcell.basis_0[:] = unitcell.basis
+
+        transformed = unitcell.affine_layer_transform([0, 0, 1])
+
+        np.testing.assert_allclose(transformed.basis[:, 1], [0.3, 0.1, 0.2])
+        np.testing.assert_allclose(
+            transformed.basis[:, 3],
+            [0.05, 1 / 3 + 0.05, 2 / 3 + 0.05],
+        )
+        np.testing.assert_array_equal(transformed.basis[:, 7], [1, 2, 3])
+        self.assertEqual(transformed.layerpos, unitcell.layerpos)
+
+    def test_unitcell_affine_layer_transform_full_cycle_preserves_wrapped_z(self):
+        unitcell = CTRcalc.UnitCell(
+            [3.0, 3.0, 6.0],
+            [90.0, 90.0, 90.0],
+            name="two_layer",
+        )
+        for layer, z in zip((1, 2), (0.0, 0.5)):
+            unitcell.addAtom("C", [0.0, 0.0, z], 0.1, 0.1, 1.0, layer=layer)
+            unitcell.layerpos[float(layer)] = z
+
+        transformed = unitcell.affine_layer_transform([0, 0, -2])
+
+        np.testing.assert_allclose(transformed.basis, unitcell.basis)
+        np.testing.assert_allclose(transformed.basis_0, unitcell.basis_0)
+        self.assertEqual(transformed.layerpos, unitcell.layerpos)
+
+    def test_unitcell_affine_layer_transform_remaps_symmetry_metadata_atoms(self):
+        unitcell = self.make_layered_unitcell()
+        unitcell.symmetry_metadata = CTRsymmetry.SurfaceSymmetryModel(
+            CTRsymmetry.SurfaceCellSpec(
+                (3.0, 3.0, 6.0),
+                (90.0, 90.0, 90.0),
+                np.identity(3),
+            ),
+            (),
+            atoms=[
+                CTRsymmetry.GeneratedWyckoffAtom(
+                    atom_index=2,
+                    element="C",
+                    site_id="C_2",
+                    wyckoff_label="1a",
+                    parent_fractional=np.array([0.0, 0.0, 2 / 3]),
+                    surface_fractional=np.array([0.0, 0.0, 2 / 3]),
+                    layer=3,
+                    couplings=(
+                        CTRsymmetry.WyckoffCoupling(
+                            atom_index=2,
+                            coordinate="z",
+                            variable="u",
+                            constant=2 / 3,
+                            factor=1.0,
+                            site_id="C_2",
+                        ),
+                    ),
+                ),
+            ],
+        )
+
+        transformed = unitcell.affine_layer_transform([0, 0, 1])
+
+        atom = transformed.atom_wyckoff_metadata(0)
+        self.assertIsNotNone(atom)
+        self.assertEqual(atom.layer, 1)
+        np.testing.assert_allclose(atom.surface_fractional, [0.0, 0.0, 0.0])
+        np.testing.assert_allclose(atom.parent_fractional, [0.0, 0.0, 0.0])
+        self.assertEqual(atom.couplings[0].atom_index, 0)
+        self.assertAlmostEqual(atom.couplings[0].constant, 0.0)
+
+    @staticmethod
+    def make_single_wyckoff_cell():
+        unitcell = CTRcalc.UnitCell(
+            [3.0, 4.0, 5.0],
+            [90.0, 90.0, 90.0],
+            name="single",
+        )
+        unitcell.addAtom("C", [0.25, 0.0, 0.0], 0.1, 0.1, 1.0, layer=1)
+        unitcell.layerpos[1.0] = 0.0
+        unitcell.symmetry_metadata = CTRsymmetry.SurfaceSymmetryModel(
+            CTRsymmetry.SurfaceCellSpec(
+                (3.0, 4.0, 5.0),
+                (90.0, 90.0, 90.0),
+                np.identity(3),
+                layer_origins=(0.0,),
+            ),
+            (
+                CTRsymmetry.WyckoffSiteSpec(
+                    site_id="C_1",
+                    element="C",
+                    wyckoff_label="1a",
+                    coordinates=(),
+                    variables={"u": 0.25},
+                    occ=1.0,
+                    iDW=0.1,
+                    oDW=0.1,
+                ),
+            ),
+            atoms=[
+                CTRsymmetry.GeneratedWyckoffAtom(
+                    atom_index=0,
+                    element="C",
+                    site_id="C_1",
+                    wyckoff_label="1a",
+                    parent_fractional=np.array([0.25, 0.0, 0.0]),
+                    surface_fractional=np.array([0.25, 0.0, 0.0]),
+                    layer=1,
+                    couplings=(
+                        CTRsymmetry.WyckoffCoupling(
+                            atom_index=0,
+                            coordinate="x",
+                            variable="u",
+                            constant=0.0,
+                            factor=1.0,
+                            site_id="C_1",
+                        ),
+                    ),
+                ),
+            ],
+        )
+        return unitcell
+
+    def test_unitcell_supercell_scales_lattice_and_coordinates(self):
+        unitcell = self.make_single_wyckoff_cell()
+
+        supercell = unitcell.supercell((2, 3, 1), name="super")
+
+        np.testing.assert_allclose(supercell.a, [6.0, 12.0, 5.0])
+        self.assertEqual(supercell.name, "super")
+        self.assertEqual(supercell.basis.shape[0], 6)
+        np.testing.assert_allclose(
+            supercell.basis[:2, 1:4],
+            [[0.125, 0.0, 0.0], [0.625, 0.0, 0.0]],
+        )
+        np.testing.assert_allclose(
+            supercell.symmetry_metadata.surface_spec.transform,
+            np.diag([2.0, 3.0, 1.0]),
+        )
+        self.assertEqual(supercell.parameters, {"absolute": [], "relative": []})
+
+    def test_unitcell_supercell_repeats_layers_along_z(self):
+        unitcell = self.make_layered_unitcell()
+
+        supercell = unitcell.supercell((1, 1, 2))
+
+        np.testing.assert_array_equal(supercell.layers, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        self.assertEqual(set(supercell.layerpos), {1.0, 2.0, 3.0, 4.0, 5.0, 6.0})
+        np.testing.assert_allclose(
+            [supercell.layerpos[layer] for layer in supercell.layers],
+            [0.0, 1 / 6, 1 / 3, 0.5, 2 / 3, 5 / 6],
+        )
+
+    def test_unitcell_supercell_preserves_shared_wyckoff_site(self):
+        unitcell = self.make_single_wyckoff_cell()
+
+        supercell = unitcell.supercell((2, 1, 1), symmetry="preserve")
+
+        self.assertEqual(
+            [site["site_id"] for site in supercell.wyckoff_sites()],
+            ["C_1"],
+        )
+        couplings = supercell.wyckoff_couplings("C_1")
+        self.assertEqual([coupling.atom_index for coupling in couplings], [0, 1])
+        np.testing.assert_allclose(
+            [coupling.constant for coupling in couplings],
+            [0.0, 0.5],
+        )
+        np.testing.assert_allclose(
+            [coupling.factor for coupling in couplings],
+            [0.5, 0.5],
+        )
+
+        supercell.addWyckoffParameter("C_1", "u", limits=(-0.2, 0.2))
+        supercell.setFitParameters([0.1])
+
+        np.testing.assert_allclose(supercell.basis[:, 1], [0.175, 0.675])
+
+    def test_unitcell_supercell_independent_wyckoff_sites_fit_separately(self):
+        unitcell = self.make_single_wyckoff_cell()
+
+        supercell = unitcell.supercell((2, 1, 1), symmetry="independent")
+
+        self.assertEqual(
+            [site["site_id"] for site in supercell.wyckoff_sites()],
+            ["C_1_copy0", "C_1_copy1"],
+        )
+        supercell.addWyckoffParameter("C_1_copy0", "u", limits=(-0.2, 0.2))
+        supercell.setFitParameters([0.1])
+
+        np.testing.assert_allclose(supercell.basis[:, 1], [0.175, 0.625])
+
     def test_film_and_poisson_rotate_cyclic_layer_order(self):
         film = CTRfilm.Film(self.make_layered_unitcell("film"))
         film.basis[0] = 2
