@@ -1,6 +1,6 @@
 option(
   'native_optimization',
   type: 'boolean',
-  value: true,
+  value: false,
   description: 'Build C++ extensions with native CPU flags for local benchmarking'
 )
