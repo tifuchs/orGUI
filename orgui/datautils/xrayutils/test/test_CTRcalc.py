@@ -410,6 +410,17 @@ class TestLayerStacking(unittest.TestCase):
             {0.0: 0.0, 1.0: -1.0, 2.0: -0.5},
         )
 
+    def test_unitcell_translate_layered_shifts_absolute_parameter_values(self):
+        unitcell = self.make_layered_unitcell()
+        unitcell.addFitParameter((0, "z"), limits=(-0.1, 2.0), name="z_abs")
+        unitcell.setFitParameters([0.05])
+
+        transformed = unitcell.translate_layered([0, 0, 3])
+
+        np.testing.assert_allclose(transformed.getInitialParameters(), [1.05])
+        transformed.setFitParameters([1.05])
+        self.assertAlmostEqual(transformed.basis[0, 3], 1.05)
+
     def test_unitcell_translate_layered_preserves_full_cycle_symmetry_metadata(self):
         unitcell = CTRcalc.UnitCell(
             [3.0, 3.0, 6.0],
@@ -722,6 +733,26 @@ class TestLayerStacking(unittest.TestCase):
             np.diag([2.0, 3.0, 1.0]),
         )
         self.assertEqual(supercell.parameters, {"absolute": [], "relative": []})
+
+    def test_unitcell_supercell_rescales_coherent_domain_translations(self):
+        unitcell = CTRcalc.UnitCell(
+            [2.0, 3.0, 4.0],
+            [90.0, 90.0, 90.0],
+            name="domain",
+        )
+        unitcell.addAtom("C", [0.25, 0.0, 0.0], 0.1, 0.1, 1.0, layer=1)
+        unitcell.layerpos[1.0] = 0.0
+        domain = np.eye(3, 4)
+        domain[0, 3] = 0.5
+        unitcell.coherentDomainMatrix = [domain]
+
+        supercell = unitcell.supercell((2, 1, 1))
+
+        np.testing.assert_allclose(
+            supercell.coherentDomainMatrix[0][:, -1],
+            [0.25, 0.0, 0.0],
+        )
+        np.testing.assert_allclose(supercell.pos_cart(0), unitcell.pos_cart(0))
 
     def test_unitcell_supercell_repeats_layers_along_z(self):
         unitcell = self.make_layered_unitcell()

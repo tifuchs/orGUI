@@ -1179,6 +1179,28 @@ class UnitCell(Lattice):
         parameter.indices = (old_to_new[atoms], parindexes)
 
     @staticmethod
+    def _update_absolute_parameter_values_after_basis_transform(
+        transformed,
+        original_basis,
+        old_to_new,
+    ):
+        new_to_old = np.empty_like(old_to_new)
+        new_to_old[old_to_new] = np.arange(old_to_new.size, dtype=np.intp)
+        for parameter in transformed.parameters["absolute"]:
+            if parameter.value is None or not isinstance(parameter.indices, tuple):
+                continue
+            atoms, parindexes = parameter.indices
+            atoms = np.asarray(atoms, dtype=np.intp)
+            old_atoms = new_to_old[atoms]
+            old_values = original_basis[(old_atoms, parindexes)]
+            new_values = transformed.basis[(atoms, parindexes)]
+            shifts = np.asarray(new_values - old_values, dtype=np.float64)
+            if np.allclose(shifts, shifts.flat[0]):
+                parameter.value += float(shifts.flat[0])
+            else:
+                parameter.value = None
+
+    @staticmethod
     def _transform_symmetry_metadata(
         metadata,
         old_to_new,
@@ -1321,6 +1343,11 @@ class UnitCell(Lattice):
                     )
                 transformed.layerpos[layer_key] += z_translation
             old_to_new = np.arange(self.basis.shape[0], dtype=np.intp)
+            self._update_absolute_parameter_values_after_basis_transform(
+                transformed,
+                self.basis,
+                old_to_new,
+            )
             layer_map = {layer: layer for layer in cycle}
             z_shift_by_layer = {layer: z_translation for layer in cycle}
             transformed.symmetry_metadata = self._transform_symmetry_metadata(
@@ -1383,6 +1410,11 @@ class UnitCell(Lattice):
         for parameters in transformed.parameters.values():
             for parameter in parameters:
                 self._remap_parameter_atom_indices(parameter, old_to_new)
+        self._update_absolute_parameter_values_after_basis_transform(
+            transformed,
+            self.basis,
+            old_to_new,
+        )
 
         transformed.layerpos = copy.deepcopy(self.layerpos)
         for layer in cycle:
@@ -1457,6 +1489,11 @@ class UnitCell(Lattice):
             if transformed._basis_parvalues is not None:
                 transformed._basis_parvalues[:, 1:3] += xy_translation
             old_to_new = np.arange(self.basis.shape[0], dtype=np.intp)
+            self._update_absolute_parameter_values_after_basis_transform(
+                transformed,
+                self.basis,
+                old_to_new,
+            )
             layer_map = {layer: layer for layer in cycle}
             z_shift_by_layer = {layer: 0.0 for layer in cycle}
             transformed.symmetry_metadata = self._transform_symmetry_metadata(
@@ -1521,6 +1558,11 @@ class UnitCell(Lattice):
         for parameters in transformed.parameters.values():
             for parameter in parameters:
                 self._remap_parameter_atom_indices(parameter, old_to_new)
+        self._update_absolute_parameter_values_after_basis_transform(
+            transformed,
+            self.basis,
+            old_to_new,
+        )
 
         transformed.layerpos = copy.deepcopy(self.layerpos)
         for layer in cycle:
@@ -1576,7 +1618,12 @@ class UnitCell(Lattice):
         transformed.layer_transition = copy.deepcopy(self.layer_transition)
         transformed.refHKLTransform = np.copy(self.refHKLTransform)
         transformed.refRealTransform = np.copy(self.refRealTransform)
-        transformed.coherentDomainMatrix = copy.deepcopy(self.coherentDomainMatrix)
+        transformed.coherentDomainMatrix = []
+        repeats_float = repeats.astype(np.float64)
+        for matrix in self.coherentDomainMatrix:
+            matrix_new = np.array(matrix, copy=True)
+            matrix_new[:, -1] = matrix_new[:, -1] / repeats_float
+            transformed.coherentDomainMatrix.append(matrix_new)
         transformed.coherentDomainOccupancy = copy.deepcopy(
             self.coherentDomainOccupancy
         )

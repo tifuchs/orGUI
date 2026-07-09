@@ -37,6 +37,37 @@ HAS_PYXTAL = importlib.util.find_spec("pyxtal") is not None
 HAS_PYMATGEN = importlib.util.find_spec("pymatgen") is not None
 
 
+class TestSymmetryUtilities(unittest.TestCase):
+    def test_duplicate_wyckoff_site_ids_are_disambiguated(self):
+        sites = CTRsymmetry._with_unique_site_ids(
+            (
+                CTRsymmetry.WyckoffSiteSpec(
+                    site_id="O_4f",
+                    element="O",
+                    wyckoff_label="4f",
+                    coordinates=(),
+                ),
+                CTRsymmetry.WyckoffSiteSpec(
+                    site_id="O_4f",
+                    element="O",
+                    wyckoff_label="4f",
+                    coordinates=(),
+                ),
+                CTRsymmetry.WyckoffSiteSpec(
+                    site_id="Ru_2a",
+                    element="Ru",
+                    wyckoff_label="2a",
+                    coordinates=(),
+                ),
+            )
+        )
+
+        self.assertEqual(
+            [site.site_id for site in sites],
+            ["O_4f_1", "O_4f_2", "Ru_2a"],
+        )
+
+
 @unittest.skipUnless(
     HAS_PYXTAL and HAS_PYMATGEN,
     "PyXtal symmetry tests require PyXtal",

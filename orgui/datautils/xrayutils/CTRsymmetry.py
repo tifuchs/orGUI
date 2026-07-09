@@ -31,7 +31,7 @@ structure-factor calculation remains unchanged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import itertools
 import math
 
@@ -635,7 +635,7 @@ def sites_from_seed(
     pyxtal = _import_pyxtal_class()
     crystal = pyxtal()
     crystal.from_seed(seed, tol=tol, a_tol=a_tol, backend=backend, style=style)
-    sites = tuple(
+    sites = _with_unique_site_ids(
         _site_from_pyxtal_site(
             atom_site,
             variable_names=variable_names,
@@ -1209,6 +1209,26 @@ def _site_from_pyxtal_site(atom_site, variable_names, iDW, oDW, occ):
         iDW=iDW,
         oDW=oDW,
     )
+
+
+def _with_unique_site_ids(sites):
+    sites = tuple(sites)
+    site_id_counts = {}
+    for site in sites:
+        site_id_counts[site.site_id] = site_id_counts.get(site.site_id, 0) + 1
+    if all(count == 1 for count in site_id_counts.values()):
+        return sites
+
+    occurrences = {}
+    unique_sites = []
+    for site in sites:
+        if site_id_counts[site.site_id] == 1:
+            unique_sites.append(site)
+            continue
+        occurrence = occurrences.get(site.site_id, 0) + 1
+        occurrences[site.site_id] = occurrence
+        unique_sites.append(replace(site, site_id=f"{site.site_id}_{occurrence}"))
+    return tuple(unique_sites)
 
 
 def _site_operation_matrices(wp, representative, coordinates, variables):
