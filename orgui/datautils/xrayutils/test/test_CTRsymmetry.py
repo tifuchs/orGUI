@@ -73,6 +73,54 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
         )
         return model.build_unitcell("RuO2")
 
+    def make_pyxtal_generated_unitcell(
+        self,
+        spacegroup,
+        wyckoff_label,
+        variable_values,
+        lattice,
+        transform=None,
+        element="Si",
+    ):
+        """Generate a UnitCell from one PyXtal Wyckoff position."""
+        from pymatgen.core import Structure
+        from pyxtal.symmetry import Group
+
+        wyckoff_position = Group(spacegroup).get_wyckoff_position(wyckoff_label)
+        coordinates = wyckoff_position.get_all_positions(variable_values)
+        seed = Structure(lattice, [element] * len(coordinates), coordinates)
+        surface_spec = CTRsymmetry.SurfaceCellSpec(
+            lattice.abc,
+            lattice.angles,
+            np.identity(3) if transform is None else transform,
+            layer_origins=(0.0,),
+            translation_range=0,
+        )
+        model = CTRsymmetry.model_from_seed(seed, surface_spec, tol=1e-3)
+        return model.build_unitcell(element)
+
+    @staticmethod
+    def coupling_factor_vectors(unitcell, site_id):
+        grouped = {}
+        for coupling in unitcell.wyckoff_couplings(site_id):
+            key = (coupling.atom_index, coupling.coordinate)
+            grouped.setdefault(key, {})[coupling.variable] = coupling.factor
+        return {
+            tuple(round(factors.get(variable, 0.0), 8) for variable in ("u", "v", "w"))
+            for factors in grouped.values()
+        }
+
+    @staticmethod
+    def site_coupling_factor_vectors(unitcell, site_id):
+        grouped = {}
+        for coupling in unitcell.wyckoff_site_couplings(site_id):
+            key = (coupling.atom_index, coupling.coordinate)
+            grouped.setdefault(key, {})[coupling.axis] = coupling.factor
+        return {
+            tuple(round(factors.get(axis, 0.0), 8) for axis in ("x", "y", "z"))
+            for factors in grouped.values()
+        }
+
     def test_pyxtal_assigns_rutile_wyckoff_sites(self):
         sites, number, symbol = CTRsymmetry.sites_from_seed(
             self.make_rutile_seed(),
@@ -151,7 +199,7 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
             {(0.0, 1.0), (1.0, -1.0), (0.5, 1.0), (0.5, -1.0)},
         )
 
-    def test_wyckoff_parameter_preserves_rutile_u_symmetry(self):
+    def test_wyckoff_coordinate_parameter_preserves_rutile_u_symmetry(self):
         unitcell = self.make_rutile_110_unitcell()
         couplings = unitcell.wyckoff_couplings("O_4f")
         original = unitcell.basis.copy()
@@ -162,6 +210,7 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
             absolute_limits=(0.2, 0.4),
         )
 
+        self.assertEqual(parameter.settings["wyckoff"]["kind"], "coordinate")
         self.assertEqual(parameter.settings["wyckoff"]["value_kind"], "delta")
         np.testing.assert_allclose(unitcell.getInitialParameters(), [0.0])
         np.testing.assert_allclose(
@@ -179,6 +228,177 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
                 unitcell.basis[coupling.atom_index, column],
                 expected,
             )
+
+    def test_wyckoff_site_parameter_displaces_fixed_rutile_site(self):
+        unitcell = self.make_rutile_110_unitcell()
+        couplings = [
+            coupling
+            for coupling in unitcell.wyckoff_site_couplings("Ru_2a")
+            if coupling.axis == "x"
+        ]
+        original = unitcell.basis.copy()
+
+        parameter = unitcell.addWyckoffShift(
+            "Ru_2a",
+            "x",
+            absolute_limits=(-0.1, 0.1),
+        )
+
+        self.assertEqual(parameter.settings["wyckoff"]["kind"], "site_displacement")
+        self.assertEqual(unitcell.wyckoff_sites()[0]["status"], "site_displaced")
+        np.testing.assert_allclose(
+            unitcell.getStartParamAndLimits()[1:],
+            ([-0.1], [0.1]),
+        )
+
+        unitcell.setFitParameters([0.02])
+
+        for coupling in couplings:
+            column = unitcell.parameterLookup[coupling.coordinate]
+            expected = original[coupling.atom_index, column] + 0.02 * coupling.factor
+            self.assertAlmostEqual(
+                unitcell.basis[coupling.atom_index, column],
+                expected,
+            )
+
+    def test_wyckoff_site_parameter_lowers_oxygen_site_symmetry(self):
+        unitcell = self.make_rutile_110_unitcell()
+
+        unitcell.addWyckoffParameter("O_4f", "u")
+        self.assertEqual(unitcell.wyckoff_sites()[1]["status"], "symmetry_preserving")
+
+        unitcell = self.make_rutile_110_unitcell()
+        unitcell.addWyckoffShift("O_4f", "x")
+
+        self.assertEqual(unitcell.wyckoff_sites()[1]["status"], "site_displaced")
+
+    def test_wyckoff_coordinate_parameters_fit_all_site_variables(self):
+        from pymatgen.core import Lattice
+
+        unitcell = self.make_pyxtal_generated_unitcell(
+            62,
+            "8d",
+            [0.12, 0.23, 0.34],
+            Lattice.orthorhombic(4.0, 5.0, 6.0),
+            element="Mg",
+        )
+        original = unitcell.basis.copy()
+
+        parameters = unitcell.addWyckoffParameters("Mg_8d")
+
+        self.assertEqual(
+            [par.settings["wyckoff"]["variable"] for par in parameters],
+            ["u", "v", "w"],
+        )
+        self.assertEqual(unitcell.wyckoff_sites()[0]["status"], "symmetry_preserving")
+
+        unitcell.setFitParameters([0.01, -0.02, 0.03])
+
+        deltas = {"u": 0.01, "v": -0.02, "w": 0.03}
+        for coordinate_name in ("x", "y", "z"):
+            column = unitcell.parameterLookup[coordinate_name]
+            expected = original[:, column].copy()
+            for coupling in unitcell.wyckoff_couplings("Mg_8d"):
+                if coupling.coordinate == coordinate_name:
+                    expected[coupling.atom_index] += (
+                        coupling.factor * deltas[coupling.variable]
+                    )
+            np.testing.assert_allclose(unitcell.basis[:, column], expected)
+
+    def test_fixed_wyckoff_site_rejects_coordinate_parameter(self):
+        unitcell = self.make_rutile_110_unitcell()
+
+        with self.assertRaisesRegex(ValueError, "no positional coordinate variables"):
+            unitcell.addWyckoffParameter("Ru_2a", "u")
+
+    def test_trigonal_general_site_exposes_u_minus_v_couplings(self):
+        from pymatgen.core import Lattice
+
+        unitcell = self.make_pyxtal_generated_unitcell(
+            152,
+            "6c",
+            [0.12, 0.27, 0.34],
+            Lattice.hexagonal(4.0, 6.0),
+        )
+
+        self.assertEqual(
+            unitcell.wyckoff_sites()[0]["variables"],
+            {"u": 0.12, "v": 0.27, "w": 0.34},
+        )
+        vectors = self.coupling_factor_vectors(unitcell, "Si_6c")
+
+        self.assertIn((1.0, -1.0, 0.0), vectors)
+        self.assertTrue(
+            any(abs(vector[0]) == 1.0 and abs(vector[1]) == 1.0 for vector in vectors)
+        )
+
+    def test_surface_transform_can_mix_u_v_w_into_one_coordinate(self):
+        from pymatgen.core import Lattice
+
+        parent_to_surface = np.asarray(
+            [
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        transform = np.linalg.inv(parent_to_surface)
+        unitcell = self.make_pyxtal_generated_unitcell(
+            62,
+            "8d",
+            [0.12, 0.23, 0.34],
+            Lattice.orthorhombic(4.0, 5.0, 6.0),
+            transform=transform,
+            element="Mg",
+        )
+
+        vectors = self.coupling_factor_vectors(unitcell, "Mg_8d")
+
+        self.assertIn((1.0, 1.0, 1.0), vectors)
+
+    def test_general_site_displacement_exposes_operation_factor_vectors(self):
+        from pymatgen.core import Lattice
+
+        unitcell = self.make_pyxtal_generated_unitcell(
+            62,
+            "8d",
+            [0.12, 0.23, 0.34],
+            Lattice.orthorhombic(4.0, 5.0, 6.0),
+            element="Mg",
+        )
+
+        vectors = self.site_coupling_factor_vectors(unitcell, "Mg_8d")
+
+        self.assertIn((1.0, 0.0, 0.0), vectors)
+        self.assertIn((-1.0, 0.0, 0.0), vectors)
+        self.assertIn((0.0, 0.0, 1.0), vectors)
+        self.assertIn((0.0, 0.0, -1.0), vectors)
+
+    def test_surface_transform_can_mix_site_displacement_axes(self):
+        from pymatgen.core import Lattice
+
+        parent_to_surface = np.asarray(
+            [
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        transform = np.linalg.inv(parent_to_surface)
+        unitcell = self.make_pyxtal_generated_unitcell(
+            62,
+            "8d",
+            [0.12, 0.23, 0.34],
+            Lattice.orthorhombic(4.0, 5.0, 6.0),
+            transform=transform,
+            element="Mg",
+        )
+
+        vectors = self.site_coupling_factor_vectors(unitcell, "Mg_8d")
+
+        self.assertIn((1.0, 1.0, 1.0), vectors)
 
     def test_manual_atom_parameter_marks_wyckoff_site_as_partially_overridden(self):
         unitcell = self.make_rutile_110_unitcell()
@@ -200,8 +420,13 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
 
         self.assertEqual(restored.wyckoff_sites()[1]["variables"], {"u": 0.30569})
         self.assertEqual(len(restored.wyckoff_couplings("O_4f")), 8)
+        self.assertGreater(len(restored.wyckoff_site_couplings("Ru_2a")), 0)
         restored.addWyckoffParameter("O_4f", "u", absolute_limits=(0.2, 0.4))
         self.assertEqual(restored.wyckoff_sites()[1]["status"], "symmetry_preserving")
+
+        restored = UnitCell.fromStr(text)
+        restored.addWyckoffShift("Ru_2a", "x", absolute_limits=(-0.1, 0.1))
+        self.assertEqual(restored.wyckoff_sites()[0]["status"], "site_displaced")
 
 
 class TestOptionalSymmetryImports(unittest.TestCase):

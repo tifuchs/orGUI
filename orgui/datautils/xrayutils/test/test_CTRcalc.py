@@ -665,6 +665,7 @@ class TestLayerStacking(unittest.TestCase):
                     element="C",
                     wyckoff_label="1a",
                     coordinates=(),
+                    representative_parent_fractional=(0.25, 0.0, 0.0),
                     variables={"u": 0.25},
                     occ=1.0,
                     iDW=0.1,
@@ -686,6 +687,15 @@ class TestLayerStacking(unittest.TestCase):
                             coordinate="x",
                             variable="u",
                             constant=0.0,
+                            factor=1.0,
+                            site_id="C_1",
+                        ),
+                    ),
+                    site_couplings=(
+                        CTRsymmetry.WyckoffSiteCoupling(
+                            atom_index=0,
+                            coordinate="x",
+                            axis="x",
                             factor=1.0,
                             site_id="C_1",
                         ),
@@ -750,6 +760,12 @@ class TestLayerStacking(unittest.TestCase):
 
         np.testing.assert_allclose(supercell.basis[:, 1], [0.175, 0.675])
 
+        supercell = unitcell.supercell((2, 1, 1), symmetry="preserve")
+        supercell.addWyckoffShift("C_1", "x", limits=(-0.2, 0.2))
+        supercell.setFitParameters([0.1])
+
+        np.testing.assert_allclose(supercell.basis[:, 1], [0.175, 0.675])
+
     def test_unitcell_supercell_independent_wyckoff_sites_fit_separately(self):
         unitcell = self.make_single_wyckoff_cell()
 
@@ -759,10 +775,182 @@ class TestLayerStacking(unittest.TestCase):
             [site["site_id"] for site in supercell.wyckoff_sites()],
             ["C_1_copy0", "C_1_copy1"],
         )
-        supercell.addWyckoffParameter("C_1_copy0", "u", limits=(-0.2, 0.2))
+        supercell.addWyckoffParameter(
+            "C_1_copy0",
+            "u",
+            limits=(-0.2, 0.2),
+        )
         supercell.setFitParameters([0.1])
 
         np.testing.assert_allclose(supercell.basis[:, 1], [0.175, 0.625])
+
+        supercell = unitcell.supercell((2, 1, 1), symmetry="independent")
+        supercell.addWyckoffShift("C_1_copy0", "x", limits=(-0.2, 0.2))
+        supercell.setFitParameters([0.1])
+
+        np.testing.assert_allclose(supercell.basis[:, 1], [0.175, 0.625])
+
+    def test_film_forwards_wyckoff_parameters_to_template_unitcell(self):
+        film = CTRfilm.Film(self.make_single_wyckoff_cell())
+
+        film.addWyckoffParameter("C_1", "u", limits=(-0.2, 0.2))
+        film.setFitParameters([0.1])
+
+        self.assertEqual(film.unitcell.wyckoff_sites()[0]["status"], "symmetry_preserving")
+        np.testing.assert_allclose(film.unitcell.basis[:, 1], [0.35])
+
+    def test_poisson_surface_forwards_wyckoff_shifts_to_template_unitcell(self):
+        surface = CTRfilm.PoissonSurface(self.make_single_wyckoff_cell())
+
+        surface.addWyckoffShift("C_1", "x", limits=(-0.2, 0.2))
+        surface.setFitParameters([0.1])
+
+        self.assertEqual(surface.unitcell.wyckoff_sites()[0]["status"], "site_displaced")
+        np.testing.assert_allclose(surface.unitcell.basis[:, 1], [0.35])
+
+    def test_epitaxy_interface_uses_unitcell_selector_for_wyckoff_parameters(self):
+        interface = CTRfilm.EpitaxyInterface(
+            self.make_single_wyckoff_cell(),
+            self.make_single_wyckoff_cell(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Missing unit cell name"):
+            interface.addWyckoffParameter("C_1", "u", limits=(-0.2, 0.2))
+
+        interface.addWyckoffShift(
+            "C_1",
+            "x",
+            limits=(-0.2, 0.2),
+            unitcell="top",
+        )
+        interface.setFitParameters([0.1])
+
+        self.assertEqual(interface.uc_top.wyckoff_sites()[0]["status"], "site_displaced")
+        self.assertEqual(interface.uc_bottom.wyckoff_sites()[0]["status"], "metadata_only")
+        np.testing.assert_allclose(interface.uc_top.basis[:, 1], [0.35])
+        np.testing.assert_allclose(interface.uc_bottom.basis[:, 1], [0.25])
+
+    def test_epitaxy_interface_accepts_unitcell_list_for_wyckoff_parameters(self):
+        interface = CTRfilm.EpitaxyInterface(
+            self.make_single_wyckoff_cell(),
+            self.make_single_wyckoff_cell(),
+        )
+
+        parameters = interface.addWyckoffParameter(
+            "C_1",
+            "u",
+            limits=(-0.2, 0.2),
+            unitcell=["top", "bottom"],
+        )
+        interface.setFitParameters([0.1, 0.1])
+
+        self.assertEqual(len(parameters), 2)
+        self.assertEqual(interface.uc_top.wyckoff_sites()[0]["status"], "symmetry_preserving")
+        self.assertEqual(interface.uc_bottom.wyckoff_sites()[0]["status"], "symmetry_preserving")
+        np.testing.assert_allclose(interface.uc_top.basis[:, 1], [0.35])
+        np.testing.assert_allclose(interface.uc_bottom.basis[:, 1], [0.35])
+
+    def test_sxrdcrystal_links_wyckoff_parameters_across_unitcells(self):
+        bulk = self.make_single_wyckoff_cell()
+        film1 = self.make_single_wyckoff_cell()
+        film2 = self.make_single_wyckoff_cell()
+        bulk.name = "bulk_template"
+        film1.name = "film1"
+        film2.name = "film2"
+        crystal = CTRcalc.SXRDCrystal(bulk, film1, film2)
+
+        parameter = crystal.addWyckoffParameter(
+            {
+                "film1": ("C_1", "u"),
+                "film2": ("C_1", "u"),
+            },
+            name="shared_u",
+            limits=(-0.2, 0.2),
+        )
+        crystal.setParameters([0.1])
+
+        self.assertEqual(parameter.name, "shared_u")
+        self.assertEqual(crystal.fitparnames, ["shared_u"])
+        self.assertEqual(film1.wyckoff_sites()[0]["status"], "symmetry_preserving")
+        self.assertEqual(film2.wyckoff_sites()[0]["status"], "symmetry_preserving")
+        np.testing.assert_allclose(film1.basis[:, 1], [0.35])
+        np.testing.assert_allclose(film2.basis[:, 1], [0.35])
+
+    def test_sxrdcrystal_links_wyckoff_shifts_across_unitcells(self):
+        bulk = self.make_single_wyckoff_cell()
+        film1 = self.make_single_wyckoff_cell()
+        film2 = self.make_single_wyckoff_cell()
+        bulk.name = "bulk_template"
+        film1.name = "film1"
+        film2.name = "film2"
+        crystal = CTRcalc.SXRDCrystal(bulk, film1, film2)
+
+        crystal.addWyckoffShift(
+            {
+                "film1": ("C_1", "x"),
+                "film2": ("C_1", "x"),
+            },
+            name="shared_shift",
+            limits=(-0.2, 0.2),
+        )
+        crystal.setParameters([0.1])
+
+        self.assertEqual(crystal.fitparnames, ["shared_shift"])
+        self.assertEqual(film1.wyckoff_sites()[0]["status"], "site_displaced")
+        self.assertEqual(film2.wyckoff_sites()[0]["status"], "site_displaced")
+        np.testing.assert_allclose(film1.basis[:, 1], [0.35])
+        np.testing.assert_allclose(film2.basis[:, 1], [0.35])
+
+    def test_sxrdcrystal_links_wyckoff_parameters_inside_interface(self):
+        bulk = self.make_single_wyckoff_cell()
+        top = self.make_single_wyckoff_cell()
+        bottom = self.make_single_wyckoff_cell()
+        bulk.name = "bulk_template"
+        interface = CTRfilm.EpitaxyInterface(top, bottom, name="interface")
+        crystal = CTRcalc.SXRDCrystal(bulk, interface)
+
+        with self.assertRaisesRegex(ValueError, "EpitaxyInterface"):
+            crystal.addWyckoffParameter({"interface": ("C_1", "u")})
+
+        crystal.addWyckoffParameter(
+            {
+                "interface": {
+                    "site_id": "C_1",
+                    "variable": "u",
+                    "unitcell": ("top", "bottom"),
+                }
+            },
+            name="shared_interface_u",
+            limits=(-0.2, 0.2),
+        )
+        crystal.setParameters([0.1])
+
+        self.assertEqual(crystal.fitparnames, ["shared_interface_u"])
+        self.assertEqual(interface.uc_top.wyckoff_sites()[0]["status"], "symmetry_preserving")
+        self.assertEqual(interface.uc_bottom.wyckoff_sites()[0]["status"], "symmetry_preserving")
+        np.testing.assert_allclose(interface.uc_top.basis[:, 1], [0.35])
+        np.testing.assert_allclose(interface.uc_bottom.basis[:, 1], [0.35])
+
+    def test_sxrdcrystal_links_wyckoff_shift_to_interface_unitcell_key(self):
+        bulk = self.make_single_wyckoff_cell()
+        top = self.make_single_wyckoff_cell()
+        bottom = self.make_single_wyckoff_cell()
+        bulk.name = "bulk_template"
+        interface = CTRfilm.EpitaxyInterface(top, bottom, name="interface")
+        crystal = CTRcalc.SXRDCrystal(bulk, interface)
+
+        crystal.addWyckoffShift(
+            {("interface", "top"): ("C_1", "x")},
+            name="top_shift",
+            limits=(-0.2, 0.2),
+        )
+        crystal.setParameters([0.1])
+
+        self.assertEqual(crystal.fitparnames, ["top_shift"])
+        self.assertEqual(interface.uc_top.wyckoff_sites()[0]["status"], "site_displaced")
+        self.assertEqual(interface.uc_bottom.wyckoff_sites()[0]["status"], "metadata_only")
+        np.testing.assert_allclose(interface.uc_top.basis[:, 1], [0.35])
+        np.testing.assert_allclose(interface.uc_bottom.basis[:, 1], [0.25])
 
     def test_film_and_poisson_rotate_cyclic_layer_order(self):
         film = CTRfilm.Film(self.make_layered_unitcell("film"))

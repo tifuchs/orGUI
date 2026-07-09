@@ -47,6 +47,7 @@ SYMMETRY_SECTION_HEADERS = {
     "wyckoff_sites:",
     "wyckoff_atoms:",
     "wyckoff_couplings:",
+    "wyckoff_site_couplings:",
 }
 
 
@@ -233,6 +234,8 @@ class WyckoffSiteSpec:
     element: str
     wyckoff_label: str
     coordinates: tuple[tuple[AffineExpression, AffineExpression, AffineExpression], ...]
+    representative_parent_fractional: tuple[float, float, float] | None = None
+    operation_matrices: tuple[np.ndarray, ...] = ()
     variables: dict[str, float] = field(default_factory=dict)
     occ: float = 1.0
     iDW: float = 0.5
@@ -296,6 +299,31 @@ class WyckoffCoupling:
 
 
 @dataclass(frozen=True)
+class WyckoffSiteCoupling:
+    """Describe one atom-coordinate dependency on site representative motion.
+
+    :param int atom_index:
+        Index of the generated atom in ``UnitCell.basis``.
+    :param str coordinate:
+        Surface coordinate name, one of ``"x"``, ``"y"``, or ``"z"``.
+    :param str axis:
+        Parent conventional representative coordinate, one of ``"x"``,
+        ``"y"``, or ``"z"``.
+    :param float factor:
+        Surface-coordinate coefficient for a parent representative-coordinate
+        displacement.
+    :param str site_id:
+        Site identifier owning the coupling.
+    """
+
+    atom_index: int
+    coordinate: str
+    axis: str
+    factor: float
+    site_id: str
+
+
+@dataclass(frozen=True)
 class GeneratedWyckoffAtom:
     """Metadata for one generated surface-cell atom.
 
@@ -326,6 +354,7 @@ class GeneratedWyckoffAtom:
     surface_fractional: np.ndarray
     layer: int
     couplings: tuple[WyckoffCoupling, ...] = ()
+    site_couplings: tuple[WyckoffSiteCoupling, ...] = ()
 
 
 @dataclass
@@ -363,6 +392,11 @@ class SurfaceSymmetryModel:
                     "element": site.element,
                     "wyckoff_label": site.wyckoff_label,
                     "variables": variables,
+                    "representative_parent_fractional": (
+                        None
+                        if site.representative_parent_fractional is None
+                        else tuple(site.representative_parent_fractional)
+                    ),
                     "atom_indices": atoms,
                     "spacegroup_number": self.spacegroup_number,
                     "spacegroup_symbol": self.spacegroup_symbol,
@@ -385,6 +419,22 @@ class SurfaceSymmetryModel:
         for atom in self.atoms:
             if site_id is None or atom.site_id == site_id:
                 couplings.extend(atom.couplings)
+        return couplings
+
+    def wyckoff_site_couplings(self, site_id=None):
+        """Return site-displacement couplings for generated atom coordinates.
+
+        :param str site_id:
+            Optional site identifier. If omitted, all couplings are returned.
+        :returns:
+            List of :class:`WyckoffSiteCoupling` objects.
+        :rtype:
+            list
+        """
+        couplings = []
+        for atom in self.atoms:
+            if site_id is None or atom.site_id == site_id:
+                couplings.extend(atom.site_couplings)
         return couplings
 
     def atom_wyckoff_metadata(self, atom_index):
@@ -428,6 +478,7 @@ class SurfaceSymmetryModel:
             return "metadata_only"
 
         preserving = False
+        displaced = False
         for kind in ("absolute", "relative"):
             for parameter in parameters.get(kind, []):
                 pairs = set(zip(parameter.indices[0], parameter.indices[1]))
@@ -437,9 +488,16 @@ class SurfaceSymmetryModel:
                     and wyckoff_settings.get("site_id") == site_id
                     and pairs <= site_pairs
                 ):
-                    preserving = True
+                    if wyckoff_settings.get("kind") == "coordinate":
+                        preserving = True
+                    elif wyckoff_settings.get("kind") == "site_displacement":
+                        displaced = True
+                    else:
+                        return "partially_overridden"
                 elif pairs & site_pairs:
                     return "partially_overridden"
+        if displaced:
+            return "site_displaced"
         if preserving:
             return "symmetry_preserving"
         return "metadata_only"
@@ -486,6 +544,7 @@ class SurfaceSymmetryModel:
                 atom.surface_fractional,
                 atom.layer,
                 atom.couplings,
+                atom.site_couplings,
             )
             for atom in generated
         ]
@@ -713,7 +772,7 @@ def generate_surface_atoms(surface_spec, sites, tolerance=1e-8):
     z_min, z_max = surface_spec.z_bounds
 
     for site in sites:
-        for coordinate in site.coordinates:
+        for coordinate_index, coordinate in enumerate(site.coordinates):
             for translation in surface_spec.parent_translations():
                 parent_exprs = tuple(
                     expression.shifted(translation[index])
@@ -764,6 +823,28 @@ def generate_surface_atoms(surface_spec, sites, tolerance=1e-8):
                                     site_id=site.site_id,
                                 )
                             )
+                site_couplings = []
+                if coordinate_index < len(site.operation_matrices):
+                    operation = np.asarray(
+                        site.operation_matrices[coordinate_index],
+                        dtype=np.float64,
+                    )
+                    site_displacements = inverse @ operation[:3, :3]
+                    for parent_axis, axis_name in enumerate(COORDINATE_NAMES):
+                        for surface_axis, coordinate_name in enumerate(
+                            COORDINATE_NAMES
+                        ):
+                            factor = site_displacements[surface_axis, parent_axis]
+                            if not math.isclose(factor, 0.0, abs_tol=tolerance):
+                                site_couplings.append(
+                                    WyckoffSiteCoupling(
+                                        atom_index=atom_index,
+                                        coordinate=coordinate_name,
+                                        axis=axis_name,
+                                        factor=float(factor),
+                                        site_id=site.site_id,
+                                    )
+                                )
                 generated.append(
                     GeneratedWyckoffAtom(
                         atom_index=atom_index,
@@ -780,6 +861,7 @@ def generate_surface_atoms(surface_spec, sites, tolerance=1e-8):
                         surface_fractional=wrapped_values,
                         layer=layer,
                         couplings=tuple(couplings),
+                        site_couplings=tuple(site_couplings),
                     )
                 )
 
@@ -812,6 +894,16 @@ def generate_surface_atoms(surface_spec, sites, tolerance=1e-8):
                 )
                 for coupling in atom.couplings
             ),
+            site_couplings=tuple(
+                WyckoffSiteCoupling(
+                    atom_index=index,
+                    coordinate=coupling.coordinate,
+                    axis=coupling.axis,
+                    factor=coupling.factor,
+                    site_id=coupling.site_id,
+                )
+                for coupling in atom.site_couplings
+            ),
         )
         for index, atom in enumerate(generated)
     ]
@@ -836,9 +928,18 @@ def symmetry_metadata_to_lines(model):
         lines.append("  " + _format_values(row))
     lines.append("surface_origin: " + _format_values(model.surface_spec.origin))
     lines.append("wyckoff_sites:")
-    lines.append("  site_id element wyckoff_label variables occ iDW oDW")
+    lines.append(
+        "  site_id element wyckoff_label variables "
+        "representative_x representative_y representative_z occ iDW oDW"
+    )
     for site in model.sites:
         variables = _format_variables(site.variables)
+        representative = site.representative_parent_fractional
+        representative_values = (
+            ["-", "-", "-"]
+            if representative is None
+            else _format_values(representative).split()
+        )
         lines.append(
             "  "
             + " ".join(
@@ -847,6 +948,7 @@ def symmetry_metadata_to_lines(model):
                     site.element,
                     site.wyckoff_label,
                     variables,
+                    *representative_values,
                     _format_float(site.occ),
                     _format_float(site.iDW),
                     _format_float(site.oDW),
@@ -885,6 +987,21 @@ def symmetry_metadata_to_lines(model):
                 ]
             )
         )
+    lines.append("wyckoff_site_couplings:")
+    lines.append("  atom_index coordinate site_id axis factor")
+    for coupling in model.wyckoff_site_couplings():
+        lines.append(
+            "  "
+            + " ".join(
+                [
+                    str(coupling.atom_index),
+                    coupling.coordinate,
+                    coupling.site_id,
+                    coupling.axis,
+                    _format_float(coupling.factor),
+                ]
+            )
+        )
     return lines
 
 
@@ -914,6 +1031,7 @@ def symmetry_metadata_from_lines(lines, unitcell=None):
     site_specs = []
     atoms = []
     couplings_by_atom = {}
+    site_couplings_by_atom = {}
     sections = _collect_sections(cleaned)
 
     if "spacegroup" in sections:
@@ -937,16 +1055,27 @@ def symmetry_metadata_from_lines(lines, unitcell=None):
     for row in _data_rows(sections.get("wyckoff_sites", [])):
         parts = row.split()
         variables = _parse_variables(parts[3])
+        if len(parts) >= 10:
+            representative = (
+                None
+                if parts[4] == "-"
+                else tuple(float(value) for value in parts[4:7])
+            )
+            occ, iDW, oDW = (float(value) for value in parts[7:10])
+        else:
+            representative = None
+            occ, iDW, oDW = (float(value) for value in parts[4:7])
         site_specs.append(
             WyckoffSiteSpec(
                 site_id=parts[0],
                 element=parts[1],
                 wyckoff_label=parts[2],
                 coordinates=(),
+                representative_parent_fractional=representative,
                 variables=variables,
-                occ=float(parts[4]),
-                iDW=float(parts[5]),
-                oDW=float(parts[6]),
+                occ=occ,
+                iDW=iDW,
+                oDW=oDW,
             )
         )
 
@@ -962,6 +1091,17 @@ def symmetry_metadata_from_lines(lines, unitcell=None):
         )
         couplings_by_atom.setdefault(coupling.atom_index, []).append(coupling)
 
+    for row in _data_rows(sections.get("wyckoff_site_couplings", [])):
+        parts = row.split()
+        coupling = WyckoffSiteCoupling(
+            atom_index=int(parts[0]),
+            coordinate=parts[1],
+            site_id=parts[2],
+            axis=parts[3],
+            factor=float(parts[4]),
+        )
+        site_couplings_by_atom.setdefault(coupling.atom_index, []).append(coupling)
+
     for row in _data_rows(sections.get("wyckoff_atoms", [])):
         parts = row.split()
         atom_index = int(parts[0])
@@ -975,6 +1115,7 @@ def symmetry_metadata_from_lines(lines, unitcell=None):
                 surface_fractional=np.asarray(parts[7:10], dtype=np.float64),
                 layer=int(float(parts[10])),
                 couplings=tuple(couplings_by_atom.get(atom_index, ())),
+                site_couplings=tuple(site_couplings_by_atom.get(atom_index, ())),
             )
         )
 
@@ -1023,6 +1164,7 @@ def _import_pyxtal_group():
 
 def _site_from_pyxtal_site(atom_site, variable_names, iDW, oDW, occ):
     wp = atom_site.wp
+    representative = _wrap_fractional(atom_site.position)
     free_values = list(wp.get_free_xyzs(atom_site.position))
     if len(free_values) > len(variable_names):
         raise ValueError(
@@ -1046,17 +1188,51 @@ def _site_from_pyxtal_site(atom_site, variable_names, iDW, oDW, occ):
         _apply_operation_to_expressions(operation.affine_matrix, primary)
         for operation in wp.ops
     )
+    operation_matrices = _site_operation_matrices(
+        wp,
+        representative,
+        coordinates,
+        variables,
+    )
     element = str(atom_site.specie)
     return WyckoffSiteSpec(
         site_id=f"{element}_{wp.get_label()}",
         element=element,
         wyckoff_label=wp.get_label(),
         coordinates=coordinates,
+        representative_parent_fractional=tuple(
+            float(value) for value in representative
+        ),
+        operation_matrices=operation_matrices,
         variables=variables,
         occ=occ,
         iDW=iDW,
         oDW=oDW,
     )
+
+
+def _site_operation_matrices(wp, representative, coordinates, variables):
+    group = _import_pyxtal_group()(wp.number)
+    general_operations = group[0].ops
+    operation_matrices = []
+    for coordinate in coordinates:
+        target = _wrap_fractional(
+            [expression.evaluate(variables) for expression in coordinate]
+        )
+        for operation in general_operations:
+            matrix = np.asarray(operation.affine_matrix, dtype=np.float64)
+            generated = _wrap_fractional(
+                matrix[:3, :3] @ representative + matrix[:3, 3]
+            )
+            if _fractional_positions_close(generated, target):
+                operation_matrices.append(matrix)
+                break
+        else:
+            raise ValueError(
+                f"Could not match a full symmetry operation for Wyckoff "
+                f"position {wp.get_label()} at {target}."
+            )
+    return tuple(operation_matrices)
 
 
 def _primary_position_affine(wp, free_values, variable_names):
@@ -1127,6 +1303,17 @@ def _wrap_surface_expressions(values, expressions):
         shift = wrapped_value - value
         wrapped_expressions.append(expression.shifted(round(shift)))
     return wrapped_values, tuple(wrapped_expressions)
+
+
+def _wrap_fractional(values):
+    wrapped = np.mod(np.asarray(values, dtype=np.float64), 1.0)
+    wrapped[np.isclose(wrapped, 1.0, atol=1e-12)] = 0.0
+    return wrapped
+
+
+def _fractional_positions_close(first, second, tolerance=1e-6):
+    diff = np.mod(np.asarray(first) - np.asarray(second) + 0.5, 1.0) - 0.5
+    return np.allclose(diff, 0.0, atol=tolerance)
 
 
 def _assign_layer(z_value, layer_origins):

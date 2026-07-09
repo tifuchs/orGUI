@@ -5,6 +5,7 @@ API
    :maxdepth: 1
 
    ctr_structure_factors
+   wyckoff_fitting
 
 GUI API
 -------

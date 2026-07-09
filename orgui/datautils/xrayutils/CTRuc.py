@@ -1209,6 +1209,14 @@ class UnitCell(Lattice):
                         ),
                     )
                 )
+            site_couplings = []
+            for coupling in atom.site_couplings:
+                site_couplings.append(
+                    dataclasses.replace(
+                        coupling,
+                        atom_index=int(old_to_new[coupling.atom_index]),
+                    )
+                )
             parent_shift = metadata.surface_spec.transform @ coordinate_shift
             atoms.append(
                 dataclasses.replace(
@@ -1224,6 +1232,7 @@ class UnitCell(Lattice):
                     ),
                     layer=layer_map[atom.layer],
                     couplings=tuple(couplings),
+                    site_couplings=tuple(site_couplings),
                 )
             )
         metadata.atoms = sorted(atoms, key=lambda atom: atom.atom_index)
@@ -1720,7 +1729,19 @@ class UnitCell(Lattice):
                 )
                 site_id = f"{site.site_id}_copy{row['copy_index']}"
                 site_by_copy[key] = site_id
-                sites.append(dataclasses.replace(site, site_id=site_id))
+                representative = site.representative_parent_fractional
+                if representative is not None:
+                    representative = tuple(
+                        np.asarray(representative, dtype=np.float64)
+                        + metadata.surface_spec.transform @ row["cell_offset"]
+                    )
+                sites.append(
+                    dataclasses.replace(
+                        site,
+                        site_id=site_id,
+                        representative_parent_fractional=representative,
+                    )
+                )
             sites = tuple(sites)
 
         atoms = []
@@ -1761,6 +1782,19 @@ class UnitCell(Lattice):
                         ),
                     )
                 )
+            site_couplings = []
+            for coupling in atom.site_couplings:
+                site_couplings.append(
+                    dataclasses.replace(
+                        coupling,
+                        atom_index=new_index,
+                        site_id=site_id,
+                        factor=(
+                            coupling.factor
+                            / repeats[coordinate_index[coupling.coordinate]]
+                        ),
+                    )
+                )
             atoms.append(
                 dataclasses.replace(
                     atom,
@@ -1770,6 +1804,7 @@ class UnitCell(Lattice):
                     surface_fractional=surface_fractional,
                     layer=layer_ids[(int(row["cell_offset"][2]), atom.layer)],
                     couplings=tuple(couplings),
+                    site_couplings=tuple(site_couplings),
                 )
             )
 
@@ -2052,6 +2087,20 @@ class UnitCell(Lattice):
             return []
         return self.symmetry_metadata.wyckoff_couplings(site_id)
 
+    def wyckoff_site_couplings(self, site_id=None):
+        """Return couplings for representative Wyckoff-site displacement.
+
+        :param str site_id:
+            Optional site identifier. If omitted, all couplings are returned.
+        :returns:
+            List of site-displacement coupling metadata objects.
+        :rtype:
+            list
+        """
+        if self.symmetry_metadata is None:
+            return []
+        return self.symmetry_metadata.wyckoff_site_couplings(site_id)
+
     def atom_wyckoff_metadata(self, atom_index):
         """Return symmetry metadata for one atom.
 
@@ -2074,12 +2123,13 @@ class UnitCell(Lattice):
         absolute_limits=None,
         **keyargs,
     ):
-        """Add a symmetry-preserving relative fit parameter for a Wyckoff variable.
+        """Add a symmetry-preserving fit parameter for a Wyckoff variable.
 
         The stored fit value is the change in the Wyckoff variable from the
         generated coordinates. For example, fitting rutile oxygen ``u`` adds
         ``factor * delta_u`` to every generated coordinate that depends on
-        ``u``.
+        ``u``. Multi-variable Wyckoff sites are fitted by adding one parameter
+        per independent coordinate variable.
 
         :param str site_id:
             Site identifier returned by :meth:`wyckoff_sites`.
@@ -2099,21 +2149,26 @@ class UnitCell(Lattice):
         """
         if self.symmetry_metadata is None:
             raise ValueError(f"UnitCell {self.name} has no symmetry metadata.")
+        site = next(
+            (
+                site
+                for site in self.wyckoff_sites()
+                if site["site_id"] == site_id
+            ),
+            None,
+        )
+        if site is None:
+            raise ValueError(f"Unknown Wyckoff site {site_id}.")
+        if not site["variables"]:
+            raise ValueError(
+                f"Wyckoff site {site_id} has no positional coordinate variables."
+            )
+        if variable not in site["variables"]:
+            raise ValueError(f"Wyckoff site {site_id} has no variable {variable}.")
+
         if absolute_limits is not None:
             if limits != (-np.inf, np.inf):
                 raise ValueError("Use either limits or absolute_limits, not both.")
-            site = next(
-                (
-                    site
-                    for site in self.wyckoff_sites()
-                    if site["site_id"] == site_id
-                ),
-                None,
-            )
-            if site is None or variable not in site["variables"]:
-                raise ValueError(
-                    f"Wyckoff site {site_id} has no variable {variable}."
-                )
             variable_value = site["variables"][variable]
             limits = (
                 absolute_limits[0] - variable_value,
@@ -2140,11 +2195,15 @@ class UnitCell(Lattice):
             dtype=np.float64,
         )
 
-        keyargs.setdefault("name", f"{self.name} {site_id}_{variable}_wyckoff")
+        keyargs.setdefault(
+            "name",
+            f"{self.name} {site_id}_{variable}_wyckoff_coordinate",
+        )
         settings = keyargs.setdefault("wyckoff", {})
         settings.update(
             {
                 "site_id": site_id,
+                "kind": "coordinate",
                 "variable": variable,
                 "value_kind": "delta",
             }
@@ -2155,6 +2214,225 @@ class UnitCell(Lattice):
             limits=limits,
             **keyargs,
         )
+
+    def addWyckoffParameters(
+        self,
+        site_id,
+        variables=None,
+        limits=(-np.inf, np.inf),
+        absolute_limits=None,
+        **keyargs,
+    ):
+        """Add symmetry-preserving fit parameters for Wyckoff variables.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :param variables:
+            Iterable of coordinate variables to fit. If ``None``, all free
+            variables on the site are fitted.
+        :type variables:
+            iterable or None
+        :param limits:
+            Either one ``(lower, upper)`` tuple applied to every variable or a
+            dictionary mapping variable names to delta limits.
+        :param absolute_limits:
+            Optional dictionary mapping variable names to absolute limits.
+        :returns:
+            Created relative fit parameters in variable order.
+        :rtype:
+            list
+        :raises ValueError:
+            If the site has no free coordinate variables.
+        """
+        sites = {site["site_id"]: site for site in self.wyckoff_sites()}
+        if site_id not in sites:
+            raise ValueError(f"Unknown Wyckoff site {site_id}.")
+        site_variables = tuple(sites[site_id]["variables"])
+        if not site_variables:
+            raise ValueError(
+                f"Wyckoff site {site_id} has no positional coordinate variables."
+            )
+        if variables is None:
+            variables = site_variables
+        variables = tuple(variables)
+
+        def limit_for(limit_spec, variable_name):
+            if isinstance(limit_spec, dict):
+                return limit_spec.get(variable_name, (-np.inf, np.inf))
+            return limit_spec
+
+        parameters = []
+        for variable in variables:
+            parameter_keyargs = copy.deepcopy(keyargs)
+            parameter_limits = limit_for(limits, variable)
+            parameter_absolute_limits = (
+                None
+                if absolute_limits is None
+                else limit_for(absolute_limits, variable)
+            )
+            parameters.append(
+                self.addWyckoffParameter(
+                    site_id,
+                    variable,
+                    limits=parameter_limits,
+                    absolute_limits=parameter_absolute_limits,
+                    **parameter_keyargs,
+                )
+            )
+        return parameters
+
+    def addWyckoffShift(
+        self,
+        site_id,
+        axis,
+        limits=(-np.inf, np.inf),
+        absolute_limits=None,
+        **keyargs,
+    ):
+        """Add a symmetry-lowering shift for representative site motion.
+
+        ``axis`` is a parent conventional fractional coordinate of the
+        representative atom. The stored fit value is a delta from the
+        representative coordinate; generated atoms move through the stored
+        space-group operation and surface-cell transform factors.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :param str axis:
+            Parent representative coordinate, one of ``"x"``, ``"y"``, or
+            ``"z"``.
+        :param tuple limits:
+            Fit limits for the coordinate change in parent fractional units.
+        :param tuple absolute_limits:
+            Optional absolute parent-coordinate limits, converted to changes
+            around the stored representative coordinate.
+        :returns:
+            Created relative fit parameter.
+        :rtype:
+            CTRutil.Parameter
+        :raises ValueError:
+            If no matching site-displacement couplings exist.
+        """
+        if self.symmetry_metadata is None:
+            raise ValueError(f"UnitCell {self.name} has no symmetry metadata.")
+        if axis not in {"x", "y", "z"}:
+            raise ValueError("axis must be one of 'x', 'y', or 'z'.")
+        site = next(
+            (
+                site
+                for site in self.wyckoff_sites()
+                if site["site_id"] == site_id
+            ),
+            None,
+        )
+        if site is None:
+            raise ValueError(f"Unknown Wyckoff site {site_id}.")
+        representative = site.get("representative_parent_fractional")
+        if representative is None:
+            raise ValueError(
+                f"Wyckoff site {site_id} has no representative parent coordinate."
+            )
+        if absolute_limits is not None:
+            if limits != (-np.inf, np.inf):
+                raise ValueError("Use either limits or absolute_limits, not both.")
+            axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+            axis_value = representative[axis_index]
+            limits = (
+                absolute_limits[0] - axis_value,
+                absolute_limits[1] - axis_value,
+            )
+
+        couplings = [
+            coupling
+            for coupling in self.wyckoff_site_couplings(site_id)
+            if coupling.axis == axis
+        ]
+        if not couplings:
+            raise ValueError(
+                f"No site-displacement couplings found for Wyckoff site "
+                f"{site_id} and parent axis {axis}."
+            )
+        atoms = np.asarray(
+            [coupling.atom_index for coupling in couplings],
+            dtype=np.intp,
+        )
+        coordinates = tuple(coupling.coordinate for coupling in couplings)
+        factors = np.asarray(
+            [coupling.factor for coupling in couplings],
+            dtype=np.float64,
+        )
+
+        keyargs.setdefault(
+            "name",
+            f"{self.name} {site_id}_{axis}_wyckoff_site",
+        )
+        settings = keyargs.setdefault("wyckoff", {})
+        settings.update(
+            {
+                "site_id": site_id,
+                "kind": "site_displacement",
+                "axis": axis,
+                "value_kind": "delta",
+            }
+        )
+        return self.addRelParameter(
+            (atoms, coordinates),
+            factors,
+            limits=limits,
+            **keyargs,
+        )
+
+    def addWyckoffShifts(
+        self,
+        site_id,
+        axes=("x", "y", "z"),
+        limits=(-np.inf, np.inf),
+        absolute_limits=None,
+        **keyargs,
+    ):
+        """Add representative site-displacement shifts for several axes.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :param axes:
+            Parent representative coordinate axes to fit.
+        :type axes:
+            iterable
+        :param limits:
+            Either one ``(lower, upper)`` tuple applied to every axis or a
+            dictionary mapping axis names to delta limits.
+        :param absolute_limits:
+            Optional dictionary mapping axis names to absolute limits.
+        :returns:
+            Created relative fit parameters in axis order.
+        :rtype:
+            list
+        """
+
+        def limit_for(limit_spec, axis_name):
+            if isinstance(limit_spec, dict):
+                return limit_spec.get(axis_name, (-np.inf, np.inf))
+            return limit_spec
+
+        parameters = []
+        for axis in axes:
+            parameter_keyargs = copy.deepcopy(keyargs)
+            parameter_limits = limit_for(limits, axis)
+            parameter_absolute_limits = (
+                None
+                if absolute_limits is None
+                else limit_for(absolute_limits, axis)
+            )
+            parameters.append(
+                self.addWyckoffShift(
+                    site_id,
+                    axis,
+                    limits=parameter_limits,
+                    absolute_limits=parameter_absolute_limits,
+                    **parameter_keyargs,
+                )
+            )
+        return parameters
 
     def showFitparameters(self):
         print(self.fitparameterList())
