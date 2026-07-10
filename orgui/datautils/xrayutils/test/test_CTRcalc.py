@@ -553,6 +553,23 @@ class TestLayerStacking(unittest.TestCase):
         self.assertEqual(atom.couplings[0].atom_index, 0)
         self.assertAlmostEqual(atom.couplings[0].constant, 1.0)
 
+    def test_unitcell_translate_layered_updates_wyckoff_representatives(self):
+        unitcell = self.make_single_wyckoff_cell()
+
+        transformed = unitcell.translate_layered([1, -1, 0])
+
+        site = transformed.wyckoff_sites()[0]
+        np.testing.assert_allclose(
+            site["representative_parent_fractional"],
+            [1.25, -1.0, 0.0],
+        )
+        parameter = transformed.addWyckoffShift(
+            "C_1",
+            "x",
+            absolute_limits=(1.0, 1.5),
+        )
+        self.assertEqual(parameter.limits, (-0.25, 0.25))
+
     def test_unitcell_translate_layered_rejects_unsupported_affines(self):
         unitcell = self.make_layered_unitcell()
 
@@ -753,6 +770,19 @@ class TestLayerStacking(unittest.TestCase):
             [0.25, 0.0, 0.0],
         )
         np.testing.assert_allclose(supercell.pos_cart(0), unitcell.pos_cart(0))
+
+    def test_unitcell_supercell_uses_current_coordinates_as_new_reference(self):
+        unitcell = self.make_single_wyckoff_cell()
+        unitcell.addRelParameter(([0], "x"), [1.0], (-1.0, 1.0), name="dx")
+        unitcell.setFitParameters([0.05])
+
+        supercell = unitcell.supercell((2, 1, 1))
+
+        np.testing.assert_allclose(supercell.basis[:, 1], [0.15, 0.65])
+        np.testing.assert_allclose(supercell.basis_0, supercell.basis)
+        supercell.addRelParameter(([0], "x"), [1.0], (-1.0, 1.0), name="dx2")
+        supercell.setFitParameters([0.0])
+        np.testing.assert_allclose(supercell.basis[:, 1], [0.15, 0.65])
 
     def test_unitcell_supercell_repeats_layers_along_z(self):
         unitcell = self.make_layered_unitcell()

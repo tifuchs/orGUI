@@ -1213,6 +1213,7 @@ class UnitCell(Lattice):
         metadata = copy.deepcopy(metadata)
         coordinate_index = {"x": 0, "y": 1, "z": 2}
         atoms = []
+        site_parent_shifts = {}
         for atom in metadata.atoms:
             z_shift = z_shift_by_layer[atom.layer]
             coordinate_shift = np.asarray(
@@ -1240,6 +1241,7 @@ class UnitCell(Lattice):
                     )
                 )
             parent_shift = metadata.surface_spec.transform @ coordinate_shift
+            site_parent_shifts.setdefault(atom.site_id, parent_shift)
             atoms.append(
                 dataclasses.replace(
                     atom,
@@ -1257,6 +1259,21 @@ class UnitCell(Lattice):
                     site_couplings=tuple(site_couplings),
                 )
             )
+        sites = []
+        for site in metadata.sites:
+            representative = site.representative_parent_fractional
+            if representative is not None and site.site_id in site_parent_shifts:
+                representative = tuple(
+                    np.asarray(representative, dtype=np.float64)
+                    + site_parent_shifts[site.site_id]
+                )
+            sites.append(
+                dataclasses.replace(
+                    site,
+                    representative_parent_fractional=representative,
+                )
+            )
+        metadata.sites = tuple(sites)
         metadata.atoms = sorted(atoms, key=lambda atom: atom.atom_index)
         return metadata
 
@@ -1729,6 +1746,8 @@ class UnitCell(Lattice):
             for layer in cycle
         )
         transformed.parameters = {"absolute": [], "relative": []}
+        transformed.basis_0 = np.copy(transformed.basis)
+        transformed._basis_parvalues = np.copy(transformed.basis)
         transformed.symmetry_metadata = self._supercell_symmetry_metadata(
             rows,
             repeats.astype(np.float64),
