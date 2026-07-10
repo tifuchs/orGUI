@@ -125,18 +125,25 @@ class _LayerStackingMixin:
     def layer_behaviour(self, behavior):
         self.layer_behavior = behavior
 
-    def _wyckoff_target_unitcells(self, kwarg):
+    def _wyckoff_target_unitcells(self, kwargs):
         if hasattr(self, "uc_top") and hasattr(self, "uc_bottom"):
-            if "unitcell" not in kwarg:
+            if "unitcell" not in kwargs:
                 raise ValueError(
                     "Missing unit cell name. Provide unit cell name as kwarg "
                     "'unitcell'"
                 )
-            unitcell = kwarg["unitcell"]
-            if isinstance(unitcell, list):
+            unitcell = kwargs["unitcell"]
+            if isinstance(unitcell, list | tuple):
                 return [self[ucn] for ucn in unitcell]
             return [self[unitcell]]
         return [self.unitcell]
+
+    def _forward_wyckoff_call(self, method_name, *args, **kwargs):
+        parameters = [
+            getattr(unitcell, method_name)(*args, **kwargs)
+            for unitcell in self._wyckoff_target_unitcells(kwargs)
+        ]
+        return parameters if len(parameters) > 1 else parameters[0]
 
     def addWyckoffParameter(
         self,
@@ -144,7 +151,7 @@ class _LayerStackingMixin:
         variable,
         limits=(-np.inf, np.inf),
         absolute_limits=None,
-        **kwarg,
+        **kwargs,
     ):
         """Add a Wyckoff variable parameter on contained unit cells.
 
@@ -156,23 +163,20 @@ class _LayerStackingMixin:
             Delta fit limits in fractional units.
         :param tuple absolute_limits:
             Optional absolute variable limits.
-        :param kwarg:
+        :param kwargs:
             For ``EpitaxyInterface``, provide ``unitcell="top"``,
             ``unitcell="bottom"``, or a list of these names.
         :returns:
             Created parameter or list of parameters.
         """
-        parameters = [
-            unitcell.addWyckoffParameter(
-                site_id,
-                variable,
-                limits=limits,
-                absolute_limits=absolute_limits,
-                **kwarg,
-            )
-            for unitcell in self._wyckoff_target_unitcells(kwarg)
-        ]
-        return parameters if len(parameters) > 1 else parameters[0]
+        return self._forward_wyckoff_call(
+            "addWyckoffParameter",
+            site_id,
+            variable,
+            limits=limits,
+            absolute_limits=absolute_limits,
+            **kwargs,
+        )
 
     def addWyckoffParameters(
         self,
@@ -180,7 +184,7 @@ class _LayerStackingMixin:
         variables=None,
         limits=(-np.inf, np.inf),
         absolute_limits=None,
-        **kwarg,
+        **kwargs,
     ):
         """Add several Wyckoff variable parameters on contained unit cells.
 
@@ -192,24 +196,21 @@ class _LayerStackingMixin:
             Delta fit limits in fractional units.
         :param absolute_limits:
             Optional absolute variable limits.
-        :param kwarg:
+        :param kwargs:
             For ``EpitaxyInterface``, provide ``unitcell="top"``,
             ``unitcell="bottom"``, or a list of these names.
         :returns:
             Created parameters. A list of lists is returned when multiple
             contained unit cells are selected.
         """
-        parameters = [
-            unitcell.addWyckoffParameters(
-                site_id,
-                variables=variables,
-                limits=limits,
-                absolute_limits=absolute_limits,
-                **kwarg,
-            )
-            for unitcell in self._wyckoff_target_unitcells(kwarg)
-        ]
-        return parameters if len(parameters) > 1 else parameters[0]
+        return self._forward_wyckoff_call(
+            "addWyckoffParameters",
+            site_id,
+            variables=variables,
+            limits=limits,
+            absolute_limits=absolute_limits,
+            **kwargs,
+        )
 
     def addWyckoffShift(
         self,
@@ -217,7 +218,7 @@ class _LayerStackingMixin:
         axis,
         limits=(-np.inf, np.inf),
         absolute_limits=None,
-        **kwarg,
+        **kwargs,
     ):
         """Add a representative Wyckoff-site shift on contained unit cells.
 
@@ -230,23 +231,20 @@ class _LayerStackingMixin:
             Delta fit limits in parent fractional units.
         :param tuple absolute_limits:
             Optional absolute parent-coordinate limits.
-        :param kwarg:
+        :param kwargs:
             For ``EpitaxyInterface``, provide ``unitcell="top"``,
             ``unitcell="bottom"``, or a list of these names.
         :returns:
             Created parameter or list of parameters.
         """
-        parameters = [
-            unitcell.addWyckoffShift(
-                site_id,
-                axis,
-                limits=limits,
-                absolute_limits=absolute_limits,
-                **kwarg,
-            )
-            for unitcell in self._wyckoff_target_unitcells(kwarg)
-        ]
-        return parameters if len(parameters) > 1 else parameters[0]
+        return self._forward_wyckoff_call(
+            "addWyckoffShift",
+            site_id,
+            axis,
+            limits=limits,
+            absolute_limits=absolute_limits,
+            **kwargs,
+        )
 
     def addWyckoffShifts(
         self,
@@ -254,7 +252,7 @@ class _LayerStackingMixin:
         axes=("x", "y", "z"),
         limits=(-np.inf, np.inf),
         absolute_limits=None,
-        **kwarg,
+        **kwargs,
     ):
         """Add representative Wyckoff-site shifts on contained unit cells.
 
@@ -266,24 +264,21 @@ class _LayerStackingMixin:
             Delta fit limits in parent fractional units.
         :param absolute_limits:
             Optional absolute parent-coordinate limits.
-        :param kwarg:
+        :param kwargs:
             For ``EpitaxyInterface``, provide ``unitcell="top"``,
             ``unitcell="bottom"``, or a list of these names.
         :returns:
             Created parameters. A list of lists is returned when multiple
             contained unit cells are selected.
         """
-        parameters = [
-            unitcell.addWyckoffShifts(
-                site_id,
-                axes=axes,
-                limits=limits,
-                absolute_limits=absolute_limits,
-                **kwarg,
-            )
-            for unitcell in self._wyckoff_target_unitcells(kwarg)
-        ]
-        return parameters if len(parameters) > 1 else parameters[0]
+        return self._forward_wyckoff_call(
+            "addWyckoffShifts",
+            site_id,
+            axes=axes,
+            limits=limits,
+            absolute_limits=absolute_limits,
+            **kwargs,
+        )
 
     @property
     def start_layer_number(self):

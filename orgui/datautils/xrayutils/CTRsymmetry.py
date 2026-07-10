@@ -923,6 +923,8 @@ def symmetry_metadata_to_lines(model):
     if model.spacegroup_number is not None:
         symbol = model.spacegroup_symbol or ""
         lines.append(f"spacegroup: {model.spacegroup_number} {symbol}".rstrip())
+    lines.append("parent_a: " + _format_values(model.surface_spec.parent_a))
+    lines.append("parent_alpha: " + _format_values(model.surface_spec.parent_alpha))
     lines.append("surface_transform:")
     for row in model.surface_spec.transform:
         lines.append("  " + _format_values(row))
@@ -1041,6 +1043,19 @@ def symmetry_metadata_from_lines(lines, unitcell=None):
             if len(parts) > 1:
                 spacegroup_symbol = " ".join(parts[1:])
 
+    parent_a = (1.0, 1.0, 1.0)
+    parent_alpha = (90.0, 90.0, 90.0)
+    if "parent_a" in sections:
+        parent_a = tuple(float(value) for value in sections["parent_a"][0].split())
+    elif unitcell is not None:
+        parent_a = tuple(float(value) for value in unitcell.a)
+    if "parent_alpha" in sections:
+        parent_alpha = tuple(
+            float(value) for value in sections["parent_alpha"][0].split()
+        )
+    elif unitcell is not None:
+        parent_alpha = tuple(float(value) for value in np.rad2deg(unitcell.alpha))
+
     if "surface_transform" in sections:
         transform = np.asarray(
             [
@@ -1119,11 +1134,6 @@ def symmetry_metadata_from_lines(lines, unitcell=None):
             )
         )
 
-    parent_a = (1.0, 1.0, 1.0)
-    parent_alpha = (90.0, 90.0, 90.0)
-    if unitcell is not None:
-        parent_a = tuple(float(value) for value in unitcell.a)
-        parent_alpha = tuple(float(value) for value in np.rad2deg(unitcell.alpha))
     surface_spec = SurfaceCellSpec(
         parent_a,
         parent_alpha,
@@ -1379,6 +1389,12 @@ def _collect_sections(lines):
     for line in lines:
         if line.startswith("spacegroup:"):
             sections["spacegroup"] = [line.split(":", 1)[1].strip()]
+            current = None
+        elif line.startswith("parent_a:"):
+            sections["parent_a"] = [line.split(":", 1)[1].strip()]
+            current = None
+        elif line.startswith("parent_alpha:"):
+            sections["parent_alpha"] = [line.split(":", 1)[1].strip()]
             current = None
         elif line.startswith("surface_origin:"):
             sections["surface_origin"] = [line.split(":", 1)[1].strip()]

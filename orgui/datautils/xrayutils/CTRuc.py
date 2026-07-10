@@ -1287,6 +1287,129 @@ class UnitCell(Lattice):
                 layer_positions[layer] = float(np.mean(self.basis[where, 3]))
         return layer_positions
 
+    def _validated_layered_translation(self, translation):
+        translation = self._translation_from_affine_input(translation)
+        xy_translation = translation[:2]
+        if not np.allclose(xy_translation, np.rint(xy_translation)):
+            raise ValueError("x and y affine translations must be integers.")
+        if not np.isclose(translation[2], np.rint(translation[2])):
+            raise ValueError("z affine translation must be an integer layer step.")
+        return np.rint(xy_translation).astype(np.float64), int(
+            np.rint(translation[2])
+        )
+
+    @staticmethod
+    def _shift_layered_basis_values(
+        values,
+        cycle,
+        xy_translation,
+        z_shift_by_layer,
+        layer_map=None,
+    ):
+        if values is None or values.size == 0:
+            return values
+        values_new = np.array(values, copy=True)
+        values_new[:, 1:3] += xy_translation
+        for layer in cycle:
+            where = values[:, 7] == layer
+            if not np.any(where):
+                continue
+            values_new[where, 3] += z_shift_by_layer[layer]
+            if layer_map is not None:
+                values_new[where, 7] = layer_map[layer]
+        return values_new
+
+    def _finish_layered_transform(
+        self,
+        transformed,
+        old_to_new,
+        layer_map,
+        xy_translation,
+        z_shift_by_layer,
+        test_special_formfactors=False,
+    ):
+        for parameters in transformed.parameters.values():
+            for parameter in parameters:
+                self._remap_parameter_atom_indices(parameter, old_to_new)
+        self._update_absolute_parameter_values_after_basis_transform(
+            transformed,
+            self.basis,
+            old_to_new,
+        )
+        transformed.symmetry_metadata = self._transform_symmetry_metadata(
+            self.symmetry_metadata,
+            old_to_new,
+            layer_map,
+            xy_translation,
+            z_shift_by_layer,
+        )
+        if test_special_formfactors:
+            transformed._test_special_formfactors()
+        return transformed
+
+    def _apply_reordered_layered_transform(
+        self,
+        transformed,
+        cycle,
+        xy_translation,
+        layer_map,
+        z_shift_by_layer,
+    ):
+        basis = self._shift_layered_basis_values(
+            self.basis,
+            cycle,
+            xy_translation,
+            z_shift_by_layer,
+            layer_map,
+        )
+        basis_0 = self._shift_layered_basis_values(
+            self.basis_0,
+            cycle,
+            xy_translation,
+            z_shift_by_layer,
+            layer_map,
+        )
+        basis_parvalues = self._shift_layered_basis_values(
+            self._basis_parvalues,
+            cycle,
+            xy_translation,
+            z_shift_by_layer,
+            layer_map,
+        )
+
+        order_lookup = {layer: index for index, layer in enumerate(cycle)}
+        row_order = np.array(
+            sorted(range(basis.shape[0]), key=lambda i: (order_lookup[basis[i, 7]], i)),
+            dtype=np.intp,
+        )
+        old_to_new = np.empty_like(row_order)
+        old_to_new[row_order] = np.arange(row_order.size)
+
+        transformed.basis = basis[row_order]
+        transformed.basis_0 = basis_0[row_order]
+        if basis_parvalues is not None:
+            transformed._basis_parvalues = basis_parvalues[row_order]
+        if self.errors is not None:
+            transformed.errors = np.array(self.errors, copy=True)[row_order]
+        if self._errors_parvalues is not None:
+            transformed._errors_parvalues = np.array(
+                self._errors_parvalues,
+                copy=True,
+            )[row_order]
+        transformed.names = [self.names[i] for i in row_order]
+        transformed.dw_increase_constraint = self.dw_increase_constraint[row_order]
+        if hasattr(self, "f"):
+            transformed.f = self.f[row_order]
+
+        return self._finish_layered_transform(
+            transformed,
+            old_to_new,
+            layer_map,
+            xy_translation,
+            z_shift_by_layer,
+            test_special_formfactors=True,
+        )
+
     def translate_layered(self, translation, name=None):
         """Return a translated copy with cyclic z-layer wrapping.
 
@@ -1316,16 +1439,7 @@ class UnitCell(Lattice):
             If the affine linear part is not identity or any requested
             translation is not an integer.
         """
-        translation = self._translation_from_affine_input(translation)
-        xy_translation = translation[:2]
-        if not np.allclose(xy_translation, np.rint(xy_translation)):
-            raise ValueError("x and y affine translations must be integers.")
-        if not np.isclose(translation[2], np.rint(translation[2])):
-            raise ValueError("z affine translation must be an integer layer step.")
-
-        xy_translation = np.rint(xy_translation).astype(np.float64)
-        z_steps = int(np.rint(translation[2]))
-
+        xy_translation, z_steps = self._validated_layered_translation(translation)
         transformed = copy.deepcopy(self)
         if name is not None:
             transformed.name = name
@@ -1344,13 +1458,25 @@ class UnitCell(Lattice):
             if z_steps == 0:
                 return transformed
         if z_steps_effective == 0:
-            transformed.basis[:, 1:3] += xy_translation
-            transformed.basis[:, 3] += z_translation
-            transformed.basis_0[:, 1:3] += xy_translation
-            transformed.basis_0[:, 3] += z_translation
-            if transformed._basis_parvalues is not None:
-                transformed._basis_parvalues[:, 1:3] += xy_translation
-                transformed._basis_parvalues[:, 3] += z_translation
+            z_shift_by_layer = {layer: z_translation for layer in cycle}
+            transformed.basis = self._shift_layered_basis_values(
+                transformed.basis,
+                cycle,
+                xy_translation,
+                z_shift_by_layer,
+            )
+            transformed.basis_0 = self._shift_layered_basis_values(
+                transformed.basis_0,
+                cycle,
+                xy_translation,
+                z_shift_by_layer,
+            )
+            transformed._basis_parvalues = self._shift_layered_basis_values(
+                transformed._basis_parvalues,
+                cycle,
+                xy_translation,
+                z_shift_by_layer,
+            )
             for layer in cycle:
                 layer_key = float(layer)
                 if layer_key not in transformed.layerpos:
@@ -1360,77 +1486,27 @@ class UnitCell(Lattice):
                     )
                 transformed.layerpos[layer_key] += z_translation
             old_to_new = np.arange(self.basis.shape[0], dtype=np.intp)
-            self._update_absolute_parameter_values_after_basis_transform(
-                transformed,
-                self.basis,
-                old_to_new,
-            )
             layer_map = {layer: layer for layer in cycle}
-            z_shift_by_layer = {layer: z_translation for layer in cycle}
-            transformed.symmetry_metadata = self._transform_symmetry_metadata(
-                self.symmetry_metadata,
+            return self._finish_layered_transform(
+                transformed,
                 old_to_new,
                 layer_map,
                 xy_translation,
                 z_shift_by_layer,
             )
-            return transformed
 
         layer_positions = self._layer_positions_for_cycle(cycle)
-
         layer_map = {
             layer: cycle[(index + z_steps_effective) % layer_count]
             for index, layer in enumerate(cycle)
         }
-
-        def transform_basis_values(values):
-            if values is None or values.size == 0:
-                return values
-            values_new = np.array(values, copy=True)
-            values_new[:, 1:3] += xy_translation
-            values_new[:, 3] += z_translation
-            for layer in cycle:
-                where = values[:, 7] == layer
-                if not np.any(where):
-                    continue
-                new_layer = layer_map[layer]
-                values_new[where, 7] = new_layer
-            return values_new
-
-        basis = transform_basis_values(self.basis)
-        basis_0 = transform_basis_values(self.basis_0)
-        basis_parvalues = transform_basis_values(self._basis_parvalues)
-
-        order_lookup = {layer: index for index, layer in enumerate(cycle)}
-        row_order = np.array(
-            sorted(range(basis.shape[0]), key=lambda i: (order_lookup[basis[i, 7]], i)),
-            dtype=np.intp,
-        )
-        old_to_new = np.empty_like(row_order)
-        old_to_new[row_order] = np.arange(row_order.size)
-
-        transformed.basis = basis[row_order]
-        transformed.basis_0 = basis_0[row_order]
-        if basis_parvalues is not None:
-            transformed._basis_parvalues = basis_parvalues[row_order]
-        if self.errors is not None:
-            transformed.errors = np.array(self.errors, copy=True)[row_order]
-        if self._errors_parvalues is not None:
-            transformed._errors_parvalues = np.array(
-                self._errors_parvalues, copy=True
-            )[row_order]
-        transformed.names = [self.names[i] for i in row_order]
-        transformed.dw_increase_constraint = self.dw_increase_constraint[row_order]
-        if hasattr(self, "f"):
-            transformed.f = self.f[row_order]
-
-        for parameters in transformed.parameters.values():
-            for parameter in parameters:
-                self._remap_parameter_atom_indices(parameter, old_to_new)
-        self._update_absolute_parameter_values_after_basis_transform(
+        z_shift_by_layer = {layer: z_translation for layer in cycle}
+        transformed = self._apply_reordered_layered_transform(
             transformed,
-            self.basis,
-            old_to_new,
+            cycle,
+            xy_translation,
+            layer_map,
+            z_shift_by_layer,
         )
 
         transformed.layerpos = copy.deepcopy(self.layerpos)
@@ -1441,15 +1517,6 @@ class UnitCell(Lattice):
             )
         if transformed._explicit_layer_cycle is not None:
             transformed._explicit_layer_cycle = tuple(cycle)
-        z_shift_by_layer = {layer: z_translation for layer in cycle}
-        transformed.symmetry_metadata = self._transform_symmetry_metadata(
-            self.symmetry_metadata,
-            old_to_new,
-            layer_map,
-            xy_translation,
-            z_shift_by_layer,
-        )
-        transformed._test_special_formfactors()
         return transformed
 
     def affine_layer_transform(self, translation, name=None):
@@ -1478,16 +1545,7 @@ class UnitCell(Lattice):
             If the affine linear part is not identity or any requested
             translation is not an integer.
         """
-        translation = self._translation_from_affine_input(translation)
-        xy_translation = translation[:2]
-        if not np.allclose(xy_translation, np.rint(xy_translation)):
-            raise ValueError("x and y affine translations must be integers.")
-        if not np.isclose(translation[2], np.rint(translation[2])):
-            raise ValueError("z affine translation must be an integer layer step.")
-
-        xy_translation = np.rint(xy_translation).astype(np.float64)
-        z_steps = int(np.rint(translation[2]))
-
+        xy_translation, z_steps = self._validated_layered_translation(translation)
         transformed = copy.deepcopy(self)
         if name is not None:
             transformed.name = name
@@ -1501,26 +1559,34 @@ class UnitCell(Lattice):
         layer_count = len(cycle)
         z_steps_effective = z_steps % layer_count
         if z_steps_effective == 0:
-            transformed.basis[:, 1:3] += xy_translation
-            transformed.basis_0[:, 1:3] += xy_translation
-            if transformed._basis_parvalues is not None:
-                transformed._basis_parvalues[:, 1:3] += xy_translation
-            old_to_new = np.arange(self.basis.shape[0], dtype=np.intp)
-            self._update_absolute_parameter_values_after_basis_transform(
-                transformed,
-                self.basis,
-                old_to_new,
-            )
-            layer_map = {layer: layer for layer in cycle}
             z_shift_by_layer = {layer: 0.0 for layer in cycle}
-            transformed.symmetry_metadata = self._transform_symmetry_metadata(
-                self.symmetry_metadata,
+            transformed.basis = self._shift_layered_basis_values(
+                transformed.basis,
+                cycle,
+                xy_translation,
+                z_shift_by_layer,
+            )
+            transformed.basis_0 = self._shift_layered_basis_values(
+                transformed.basis_0,
+                cycle,
+                xy_translation,
+                z_shift_by_layer,
+            )
+            transformed._basis_parvalues = self._shift_layered_basis_values(
+                transformed._basis_parvalues,
+                cycle,
+                xy_translation,
+                z_shift_by_layer,
+            )
+            old_to_new = np.arange(self.basis.shape[0], dtype=np.intp)
+            layer_map = {layer: layer for layer in cycle}
+            return self._finish_layered_transform(
+                transformed,
                 old_to_new,
                 layer_map,
                 xy_translation,
                 z_shift_by_layer,
             )
-            return transformed
 
         layer_positions = self._layer_positions_for_cycle(cycle)
         layer_map = {
@@ -1531,54 +1597,12 @@ class UnitCell(Lattice):
             layer: layer_positions[layer_map[layer]] - layer_positions[layer]
             for layer in cycle
         }
-
-        def transform_basis_values(values):
-            if values is None or values.size == 0:
-                return values
-            values_new = np.array(values, copy=True)
-            values_new[:, 1:3] += xy_translation
-            for layer in cycle:
-                where = values[:, 7] == layer
-                if not np.any(where):
-                    continue
-                values_new[where, 3] += z_shift_by_layer[layer]
-                values_new[where, 7] = layer_map[layer]
-            return values_new
-
-        basis = transform_basis_values(self.basis)
-        basis_0 = transform_basis_values(self.basis_0)
-        basis_parvalues = transform_basis_values(self._basis_parvalues)
-
-        order_lookup = {layer: index for index, layer in enumerate(cycle)}
-        row_order = np.array(
-            sorted(range(basis.shape[0]), key=lambda i: (order_lookup[basis[i, 7]], i)),
-            dtype=np.intp,
-        )
-        old_to_new = np.empty_like(row_order)
-        old_to_new[row_order] = np.arange(row_order.size)
-
-        transformed.basis = basis[row_order]
-        transformed.basis_0 = basis_0[row_order]
-        if basis_parvalues is not None:
-            transformed._basis_parvalues = basis_parvalues[row_order]
-        if self.errors is not None:
-            transformed.errors = np.array(self.errors, copy=True)[row_order]
-        if self._errors_parvalues is not None:
-            transformed._errors_parvalues = np.array(
-                self._errors_parvalues, copy=True
-            )[row_order]
-        transformed.names = [self.names[i] for i in row_order]
-        transformed.dw_increase_constraint = self.dw_increase_constraint[row_order]
-        if hasattr(self, "f"):
-            transformed.f = self.f[row_order]
-
-        for parameters in transformed.parameters.values():
-            for parameter in parameters:
-                self._remap_parameter_atom_indices(parameter, old_to_new)
-        self._update_absolute_parameter_values_after_basis_transform(
+        transformed = self._apply_reordered_layered_transform(
             transformed,
-            self.basis,
-            old_to_new,
+            cycle,
+            xy_translation,
+            layer_map,
+            z_shift_by_layer,
         )
 
         transformed.layerpos = copy.deepcopy(self.layerpos)
@@ -1586,14 +1610,6 @@ class UnitCell(Lattice):
             transformed.layerpos[float(layer)] = layer_positions[layer]
         if transformed._explicit_layer_cycle is not None:
             transformed._explicit_layer_cycle = tuple(cycle)
-        transformed.symmetry_metadata = self._transform_symmetry_metadata(
-            self.symmetry_metadata,
-            old_to_new,
-            layer_map,
-            xy_translation,
-            z_shift_by_layer,
-        )
-        transformed._test_special_formfactors()
         return transformed
 
     def supercell(self, repeats, symmetry="preserve", name=None):
@@ -2181,6 +2197,83 @@ class UnitCell(Lattice):
             return None
         return self.symmetry_metadata.atom_wyckoff_metadata(atom_index)
 
+    @staticmethod
+    def _limit_for(limit_spec, parameter_name):
+        if isinstance(limit_spec, dict):
+            return limit_spec.get(parameter_name, (-np.inf, np.inf))
+        return limit_spec
+
+    @staticmethod
+    def _delta_limits(limits, absolute_limits, reference_value):
+        if absolute_limits is None:
+            return limits
+        if limits != (-np.inf, np.inf):
+            raise ValueError("Use either limits or absolute_limits, not both.")
+        return (
+            absolute_limits[0] - reference_value,
+            absolute_limits[1] - reference_value,
+        )
+
+    def _wyckoff_site(self, site_id):
+        if self.symmetry_metadata is None:
+            raise ValueError(f"UnitCell {self.name} has no symmetry metadata.")
+        site = next(
+            (
+                site
+                for site in self.wyckoff_sites()
+                if site["site_id"] == site_id
+            ),
+            None,
+        )
+        if site is None:
+            raise ValueError(f"Unknown Wyckoff site {site_id}.")
+        return site
+
+    @staticmethod
+    def _coupling_parameter_arrays(couplings):
+        atoms = np.asarray(
+            [coupling.atom_index for coupling in couplings],
+            dtype=np.intp,
+        )
+        coordinates = tuple(coupling.coordinate for coupling in couplings)
+        factors = np.asarray(
+            [coupling.factor for coupling in couplings],
+            dtype=np.float64,
+        )
+        return atoms, coordinates, factors
+
+    def _add_wyckoff_relative_parameter(
+        self,
+        site_id,
+        selector_name,
+        selector_value,
+        kind,
+        couplings,
+        limits,
+        default_name,
+        empty_message,
+        keyargs,
+    ):
+        if not couplings:
+            raise ValueError(empty_message)
+        atoms, coordinates, factors = self._coupling_parameter_arrays(couplings)
+        keyargs.setdefault("name", default_name)
+        settings = keyargs.setdefault("wyckoff", {})
+        settings.update(
+            {
+                "site_id": site_id,
+                "kind": kind,
+                selector_name: selector_value,
+                "value_kind": "delta",
+            }
+        )
+        return self.addRelParameter(
+            (atoms, coordinates),
+            factors,
+            limits=limits,
+            **keyargs,
+        )
+
     def addWyckoffParameter(
         self,
         site_id,
@@ -2213,18 +2306,7 @@ class UnitCell(Lattice):
         :raises ValueError:
             If no matching affine couplings exist.
         """
-        if self.symmetry_metadata is None:
-            raise ValueError(f"UnitCell {self.name} has no symmetry metadata.")
-        site = next(
-            (
-                site
-                for site in self.wyckoff_sites()
-                if site["site_id"] == site_id
-            ),
-            None,
-        )
-        if site is None:
-            raise ValueError(f"Unknown Wyckoff site {site_id}.")
+        site = self._wyckoff_site(site_id)
         if not site["variables"]:
             raise ValueError(
                 f"Wyckoff site {site_id} has no positional coordinate variables."
@@ -2232,53 +2314,29 @@ class UnitCell(Lattice):
         if variable not in site["variables"]:
             raise ValueError(f"Wyckoff site {site_id} has no variable {variable}.")
 
-        if absolute_limits is not None:
-            if limits != (-np.inf, np.inf):
-                raise ValueError("Use either limits or absolute_limits, not both.")
-            variable_value = site["variables"][variable]
-            limits = (
-                absolute_limits[0] - variable_value,
-                absolute_limits[1] - variable_value,
-            )
-
+        limits = self._delta_limits(
+            limits,
+            absolute_limits,
+            site["variables"][variable],
+        )
         couplings = [
             coupling
             for coupling in self.wyckoff_couplings(site_id)
             if coupling.variable == variable
         ]
-        if not couplings:
-            raise ValueError(
+        return self._add_wyckoff_relative_parameter(
+            site_id,
+            "variable",
+            variable,
+            "coordinate",
+            couplings,
+            limits,
+            f"{self.name} {site_id}_{variable}_wyckoff_coordinate",
+            (
                 f"No affine couplings found for Wyckoff site {site_id} "
                 f"and variable {variable}."
-            )
-        atoms = np.asarray(
-            [coupling.atom_index for coupling in couplings],
-            dtype=np.intp,
-        )
-        coordinates = tuple(coupling.coordinate for coupling in couplings)
-        factors = np.asarray(
-            [coupling.factor for coupling in couplings],
-            dtype=np.float64,
-        )
-
-        keyargs.setdefault(
-            "name",
-            f"{self.name} {site_id}_{variable}_wyckoff_coordinate",
-        )
-        settings = keyargs.setdefault("wyckoff", {})
-        settings.update(
-            {
-                "site_id": site_id,
-                "kind": "coordinate",
-                "variable": variable,
-                "value_kind": "delta",
-            }
-        )
-        return self.addRelParameter(
-            (atoms, coordinates),
-            factors,
-            limits=limits,
-            **keyargs,
+            ),
+            keyargs,
         )
 
     def addWyckoffParameters(
@@ -2310,10 +2368,7 @@ class UnitCell(Lattice):
         :raises ValueError:
             If the site has no free coordinate variables.
         """
-        sites = {site["site_id"]: site for site in self.wyckoff_sites()}
-        if site_id not in sites:
-            raise ValueError(f"Unknown Wyckoff site {site_id}.")
-        site_variables = tuple(sites[site_id]["variables"])
+        site_variables = tuple(self._wyckoff_site(site_id)["variables"])
         if not site_variables:
             raise ValueError(
                 f"Wyckoff site {site_id} has no positional coordinate variables."
@@ -2322,19 +2377,14 @@ class UnitCell(Lattice):
             variables = site_variables
         variables = tuple(variables)
 
-        def limit_for(limit_spec, variable_name):
-            if isinstance(limit_spec, dict):
-                return limit_spec.get(variable_name, (-np.inf, np.inf))
-            return limit_spec
-
         parameters = []
         for variable in variables:
             parameter_keyargs = copy.deepcopy(keyargs)
-            parameter_limits = limit_for(limits, variable)
+            parameter_limits = self._limit_for(limits, variable)
             parameter_absolute_limits = (
                 None
                 if absolute_limits is None
-                else limit_for(absolute_limits, variable)
+                else self._limit_for(absolute_limits, variable)
             )
             parameters.append(
                 self.addWyckoffParameter(
@@ -2379,73 +2429,39 @@ class UnitCell(Lattice):
         :raises ValueError:
             If no matching site-displacement couplings exist.
         """
-        if self.symmetry_metadata is None:
-            raise ValueError(f"UnitCell {self.name} has no symmetry metadata.")
         if axis not in {"x", "y", "z"}:
             raise ValueError("axis must be one of 'x', 'y', or 'z'.")
-        site = next(
-            (
-                site
-                for site in self.wyckoff_sites()
-                if site["site_id"] == site_id
-            ),
-            None,
-        )
-        if site is None:
-            raise ValueError(f"Unknown Wyckoff site {site_id}.")
+        site = self._wyckoff_site(site_id)
         representative = site.get("representative_parent_fractional")
         if representative is None:
             raise ValueError(
                 f"Wyckoff site {site_id} has no representative parent coordinate."
             )
-        if absolute_limits is not None:
-            if limits != (-np.inf, np.inf):
-                raise ValueError("Use either limits or absolute_limits, not both.")
-            axis_index = {"x": 0, "y": 1, "z": 2}[axis]
-            axis_value = representative[axis_index]
-            limits = (
-                absolute_limits[0] - axis_value,
-                absolute_limits[1] - axis_value,
-            )
+        axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+        limits = self._delta_limits(
+            limits,
+            absolute_limits,
+            representative[axis_index],
+        )
 
         couplings = [
             coupling
             for coupling in self.wyckoff_site_couplings(site_id)
             if coupling.axis == axis
         ]
-        if not couplings:
-            raise ValueError(
+        return self._add_wyckoff_relative_parameter(
+            site_id,
+            "axis",
+            axis,
+            "site_displacement",
+            couplings,
+            limits,
+            f"{self.name} {site_id}_{axis}_wyckoff_site",
+            (
                 f"No site-displacement couplings found for Wyckoff site "
                 f"{site_id} and parent axis {axis}."
-            )
-        atoms = np.asarray(
-            [coupling.atom_index for coupling in couplings],
-            dtype=np.intp,
-        )
-        coordinates = tuple(coupling.coordinate for coupling in couplings)
-        factors = np.asarray(
-            [coupling.factor for coupling in couplings],
-            dtype=np.float64,
-        )
-
-        keyargs.setdefault(
-            "name",
-            f"{self.name} {site_id}_{axis}_wyckoff_site",
-        )
-        settings = keyargs.setdefault("wyckoff", {})
-        settings.update(
-            {
-                "site_id": site_id,
-                "kind": "site_displacement",
-                "axis": axis,
-                "value_kind": "delta",
-            }
-        )
-        return self.addRelParameter(
-            (atoms, coordinates),
-            factors,
-            limits=limits,
-            **keyargs,
+            ),
+            keyargs,
         )
 
     def addWyckoffShifts(
@@ -2475,19 +2491,14 @@ class UnitCell(Lattice):
             list
         """
 
-        def limit_for(limit_spec, axis_name):
-            if isinstance(limit_spec, dict):
-                return limit_spec.get(axis_name, (-np.inf, np.inf))
-            return limit_spec
-
         parameters = []
         for axis in axes:
             parameter_keyargs = copy.deepcopy(keyargs)
-            parameter_limits = limit_for(limits, axis)
+            parameter_limits = self._limit_for(limits, axis)
             parameter_absolute_limits = (
                 None
                 if absolute_limits is None
-                else limit_for(absolute_limits, axis)
+                else self._limit_for(absolute_limits, axis)
             )
             parameters.append(
                 self.addWyckoffShift(
@@ -3672,6 +3683,8 @@ class UnitCell(Lattice):
                 if reading_symmetry or stripped.startswith(
                     (
                         "spacegroup:",
+                        "parent_a:",
+                        "parent_alpha:",
                         "surface_transform:",
                         "surface_origin:",
                         "wyckoff_sites:",

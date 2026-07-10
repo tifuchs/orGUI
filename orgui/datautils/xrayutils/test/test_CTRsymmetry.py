@@ -459,6 +459,23 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
         restored.addWyckoffShift("Ru_2a", "x", absolute_limits=(-0.1, 0.1))
         self.assertEqual(restored.wyckoff_sites()[0]["status"], "site_displaced")
 
+    def test_symmetry_metadata_round_trip_preserves_parent_lattice(self):
+        unitcell = self.make_rutile_110_unitcell()
+
+        restored = UnitCell.fromStr(unitcell.toStr())
+        rebuilt = restored.symmetry_metadata.build_unitcell("rebuilt")
+
+        np.testing.assert_allclose(
+            restored.symmetry_metadata.surface_spec.parent_a,
+            unitcell.symmetry_metadata.surface_spec.parent_a,
+        )
+        np.testing.assert_allclose(
+            restored.symmetry_metadata.surface_spec.parent_alpha,
+            unitcell.symmetry_metadata.surface_spec.parent_alpha,
+        )
+        np.testing.assert_allclose(rebuilt.a, unitcell.a, atol=1e-8)
+        np.testing.assert_allclose(rebuilt.alpha, unitcell.alpha, atol=1e-8)
+
 
 class TestOptionalSymmetryImports(unittest.TestCase):
     def test_missing_pyxtal_reports_optional_dependency(self):
