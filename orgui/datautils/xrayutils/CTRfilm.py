@@ -125,6 +125,161 @@ class _LayerStackingMixin:
     def layer_behaviour(self, behavior):
         self.layer_behavior = behavior
 
+    def _wyckoff_target_unitcells(self, kwargs):
+        if hasattr(self, "uc_top") and hasattr(self, "uc_bottom"):
+            if "unitcell" not in kwargs:
+                raise ValueError(
+                    "Missing unit cell name. Provide unit cell name as kwarg "
+                    "'unitcell'"
+                )
+            unitcell = kwargs["unitcell"]
+            if isinstance(unitcell, list | tuple):
+                return [self[ucn] for ucn in unitcell]
+            return [self[unitcell]]
+        return [self.unitcell]
+
+    def _forward_wyckoff_call(self, method_name, *args, **kwargs):
+        parameters = [
+            getattr(unitcell, method_name)(*args, **kwargs)
+            for unitcell in self._wyckoff_target_unitcells(kwargs)
+        ]
+        return parameters if len(parameters) > 1 else parameters[0]
+
+    def addWyckoffParameter(
+        self,
+        site_id,
+        variable,
+        limits=(-np.inf, np.inf),
+        absolute_limits=None,
+        **kwargs,
+    ):
+        """Add a Wyckoff variable parameter on contained unit cells.
+
+        :param str site_id:
+            Wyckoff site identifier.
+        :param str variable:
+            Wyckoff variable name, for example ``"u"``.
+        :param tuple limits:
+            Delta fit limits in fractional units.
+        :param tuple absolute_limits:
+            Optional absolute variable limits.
+        :param kwargs:
+            For ``EpitaxyInterface``, provide ``unitcell="top"``,
+            ``unitcell="bottom"``, or a list of these names.
+        :returns:
+            Created parameter or list of parameters.
+        """
+        return self._forward_wyckoff_call(
+            "addWyckoffParameter",
+            site_id,
+            variable,
+            limits=limits,
+            absolute_limits=absolute_limits,
+            **kwargs,
+        )
+
+    def addWyckoffParameters(
+        self,
+        site_id,
+        variables=None,
+        limits=(-np.inf, np.inf),
+        absolute_limits=None,
+        **kwargs,
+    ):
+        """Add several Wyckoff variable parameters on contained unit cells.
+
+        :param str site_id:
+            Wyckoff site identifier.
+        :param variables:
+            Iterable of Wyckoff variable names. If ``None``, fit all variables.
+        :param tuple limits:
+            Delta fit limits in fractional units.
+        :param absolute_limits:
+            Optional absolute variable limits.
+        :param kwargs:
+            For ``EpitaxyInterface``, provide ``unitcell="top"``,
+            ``unitcell="bottom"``, or a list of these names.
+        :returns:
+            Created parameters. A list of lists is returned when multiple
+            contained unit cells are selected.
+        """
+        return self._forward_wyckoff_call(
+            "addWyckoffParameters",
+            site_id,
+            variables=variables,
+            limits=limits,
+            absolute_limits=absolute_limits,
+            **kwargs,
+        )
+
+    def addWyckoffShift(
+        self,
+        site_id,
+        axis,
+        limits=(-np.inf, np.inf),
+        absolute_limits=None,
+        **kwargs,
+    ):
+        """Add a representative Wyckoff-site shift on contained unit cells.
+
+        :param str site_id:
+            Wyckoff site identifier.
+        :param str axis:
+            Parent conventional representative coordinate, one of ``"x"``,
+            ``"y"``, or ``"z"``.
+        :param tuple limits:
+            Delta fit limits in parent fractional units.
+        :param tuple absolute_limits:
+            Optional absolute parent-coordinate limits.
+        :param kwargs:
+            For ``EpitaxyInterface``, provide ``unitcell="top"``,
+            ``unitcell="bottom"``, or a list of these names.
+        :returns:
+            Created parameter or list of parameters.
+        """
+        return self._forward_wyckoff_call(
+            "addWyckoffShift",
+            site_id,
+            axis,
+            limits=limits,
+            absolute_limits=absolute_limits,
+            **kwargs,
+        )
+
+    def addWyckoffShifts(
+        self,
+        site_id,
+        axes=("x", "y", "z"),
+        limits=(-np.inf, np.inf),
+        absolute_limits=None,
+        **kwargs,
+    ):
+        """Add representative Wyckoff-site shifts on contained unit cells.
+
+        :param str site_id:
+            Wyckoff site identifier.
+        :param axes:
+            Parent conventional representative coordinate axes.
+        :param tuple limits:
+            Delta fit limits in parent fractional units.
+        :param absolute_limits:
+            Optional absolute parent-coordinate limits.
+        :param kwargs:
+            For ``EpitaxyInterface``, provide ``unitcell="top"``,
+            ``unitcell="bottom"``, or a list of these names.
+        :returns:
+            Created parameters. A list of lists is returned when multiple
+            contained unit cells are selected.
+        """
+        return self._forward_wyckoff_call(
+            "addWyckoffShifts",
+            site_id,
+            axes=axes,
+            limits=limits,
+            absolute_limits=absolute_limits,
+            **kwargs,
+        )
+
     @property
     def start_layer_number(self):
         """Return the first cyclic layer created by this object."""

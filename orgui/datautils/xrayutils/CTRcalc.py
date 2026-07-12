@@ -502,6 +502,200 @@ class SXRDCrystal:
 
         return par
 
+    def addWyckoffParameter(self, parameter, limits=(-np.inf, np.inf), **keyargs):
+        """Add a coupled symmetry-preserving Wyckoff parameter.
+
+        ``parameter`` maps crystal component names to Wyckoff selections. A
+        selection can be ``(site_id, variable)`` or a dictionary with
+        ``site_id`` and ``variable`` entries. For ``EpitaxyInterface``
+        components, either use a key ``(component, unitcell)`` or provide
+        ``unitcell="top"``, ``unitcell="bottom"``, or a list in the selection
+        dictionary.
+
+        :param dict parameter:
+            Component-specific Wyckoff variable selections.
+        :param tuple limits:
+            Shared delta limits in fractional units.
+        :param keyargs:
+            Additional coupled-parameter settings such as ``name`` or
+            ``prior``.
+        :returns:
+            Created coupled parameter.
+        :rtype:
+            Parameter
+        """
+        return self._add_wyckoff_coupled_parameter(
+            parameter,
+            kind="coordinate",
+            value_key="variable",
+            coupling_getter="wyckoff_couplings",
+            limits=limits,
+            **keyargs,
+        )
+
+    def addWyckoffShift(self, parameter, limits=(-np.inf, np.inf), **keyargs):
+        """Add a coupled representative Wyckoff-site shift parameter.
+
+        ``parameter`` maps crystal component names to Wyckoff shift
+        selections. A selection can be ``(site_id, axis)`` or a dictionary with
+        ``site_id`` and ``axis`` entries. For ``EpitaxyInterface`` components,
+        either use a key ``(component, unitcell)`` or provide
+        ``unitcell="top"``, ``unitcell="bottom"``, or a list in the selection
+        dictionary.
+
+        :param dict parameter:
+            Component-specific Wyckoff shift selections.
+        :param tuple limits:
+            Shared parent-coordinate delta limits in fractional units.
+        :param keyargs:
+            Additional coupled-parameter settings such as ``name`` or
+            ``prior``.
+        :returns:
+            Created coupled parameter.
+        :rtype:
+            Parameter
+        """
+        return self._add_wyckoff_coupled_parameter(
+            parameter,
+            kind="site_displacement",
+            value_key="axis",
+            coupling_getter="wyckoff_site_couplings",
+            limits=limits,
+            **keyargs,
+        )
+
+    def _add_wyckoff_coupled_parameter(
+        self,
+        parameter,
+        kind,
+        value_key,
+        coupling_getter,
+        limits=(-np.inf, np.inf),
+        **keyargs,
+    ):
+        if not parameter:
+            raise ValueError("At least one Wyckoff target must be provided.")
+
+        prior = keyargs.get("prior", None)
+        name = keyargs.get("name", f"{self.name}_par_{self._parIdNo}")
+        keyargs["name"] = name
+        keyargs["prior"] = prior
+
+        component_indices = []
+        for component_key, selection in parameter.items():
+            for component_index, unitcell, site_id, value in self._wyckoff_targets(
+                component_key,
+                selection,
+                value_key,
+            ):
+                couplings = [
+                    coupling
+                    for coupling in getattr(unitcell, coupling_getter)(site_id)
+                    if getattr(coupling, value_key) == value
+                ]
+                if not couplings:
+                    raise ValueError(
+                        f"No Wyckoff {value_key} couplings found for "
+                        f"{component_key!r}, site {site_id!r}, {value_key} "
+                        f"{value!r}."
+                    )
+                atoms = np.asarray(
+                    [coupling.atom_index for coupling in couplings],
+                    dtype=np.intp,
+                )
+                coordinates = tuple(coupling.coordinate for coupling in couplings)
+                factors = np.asarray(
+                    [coupling.factor for coupling in couplings],
+                    dtype=np.float64,
+                )
+                settings = dict(keyargs)
+                settings["wyckoff"] = {
+                    "site_id": site_id,
+                    "kind": kind,
+                    value_key: value,
+                    "value_kind": "delta",
+                }
+                unitcell.addRelParameter(
+                    (atoms, coordinates),
+                    factors,
+                    limits,
+                    **settings,
+                )
+                component_indices.append(component_index)
+
+        par = Parameter(
+            name,
+            np.asarray(component_indices, dtype=np.intp),
+            ParameterType.RELATIVE,
+            limits,
+            prior,
+            keyargs,
+        )
+        self.parameters["coupled"].append(par)
+        self._parIdNo += 1
+        self.fit_metadata_cache = None
+        return par
+
+    def _wyckoff_targets(self, component_key, selection, value_key):
+        internal = None
+        if isinstance(component_key, tuple):
+            if len(component_key) != 2:
+                raise ValueError(
+                    "Tuple Wyckoff component keys must be "
+                    "(component, unitcell)."
+                )
+            component_key, internal = component_key
+
+        if isinstance(selection, dict):
+            site_id = selection["site_id"]
+            value = selection[value_key]
+            internal = selection.get("unitcell", internal)
+        else:
+            site_id, value = selection
+
+        component = self[component_key]
+        component_index = self.getUcIndex(component_key)
+        if isinstance(internal, list | tuple):
+            for internal_name in internal:
+                yield (
+                    component_index,
+                    self._wyckoff_target_unitcell(component, internal_name),
+                    site_id,
+                    value,
+                )
+        else:
+            yield (
+                component_index,
+                self._wyckoff_target_unitcell(component, internal),
+                site_id,
+                value,
+            )
+
+    @staticmethod
+    def _wyckoff_target_unitcell(component, internal):
+        if isinstance(component, UnitCell):
+            if internal is not None:
+                raise ValueError("UnitCell components do not use 'unitcell'.")
+            return component
+        if isinstance(component, Film | PoissonSurface):
+            if internal is not None:
+                return component[internal]
+            return component.unitcell
+        if isinstance(component, EpitaxyInterface):
+            if internal is None:
+                raise ValueError(
+                    "EpitaxyInterface Wyckoff parameters require "
+                    "unitcell='top' or unitcell='bottom'."
+                )
+            return component[internal]
+        if internal is not None and hasattr(component, "__getitem__"):
+            return component[internal]
+        if hasattr(component, "unitcell"):
+            return component.unitcell
+        raise TypeError(
+            f"Component {component!r} does not expose Wyckoff-bearing unit cells."
+        )
+
     def getSurfaceBasis(self):
         return np.concatenate([uc.basis for uc in self if isinstance(uc, UnitCell)])
 

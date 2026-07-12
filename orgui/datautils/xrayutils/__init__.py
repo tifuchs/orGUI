@@ -31,6 +31,7 @@ __email__ = "tfuchs@cornell.edu"
 __all__ = [
     "CTRcalc",
     "CTRplotutil",
+    "CTRsymmetry",
     "DetectorCalibration",
     "HKLVlieg",
     "id31_tools",

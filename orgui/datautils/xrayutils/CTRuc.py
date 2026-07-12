@@ -37,6 +37,8 @@ import xraydb
 import warnings
 import random
 import math
+import copy
+import dataclasses
 from scipy.ndimage import gaussian_filter1d
 import os
 import re
@@ -872,6 +874,7 @@ class UnitCell(Lattice):
         self.coherentDomainOccupancy = [1.0]
         self.dw_increase_constraint = np.array([], dtype=np.bool_)
         self._special_formfactors_present = False
+        self.symmetry_metadata = keyargs.get("symmetry_metadata", None)
 
     def parametersToDict(self):
         d = dict()
@@ -1139,6 +1142,774 @@ class UnitCell(Lattice):
     def layer_cycle(self, layers):
         self._explicit_layer_cycle = tuple(layers)
 
+    @staticmethod
+    def _translation_from_affine_input(translation):
+        translation = np.asarray(translation, dtype=np.float64)
+        if translation.shape == (3,):
+            return translation
+        if translation.shape == (3, 4):
+            linear = translation[:, :3]
+            vector = translation[:, 3]
+        elif translation.shape == (4, 4):
+            if not np.allclose(translation[3], [0.0, 0.0, 0.0, 1.0]):
+                raise ValueError(
+                    "Homogeneous affine transforms must end with "
+                    "[0, 0, 0, 1]."
+                )
+            linear = translation[:3, :3]
+            vector = translation[:3, 3]
+        else:
+            raise ValueError(
+                "translation must be a vector with shape (3,), "
+                "a 3-by-4 matrix, or a homogeneous 4-by-4 matrix."
+            )
+        if not np.allclose(linear, np.identity(3)):
+            raise ValueError(
+                "UnitCell.translate_layered currently supports "
+                "translations only; the affine linear part must be identity."
+            )
+        return vector
+
+    @staticmethod
+    def _remap_parameter_atom_indices(parameter, old_to_new):
+        if not isinstance(parameter.indices, tuple):
+            return
+        atoms, parindexes = parameter.indices
+        atoms = np.asarray(atoms, dtype=np.intp)
+        parameter.indices = (old_to_new[atoms], parindexes)
+
+    @staticmethod
+    def _update_absolute_parameter_values_after_basis_transform(
+        transformed,
+        original_basis,
+        old_to_new,
+    ):
+        new_to_old = np.empty_like(old_to_new)
+        new_to_old[old_to_new] = np.arange(old_to_new.size, dtype=np.intp)
+        for parameter in transformed.parameters["absolute"]:
+            if parameter.value is None or not isinstance(parameter.indices, tuple):
+                continue
+            atoms, parindexes = parameter.indices
+            atoms = np.asarray(atoms, dtype=np.intp)
+            old_atoms = new_to_old[atoms]
+            old_values = original_basis[(old_atoms, parindexes)]
+            new_values = transformed.basis[(atoms, parindexes)]
+            shifts = np.asarray(new_values - old_values, dtype=np.float64)
+            if np.allclose(shifts, shifts.flat[0]):
+                parameter.value += float(shifts.flat[0])
+            else:
+                parameter.value = None
+
+    @staticmethod
+    def _transform_symmetry_metadata(
+        metadata,
+        old_to_new,
+        layer_map,
+        xy_translation,
+        z_shift_by_layer,
+    ):
+        if metadata is None:
+            return None
+        metadata = copy.deepcopy(metadata)
+        coordinate_index = {"x": 0, "y": 1, "z": 2}
+        atoms = []
+        site_parent_shifts = {}
+        for atom in metadata.atoms:
+            z_shift = z_shift_by_layer[atom.layer]
+            coordinate_shift = np.asarray(
+                [xy_translation[0], xy_translation[1], z_shift],
+                dtype=np.float64,
+            )
+            couplings = []
+            for coupling in atom.couplings:
+                couplings.append(
+                    dataclasses.replace(
+                        coupling,
+                        atom_index=int(old_to_new[coupling.atom_index]),
+                        constant=(
+                            coupling.constant
+                            + coordinate_shift[coordinate_index[coupling.coordinate]]
+                        ),
+                    )
+                )
+            site_couplings = []
+            for coupling in atom.site_couplings:
+                site_couplings.append(
+                    dataclasses.replace(
+                        coupling,
+                        atom_index=int(old_to_new[coupling.atom_index]),
+                    )
+                )
+            parent_shift = metadata.surface_spec.transform @ coordinate_shift
+            site_parent_shifts.setdefault(atom.site_id, parent_shift)
+            atoms.append(
+                dataclasses.replace(
+                    atom,
+                    atom_index=int(old_to_new[atom.atom_index]),
+                    parent_fractional=(
+                        np.asarray(atom.parent_fractional, dtype=np.float64)
+                        + parent_shift
+                    ),
+                    surface_fractional=(
+                        np.asarray(atom.surface_fractional, dtype=np.float64)
+                        + coordinate_shift
+                    ),
+                    layer=layer_map[atom.layer],
+                    couplings=tuple(couplings),
+                    site_couplings=tuple(site_couplings),
+                )
+            )
+        sites = []
+        for site in metadata.sites:
+            representative = site.representative_parent_fractional
+            if representative is not None and site.site_id in site_parent_shifts:
+                representative = tuple(
+                    np.asarray(representative, dtype=np.float64)
+                    + site_parent_shifts[site.site_id]
+                )
+            sites.append(
+                dataclasses.replace(
+                    site,
+                    representative_parent_fractional=representative,
+                )
+            )
+        metadata.sites = tuple(sites)
+        metadata.atoms = sorted(atoms, key=lambda atom: atom.atom_index)
+        return metadata
+
+    def _layer_positions_for_cycle(self, cycle):
+        layer_positions = {
+            layer: float(self.layerpos.get(float(layer), np.nan)) for layer in cycle
+        }
+        for layer, position in layer_positions.items():
+            if np.isnan(position):
+                where = self.basis[:, 7] == layer
+                layer_positions[layer] = float(np.mean(self.basis[where, 3]))
+        return layer_positions
+
+    def _validated_layered_translation(self, translation):
+        translation = self._translation_from_affine_input(translation)
+        xy_translation = translation[:2]
+        if not np.allclose(xy_translation, np.rint(xy_translation)):
+            raise ValueError("x and y affine translations must be integers.")
+        if not np.isclose(translation[2], np.rint(translation[2])):
+            raise ValueError("z affine translation must be an integer layer step.")
+        return np.rint(xy_translation).astype(np.float64), int(
+            np.rint(translation[2])
+        )
+
+    @staticmethod
+    def _shift_layered_basis_values(
+        values,
+        cycle,
+        xy_translation,
+        z_shift_by_layer,
+        layer_map=None,
+    ):
+        if values is None or values.size == 0:
+            return values
+        values_new = np.array(values, copy=True)
+        values_new[:, 1:3] += xy_translation
+        for layer in cycle:
+            where = values[:, 7] == layer
+            if not np.any(where):
+                continue
+            values_new[where, 3] += z_shift_by_layer[layer]
+            if layer_map is not None:
+                values_new[where, 7] = layer_map[layer]
+        return values_new
+
+    def _finish_layered_transform(
+        self,
+        transformed,
+        old_to_new,
+        layer_map,
+        xy_translation,
+        z_shift_by_layer,
+        test_special_formfactors=False,
+    ):
+        for parameters in transformed.parameters.values():
+            for parameter in parameters:
+                self._remap_parameter_atom_indices(parameter, old_to_new)
+        self._update_absolute_parameter_values_after_basis_transform(
+            transformed,
+            self.basis,
+            old_to_new,
+        )
+        transformed.symmetry_metadata = self._transform_symmetry_metadata(
+            self.symmetry_metadata,
+            old_to_new,
+            layer_map,
+            xy_translation,
+            z_shift_by_layer,
+        )
+        if test_special_formfactors:
+            transformed._test_special_formfactors()
+        return transformed
+
+    def _apply_reordered_layered_transform(
+        self,
+        transformed,
+        cycle,
+        xy_translation,
+        layer_map,
+        z_shift_by_layer,
+    ):
+        basis = self._shift_layered_basis_values(
+            self.basis,
+            cycle,
+            xy_translation,
+            z_shift_by_layer,
+            layer_map,
+        )
+        basis_0 = self._shift_layered_basis_values(
+            self.basis_0,
+            cycle,
+            xy_translation,
+            z_shift_by_layer,
+            layer_map,
+        )
+        basis_parvalues = self._shift_layered_basis_values(
+            self._basis_parvalues,
+            cycle,
+            xy_translation,
+            z_shift_by_layer,
+            layer_map,
+        )
+
+        order_lookup = {layer: index for index, layer in enumerate(cycle)}
+        row_order = np.array(
+            sorted(range(basis.shape[0]), key=lambda i: (order_lookup[basis[i, 7]], i)),
+            dtype=np.intp,
+        )
+        old_to_new = np.empty_like(row_order)
+        old_to_new[row_order] = np.arange(row_order.size)
+
+        transformed.basis = basis[row_order]
+        transformed.basis_0 = basis_0[row_order]
+        if basis_parvalues is not None:
+            transformed._basis_parvalues = basis_parvalues[row_order]
+        if self.errors is not None:
+            transformed.errors = np.array(self.errors, copy=True)[row_order]
+        if self._errors_parvalues is not None:
+            transformed._errors_parvalues = np.array(
+                self._errors_parvalues,
+                copy=True,
+            )[row_order]
+        transformed.names = [self.names[i] for i in row_order]
+        transformed.dw_increase_constraint = self.dw_increase_constraint[row_order]
+        if hasattr(self, "f"):
+            transformed.f = self.f[row_order]
+
+        return self._finish_layered_transform(
+            transformed,
+            old_to_new,
+            layer_map,
+            xy_translation,
+            z_shift_by_layer,
+            test_special_formfactors=True,
+        )
+
+    def translate_layered(self, translation, name=None):
+        """Return a translated copy with cyclic z-layer wrapping.
+
+        The translation is expressed in unit-cell fractional coordinates. The
+        ``x`` and ``y`` translations must be integer unit-cell offsets, and
+        ``z`` is an integer number of structural-layer steps. Atom fractional
+        z coordinates and layer origins are shifted by ``z / len(layer_cycle)``
+        while layer identifiers are reassigned through the ordered
+        :class:`CTRstacking.LayerCycle`. A positive z step moves lower layers
+        upward and wraps the former top layer to the bottom.
+
+        Symmetry metadata is updated by remapping atom indices, atom layers,
+        surface coordinates, parent coordinates, and Wyckoff coupling
+        constants.
+
+        :param translation:
+            Translation vector with shape ``(3,)``, affine matrix with shape
+            ``(3, 4)``, or homogeneous affine matrix with shape ``(4, 4)``.
+        :param str name:
+            Optional name for the returned unit cell. Defaults to this unit
+            cell's name.
+        :returns:
+            Transformed unit-cell copy.
+        :rtype:
+            UnitCell
+        :raises ValueError:
+            If the affine linear part is not identity or any requested
+            translation is not an integer.
+        """
+        xy_translation, z_steps = self._validated_layered_translation(translation)
+        transformed = copy.deepcopy(self)
+        if name is not None:
+            transformed.name = name
+
+        if self.basis.size == 0:
+            if z_steps:
+                raise ValueError("Cannot cyclically shift layers in an empty UnitCell.")
+            return transformed
+
+        cycle = self.layer_cycle.layers
+        layer_count = len(cycle)
+        z_steps_effective = z_steps % layer_count
+        z_translation = z_steps / layer_count
+
+        if z_steps_effective == 0 and np.all(xy_translation == 0):
+            if z_steps == 0:
+                return transformed
+        if z_steps_effective == 0:
+            z_shift_by_layer = {layer: z_translation for layer in cycle}
+            transformed.basis = self._shift_layered_basis_values(
+                transformed.basis,
+                cycle,
+                xy_translation,
+                z_shift_by_layer,
+            )
+            transformed.basis_0 = self._shift_layered_basis_values(
+                transformed.basis_0,
+                cycle,
+                xy_translation,
+                z_shift_by_layer,
+            )
+            transformed._basis_parvalues = self._shift_layered_basis_values(
+                transformed._basis_parvalues,
+                cycle,
+                xy_translation,
+                z_shift_by_layer,
+            )
+            for layer in cycle:
+                layer_key = float(layer)
+                if layer_key not in transformed.layerpos:
+                    where = self.basis[:, 7] == layer
+                    transformed.layerpos[layer_key] = float(
+                        np.mean(self.basis[where, 3])
+                    )
+                transformed.layerpos[layer_key] += z_translation
+            old_to_new = np.arange(self.basis.shape[0], dtype=np.intp)
+            layer_map = {layer: layer for layer in cycle}
+            return self._finish_layered_transform(
+                transformed,
+                old_to_new,
+                layer_map,
+                xy_translation,
+                z_shift_by_layer,
+            )
+
+        layer_positions = self._layer_positions_for_cycle(cycle)
+        layer_map = {
+            layer: cycle[(index + z_steps_effective) % layer_count]
+            for index, layer in enumerate(cycle)
+        }
+        z_shift_by_layer = {layer: z_translation for layer in cycle}
+        transformed = self._apply_reordered_layered_transform(
+            transformed,
+            cycle,
+            xy_translation,
+            layer_map,
+            z_shift_by_layer,
+        )
+
+        transformed.layerpos = copy.deepcopy(self.layerpos)
+        for layer in cycle:
+            new_layer = layer_map[layer]
+            transformed.layerpos[float(new_layer)] = (
+                layer_positions[layer] + z_translation
+            )
+        if transformed._explicit_layer_cycle is not None:
+            transformed._explicit_layer_cycle = tuple(cycle)
+        return transformed
+
+    def affine_layer_transform(self, translation, name=None):
+        """Return a canonical layered translation copy.
+
+        The translation input follows :meth:`translate_layered`, but z layer
+        steps are wrapped back into this unit cell's structural-layer
+        positions. This preserves a ``0 <= z < 1`` unit-cell representation
+        for cells whose layer origins are inside that interval.
+
+        Symmetry metadata is updated by remapping atom indices, atom layers,
+        surface coordinates, parent coordinates, and Wyckoff coupling
+        constants.
+
+        :param translation:
+            Translation vector with shape ``(3,)``, affine matrix with shape
+            ``(3, 4)``, or homogeneous affine matrix with shape ``(4, 4)``.
+        :param str name:
+            Optional name for the returned unit cell. Defaults to this unit
+            cell's name.
+        :returns:
+            Transformed unit-cell copy with wrapped layer coordinates.
+        :rtype:
+            UnitCell
+        :raises ValueError:
+            If the affine linear part is not identity or any requested
+            translation is not an integer.
+        """
+        xy_translation, z_steps = self._validated_layered_translation(translation)
+        transformed = copy.deepcopy(self)
+        if name is not None:
+            transformed.name = name
+
+        if self.basis.size == 0:
+            if z_steps:
+                raise ValueError("Cannot cyclically shift layers in an empty UnitCell.")
+            return transformed
+
+        cycle = self.layer_cycle.layers
+        layer_count = len(cycle)
+        z_steps_effective = z_steps % layer_count
+        if z_steps_effective == 0:
+            z_shift_by_layer = {layer: 0.0 for layer in cycle}
+            transformed.basis = self._shift_layered_basis_values(
+                transformed.basis,
+                cycle,
+                xy_translation,
+                z_shift_by_layer,
+            )
+            transformed.basis_0 = self._shift_layered_basis_values(
+                transformed.basis_0,
+                cycle,
+                xy_translation,
+                z_shift_by_layer,
+            )
+            transformed._basis_parvalues = self._shift_layered_basis_values(
+                transformed._basis_parvalues,
+                cycle,
+                xy_translation,
+                z_shift_by_layer,
+            )
+            old_to_new = np.arange(self.basis.shape[0], dtype=np.intp)
+            layer_map = {layer: layer for layer in cycle}
+            return self._finish_layered_transform(
+                transformed,
+                old_to_new,
+                layer_map,
+                xy_translation,
+                z_shift_by_layer,
+            )
+
+        layer_positions = self._layer_positions_for_cycle(cycle)
+        layer_map = {
+            layer: cycle[(index + z_steps_effective) % layer_count]
+            for index, layer in enumerate(cycle)
+        }
+        z_shift_by_layer = {
+            layer: layer_positions[layer_map[layer]] - layer_positions[layer]
+            for layer in cycle
+        }
+        transformed = self._apply_reordered_layered_transform(
+            transformed,
+            cycle,
+            xy_translation,
+            layer_map,
+            z_shift_by_layer,
+        )
+
+        transformed.layerpos = copy.deepcopy(self.layerpos)
+        for layer in cycle:
+            transformed.layerpos[float(layer)] = layer_positions[layer]
+        if transformed._explicit_layer_cycle is not None:
+            transformed._explicit_layer_cycle = tuple(cycle)
+        return transformed
+
+    def supercell(self, repeats, symmetry="preserve", name=None):
+        """Return a repeated unit-cell copy.
+
+        :param repeats:
+            Integer repeat counts along the ``a``, ``b``, and ``c`` lattice
+            directions.
+        :param str symmetry:
+            ``"preserve"`` keeps generated atoms on the original Wyckoff
+            sites, so a later Wyckoff fit parameter is shared across all
+            repeated copies. ``"independent"`` creates one copied Wyckoff site
+            per generated unit-cell repeat, so each copy can be fitted
+            independently.
+        :param str name:
+            Optional name for the returned unit cell. Defaults to this unit
+            cell's name.
+        :returns:
+            Repeated unit-cell copy.
+        :rtype:
+            UnitCell
+        :raises ValueError:
+            If repeat counts are not positive integers or ``symmetry`` is
+            unknown.
+        """
+        repeat_values = np.asarray(repeats, dtype=np.float64)
+        if (
+            repeat_values.shape != (3,)
+            or not np.all(np.isfinite(repeat_values))
+            or np.any(repeat_values <= 0)
+            or not np.all(repeat_values == np.rint(repeat_values))
+        ):
+            raise ValueError("repeats must contain three positive integers.")
+        repeats = repeat_values.astype(np.intp)
+        if symmetry not in {"preserve", "independent"}:
+            raise ValueError("symmetry must be 'preserve' or 'independent'.")
+
+        new_a = self.a * repeats
+        transformed = UnitCell(
+            new_a,
+            np.rad2deg(self.alpha),
+            name=self.name if name is None else name,
+            layer_behavior=self.layer_behavior,
+        )
+        transformed.layer_transition = copy.deepcopy(self.layer_transition)
+        transformed.refHKLTransform = np.copy(self.refHKLTransform)
+        transformed.refRealTransform = np.copy(self.refRealTransform)
+        transformed.coherentDomainMatrix = []
+        repeats_float = repeats.astype(np.float64)
+        for matrix in self.coherentDomainMatrix:
+            matrix_new = np.array(matrix, copy=True)
+            matrix_new[:, -1] = matrix_new[:, -1] / repeats_float
+            transformed.coherentDomainMatrix.append(matrix_new)
+        transformed.coherentDomainOccupancy = copy.deepcopy(
+            self.coherentDomainOccupancy
+        )
+        transformed._special_formfactors_present = self._special_formfactors_present
+        if hasattr(self, "_E"):
+            transformed._E = self._E
+
+        if self.basis.size == 0:
+            return transformed
+
+        cycle = self.layer_cycle.layers
+        layer_positions = self._layer_positions_for_cycle(cycle)
+        layer_ids = self._supercell_layer_ids(cycle, int(repeats[2]))
+
+        rows = []
+        for iz in range(int(repeats[2])):
+            for iy in range(int(repeats[1])):
+                for ix in range(int(repeats[0])):
+                    cell_offset = np.asarray([ix, iy, iz], dtype=np.float64)
+                    copy_index = (
+                        iz * int(repeats[0]) * int(repeats[1])
+                        + iy * int(repeats[0])
+                        + ix
+                    )
+                    for atom_index, row in enumerate(self.basis):
+                        layer = row[7]
+                        layer_index = cycle.index(layer)
+                        new_row = np.array(row, copy=True)
+                        new_row[1:4] = (row[1:4] + cell_offset) / repeats
+                        new_row[7] = layer_ids[(iz, layer)]
+                        rows.append(
+                            {
+                                "basis": new_row,
+                                "basis_0": np.array(
+                                    self.basis_0[atom_index], copy=True
+                                ),
+                                "name": self.names[atom_index],
+                                "constraint": self.dw_increase_constraint[atom_index],
+                                "old_atom": atom_index,
+                                "copy_index": copy_index,
+                                "cell_offset": cell_offset,
+                                "layer_order": iz * len(cycle) + layer_index,
+                            }
+                        )
+                        rows[-1]["basis_0"][1:4] = (
+                            self.basis_0[atom_index, 1:4] + cell_offset
+                        ) / repeats
+                        rows[-1]["basis_0"][7] = layer_ids[(iz, layer)]
+                        if self.errors is not None:
+                            rows[-1]["errors"] = np.array(
+                                self.errors[atom_index], copy=True
+                            )
+                        if self._errors_parvalues is not None:
+                            rows[-1]["errors_parvalues"] = np.array(
+                                self._errors_parvalues[atom_index], copy=True
+                            )
+                        if self._basis_parvalues is not None:
+                            rows[-1]["basis_parvalues"] = np.array(
+                                self._basis_parvalues[atom_index], copy=True
+                            )
+                            rows[-1]["basis_parvalues"][1:4] = (
+                                self._basis_parvalues[atom_index, 1:4] + cell_offset
+                            ) / repeats
+                            rows[-1]["basis_parvalues"][7] = layer_ids[(iz, layer)]
+                        if hasattr(self, "f"):
+                            rows[-1]["f"] = np.array(self.f[atom_index], copy=True)
+
+        rows = sorted(
+            enumerate(rows),
+            key=lambda item: (item[1]["layer_order"], item[0]),
+        )
+        rows = [row for _, row in rows]
+
+        transformed.basis = np.vstack([row["basis"] for row in rows])
+        transformed.basis_0 = np.vstack([row["basis_0"] for row in rows])
+        transformed.names = [row["name"] for row in rows]
+        transformed.dw_increase_constraint = np.asarray(
+            [row["constraint"] for row in rows],
+            dtype=np.bool_,
+        )
+        if self.errors is not None:
+            transformed.errors = np.vstack([row["errors"] for row in rows])
+        if self._errors_parvalues is not None:
+            transformed._errors_parvalues = np.vstack(
+                [row["errors_parvalues"] for row in rows]
+            )
+        if self._basis_parvalues is not None:
+            transformed._basis_parvalues = np.vstack(
+                [row["basis_parvalues"] for row in rows]
+            )
+        if hasattr(self, "f"):
+            transformed.f = np.vstack([row["f"] for row in rows])
+
+        transformed.layerpos = {}
+        for iz in range(int(repeats[2])):
+            for layer in cycle:
+                transformed.layerpos[float(layer_ids[(iz, layer)])] = (
+                    layer_positions[layer] + iz
+                ) / repeats[2]
+        transformed._explicit_layer_cycle = tuple(
+            layer_ids[(iz, layer)]
+            for iz in range(int(repeats[2]))
+            for layer in cycle
+        )
+        transformed.parameters = {"absolute": [], "relative": []}
+        transformed.basis_0 = np.copy(transformed.basis)
+        transformed._basis_parvalues = np.copy(transformed.basis)
+        transformed.symmetry_metadata = self._supercell_symmetry_metadata(
+            rows,
+            repeats.astype(np.float64),
+            layer_ids,
+            symmetry,
+        )
+        transformed._test_special_formfactors()
+        return transformed
+
+    def _supercell_layer_ids(self, cycle, z_repeats):
+        if z_repeats == 1:
+            return {(0, layer): layer for layer in cycle}
+        numeric = np.asarray(cycle, dtype=np.float64)
+        expected = np.arange(1, len(cycle) + 1, dtype=np.float64)
+        if np.allclose(numeric, expected):
+            return {
+                (iz, layer): float(layer + iz * len(cycle))
+                for iz in range(z_repeats)
+                for layer in cycle
+            }
+        return {
+            (iz, layer): float(iz * len(cycle) + index)
+            for iz in range(z_repeats)
+            for index, layer in enumerate(cycle)
+        }
+
+    def _supercell_symmetry_metadata(self, rows, repeats, layer_ids, symmetry):
+        if self.symmetry_metadata is None:
+            return None
+        metadata = copy.deepcopy(self.symmetry_metadata)
+        site_by_copy = {}
+        if symmetry == "preserve":
+            sites = tuple(copy.deepcopy(metadata.sites))
+        else:
+            sites = []
+            for row in rows:
+                atom = metadata.atom_wyckoff_metadata(row["old_atom"])
+                if atom is None:
+                    continue
+                key = (row["copy_index"], atom.site_id)
+                if key in site_by_copy:
+                    continue
+                site = next(
+                    site for site in metadata.sites if site.site_id == atom.site_id
+                )
+                site_id = f"{site.site_id}_copy{row['copy_index']}"
+                site_by_copy[key] = site_id
+                representative = site.representative_parent_fractional
+                if representative is not None:
+                    representative = tuple(
+                        np.asarray(representative, dtype=np.float64)
+                        + metadata.surface_spec.transform @ row["cell_offset"]
+                    )
+                sites.append(
+                    dataclasses.replace(
+                        site,
+                        site_id=site_id,
+                        representative_parent_fractional=representative,
+                    )
+                )
+            sites = tuple(sites)
+
+        atoms = []
+        coordinate_index = {"x": 0, "y": 1, "z": 2}
+        for new_index, row in enumerate(rows):
+            atom = metadata.atom_wyckoff_metadata(row["old_atom"])
+            if atom is None:
+                continue
+            site_id = atom.site_id
+            if symmetry == "independent":
+                site_id = site_by_copy[(row["copy_index"], atom.site_id)]
+            surface_fractional = (
+                np.asarray(atom.surface_fractional, dtype=np.float64)
+                + row["cell_offset"]
+            ) / repeats
+            parent_fractional = (
+                np.asarray(atom.parent_fractional, dtype=np.float64)
+                + metadata.surface_spec.transform @ row["cell_offset"]
+            )
+            couplings = []
+            for coupling in atom.couplings:
+                new_site_id = site_id
+                couplings.append(
+                    dataclasses.replace(
+                        coupling,
+                        atom_index=new_index,
+                        site_id=new_site_id,
+                        constant=(
+                            coupling.constant
+                            + row["cell_offset"][
+                                coordinate_index[coupling.coordinate]
+                            ]
+                        )
+                        / repeats[coordinate_index[coupling.coordinate]],
+                        factor=(
+                            coupling.factor
+                            / repeats[coordinate_index[coupling.coordinate]]
+                        ),
+                    )
+                )
+            site_couplings = []
+            for coupling in atom.site_couplings:
+                site_couplings.append(
+                    dataclasses.replace(
+                        coupling,
+                        atom_index=new_index,
+                        site_id=site_id,
+                        factor=(
+                            coupling.factor
+                            / repeats[coordinate_index[coupling.coordinate]]
+                        ),
+                    )
+                )
+            atoms.append(
+                dataclasses.replace(
+                    atom,
+                    atom_index=new_index,
+                    site_id=site_id,
+                    parent_fractional=parent_fractional,
+                    surface_fractional=surface_fractional,
+                    layer=layer_ids[(int(row["cell_offset"][2]), atom.layer)],
+                    couplings=tuple(couplings),
+                    site_couplings=tuple(site_couplings),
+                )
+            )
+
+        metadata.surface_spec = dataclasses.replace(
+            metadata.surface_spec,
+            transform=metadata.surface_spec.transform @ np.diag(repeats),
+            layer_origins=tuple(
+                (self._layer_positions_for_cycle(self.layer_cycle.layers)[layer] + iz)
+                / repeats[2]
+                for iz in range(int(repeats[2]))
+                for layer in self.layer_cycle.layers
+            ),
+        )
+        metadata.sites = sites
+        metadata.atoms = atoms
+        return metadata
+
     @property
     def layer_behavior(self):
         """Return how layer selection is handled during crystal stacking."""
@@ -1376,6 +2147,375 @@ class UnitCell(Lattice):
         )
         self.parameters["relative"].append(par)
         return par
+
+    def wyckoff_sites(self):
+        """Return Wyckoff site metadata for this unit cell.
+
+        :returns:
+            List of site dictionaries. The list is empty when no symmetry
+            metadata is attached.
+        :rtype:
+            list
+        """
+        if self.symmetry_metadata is None:
+            return []
+        return self.symmetry_metadata.wyckoff_sites(self.parameters)
+
+    def wyckoff_couplings(self, site_id=None):
+        """Return symmetry couplings for generated Wyckoff atom coordinates.
+
+        :param str site_id:
+            Optional site identifier. If omitted, all couplings are returned.
+        :returns:
+            List of coordinate coupling metadata objects.
+        :rtype:
+            list
+        """
+        if self.symmetry_metadata is None:
+            return []
+        return self.symmetry_metadata.wyckoff_couplings(site_id)
+
+    def wyckoff_site_couplings(self, site_id=None):
+        """Return couplings for representative Wyckoff-site displacement.
+
+        :param str site_id:
+            Optional site identifier. If omitted, all couplings are returned.
+        :returns:
+            List of site-displacement coupling metadata objects.
+        :rtype:
+            list
+        """
+        if self.symmetry_metadata is None:
+            return []
+        return self.symmetry_metadata.wyckoff_site_couplings(site_id)
+
+    def atom_wyckoff_metadata(self, atom_index):
+        """Return symmetry metadata for one atom.
+
+        :param int atom_index:
+            Index in ``basis``.
+        :returns:
+            Atom metadata or ``None`` when no metadata is available.
+        :rtype:
+            object or None
+        """
+        if self.symmetry_metadata is None:
+            return None
+        return self.symmetry_metadata.atom_wyckoff_metadata(atom_index)
+
+    @staticmethod
+    def _limit_for(limit_spec, parameter_name):
+        if isinstance(limit_spec, dict):
+            return limit_spec.get(parameter_name, (-np.inf, np.inf))
+        return limit_spec
+
+    @staticmethod
+    def _delta_limits(limits, absolute_limits, reference_value):
+        if absolute_limits is None:
+            return limits
+        if limits != (-np.inf, np.inf):
+            raise ValueError("Use either limits or absolute_limits, not both.")
+        return (
+            absolute_limits[0] - reference_value,
+            absolute_limits[1] - reference_value,
+        )
+
+    def _wyckoff_site(self, site_id):
+        if self.symmetry_metadata is None:
+            raise ValueError(f"UnitCell {self.name} has no symmetry metadata.")
+        site = next(
+            (
+                site
+                for site in self.wyckoff_sites()
+                if site["site_id"] == site_id
+            ),
+            None,
+        )
+        if site is None:
+            raise ValueError(f"Unknown Wyckoff site {site_id}.")
+        return site
+
+    @staticmethod
+    def _coupling_parameter_arrays(couplings):
+        atoms = np.asarray(
+            [coupling.atom_index for coupling in couplings],
+            dtype=np.intp,
+        )
+        coordinates = tuple(coupling.coordinate for coupling in couplings)
+        factors = np.asarray(
+            [coupling.factor for coupling in couplings],
+            dtype=np.float64,
+        )
+        return atoms, coordinates, factors
+
+    def _add_wyckoff_relative_parameter(
+        self,
+        site_id,
+        selector_name,
+        selector_value,
+        kind,
+        couplings,
+        limits,
+        default_name,
+        empty_message,
+        keyargs,
+    ):
+        if not couplings:
+            raise ValueError(empty_message)
+        atoms, coordinates, factors = self._coupling_parameter_arrays(couplings)
+        keyargs.setdefault("name", default_name)
+        settings = keyargs.setdefault("wyckoff", {})
+        settings.update(
+            {
+                "site_id": site_id,
+                "kind": kind,
+                selector_name: selector_value,
+                "value_kind": "delta",
+            }
+        )
+        return self.addRelParameter(
+            (atoms, coordinates),
+            factors,
+            limits=limits,
+            **keyargs,
+        )
+
+    def addWyckoffParameter(
+        self,
+        site_id,
+        variable,
+        limits=(-np.inf, np.inf),
+        absolute_limits=None,
+        **keyargs,
+    ):
+        """Add a symmetry-preserving fit parameter for a Wyckoff variable.
+
+        The stored fit value is the change in the Wyckoff variable from the
+        generated coordinates. For example, fitting rutile oxygen ``u`` adds
+        ``factor * delta_u`` to every generated coordinate that depends on
+        ``u``. Multi-variable Wyckoff sites are fitted by adding one parameter
+        per independent coordinate variable.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :param str variable:
+            Wyckoff variable name, for example ``"u"``.
+        :param tuple limits:
+            Fit limits for the variable change in fractional units.
+        :param tuple absolute_limits:
+            Optional absolute variable limits. These are converted to change
+            limits around the metadata variable value.
+        :returns:
+            Created relative fit parameter.
+        :rtype:
+            CTRutil.Parameter
+        :raises ValueError:
+            If no matching affine couplings exist.
+        """
+        site = self._wyckoff_site(site_id)
+        if not site["variables"]:
+            raise ValueError(
+                f"Wyckoff site {site_id} has no positional coordinate variables."
+            )
+        if variable not in site["variables"]:
+            raise ValueError(f"Wyckoff site {site_id} has no variable {variable}.")
+
+        limits = self._delta_limits(
+            limits,
+            absolute_limits,
+            site["variables"][variable],
+        )
+        couplings = [
+            coupling
+            for coupling in self.wyckoff_couplings(site_id)
+            if coupling.variable == variable
+        ]
+        return self._add_wyckoff_relative_parameter(
+            site_id,
+            "variable",
+            variable,
+            "coordinate",
+            couplings,
+            limits,
+            f"{self.name} {site_id}_{variable}_wyckoff_coordinate",
+            (
+                f"No affine couplings found for Wyckoff site {site_id} "
+                f"and variable {variable}."
+            ),
+            keyargs,
+        )
+
+    def addWyckoffParameters(
+        self,
+        site_id,
+        variables=None,
+        limits=(-np.inf, np.inf),
+        absolute_limits=None,
+        **keyargs,
+    ):
+        """Add symmetry-preserving fit parameters for Wyckoff variables.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :param variables:
+            Iterable of coordinate variables to fit. If ``None``, all free
+            variables on the site are fitted.
+        :type variables:
+            iterable or None
+        :param limits:
+            Either one ``(lower, upper)`` tuple applied to every variable or a
+            dictionary mapping variable names to delta limits.
+        :param absolute_limits:
+            Optional dictionary mapping variable names to absolute limits.
+        :returns:
+            Created relative fit parameters in variable order.
+        :rtype:
+            list
+        :raises ValueError:
+            If the site has no free coordinate variables.
+        """
+        site_variables = tuple(self._wyckoff_site(site_id)["variables"])
+        if not site_variables:
+            raise ValueError(
+                f"Wyckoff site {site_id} has no positional coordinate variables."
+            )
+        if variables is None:
+            variables = site_variables
+        variables = tuple(variables)
+
+        parameters = []
+        for variable in variables:
+            parameter_keyargs = copy.deepcopy(keyargs)
+            parameter_limits = self._limit_for(limits, variable)
+            parameter_absolute_limits = (
+                None
+                if absolute_limits is None
+                else self._limit_for(absolute_limits, variable)
+            )
+            parameters.append(
+                self.addWyckoffParameter(
+                    site_id,
+                    variable,
+                    limits=parameter_limits,
+                    absolute_limits=parameter_absolute_limits,
+                    **parameter_keyargs,
+                )
+            )
+        return parameters
+
+    def addWyckoffShift(
+        self,
+        site_id,
+        axis,
+        limits=(-np.inf, np.inf),
+        absolute_limits=None,
+        **keyargs,
+    ):
+        """Add a symmetry-lowering shift for representative site motion.
+
+        ``axis`` is a parent conventional fractional coordinate of the
+        representative atom. The stored fit value is a delta from the
+        representative coordinate; generated atoms move through the stored
+        space-group operation and surface-cell transform factors.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :param str axis:
+            Parent representative coordinate, one of ``"x"``, ``"y"``, or
+            ``"z"``.
+        :param tuple limits:
+            Fit limits for the coordinate change in parent fractional units.
+        :param tuple absolute_limits:
+            Optional absolute parent-coordinate limits, converted to changes
+            around the stored representative coordinate.
+        :returns:
+            Created relative fit parameter.
+        :rtype:
+            CTRutil.Parameter
+        :raises ValueError:
+            If no matching site-displacement couplings exist.
+        """
+        if axis not in {"x", "y", "z"}:
+            raise ValueError("axis must be one of 'x', 'y', or 'z'.")
+        site = self._wyckoff_site(site_id)
+        representative = site.get("representative_parent_fractional")
+        if representative is None:
+            raise ValueError(
+                f"Wyckoff site {site_id} has no representative parent coordinate."
+            )
+        axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+        limits = self._delta_limits(
+            limits,
+            absolute_limits,
+            representative[axis_index],
+        )
+
+        couplings = [
+            coupling
+            for coupling in self.wyckoff_site_couplings(site_id)
+            if coupling.axis == axis
+        ]
+        return self._add_wyckoff_relative_parameter(
+            site_id,
+            "axis",
+            axis,
+            "site_displacement",
+            couplings,
+            limits,
+            f"{self.name} {site_id}_{axis}_wyckoff_site",
+            (
+                f"No site-displacement couplings found for Wyckoff site "
+                f"{site_id} and parent axis {axis}."
+            ),
+            keyargs,
+        )
+
+    def addWyckoffShifts(
+        self,
+        site_id,
+        axes=("x", "y", "z"),
+        limits=(-np.inf, np.inf),
+        absolute_limits=None,
+        **keyargs,
+    ):
+        """Add representative site-displacement shifts for several axes.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :param axes:
+            Parent representative coordinate axes to fit.
+        :type axes:
+            iterable
+        :param limits:
+            Either one ``(lower, upper)`` tuple applied to every axis or a
+            dictionary mapping axis names to delta limits.
+        :param absolute_limits:
+            Optional dictionary mapping axis names to absolute limits.
+        :returns:
+            Created relative fit parameters in axis order.
+        :rtype:
+            list
+        """
+
+        parameters = []
+        for axis in axes:
+            parameter_keyargs = copy.deepcopy(keyargs)
+            parameter_limits = self._limit_for(limits, axis)
+            parameter_absolute_limits = (
+                None
+                if absolute_limits is None
+                else self._limit_for(absolute_limits, axis)
+            )
+            parameters.append(
+                self.addWyckoffShift(
+                    site_id,
+                    axis,
+                    limits=parameter_limits,
+                    absolute_limits=parameter_absolute_limits,
+                    **parameter_keyargs,
+                )
+            )
+        return parameters
 
     def showFitparameters(self):
         print(self.fitparameterList())
@@ -2279,6 +3419,10 @@ class UnitCell(Lattice):
             st += "layer_cycle: {}\n".format(
                 ", ".join(str(layer) for layer in self._explicit_layer_cycle)
             )
+        if self.symmetry_metadata is not None:
+            from .CTRsymmetry import symmetry_metadata_to_lines
+
+            st += "\n".join(symmetry_metadata_to_lines(self.symmetry_metadata)) + "\n"
         return st
 
     def parameterStrRod(self):
@@ -2537,8 +3681,27 @@ class UnitCell(Lattice):
             layerpos = dict()
             layer_behaviour = "ignore"
             layer_cycle = None
+            symmetry_lines = []
+            reading_symmetry = False
             for l in f:  # noqa: E741
                 line = l.rsplit("//")[0]
+                stripped = line.strip()
+                if reading_symmetry or stripped.startswith(
+                    (
+                        "spacegroup:",
+                        "parent_a:",
+                        "parent_alpha:",
+                        "surface_transform:",
+                        "surface_origin:",
+                        "wyckoff_sites:",
+                        "wyckoff_atoms:",
+                        "wyckoff_couplings:",
+                    )
+                ):
+                    reading_symmetry = True
+                    if stripped:
+                        symmetry_lines.append(stripped)
+                    continue
                 if line.startswith("layerpos:"):
                     if "=" in line:
                         try:
@@ -2704,6 +3867,13 @@ class UnitCell(Lattice):
             uc.basis_0 = np.copy(uc.basis)
             uc.dw_increase_constraint = np.ones(uc.basis.shape[0], dtype=np.bool_)
             uc._test_special_formfactors()
+            if symmetry_lines:
+                from .CTRsymmetry import symmetry_metadata_from_lines
+
+                uc.symmetry_metadata = symmetry_metadata_from_lines(
+                    symmetry_lines,
+                    uc,
+                )
             return uc
         elif len(basis) == 1:
             if (
@@ -2725,6 +3895,13 @@ class UnitCell(Lattice):
             uc.basis_0 = np.copy(uc.basis)
             uc.dw_increase_constraint = np.ones(uc.basis.shape[0], dtype=np.bool_)
             uc._test_special_formfactors()
+            if symmetry_lines:
+                from .CTRsymmetry import symmetry_metadata_from_lines
+
+                uc.symmetry_metadata = symmetry_metadata_from_lines(
+                    symmetry_lines,
+                    uc,
+                )
             return uc
         else:
             raise ValueError(
