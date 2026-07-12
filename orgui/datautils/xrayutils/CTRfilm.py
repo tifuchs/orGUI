@@ -382,15 +382,6 @@ def _parse_float_metadata(string, name, default):
     return default
 
 
-def _parse_text_metadata(string, name, default=None):
-    prefix = name.lower() + ":"
-    for line in string.splitlines():
-        normalized = line.strip()
-        if normalized.lower().startswith(prefix):
-            return normalized.split(":", 1)[1].strip()
-    return default
-
-
 class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
     parameterOrder = "Width/cells Skew/cells"
 
@@ -420,9 +411,6 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             raise TypeError("EpitaxyInterface profile must be SkellamProfile")
         self.type = type
         self.profile = profile
-        self._legacy_support_cursor = kwargs.pop(
-            "legacy_support_cursor", profile is None
-        )
         self.sigma_calc = kwargs.get("sigma_calc", 3)
         self.fixed_ucs = kwargs.get("fixed_ucs", False)
         self.set_ucs(uc_top, uc_bottom, **kwargs)
@@ -578,26 +566,27 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
     @property
     def stacking_height_absolute(self):
-        """Return the nominal interface boundary height in Angstrom."""
-        if self._legacy_support_cursor:
-            return self.height_absolute
-        return self.below_H
+        """Return the physical upper support height in Angstrom.
+
+        Components stacked above this interface start at this height, so the
+        interface alone owns every layer in its generated support.
+        """
+        return self.height_absolute
 
     @property
     def stacking_loc_absolute(self):
-        """Return the nominal interface boundary location in Angstrom."""
-        if self._legacy_support_cursor:
-            return self.loc_absolute
-        return self.below_H
+        """Return the nominal interface boundary location in Angstrom.
+
+        A Film uses this location as the origin of its requested total width,
+        while :attr:`stacking_height_absolute` supplies the physical support
+        it must not duplicate.
+        """
+        return self.loc_absolute
 
     @property
     def layer_state(self):
-        """Return the nominal layer state at the upper side of the interface."""
-        if self._legacy_support_cursor:
-            return super().layer_state
-        layers = self.layer_cycle.layers
-        start = layers.index(self.start_layer_number)
-        return LayerState(self.layer_cycle, layers[start - 1])
+        """Return the terminal layer state of the physical upper support."""
+        return super().layer_state
 
     def createInterfaceCells(self):
         n_layers = len(self.uc_top.layers)
@@ -635,14 +624,11 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 (-1, n_layers)
             )
             probability_bottom = 1.0 - probability_top
-            occupancy_top = probability_top
-            occupancy_bottom = probability_bottom
-            if not self._legacy_support_cursor:
-                sharp_top = (
-                    (unitcells >= loc).astype(np.float64).reshape((-1, n_layers))
-                )
-                occupancy_top = probability_top - sharp_top
-                occupancy_bottom = probability_bottom - (1.0 - sharp_top)
+            sharp_top = (
+                (unitcells >= loc).astype(np.float64).reshape((-1, n_layers))
+            )
+            occupancy_top = probability_top - sharp_top
+            occupancy_bottom = probability_bottom - (1.0 - sharp_top)
 
             a3_top = self.top_layers[0].a[2]
             a3_bottom = self.bottom_layers[0].a[2]
@@ -708,12 +694,8 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             self._loc_absolute_ref = (
                 loc_mat[2, 3] * a3_top + loc_remainder * loc_mat[2, 2] * a3_top
             )
-            if self._legacy_support_cursor:
-                translation = self.below_H
-                self._loc_absolute = self._loc_absolute_ref + self.below_H
-            else:
-                translation = self.below_H - self._loc_absolute_ref
-                self._loc_absolute = self.below_H
+            translation = self.below_H - self._loc_absolute_ref
+            self._loc_absolute = self.below_H
             _translate_domains(self.top_layers, translation)
             _translate_domains(self.bottom_layers, translation)
             self._end_layer_number = self.layer_order[-1]
@@ -1020,20 +1002,16 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         uc_top.name = top_name
         uc_bottom.name = bottom_name
 
-        support_cursor = _parse_text_metadata(string, "support_cursor", "legacy")
         tail_probability = _parse_float_metadata(
             string, "tail_probability", DEFAULT_TAIL_PROBABILITY
         )
-        profile = None
-        if support_cursor == "nominal":
-            profile = SkellamProfile(basis[0], basis[1], tail_probability)
+        profile = SkellamProfile(basis[0], basis[1], tail_probability)
         epit = cls(
             uc_top,
             uc_bottom,
             ep_type,
             profile=profile,
             layer_transition=_parse_layer_transition(string),
-            legacy_support_cursor=(support_cursor != "nominal"),
         )
         epit.statistics = statistics
         epit.basis = basis
@@ -1057,13 +1035,11 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             + "\n"
             + self.epitToStr(showErrors=showErrors)
         )
-        if not self._legacy_support_cursor:
-            s += "\nsupport_cursor: nominal"
-            if (
-                self.profile is not None
-                and self.profile.tail_probability != DEFAULT_TAIL_PROBABILITY
-            ):
-                s += f"\ntail_probability: {self.profile.tail_probability:.12g}"
+        if (
+            self.profile is not None
+            and self.profile.tail_probability != DEFAULT_TAIL_PROBABILITY
+        ):
+            s += f"\ntail_probability: {self.profile.tail_probability:.12g}"
         metadata = self._stacking_metadata_to_str()
         if metadata:
             s += "\n" + metadata.rstrip()
@@ -1173,6 +1149,15 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         return self.pos_absolute
 
     def set_below(self, loc, height):
+        """Place Film above support while retaining its nominal width origin.
+
+        :param float loc:
+            Nominal lower boundary in Angstrom, used as the origin of
+            :attr:`basis` width.
+        :param float height:
+            Physical upper support height in Angstrom. Generated unstrained
+            Film layers begin here.
+        """
         self.below_loc = loc
         self.below_H = height
         self.createLayers()
@@ -1181,6 +1166,8 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
     def height_absolute(self):
         if np.any(self._basis_created != self.basis):
             self.createLayers()
+        if self._layers_to_create == 0:
+            return self.below_H
         upper_layer_id = self.end_layer_number
         upper_layer = self.uc_layers[upper_layer_id]
         idx = self.layer_ucs.index(upper_layer)
@@ -1195,6 +1182,8 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
     def pos_absolute(self):
         if np.any(self._basis_created != self.basis):
             self.createLayers()
+        if self._layers_to_create == 0:
+            return self.below_H
         lower_layer = self.layer_ucs[0]
         matrix = lower_layer.coherentDomainMatrix[0]
         layer_id = self.layer_order[0]
@@ -1218,16 +1207,34 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         return self._end_layer_number
 
     def createLayers(self):
+        """Create unstrained Film layers above lower-component support.
+
+        The Film width in :attr:`basis` is measured from ``below_loc``. When
+        the component below has already generated support up to ``below_H``,
+        only the remaining width is represented by Film layers.
+        """
         n_layers_in_uc = len(self.unitcell.layers)
         scaled_width = self.basis[0] - n_layers_in_uc * (
             (self.below_H - self.below_loc) / self.unitcell.a[2]
         )
+        if scaled_width < 0 and not np.isclose(scaled_width, 0.0):
+            raise ValueError(
+                "Effective film width is shorter than lower-component support"
+            )
         layers_to_create = int(round(scaled_width, 0))
-        if layers_to_create <= 0:
-            raise ValueError("Effective film width <= 0. Cannot create layers")
+        if layers_to_create < 0:
+            raise ValueError(
+                "Effective film width is shorter than lower-component support"
+            )
         for i, uc in enumerate(self.layer_ucs):
             uc.coherentDomainMatrix = []
             uc.coherentDomainOccupancy = []
+
+        self._layers_to_create = layers_to_create
+        if layers_to_create == 0:
+            self._end_layer_number = self.layer_order[-1]
+            self._basis_created = np.copy(self.basis)
+            return
 
         mat_0 = np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
         strain = self.unitcell.coherentDomainMatrix[0][2, 2]
@@ -1973,12 +1980,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             string, "tail_probability", DEFAULT_TAIL_PROBABILITY
         )
         legacy_parameter_names = any("deltaW" in line for line in string.splitlines())
-        support_cursor = _parse_text_metadata(string, "support_cursor", None)
-        legacy_absolute_width = (
-            legacy_parameter_names
-            if support_cursor is None
-            else support_cursor != "nominal"
-        )
+        legacy_absolute_width = legacy_parameter_names
         if legacy_absolute_width:
             profile = PoissonProfile(
                 mean_change=basis[1],
@@ -2026,8 +2028,6 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         else:
             parameter_order = PoissonSurface.parameterOrder
         s = "\n" + parameter_order + "\n" + self.filmToStr(showErrors=showErrors)
-        if not self._legacy_absolute_width:
-            s += "\nsupport_cursor: nominal"
         if (
             self.profile is not None
             and self.profile.tail_probability != DEFAULT_TAIL_PROBABILITY
