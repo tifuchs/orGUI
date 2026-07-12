@@ -751,6 +751,12 @@ class TestLayerStacking(unittest.TestCase):
         )
         self.assertEqual(supercell.parameters, {"absolute": [], "relative": []})
 
+    def test_unitcell_supercell_rejects_fractional_repeat_counts(self):
+        unitcell = self.make_single_wyckoff_cell()
+
+        with self.assertRaisesRegex(ValueError, "positive integers"):
+            unitcell.supercell((1.5, 1, 1))
+
     def test_unitcell_supercell_rescales_coherent_domain_translations(self):
         unitcell = CTRcalc.UnitCell(
             [2.0, 3.0, 4.0],

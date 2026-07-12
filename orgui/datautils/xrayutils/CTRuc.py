@@ -1635,9 +1635,15 @@ class UnitCell(Lattice):
             If repeat counts are not positive integers or ``symmetry`` is
             unknown.
         """
-        repeats = np.asarray(repeats, dtype=np.intp)
-        if repeats.shape != (3,) or np.any(repeats <= 0):
+        repeat_values = np.asarray(repeats, dtype=np.float64)
+        if (
+            repeat_values.shape != (3,)
+            or not np.all(np.isfinite(repeat_values))
+            or np.any(repeat_values <= 0)
+            or not np.all(repeat_values == np.rint(repeat_values))
+        ):
             raise ValueError("repeats must contain three positive integers.")
+        repeats = repeat_values.astype(np.intp)
         if symmetry not in {"preserve", "independent"}:
             raise ValueError("symmetry must be 'preserve' or 'independent'.")
 
