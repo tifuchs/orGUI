@@ -473,6 +473,9 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
             restored.symmetry_metadata.surface_spec.parent_alpha,
             unitcell.symmetry_metadata.surface_spec.parent_alpha,
         )
+        self.assertEqual(len(rebuilt.basis), len(restored.basis))
+        self.assertEqual(rebuilt.names, restored.names)
+        np.testing.assert_allclose(rebuilt.basis[:, 1:4], restored.basis[:, 1:4])
         np.testing.assert_allclose(rebuilt.a, unitcell.a, atol=1e-8)
         np.testing.assert_allclose(rebuilt.alpha, unitcell.alpha, atol=1e-8)
 

@@ -518,7 +518,10 @@ class SurfaceSymmetryModel:
 
         a, alpha = self.surface_spec.surface_lattice_parameters()
         unitcell = UnitCell(a, alpha, name=name, layer_behavior=layer_behavior)
-        generated = generate_surface_atoms(self.surface_spec, self.sites)
+        if self.atoms and any(not site.coordinates for site in self.sites):
+            generated = _reindex_generated_atoms(self.atoms)
+        else:
+            generated = generate_surface_atoms(self.surface_spec, self.sites)
         for atom in generated:
             site = self._site(atom.site_id)
             unitcell.addAtom(
@@ -874,6 +877,11 @@ def generate_surface_atoms(surface_spec, sites, tolerance=1e-8):
             round(atom.surface_fractional[0], 10),
         )
     )
+    return _reindex_generated_atoms(generated)
+
+
+def _reindex_generated_atoms(atoms):
+    """Return generated atom metadata with indices matching list order."""
     return [
         GeneratedWyckoffAtom(
             atom_index=index,
@@ -905,7 +913,7 @@ def generate_surface_atoms(surface_spec, sites, tolerance=1e-8):
                 for coupling in atom.site_couplings
             ),
         )
-        for index, atom in enumerate(generated)
+        for index, atom in enumerate(atoms)
     ]
 
 
