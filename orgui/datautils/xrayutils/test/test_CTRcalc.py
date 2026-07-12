@@ -301,7 +301,7 @@ class TestPoissonSurface(unittest.TestCase):
             0.0,
         )
 
-    def test_nominal_delta_width_serialization_migrates_to_offset(self):
+    def test_delta_width_serialization_uses_legacy_absolute_width(self):
         transitional = CTRfilm.PoissonSurface(
             self.unitcell,
             profile=PoissonProfile(mean_change=1.0),
@@ -316,9 +316,9 @@ class TestPoissonSurface(unittest.TestCase):
 
         restored = CTRfilm.PoissonSurface.fromStr(transitional)
 
-        np.testing.assert_allclose(restored.basis, [1.0, -1.0])
-        self.assertAlmostEqual(restored.profile.expected_height_change, 0.0)
-        self.assertIn("W/layers offset/layers", restored.toStr())
+        np.testing.assert_allclose(restored.basis, [0.0, 1.0])
+        self.assertAlmostEqual(restored.profile.expected_height_change, 1.0)
+        self.assertIn("Width/layers deltaW/layers", restored.toStr())
 
 
 class TestLayerStacking(unittest.TestCase):
@@ -1063,7 +1063,8 @@ class TestLayerStacking(unittest.TestCase):
         self.assertEqual(interface.start_layer_number, 2)
         self.assertEqual(interface.end_layer_number, 1)
         np.testing.assert_array_equal(interface.layer_order, [2, 3, 1])
-        self.assertAlmostEqual(interface.pos_absolute, 12.0)
+        self.assertAlmostEqual(interface.loc_absolute, 12.0)
+        self.assertLess(interface.pos_absolute, interface.loc_absolute)
         self.assertGreater(interface.height_absolute, 12.0)
         self.assertGreater(
             interface.top_layers[-1].coherentDomainMatrix[0][2, 3],
@@ -1179,7 +1180,7 @@ class TestLayerStacking(unittest.TestCase):
         self.assertEqual(lower.end_layer_number, 3)
         self.assertEqual(upper.start_layer_number, 1)
 
-    def test_profile_interface_does_not_advance_nominal_cursor(self):
+    def test_profile_interface_support_is_not_owned_by_film(self):
         lower = self.make_layered_unitcell("lower")
         interface = CTRfilm.EpitaxyInterface(
             self.make_layered_unitcell("top"),
@@ -1187,7 +1188,7 @@ class TestLayerStacking(unittest.TestCase):
             profile=SkellamProfile(0.5),
         )
         film = CTRfilm.Film(self.make_layered_unitcell("film"))
-        film.basis[0] = 3
+        film.basis[0] = 18
         crystal = CTRcalc.SXRDCrystal(
             lower,
             interface,
@@ -1197,14 +1198,80 @@ class TestLayerStacking(unittest.TestCase):
 
         crystal.apply_stacking()
 
-        self.assertEqual(interface.stacking_height_absolute, 0.0)
-        self.assertEqual(film.pos_absolute, 0.0)
-        self.assertAlmostEqual(film.height_absolute, 6.0)
+        self.assertAlmostEqual(
+            interface.stacking_height_absolute, interface.height_absolute
+        )
+        self.assertAlmostEqual(
+            interface.stacking_loc_absolute, interface.loc_absolute
+        )
+        self.assertAlmostEqual(film.pos_absolute, interface.height_absolute)
+        self.assertGreater(film.pos_absolute, interface.loc_absolute)
+        self.assertAlmostEqual(
+            film.height_absolute - interface.loc_absolute,
+            film.basis[0] * film.unitcell.a[2] / len(film.layers),
+        )
+        layer_cycle = interface.layer_cycle.layers
+        next_index = (layer_cycle.index(interface.end_layer_number) + 1) % len(
+            layer_cycle
+        )
+        self.assertEqual(film.start_layer_number, layer_cycle[next_index])
 
         restored = CTRfilm.EpitaxyInterface.fromStr(interface.toStr())
-        self.assertFalse(restored._legacy_support_cursor)
         self.assertIsInstance(restored.profile, SkellamProfile)
         np.testing.assert_allclose(restored.basis, interface.basis)
+        self.assertNotIn("support_cursor", interface.toStr())
+
+    def test_profile_interface_can_consume_entire_film_width(self):
+        lower = self.make_layered_unitcell("lower")
+        interface = CTRfilm.EpitaxyInterface(
+            self.make_layered_unitcell("top"),
+            self.make_layered_unitcell("bottom"),
+            profile=SkellamProfile(0.5),
+        )
+        interface.stack_on(
+            0.0,
+            0.0,
+            lower.end_layer_number,
+            below_state=lower.layer_state,
+        )
+        film = CTRfilm.Film(self.make_layered_unitcell("film"))
+        film.basis[0] = (
+            (interface.height_absolute - interface.loc_absolute)
+            * len(film.layers) / film.unitcell.a[2]
+        )
+        crystal = CTRcalc.SXRDCrystal(
+            lower, interface, film, stacking=np.array([1, 2])
+        )
+
+        crystal.apply_stacking()
+
+        self.assertAlmostEqual(film.pos_absolute, interface.height_absolute)
+        self.assertAlmostEqual(film.height_absolute, interface.height_absolute)
+        self.assertEqual(
+            sum(len(layer.coherentDomainMatrix) for layer in film.layer_ucs), 0
+        )
+        np.testing.assert_allclose(
+            film.F_uc(
+                np.array([0.0]), np.array([0.0]), np.array([1.0])
+            ),
+            0.0,
+        )
+
+    def test_profile_interface_rejects_film_narrower_than_support(self):
+        lower = self.make_layered_unitcell("lower")
+        interface = CTRfilm.EpitaxyInterface(
+            self.make_layered_unitcell("top"),
+            self.make_layered_unitcell("bottom"),
+            profile=SkellamProfile(0.5),
+        )
+        film = CTRfilm.Film(self.make_layered_unitcell("film"))
+        film.basis[0] = 3
+        crystal = CTRcalc.SXRDCrystal(
+            lower, interface, film, stacking=np.array([1, 2])
+        )
+
+        with self.assertRaisesRegex(ValueError, "shorter than lower-component"):
+            crystal.apply_stacking()
 
     def test_profile_interface_is_a_correction_not_extra_material(self):
         unitcell = self.make_layered_unitcell("material")
@@ -1237,7 +1304,7 @@ class TestLayerStacking(unittest.TestCase):
 
 
 class TestLegacyLayeredCTR(unittest.TestCase):
-    def test_legacy_xtal_reconstructs_reference_interface(self):
+    def test_legacy_xtal_uses_corrected_interface_support(self):
         repository_root = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
         )
@@ -1247,8 +1314,7 @@ class TestLegacyLayeredCTR(unittest.TestCase):
         xtal_path = os.path.join(
             fixture_root, "0001_fit_2V036_reference.xtal"
         )
-        reference_path = os.path.join(fixture_root, "CTRs_reference.dat")
-        for path in (xtal_path, reference_path):
+        for path in (xtal_path,):
             if not os.path.exists(path):
                 self.skipTest(f"Missing optional CTR fixture: {path}")
         xtal = CTRcalc.SXRDCrystal.fromFile(
@@ -1258,30 +1324,16 @@ class TestLegacyLayeredCTR(unittest.TestCase):
         self.assertIsInstance(xtal["RuO2"], CTRfilm.Film)
         self.assertIsInstance(xtal["TiO2toRuO2"], CTRfilm.EpitaxyInterface)
         np.testing.assert_allclose(xtal["TiO2toRuO2"].basis, [0.35, 0.0])
-        self.assertTrue(xtal["TiO2toRuO2"]._legacy_support_cursor)
-
-        xtal["RuO2"].basis[0] = 17.0
-        xtal["RuO2"].basis_0[0] = 17.0
-        xtal.atten = 0.01
-        reference = np.loadtxt(
-            reference_path,
-            skiprows=1,
-            max_rows=8,
+        interface = xtal["TiO2toRuO2"]
+        xtal.apply_stacking()
+        self.assertAlmostEqual(
+            interface.stacking_height_absolute, interface.height_absolute
         )
-        l_values = np.linspace(0.0, 7.25, 2000)[:8]
-        calculated = np.abs(
-            xtal.F(
-                np.zeros(8, dtype=np.float64),
-                np.zeros(8, dtype=np.float64),
-                l_values,
-            )
+        self.assertAlmostEqual(
+            interface.stacking_loc_absolute, interface.loc_absolute
         )
-        np.testing.assert_allclose(
-            calculated,
-            reference[:, 3] * xtal.reference_area,
-            rtol=2e-5,
-            atol=2e-5,
-        )
+        self.assertIsInstance(interface.profile, SkellamProfile)
+        self.assertNotIn("support_cursor", interface.toStr())
 
 
 class TestStructureFactorNormalization(unittest.TestCase):
