@@ -40,6 +40,7 @@ from .CTRutil import ParameterType, Parameter, next_skip_comment
 
 from .CTRuc import WaterModel, UnitCell
 from .CTRfilm import EpitaxyInterface, Film, PoissonSurface
+from .CTRoptics import add_structural_to_sampled_profile, combine_profiles
 from .CTRdistributions import PoissonProfile, SkellamProfile  # noqa: F401
 from .CTRstacking import (  # noqa: F401
     LayerCycle,
@@ -84,7 +85,8 @@ class SXRDCrystal:
         self.enable_uc_stacking = keyargs.get("enable_stacking", False)
         if not self.enable_uc_stacking:
             for uc in self.uc_surface_list:
-                if isinstance(uc, Film | PoissonSurface | EpitaxyInterface):
+                stackable = Film | PoissonSurface | EpitaxyInterface | WaterModel
+                if isinstance(uc, stackable):
                     self.enable_uc_stacking = True
                     break
 
@@ -1078,6 +1080,41 @@ class SXRDCrystal:
         for uc, w in zip(self.uc_surface_list, self.weights):
             rho += uc.zDensity_G(z, h, k) * w
         return rho
+
+    def optical_profile(self):
+        """Return the combined homogeneous optical profile of this crystal.
+
+        Crystal surface weights are applied directly to ``delta`` and ``beta``.
+        Water and other continuum-only components are not yet supported.
+
+        :returns:
+            C-contiguous ``(N, 3)`` array with columns ``z`` in Angstrom,
+            ``delta``, and ``beta``.
+        :rtype: numpy.ndarray
+        :raises NotImplementedError:
+            If a component does not expose an atomistic optical profile.
+        """
+        if self.enable_uc_stacking:
+            self.apply_stacking()
+        profiles = [self.uc_bulk.optical_profile_asbulk()]
+        water_profiles = []
+        for component, weight in zip(self.uc_surface_list, self.weights):
+            if not hasattr(component, "optical_profile"):
+                raise NotImplementedError(
+                    f"{type(component).__name__} has no atomistic optical profile."
+                )
+            profile = component.optical_profile().copy()
+            profile[:, 1:] *= weight
+            if isinstance(component, WaterModel):
+                water_profiles.append(profile)
+            else:
+                profiles.append(profile)
+        structural_profile = combine_profiles(*profiles)
+        if not water_profiles:
+            return structural_profile
+        return add_structural_to_sampled_profile(
+            structural_profile, *water_profiles
+        )
 
     def toRODStr(self):
         s = f"E = {self.uc_bulk._E * 1e-3:.5f} keV\n"

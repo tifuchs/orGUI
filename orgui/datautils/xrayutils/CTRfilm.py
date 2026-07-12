@@ -35,6 +35,7 @@ import re
 
 
 from .CTRutil import _ensure_contiguous, next_skip_comment, LinearFitFunctions
+from .CTRoptics import combine_profiles
 
 from .CTRuc import UnitCell, ctr_accel_enabled
 from .CTRdistributions import (
@@ -759,6 +760,20 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             rho += uc_b.zDensity_G(z, h, k)
         return rho
 
+    def optical_profile(self):
+        """Return the combined homogeneous optical profile of the interface.
+
+        :returns:
+            C-contiguous ``(N, 3)`` array with columns ``z``, ``delta``, and
+            ``beta``.
+        :rtype: numpy.ndarray
+        """
+        if np.any(self._basis_created != self.basis):
+            self.createInterfaceCells()
+        profiles = [uc.optical_profile() for uc in self.top_layers]
+        profiles.extend(uc.optical_profile() for uc in self.bottom_layers)
+        return combine_profiles(*profiles)
+
     def addFitParameter(self, indexarray, limits=(-np.inf, np.inf), **kwarg):
         """to assign multiple unitcells with the same fitparameter, provide list of
         unitcell names as kwarg `unitcell`
@@ -1274,6 +1289,18 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
             rho += uc.zDensity_G(z, h, k)
         return rho
 
+    def optical_profile(self):
+        """Return the combined homogeneous optical profile of the Film.
+
+        :returns:
+            C-contiguous ``(N, 3)`` array with columns ``z``, ``delta``, and
+            ``beta``.
+        :rtype: numpy.ndarray
+        """
+        if np.any(self._basis_created != self.basis):
+            self.createLayers()
+        return combine_profiles(*(uc.optical_profile() for uc in self.layer_ucs))
+
     def addFitParameter(self, indexarray, limits=(-np.inf, np.inf), **kwarg):
         """to assign multiple unitcells with the same fitparameter, provide list of
         unitcell names as kwarg `unitcell`
@@ -1753,6 +1780,20 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             if uc.coherentDomainMatrix:
                 rho += uc.zDensity_G(z, h, k)
         return rho
+
+    def optical_profile(self):
+        """Return the homogeneous optical profile of the Poisson surface.
+
+        :returns:
+            C-contiguous ``(N, 3)`` array with columns ``z``, ``delta``, and
+            ``beta``.
+        :rtype: numpy.ndarray
+        """
+        if np.any(self._basis_created != self.basis):
+            self.createLayers()
+        return combine_profiles(
+            *(uc.optical_profile() for uc in self.layer_ucs if uc.coherentDomainMatrix)
+        )
 
     def addFitParameter(self, indexarray, limits=(-np.inf, np.inf), **kwarg):
         """to assign multiple unitcells with the same fitparameter, provide list of

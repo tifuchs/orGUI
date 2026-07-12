@@ -273,6 +273,50 @@ class WaterModel(Lattice, LinearFitFunctions):
     def pos_absolute(self, pos):
         self._pos_absolute = pos
 
+    @property
+    def height_absolute(self):
+        """Return the water onset height in Angstrom.
+
+        Water is continuous towards positive z and therefore does not advance
+        the structural stacking cursor beyond its onset.
+        """
+        return self.pos_absolute
+
+    @property
+    def loc_absolute(self):
+        """Return the water onset location in Angstrom."""
+        return self.pos_absolute
+
+    @property
+    def stacking_height_absolute(self):
+        """Return the height passed to components above the water model."""
+        return self.pos_absolute
+
+    @property
+    def stacking_loc_absolute(self):
+        """Return the location passed to components above the water model."""
+        return self.pos_absolute
+
+    @property
+    def end_layer_number(self):
+        """Preserve the structural layer number below continuous water."""
+        return getattr(self, "start_layer_number", -1)
+
+    def stack_on(self, below_loc, below_height, below_layer=-1, below_state=None):
+        """Place the water onset at the top of the object below it.
+
+        :param float below_loc:
+            Reference location of the object below in Angstrom.
+        :param float below_height:
+            Top height of the object below in Angstrom.
+        :param float below_layer:
+            Top structural layer identifier of the object below.
+        :param below_state:
+            Accepted for compatibility with other stackable components.
+        """
+        self.start_layer_number = below_layer
+        self.pos_absolute = below_height
+
     def F_uc(self, h, k, l):  # noqa: E741
         """Return the water-model structure factor in electrons.
 
@@ -443,6 +487,27 @@ class WaterModel(Lattice, LinearFitFunctions):
         for i, name in enumerate(["O", "H", "O2-"]):
             self.f[i, :11] = readWaasmaier(name)
             self.f[i, 11:] = readDispersion(name, E)
+        self.wat_dispersion = (
+            self.f[0, 11]
+            + 2.0 * self.f[1, 11]
+            + 1j * (self.f[0, 12] + 2.0 * self.f[1, 12])
+        )
+
+    def optical_profile(self, noUC=30, z_step=0.6):
+        """Return continuous water optical constants sampled towards positive z.
+
+        :param int noUC:
+            Length of the sampled water region in water-model unit cells.
+        :param float z_step:
+            Uniform z sampling interval in Angstrom.
+        :returns:
+            ``(N, 3)`` float64 array containing z in Angstrom, delta, and
+            beta.
+        :rtype: numpy.ndarray
+        """
+        from .CTRoptics import water_optical_profile
+
+        return water_optical_profile(self, noUC=noUC, z_step=z_step)
         # f1,f2 = UnitCell.special_formfactors['H2O'][1](E)
         # self.wat_dispersion = f1 + 1j*f2
 
@@ -511,9 +576,9 @@ class WaterModel(Lattice, LinearFitFunctions):
                     + erf((z - zpos * self._a[2]) / (np.sqrt(2) * sigma_0 * self._a[2]))
                 )
             )
-            rho = gaussian_filter1d(np.abs(rho), 0.2547 / zstep_mean).astype(
-                np.complex128
-            )  # estimation of water molecular form factor
+            rho_real = gaussian_filter1d(rho.real, 0.2547 / zstep_mean)
+            rho_imag = gaussian_filter1d(rho.imag, 0.2547 / zstep_mean)
+            rho = rho_real + 1j * rho_imag  # estimation of water molecular form factor
         elif self.type == "layered":
             zrange_waterstructure = np.amax(z) / self._a[2] - zpos  # lattice units
             nogausseans_inrange = np.ceil(zrange_waterstructure / d_layering)
@@ -582,9 +647,9 @@ class WaterModel(Lattice, LinearFitFunctions):
                     + erf((z - zpos * self._a[2]) / (np.sqrt(2) * sigma_0 * self._a[2]))
                 )
             )
-            rho = gaussian_filter1d(np.abs(rho), 0.2547 / zstep_mean).astype(
-                np.complex128
-            )  # estimation of water molecular form factor
+            rho_real = gaussian_filter1d(rho.real, 0.2547 / zstep_mean)
+            rho_imag = gaussian_filter1d(rho.imag, 0.2547 / zstep_mean)
+            rho = rho_real + 1j * rho_imag  # estimation of water molecular form factor
             rho_layer, mu_offset = self._1layer_firstGauss()
             rho += rho_layer * np.exp(
                 -((z / self._a[2] - zpos - mu_offset) ** 2) / (2 * sigma2_rel)
@@ -1097,12 +1162,11 @@ class UnitCell(Lattice):
             uc.dw_increase_constraint = self.dw_increase_constraint[idx_low:idx_high]
             uc._test_special_formfactors()
             uc.f = self.f[idx_low:idx_high]
+            if hasattr(self, "_E"):
+                uc._E = self._E
             uc.refRealTransform = self.refRealTransform
             uc.refHKLTransform = self.refHKLTransform
             layers[l] = uc
-        if len(layer_numbers) == 1:
-            return layers
-
         if self._explicit_layer_cycle is not None:
             cycle = tuple(self._explicit_layer_cycle)
             missing = set(layers) - set(cycle)
@@ -1111,7 +1175,7 @@ class UnitCell(Lattice):
                     f"layer_cycle omits unit-cell layers {sorted(missing)!r}"
                 )
             layers = OrderedDict((n, layers[n]) for n in cycle)
-        elif ordered:
+        elif ordered and len(layer_numbers) > 1:
             avg_height = []
             uc_nms = []
             for uc_l in layers:
@@ -1124,7 +1188,57 @@ class UnitCell(Lattice):
 
             layers = OrderedDict([(n, layers[n]) for n in uc_nms])
 
+        ordered_layers = tuple(layers)
+        origins = []
+        for layer in ordered_layers:
+            origin = self.layerpos.get(float(layer))
+            if origin is None:
+                atom_mask = self.basis[:, 7] == layer
+                origin = float(np.mean(self.basis[atom_mask, 3]))
+            origins.append(float(origin))
+        for index, layer in enumerate(ordered_layers):
+            spacing = origins[(index + 1) % len(ordered_layers)] - origins[index]
+            while spacing <= 0.0:
+                spacing += 1.0
+            layers[layer]._optical_layer_origin = origins[index]
+            layers[layer]._optical_layer_thickness_fraction = spacing
+
         return layers
+
+    def optical_profile(self):
+        """Return homogeneous optical constants for every layer and domain.
+
+        The returned ``(N, 3)`` float64 array has columns ``z`` in Angstrom,
+        ``delta``, and ``beta``. Each row is a domain-transformed layer
+        contribution with coherent-domain occupancy already applied.
+
+        :returns:
+            One row for every structural layer and coherent domain.
+        :rtype: numpy.ndarray
+        :raises ValueError:
+            If :meth:`setEnergy` has not populated the anomalous scattering
+            factors.
+        """
+        from .CTRoptics import optical_profile
+
+        return optical_profile(self)
+
+    def optical_profile_asbulk(self, noUC=30):
+        """Return a finite representation of the semi-infinite bulk profile.
+
+        The unit cell is repeated towards negative z exactly as in
+        :meth:`zDensity_G_asbulk`.
+
+        :param int noUC:
+            Number of unit cells to represent below the termination.
+        :returns:
+            ``(N, 3)`` float64 array containing z in Angstrom, delta, and
+            beta.
+        :rtype: numpy.ndarray
+        """
+        from .CTRoptics import optical_profile_asbulk
+
+        return optical_profile_asbulk(self, noUC=noUC)
 
     @property
     def layers(self):
