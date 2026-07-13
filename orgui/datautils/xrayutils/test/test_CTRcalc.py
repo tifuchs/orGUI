@@ -1273,7 +1273,7 @@ class TestLayerStacking(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "shorter than lower-component"):
             crystal.apply_stacking()
 
-    def test_profile_interface_is_a_correction_not_extra_material(self):
+    def test_profile_interface_owns_upper_support_material(self):
         unitcell = self.make_layered_unitcell("material")
         interface = CTRfilm.EpitaxyInterface(
             self.make_layered_unitcell("top"),
@@ -1294,13 +1294,13 @@ class TestLayerStacking(unittest.TestCase):
             [layer.coherentDomainOccupancy for layer in interface.bottom_layers]
         )
 
-        self.assertTrue(np.any(top_occupancy < 0.0))
+        self.assertTrue(np.all(top_occupancy >= 0.0))
+        self.assertTrue(np.any(top_occupancy > 0.9))
         self.assertTrue(np.any(bottom_occupancy < 0.0))
-        np.testing.assert_allclose(
-            np.sort(top_occupancy),
-            np.sort(-bottom_occupancy),
-            atol=1e-15,
-        )
+        self.assertTrue(np.any(bottom_occupancy > 0.0))
+        total_occupancy = top_occupancy + bottom_occupancy
+        self.assertTrue(np.any(np.isclose(total_occupancy, 0.0)))
+        self.assertTrue(np.any(np.isclose(total_occupancy, 1.0)))
 
 
 class TestLegacyLayeredCTR(unittest.TestCase):

@@ -627,7 +627,11 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             sharp_top = (
                 (unitcells >= loc).astype(np.float64).reshape((-1, n_layers))
             )
-            occupancy_top = probability_top - sharp_top
+            # The upper material owns the complete generated support because
+            # Film starts only above ``stacking_height_absolute``.  The lower
+            # material remains a signed correction to the semi-infinite bulk
+            # that already occupies the lower side of the nominal boundary.
+            occupancy_top = probability_top
             occupancy_bottom = probability_bottom - (1.0 - sharp_top)
 
             a3_top = self.top_layers[0].a[2]
