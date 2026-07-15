@@ -40,7 +40,14 @@ from .CTRutil import ParameterType, Parameter, next_skip_comment
 
 from .CTRuc import WaterModel, UnitCell
 from .CTRfilm import EpitaxyInterface, Film, PoissonSurface
-from .CTRoptics import add_structural_to_sampled_profile, combine_profiles
+from .CTRoptics import (
+    add_structural_to_sampled_profile,
+    combine_profiles,
+    simplify_profile,
+    solve_wavefield,
+    stratify_profile,
+    top_layer_spacing,
+)
 from .CTRdistributions import PoissonProfile, SkellamProfile  # noqa: F401
 from .CTRstacking import (  # noqa: F401
     LayerCycle,
@@ -1085,7 +1092,9 @@ class SXRDCrystal:
         """Return the combined homogeneous optical profile of this crystal.
 
         Crystal surface weights are applied directly to ``delta`` and ``beta``.
-        Water and other continuum-only components are not yet supported.
+        Water is sampled on the top atomistic layer grid. Without water, one
+        vacuum row is appended one top-layer spacing above the highest atomic
+        layer.
 
         :returns:
             C-contiguous ``(N, 3)`` array with columns ``z`` in Angstrom,
@@ -1097,24 +1106,179 @@ class SXRDCrystal:
         if self.enable_uc_stacking:
             self.apply_stacking()
         profiles = [self.uc_bulk.optical_profile_asbulk()]
-        water_profiles = []
+        water_components = []
         for component, weight in zip(self.uc_surface_list, self.weights):
             if not hasattr(component, "optical_profile"):
                 raise NotImplementedError(
                     f"{type(component).__name__} has no atomistic optical profile."
                 )
-            profile = component.optical_profile().copy()
-            profile[:, 1:] *= weight
             if isinstance(component, WaterModel):
-                water_profiles.append(profile)
+                water_components.append((component, weight))
             else:
+                profile = component.optical_profile().copy()
+                profile[:, 1:] *= weight
                 profiles.append(profile)
         structural_profile = combine_profiles(*profiles)
-        if not water_profiles:
-            return structural_profile
+        dz = top_layer_spacing(structural_profile)
+        if not water_components:
+            vacuum = np.array(
+                [[structural_profile[-1, 0] + dz, 0.0, 0.0]], dtype=np.float64
+            )
+            return np.ascontiguousarray(
+                np.concatenate((structural_profile, vacuum), axis=0)
+            )
+        water_profiles = []
+        z_origin = structural_profile[-1, 0]
+        for component, weight in water_components:
+            profile = component.optical_profile(
+                z_step=dz, z_origin=z_origin
+            ).copy()
+            profile[:, 1:] *= weight
+            water_profiles.append(profile)
         return add_structural_to_sampled_profile(
             structural_profile, *water_profiles
         )
+
+    def simplified_optical_profile(
+        self, delta_tolerance=1e-9, beta_tolerance=None
+    ):
+        """Return a thickness-conserving simplified optical profile.
+
+        :param float delta_tolerance:
+            Maximum delta range within a merged finite layer.
+        :param float beta_tolerance:
+            Maximum beta range within a merged finite layer. Defaults to the
+            delta tolerance.
+        :returns:
+            Simplified ``(N, 3)`` optical profile.
+        :rtype: numpy.ndarray
+        """
+        return simplify_profile(
+            self.optical_profile(), delta_tolerance, beta_tolerance
+        )
+
+    def stratified_optical_profile(
+        self, delta_tolerance=1e-9, beta_tolerance=None
+    ):
+        """Return optical media and their physical interface positions.
+
+        Profile z coordinates are centers of homogeneous media. Interfaces
+        are centered between adjacent samples before optional simplification;
+        merged media retain those original outer boundaries.
+
+        :param float delta_tolerance:
+            Maximum delta range within a merged finite layer. Pass ``None``
+            to retain every sampled medium.
+        :param float beta_tolerance:
+            Maximum beta range within a merged finite layer. Defaults to the
+            delta tolerance when simplification is requested.
+        :returns:
+            Layer-center optical constants and substrate-to-ambient edges.
+        :rtype: CTRoptics.StratifiedProfile
+        """
+        return stratify_profile(
+            self.optical_profile(), delta_tolerance, beta_tolerance
+        )
+
+    def wavefield(
+        self,
+        alpha,
+        polarization="s",
+        delta_tolerance=1e-9,
+        beta_tolerance=None,
+    ):
+        """Return the unperturbed layered electric field.
+
+        The field follows the Renaud convention with downward and upward
+        amplitudes ``A_plus`` and ``A_minus``. Slabs are ordered from the
+        incident medium towards the substrate.
+
+        :param float alpha:
+            Glancing incidence angle in degrees inside the incident medium.
+        :param str polarization:
+            ``"s"`` or ``"p"``.
+        :param float delta_tolerance:
+            Maximum delta range used to simplify adjacent layers. Pass
+            ``None`` to disable simplification.
+        :param float beta_tolerance:
+            Optional beta simplification tolerance. Defaults to the delta
+            tolerance when simplification is requested.
+        :returns:
+            Layer amplitudes, normal wavevectors, and sampled electric field.
+        :rtype: CTRoptics.Wavefield
+        """
+        profile = self.stratified_optical_profile(
+            delta_tolerance, beta_tolerance
+        )
+        return solve_wavefield(
+            profile.values,
+            self.uc_bulk._E,
+            alpha,
+            polarization,
+            boundaries=profile.boundaries,
+        )
+
+    def specular_reflectivity(
+        self,
+        alpha,
+        polarization="s",
+        delta_tolerance=1e-9,
+        beta_tolerance=None,
+    ):
+        """Return scalar optical specular reflectivity.
+
+        :param float or numpy.ndarray alpha:
+            Glancing incidence angle or angles in degrees inside the incident
+            medium.
+        :param str polarization:
+            ``"s"``, ``"p"``, or ``"unpolarized"``. Unpolarized intensity
+            is the equal incoherent average of s and p reflectivity.
+        :param float delta_tolerance:
+            Maximum delta range used to simplify adjacent layers. Pass
+            ``None`` to disable simplification.
+        :param float beta_tolerance:
+            Optional beta simplification tolerance. Defaults to the delta
+            tolerance when simplification is requested.
+        :returns:
+            Reflectivity with the same scalar/array shape as ``alpha``.
+        :rtype: float or numpy.ndarray
+        """
+        if polarization not in {"s", "p", "unpolarized"}:
+            raise ValueError(
+                "polarization must be 's', 'p', or 'unpolarized'."
+            )
+        alpha_array = np.asarray(alpha, dtype=np.float64)
+        scalar = alpha_array.ndim == 0
+        angles = np.atleast_1d(alpha_array)
+        profile = self.stratified_optical_profile(
+            delta_tolerance, beta_tolerance
+        )
+
+        def reflectivity(pol):
+            return np.asarray(
+                [
+                    abs(
+                        solve_wavefield(
+                            profile.values,
+                            self.uc_bulk._E,
+                            angle,
+                            pol,
+                            boundaries=profile.boundaries,
+                        ).r_S
+                    )
+                    ** 2
+                    for angle in angles
+                ],
+                dtype=np.float64,
+            )
+
+        if polarization == "unpolarized":
+            result = 0.5 * (reflectivity("s") + reflectivity("p"))
+        else:
+            result = reflectivity(polarization)
+        if scalar:
+            return float(result[0])
+        return result.reshape(alpha_array.shape)
 
     def toRODStr(self):
         s = f"E = {self.uc_bulk._E * 1e-3:.5f} keV\n"

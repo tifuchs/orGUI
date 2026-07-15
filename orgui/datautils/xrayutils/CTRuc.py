@@ -493,13 +493,16 @@ class WaterModel(Lattice, LinearFitFunctions):
             + 1j * (self.f[0, 12] + 2.0 * self.f[1, 12])
         )
 
-    def optical_profile(self, noUC=30, z_step=0.6):
+    def optical_profile(self, noUC=30, z_step=None, z_origin=None):
         """Return continuous water optical constants sampled towards positive z.
 
         :param int noUC:
             Length of the sampled water region in water-model unit cells.
         :param float z_step:
-            Uniform z sampling interval in Angstrom.
+            Uniform z sampling interval in Angstrom. Defaults to this model's
+            lattice height.
+        :param float z_origin:
+            Optional atomistic-grid origin in Angstrom used to align samples.
         :returns:
             ``(N, 3)`` float64 array containing z in Angstrom, delta, and
             beta.
@@ -507,7 +510,9 @@ class WaterModel(Lattice, LinearFitFunctions):
         """
         from .CTRoptics import water_optical_profile
 
-        return water_optical_profile(self, noUC=noUC, z_step=z_step)
+        return water_optical_profile(
+            self, noUC=noUC, z_step=z_step, z_origin=z_origin
+        )
         # f1,f2 = UnitCell.special_formfactors['H2O'][1](E)
         # self.wat_dispersion = f1 + 1j*f2
 
