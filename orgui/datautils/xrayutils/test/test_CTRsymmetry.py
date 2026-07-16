@@ -38,6 +38,139 @@ HAS_PYMATGEN = importlib.util.find_spec("pymatgen") is not None
 
 
 class TestSymmetryUtilities(unittest.TestCase):
+    @staticmethod
+    def make_metadata_unitcell():
+        site = CTRsymmetry.WyckoffSiteSpec(
+            site_id="O_2a",
+            element="O",
+            wyckoff_label="2a",
+            coordinates=(),
+            representative_parent_fractional=(0.2, 0.3, 0.4),
+            occ=0.9,
+            iDW=0.5,
+            oDW=0.6,
+        )
+        atoms = []
+        for index, (position, x_factor) in enumerate(
+            (((0.2, 0.3, 0.4), 1.0), ((0.8, 0.7, 0.6), -1.0))
+        ):
+            atoms.append(
+                CTRsymmetry.GeneratedWyckoffAtom(
+                    atom_index=index,
+                    element="O",
+                    site_id="O_2a",
+                    wyckoff_label="2a",
+                    parent_fractional=np.asarray(position),
+                    surface_fractional=np.asarray(position),
+                    layer=0,
+                    site_couplings=(
+                        CTRsymmetry.WyckoffSiteCoupling(
+                            atom_index=index,
+                            coordinate="x",
+                            axis="x",
+                            factor=x_factor,
+                            site_id="O_2a",
+                        ),
+                    ),
+                )
+            )
+        model = CTRsymmetry.SurfaceSymmetryModel(
+            CTRsymmetry.SurfaceCellSpec(
+                (4.0, 4.0, 4.0),
+                (90.0, 90.0, 90.0),
+                np.identity(3),
+                translation_range=0,
+            ),
+            (site,),
+            atoms,
+        )
+        return model.build_unitcell("test")
+
+    def test_wyckoff_returns_one_site_and_reports_site_parameters(self):
+        unitcell = self.make_metadata_unitcell()
+
+        self.assertEqual(unitcell.wyckoff("O_2a"), unitcell.wyckoff_sites()[0])
+        self.assertEqual(unitcell.wyckoff("O_2a")["occ"], 0.9)
+        self.assertEqual(unitcell.wyckoff("O_2a")["iDW"], 0.5)
+        self.assertEqual(unitcell.wyckoff("O_2a")["oDW"], 0.6)
+        with self.assertRaisesRegex(ValueError, "Unknown Wyckoff site"):
+            unitcell.wyckoff("missing")
+
+    def test_set_wyckoff_atom_parameter_updates_all_site_atoms(self):
+        unitcell = self.make_metadata_unitcell()
+
+        unitcell.set_wyckoff_atom_parameter("O_2a", "occ", 0.75)
+        unitcell.set_wyckoff_atom_parameter("O_2a", "z", [0.1, 0.9])
+
+        np.testing.assert_allclose(unitcell.basis[:, 6], 0.75)
+        np.testing.assert_allclose(unitcell.basis_0[:, 6], 0.75)
+        np.testing.assert_allclose(unitcell.basis[:, 3], [0.1, 0.9])
+        np.testing.assert_allclose(unitcell.basis_0[:, 3], [0.1, 0.9])
+        self.assertEqual(unitcell.wyckoff("O_2a")["occ"], 0.75)
+        np.testing.assert_allclose(
+            [atom.surface_fractional[2] for atom in unitcell.symmetry_metadata.atoms],
+            [0.1, 0.9],
+        )
+
+    def test_set_wyckoff_site_parameter_propagates_parent_coordinate(self):
+        unitcell = self.make_metadata_unitcell()
+
+        unitcell.set_wyckoff_site_parameter("O_2a", "x", 0.25)
+
+        np.testing.assert_allclose(unitcell.basis[:, 1], [0.25, 0.75])
+        np.testing.assert_allclose(unitcell.basis_0[:, 1], [0.25, 0.75])
+        self.assertEqual(
+            unitcell.wyckoff("O_2a")["representative_parent_fractional"],
+            (0.25, 0.3, 0.4),
+        )
+        np.testing.assert_allclose(
+            [atom.parent_fractional[0] for atom in unitcell.symmetry_metadata.atoms],
+            [0.25, 0.75],
+        )
+
+    def test_set_wyckoff_site_parameter_sets_site_wide_physical_values(self):
+        unitcell = self.make_metadata_unitcell()
+
+        unitcell.set_wyckoff_site_parameter("O_2a", "iDW", 0.7)
+        unitcell.set_wyckoff_site_parameter("O_2a", "oDW", 0.8)
+        unitcell.set_wyckoff_site_parameter("O_2a", "occ", 0.65)
+
+        np.testing.assert_allclose(unitcell.basis[:, 4], 0.7)
+        np.testing.assert_allclose(unitcell.basis[:, 5], 0.8)
+        np.testing.assert_allclose(unitcell.basis[:, 6], 0.65)
+        self.assertEqual(unitcell.wyckoff("O_2a")["iDW"], 0.7)
+        self.assertEqual(unitcell.wyckoff("O_2a")["oDW"], 0.8)
+        self.assertEqual(unitcell.wyckoff("O_2a")["occ"], 0.65)
+
+    def test_legacy_expanded_couplings_remain_readable(self):
+        lines = [
+            "parent_a: 4 4 4",
+            "parent_alpha: 90 90 90",
+            "surface_transform:",
+            "1 0 0",
+            "0 1 0",
+            "0 0 1",
+            "wyckoff_sites:",
+            "site_id element wyckoff_label variables representative_x "
+            "representative_y representative_z occ iDW oDW",
+            "O_1a O 1a u=0.2 0.2 0 0 1 0.5 0.5",
+            "wyckoff_atoms:",
+            "atom_index element site_id wyckoff_label parent_x parent_y "
+            "parent_z surface_x surface_y surface_z layer",
+            "0 O O_1a 1a 0.2 0 0 0.2 0 0 0",
+            "wyckoff_couplings:",
+            "atom_index coordinate site_id variable constant factor",
+            "0 x O_1a u 0 1",
+            "wyckoff_site_couplings:",
+            "atom_index coordinate site_id axis factor",
+            "0 x O_1a x 1",
+        ]
+
+        model = CTRsymmetry.symmetry_metadata_from_lines(lines)
+
+        self.assertEqual(len(model.wyckoff_couplings("O_1a")), 1)
+        self.assertEqual(len(model.wyckoff_site_couplings("O_1a")), 1)
+
     def test_duplicate_wyckoff_site_ids_are_disambiguated(self):
         sites = CTRsymmetry._with_unique_site_ids(
             (
@@ -447,11 +580,37 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
         unitcell = self.make_rutile_110_unitcell()
         text = unitcell.toStr()
 
+        self.assertIn("wyckoff_coupling_matrices:", text)
+        self.assertIn("wyckoff_site_coupling_matrices:", text)
+        self.assertNotIn("\nwyckoff_couplings:\n", text)
+        self.assertNotIn("\nwyckoff_site_couplings:\n", text)
+
         restored = UnitCell.fromStr(text)
 
         self.assertEqual(restored.wyckoff_sites()[1]["variables"], {"u": 0.30569})
         self.assertEqual(len(restored.wyckoff_couplings("O_4f")), 8)
         self.assertGreater(len(restored.wyckoff_site_couplings("Ru_2a")), 0)
+        original_couplings = sorted(
+            (
+                coupling.atom_index,
+                coupling.coordinate,
+                coupling.variable,
+                round(coupling.constant, 10),
+                round(coupling.factor, 10),
+            )
+            for coupling in unitcell.wyckoff_couplings()
+        )
+        restored_couplings = sorted(
+            (
+                coupling.atom_index,
+                coupling.coordinate,
+                coupling.variable,
+                round(coupling.constant, 10),
+                round(coupling.factor, 10),
+            )
+            for coupling in restored.wyckoff_couplings()
+        )
+        self.assertEqual(restored_couplings, original_couplings)
         restored.addWyckoffParameter("O_4f", "u", absolute_limits=(0.2, 0.4))
         self.assertEqual(restored.wyckoff_sites()[1]["status"], "symmetry_preserving")
 

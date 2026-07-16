@@ -2280,6 +2280,226 @@ class UnitCell(Lattice):
             return []
         return self.symmetry_metadata.wyckoff_sites(self.parameters)
 
+    def wyckoff(self, site_id):
+        """Return metadata for one Wyckoff site.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :returns:
+            The matching site metadata dictionary.
+        :rtype:
+            dict
+        :raises ValueError:
+            If this unit cell has no symmetry metadata or the site is unknown.
+        """
+        return self._wyckoff_site(site_id)
+
+    def set_wyckoff_atom_parameter(self, site_id, parameter, value):
+        """Set one field on every generated atom in a Wyckoff site.
+
+        Coordinates are fractional coordinates in the surface unit cell.
+        Coordinate values may be a scalar, applied to every atom, or one value
+        per atom in the order reported by
+        ``wyckoff(site_id)["atom_indices"]``. The site-wide ``iDW``, ``oDW``,
+        and ``occ`` fields require a scalar. Both the active basis and its
+        unfitted baseline are updated.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :param str parameter:
+            One of ``"x"``, ``"y"``, ``"z"``, ``"iDW"``, ``"oDW"``,
+            or ``"occ"``.
+        :param value:
+            Scalar value or one value per generated atom.
+        :raises ValueError:
+            If the parameter is invalid or the value cannot be broadcast to
+            the atoms in the site.
+        """
+        allowed = {"x", "y", "z", "iDW", "oDW", "occ"}
+        if parameter not in allowed:
+            raise ValueError(
+                "parameter must be one of 'x', 'y', 'z', 'iDW', 'oDW', or 'occ'."
+            )
+        site = self.wyckoff(site_id)
+        atoms = np.asarray(site["atom_indices"], dtype=np.intp)
+        if not len(atoms):
+            raise ValueError(f"Wyckoff site {site_id} has no generated atoms.")
+        value_array = np.asarray(value, dtype=np.float64)
+        if parameter in {"iDW", "oDW", "occ"} and value_array.ndim:
+            raise ValueError(f"{parameter} must be a scalar site-wide value.")
+        try:
+            values = np.broadcast_to(
+                value_array,
+                atoms.shape,
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"value must be scalar or contain one value for each of the "
+                f"{len(atoms)} atoms in Wyckoff site {site_id}."
+            ) from error
+
+        column = self.parameterLookup[parameter]
+        self.basis_0[atoms, column] = values
+        self.basis[atoms, column] = values
+        self._update_wyckoff_metadata_from_atom_values(
+            site_id,
+            parameter,
+            atoms,
+            values,
+        )
+        self._refresh_after_baseline_change()
+
+    def set_wyckoff_site_parameter(self, site_id, parameter, value):
+        """Set one representative coordinate or site-wide physical parameter.
+
+        An absolute parent conventional fractional coordinate is propagated to
+        all generated surface-cell atoms through their stored space-group and
+        surface-transform couplings. ``iDW``, ``oDW``, and ``occ`` are applied
+        as scalar values to every atom in the site. Both the active basis and
+        its unfitted baseline are updated.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :param str parameter:
+            Parent conventional fractional axis ``"x"``, ``"y"``, or
+            ``"z"``; or site-wide ``"iDW"``, ``"oDW"``, or ``"occ"``.
+        :param float value:
+            New absolute coordinate in parent fractional units or scalar
+            physical parameter value.
+        :raises ValueError:
+            If the parameter is invalid or required symmetry metadata is absent.
+        """
+        allowed = {"x", "y", "z", "iDW", "oDW", "occ"}
+        if parameter not in allowed:
+            raise ValueError(
+                "parameter must be one of 'x', 'y', 'z', 'iDW', 'oDW', or 'occ'."
+            )
+        if parameter in {"iDW", "oDW", "occ"}:
+            self.set_wyckoff_atom_parameter(site_id, parameter, value)
+            return
+
+        site = self.wyckoff(site_id)
+        representative = site.get("representative_parent_fractional")
+        if representative is None:
+            raise ValueError(
+                f"Wyckoff site {site_id} has no representative parent coordinate."
+            )
+
+        axis_index = {"x": 0, "y": 1, "z": 2}[parameter]
+        value = float(value)
+        delta = value - representative[axis_index]
+        couplings = [
+            coupling
+            for coupling in self.wyckoff_site_couplings(site_id)
+            if coupling.axis == parameter
+        ]
+        if not couplings:
+            raise ValueError(
+                f"No site-displacement couplings found for Wyckoff site "
+                f"{site_id} and parent axis {parameter}."
+            )
+
+        surface_deltas = {}
+        for coupling in couplings:
+            column = self.parameterLookup[coupling.coordinate]
+            change = delta * coupling.factor
+            self.basis_0[coupling.atom_index, column] += change
+            self.basis[coupling.atom_index, column] += change
+            surface_deltas.setdefault(
+                coupling.atom_index,
+                np.zeros(3, dtype=np.float64),
+            )[{"x": 0, "y": 1, "z": 2}[coupling.coordinate]] += change
+
+        self._update_wyckoff_metadata_from_site_value(
+            site_id,
+            axis_index,
+            value,
+            surface_deltas,
+        )
+        self._refresh_after_baseline_change()
+
+    def _refresh_after_baseline_change(self):
+        self.errors = None
+        self._basis_parvalues = None
+        self._errors_parvalues = None
+        if any(self.parameters.values()):
+            self.updateFromParameters()
+
+    def _update_wyckoff_metadata_from_atom_values(
+        self,
+        site_id,
+        parameter,
+        atoms,
+        values,
+    ):
+        model = self.symmetry_metadata
+        if parameter in {"iDW", "oDW", "occ"}:
+            model.sites = tuple(
+                dataclasses.replace(site, **{parameter: float(values[0])})
+                if site.site_id == site_id
+                else site
+                for site in model.sites
+            )
+            return
+
+        coordinate = {"x": 0, "y": 1, "z": 2}[parameter]
+        values_by_atom = dict(zip(atoms.tolist(), values.tolist()))
+        transform = model.surface_spec.transform
+        updated_atoms = []
+        for atom in model.atoms:
+            if atom.atom_index not in values_by_atom:
+                updated_atoms.append(atom)
+                continue
+            surface = np.array(atom.surface_fractional, copy=True)
+            surface_delta = values_by_atom[atom.atom_index] - surface[coordinate]
+            surface[coordinate] = values_by_atom[atom.atom_index]
+            parent = np.array(atom.parent_fractional, copy=True)
+            parent += transform[:, coordinate] * surface_delta
+            updated_atoms.append(
+                dataclasses.replace(
+                    atom,
+                    surface_fractional=surface,
+                    parent_fractional=parent,
+                )
+            )
+        model.atoms = updated_atoms
+
+    def _update_wyckoff_metadata_from_site_value(
+        self,
+        site_id,
+        axis_index,
+        value,
+        surface_deltas,
+    ):
+        model = self.symmetry_metadata
+        model.sites = tuple(
+            dataclasses.replace(
+                site,
+                representative_parent_fractional=tuple(
+                    value if index == axis_index else coordinate
+                    for index, coordinate in enumerate(
+                        site.representative_parent_fractional
+                    )
+                ),
+            )
+            if site.site_id == site_id
+            else site
+            for site in model.sites
+        )
+        transform = model.surface_spec.transform
+        model.atoms = [
+            dataclasses.replace(
+                atom,
+                surface_fractional=np.asarray(atom.surface_fractional)
+                + surface_deltas[atom.atom_index],
+                parent_fractional=np.asarray(atom.parent_fractional)
+                + transform @ surface_deltas[atom.atom_index],
+            )
+            if atom.atom_index in surface_deltas
+            else atom
+            for atom in model.atoms
+        ]
+
     def wyckoff_couplings(self, site_id=None):
         """Return symmetry couplings for generated Wyckoff atom coordinates.
 

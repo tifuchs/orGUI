@@ -59,12 +59,34 @@ Querying Wyckoff Metadata
 .. code-block:: python
 
    unitcell.wyckoff_sites()
+   unitcell.wyckoff("O_4f")
    unitcell.wyckoff_couplings("O_4f")
    unitcell.wyckoff_site_couplings("O_4f")
    unitcell.atom_wyckoff_metadata(0)
 
 ``wyckoff_sites()`` returns site dictionaries with the site id, element,
-Wyckoff label, free variables, generated atom indices, space group, and status.
+Wyckoff label, free variables, generated atom indices, site occupancy and
+Debye-Waller parameters, space group, and status. ``wyckoff(site_id)`` returns
+the same dictionary for one site.
+
+Direct convenience setters use symmetric signatures for atom and site data:
+
+.. code-block:: python
+
+   # Surface-cell atom coordinates or per-atom physical parameters.
+   unitcell.set_wyckoff_atom_parameter("O_4f", "occ", 0.5)
+   unitcell.set_wyckoff_atom_parameter("O_4f", "z", oxygen_z_values)
+
+   # Representative coordinate in the parent conventional cell.
+   unitcell.set_wyckoff_site_parameter("O_4f", "x", 0.31)
+   unitcell.set_wyckoff_site_parameter("O_4f", "iDW", 0.6)
+
+The atom setter accepts ``x``, ``y``, ``z``, ``iDW``, ``oDW``, and ``occ``.
+Coordinate values are in surface-cell fractional units and may be supplied per
+atom; ``iDW``, ``oDW``, and ``occ`` are scalar site-wide values. The site setter
+accepts ``x``, ``y``, and ``z`` in parent conventional fractional units and
+propagates the displacement through the stored symmetry couplings. It also
+accepts scalar site-wide ``iDW``, ``oDW``, and ``occ`` values.
 The status is one of:
 
 ``metadata_only``
@@ -225,8 +247,12 @@ after the layer metadata. The persisted information includes:
 * surface transform and origin;
 * Wyckoff site ids, labels, variables, and representative parent coordinates;
 * generated atom metadata;
-* Wyckoff variable couplings;
-* representative-site shift couplings.
+* deduplicated matrices for Wyckoff-variable and representative-site
+  couplings, referenced by the generated atoms.
+
+The matrix representation avoids repeating one text row for every nonzero
+atom/coordinate coupling. The reader also accepts the older expanded
+``wyckoff_couplings`` and ``wyckoff_site_couplings`` tables.
 
 Reloaded files can be queried and fitted with ``addWyckoffParameter`` and
 ``addWyckoffShift`` without PyXtal because the resolved couplings are already
@@ -242,7 +268,8 @@ API Reference
    :no-index:
 
 .. autoclass:: orgui.datautils.xrayutils.CTRuc.UnitCell
-   :members: wyckoff_sites, wyckoff_couplings, wyckoff_site_couplings,
+   :members: wyckoff_sites, wyckoff, set_wyckoff_atom_parameter,
+             set_wyckoff_site_parameter, wyckoff_couplings, wyckoff_site_couplings,
              atom_wyckoff_metadata, addWyckoffParameter, addWyckoffParameters,
              addWyckoffShift, addWyckoffShifts
    :member-order: bysource
