@@ -154,16 +154,16 @@ class _LayerStackingMixin:
         absolute_limits=None,
         **kwargs,
     ):
-        """Add a Wyckoff variable parameter on contained unit cells.
+        """Add an absolute Wyckoff variable parameter on contained unit cells.
 
         :param str site_id:
             Wyckoff site identifier.
         :param str variable:
             Wyckoff variable name, for example ``"u"``.
         :param tuple limits:
-            Delta fit limits in fractional units.
+            Absolute variable limits in parent fractional units.
         :param tuple absolute_limits:
-            Optional absolute variable limits.
+            Deprecated alias for ``limits`` retained for compatibility.
         :param kwargs:
             For ``EpitaxyInterface``, provide ``unitcell="top"``,
             ``unitcell="bottom"``, or a list of these names.
@@ -187,16 +187,17 @@ class _LayerStackingMixin:
         absolute_limits=None,
         **kwargs,
     ):
-        """Add several Wyckoff variable parameters on contained unit cells.
+        """Add absolute Wyckoff variable parameters on contained unit cells.
 
         :param str site_id:
             Wyckoff site identifier.
         :param variables:
             Iterable of Wyckoff variable names. If ``None``, fit all variables.
         :param tuple limits:
-            Delta fit limits in fractional units.
+            Absolute variable limits in parent fractional units, or a mapping
+            from variable names to absolute limits.
         :param absolute_limits:
-            Optional absolute variable limits.
+            Deprecated alias for ``limits`` retained for compatibility.
         :param kwargs:
             For ``EpitaxyInterface``, provide ``unitcell="top"``,
             ``unitcell="bottom"``, or a list of these names.
@@ -221,7 +222,10 @@ class _LayerStackingMixin:
         absolute_limits=None,
         **kwargs,
     ):
-        """Add a representative Wyckoff-site shift on contained unit cells.
+        """Add a relative symmetry-site shift along a parent direction.
+
+        The parameter is a displacement from the representative symmetry-site
+        coordinate, not an absolute parent coordinate.
 
         :param str site_id:
             Wyckoff site identifier.
@@ -231,7 +235,8 @@ class _LayerStackingMixin:
         :param tuple limits:
             Delta fit limits in parent fractional units.
         :param tuple absolute_limits:
-            Optional absolute parent-coordinate limits.
+            Optional absolute parent-coordinate bounds converted to relative
+            shift bounds. The fitted value remains a relative displacement.
         :param kwargs:
             For ``EpitaxyInterface``, provide ``unitcell="top"``,
             ``unitcell="bottom"``, or a list of these names.
@@ -255,7 +260,10 @@ class _LayerStackingMixin:
         absolute_limits=None,
         **kwargs,
     ):
-        """Add representative Wyckoff-site shifts on contained unit cells.
+        """Add relative symmetry-site shifts along parent directions.
+
+        Every parameter is a displacement from the representative
+        symmetry-site coordinate, not an absolute parent coordinate.
 
         :param str site_id:
             Wyckoff site identifier.
@@ -264,7 +272,8 @@ class _LayerStackingMixin:
         :param tuple limits:
             Delta fit limits in parent fractional units.
         :param absolute_limits:
-            Optional absolute parent-coordinate limits.
+            Optional absolute parent-coordinate bounds converted to relative
+            shift bounds. The fitted values remain relative displacements.
         :param kwargs:
             For ``EpitaxyInterface``, provide ``unitcell="top"``,
             ``unitcell="bottom"``, or a list of these names.

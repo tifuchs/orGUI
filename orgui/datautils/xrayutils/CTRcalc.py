@@ -521,10 +521,14 @@ class SXRDCrystal:
         ``unitcell="top"``, ``unitcell="bottom"``, or a list in the selection
         dictionary.
 
+        The coupled value and limits are absolute. This method distributes the
+        request to :meth:`UnitCell.addWyckoffParameter` on each selected unit
+        cell and links the resulting absolute parameters by name.
+
         :param dict parameter:
             Component-specific Wyckoff variable selections.
         :param tuple limits:
-            Shared delta limits in fractional units.
+            Shared absolute limits in fractional units.
         :param keyargs:
             Additional coupled-parameter settings such as ``name`` or
             ``prior``.
@@ -537,13 +541,12 @@ class SXRDCrystal:
             parameter,
             kind="coordinate",
             value_key="variable",
-            coupling_getter="wyckoff_couplings",
             limits=limits,
             **keyargs,
         )
 
     def addWyckoffShift(self, parameter, limits=(-np.inf, np.inf), **keyargs):
-        """Add a coupled representative Wyckoff-site shift parameter.
+        """Add coupled relative shifts along parent-cell directions.
 
         ``parameter`` maps crystal component names to Wyckoff shift
         selections. A selection can be ``(site_id, axis)`` or a dictionary with
@@ -555,7 +558,7 @@ class SXRDCrystal:
         :param dict parameter:
             Component-specific Wyckoff shift selections.
         :param tuple limits:
-            Shared parent-coordinate delta limits in fractional units.
+            Shared relative-shift limits in parent fractional units.
         :param keyargs:
             Additional coupled-parameter settings such as ``name`` or
             ``prior``.
@@ -568,7 +571,6 @@ class SXRDCrystal:
             parameter,
             kind="site_displacement",
             value_key="axis",
-            coupling_getter="wyckoff_site_couplings",
             limits=limits,
             **keyargs,
         )
@@ -578,7 +580,6 @@ class SXRDCrystal:
         parameter,
         kind,
         value_key,
-        coupling_getter,
         limits=(-np.inf, np.inf),
         **keyargs,
     ):
@@ -590,47 +591,41 @@ class SXRDCrystal:
         keyargs["name"] = name
         keyargs["prior"] = prior
 
-        component_indices = []
+        targets = []
         for component_key, selection in parameter.items():
-            for component_index, unitcell, site_id, value in self._wyckoff_targets(
-                component_key,
-                selection,
-                value_key,
-            ):
-                couplings = [
-                    coupling
-                    for coupling in getattr(unitcell, coupling_getter)(site_id)
-                    if getattr(coupling, value_key) == value
-                ]
-                if not couplings:
-                    raise ValueError(
-                        f"No Wyckoff {value_key} couplings found for "
-                        f"{component_key!r}, site {site_id!r}, {value_key} "
-                        f"{value!r}."
-                    )
-                atoms = np.asarray(
-                    [coupling.atom_index for coupling in couplings],
-                    dtype=np.intp,
+            targets.extend(
+                (component_key, *target)
+                for target in self._wyckoff_targets(
+                    component_key,
+                    selection,
+                    value_key,
                 )
-                coordinates = tuple(coupling.coordinate for coupling in couplings)
-                factors = np.asarray(
-                    [coupling.factor for coupling in couplings],
-                    dtype=np.float64,
-                )
-                settings = dict(keyargs)
-                settings["wyckoff"] = {
-                    "site_id": site_id,
-                    "kind": kind,
-                    value_key: value,
-                    "value_kind": "delta",
-                }
-                unitcell.addRelParameter(
-                    (atoms, coordinates),
-                    factors,
-                    limits,
+            )
+
+        component_indices = []
+        for component_key, component_index, unitcell, site_id, value in targets:
+            settings = dict(keyargs)
+            if kind == "coordinate":
+                unitcell.addWyckoffParameter(
+                    site_id,
+                    value,
+                    limits=limits,
                     **settings,
                 )
-                component_indices.append(component_index)
+            else:
+                unitcell.addWyckoffShift(
+                    site_id,
+                    value,
+                    limits=limits,
+                    **settings,
+                )
+            component_indices.append(component_index)
+
+        coupled_settings = dict(keyargs)
+        coupled_settings["wyckoff"] = {
+            "kind": kind,
+            "value_kind": "absolute" if kind == "coordinate" else "delta",
+        }
 
         par = Parameter(
             name,
@@ -638,7 +633,7 @@ class SXRDCrystal:
             ParameterType.RELATIVE,
             limits,
             prior,
-            keyargs,
+            coupled_settings,
         )
         self.parameters["coupled"].append(par)
         self._parIdNo += 1
@@ -935,7 +930,7 @@ class SXRDCrystal:
         x = np.asarray(x)
         x_r = x[
             self.fit_metadata_cache["par_idx_sortarray"]
-        ]  # reorder fitpars, this handles coupled parameters
+        ]  # reorder fitpars, including coupled absolute Wyckoff parameters
         x_ucs = x_r[self.fit_metadata_cache["number_xtalpar"] :]
         uc_numberpars = self.fit_metadata_cache["uc_numberpars"]
 
@@ -967,7 +962,7 @@ class SXRDCrystal:
         lim = np.asarray(lim)
         x_r = lim[
             self.fit_metadata_cache["par_idx_sortarray"]
-        ]  # reorder fitpars, this handles coupled parameters
+        ]  # reorder limits, including coupled absolute Wyckoff parameters
         x_ucs = x_r[self.fit_metadata_cache["number_xtalpar"] :]
         uc_numberpars = self.fit_metadata_cache["uc_numberpars"]
 

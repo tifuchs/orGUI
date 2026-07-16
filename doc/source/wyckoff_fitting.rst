@@ -116,15 +116,17 @@ atom coordinates are updated through the stored affine Wyckoff couplings:
    unitcell.addWyckoffParameter(
        "O_4f",
        "u",
-       absolute_limits=(0.28, 0.34),
+       limits=(0.28, 0.34),
    )
 
-The fitted value is a delta from the stored variable value. For rutile oxygen,
-coordinates such as ``u``, ``1-u``, ``0.5+u``, and ``0.5-u`` therefore move
-with the correct signs.
+The fitted value and limits are absolute Wyckoff-variable coordinates. The
+implementation converts the absolute value to an internal delta from the
+site's reference value and applies that delta through the affine couplings.
+For rutile oxygen, coordinates such as ``u``, ``1-u``, ``0.5+u``, and
+``0.5-u`` therefore move with the correct signs.
 
-``addWyckoffShift`` fits a parent conventional fractional displacement of the
-representative site coordinate:
+``addWyckoffShift`` fits a relative parent conventional fractional displacement
+from the representative symmetry-site coordinate:
 
 .. code-block:: python
 
@@ -135,10 +137,11 @@ representative site coordinate:
    )
 
 Here ``"x"``, ``"y"``, and ``"z"`` are parent conventional fractional axes,
-not generated surface-cell axes. The shift is propagated through the stored
+not generated surface-cell axes, and the parameter is a relative shift rather
+than an absolute coordinate. The shift is propagated through the stored
 space-group operation for each generated atom and then through the surface-cell
-transform. This intentionally keeps the original atom assignment and atom count
-while allowing the site to move away from its exact Wyckoff constraint.
+transform. This intentionally keeps the original atom assignment and atom
+count while allowing the site to move away from its exact Wyckoff constraint.
 
 Plural helpers are available for fitting several variables or shifts:
 
@@ -155,7 +158,7 @@ template unit cell:
 
 .. code-block:: python
 
-   film.addWyckoffParameter("O_4f", "u", limits=(-0.05, 0.05))
+   film.addWyckoffParameter("O_4f", "u", limits=(0.25, 0.35))
    poisson.addWyckoffShift("O_4f", "x", limits=(-0.02, 0.02))
 
 ``EpitaxyInterface`` follows the same selector convention as its existing
@@ -166,7 +169,7 @@ template unit cell:
    interface.addWyckoffParameter(
        "O_4f",
        "u",
-       limits=(-0.05, 0.05),
+       limits=(0.25, 0.35),
        unitcell="top",
    )
 
@@ -185,8 +188,11 @@ Linking Across Unit Cells
 -------------------------
 
 ``SXRDCrystal`` provides the same two Wyckoff helper modes at the crystal
-level. These helpers create one coupled crystal parameter and ordinary
-relative fit parameters inside each selected unit cell.
+level. ``addWyckoffParameter`` distributes one absolute value to the selected
+unit cells, while ``addWyckoffShift`` distributes one relative displacement.
+If selected sites begin with different values, the coupled starting value is
+their mean; setting the coupled parameter assigns the same absolute Wyckoff
+variable to every selected site.
 
 For a symmetry-preserving Wyckoff variable:
 
@@ -198,7 +204,7 @@ For a symmetry-preserving Wyckoff variable:
            "TiO2": ("O_4f", "u"),
        },
        name="shared_rutile_oxygen_u",
-       limits=(-0.05, 0.05),
+       limits=(0.25, 0.35),
    )
 
 For a representative-site shift:
@@ -228,7 +234,7 @@ value dictionary, or use a ``(component, unitcell)`` key:
            }
        },
        name="shared_interface_u",
-       limits=(-0.05, 0.05),
+       limits=(0.25, 0.35),
    )
 
    crystal.addWyckoffShift(

@@ -30,6 +30,7 @@ __version__ = "1.0.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
+import dataclasses
 import unittest
 from unittest import mock
 import os
@@ -822,8 +823,9 @@ class TestLayerStacking(unittest.TestCase):
             [0.5, 0.5],
         )
 
-        supercell.addWyckoffParameter("C_1", "u", limits=(-0.2, 0.2))
-        supercell.setFitParameters([0.1])
+        supercell.addWyckoffParameter("C_1", "u", limits=(0.1, 0.4))
+        np.testing.assert_allclose(supercell.getInitialParameters(), [0.25])
+        supercell.setFitParameters([0.35])
 
         np.testing.assert_allclose(supercell.basis[:, 1], [0.175, 0.675])
 
@@ -845,9 +847,9 @@ class TestLayerStacking(unittest.TestCase):
         supercell.addWyckoffParameter(
             "C_1_copy0",
             "u",
-            limits=(-0.2, 0.2),
+            limits=(0.1, 0.4),
         )
-        supercell.setFitParameters([0.1])
+        supercell.setFitParameters([0.35])
 
         np.testing.assert_allclose(supercell.basis[:, 1], [0.175, 0.625])
 
@@ -860,11 +862,28 @@ class TestLayerStacking(unittest.TestCase):
     def test_film_forwards_wyckoff_parameters_to_template_unitcell(self):
         film = CTRfilm.Film(self.make_single_wyckoff_cell())
 
-        film.addWyckoffParameter("C_1", "u", limits=(-0.2, 0.2))
-        film.setFitParameters([0.1])
+        film.addWyckoffParameter("C_1", "u", limits=(0.1, 0.4))
+        np.testing.assert_allclose(film.getInitialParameters(), [0.25])
+        film.setFitParameters([0.35])
 
         self.assertEqual(film.unitcell.wyckoff_sites()[0]["status"], "symmetry_preserving")
         np.testing.assert_allclose(film.unitcell.basis[:, 1], [0.35])
+
+    def test_film_forwards_absolute_plural_wyckoff_parameters(self):
+        film = CTRfilm.Film(self.make_single_wyckoff_cell())
+
+        parameters = film.addWyckoffParameters(
+            "C_1",
+            limits={"u": (0.1, 0.4)},
+        )
+
+        self.assertEqual(len(parameters), 1)
+        np.testing.assert_allclose(
+            film.getStartParamAndLimits(),
+            ([0.25], [0.1], [0.4]),
+        )
+        film.setFitParameters([0.3])
+        np.testing.assert_allclose(film.unitcell.basis[:, 1], [0.3])
 
     def test_poisson_surface_forwards_wyckoff_shifts_to_template_unitcell(self):
         surface = CTRfilm.PoissonSurface(self.make_single_wyckoff_cell())
@@ -906,10 +925,11 @@ class TestLayerStacking(unittest.TestCase):
         parameters = interface.addWyckoffParameter(
             "C_1",
             "u",
-            limits=(-0.2, 0.2),
+            limits=(0.1, 0.4),
             unitcell=["top", "bottom"],
         )
-        interface.setFitParameters([0.1, 0.1])
+        np.testing.assert_allclose(interface.getInitialParameters(), [0.25, 0.25])
+        interface.setFitParameters([0.35, 0.35])
 
         self.assertEqual(len(parameters), 2)
         self.assertEqual(interface.uc_top.wyckoff_sites()[0]["status"], "symmetry_preserving")
@@ -932,9 +952,22 @@ class TestLayerStacking(unittest.TestCase):
                 "film2": ("C_1", "u"),
             },
             name="shared_u",
-            limits=(-0.2, 0.2),
+            limits=(0.1, 0.4),
         )
-        crystal.setParameters([0.1])
+        np.testing.assert_allclose(
+            crystal.getStartParamAndLimits(),
+            ([0.25], [0.1], [0.4]),
+        )
+        np.testing.assert_allclose(
+            film1.getStartParamAndLimits()[1:],
+            ([0.1], [0.4]),
+        )
+        crystal.setLimits([(0.2, 0.3)])
+        np.testing.assert_allclose(
+            film1.getStartParamAndLimits()[1:],
+            ([0.2], [0.3]),
+        )
+        crystal.setParameters([0.35])
 
         self.assertEqual(parameter.name, "shared_u")
         self.assertEqual(crystal.fitparnames, ["shared_u"])
@@ -988,15 +1021,44 @@ class TestLayerStacking(unittest.TestCase):
                 }
             },
             name="shared_interface_u",
-            limits=(-0.2, 0.2),
+            limits=(0.1, 0.4),
         )
-        crystal.setParameters([0.1])
+        np.testing.assert_allclose(crystal.getInitialParameters(), [0.25])
+        crystal.setParameters([0.35])
 
         self.assertEqual(crystal.fitparnames, ["shared_interface_u"])
         self.assertEqual(interface.uc_top.wyckoff_sites()[0]["status"], "symmetry_preserving")
         self.assertEqual(interface.uc_bottom.wyckoff_sites()[0]["status"], "symmetry_preserving")
         np.testing.assert_allclose(interface.uc_top.basis[:, 1], [0.35])
         np.testing.assert_allclose(interface.uc_bottom.basis[:, 1], [0.35])
+
+    def test_sxrdcrystal_distributes_absolute_wyckoff_parameter(self):
+        bulk = self.make_single_wyckoff_cell()
+        film1 = self.make_single_wyckoff_cell()
+        film2 = self.make_single_wyckoff_cell()
+        bulk.name = "bulk_template"
+        film1.name = "film1"
+        film2.name = "film2"
+        film2.basis[:, 1] = 0.27
+        film2.basis_0[:, 1] = 0.27
+        film2.symmetry_metadata.sites = (
+            dataclasses.replace(
+                film2.symmetry_metadata.sites[0],
+                variables={"u": 0.27},
+            ),
+        )
+        crystal = CTRcalc.SXRDCrystal(bulk, film1, film2)
+
+        crystal.addWyckoffParameter(
+            {"film1": ("C_1", "u"), "film2": ("C_1", "u")},
+            name="mean_u",
+            limits=(0.2, 0.35),
+        )
+
+        np.testing.assert_allclose(crystal.getInitialParameters(), [0.26])
+        crystal.setParameters([0.28])
+        np.testing.assert_allclose(film1.basis[:, 1], [0.28])
+        np.testing.assert_allclose(film2.basis[:, 1], [0.28])
 
     def test_sxrdcrystal_links_wyckoff_shift_to_interface_unitcell_key(self):
         bulk = self.make_single_wyckoff_cell()
@@ -1420,6 +1482,33 @@ class TestStructureFactorNormalization(unittest.TestCase):
 
 
 class TestCTRTextFilesAndFitParameters(unittest.TestCase):
+    def test_unitcell_atom_table_uses_fixed_width_columns(self):
+        cell = CTRcalc.UnitCell([1.0, 1.0, 1.0], [90.0, 90.0, 90.0])
+        cell.addAtom("O", [0.5, 0.0, 0.80569], 0.4119, 0.4119, 1.0, layer=2)
+
+        lines = cell.toStr(showErrors=False).splitlines()
+
+        self.assertIn(
+            "Name        x/frac      y/frac      z/frac       iDW       oDW"
+            "     occup  layerIdx",
+            lines,
+        )
+        self.assertIn(
+            "00  O          0.50000     0.00000     0.80569    0.4119"
+            "    0.4119    1.0000         2",
+            lines,
+        )
+
+        cell.errors = np.full_like(cell.basis, np.nan)
+        cell.errors[0, 3] = 0.00007
+        error_lines = cell.toStr(showErrors=True).splitlines()
+        header = next(line for line in error_lines if line.startswith("Name"))
+        atom = next(line for line in error_lines if line.startswith("00"))
+        for column in ("x/frac", "y/frac", "z/frac", "iDW", "oDW", "occup"):
+            self.assertGreater(header.index(column), 0)
+        self.assertIn("(0.80569 +- 0.00007)", atom)
+        self.assertEqual(len(header), len(atom) - 4)
+
     @staticmethod
     def make_layered_cell(name):
         cell = CTRcalc.UnitCell(

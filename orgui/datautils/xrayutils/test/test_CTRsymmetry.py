@@ -112,6 +112,21 @@ class TestSymmetryUtilities(unittest.TestCase):
             [0.1, 0.9],
         )
 
+    def test_set_wyckoff_atom_parameter_allows_uninitialized_fit_parameters(self):
+        unitcell = self.make_metadata_unitcell()
+        unitcell.addFitParameter(
+            ([0], ["z"]),
+            name="manual_top_oxygen_z",
+        )
+        original_z = unitcell.basis[:, 3].copy()
+
+        unitcell.set_wyckoff_atom_parameter("O_2a", "iDW", 0.35)
+
+        np.testing.assert_allclose(unitcell.basis[:, 4], 0.35)
+        np.testing.assert_allclose(unitcell.basis_0[:, 4], 0.35)
+        np.testing.assert_allclose(unitcell.basis[:, 3], original_z)
+        self.assertIsNone(unitcell.parameters["absolute"][0].value)
+
     def test_set_wyckoff_site_parameter_propagates_parent_coordinate(self):
         unitcell = self.make_metadata_unitcell()
 
@@ -375,15 +390,15 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
         )
 
         self.assertEqual(parameter.settings["wyckoff"]["kind"], "coordinate")
-        self.assertEqual(parameter.settings["wyckoff"]["value_kind"], "delta")
-        np.testing.assert_allclose(unitcell.getInitialParameters(), [0.0])
+        self.assertEqual(parameter.settings["wyckoff"]["value_kind"], "absolute")
+        np.testing.assert_allclose(unitcell.getInitialParameters(), [0.30569])
         np.testing.assert_allclose(
             unitcell.getStartParamAndLimits()[1:],
-            ([-0.10569], [0.09431]),
+            ([0.2], [0.4]),
         )
         self.assertEqual(unitcell.wyckoff_sites()[1]["status"], "symmetry_preserving")
 
-        unitcell.setFitParameters([0.01])
+        unitcell.setFitParameters([0.31569])
 
         for coupling in couplings:
             column = unitcell.parameterLookup[coupling.coordinate]
@@ -454,9 +469,13 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
             [par.settings["wyckoff"]["variable"] for par in parameters],
             ["u", "v", "w"],
         )
+        np.testing.assert_allclose(
+            unitcell.getInitialParameters(),
+            [0.12, 0.23, 0.34],
+        )
         self.assertEqual(unitcell.wyckoff_sites()[0]["status"], "symmetry_preserving")
 
-        unitcell.setFitParameters([0.01, -0.02, 0.03])
+        unitcell.setFitParameters([0.13, 0.21, 0.37])
 
         deltas = {"u": 0.01, "v": -0.02, "w": 0.03}
         for coordinate_name in ("x", "y", "z"):

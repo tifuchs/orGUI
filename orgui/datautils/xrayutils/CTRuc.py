@@ -871,9 +871,24 @@ class WaterModel(Lattice, LinearFitFunctions):
 
 
 class UnitCell(Lattice):
-    parameterOrder = (
-        "Name   x/frac     y/frac     z/frac     iDW     oDW      occup    layerIdx"
+    _atom_column_names = (
+        "Name",
+        "x/frac",
+        "y/frac",
+        "z/frac",
+        "iDW",
+        "oDW",
+        "occup",
+        "layerIdx",
     )
+    _atom_column_widths = (6, 12, 12, 12, 10, 10, 10, 10)
+    _atom_error_column_widths = (6, 24, 24, 24, 22, 22, 22, 14)
+    parameterOrder = "".join(
+        f"{name:<{width}}" if index == 0 else f"{name:>{width}}"
+        for index, (name, width) in enumerate(
+            zip(_atom_column_names, _atom_column_widths)
+        )
+    ).rstrip()
 
     parameterLookup = {"x": 1, "y": 2, "z": 3, "iDW": 4, "oDW": 5, "occ": 6, "layer": 7}
 
@@ -998,7 +1013,8 @@ class UnitCell(Lattice):
                 no_errors = True
         for par in self.parameters["relative"]:
             if par.value is not None:
-                self.basis[par.indices] += par.factors * par.value
+                value = self._relative_internal_value(par, par.value)
+                self.basis[par.indices] += par.factors * value
             else:
                 raise ValueError(
                     f"Can not set basis values from parameters. Value of Parameter {par.name} is None."  # noqa: E501
@@ -1014,6 +1030,14 @@ class UnitCell(Lattice):
         self._basis_parvalues = np.copy(self.basis)
         if not no_errors:
             self._errors_parvalues = np.copy(self.errors)
+
+    @staticmethod
+    def _relative_internal_value(parameter, value):
+        """Convert an exposed parameter value to its internal relative delta."""
+        wyckoff = parameter.settings.get("wyckoff", {})
+        if wyckoff.get("value_kind") == "absolute":
+            return value - wyckoff["reference_value"]
+        return value
 
     def clearParameters(self):
         for p in self.parameters:
@@ -2422,8 +2446,6 @@ class UnitCell(Lattice):
         self.errors = None
         self._basis_parvalues = None
         self._errors_parvalues = None
-        if any(self.parameters.values()):
-            self.updateFromParameters()
 
     def _update_wyckoff_metadata_from_atom_values(
         self,
@@ -2627,25 +2649,22 @@ class UnitCell(Lattice):
         absolute_limits=None,
         **keyargs,
     ):
-        """Add a symmetry-preserving fit parameter for a Wyckoff variable.
+        """Add an absolute symmetry-preserving Wyckoff variable parameter.
 
-        The stored fit value is the change in the Wyckoff variable from the
-        generated coordinates. For example, fitting rutile oxygen ``u`` adds
-        ``factor * delta_u`` to every generated coordinate that depends on
-        ``u``. Multi-variable Wyckoff sites are fitted by adding one parameter
-        per independent coordinate variable.
+        The exposed fit value is the absolute Wyckoff variable. Internally,
+        its difference from the site's reference value is propagated through
+        every affine coupling, preserving symmetry-equivalent coordinates.
 
         :param str site_id:
             Site identifier returned by :meth:`wyckoff_sites`.
         :param str variable:
             Wyckoff variable name, for example ``"u"``.
         :param tuple limits:
-            Fit limits for the variable change in fractional units.
+            Absolute variable limits in parent fractional units.
         :param tuple absolute_limits:
-            Optional absolute variable limits. These are converted to change
-            limits around the metadata variable value.
+            Deprecated alias for ``limits`` retained for compatibility.
         :returns:
-            Created relative fit parameter.
+            Parameter exposing the absolute Wyckoff variable value.
         :rtype:
             CTRutil.Parameter
         :raises ValueError:
@@ -2659,17 +2678,17 @@ class UnitCell(Lattice):
         if variable not in site["variables"]:
             raise ValueError(f"Wyckoff site {site_id} has no variable {variable}.")
 
-        limits = self._delta_limits(
-            limits,
-            absolute_limits,
-            site["variables"][variable],
-        )
+        if absolute_limits is not None:
+            if limits != (-np.inf, np.inf):
+                raise ValueError("Use either limits or absolute_limits, not both.")
+            limits = absolute_limits
+        reference_value = site["variables"][variable]
         couplings = [
             coupling
             for coupling in self.wyckoff_couplings(site_id)
             if coupling.variable == variable
         ]
-        return self._add_wyckoff_relative_parameter(
+        parameter = self._add_wyckoff_relative_parameter(
             site_id,
             "variable",
             variable,
@@ -2683,6 +2702,13 @@ class UnitCell(Lattice):
             ),
             keyargs,
         )
+        parameter.settings["wyckoff"].update(
+            {
+                "value_kind": "absolute",
+                "reference_value": reference_value,
+            }
+        )
+        return parameter
 
     def addWyckoffParameters(
         self,
@@ -2692,7 +2718,7 @@ class UnitCell(Lattice):
         absolute_limits=None,
         **keyargs,
     ):
-        """Add symmetry-preserving fit parameters for Wyckoff variables.
+        """Add absolute symmetry-preserving Wyckoff variable parameters.
 
         :param str site_id:
             Site identifier returned by :meth:`wyckoff_sites`.
@@ -2702,12 +2728,12 @@ class UnitCell(Lattice):
         :type variables:
             iterable or None
         :param limits:
-            Either one ``(lower, upper)`` tuple applied to every variable or a
-            dictionary mapping variable names to delta limits.
+            One absolute ``(lower, upper)`` tuple for every variable or a
+            dictionary mapping variable names to absolute limits.
         :param absolute_limits:
-            Optional dictionary mapping variable names to absolute limits.
+            Deprecated alias for absolute ``limits`` retained for compatibility.
         :returns:
-            Created relative fit parameters in variable order.
+            Created absolute variable parameters in variable order.
         :rtype:
             list
         :raises ValueError:
@@ -2750,12 +2776,12 @@ class UnitCell(Lattice):
         absolute_limits=None,
         **keyargs,
     ):
-        """Add a symmetry-lowering shift for representative site motion.
+        """Add a relative shift from a symmetry site along a parent direction.
 
-        ``axis`` is a parent conventional fractional coordinate of the
-        representative atom. The stored fit value is a delta from the
-        representative coordinate; generated atoms move through the stored
-        space-group operation and surface-cell transform factors.
+        ``axis`` is a parent conventional-cell direction. The exposed value is
+        a relative displacement from the representative symmetry-site
+        coordinate, not an absolute parent coordinate. Generated atoms move
+        through the stored space-group operation and surface-cell transform.
 
         :param str site_id:
             Site identifier returned by :meth:`wyckoff_sites`.
@@ -2765,8 +2791,8 @@ class UnitCell(Lattice):
         :param tuple limits:
             Fit limits for the coordinate change in parent fractional units.
         :param tuple absolute_limits:
-            Optional absolute parent-coordinate limits, converted to changes
-            around the stored representative coordinate.
+            Optional absolute parent-coordinate bounds converted to relative
+            shift bounds. The fitted value remains a relative displacement.
         :returns:
             Created relative fit parameter.
         :rtype:
@@ -2817,7 +2843,11 @@ class UnitCell(Lattice):
         absolute_limits=None,
         **keyargs,
     ):
-        """Add representative site-displacement shifts for several axes.
+        """Add relative symmetry-site shifts along parent-cell directions.
+
+        Every exposed value is a displacement from the representative
+        symmetry-site coordinate along the selected parent conventional-cell
+        direction; it is not an absolute coordinate.
 
         :param str site_id:
             Site identifier returned by :meth:`wyckoff_sites`.
@@ -2829,7 +2859,8 @@ class UnitCell(Lattice):
             Either one ``(lower, upper)`` tuple applied to every axis or a
             dictionary mapping axis names to delta limits.
         :param absolute_limits:
-            Optional dictionary mapping axis names to absolute limits.
+            Optional absolute parent-coordinate bounds converted to relative
+            shift bounds. The fitted values remain relative displacements.
         :returns:
             Created relative fit parameters in axis order.
         :rtype:
@@ -2938,6 +2969,9 @@ class UnitCell(Lattice):
             val = np.mean(
                 (self.basis[par.indices] - basis_0[par.indices]) / par.factors
             )
+            wyckoff = par.settings.get("wyckoff", {})
+            if wyckoff.get("value_kind") == "absolute":
+                val += wyckoff["reference_value"]
             # if isinstance(par.indices[1], (np.integer,int)):
             #    parameternames = (UnitCell.parameterLookup_inv[par.indices[1]] + '_r',)
             #    atoms = (f"{par.indices[0]}_{self.names[par.indices[0]]}",)
@@ -2984,12 +3018,14 @@ class UnitCell(Lattice):
 
         for par in relpar:
             if recalculate or par.value is None:
-                x0.append(
-                    np.mean(
-                        (self.basis[par.indices] - self.basis_0[par.indices])
-                        / par.factors
-                    )
+                value = np.mean(
+                    (self.basis[par.indices] - self.basis_0[par.indices])
+                    / par.factors
                 )
+                wyckoff = par.settings.get("wyckoff", {})
+                if wyckoff.get("value_kind") == "absolute":
+                    value += wyckoff["reference_value"]
+                x0.append(value)
             else:
                 x0.append(par.value)
             lower.append(par.limits[0])
@@ -3005,7 +3041,8 @@ class UnitCell(Lattice):
             self.basis[par.indices] = val
             par.value = val
         for val, par in zip(x_r, self.parameters["relative"]):
-            self.basis[par.indices] += par.factors * val
+            internal_value = self._relative_internal_value(par, val)
+            self.basis[par.indices] += par.factors * internal_value
             par.value = val
         self._basis_parvalues = np.copy(self.basis)
 
@@ -3704,19 +3741,42 @@ class UnitCell(Lattice):
         name = self.names[no]
         if (self.errors is not None) and showErrors:
             err = self.errors[no][1:]
-            l = []  # noqa: E741
-            for t in zip(param, err):
-                [l.append(ti) for ti in t]
-            return (
-                "{}  ({:.5f} +- {:.5f})  ({:.5f} +- {:.5f})  ({:.5f} +- {:.5f})  ({:.4f} +- {:.4f})  ({:.4f} +- {:.4f})  ({:.4f} +- {:.4f}) ({:.0f} +- {:.0f})".format(  # noqa: E501
-                    name, *l
-                )  # noqa: E501
+            values = [
+                f"({param[index]:.5f} +- {err[index]:.5f})"
+                for index in range(3)
+            ]
+            values.extend(
+                f"({param[index]:.4f} +- {err[index]:.4f})"
+                for index in range(3, 6)
             )
-        else:
-            return "{}     {:.5f}     {:.5f}     {:.5f}  {:.4f}  {:.4f}  {:.4f} {:.0f}".format(  # noqa: E501
-                name,
-                *param,
+            values.append(f"({param[6]:.0f} +- {err[6]:.0f})")
+            return f"{name:<{self._atom_error_column_widths[0]}}" + "".join(
+                f"{value:>{width}}"
+                for value, width in zip(
+                    values,
+                    self._atom_error_column_widths[1:],
+                )
             )
+
+        formats = (".5f", ".5f", ".5f", ".4f", ".4f", ".4f", ".0f")
+        values = [format(value, spec) for value, spec in zip(param, formats)]
+        return f"{name:<{self._atom_column_widths[0]}}" + "".join(
+            f"{value:>{width}}"
+            for value, width in zip(values, self._atom_column_widths[1:])
+        )
+
+    def _parameter_header(self, showErrors=True):
+        widths = (
+            self._atom_error_column_widths
+            if self.errors is not None and showErrors
+            else self._atom_column_widths
+        )
+        return "".join(
+            f"{name:<{width}}" if index == 0 else f"{name:>{width}}"
+            for index, (name, width) in enumerate(
+                zip(self._atom_column_names, widths)
+            )
+        ).rstrip()
 
     def domainsToStr(self):
         s = ""
@@ -3772,7 +3832,7 @@ class UnitCell(Lattice):
 
     def __str__(self):
         st = repr(self) + "\n"
-        st += "id  " + UnitCell.parameterOrder + "\n"
+        st += "id  " + self._parameter_header() + "\n"
         return st + self.parameterStr()
 
     def writeSURfile(self, filename):
@@ -3809,7 +3869,7 @@ class UnitCell(Lattice):
             + self.domainsToStr()
             + self.latticeRODStr()
             + "\n"
-            + UnitCell.parameterOrder
+            + self._parameter_header(showErrors)
             + "\n"
             + self.parameterStr(showErrors=showErrors)
         )
