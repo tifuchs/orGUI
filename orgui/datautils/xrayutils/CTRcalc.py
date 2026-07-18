@@ -262,18 +262,23 @@ class SXRDCrystal:
         layer_state_new = getattr(self.uc_bulk, "layer_state", None)
         layer_number_new = layer_state_new.layer if layer_state_new is not None else -1
         loc_new = 0.0
+        component_new = self.uc_bulk
         for stacking_level in np.unique(self.uc_stacking_ordered):
             below_height = height_new
             below_layer = layer_number_new
             below_loc = loc_new
+            below_component = component_new
             while self.uc_stacking_ordered[i] == stacking_level:
                 uc = self.uc_surface_list_ordered[i]
                 if hasattr(uc, "stack_on"):
+                    stack_kwargs = {"below_state": layer_state_new}
+                    if isinstance(uc, PoissonSurface):
+                        stack_kwargs["below_component"] = below_component
                     uc.stack_on(
                         below_loc,
                         below_height,
                         below_layer,
-                        below_state=layer_state_new,
+                        **stack_kwargs,
                     )
                 else:
                     uc.start_layer_number = below_layer
@@ -288,6 +293,7 @@ class SXRDCrystal:
                     loc_new = uc.loc_absolute
                 layer_number_new = uc.end_layer_number
                 layer_state_new = getattr(uc, "layer_state", None)
+                component_new = uc
                 i += 1
                 if i == len(self.uc_stacking_ordered):
                     return

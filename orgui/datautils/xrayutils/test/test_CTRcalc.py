@@ -31,6 +31,7 @@ __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
 import dataclasses
+import copy
 import unittest
 from unittest import mock
 import os
@@ -40,7 +41,8 @@ import numpy as np
 
 from ... import util
 from .. import CTRcalc, CTRfilm, CTRplotutil, CTRsymmetry, CTRuc
-from ..CTRdistributions import PoissonProfile, SkellamProfile
+from ..CTRdistributions import PoissonProfile, SkellamProfile, SurfaceProfile
+from ..CTRutil import generate_surface_termination_cells
 
 
 class TestReadSXRDCrystal(unittest.TestCase):
@@ -143,11 +145,24 @@ class TestPoissonSurface(unittest.TestCase):
         self.unitcell.addAtom("C", [0.0, 0.0, 0.5], 0.1, 0.1, 1.0, layer=1)
         self.unitcell.coherentDomainOccupancy = [0.75]
 
+    def bind_surface(self, surface, loc=0.0, height=4.0):
+        film = CTRfilm.Film(copy.deepcopy(self.unitcell), name="underlying_film")
+        film.basis[0] = 2.0
+        film.createLayers()
+        surface.stack_on(
+            loc,
+            height,
+            film.end_layer_number,
+            below_state=film.layer_state,
+            below_component=film,
+        )
+        return film
+
     def test_serialization_round_trip(self):
         surface = CTRfilm.PoissonSurface(self.unitcell)
-        surface.basis = np.array([4.0, 1.0])
+        surface.basis = np.array([4.0, 1.0, 0.25])
         surface.basis_0 = np.copy(surface.basis)
-        surface.errors = np.array([0.2, 0.1])
+        surface.errors = np.array([0.2, 0.1, 0.05])
 
         restored = CTRfilm.PoissonSurface.fromStr(surface.toStr())
 
@@ -161,56 +176,156 @@ class TestPoissonSurface(unittest.TestCase):
         self.assertEqual(restored.unitcell.name, self.unitcell.name)
         self.assertEqual(restored.toStr(), surface.toStr())
 
-    def test_create_layers_assigns_poisson_occupancies(self):
-        surface = CTRfilm.PoissonSurface(self.unitcell)
-        surface.basis = np.array([4.0, 1.0])
+    def test_create_layers_assigns_convolved_occupancies(self):
+        surface = CTRfilm.PoissonSurface(
+            self.unitcell,
+            profile=PoissonProfile(mean_change=2.0, alpha=0.5),
+        )
 
-        surface.set_below(0.0, self.unitcell.a[2])
+        self.bind_surface(surface)
 
-        expected = 0.75 * np.array(
+        lower, upper = surface.profile.support()
+        offsets = np.arange(lower, upper + 1)
+        material = surface.profile.occupancy(offsets)
+        top_stop = np.flatnonzero(
+            material > surface.profile.tail_probability
+        )[-1] + 1
+        offsets = offsets[:top_stop]
+        material = material[:top_stop]
+        expected_surface = 0.75 * surface.profile.surface_occupancy(offsets)
+        expected_film = 0.75 * (material - (offsets < 0))
+        expected_reference = -expected_surface
+        represented = (expected_surface > surface.profile.tail_probability) | (
+            np.abs(expected_film) > surface.profile.tail_probability
+        )
+        actual_surface = np.concatenate(
+            [uc.coherentDomainOccupancy for uc in surface.layer_ucs]
+        )
+        actual_film = np.concatenate(
+            [uc.coherentDomainOccupancy for uc in surface.film_layer_ucs]
+        )
+        actual_reference = np.concatenate(
             [
-                1.0,
-                1.0 - np.exp(-1.0),
-                1.0 - 2.0 * np.exp(-1.0),
+                uc.coherentDomainOccupancy
+                for uc in surface._film_termination_ucs.values()
             ]
         )
         np.testing.assert_allclose(
-            surface.layer_ucs[0].coherentDomainOccupancy,
-            expected[[0, 2]],
+            np.sort(actual_surface), np.sort(expected_surface[represented])
         )
         np.testing.assert_allclose(
-            surface.layer_ucs[1].coherentDomainOccupancy,
-            expected[[1]],
+            np.sort(actual_film), np.sort(expected_film[represented])
         )
-        self.assertEqual(
-            [len(uc.coherentDomainMatrix) for uc in surface.layer_ucs],
-            [2, 1],
+        np.testing.assert_allclose(
+            np.sort(actual_reference), np.sort(expected_reference[represented])
         )
 
     def test_profile_support_and_serialization_are_numerical_only(self):
         profile = PoissonProfile(
             mean_change=1.0,
-            offset=-1.0,
+            alpha=0.25,
+            offset=0.25,
             tail_probability=1e-8,
         )
         surface = CTRfilm.PoissonSurface(self.unitcell, profile=profile)
         surface.basis_0[:] = surface.basis
-        surface.set_below(7.0, 11.0)
+        self.bind_surface(surface, loc=7.0, height=11.0)
 
         self.assertEqual(surface.pos_absolute, 11.0)
-        self.assertEqual(surface.stacking_height_absolute, 11.0)
-        self.assertGreater(surface.height_absolute, 11.0)
+        self.assertEqual(surface.stacking_height_absolute, 13.5)
+        self.assertGreater(surface.height_absolute, 13.5)
         self.assertLessEqual(
             surface.layer_ucs[-1].coherentDomainOccupancy[-1],
             self.unitcell.coherentDomainOccupancy[0],
         )
 
         restored = CTRfilm.PoissonSurface.fromStr(surface.toStr())
-        self.assertFalse(restored._legacy_absolute_width)
         self.assertAlmostEqual(restored.profile.mean_change, 1.0)
-        self.assertAlmostEqual(restored.profile.offset, -1.0)
+        self.assertAlmostEqual(restored.profile.alpha, 0.25)
+        self.assertAlmostEqual(restored.profile.offset, 0.25)
         self.assertAlmostEqual(restored.profile.tail_probability, 1e-8)
         self.assertEqual(restored.toStr(), surface.toStr())
+
+    def test_supercell_termination_bank_selects_complete_relaxed_slabs(self):
+        slab = self.unitcell.supercell((1, 1, 2), symmetry="independent")
+        termination_1 = slab.affine_layer_transform([0, 0, 0]).as_surface_termination(
+            1,
+            name="surface_termination_1",
+        )
+        termination_0 = slab.affine_layer_transform([0, 0, 1]).as_surface_termination(
+            0,
+            name="surface_termination_0",
+        )
+        top_atom = np.argmax(termination_0.basis[:, 3])
+        termination_0.basis[top_atom, 3] += 0.025
+        termination_0.basis_0[top_atom, 3] += 0.025
+
+        surface = CTRfilm.PoissonSurface(
+            {0: termination_0, 1: termination_1},
+            profile=PoissonProfile(1.0, alpha=1.0),
+            name="surface",
+        )
+        serialized = surface.toStr()
+        restored = CTRfilm.PoissonSurface.fromStr(serialized)
+        self.assertEqual(set(restored.termination_cells), {0.0, 1.0})
+        self.assertIn("TerminationUnitCell 0", restored.toStr())
+
+        self.bind_surface(surface)
+        self.assertEqual(
+            {cell.basis.shape[0] for cell in surface.termination_cells.values()},
+            {4},
+        )
+        for layer, cell in surface.termination_cells.items():
+            np.testing.assert_array_equal(cell.basis[:, 7], layer)
+            self.assertEqual(cell.layer_behavior, "select")
+        self.assertTrue(
+            all(
+                cell.coherentDomainMatrix
+                for cell in surface.layer_ucs
+            )
+        )
+        self.assertEqual(surface.toStr(), serialized)
+
+    def test_surface_termination_helper_accepts_film_cycle_owner(self):
+        film = CTRfilm.Film(copy.deepcopy(self.unitcell))
+        slab = self.unitcell.supercell((1, 1, 2), symmetry="independent")
+
+        terminations = generate_surface_termination_cells(
+            slab,
+            film,
+            name_template="relaxed_{layer:g}",
+        )
+
+        self.assertEqual(set(terminations), {0.0, 1.0})
+        self.assertEqual(
+            [terminations[layer].name for layer in (0.0, 1.0)],
+            ["relaxed_0", "relaxed_1"],
+        )
+        for layer, cell in terminations.items():
+            self.assertEqual(cell.basis.shape[0], 4)
+            np.testing.assert_array_equal(cell.basis[:, 7], layer)
+            self.assertEqual(cell.layer_behavior, "select")
+            self.assertEqual(tuple(cell.layer_cycle.layers), (layer,))
+
+        with self.assertRaisesRegex(ValueError, "integer multiple"):
+            generate_surface_termination_cells(slab, (0, 1, 2))
+
+    def test_termination_bank_requires_one_cell_per_film_cycle(self):
+        termination = self.unitcell.as_surface_termination(0)
+        surface = CTRfilm.PoissonSurface(
+            {0: termination},
+            profile=PoissonProfile(0.0),
+        )
+        film = CTRfilm.Film(copy.deepcopy(self.unitcell))
+        film.basis[0] = 2.0
+        crystal = CTRcalc.SXRDCrystal(
+            self.unitcell,
+            film,
+            surface,
+            stacking=np.array([1, 2]),
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one surface unit cell"):
+            crystal.apply_stacking()
 
     def test_distribution_support_bounds_omitted_tail(self):
         poisson_profile = PoissonProfile(2.5, tail_probability=1e-9)
@@ -222,32 +337,92 @@ class TestPoissonSurface(unittest.TestCase):
         self.assertLess(lower, 0)
         self.assertGreater(upper, 0)
 
-    def test_signed_poisson_process_changes_mean_surface_height(self):
-        for width, offset in (
-            (2.0, 0.0),
-            (-2.0, 0.0),
-            (2.0, -2.0),
-            (-2.0, 2.0),
+    def test_step_poisson_convolution_preserves_signed_mean(self):
+        for width in (2.3, -2.3):
+            for alpha in (0.0, 0.25, 1.0):
+                offset = 0.4
+                profile = PoissonProfile(
+                    mean_change=width,
+                    alpha=alpha,
+                    offset=offset,
+                    tail_probability=1e-12,
+                )
+                lower, upper = profile.support()
+                layers = np.arange(lower, upper + 1)
+                self.assertAlmostEqual(
+                    np.sum(profile.correction(layers)),
+                    width + offset,
+                    places=10,
+                )
+
+    def test_surface_occupancy_is_neighbor_difference(self):
+        for profile in (
+            PoissonProfile(2.5, alpha=0.4, tail_probability=1e-12),
+            PoissonProfile(-2.5, alpha=0.4, tail_probability=1e-12),
         ):
-            profile = PoissonProfile(
-                mean_change=width,
-                offset=offset,
-                tail_probability=1e-12,
-            )
             lower, upper = profile.support()
-            layers = np.arange(lower, upper + 1)
-            self.assertAlmostEqual(
-                np.sum(profile.correction(layers)),
-                width + offset,
-                places=10,
+            offsets = np.arange(lower, upper + 1)
+            material = profile.occupancy(offsets)
+            exposed = profile.surface_occupancy(offsets)
+
+            np.testing.assert_allclose(exposed[:-1], material[:-1] - material[1:])
+            self.assertEqual(exposed[-1], material[-1])
+            self.assertTrue(np.all(exposed >= 0.0))
+            self.assertAlmostEqual(np.sum(exposed), material[0])
+
+    def test_surface_profile_rejects_nonmonotonic_occupancy(self):
+        class InvalidProfile(SurfaceProfile):
+            def support(self):
+                return 0, 2
+
+            def occupancy(self, offsets):
+                return np.array([0.5, 0.6, 0.1])
+
+        with self.assertRaisesRegex(ValueError, "must not increase"):
+            InvalidProfile().surface_occupancy(np.arange(3))
+
+    def test_probability_is_step_poisson_convolution(self):
+        profile = PoissonProfile(mean_change=2.0, alpha=0.25)
+        changes = np.arange(0, 8)
+        poisson_probability = np.exp(-0.5) * 0.5 ** np.arange(7) / np.array(
+            [1, 1, 2, 6, 24, 120, 720]
+        )
+        expected = np.zeros_like(changes, dtype=np.float64)
+        expected[1:] += 0.5 * poisson_probability
+        expected[2:] += 0.5 * poisson_probability[:-1]
+        np.testing.assert_allclose(profile.probability(changes), expected)
+
+        dissolution = PoissonProfile(mean_change=-2.0, alpha=0.25)
+        np.testing.assert_allclose(
+            dissolution.probability(-changes),
+            expected,
+        )
+
+    def test_alpha_selects_layer_by_layer_and_poisson_limits(self):
+        layer_by_layer = PoissonProfile(mean_change=-1.25, alpha=0.0)
+        np.testing.assert_allclose(
+            layer_by_layer.probability([-1, -2]),
+            [0.75, 0.25],
+        )
+
+        poisson_only = PoissonProfile(mean_change=1.25, alpha=1.0)
+        np.testing.assert_allclose(
+            poisson_only.probability([0, 1, 2]),
+            np.exp(-1.25) * np.array([1.0, 1.25, 1.25**2 / 2.0]),
+        )
+
+        with self.assertRaisesRegex(ValueError, "alpha"):
+            PoissonProfile(
+                mean_change=1.0,
+                alpha=1.01,
             )
 
     def test_poisson_surface_growth_and_etching_are_signed(self):
         growth = CTRfilm.PoissonSurface(
             self.unitcell,
-            profile=PoissonProfile(mean_change=1.0),
+            profile=PoissonProfile(mean_change=1.0, alpha=0.4),
         )
-        growth.set_below(0.0, 8.0)
+        self.bind_surface(growth, height=8.0)
         growth_occupancy = np.concatenate(
             [layer.coherentDomainOccupancy for layer in growth.layer_ucs]
         )
@@ -256,39 +431,51 @@ class TestPoissonSurface(unittest.TestCase):
 
         etching = CTRfilm.PoissonSurface(
             self.unitcell,
-            profile=PoissonProfile(mean_change=-1.0),
+            profile=PoissonProfile(mean_change=-1.0, alpha=0.4),
         )
-        etching.set_below(0.0, 8.0)
-        etching_occupancy = np.concatenate(
+        self.bind_surface(etching, height=8.0)
+        etching_surface_occupancy = np.concatenate(
             [layer.coherentDomainOccupancy for layer in etching.layer_ucs]
         )
-        self.assertTrue(np.all(etching_occupancy < 0))
+        etching_film_occupancy = np.concatenate(
+            [layer.coherentDomainOccupancy for layer in etching.film_layer_ucs]
+        )
+        self.assertTrue(np.all(etching_surface_occupancy > 0))
+        self.assertTrue(np.all(etching_film_occupancy < 0))
         self.assertAlmostEqual(etching.mean_height_absolute, 6.0)
 
-        compensated = CTRfilm.PoissonSurface(
-            self.unitcell,
-            profile=PoissonProfile(mean_change=1.0, offset=-1.0),
-        )
-        compensated.set_below(0.0, 8.0)
-        compensated_occupancy = np.concatenate(
-            [layer.coherentDomainOccupancy for layer in compensated.layer_ucs]
-        )
-        self.assertTrue(np.any(compensated_occupancy < 0))
-        self.assertTrue(np.any(compensated_occupancy > 0))
-        self.assertAlmostEqual(compensated.mean_height_absolute, 8.0)
-
-    def test_zero_width_poisson_surface_stacks_without_domains(self):
+    def test_offset_is_an_independent_fit_parameter(self):
         surface = CTRfilm.PoissonSurface(
             self.unitcell,
+            profile=PoissonProfile(mean_change=1.0, alpha=0.4, offset=0.25),
+        )
+        surface.basis_0[:] = surface.basis
+        surface.addFitParameter("offset", limits=(-2.0, 2.0))
+
+        np.testing.assert_allclose(surface.getStartParamAndLimits()[0], [0.25])
+        surface.setFitParameters([-0.5])
+
+        self.assertAlmostEqual(surface.profile.mean_change, 1.0)
+        self.assertAlmostEqual(surface.profile.alpha, 0.4)
+        self.assertAlmostEqual(surface.profile.offset, -0.5)
+        self.assertAlmostEqual(surface.profile.expected_height_change, 0.5)
+
+    def test_zero_width_identical_surface_is_zero_net_correction(self):
+        film = CTRfilm.Film(copy.deepcopy(self.unitcell), name="film")
+        film.basis[0] = 2.0
+        surface = CTRfilm.PoissonSurface(
+            copy.deepcopy(self.unitcell),
             profile=PoissonProfile(mean_change=0.0),
         )
-        crystal = CTRcalc.SXRDCrystal(self.unitcell, surface, stacking=np.array([1]))
+        crystal = CTRcalc.SXRDCrystal(
+            self.unitcell, film, surface, stacking=np.array([1, 2])
+        )
 
         crystal.apply_stacking()
 
-        self.assertEqual(surface.stacking_height_absolute, 0.0)
+        self.assertEqual(surface.stacking_height_absolute, film.height_absolute)
         self.assertTrue(
-            all(not layer.coherentDomainMatrix for layer in surface.layer_ucs)
+            any(layer.coherentDomainMatrix for layer in surface.layer_ucs)
         )
         h = np.zeros(3)
         ell = np.linspace(0.1, 0.3, 3)
@@ -301,26 +488,98 @@ class TestPoissonSurface(unittest.TestCase):
             surface.zDensity_G(np.linspace(-1.0, 1.0, 5), 0, 0),
             0.0,
         )
+        np.testing.assert_allclose(surface.optical_profile()[:, 1:], 0.0)
 
-    def test_delta_width_serialization_uses_legacy_absolute_width(self):
-        transitional = CTRfilm.PoissonSurface(
-            self.unitcell,
-            profile=PoissonProfile(mean_change=1.0),
-        ).toStr()
-        transitional = transitional.replace(
-            "W/layers offset/layers",
-            "Width/layers deltaW/layers",
-        ).replace(
-            "1.00000    0.00000",
-            "0.00000    1.00000",
+    def test_zero_width_replaces_top_film_layer_with_surface_structure(self):
+        film_cell = copy.deepcopy(self.unitcell)
+        surface_cell = copy.deepcopy(self.unitcell)
+        surface_cell.names[:] = ["O", "O"]
+        surface_cell.basis[:, 0] = 8
+        surface_cell.setEnergy(10000.0)
+        film = CTRfilm.Film(film_cell, name="film")
+        film.basis[0] = 2.0
+        surface = CTRfilm.PoissonSurface(
+            surface_cell,
+            profile=PoissonProfile(mean_change=0.0),
+            name="surface",
         )
+        crystal = CTRcalc.SXRDCrystal(
+            self.unitcell, film, surface, stacking=np.array([1, 2])
+        )
+        crystal.apply_stacking()
 
-        restored = CTRfilm.PoissonSurface.fromStr(transitional)
+        surface_occupancies = np.concatenate(
+            [layer.coherentDomainOccupancy for layer in surface.layer_ucs]
+        )
+        film_corrections = np.concatenate(
+            [layer.coherentDomainOccupancy for layer in surface.film_layer_ucs]
+        )
+        reference_corrections = np.concatenate(
+            [
+                cell.coherentDomainOccupancy
+                for cell in surface._film_termination_ucs.values()
+            ]
+        )
+        np.testing.assert_allclose(surface_occupancies, [0.75])
+        np.testing.assert_allclose(film_corrections, [0.0])
+        np.testing.assert_allclose(reference_corrections, [-0.75])
+        h = np.zeros(3)
+        ell = np.linspace(0.1, 0.3, 3)
+        self.assertTrue(np.any(np.abs(surface.F_uc(h, h, ell)) > 0.0))
 
-        np.testing.assert_allclose(restored.basis, [0.0, 1.0])
-        self.assertAlmostEqual(restored.profile.expected_height_change, 1.0)
-        self.assertIn("Width/layers deltaW/layers", restored.toStr())
+    def test_surface_requires_compatible_underlying_film(self):
+        surface = CTRfilm.PoissonSurface(
+            copy.deepcopy(self.unitcell), profile=PoissonProfile(1.0)
+        )
+        crystal = CTRcalc.SXRDCrystal(
+            self.unitcell, surface, stacking=np.array([1])
+        )
+        with self.assertRaisesRegex(ValueError, "immediately above a Film"):
+            crystal.apply_stacking()
 
+        mismatched = copy.deepcopy(self.unitcell)
+        mismatched.a[2] *= 1.1
+        film = CTRfilm.Film(mismatched)
+        film.basis[0] = 2.0
+        crystal = CTRcalc.SXRDCrystal(
+            self.unitcell, film, surface, stacking=np.array([1, 2])
+        )
+        with self.assertRaisesRegex(ValueError, "integer multiple"):
+            crystal.apply_stacking()
+
+    def test_repeated_stacking_refreshes_underlying_film_views(self):
+        film = CTRfilm.Film(copy.deepcopy(self.unitcell), name="film")
+        film.basis[0] = 2.0
+        surface = CTRfilm.PoissonSurface(
+            copy.deepcopy(self.unitcell),
+            profile=PoissonProfile(1.0, alpha=0.5),
+            name="surface",
+        )
+        crystal = CTRcalc.SXRDCrystal(
+            self.unitcell, film, surface, stacking=np.array([1, 2])
+        )
+        crystal.apply_stacking()
+        first_counts = [
+            len(layer.coherentDomainMatrix) for layer in surface.film_layer_ucs
+        ]
+
+        film.unitcell.basis[:, 6] *= 0.5
+        crystal.apply_stacking()
+
+        self.assertEqual(
+            [len(layer.coherentDomainMatrix) for layer in surface.film_layer_ucs],
+            first_counts,
+        )
+        self.assertTrue(
+            all(
+                np.shares_memory(layer.basis, film.unitcell.basis)
+                for layer in surface.film_layer_ucs
+            )
+        )
+        np.testing.assert_allclose(
+            np.concatenate([layer.basis[:, 6] for layer in surface.film_layer_ucs]),
+            0.5,
+        )
 
 class TestLayerStacking(unittest.TestCase):
     @staticmethod
@@ -1097,7 +1356,8 @@ class TestLayerStacking(unittest.TestCase):
         self.assertAlmostEqual(film.height_absolute, 4.0)
 
         surface = CTRfilm.PoissonSurface(self.make_layered_unitcell("surface"))
-        surface.basis[:] = [2, 0]
+        surface.basis[:] = [2, 0, 0]
+        surface._bind_underlying_component(film)
         surface.start_layer_number = 2
         surface.createLayers()
 
@@ -1110,7 +1370,7 @@ class TestLayerStacking(unittest.TestCase):
         )
         self.assertAlmostEqual(
             surface.layer_ucs[1].coherentDomainMatrix[0][2, 3],
-            1 / 3,
+            -1 / 3,
         )
 
     def test_epitaxy_interface_rotates_cyclic_layer_order(self):
@@ -1145,7 +1405,7 @@ class TestLayerStacking(unittest.TestCase):
 
         surface = CTRfilm.PoissonSurface(self.make_layered_unitcell("surface"))
         surface.name = "surface"
-        surface.basis[:] = [5, 0]
+        surface.basis[:] = [5, 0, 0]
 
         crystal = CTRcalc.SXRDCrystal(
             self.make_layered_unitcell("bulk"),
@@ -1535,14 +1795,14 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         film.basis_0[:] = film.basis
         surface = CTRfilm.PoissonSurface(
             self.make_layered_cell("surface_cell"),
-            profile=PoissonProfile(mean_change=1.5, offset=-1.5),
+            profile=PoissonProfile(mean_change=1.5, alpha=0.5),
             name="surface",
         )
         surface.basis_0[:] = surface.basis
 
         film.errors = np.array([0.2])
         interface.errors = np.array([0.03, 0.04])
-        surface.errors = np.array([0.1, 0.15])
+        surface.errors = np.array([0.1, 0.15, 0.2])
         film.unitcell.errors = np.full_like(film.unitcell.basis, np.nan)
         film.unitcell.errors[:, 1:7] = 0.01
 
@@ -1582,7 +1842,10 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         np.testing.assert_allclose(restored_xpr.werrors, crystal.werrors)
         np.testing.assert_allclose(restored_xpr["film"].errors, [0.2])
         np.testing.assert_allclose(restored_xpr["interface"].errors, [0.03, 0.04])
-        np.testing.assert_allclose(restored_xpr["surface"].errors, [0.1, 0.15])
+        np.testing.assert_allclose(
+            restored_xpr["surface"].errors,
+            [0.1, 0.15, 0.2],
+        )
         np.testing.assert_allclose(
             restored_xpr["film"].unitcell.errors[:, 1:7],
             crystal["film"].unitcell.errors[:, 1:7],
@@ -1616,42 +1879,43 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
 
         surface = CTRfilm.PoissonSurface(
             self.make_layered_cell("surface_cell"),
-            profile=PoissonProfile(mean_change=2.0, offset=-2.0),
+            profile=PoissonProfile(mean_change=2.0, alpha=0.4),
             name="surface",
         )
         surface.basis_0[:] = surface.basis
         surface.addRelParameter(
-            ("W", "offset"),
-            (1.0, -1.0),
-            limits=(-1.0, 1.0),
+            ("W", "alpha"),
+            (1.0, 0.1),
+            limits=(-0.4, 0.4),
         )
-        surface.setFitParameters([0.5])
+        surface.setFitParameters([0.25])
         surface.setFitErrors([0.1])
-        np.testing.assert_allclose(surface.basis, [2.5, -2.5])
-        np.testing.assert_allclose(surface.errors, [0.1, 0.1])
-        self.assertAlmostEqual(surface.profile.mean_change, 2.5)
-        self.assertAlmostEqual(surface.profile.offset, -2.5)
-        self.assertAlmostEqual(surface.profile.expected_height_change, 0.0)
+        np.testing.assert_allclose(surface.basis, [2.25, 0.425, 0.0])
+        np.testing.assert_allclose(surface.errors[:2], [0.1, 0.01])
+        self.assertTrue(np.isnan(surface.errors[2]))
+        self.assertAlmostEqual(surface.profile.mean_change, 2.25)
+        self.assertAlmostEqual(surface.profile.alpha, 0.425)
+        self.assertAlmostEqual(surface.profile.expected_height_change, 2.25)
 
     def test_linear_fit_parameter_dictionary_round_trip(self):
         original = CTRfilm.PoissonSurface(
             self.make_layered_cell("surface_cell"),
-            profile=PoissonProfile(mean_change=2.0, offset=-2.0),
+            profile=PoissonProfile(mean_change=2.0, alpha=0.4),
             name="surface",
         )
         original.basis_0[:] = original.basis
         original.addRelParameter(
-            ("W", "offset"),
-            (1.0, -1.0),
-            limits=(-1.0, 1.0),
-            name="mean_preserving_width",
+            ("W", "alpha"),
+            (1.0, 0.1),
+            limits=(-0.4, 0.4),
+            name="coupled_roughness",
         )
         original.setFitParameters([0.4])
         original.setFitErrors([0.05])
 
         restored = CTRfilm.PoissonSurface(
             self.make_layered_cell("surface_cell"),
-            profile=PoissonProfile(mean_change=2.0, offset=-2.0),
+            profile=PoissonProfile(mean_change=2.0, alpha=0.4),
             name="surface",
         )
         restored.parametersFromDict(original.parametersToDict())
@@ -1661,7 +1925,7 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         np.testing.assert_allclose(restored.getFitErrors(), original.getFitErrors())
         self.assertEqual(restored.fitparnames, original.fitparnames)
         self.assertAlmostEqual(restored.profile.mean_change, 2.4)
-        self.assertAlmostEqual(restored.profile.offset, -2.4)
+        self.assertAlmostEqual(restored.profile.alpha, 0.44)
 
     def test_crystal_fit_vector_updates_ctrfilm_components(self):
         crystal = self.make_crystal_with_errors()
@@ -1678,7 +1942,7 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
 
         np.testing.assert_allclose(crystal["interface"].basis, [0.4, 0.0])
         np.testing.assert_allclose(crystal["film"].basis, [7.0])
-        np.testing.assert_allclose(crystal["surface"].basis, [2.0, -1.5])
+        np.testing.assert_allclose(crystal["surface"].basis, [2.0, 0.5, 0.0])
         np.testing.assert_allclose(crystal.getFitErrors(), [0.01, 0.2, 0.1])
         self.assertAlmostEqual(crystal["interface"].profile.width, 0.4)
         self.assertAlmostEqual(crystal["surface"].profile.mean_change, 2.0)
@@ -1713,7 +1977,7 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         np.testing.assert_array_equal(xpr.uc_stacking, [3, 2, 1])
         np.testing.assert_allclose(xtal["TiO2toRuO2"].basis, [0.35, 0.0])
         np.testing.assert_allclose(xtal["RuO2"].basis, [17.0])
-        np.testing.assert_allclose(xtal["RuO2surface"].basis, [-6.0, 0.0])
+        np.testing.assert_allclose(xtal["RuO2surface"].basis, [-6.0, 1.0, 0.0])
         for name in ("TiO2toRuO2", "RuO2", "RuO2surface"):
             np.testing.assert_allclose(xtal[name].basis, xpr[name].basis)
 

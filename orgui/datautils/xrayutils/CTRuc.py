@@ -1755,6 +1755,59 @@ class UnitCell(Lattice):
             transformed._explicit_layer_cycle = tuple(cycle)
         return transformed
 
+    def as_surface_termination(self, layer, name=None, origin=None):
+        """Return a copy whose complete structure is one surface termination.
+
+        The atomic ``layer`` column is used only as a stacking/termination
+        selector in the returned cell.  All atoms therefore receive the same
+        layer identifier, while their fractional coordinates and fit
+        parameters remain unchanged.  This permits a multi-layer relaxed slab
+        to be selected as one termination with ``layer_behavior='select'``.
+
+        :param float layer:
+            Layer identifier in the primitive Film stacking cycle.
+        :param str name:
+            Optional name for the returned unit cell.
+        :param float origin:
+            Fractional z coordinate in this cell that is placed at the exposed
+            terrace height.  By default the highest structural-layer origin is
+            used.
+        :returns:
+            Independent termination-cell copy.
+        :rtype: UnitCell
+        """
+        transformed = copy.deepcopy(self)
+        if name is not None:
+            transformed.name = name
+        layer = float(layer)
+        if origin is None:
+            origins = list(self.layerpos.values())
+            if origins:
+                origin = max(origins)
+            elif self.basis.size:
+                origin = float(np.max(self.basis[:, 3]))
+            else:
+                origin = 0.0
+        origin = float(origin)
+
+        for values in (
+            transformed.basis,
+            transformed.basis_0,
+            transformed._basis_parvalues,
+        ):
+            if values is not None and values.size:
+                values[:, 7] = layer
+        if transformed.symmetry_metadata is not None:
+            transformed.symmetry_metadata.atoms = tuple(
+                dataclasses.replace(atom, layer=layer)
+                for atom in transformed.symmetry_metadata.atoms
+            )
+        transformed.layerpos = {layer: origin}
+        transformed._explicit_layer_cycle = (layer,)
+        transformed.layer_behavior = "select"
+        transformed._start_layer = layer
+        return transformed
+
     def supercell(self, repeats, symmetry="preserve", name=None):
         """Return a repeated unit-cell copy.
 

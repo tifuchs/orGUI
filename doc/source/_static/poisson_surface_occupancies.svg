@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="500" viewBox="0 0 840 500" role="img" aria-labelledby="title desc">
+  <title id="title">Poisson surface occupancy decomposition</title>
+  <desc id="desc">Stacked bars show covered Film occupancy and exposed surface occupancy for structural-layer offsets minus one through five.</desc>
+  <style>
+    .axis { stroke: #414754; stroke-width: 1.5; }
+    .grid { stroke: #aeb4bf; stroke-width: 1; opacity: 0.45; }
+    .label { fill: #252a34; font: 16px sans-serif; }
+    .small { fill: #4b5260; font: 14px sans-serif; }
+    .film { fill: #4678a8; }
+    .surface { fill: #e08b32; }
+    .total { fill: none; stroke: #252a34; stroke-width: 1.5; }
+    @media (prefers-color-scheme: dark) {
+      .axis { stroke: #d8dce4; }
+      .grid { stroke: #7e8797; }
+      .label { fill: #f0f2f6; }
+      .small { fill: #d3d7df; }
+      .total { stroke: #f0f2f6; }
+    }
+  </style>
+
+  <line class="grid" x1="92" y1="390" x2="790" y2="390"/>
+  <line class="grid" x1="92" y1="305" x2="790" y2="305"/>
+  <line class="grid" x1="92" y1="220" x2="790" y2="220"/>
+  <line class="grid" x1="92" y1="135" x2="790" y2="135"/>
+  <line class="grid" x1="92" y1="50" x2="790" y2="50"/>
+  <line class="axis" x1="92" y1="50" x2="92" y2="390"/>
+  <line class="axis" x1="92" y1="390" x2="790" y2="390"/>
+
+  <text class="small" x="78" y="395" text-anchor="end">0</text>
+  <text class="small" x="78" y="310" text-anchor="end">0.25</text>
+  <text class="small" x="78" y="225" text-anchor="end">0.50</text>
+  <text class="small" x="78" y="140" text-anchor="end">0.75</text>
+  <text class="small" x="78" y="55" text-anchor="end">1.00</text>
+  <text class="label" x="25" y="220" text-anchor="middle" transform="rotate(-90 25 220)">occupancy</text>
+  <text class="label" x="441" y="470" text-anchor="middle">z / structural layers</text>
+
+  <rect class="film" x="122" y="50" width="62" height="340"/>
+  <rect class="total" x="122" y="50" width="62" height="340"/>
+  <rect class="film" x="218" y="175.08" width="62" height="214.92"/>
+  <rect class="surface" x="218" y="50" width="62" height="125.08"/>
+  <rect class="total" x="218" y="50" width="62" height="340"/>
+  <rect class="film" x="314" y="300.16" width="62" height="89.84"/>
+  <rect class="surface" x="314" y="175.08" width="62" height="125.08"/>
+  <rect class="total" x="314" y="175.08" width="62" height="214.92"/>
+  <rect class="film" x="410" y="362.70" width="62" height="27.30"/>
+  <rect class="surface" x="410" y="300.16" width="62" height="62.54"/>
+  <rect class="total" x="410" y="300.16" width="62" height="89.84"/>
+  <rect class="film" x="506" y="383.54" width="62" height="6.46"/>
+  <rect class="surface" x="506" y="362.70" width="62" height="20.84"/>
+  <rect class="total" x="506" y="362.70" width="62" height="27.30"/>
+  <rect class="film" x="602" y="388.75" width="62" height="1.25"/>
+  <rect class="surface" x="602" y="383.54" width="62" height="5.21"/>
+  <rect class="total" x="602" y="383.54" width="62" height="6.46"/>
+  <rect class="surface" x="698" y="388.75" width="62" height="1.25"/>
+  <rect class="total" x="698" y="388.75" width="62" height="1.25"/>
+
+  <text class="small" x="153" y="416" text-anchor="middle">−1</text>
+  <text class="small" x="249" y="416" text-anchor="middle">0</text>
+  <text class="small" x="345" y="416" text-anchor="middle">1</text>
+  <text class="small" x="441" y="416" text-anchor="middle">2</text>
+  <text class="small" x="537" y="416" text-anchor="middle">3</text>
+  <text class="small" x="633" y="416" text-anchor="middle">4</text>
+  <text class="small" x="729" y="416" text-anchor="middle">5</text>
+
+  <rect class="film" x="515" y="18" width="18" height="12"/>
+  <text class="small" x="540" y="29">covered Film, cᵢ</text>
+  <rect class="surface" x="655" y="18" width="18" height="12"/>
+  <text class="small" x="680" y="29">exposed surface, sᵢ</text>
+</svg>

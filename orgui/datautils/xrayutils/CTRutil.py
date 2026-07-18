@@ -525,6 +525,96 @@ def next_skip_comment(it, comment=("//", "return")):
     return line
 
 
+def generate_surface_termination_cells(
+    surface_supercell,
+    film_cycle,
+    name_template=None,
+):
+    """Generate one complete surface-slab cell per Film termination.
+
+    The returned cells are suitable for any roughness model that selects a
+    surface structure from the primitive Film stacking cycle.  Each variant is
+    first shifted with ``UnitCell.affine_layer_transform`` so the requested
+    primitive-cycle member is the uppermost internal layer.  All atoms are
+    then assigned that one termination identifier with
+    ``UnitCell.as_surface_termination``.  Internal slab planes remain encoded
+    by their fractional z coordinates and may be fitted independently.
+
+    :param UnitCell surface_supercell:
+        Surface slab produced by ``UnitCell.supercell``.  Its number of
+        structural layers must be an integer multiple of the Film-cycle
+        length.
+    :param film_cycle:
+        A Film, UnitCell, LayerCycle, or iterable of primitive Film layer
+        identifiers, ordered from bottom to top.
+    :param str name_template:
+        Optional ``str.format`` template for generated names.  The fields
+        ``name`` (the source-cell name) and ``layer`` are available.  The
+        default is ``"{name}_termination_<layer>"``.
+    :returns:
+        Mapping from primitive Film layer identifier to an independent,
+        complete termination unit cell.
+    :rtype: dict
+    :raises ValueError:
+        If either cycle is empty, contains duplicate identifiers, or the slab
+        layer count is not an integer multiple of the Film cycle.
+    :raises TypeError:
+        If the supplied surface cell does not provide the required layered
+        transformation methods.
+    """
+    required_methods = ("affine_layer_transform", "as_surface_termination")
+    if any(not hasattr(surface_supercell, method) for method in required_methods):
+        raise TypeError(
+            "surface_supercell must be a layered UnitCell with affine and "
+            "surface-termination transforms"
+        )
+
+    cycle = getattr(film_cycle, "layer_cycle", film_cycle)
+    cycle = getattr(cycle, "layers", cycle)
+    film_layers = tuple(cycle)
+    if not film_layers:
+        raise ValueError("Film termination cycle cannot be empty")
+    if len(set(film_layers)) != len(film_layers):
+        raise ValueError("Film termination cycle identifiers must be unique")
+
+    internal_layers = tuple(surface_supercell.layer_cycle.layers)
+    if not internal_layers:
+        raise ValueError("Surface supercell layer cycle cannot be empty")
+    if len(internal_layers) % len(film_layers):
+        raise ValueError(
+            "Surface slab layer count must be an integer multiple of the "
+            "Film layer-cycle length"
+        )
+
+    terminations = {}
+    for termination_index, termination in enumerate(film_layers):
+        source_index = list(
+            range(termination_index, len(internal_layers), len(film_layers))
+        )[-1]
+        shift = len(internal_layers) - 1 - source_index
+        if name_template is None:
+            layer_label = f"{termination:g}" if isinstance(
+                termination, int | float | np.integer | np.floating
+            ) else str(termination)
+            name = f"{surface_supercell.name}_termination_{layer_label}"
+        else:
+            name = name_template.format(
+                name=surface_supercell.name,
+                layer=termination,
+            )
+        transformed = surface_supercell.affine_layer_transform(
+            [0, 0, shift],
+            name=name,
+        )
+        origin = max(transformed.layerpos.values())
+        terminations[termination] = transformed.as_surface_termination(
+            termination,
+            name=name,
+            origin=origin,
+        )
+    return terminations
+
+
 SQRT2pi = np.sqrt(2 * np.pi)
 
 
