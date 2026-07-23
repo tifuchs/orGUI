@@ -32,6 +32,7 @@ __all__ = [
     "CTRcalc",
     "CTRoptics",
     "CTRplotutil",
+    "CTRresolution",
     "CTRsymmetry",
     "DetectorCalibration",
     "HKLVlieg",

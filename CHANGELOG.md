@@ -3,6 +3,16 @@
 This is the changelog for the software orGUI, written by Timo Fuchs
 
 
+## [Unreleased] (2026-07-19)
+
+Scientific and analysis additions:
+
+- Added optional CTR intensity-resolution modeling with constant or
+  gamma-dependent box and Gaussian functions. Calculations can convolve
+  irregular existing L points or sample the crystal structure factor with
+  deterministic quadrature.
+
+
 ## [1.5.0] (2026-06-07)
 
 [532b60b](https://github.com/tifuchs/orGUI/commit/532b60bab3073ae9f0ff063a0e119aa9e9957857)...[c574bdf](https://github.com/tifuchs/orGUI/commit/c574bdf0bd5af6fa8258d108e7355c579bfef857)
