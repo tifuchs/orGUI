@@ -1368,10 +1368,9 @@ class UnitCell(Lattice):
             self._reorder_atoms(np.argsort(self.basis[:, 7], kind="stable"))
 
         layers = OrderedDict()
-        if not hasattr(self, "f"):
-            self.setEnergy(
-                10000.0
-            )  # populate f with some values to enable in-place modification
+        has_form_factors = (
+            hasattr(self, "f") and self.f.shape == (self.basis.shape[0], 13)
+        )
 
         for l in layer_numbers:  # noqa: E741
             where = (self.basis[:, 7] == l).nonzero()[0]
@@ -1385,9 +1384,13 @@ class UnitCell(Lattice):
             uc.basis_0 = self.basis_0[idx_low:idx_high]
             uc.dw_increase_constraint = self.dw_increase_constraint[idx_low:idx_high]
             uc._test_special_formfactors()
-            uc.f = self.f[idx_low:idx_high]
-            if hasattr(self, "_E"):
+            if has_form_factors:
+                # Each layer owns its array: layer-level fitting must not alter
+                # its parent or sibling form factors.
+                uc.f = np.array(self.f[idx_low:idx_high], copy=True)
+            if has_form_factors and hasattr(self, "_E"):
                 uc._E = self._E
+                uc._formfactor_state = uc._formfactor_state_token()
             uc.refRealTransform = self.refRealTransform
             uc.refHKLTransform = self.refHKLTransform
             layers[l] = uc
@@ -2435,8 +2438,27 @@ class UnitCell(Lattice):
         for dispersion and absorption correction
         in eV
         """
+        shape = (self.basis.shape[0], 13)
+        state = self._formfactor_state_token()
+        if (
+            getattr(self, "_E", None) == E
+            and hasattr(self, "f")
+            and self.f.shape == shape
+            and getattr(self, "_formfactor_state", None) == state
+        ):
+            return
         self._E = E
         self.lookupScatteringFactors(E)
+
+    def _formfactor_state_token(self):
+        """Return the species and special-callback state used by ``self.f``."""
+        special = tuple(
+            (name, id(UnitCell.special_formfactors[name][0]),
+             id(UnitCell.special_formfactors[name][1]))
+            for name in self.names
+            if name in UnitCell.special_formfactors
+        )
+        return tuple(self.names), special
 
     def addFitParameter(self, indexarray, limits=(-np.inf, np.inf), **keyargs):
         """
@@ -3390,6 +3412,12 @@ class UnitCell(Lattice):
         return err0
 
     def build_selected_basis(self):
+        # Preserve the legacy default-energy behavior for callers that compute
+        # a structure factor before selecting an energy, while allowing layer
+        # construction itself to remain free of unnecessary database work.
+        if not hasattr(self, "f") or self.f.shape != (self.basis.shape[0], 13):
+            self.setEnergy(getattr(self, "_E", 10000.0))
+
         if self.layer_behaviour == "select":
             if self.start_layer_number == -1.0:
                 warnings.warn(
@@ -3806,13 +3834,20 @@ class UnitCell(Lattice):
         else:
             self.f = np.empty((self.basis.shape[0], 13), dtype=np.float64)
 
-        for i, name in enumerate(self.names):
+        species_indices = OrderedDict()
+        for index, name in enumerate(self.names):
+            species_indices.setdefault(name, []).append(index)
+
+        for name, indices in species_indices.items():
             if name in UnitCell.special_formfactors:
-                self.f[i, :11] = 0.0
-                self.f[i, 11:] = UnitCell.special_formfactors[name][1](E)
+                row = np.zeros(13, dtype=np.float64)
+                row[11:] = UnitCell.special_formfactors[name][1](E)
             else:
-                self.f[i, :11] = readWaasmaier(name)
-                self.f[i, 11:] = readDispersion(name, E)
+                row = np.empty(13, dtype=np.float64)
+                row[:11] = readWaasmaier(name)
+                row[11:] = readDispersion(name, E)
+            self.f[indices] = row
+        self._formfactor_state = self._formfactor_state_token()
         return
 
     def plot3d(

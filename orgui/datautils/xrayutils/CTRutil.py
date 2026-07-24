@@ -32,6 +32,7 @@ import numpy as np
 import xraydb
 import warnings
 import json
+from functools import cache
 
 # random.seed(45)
 from collections import OrderedDict
@@ -644,7 +645,16 @@ def DWtoDisorder(dw):
 
 
 # returns a,b,c for Q = 4pi/lambda * sin th (instead of s)
-def readWaasmaier(element):
+def _normalize_species(element):
+    """Return a stable lookup key for an element or ion name."""
+    if isinstance(element, int):
+        return int(element)
+    return str(element).strip().title()
+
+
+@cache
+def _readWaasmaier_cached(element):
+    """Read immutable Waasmaier coefficients for a normalized species."""
     xraydb_t = xraydb.get_xraydb()
     wtab = xraydb_t.tables["Waasmaier"]
 
@@ -652,22 +662,37 @@ def readWaasmaier(element):
     if isinstance(element, int):
         row = row.filter(wtab.c.atomic_number == element).one()
     else:
-        row = row.filter(wtab.c.ion == element.title()).one()
-    # if len(row) > 0:
-    #    row = row[0]
+        row = row.filter(wtab.c.ion == element).one()
 
     c = row.offset
     a = json.loads(row.scale)
     b = np.array(json.loads(row.exponents)) / (4 * np.pi) ** 2
     xraydb_t.close()
-    return np.concatenate((a, b, [c]))
+    return tuple(np.concatenate((a, b, [c])))
+
+
+def readWaasmaier(element):
+    """Return Waasmaier coefficients for an element or ion.
+
+    The database result is cached by normalized species name. A new array is
+    returned on each call so callers cannot modify the cache.
+    """
+    return np.array(_readWaasmaier_cached(_normalize_species(element)))
+
+
+@cache
+def _readDispersion_cached(element, energy):
+    """Read immutable dispersion terms for a normalized species and energy."""
+    return (
+        xraydb.f1_chantler(atomic_number(element), energy),
+        xraydb.f2_chantler(atomic_number(element), energy),
+    )
 
 
 # incorrect for ions!!
 def readDispersion(element, E):
-    return xraydb.f1_chantler(atomic_number(element), E), xraydb.f2_chantler(
-        atomic_number(element), E
-    )
+    """Return dispersion terms for an element or ion at energy ``E`` in eV."""
+    return _readDispersion_cached(_normalize_species(element), float(E))
 
 
 def atomic_number(elementname):
