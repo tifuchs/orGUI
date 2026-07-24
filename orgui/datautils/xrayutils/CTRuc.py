@@ -285,6 +285,72 @@ def ctr_accel_enabled():
     return CTR_ACCEL_BACKEND != "numpy"
 
 
+def form_factor_cache_stats():
+    """Return process-global C++ Waasmaier form-factor cache statistics.
+
+    The cache is used only by accelerated :meth:`UnitCell.F_uc` calls. Its
+    resident-byte accounting includes retained float64 Q-squared and real
+    form-factor vectors, but not short-lived call snapshots or output arrays.
+    Reuse requires bitwise-identical computed Q-squared arrays and complete
+    13-value scattering rows; numerically near grids intentionally miss.
+
+    :returns: Cache hits, misses, evictions, capacity, and residency details.
+    :rtype: dict
+    :raises RuntimeError: If the C++ acceleration module is unavailable.
+    """
+    if not HAS_CPP_ACCEL:
+        raise RuntimeError("C++ form-factor cache is not available")
+    return _CTRcalc_cpp.form_factor_cache_stats()
+
+
+def clear_form_factor_cache():
+    """Clear all process-global C++ Waasmaier form-factor cache entries."""
+    if not HAS_CPP_ACCEL:
+        raise RuntimeError("C++ form-factor cache is not available")
+    _CTRcalc_cpp.clear_form_factor_cache()
+
+
+def reset_form_factor_cache_stats():
+    """Reset process-global C++ Waasmaier form-factor cache counters.
+
+    Retained entries and the configured capacity are unchanged. Pair this
+    with :func:`clear_form_factor_cache` to start a measurement from an empty
+    cache and zero counters.
+    """
+    if not HAS_CPP_ACCEL:
+        raise RuntimeError("C++ form-factor cache is not available")
+    _CTRcalc_cpp.reset_form_factor_cache_stats()
+
+
+def set_form_factor_cache_budget(bytes):
+    """Set the process-global C++ form-factor cache capacity in bytes.
+
+    :param int bytes: Non-negative cache residency limit in bytes.
+    :raises RuntimeError: If the C++ acceleration module is unavailable.
+    :raises ValueError: If ``bytes`` is negative.
+    """
+    if bytes < 0:
+        raise ValueError("form-factor cache budget must be non-negative")
+    if not HAS_CPP_ACCEL:
+        raise RuntimeError("C++ form-factor cache is not available")
+    _CTRcalc_cpp.set_form_factor_cache_budget(bytes)
+
+
+def form_factor_cache_expected_bytes(points, species):
+    """Return retained float64 bytes for one matching Q-squared grid.
+
+    :param int points: Number of reflections in the Q-squared vector.
+    :param int species: Number of distinct complete 13-value scattering rows.
+    :returns: Q-grid plus one real form-factor vector per species.
+    :rtype: int
+    """
+    if points < 0 or species < 0:
+        raise ValueError("points and species must be non-negative")
+    if not HAS_CPP_ACCEL:
+        raise RuntimeError("C++ form-factor cache is not available")
+    return _CTRcalc_cpp.form_factor_cache_expected_bytes(points, species)
+
+
 def _ctr_accel_module():
     if CTR_ACCEL_BACKEND == "numpy":
         return None

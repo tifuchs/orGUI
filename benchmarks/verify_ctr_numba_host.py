@@ -69,6 +69,17 @@ def median_time(func, repeats: int) -> float:
     return statistics.median(timings)
 
 
+def median_cold_cache_time(func, repeats: int) -> float:
+    """Return median C++ timing with the cache cleared before each call."""
+    timings = []
+    for _ in range(repeats):
+        CTRuc.clear_form_factor_cache()
+        start = time.perf_counter()
+        func()
+        timings.append(time.perf_counter() - start)
+    return statistics.median(timings)
+
+
 def load_crystal():
     """Load the bundled CTR regression crystal."""
     xpr_path = FIXTURE_DIR / "0V12_calculated.xpr"
@@ -177,6 +188,40 @@ def run_benchmark(repeats: int = 5) -> None:
                     f"{timings['numpy'] / timings[backend]:.2f}x"
                 )
             print(text)
+
+        if CTRuc.HAS_CPP_ACCEL:
+            set_backend("cpp")
+
+            def cache_func():
+                """Evaluate the cacheable canonical unit-cell amplitude."""
+                return xtal.uc_bulk.F_uc(h, k, l_values)
+
+            old_budget = CTRuc.form_factor_cache_stats()["budget_bytes"]
+            try:
+                CTRuc.clear_form_factor_cache()
+                CTRuc.reset_form_factor_cache_stats()
+                CTRuc.set_form_factor_cache_budget(0)
+                uncached = median_time(cache_func, repeats)
+                CTRuc.set_form_factor_cache_budget(old_budget)
+                cold = median_cold_cache_time(cache_func, repeats)
+                CTRuc.clear_form_factor_cache()
+                cache_func()
+                warm = median_time(cache_func, repeats)
+                stats = CTRuc.form_factor_cache_stats()
+            finally:
+                CTRuc.clear_form_factor_cache()
+                CTRuc.set_form_factor_cache_budget(old_budget)
+            expected = CTRuc.form_factor_cache_expected_bytes(
+                n_points,
+                stats["species_entries"],
+            )
+            print(
+                "F_uc cache "
+                f"uncached={uncached:.6g}s cold={cold:.6g}s warm={warm:.6g}s "
+                f"hits={stats['hits']} misses={stats['misses']} "
+                f"evictions={stats['evictions']} resident={stats['resident_bytes']}B "
+                f"expected={expected}B"
+            )
 
 
 def main() -> None:

@@ -2397,7 +2397,6 @@ class TestCTRcalculationNumPy(StructureFactorValidationMixin, unittest.TestCase)
     def testStructureFactorEqual(self):
         self.assert_structure_factors_match_volume_normalized_reference()
 
-
 class TestCTRcalculationNumba(StructureFactorValidationMixin, unittest.TestCase):
     def setUp(self):
         original_backend = CTRuc.CTR_ACCEL_BACKEND
@@ -2458,3 +2457,32 @@ class TestCTRcalculationCpp(StructureFactorValidationMixin, unittest.TestCase):
 
     def testStructureFactorEqual(self):
         self.assert_structure_factors_match_volume_normalized_reference()
+
+    def testFormFactorCacheReusesMatchingGrid(self):
+        """The C++ cache shares Waasmaier vectors across UnitCell calls."""
+        original_budget = CTRuc.form_factor_cache_stats()["budget_bytes"]
+        self.addCleanup(CTRuc.clear_form_factor_cache)
+        self.addCleanup(CTRuc.set_form_factor_cache_budget, original_budget)
+        CTRuc.clear_form_factor_cache()
+        CTRuc.reset_form_factor_cache_stats()
+        reset = CTRuc.form_factor_cache_stats()
+        self.assertEqual(reset["hits"], 0)
+        self.assertEqual(reset["misses"], 0)
+        self.assertEqual(reset["evictions"], 0)
+        h = np.linspace(-1.0, 1.0, 32)
+        k = np.zeros_like(h)
+        ell = np.linspace(0.1, 2.0, 32)
+
+        first = self.xtal_unitcells.uc_bulk.F_uc(h, k, ell)
+        cold = CTRuc.form_factor_cache_stats()
+        second = self.xtal_unitcells.uc_bulk.F_uc(h, k, ell)
+        warm = CTRuc.form_factor_cache_stats()
+
+        np.testing.assert_allclose(second, first)
+        self.assertGreater(cold["misses"], 0)
+        self.assertGreater(warm["hits"], cold["hits"])
+        self.assertGreater(warm["resident_bytes"], 0)
+        self.assertEqual(
+            CTRuc.form_factor_cache_expected_bytes(10_000, 5),
+            6 * 10_000 * np.dtype(np.float64).itemsize,
+        )
