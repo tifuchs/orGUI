@@ -2458,6 +2458,24 @@ class TestCTRcalculationCpp(StructureFactorValidationMixin, unittest.TestCase):
     def testStructureFactorEqual(self):
         self.assert_structure_factors_match_volume_normalized_reference()
 
+    def testZDensityMatchesNumpyWithMultipleDomains(self):
+        """The C++ density kernel preserves the atomic density convention."""
+        cell = CTRcalc.UnitCell([3.0, 4.0, 5.0], [90.0, 90.0, 90.0])
+        cell.addAtom("C", [0.2, 0.3, 0.4], 0.12, 0.18, 0.8)
+        cell.addAtom("O", [0.7, 0.6, 0.1], 0.21, 0.24, 0.5)
+        cell.setEnergy(10000.0)
+        shifted_domain = np.vstack((np.identity(3).T, [0.1, -0.2, 0.15])).T
+        cell.coherentDomainMatrix = [cell.coherentDomainMatrix[0], shifted_domain]
+        cell.coherentDomainOccupancy = [0.65, 0.35]
+        z = np.linspace(-2.0, 7.0, 127)
+
+        CTRuc.set_accel_backend("numpy")
+        expected = cell.zDensity_G(z, 0.37, -0.22)
+        CTRuc.set_accel_backend("cpp")
+        actual = cell.zDensity_G(z, 0.37, -0.22)
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-13, atol=1e-13)
+
     def testFormFactorCacheReusesMatchingGrid(self):
         """The C++ cache shares Waasmaier vectors across UnitCell calls."""
         original_budget = CTRuc.form_factor_cache_stats()["budget_bytes"]

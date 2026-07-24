@@ -3738,6 +3738,27 @@ class UnitCell(Lattice):
                 "This will result in numerical errors in electron density calculation!"
             )
 
+        # Special electron-density models are Python callbacks followed by a
+        # SciPy convolution, so they deliberately retain the reference path.
+        # The native kernel implements the standard atomic density expression.
+        if CTR_ACCEL_BACKEND == "cpp" and not any(
+            name in UnitCell.special_eDensity for name in names
+        ):
+            return _CTRcalc_cpp.unitcell_zdensity_g(
+                np.ascontiguousarray(z, dtype=np.float64),
+                h,
+                k,
+                Qpara2,
+                self._a[2],
+                basis,
+                formf,
+                self.R_mat,
+                self.R_mat_inv,
+                np.asarray(self.coherentDomainMatrix),
+                np.asarray(self.coherentDomainOccupancy),
+                self.uc_area,
+            )
+
         rho = np.zeros_like(z, dtype=np.complex128)
         rho_i = np.empty_like(z, dtype=np.complex128)
 

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <complex>
@@ -356,11 +357,15 @@ inline double get3(
     return data[(i * info.shape[1] + j) * info.shape[2] + k];
 }
 
-std::unique_ptr<Matrix3[]> effective_domain_matrices(const Inputs &inputs) {
-    const auto n_domains = inputs.coherent_domain_matrix.shape[0];
-    const double *domain = ptr(inputs.coherent_domain_matrix);
-    const double *r_mat = ptr(inputs.r_mat);
-    const double *r_mat_inv = ptr(inputs.r_mat_inv);
+std::unique_ptr<Matrix3[]> effective_domain_matrices(
+    const py::buffer_info &coherent_domain_matrix,
+    const py::buffer_info &r_mat_info,
+    const py::buffer_info &r_mat_inv_info
+) {
+    const auto n_domains = coherent_domain_matrix.shape[0];
+    const double *domain = ptr(coherent_domain_matrix);
+    const double *r_mat = ptr(r_mat_info);
+    const double *r_mat_inv = ptr(r_mat_inv_info);
     auto matrices = std::make_unique<Matrix3[]>(n_domains);
 
     for (py::ssize_t d = 0; d < n_domains; ++d) {
@@ -373,7 +378,7 @@ std::unique_ptr<Matrix3[]> effective_domain_matrices(const Inputs &inputs) {
                             r_mat_inv[row * 3 + left]
                             * get3(
                                 domain,
-                                inputs.coherent_domain_matrix,
+                                coherent_domain_matrix,
                                 d,
                                 left,
                                 right
@@ -387,6 +392,14 @@ std::unique_ptr<Matrix3[]> effective_domain_matrices(const Inputs &inputs) {
         }
     }
     return matrices;
+}
+
+std::unique_ptr<Matrix3[]> effective_domain_matrices(const Inputs &inputs) {
+    return effective_domain_matrices(
+        inputs.coherent_domain_matrix,
+        inputs.r_mat,
+        inputs.r_mat_inv
+    );
 }
 
 py::array_t<complex128> unitcell_core(
@@ -821,6 +834,168 @@ py::array_t<complex128> unitcell_F_uc(
     return result;
 }
 
+py::array_t<complex128> unitcell_zdensity_g(
+    const Array1D &z,
+    const double h,
+    const double k,
+    const double q_para2,
+    const double c,
+    const Array2D &basis,
+    const Array2D &f_factors,
+    const Array2D &r_mat,
+    const Array2D &r_mat_inv,
+    const Array3D &coherent_domain_matrix,
+    const Array1D &coherent_domain_occupancy,
+    const double uc_area
+) {
+    const auto z_info = z.request();
+    const auto basis_info = basis.request();
+    const auto ff_info = f_factors.request();
+    const auto r_info = r_mat.request();
+    const auto r_inv_info = r_mat_inv.request();
+    const auto domain_info = coherent_domain_matrix.request();
+    const auto occupancy_info = coherent_domain_occupancy.request();
+
+    require_shape(z_info, 1, "z");
+    require_shape(basis_info, 2, "basis");
+    require_shape(ff_info, 2, "f_factors");
+    require_shape(r_info, 2, "R_mat");
+    require_shape(r_inv_info, 2, "R_mat_inv");
+    require_shape(domain_info, 3, "coherentDomainMatrix");
+    require_shape(occupancy_info, 1, "coherentDomainOccupancy");
+    if (basis_info.shape[1] < 7) {
+        throw py::value_error("basis must have at least 7 columns");
+    }
+    if (ff_info.shape[0] != basis_info.shape[0] || ff_info.shape[1] < 13) {
+        throw py::value_error(
+            "f_factors must have one row per basis atom and at least 13 columns"
+        );
+    }
+    if (r_info.shape[0] != 3 || r_info.shape[1] != 3
+        || r_inv_info.shape[0] != 3 || r_inv_info.shape[1] != 3) {
+        throw py::value_error("transform matrices must be shape (3, 3)");
+    }
+    if (domain_info.shape[1] != 3 || domain_info.shape[2] != 4) {
+        throw py::value_error("coherentDomainMatrix must have shape (N, 3, 4)");
+    }
+    if (occupancy_info.shape[0] != domain_info.shape[0]) {
+        throw py::value_error(
+            "coherentDomainOccupancy length must match coherentDomainMatrix"
+        );
+    }
+
+    const auto domain_matrices = effective_domain_matrices(
+        domain_info,
+        r_info,
+        r_inv_info
+    );
+    const auto n_z = z_info.shape[0];
+    const auto n_atoms = basis_info.shape[0];
+    const auto n_domains = domain_info.shape[0];
+    const auto *z_data = static_cast<const double *>(z_info.ptr);
+    const auto *basis_data = static_cast<const double *>(basis_info.ptr);
+    const auto *ff_data = static_cast<const double *>(ff_info.ptr);
+    const auto *domain_data = static_cast<const double *>(domain_info.ptr);
+    const auto *occupancy_data = static_cast<const double *>(occupancy_info.ptr);
+    auto result = py::array_t<complex128>(n_z);
+    auto *out = static_cast<complex128 *>(result.request().ptr);
+
+    constexpr double pi = 3.141592653589793238462643383279502884;
+    constexpr double two_pi = 2.0 * pi;
+    struct DensityAtomDomain {
+        double delta_z2;
+        double delta_para_q;
+        double center_z;
+        double base_real;
+        double base_imag;
+        std::array<double, 5> term_coefficients;
+        std::array<double, 5> exp_dpara_q;
+        std::array<double, 5> exp_dz;
+        double phase_real;
+        double phase_imag;
+    };
+
+    // zDensity_G evaluates the same atom/domain geometry for every profile
+    // sample. Keep the z-independent work outside the profile loop; the
+    // original Python implementation obtains the same benefit by operating
+    // on a whole z vector for each atom/domain pair.
+    std::vector<DensityAtomDomain> atom_domains;
+    atom_domains.reserve(n_atoms * n_domains);
+    for (py::ssize_t i = 0; i < n_atoms; ++i) {
+        const double delta_z2 = get2(basis_data, basis_info, i, 5)
+            / (8.0 * pi * pi);
+        const double delta_para2 = get2(basis_data, basis_info, i, 4)
+            / (8.0 * pi * pi);
+        const double x = get2(basis_data, basis_info, i, 1);
+        const double y = get2(basis_data, basis_info, i, 2);
+        const double z_frac = get2(basis_data, basis_info, i, 3);
+        for (py::ssize_t d = 0; d < n_domains; ++d) {
+            const Matrix3 &mat = domain_matrices[d];
+            const double x_rel = mat.value[0][0] * x + mat.value[0][1] * y
+                + mat.value[0][2] * z_frac
+                + get3(domain_data, domain_info, d, 0, 3);
+            const double y_rel = mat.value[1][0] * x + mat.value[1][1] * y
+                + mat.value[1][2] * z_frac
+                + get3(domain_data, domain_info, d, 1, 3);
+            const double z_rel = mat.value[2][0] * x + mat.value[2][1] * y
+                + mat.value[2][2] * z_frac
+                + get3(domain_data, domain_info, d, 2, 3);
+            DensityAtomDomain entry{
+                delta_z2,
+                delta_para2 * q_para2,
+                z_rel * c,
+                (get2(ff_data, ff_info, i, 10) + get2(ff_data, ff_info, i, 11))
+                    / std::sqrt(two_pi * delta_z2),
+                get2(ff_data, ff_info, i, 12) / std::sqrt(two_pi * delta_z2),
+                {}, {}, {},
+                0.0, 0.0,
+            };
+            for (int term = 0; term < 5; ++term) {
+                const double exponent = get2(ff_data, ff_info, i, term + 5);
+                const double exp_dpara = exponent + 0.5 * delta_para2;
+                entry.exp_dz[term] = exponent + 0.5 * delta_z2;
+                entry.term_coefficients[term] = get2(ff_data, ff_info, i, term)
+                    / std::sqrt(4.0 * pi * entry.exp_dz[term]);
+                entry.exp_dpara_q[term] = exp_dpara * q_para2;
+            }
+            const double phase = -two_pi * (h * x_rel + k * y_rel);
+            const double weight = get2(basis_data, basis_info, i, 6)
+                * occupancy_data[d];
+            entry.phase_real = weight * std::cos(phase);
+            entry.phase_imag = weight * std::sin(phase);
+            atom_domains.push_back(entry);
+        }
+    }
+
+    py::gil_scoped_release release;
+    std::fill(out, out + n_z, complex128{0.0, 0.0});
+    for (const auto &entry : atom_domains) {
+        for (py::ssize_t p = 0; p < n_z; ++p) {
+            const double dz = z_data[p] - entry.center_z;
+            const double dz_squared = dz * dz;
+            const double core = std::exp(-0.5 * (
+                entry.delta_para_q + dz_squared / entry.delta_z2
+            ));
+            double atom_real = entry.base_real * core;
+            const double atom_imag = entry.base_imag * core;
+            for (int term = 0; term < 5; ++term) {
+                atom_real += entry.term_coefficients[term] * std::exp(
+                    -entry.exp_dpara_q[term]
+                    - dz_squared / (4.0 * entry.exp_dz[term])
+                );
+            }
+            out[p] += complex128{
+                entry.phase_real * atom_real - entry.phase_imag * atom_imag,
+                entry.phase_real * atom_imag + entry.phase_imag * atom_real,
+            };
+        }
+    }
+    for (py::ssize_t p = 0; p < n_z; ++p) {
+        out[p] /= uc_area;
+    }
+    return result;
+}
+
 void set_form_factor_cache_budget(const std::size_t bytes) {
     form_factor_cache().set_budget(bytes);
 }
@@ -838,6 +1013,7 @@ PYBIND11_MODULE(_CTRcalc_cpp, module) {
     module.def("unitcell_F_uc_bulk_direct", &unitcell_F_uc_bulk_direct);
     module.def("unitcell_F_bulk", &unitcell_F_bulk);
     module.def("unitcell_F_uc", &unitcell_F_uc);
+    module.def("unitcell_zdensity_g", &unitcell_zdensity_g);
     module.def("form_factor_cache_stats", &form_factor_cache_stats);
     module.def("clear_form_factor_cache", []() { form_factor_cache().clear(); });
     module.def("reset_form_factor_cache_stats", &reset_form_factor_cache_stats);
