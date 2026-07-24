@@ -320,7 +320,7 @@ py::array_t<complex128> unitcell_core(
             }
         }
         if (apply_bulk_lattice_sum) {
-            const double denominator_phase = -two_pi * l_data[p];
+            const double denominator_phase = -two_pi * ll;
             const double lattice_factor = std::exp(-atten);
             const double denominator_real = (
                 1.0 - lattice_factor * std::cos(denominator_phase)

@@ -85,7 +85,8 @@ class SXRDCrystal:
         :param numpy.ndarray stacking:
             Integer stacking levels for the surface components.
         :param float atten:
-            Dimensionless bulk attenuation exponent per unit cell.
+            Dimensionless bulk attenuation exponent per reference-cell
+            out-of-plane repeat.
         """
         self.uc_bulk = uc_bulk
         self.uc_surface_list = list(uc_surface)

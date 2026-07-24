@@ -335,6 +335,40 @@ Name   x/frac     y/frac     z/frac     iDW     oDW      occup
         self.assertEqual(str(restored), serialized)
 
 
+class TestUnitCellCifImport(unittest.TestCase):
+    def test_cif_import_orders_atoms_by_fractional_coordinate(self):
+        cif = """data_ordering
+_cell_length_a 5
+_cell_length_b 5
+_cell_length_c 5
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_name_H-M_alt P1
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+O1 O 0.3 0.4 0.8
+O2 O 0.1 0.8 0.2
+C1 C 0.4 0.2 0.2
+Fe1 Fe 0.9 0.1 0.2
+"""
+        with tempfile.NamedTemporaryFile(suffix=".cif", mode="w") as handle:
+            handle.write(cif)
+            handle.flush()
+            unitcell = CTRcalc.UnitCell.fromFile(handle.name)
+
+        self.assertEqual(unitcell.names, ["Fe", "C", "O", "O"])
+        np.testing.assert_allclose(
+            unitcell.basis[:, 1:4],
+            [[0.9, 0.1, 0.2], [0.4, 0.2, 0.2], [0.1, 0.8, 0.2], [0.3, 0.4, 0.8]],
+        )
+        self.assertTrue(unitcell._allow_layer_order_normalization)
+
+
 class TestPoissonSurface(unittest.TestCase):
     def setUp(self):
         self.unitcell = CTRcalc.UnitCell(
@@ -794,6 +828,70 @@ class TestLayerStacking(unittest.TestCase):
             unitcell.addAtom("C", [0.0, 0.0, z], 0.1, 0.1, 1.0, layer=layer)
             unitcell.layerpos[float(layer)] = z
         return unitcell
+
+    def test_split_in_layers_rejects_interleaved_native_layers(self):
+        unitcell = CTRcalc.UnitCell([3.0, 3.0, 6.0], [90.0, 90.0, 90.0])
+        for name, z, layer in (("Fe", 0.1, 1), ("Re", 0.6, 2), ("O", 0.2, 1)):
+            unitcell.addAtom(name, [0.0, 0.0, z], 0.1, 0.1, 1.0, layer=layer)
+
+        with self.assertRaisesRegex(ValueError, "must be written in layer order"):
+            unitcell.split_in_layers()
+
+    def test_split_in_layers_normalizes_cif_metadata_and_couplings(self):
+        unitcell = CTRcalc.UnitCell([3.0, 3.0, 6.0], [90.0, 90.0, 90.0])
+        for name, z, layer in (("Fe", 0.1, 1), ("Re", 0.6, 2), ("O", 0.2, 1), ("O", 0.7, 2)):
+            unitcell.addAtom(name, [0.0, 0.0, z], 0.1, 0.1, 1.0, layer=layer)
+        unitcell._allow_layer_order_normalization = True
+        unitcell.symmetry_metadata = CTRsymmetry.SurfaceSymmetryModel(
+            CTRsymmetry.SurfaceCellSpec(
+                (3.0, 3.0, 6.0),
+                (90.0, 90.0, 90.0),
+                np.identity(3),
+                layer_origins=(0.0, 0.5),
+            ),
+            (),
+            atoms=[
+                CTRsymmetry.GeneratedWyckoffAtom(
+                    atom_index=2,
+                    element="O",
+                    site_id="O_1",
+                    wyckoff_label="1a",
+                    parent_fractional=np.array([0.0, 0.0, 0.2]),
+                    surface_fractional=np.array([0.0, 0.0, 0.2]),
+                    layer=1,
+                    couplings=(
+                        CTRsymmetry.WyckoffCoupling(
+                            atom_index=2,
+                            coordinate="z",
+                            variable="u",
+                            constant=0.2,
+                            factor=1.0,
+                            site_id="O_1",
+                        ),
+                    ),
+                    site_couplings=(
+                        CTRsymmetry.WyckoffSiteCoupling(
+                            atom_index=2,
+                            coordinate="z",
+                            axis="z",
+                            factor=1.0,
+                            site_id="O_1",
+                        ),
+                    ),
+                ),
+            ],
+        )
+
+        layers = unitcell.split_in_layers()
+
+        self.assertEqual(unitcell.names, ["Fe", "O", "Re", "O"])
+        self.assertEqual(layers[1.0].names, ["Fe", "O"])
+        self.assertEqual(layers[2.0].names, ["Re", "O"])
+        self.assertTrue(np.shares_memory(layers[1.0].basis, unitcell.basis))
+        self.assertTrue(np.shares_memory(layers[2.0].basis, unitcell.basis))
+        atom = unitcell.atom_wyckoff_metadata(1)
+        self.assertEqual(atom.couplings[0].atom_index, 1)
+        self.assertEqual(atom.site_couplings[0].atom_index, 1)
 
     def test_unitcell_selects_layer_after_below_layer(self):
         unitcell = self.make_layered_unitcell()
@@ -1896,6 +1994,38 @@ class TestStructureFactorNormalization(unittest.TestCase):
             supercell_crystal.F(h, h, h),
             rtol=1e-2,
         )
+
+    def test_bulk_repeat_follows_reference_unit_cell(self):
+        reference = CTRcalc.UnitCell(
+            [3.0, 3.0, 4.0],
+            [90.0, 90.0, 90.0],
+            name="reference",
+        )
+        bulk = CTRcalc.UnitCell(
+            [3.0, 3.0, 8.0],
+            [90.0, 90.0, 90.0],
+            name="bulk",
+        )
+        bulk.addAtom("C", [0.0, 0.0, 0.25], 0.1, 0.1, 1.0)
+        bulk.setEnergy(10000.0)
+        bulk.setReferenceUnitCell(reference)
+        h = np.zeros(2)
+        k = np.zeros(2)
+        l = np.array([0.17, 0.41])
+        atten = 0.07
+
+        hkl_bulk = bulk.refHKLTransform @ np.vstack((h, k, l))
+        repeat_atten = 2.0 * atten
+        expected = bulk.F_uc_bulk_direct(*hkl_bulk, repeat_atten)
+        expected /= 1 - np.exp(
+            -2j * np.pi * hkl_bulk[2] - repeat_atten
+        )
+
+        with mock.patch.object(CTRuc, "CTR_ACCEL_BACKEND", "numpy"):
+            actual = bulk.F_bulk(h, k, l, atten)
+
+        np.testing.assert_allclose(actual, expected)
+        np.testing.assert_allclose(hkl_bulk[2], 2.0 * l)
 
     def test_constructor_propagates_bulk_reference_to_layers(self):
         bulk = self.make_carbon_cell(3.0, [0.0], "bulk")

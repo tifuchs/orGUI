@@ -1277,7 +1277,30 @@ class UnitCell(Lattice):
         """
 
     def split_in_layers(self, ordered=True):
+        """Return structural layers as views into a contiguously ordered basis.
+
+        Layered ``UnitCell`` objects require atoms in each layer to occupy one
+        contiguous basis block. Native CTR text models must already satisfy
+        this invariant. CIF files imported through ASE are the sole exception:
+        their atom-site order is not crystallographically significant, so their
+        basis may be normalized here when necessary.
+        """
         layer_numbers = np.sort(np.unique(self.basis[:, 7]))
+        noncontiguous_layers = []
+        for layer in layer_numbers:
+            indices = np.flatnonzero(self.basis[:, 7] == layer)
+            if indices.size > 1 and np.any(np.diff(indices) != 1):
+                noncontiguous_layers.append(layer)
+        if noncontiguous_layers:
+            if not getattr(self, "_allow_layer_order_normalization", False):
+                raise ValueError(
+                    "UnitCell layers must occupy contiguous basis rows; "
+                    f"noncontiguous layers: {noncontiguous_layers!r}. "
+                    "Native .xtal/.xpr and manually constructed UnitCells "
+                    "must be written in layer order."
+                )
+            self._reorder_atoms(np.argsort(self.basis[:, 7], kind="stable"))
+
         layers = OrderedDict()
         if not hasattr(self, "f"):
             self.setEnergy(
@@ -1426,6 +1449,47 @@ class UnitCell(Lattice):
         atoms, parindexes = parameter.indices
         atoms = np.asarray(atoms, dtype=np.intp)
         parameter.indices = (old_to_new[atoms], parindexes)
+
+    def _reorder_atoms(self, order):
+        """Reorder atom-aligned state and remap atom-indexed metadata.
+
+        :param numpy.ndarray order:
+            Permutation mapping new basis rows to their old row indices.
+        """
+        order = np.asarray(order, dtype=np.intp)
+        atom_count = self.basis.shape[0]
+        if order.shape != (atom_count,) or not np.array_equal(
+            np.sort(order), np.arange(atom_count, dtype=np.intp)
+        ):
+            raise ValueError("order must be a permutation of UnitCell atom indices.")
+
+        old_to_new = np.empty(atom_count, dtype=np.intp)
+        old_to_new[order] = np.arange(atom_count, dtype=np.intp)
+        for attribute in (
+            "basis",
+            "basis_0",
+            "_basis_parvalues",
+            "errors",
+            "_errors_parvalues",
+            "f",
+            "dw_increase_constraint",
+        ):
+            values = getattr(self, attribute, None)
+            if values is not None and np.size(values):
+                setattr(self, attribute, np.asarray(values)[order])
+        self.names = [self.names[index] for index in order]
+
+        for parameters in self.parameters.values():
+            for parameter in parameters:
+                self._remap_parameter_atom_indices(parameter, old_to_new)
+        layer_map = {layer: layer for layer in np.unique(self.basis[:, 7])}
+        self.symmetry_metadata = self._transform_symmetry_metadata(
+            self.symmetry_metadata,
+            old_to_new,
+            layer_map,
+            np.zeros(2, dtype=np.float64),
+            {layer: 0.0 for layer in layer_map},
+        )
 
     @staticmethod
     def _update_absolute_parameter_values_after_basis_transform(
@@ -3493,7 +3557,9 @@ class UnitCell(Lattice):
         """Return the semi-infinite bulk structure factor in electrons.
 
         The amplitude represents one lateral bulk unit cell. The geometric
-        lattice sum is applied only along the out-of-plane direction.
+        lattice sum is applied only along the out-of-plane direction. Its
+        phase and attenuation follow the bulk-cell repeat after conversion
+        from the configured reference unit cell.
 
         :param numpy.ndarray h:
             Reference-frame reciprocal coordinate in r.l.u.
@@ -3502,12 +3568,16 @@ class UnitCell(Lattice):
         :param numpy.ndarray l:
             Reference-frame reciprocal coordinate in r.l.u.
         :param float atten:
-            Dimensionless attenuation exponent per bulk unit cell.
+            Dimensionless attenuation exponent per reference-cell
+            out-of-plane repeat.
         :returns:
             Complex bulk amplitude in electrons per lateral bulk cell.
         :rtype: numpy.ndarray
         """
         basis, formf, names = self.build_selected_basis()
+        # The reciprocal transform maps reference r.l.u. to bulk r.l.u.;
+        # (2, 2) is the bulk/reference out-of-plane repeat ratio.
+        repeat_atten = atten * abs(self.refHKLTransform[2, 2])
         if ctr_accel_enabled():
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
             accel = _ctr_accel_module()
@@ -3515,7 +3585,7 @@ class UnitCell(Lattice):
                 h,
                 k,
                 l,
-                atten,
+                repeat_atten,
                 basis,
                 formf,
                 self.refHKLTransform,
@@ -3529,8 +3599,8 @@ class UnitCell(Lattice):
             return F
         else:
             hkl = self.refHKLTransform @ np.vstack((h, k, l))
-            Fuc = self.F_uc_bulk_direct(*hkl, atten)
-            return Fuc / (1 - np.exp(-2j * np.pi * l - atten))
+            Fuc = self.F_uc_bulk_direct(*hkl, repeat_atten)
+            return Fuc / (1 - np.exp(-2j * np.pi * hkl[2] - repeat_atten))
 
     SQRT2pi = np.sqrt(2 * np.pi)
 
@@ -4165,10 +4235,23 @@ class UnitCell(Lattice):
                     f"File {filename} contains no valid crystal lattice parameters"
                 )
             uc = UnitCell(atoms.cell.lengths(), atoms.cell.angles())
-            coord = atoms.get_scaled_positions()
+            coord = np.mod(atoms.get_scaled_positions(), 1.0)
             symb = atoms.get_chemical_symbols()
-            for sym, xyz in zip(symb, coord):
-                uc.addAtom(sym, xyz, 0.0, 0.0, 1.0)
+            if ext.lower() == ".cif":
+                order = sorted(
+                    range(len(symb)),
+                    key=lambda index: (
+                        coord[index, 2],
+                        coord[index, 1],
+                        coord[index, 0],
+                        symb[index],
+                    ),
+                )
+                uc._allow_layer_order_normalization = True
+            else:
+                order = range(len(symb))
+            for index in order:
+                uc.addAtom(symb[index], coord[index], 0.0, 0.0, 1.0)
             return uc
 
     @classmethod

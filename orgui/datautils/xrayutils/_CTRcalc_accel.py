@@ -142,7 +142,7 @@ def _unitcell_F_core(
                     domain_factor *= math.exp(atten * z_rel)
                 amplitude += domain_factor * form_factor
         if apply_bulk_lattice_sum:
-            denominator_phase = -two_pi * l[p]
+            denominator_phase = -two_pi * ll
             denominator = 1.0 - math.exp(-atten) * (
                 math.cos(denominator_phase) + 1j * math.sin(denominator_phase)
             )
