@@ -16,7 +16,8 @@ concurrency:
 env:
   CIBW_SKIP: "*-musllinux_*"
   CIBW_BUILD_FRONTEND: "build"
-  CIBW_CONFIG_SETTINGS_WINDOWS: "setup-args=--vsenv"
+  CIBW_CONFIG_SETTINGS: "setup-args=-Dstatic_xxhash=true"
+  CIBW_CONFIG_SETTINGS_WINDOWS: "setup-args=--vsenv -Dstatic_xxhash=true"
   CIBW_TEST_ENVIRONMENT: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 MPLBACKEND=Agg QT_QPA_PLATFORM=minimal"
   CIBW_TEST_REQUIRES: pytest
   CIBW_TEST_COMMAND: >-

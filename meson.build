@@ -12,7 +12,14 @@ project(
 
 py = import('python').find_installation(pure: false)
 pybind11_dep = dependency('pybind11', required: true)
-xxhash_dep = dependency('libxxhash', fallback: ['xxhash', 'xxhash_dep'])
+# The default preserves normal Meson dependency resolution.  Wheel builds
+# request a static library so they do not acquire a libxxhash runtime
+# dependency from the build host; the pinned fallback is itself static.
+xxhash_dep = dependency(
+  'libxxhash',
+  static: get_option('static_xxhash'),
+  fallback: ['xxhash', 'xxhash_dep'],
+)
 cpp = meson.get_compiler('cpp')
 native_args = []
 
