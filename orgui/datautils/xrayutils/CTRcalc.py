@@ -1417,23 +1417,69 @@ class SXRDCrystal:
         occuon=False,
         figure=None,
         translate=np.array([0.0, 0.0, 0.0]),
+        backend="auto",
+        radius_scale=1.0,
         **keyargs,
     ):
-        try:
-            from mayavi import mlab
-        except ImportError:
-            warnings.warn("can not import mayavi: 3D plotting not supported")
-            return
+        """Plot the bulk and surface unit cells in one 3D viewer.
 
-        if figure is None:
-            figure = mlab.figure()
+        Coordinates and radii passed to either backend are in Angstrom.
+        Assign the result or terminate an incremental call with a semicolon to
+        prevent Jupyter from also rendering the returned view as a new output.
+
+        :param int ucx: Number of cells along the first lattice direction.
+        :param int ucy: Number of cells along the second lattice direction.
+        :param int ucz: Number of bulk cells along the third lattice direction.
+        :param bool dwon:
+            Sample atom positions using the stored Debye-Waller disorder.
+        :param bool occuon:
+            Randomly omit atoms according to their occupancies.
+        :param figure:
+            Existing Mayavi figure or py3Dmol view to extend.
+        :param numpy.ndarray translate:
+            Fractional translation retained for API compatibility.
+        :param str backend:
+            ``"auto"``, ``"mayavi"``, or ``"py3dmol"``.
+        :param float radius_scale:
+            Positive dimensionless multiplier applied to covalent radii.
+        :returns: The selected backend's shared figure or view.
+        """
+        keyargs["_defer_update"] = True
 
         for mat in self.uc_bulk.coherentDomainMatrix:
-            self.uc_bulk.plot3d(ucx, ucy, ucz, dwon, occuon, figure, mat, **keyargs)
+            figure = self.uc_bulk.plot3d(
+                ucx,
+                ucy,
+                ucz,
+                dwon,
+                occuon,
+                figure,
+                mat,
+                backend=backend,
+                radius_scale=radius_scale,
+                **keyargs,
+            )
 
         for uc in self.uc_surface_list:
             for mat in uc.coherentDomainMatrix:
-                uc.plot3d(ucx, ucy, 1, dwon, occuon, figure, mat, **keyargs)
+                figure = uc.plot3d(
+                    ucx,
+                    ucy,
+                    1,
+                    dwon,
+                    occuon,
+                    figure,
+                    mat,
+                    backend=backend,
+                    radius_scale=radius_scale,
+                    **keyargs,
+                )
+
+        if getattr(figure, "_orgui_plot3d_backend", None) == "py3dmol":
+            figure.zoomTo()
+            if getattr(figure, "uniqueid", None) is not None:
+                figure.update()
+        return figure
 
     def getUcNames(self):
         return [uc.name for uc in self.uc_surface_list] + ["bulk"]

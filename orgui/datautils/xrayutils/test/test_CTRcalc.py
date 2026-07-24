@@ -45,6 +45,207 @@ from ..CTRdistributions import PoissonProfile, SkellamProfile, SurfaceProfile
 from ..CTRutil import generate_surface_termination_cells
 
 
+class _FakePy3DmolModel:
+    def __init__(self):
+        self.styles = []
+
+    def setStyle(self, selection, style):
+        self.styles.append((selection, style))
+
+
+class _FakePy3DmolView:
+    def __init__(self, displayed=False):
+        self._orgui_plot3d_backend = "py3dmol"
+        self.uniqueid = "displayed" if displayed else None
+        self.models = []
+        self.zoom_count = 0
+        self.update_count = 0
+
+    def addModel(self, data, file_format):
+        self.models.append((data, file_format, _FakePy3DmolModel()))
+
+    def getModel(self):
+        return self.models[-1][2]
+
+    def zoomTo(self):
+        self.zoom_count += 1
+
+    def update(self):
+        self.update_count += 1
+
+
+class TestPlot3d(unittest.TestCase):
+    def setUp(self):
+        self.cell = CTRuc.UnitCell(
+            [2.0, 3.0, 4.0],
+            [90.0, 90.0, 90.0],
+            name="plot-test",
+        )
+        self.cell.addAtom("C", [0.5, 0.0, 0.0], 0.1, 0.1, 1.0)
+        self.cell.addAtom("O", [0.0, 0.5, 0.0], 0.1, 0.1, 1.0)
+        self.cell.f = np.empty((2, 13), dtype=np.float64)
+
+    @staticmethod
+    def _xyz_positions(model_data):
+        lines = model_data.splitlines()
+        return np.array(
+            [[float(value) for value in line.split()[1:]] for line in lines[2:]]
+        )
+
+    def test_py3dmol_models_preserve_positions_styles_and_increment(self):
+        view = _FakePy3DmolView(displayed=True)
+
+        result = self.cell.plot3d(
+            2,
+            1,
+            1,
+            figure=view,
+            backend="py3dmol",
+        )
+
+        self.assertIs(result, view)
+        self.assertEqual(len(view.models), 2)
+        self.assertEqual(view.update_count, 1)
+        self.assertEqual(view.zoom_count, 1)
+        carbon_xyz, file_format, carbon_model = view.models[0]
+        self.assertEqual(file_format, "xyz")
+        self.assertEqual(carbon_xyz.splitlines()[0], "2")
+        expected = self.cell.pos_cart_all(2, 1, 1)
+        expected_carbon = np.column_stack(
+            (
+                expected["x"][expected["name"] == "C"],
+                expected["y"][expected["name"] == "C"],
+                expected["z"][expected["name"] == "C"],
+            )
+        )
+        np.testing.assert_allclose(
+            self._xyz_positions(carbon_xyz),
+            expected_carbon,
+            atol=1e-14,
+        )
+        selection, style = carbon_model.styles[0]
+        self.assertEqual(selection, {})
+        self.assertEqual(style["sphere"]["radius"], 0.76)
+        self.assertRegex(style["sphere"]["color"], r"^#[0-9a-f]{6}$")
+
+        second_result = self.cell.plot3d(figure=view)
+        self.assertIs(second_result, view)
+        self.assertEqual(len(view.models), 4)
+        self.assertEqual(view.update_count, 2)
+
+    def test_radius_scale_applies_to_py3dmol_radius(self):
+        view = _FakePy3DmolView()
+
+        self.cell.plot3d(
+            figure=view,
+            backend="py3dmol",
+            radius_scale=0.5,
+        )
+
+        radii = [
+            model.styles[0][1]["sphere"]["radius"]
+            for _, _, model in view.models
+        ]
+        self.assertEqual(radii, [0.38, 0.33])
+
+    def test_py3dmol_omits_unoccupied_atoms(self):
+        self.cell.basis[0, 6] = 0.0
+        view = _FakePy3DmolView()
+
+        self.cell.plot3d(
+            figure=view,
+            backend="py3dmol",
+            occuon=True,
+        )
+
+        self.assertEqual(len(view.models), 1)
+        self.assertTrue(view.models[0][0].splitlines()[2].startswith("O "))
+
+    def test_mayavi_backend_keeps_points3d_contract(self):
+        figure = mock.Mock()
+        figure._orgui_plot3d_backend = "mayavi"
+        mlab = mock.Mock()
+
+        with mock.patch.object(CTRuc.importlib, "import_module", return_value=mlab):
+            result = self.cell.plot3d(
+                figure=figure,
+                backend="mayavi",
+                color=(0.1, 0.2, 0.3),
+                resolution=17,
+            )
+
+        self.assertIs(result, figure)
+        self.assertEqual(mlab.points3d.call_count, 2)
+        diameters = [
+            call.kwargs["scale_factor"] for call in mlab.points3d.call_args_list
+        ]
+        self.assertEqual(diameters, [1.52, 1.32])
+        kwargs = mlab.points3d.call_args.kwargs
+        self.assertEqual(kwargs["color"], (0.1, 0.2, 0.3))
+        self.assertEqual(kwargs["resolution"], 17)
+        self.assertIs(kwargs["figure"], figure)
+
+    def test_backend_validation_and_missing_dependency(self):
+        for radius_scale in (0, -1, np.nan, np.inf, None, "invalid"):
+            with self.subTest(radius_scale=radius_scale):
+                with self.assertRaisesRegex(ValueError, "positive and finite"):
+                    self.cell.plot3d(radius_scale=radius_scale)
+
+        with self.assertRaisesRegex(ValueError, "Unknown 3D plotting backend"):
+            self.cell.plot3d(backend="unknown")
+
+        mayavi_figure = mock.Mock()
+        mayavi_figure._orgui_plot3d_backend = "mayavi"
+        with self.assertRaisesRegex(TypeError, "uses mayavi"):
+            self.cell.plot3d(figure=mayavi_figure, backend="py3dmol")
+
+        with mock.patch.object(
+            CTRuc.importlib,
+            "import_module",
+            side_effect=ImportError("simulated missing dependency"),
+        ):
+            with self.assertRaisesRegex(ImportError, r"orGUI\[full\]"):
+                self.cell.plot3d(backend="py3dmol")
+
+    def test_auto_prefers_py3dmol_in_kernel(self):
+        view = _FakePy3DmolView()
+        py3dmol = mock.Mock()
+        py3dmol.view.return_value = view
+
+        with (
+            mock.patch.object(CTRuc, "_in_jupyter_kernel", return_value=True),
+            mock.patch.object(
+                CTRuc.importlib,
+                "import_module",
+                return_value=py3dmol,
+            ) as import_module,
+        ):
+            result = self.cell.plot3d(backend="auto")
+
+        self.assertIs(result, view)
+        import_module.assert_called_once_with("py3Dmol")
+        self.assertEqual(len(view.models), 2)
+
+    def test_crystal_updates_one_shared_view_once(self):
+        surface = copy.deepcopy(self.cell)
+        crystal = CTRcalc.SXRDCrystal(self.cell, surface)
+        view = _FakePy3DmolView(displayed=True)
+
+        result = crystal.plot3d(
+            1,
+            1,
+            1,
+            figure=view,
+            backend="py3dmol",
+            radius_scale=0.5,
+        )
+
+        self.assertIs(result, view)
+        self.assertEqual(len(view.models), 4)
+        self.assertEqual(view.update_count, 1)
+        self.assertEqual(view.models[0][2].styles[0][1]["sphere"]["radius"], 0.38)
+
+
 class TestReadSXRDCrystal(unittest.TestCase):
     xpr_file = """E = 68.00000 keV
 # UnitCell relaxations

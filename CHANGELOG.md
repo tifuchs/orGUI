@@ -11,6 +11,11 @@ Scientific and analysis additions:
   gamma-dependent box and Gaussian functions. Calculations can convolve
   irregular existing L points or sample the crystal structure factor with
   deterministic quadrature.
+- Added py3Dmol atom-sphere rendering for Jupyter notebooks. ``plot3d`` now
+  selects py3Dmol automatically in a notebook, can be directed to either
+  py3Dmol or Mayavi explicitly, and can incrementally add unit cells to a
+  shared viewer. Covalent radii are interpreted consistently by both backends
+  and can be adjusted with the dimensionless ``radius_scale`` parameter.
 
 
 ## [1.5.0] (2026-06-07)

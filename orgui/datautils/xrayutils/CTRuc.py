@@ -73,6 +73,112 @@ from .CTRstacking import (
     resolve_upper_start,
 )
 
+
+_PLOT3D_BACKENDS = ("mayavi", "py3dmol")
+
+
+def _in_jupyter_kernel():
+    """Return whether the current process is attached to an IPython kernel."""
+    try:
+        from IPython import get_ipython
+    except ImportError:
+        return False
+
+    shell = get_ipython()
+    return shell is not None and getattr(shell, "kernel", None) is not None
+
+
+def _figure_plot3d_backend(figure):
+    """Identify an existing plot figure without importing optional backends."""
+    backend = getattr(figure, "_orgui_plot3d_backend", None)
+    if backend in _PLOT3D_BACKENDS:
+        return backend
+
+    module = type(figure).__module__.lower()
+    if "py3dmol" in module:
+        return "py3dmol"
+    if "mayavi" in module or "tvtk" in module:
+        return "mayavi"
+    return None
+
+
+def _prepare_plot3d_figure(backend, figure):
+    """Resolve a 3D plotting backend and return its figure and renderer."""
+    backend = backend.lower()
+    if backend not in (*_PLOT3D_BACKENDS, "auto"):
+        raise ValueError(
+            f"Unknown 3D plotting backend {backend!r}; expected 'auto', "
+            "'mayavi', or 'py3dmol'."
+        )
+
+    figure_backend = None
+    if figure is not None:
+        figure_backend = _figure_plot3d_backend(figure)
+        if backend != "auto" and figure_backend not in (None, backend):
+            raise TypeError(
+                f"The supplied figure uses {figure_backend}, not the requested "
+                f"{backend} backend."
+            )
+
+    if backend == "auto":
+        if figure_backend is not None:
+            candidates = (figure_backend,)
+        elif figure is not None:
+            # Existing callers historically pass Mayavi scene objects.
+            candidates = ("mayavi",)
+        elif _in_jupyter_kernel():
+            candidates = ("py3dmol", "mayavi")
+        else:
+            candidates = ("mayavi", "py3dmol")
+    else:
+        candidates = (backend,)
+
+    errors = {}
+    for candidate in candidates:
+        try:
+            if candidate == "py3dmol":
+                if figure is None:
+                    py3Dmol = importlib.import_module("py3Dmol")
+                    figure = py3Dmol.view()
+                renderer = None
+            else:
+                renderer = importlib.import_module("mayavi.mlab")
+                if figure is None:
+                    figure = renderer.figure()
+        except ImportError as error:
+            errors[candidate] = error
+            continue
+
+        try:
+            figure._orgui_plot3d_backend = candidate
+        except AttributeError:
+            pass
+        return candidate, figure, renderer
+
+    if backend == "auto":
+        message = (
+            "No supported 3D plotting backend is installed. Install py3Dmol "
+            "(included in orGUI[full]) for notebooks or Mayavi for desktop use."
+        )
+    elif backend == "py3dmol":
+        message = (
+            "The py3dmol backend requires py3Dmol. Install orGUI[full] or "
+            "install py3Dmol separately."
+        )
+    else:
+        message = "The mayavi backend requires Mayavi."
+    raise ImportError(message) from next(iter(errors.values()), None)
+
+
+def _rgb_to_hex(color):
+    """Convert an RGB triple in the Mayavi range to a CSS hexadecimal color."""
+    rgb = np.asarray(color, dtype=np.float64)
+    if rgb.shape != (3,):
+        raise ValueError("Atom colors must be RGB triples.")
+    rgb = np.clip(np.rint(rgb * 255), 0, 255).astype(np.uint8)
+    return "#" + "".join(f"{channel:02x}" for channel in rgb)
+
+
 def _import_cpp_accel():
     try:
         return importlib.import_module("orgui.datautils.xrayutils._CTRcalc_cpp")
@@ -3583,18 +3689,50 @@ class UnitCell(Lattice):
         figure=None,
         translate=np.array([0.0, 0.0, 0.0]),
         domain=0,
+        backend="auto",
+        radius_scale=1.0,
         **keyargs,
     ):
-        try:
-            from mayavi import mlab
-        except ImportError:
-            warnings.warn("can not import mayavi: 3D plotting not supported")
-            return
+        """Plot atoms as covalent-radius spheres in a 3D viewer.
 
-        if figure is None:
-            figure = mlab.figure()
+        Coordinates and radii passed to either backend are in Angstrom.
+        Reusing the returned figure adds atoms to the existing scene. In a
+        notebook, an already displayed py3Dmol view is updated in place.
+        Assign the result or terminate an incremental call with a semicolon to
+        prevent Jupyter from also rendering the returned view as a new output.
+        The ``resolution`` keyword controls Mayavi spheres only; py3Dmol uses
+        its native sphere rendering.
+
+        :param int ucx: Number of cells along the first lattice direction.
+        :param int ucy: Number of cells along the second lattice direction.
+        :param int ucz: Number of cells along the third lattice direction.
+        :param bool dwon:
+            Sample atom positions using the stored Debye-Waller disorder.
+        :param bool occuon:
+            Randomly omit atoms according to their occupancies.
+        :param figure:
+            Existing Mayavi figure or py3Dmol view to extend.
+        :param numpy.ndarray translate:
+            Fractional translation vector or coherent-domain transform.
+        :param int domain: Index of the coherent-domain matrix.
+        :param str backend:
+            ``"auto"``, ``"mayavi"``, or ``"py3dmol"``. Automatic selection
+            prefers py3Dmol in an IPython kernel and Mayavi otherwise.
+        :param float radius_scale:
+            Positive dimensionless multiplier applied to covalent radii.
+        :returns: The selected backend's figure or view.
+        :raises ValueError: If ``radius_scale`` is not positive and finite.
+        """
+        try:
+            radius_scale = float(radius_scale)
+        except (TypeError, ValueError) as error:
+            raise ValueError("radius_scale must be positive and finite.") from error
+        if not np.isfinite(radius_scale) or radius_scale <= 0:
+            raise ValueError("radius_scale must be positive and finite.")
+
+        backend, figure, mlab = _prepare_plot3d_figure(backend, figure)
         if keyargs.get("useSelected", True):
-            basis, formf, names = self.build_selected_basis()
+            basis, _formf, names = self.build_selected_basis()
         else:
             basis, _formf, names = self.basis, self.f, self.names
         if ucx == 0 or ucy == 0 or ucz == 0:
@@ -3620,7 +3758,10 @@ class UnitCell(Lattice):
         mat = self.coherentDomainMatrix[domain]
         domainmatrix = self.R_mat_inv @ mat[:, :-1] @ self.R_mat
         for i, params in enumerate(basis):
-            radius = cov_radii_array[atomic_number(names[i]) - 1][2] * 2
+            covalent_radius = float(
+                cov_radii_array[atomic_number(names[i]) - 1][2]
+            )
+            sphere_radius = covalent_radius * radius_scale
             # elcolor_c = keyargs.get('color')
             # if elcolor_c is None:
             #    elcolor_c = elements.rgb(int(params[0]))
@@ -3676,17 +3817,48 @@ class UnitCell(Lattice):
 
             if dwon:
                 position_cart = np.random.default_rng().normal(position_cart, sigmas)
-            mlab.points3d(
-                *position_cart,
-                scale_factor=radius,
-                color=elcolors[i],
-                resolution=resolution,
-                figure=figure,
-            )
+            if backend == "mayavi":
+                mlab.points3d(
+                    *position_cart,
+                    scale_factor=2 * sphere_radius,
+                    color=elcolors[i],
+                    resolution=resolution,
+                    figure=figure,
+                )
+            else:
+                valid = np.all(np.isfinite(position_cart), axis=0)
+                positions_valid = position_cart[:, valid].T
+                if positions_valid.size == 0:
+                    continue
+                symbol = cov_radii_array[atomic_number(names[i]) - 1][1]
+                xyz_lines = [
+                    str(len(positions_valid)),
+                    f"orGUI UnitCell {self.name}",
+                ]
+                xyz_lines.extend(
+                    f"{symbol} {position[0]:.16g} {position[1]:.16g} "
+                    f"{position[2]:.16g}"
+                    for position in positions_valid
+                )
+                figure.addModel("\n".join(xyz_lines) + "\n", "xyz")
+                figure.getModel().setStyle(
+                    {},
+                    {
+                        "sphere": {
+                            "color": _rgb_to_hex(elcolors[i]),
+                            "radius": sphere_radius,
+                        }
+                    },
+                )
 
         atomlist = keyargs.get("atomlist")
         if atomlist is not None:
             atomlist.append(self.pos_cart_all(ucx, ucy, ucz, translate))
+
+        if backend == "py3dmol" and not keyargs.get("_defer_update", False):
+            figure.zoomTo()
+            if getattr(figure, "uniqueid", None) is not None:
+                figure.update()
 
         return figure
 
