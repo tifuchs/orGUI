@@ -1678,7 +1678,7 @@ class TestLayerStacking(unittest.TestCase):
             self.make_layered_unitcell("bottom"),
             fixed_ucs=3,
         )
-        interface.basis[:] = [0.5, 0.0]
+        interface.basis[:2] = [0.5, 0.0]
         interface.stack_on(0.0, 12.0, 1)
 
         self.assertEqual(interface.start_layer_number, 2)
@@ -1919,9 +1919,215 @@ class TestLayerStacking(unittest.TestCase):
         self.assertTrue(np.any(top_occupancy > 0.9))
         self.assertTrue(np.any(bottom_occupancy < 0.0))
         self.assertTrue(np.any(bottom_occupancy > 0.0))
-        total_occupancy = top_occupancy + bottom_occupancy
+        split = bottom_occupancy.size // 2
+        total_occupancy = (
+            top_occupancy + bottom_occupancy[:split] + bottom_occupancy[split:]
+        )
         self.assertTrue(np.any(np.isclose(total_occupancy, 0.0)))
         self.assertTrue(np.any(np.isclose(total_occupancy, 1.0)))
+
+    @staticmethod
+    def make_epitaxy_cells():
+        top = TestLayerStacking.make_layered_unitcell("top")
+        top.a = np.array([3.0, 3.0, 4.0])
+        bottom = TestLayerStacking.make_layered_unitcell("bottom")
+        return top, bottom
+
+    def make_epitaxy_interface(self, coherence=1.0, offset=0.0):
+        top, bottom = self.make_epitaxy_cells()
+        interface = CTRfilm.EpitaxyInterface(
+            top,
+            bottom,
+            profile=SkellamProfile(0.5),
+            fixed_ucs=6,
+        )
+        interface.basis[:] = [0.5, 0.0, coherence, offset]
+        interface.createInterfaceCells()
+        return interface
+
+    def test_epitaxy_bulk_replacement_subtracts_fixed_lattice_positions(self):
+        interface = self.make_epitaxy_interface(coherence=1.0)
+
+        for layer in interface.bottom_layers:
+            split = len(layer.coherentDomainMatrix) // 2
+            additions = layer.coherentDomainMatrix[:split]
+            fixed_bulk = layer.coherentDomainMatrix[split:]
+            np.testing.assert_allclose(
+                [matrix[2, 2] for matrix in fixed_bulk],
+                1.0,
+            )
+            self.assertTrue(
+                any(
+                    not np.allclose(addition[2], fixed[2])
+                    for addition, fixed in zip(additions, fixed_bulk)
+                )
+            )
+            self.assertTrue(
+                np.any(np.asarray(layer.coherentDomainOccupancy[split:]) < 0.0)
+            )
+
+    def test_epitaxy_coherence_interpolates_generated_positions(self):
+        incoherent = self.make_epitaxy_interface(coherence=0.0)
+        halfway = self.make_epitaxy_interface(coherence=0.5)
+        coherent = self.make_epitaxy_interface(coherence=1.0)
+
+        for layers_zero, layers_half, layers_one in (
+            (
+                incoherent.top_layers,
+                halfway.top_layers,
+                coherent.top_layers,
+            ),
+            (
+                incoherent.bottom_layers,
+                halfway.bottom_layers,
+                coherent.bottom_layers,
+            ),
+        ):
+            for layer_zero, layer_half, layer_one in zip(
+                layers_zero,
+                layers_half,
+                layers_one,
+            ):
+                domain_count = len(layer_zero.coherentDomainMatrix)
+                if layers_zero is incoherent.bottom_layers:
+                    domain_count //= 2
+                for matrix_zero, matrix_half, matrix_one in zip(
+                    layer_zero.coherentDomainMatrix[:domain_count],
+                    layer_half.coherentDomainMatrix[:domain_count],
+                    layer_one.coherentDomainMatrix[:domain_count],
+                ):
+                    self.assertAlmostEqual(matrix_zero[2, 2], 1.0)
+                    np.testing.assert_allclose(
+                        matrix_half[2],
+                        0.5 * (matrix_zero[2] + matrix_one[2]),
+                    )
+
+    def test_epitaxy_offset_moves_only_top_and_upward_stack(self):
+        baseline = self.make_epitaxy_interface(offset=0.0)
+        shifted = self.make_epitaxy_interface(offset=0.25)
+        lowered = self.make_epitaxy_interface(offset=-0.25)
+        expected_shift = 0.25 * shifted.uc_bottom.a[2]
+
+        for candidate, physical_shift in (
+            (shifted, expected_shift),
+            (lowered, -expected_shift),
+        ):
+            for base_layer, candidate_layer in zip(
+                baseline.top_layers,
+                candidate.top_layers,
+            ):
+                for base_matrix, candidate_matrix in zip(
+                    base_layer.coherentDomainMatrix,
+                    candidate_layer.coherentDomainMatrix,
+                ):
+                    self.assertAlmostEqual(
+                        (candidate_matrix[2, 3] - base_matrix[2, 3])
+                        * candidate_layer.a[2],
+                        physical_shift,
+                    )
+            for base_layer, candidate_layer in zip(
+                baseline.bottom_layers,
+                candidate.bottom_layers,
+            ):
+                np.testing.assert_allclose(
+                    candidate_layer.coherentDomainMatrix,
+                    base_layer.coherentDomainMatrix,
+                )
+            self.assertAlmostEqual(
+                candidate.stacking_loc_absolute
+                - baseline.stacking_loc_absolute,
+                physical_shift,
+            )
+            self.assertAlmostEqual(
+                candidate.height_absolute - baseline.height_absolute,
+                physical_shift,
+            )
+
+        base_film = CTRfilm.Film(self.make_layered_unitcell("base_film"))
+        shifted_film = CTRfilm.Film(self.make_layered_unitcell("shifted_film"))
+        base_film.basis[0] = 30
+        shifted_film.basis[0] = 30
+        CTRcalc.SXRDCrystal(
+            baseline.uc_bottom,
+            baseline,
+            base_film,
+            stacking=np.array([1, 2]),
+        ).apply_stacking()
+        CTRcalc.SXRDCrystal(
+            shifted.uc_bottom,
+            shifted,
+            shifted_film,
+            stacking=np.array([1, 2]),
+        ).apply_stacking()
+        self.assertAlmostEqual(
+            shifted_film.pos_absolute - base_film.pos_absolute,
+            expected_shift,
+        )
+        self.assertAlmostEqual(
+            shifted_film.height_absolute - base_film.height_absolute,
+            expected_shift,
+        )
+
+    def test_epitaxy_parameters_round_trip_and_legacy_defaults(self):
+        interface = self.make_epitaxy_interface(coherence=0.4, offset=-0.2)
+        restored = CTRfilm.EpitaxyInterface.fromStr(interface.toStr(showErrors=False))
+        np.testing.assert_allclose(restored.basis, [0.5, 0.0, 0.4, -0.2])
+
+        legacy = interface.toStr(showErrors=False)
+        legacy = legacy.replace(
+            CTRfilm.EpitaxyInterface.parameterOrder,
+            "Width/cells Skew/cells",
+        )
+        parameter_line = next(
+            line
+            for line in legacy.splitlines()
+            if line.strip().startswith("0.50000")
+        )
+        legacy = legacy.replace(parameter_line, "0.50000   0.00000", 1)
+        restored_legacy = CTRfilm.EpitaxyInterface.fromStr(legacy)
+        np.testing.assert_allclose(restored_legacy.basis, [0.5, 0.0, 1.0, 0.0])
+
+    def test_epitaxy_coherence_and_offset_are_fit_parameters(self):
+        interface = self.make_epitaxy_interface()
+        interface.basis_0[:] = interface.basis
+        interface.addFitParameter("C", limits=(0.0, 1.0))
+        interface.addFitParameter("offset", limits=(-0.5, 0.5))
+
+        np.testing.assert_allclose(interface.getInitialParameters(), [1.0, 0.0])
+        interface.setFitParameters([0.3, -0.2])
+        np.testing.assert_allclose(interface.basis[2:], [0.3, -0.2])
+
+    def test_epitaxy_rejects_invalid_coherence_and_offset(self):
+        interface = self.make_epitaxy_interface()
+        for coherence in (-0.1, 1.1, np.nan):
+            interface.basis[2] = coherence
+            with self.assertRaisesRegex(ValueError, "coherence"):
+                interface.createInterfaceCells()
+        interface.basis[2] = 1.0
+        interface.basis[3] = np.inf
+        with self.assertRaisesRegex(ValueError, "offset"):
+            interface.createInterfaceCells()
+
+    def test_epitaxy_split_bulk_domains_feed_all_profile_paths(self):
+        interface = self.make_epitaxy_interface(coherence=0.6, offset=0.1)
+        interface.setEnergy(10000.0)
+
+        structure_factor = interface.F_uc(
+            np.array([0.0, 0.2]),
+            np.array([0.0, 0.1]),
+            np.array([0.3, 0.7]),
+        )
+        density = interface.zDensity_G(
+            np.linspace(-20.0, 20.0, 401),
+            0.0,
+            0.0,
+        )
+        optical_profile = interface.optical_profile()
+
+        self.assertTrue(np.all(np.isfinite(structure_factor)))
+        self.assertTrue(np.all(np.isfinite(density)))
+        self.assertEqual(optical_profile.shape[1], 3)
+        self.assertTrue(np.all(np.isfinite(optical_profile)))
 
 
 class TestLegacyLayeredCTR(unittest.TestCase):
@@ -1944,7 +2150,10 @@ class TestLegacyLayeredCTR(unittest.TestCase):
 
         self.assertIsInstance(xtal["RuO2"], CTRfilm.Film)
         self.assertIsInstance(xtal["TiO2toRuO2"], CTRfilm.EpitaxyInterface)
-        np.testing.assert_allclose(xtal["TiO2toRuO2"].basis, [0.35, 0.0])
+        np.testing.assert_allclose(
+            xtal["TiO2toRuO2"].basis,
+            [0.35, 0.0, 1.0, 0.0],
+        )
         interface = xtal["TiO2toRuO2"]
         xtal.apply_stacking()
         self.assertAlmostEqual(
@@ -2132,7 +2341,7 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         surface.basis_0[:] = surface.basis
 
         film.errors = np.array([0.2])
-        interface.errors = np.array([0.03, 0.04])
+        interface.errors = np.array([0.03, 0.04, np.nan, np.nan])
         surface.errors = np.array([0.1, 0.15, 0.2])
         film.unitcell.errors = np.full_like(film.unitcell.basis, np.nan)
         film.unitcell.errors[:, 1:7] = 0.01
@@ -2172,7 +2381,11 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         self.assertIsNone(restored_xtal["surface"].errors)
         np.testing.assert_allclose(restored_xpr.werrors, crystal.werrors)
         np.testing.assert_allclose(restored_xpr["film"].errors, [0.2])
-        np.testing.assert_allclose(restored_xpr["interface"].errors, [0.03, 0.04])
+        np.testing.assert_allclose(
+            restored_xpr["interface"].errors[:2],
+            [0.03, 0.04],
+        )
+        self.assertTrue(np.all(np.isnan(restored_xpr["interface"].errors[2:])))
         np.testing.assert_allclose(
             restored_xpr["surface"].errors,
             [0.1, 0.15, 0.2],
@@ -2203,8 +2416,9 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         interface.addRelParameter(("W", "S"), (1.0, -1.0), limits=(-0.2, 0.2))
         interface.setFitParameters([0.1])
         interface.setFitErrors([0.02])
-        np.testing.assert_allclose(interface.basis, [0.45, -0.1])
-        np.testing.assert_allclose(interface.errors, [0.02, 0.02])
+        np.testing.assert_allclose(interface.basis, [0.45, -0.1, 1.0, 0.0])
+        np.testing.assert_allclose(interface.errors[:2], [0.02, 0.02])
+        self.assertTrue(np.all(np.isnan(interface.errors[2:])))
         self.assertAlmostEqual(interface.profile.width, 0.45)
         self.assertAlmostEqual(interface.profile.asymmetry, -0.1)
 
@@ -2271,7 +2485,10 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         crystal.setParameters([0.4, 7.0, 2.0])
         crystal.setFitErrors([0.01, 0.2, 0.1])
 
-        np.testing.assert_allclose(crystal["interface"].basis, [0.4, 0.0])
+        np.testing.assert_allclose(
+            crystal["interface"].basis,
+            [0.4, 0.0, 1.0, 0.0],
+        )
         np.testing.assert_allclose(crystal["film"].basis, [7.0])
         np.testing.assert_allclose(crystal["surface"].basis, [2.0, 0.5, 0.0])
         np.testing.assert_allclose(crystal.getFitErrors(), [0.01, 0.2, 0.1])
@@ -2306,7 +2523,10 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         )
         np.testing.assert_array_equal(xtal.uc_stacking, [3, 2, 1])
         np.testing.assert_array_equal(xpr.uc_stacking, [3, 2, 1])
-        np.testing.assert_allclose(xtal["TiO2toRuO2"].basis, [0.35, 0.0])
+        np.testing.assert_allclose(
+            xtal["TiO2toRuO2"].basis,
+            [0.35, 0.0, 1.0, 0.0],
+        )
         np.testing.assert_allclose(xtal["RuO2"].basis, [17.0])
         np.testing.assert_allclose(xtal["RuO2surface"].basis, [-6.0, 1.0, 0.0])
         for name in ("TiO2toRuO2", "RuO2", "RuO2surface"):

@@ -175,6 +175,29 @@ upper and lower amplitudes as
 
 The result is therefore in electrons per lower interface cell.
 
+The lower material is a correction to the semi-infinite bulk, whose atoms
+remain at their unstrained positions below the nominal interface boundary.
+For every represented lower-material layer, the interface therefore adds its
+distributed occupancy at the strain-field position and subtracts the
+corresponding sharp-bulk occupancy at the original bulk-lattice position.
+This remains true when the statistical support extends below zero.
+
+The ``C`` parameter controls the out-of-plane coherence.  If
+:math:`z_0` is an atom's position on its material's independent lattice and
+:math:`z_1` is its position in the fully coherent strain field, the generated
+position is
+
+.. math::
+
+   z(C) = z_0 + C (z_1 - z_0), \qquad 0 \leq C \leq 1.
+
+Thus ``C = 0`` leaves both materials unstrained, while ``C = 1`` gives the
+fully coherent interface.  The ``offset`` parameter translates only the upper
+material and all subsequently stacked components.  It is expressed in
+fractional lower-bulk :math:`c` coordinates, so its physical displacement is
+``offset * uc_bottom.a[2]`` Angstrom.  Positive offsets point toward increasing
+``z``.  The statistical boundary and the semi-infinite bulk do not move.
+
 Crystal composition
 -------------------
 
