@@ -51,9 +51,10 @@ Citation = "https://doi.org/10.5281/zenodo.12592485"
 console = ['qtconsole']
 speedup = ['numba']
 extendedfilesupport = ['ase', 'hdf5plugin']
+reconstruction = ['pyarrow >= 15', 'hdf5plugin']
 symmetry = ['pyxtal']
-full = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin', 'pyxtal', 'py3Dmol']
-full-devel = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin', 'pyxtal', 'py3Dmol', 'ruff', 'pyupgrade']
+full = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin', 'pyarrow >= 15', 'pyxtal', 'py3Dmol']
+full-devel = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin', 'pyarrow >= 15', 'pyxtal', 'py3Dmol', 'ruff', 'pyupgrade']
 
 [build-system]
 requires = ["meson-python", "pybind11", "setuptools-scm>=8", "numpy"]
@@ -67,6 +68,7 @@ namespaces = true
 
 [project.scripts] #
 orGUI='orgui.main:main'
+orGUI-rsmap='orgui.reconstruction_cli:main'
 
 [tool.setuptools]
 include-package-data = false

@@ -210,6 +210,14 @@ py.extension_module(
 )
 
 py.extension_module(
+  '_reciprocal_reconstruction_cpp',
+  files('orgui/datautils/xrayutils/cpp/reciprocal_reconstruction_cpp.cpp'),
+  dependencies: [pybind11_dep, xxhash_dep],
+  install: true,
+  subdir: 'orgui/datautils/xrayutils'
+)
+
+py.extension_module(
   '_roi_sum_cpp',
   files('orgui/app/cpp/roi_sum_cpp.cpp'),
   dependencies: [pybind11_dep],

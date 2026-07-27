@@ -51,7 +51,6 @@ from ..backend import backends, scans
 from . import qutils
 from .QReflectionSelector import QReflectionAnglesDialog
 from .QHKLDialog import HKLDialog
-import runpy
 
 from contextlib import contextmanager
 
@@ -725,11 +724,25 @@ class QScanSelector(qt.QMainWindow):
         self.useLorentzBox.setEnabled(False)
         self.useSolidAngleBox = qt.QCheckBox("Solid angle correction")
         self.usePolarizationBox = qt.QCheckBox("Polarization correction")
+        self.normalizeExposureBox = qt.QCheckBox("Normalize by exposure time")
+        self.normalizeExposureBox.setChecked(True)
+        self.monitorCorrectionsEdit = qt.QLineEdit()
+        self.monitorCorrectionsEdit.setPlaceholderText(
+            "Optional scan counters, comma-separated"
+        )
+        self.monitorCorrectionsEdit.setToolTip(
+            "Counters are applied as divisive monitor normalizations."
+        )
 
         optionsGroupLayout.addWidget(self.useMaskBox, 0, 0)
         optionsGroupLayout.addWidget(self.useLorentzBox, 1, 0)
         optionsGroupLayout.addWidget(self.useSolidAngleBox, 0, 1)
         optionsGroupLayout.addWidget(self.usePolarizationBox, 1, 1)
+        optionsGroupLayout.addWidget(self.normalizeExposureBox, 2, 0, 1, 2)
+        optionsGroupLayout.addWidget(
+            qt.QLabel("Monitor corrections:"), 3, 0
+        )
+        optionsGroupLayout.addWidget(self.monitorCorrectionsEdit, 3, 1)
 
         optionsGroup.setLayout(optionsGroupLayout)
 
@@ -847,6 +860,12 @@ class QScanSelector(qt.QMainWindow):
                 self.useSolidAngleBox.setChecked(ddict[key])
             elif key == "polarization":
                 self.usePolarizationBox.setChecked(ddict[key])
+            elif key == "normalizeExposure":
+                self.normalizeExposureBox.setChecked(ddict[key])
+            elif key == "monitorCorrections":
+                self.monitorCorrectionsEdit.setText(
+                    ", ".join(map(str, ddict[key]))
+                )
             elif key == "advanced":
                 self.roioptions.set_parameters(ddict[key])
 
@@ -855,6 +874,12 @@ class QScanSelector(qt.QMainWindow):
         ddict["mask"] = self.useMaskBox.isChecked()
         ddict["solidAngle"] = self.useSolidAngleBox.isChecked()
         ddict["polarization"] = self.usePolarizationBox.isChecked()
+        ddict["normalizeExposure"] = self.normalizeExposureBox.isChecked()
+        ddict["monitorCorrections"] = tuple(
+            value.strip()
+            for value in self.monitorCorrectionsEdit.text().split(",")
+            if value.strip()
+        )
         ddict["advanced"] = self.roioptions.get_parameters()
         return ddict
 
@@ -1059,25 +1084,7 @@ class QScanSelector(qt.QMainWindow):
             # qutils.warning_detailed_message(self, "Cannot load backend", "Cannot load backend", traceback.format_exc())  # noqa: E501
 
     def loadBackendFile(self, filename):
-        backend_file = runpy.run_path(filename)
-        found_backends = []
-        for e in backend_file:
-            try:
-                if (
-                    issubclass(backend_file[e], scans.Scan)
-                    and backend_file[e] != scans.Scan
-                ):
-                    found_backends.append((e, backend_file[e]))
-            except Exception:
-                pass
-                # traceback.print_exc()
-        if not found_backends:
-            raise ValueError(f"Found no backend in file {filename}")
-        if len(found_backends) > 1:
-            raise ValueError(
-                f"Found more than one Scan class in backend file {filename}. Only one is permitted"  # noqa: E501
-            )
-        name, scancls = found_backends[0]
+        name, scancls = scans.load_scan_backend_file(filename)
         self.btid.addItem(name)
         backends.fscans[name] = scancls
         self.btid.setCurrentText(name)
