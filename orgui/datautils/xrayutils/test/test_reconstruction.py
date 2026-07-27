@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import h5py
 import numpy as np
@@ -827,11 +828,31 @@ def test_reduce_shards_large_chunk_and_reuses_checkpoint(tmp_path, monkeypatch):
 
     progress = []
     verification_cache = set()
+    reducer_threads = set()
+    reducer_lock = threading.Lock()
+    reducer_barrier = threading.Barrier(2)
+    original_read = reconstruction._ParquetRangeReader.read
+
+    def observed_read(reader, *args):
+        thread_id = threading.get_ident()
+        with reducer_lock:
+            first_read = thread_id not in reducer_threads
+            reducer_threads.add(thread_id)
+        if first_read:
+            reducer_barrier.wait(timeout=5)
+        return original_read(reader, *args)
+
+    monkeypatch.setattr(
+        reconstruction._ParquetRangeReader,
+        "read",
+        observed_read,
+    )
     reduced = _reduce_partition(
         manifest_paths,
         tmp_path / "reduced",
         verification_cache=verification_cache,
-        memory_budget_bytes=1,
+        memory_budget_bytes=128 * 1024**2,
+        workers=2,
         progress=lambda current, total, message: progress.append(
             (current, total, message)
         ),
@@ -841,6 +862,13 @@ def test_reduce_shards_large_chunk_and_reuses_checkpoint(tmp_path, monkeypatch):
     assert reduced.status == "complete"
     assert len(reduced.chunks) == 2
     assert {chunk.shard_start for chunk in reduced.chunks} == {0, 262144}
+    assert reduced.metadata["reducer_worker_capacity"] == 2
+    assert reduced.metadata["reducer_workers_used"] == 2
+    assert (
+        reduced.metadata["reducer_memory_bytes_per_worker"]
+        == 64 * 1024**2
+    )
+    assert len(reducer_threads) == 2
     assert progress[-1][:2] == (2, 2)
 
     def unexpected_read(*args, **kwargs):
@@ -853,7 +881,8 @@ def test_reduce_shards_large_chunk_and_reuses_checkpoint(tmp_path, monkeypatch):
         manifest_paths,
         tmp_path / "reduced",
         verification_cache=verification_cache,
-        memory_budget_bytes=1,
+        memory_budget_bytes=128 * 1024**2,
+        workers=2,
         checkpoint_root=tmp_path / "manifests",
     )
     assert resumed.status == "complete"

@@ -12,6 +12,7 @@ units.  All diffractometer angles accepted here are in radians.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 import importlib
@@ -19,6 +20,7 @@ import json
 import math
 import os
 from pathlib import Path
+from queue import Queue
 from typing import Any
 
 import h5py
@@ -35,6 +37,7 @@ _PARTIAL_COLUMNS = (
 )
 _Q_FRAMES = {"lab", "alpha", "omega", "chi", "phi", "crystal"}
 _ALL_FRAMES = _Q_FRAMES | {"hkl"}
+_MIN_REDUCER_WORKER_MEMORY = 64 * 1024**2
 
 
 def _triple(values, name, dtype=float):
@@ -424,7 +427,7 @@ def _read_parquet(uri):
 class _ParquetRangeReader:
     """Stream monotonically increasing key ranges from sorted Parquet."""
 
-    def __init__(self, uri, *, batch_size=131072):
+    def __init__(self, uri, *, batch_size=131072, use_threads=True):
         _, _, pq = _require_pyarrow()
         filesystem, path = _filesystem_path(uri)
         self.parquet = pq.ParquetFile(path, filesystem=filesystem)
@@ -432,6 +435,7 @@ class _ParquetRangeReader:
         self.chunk_column = names.index("chunk_id")
         self.local_column = names.index("local_voxel_id")
         self.batch_size = int(batch_size)
+        self.use_threads = bool(use_threads)
         self.iterator = None
         self.batch = None
         self.position = 0
@@ -469,6 +473,7 @@ class _ParquetRangeReader:
             batch_size=self.batch_size,
             row_groups=row_groups,
             columns=list(_PARTIAL_COLUMNS),
+            use_threads=self.use_threads,
         )
 
     def _advance(self):
@@ -1016,10 +1021,26 @@ def _reduce_partition(
     *,
     verification_cache: set[tuple[str, str]] | None = None,
     memory_budget_bytes: int = 1024**3,
+    workers: int = 1,
     progress: Callable[[int, int, str], None] | None = None,
     checkpoint_root=None,
 ) -> _TaskManifest:
-    """Externally reduce mapping partitions into bounded chunk shards."""
+    """Externally reduce mapping partitions into bounded chunk shards.
+
+    Contiguous shard ranges run concurrently with private forward-only
+    Parquet readers. The total memory budget is divided between workers.
+    """
+    memory_budget_bytes = max(1, int(memory_budget_bytes))
+    requested_workers = max(1, int(workers))
+    worker_limit = max(
+        1,
+        memory_budget_bytes // _MIN_REDUCER_WORKER_MEMORY,
+    )
+    configured_workers = min(requested_workers, worker_limit)
+    worker_memory_budget = max(
+        1,
+        memory_budget_bytes // configured_workers,
+    )
     manifests = [_read_manifest(value) for value in manifest_set]
     if not manifests:
         raise ValueError("At least one mapping manifest is required")
@@ -1076,7 +1097,7 @@ def _reduce_partition(
         256 * 1024,
         min(
             4 * 1024 * 1024,
-            int(memory_budget_bytes) // (8 * 48),
+            worker_memory_budget // (8 * 48),
         ),
     )
     plans = []
@@ -1155,17 +1176,30 @@ def _reduce_partition(
         )
 
     def checkpoint(status):
+        ordered_chunks = sorted(
+            chunks,
+            key=lambda item: (
+                item.grid_name,
+                item.chunk_id,
+                item.shard_start,
+                item.shard_stop,
+                item.uri,
+            ),
+        )
         manifest = _TaskManifest(
             kind="reduce",
             task_id=reduce_id,
             spec_hash=spec.digest,
             status=status,
             spec=spec.to_dict(),
-            chunks=chunks,
+            chunks=ordered_chunks,
             source_tasks=source_tasks,
             metadata={
                 **base_metadata,
                 "local_voxel_shard_span": local_span,
+                "reducer_worker_capacity": configured_workers,
+                "reducer_workers_used": actual_workers,
+                "reducer_memory_bytes_per_worker": worker_memory_budget,
                 "completed_shards": sorted(completed_shards),
             },
         )
@@ -1182,29 +1216,18 @@ def _reduce_partition(
         )
         for chunk in chunks
     }
-    readers = {}
-    active_group = None
     checkpoint_interval = 64
     total_plans = len(plans)
     completed = 0
-    for (
-        grid_name,
-        bucket,
-        chunk_id,
-        shard_start,
-        shard_stop,
-        partitions,
-    ) in plans:
+    active_plans = []
+    for plan in plans:
+        grid_name, _, chunk_id, shard_start, shard_stop, _ = plan
         key = shard_key(
             grid_name,
             chunk_id,
             shard_start,
             shard_stop,
         )
-        group_key = (grid_name, bucket)
-        if group_key != active_group:
-            readers.clear()
-            active_group = group_key
         if key in existing or key in completed_shards:
             completed += 1
             if progress is not None:
@@ -1214,98 +1237,223 @@ def _reduce_partition(
                     f"Reusing reduced shard {completed}/{total_plans}",
                 )
             continue
-        for partition in partitions:
-            _verify_scratch_file(partition, verification_cache)
-            if partition.uri not in readers:
-                batch_rows = max(
-                    4096,
-                    min(
-                        131072,
-                        int(memory_budget_bytes)
-                        // (max(1, len(partitions)) * 48 * 4),
-                    ),
-                )
-                readers[partition.uri] = _ParquetRangeReader(
-                    partition.uri,
-                    batch_size=batch_rows,
-                )
-        levels = []
-        for partition in partitions:
-            batch = readers[partition.uri].read(
+        active_plans.append(plan)
+
+    actual_workers = min(configured_workers, len(active_plans))
+    worker_memory_budget = max(
+        1,
+        memory_budget_bytes // max(1, actual_workers),
+    )
+
+    active_partitions = {
+        (partition.uri, partition.checksum): partition
+        for plan in active_plans
+        for partition in plan[5]
+    }
+    partitions_to_verify = [
+        partition
+        for key, partition in active_partitions.items()
+        if verification_cache is None or key not in verification_cache
+    ]
+    if partitions_to_verify:
+        verification_workers = min(
+            actual_workers,
+            len(partitions_to_verify),
+        )
+        with ThreadPoolExecutor(
+            max_workers=verification_workers
+        ) as executor:
+            futures = {
+                executor.submit(
+                    _verify_scratch_file,
+                    partition,
+                    None,
+                ): partition
+                for partition in partitions_to_verify
+            }
+            for verified, future in enumerate(
+                as_completed(futures),
+                start=1,
+            ):
+                partition = futures[future]
+                future.result()
+                _mark_scratch_verified(partition, verification_cache)
+                if progress is not None:
+                    progress(
+                        completed,
+                        total_plans,
+                        (
+                            "Verified mapping partition "
+                            f"{verified}/{len(partitions_to_verify)} "
+                            f"with {verification_workers} workers"
+                        ),
+                    )
+
+    result_queue = Queue()
+
+    def reduce_plan_batch(plan_batch):
+        readers = {}
+        active_group = None
+        try:
+            for (
+                grid_name,
+                bucket,
                 chunk_id,
                 shard_start,
                 shard_stop,
-            )
-            if not batch["chunk_id"].size:
-                continue
-            level = 0
-            while level < len(levels) and levels[level] is not None:
-                batch = _merge_sorted_batches(levels[level], batch)
-                levels[level] = None
-                level += 1
-            if level == len(levels):
-                levels.append(batch)
-            else:
-                levels[level] = batch
-        reduced = _empty_batch()
-        for batch in reversed(levels):
-            if batch is not None:
-                reduced = _merge_sorted_batches(reduced, batch)
-        if reduced["chunk_id"].size:
-            uri = _join_uri(
-                output_uri,
-                f"grid={grid_name}",
+                partitions,
+            ) in plan_batch:
+                group_key = (grid_name, bucket)
+                if group_key != active_group:
+                    readers.clear()
+                    active_group = group_key
+                for partition in partitions:
+                    if partition.uri in readers:
+                        continue
+                    batch_rows = max(
+                        4096,
+                        min(
+                            131072,
+                            worker_memory_budget
+                            // (max(1, len(partitions)) * 48 * 4),
+                        ),
+                    )
+                    readers[partition.uri] = _ParquetRangeReader(
+                        partition.uri,
+                        batch_size=batch_rows,
+                        use_threads=actual_workers == 1,
+                    )
+                levels = []
+                for partition in partitions:
+                    batch = readers[partition.uri].read(
+                        chunk_id,
+                        shard_start,
+                        shard_stop,
+                    )
+                    if not batch["chunk_id"].size:
+                        continue
+                    level = 0
+                    while level < len(levels) and levels[level] is not None:
+                        batch = _merge_sorted_batches(levels[level], batch)
+                        levels[level] = None
+                        level += 1
+                    if level == len(levels):
+                        levels.append(batch)
+                    else:
+                        levels[level] = batch
+                reduced = _empty_batch()
+                for batch in reversed(levels):
+                    if batch is not None:
+                        reduced = _merge_sorted_batches(reduced, batch)
+                chunk = None
+                if reduced["chunk_id"].size:
+                    uri = _join_uri(
+                        output_uri,
+                        f"grid={grid_name}",
+                        (
+                            f"chunk={int(chunk_id):016d}-"
+                            f"shard={shard_start:016d}-{shard_stop:016d}.parquet"
+                        ),
+                    )
+                    _write_parquet(
+                        reduced,
+                        uri,
+                        {
+                            "spec_hash": spec.digest,
+                            "reduce_id": reduce_id,
+                            "grid_name": grid_name,
+                            "chunk_id": int(chunk_id),
+                            "shard_start": shard_start,
+                            "shard_stop": shard_stop,
+                            "source_bucket": bucket,
+                        },
+                    )
+                    checksum, size_bytes = _uri_checksum_and_size(uri)
+                    chunk = _ChunkFile(
+                        grid_name=grid_name,
+                        chunk_id=int(chunk_id),
+                        shard_start=shard_start,
+                        shard_stop=shard_stop,
+                        uri=uri,
+                        rows=int(reduced["chunk_id"].size),
+                        checksum=checksum,
+                        size_bytes=size_bytes,
+                    )
+                result_queue.put(
+                    (
+                        shard_key(
+                            grid_name,
+                            chunk_id,
+                            shard_start,
+                            shard_stop,
+                        ),
+                        chunk,
+                        grid_name,
+                        chunk_id,
+                        shard_start,
+                        shard_stop,
+                    )
+                )
+        finally:
+            result_queue.put(None)
+
+    if active_plans:
+        plans_per_worker, extra = divmod(
+            len(active_plans),
+            actual_workers,
+        )
+        plan_batches = []
+        start = 0
+        for worker_index in range(actual_workers):
+            stop = start + plans_per_worker + (worker_index < extra)
+            plan_batches.append(active_plans[start:stop])
+            start = stop
+
+        with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+            futures = [
+                executor.submit(reduce_plan_batch, batch)
+                for batch in plan_batches
+            ]
+            finished_workers = 0
+            while finished_workers < len(futures):
+                outcome = result_queue.get()
+                if outcome is None:
+                    finished_workers += 1
+                    continue
                 (
-                    f"chunk={int(chunk_id):016d}-"
-                    f"shard={shard_start:016d}-{shard_stop:016d}.parquet"
-                ),
-            )
-            _write_parquet(
-                reduced,
-                uri,
-                {
-                    "spec_hash": spec.digest,
-                    "reduce_id": reduce_id,
-                    "grid_name": grid_name,
-                    "chunk_id": int(chunk_id),
-                    "shard_start": shard_start,
-                    "shard_stop": shard_stop,
-                    "source_bucket": bucket,
-                },
-            )
-            checksum, size_bytes = _uri_checksum_and_size(uri)
-            chunk = _ChunkFile(
-                grid_name=grid_name,
-                chunk_id=int(chunk_id),
-                shard_start=shard_start,
-                shard_stop=shard_stop,
-                uri=uri,
-                rows=int(reduced["chunk_id"].size),
-                checksum=checksum,
-                size_bytes=size_bytes,
-            )
-            _mark_scratch_verified(chunk, verification_cache)
-            chunks.append(chunk)
-        completed_shards.add(key)
-        completed += 1
-        if (
-            checkpoint_path is not None
-            and (
-                completed % checkpoint_interval == 0
-                or completed == total_plans
-            )
-        ):
-            checkpoint("running")
-        if progress is not None:
-            progress(
-                completed,
-                total_plans,
-                (
-                    f"Reduced shard {completed}/{total_plans}: "
-                    f"{grid_name} chunk {chunk_id}, "
-                    f"{shard_start}:{shard_stop}"
-                ),
-            )
+                    key,
+                    chunk,
+                    grid_name,
+                    chunk_id,
+                    shard_start,
+                    shard_stop,
+                ) = outcome
+                if chunk is not None:
+                    _mark_scratch_verified(chunk, verification_cache)
+                    chunks.append(chunk)
+                completed_shards.add(key)
+                completed += 1
+                if (
+                    checkpoint_path is not None
+                    and (
+                        completed % checkpoint_interval == 0
+                        or completed == total_plans
+                    )
+                ):
+                    checkpoint("running")
+                if progress is not None:
+                    progress(
+                        completed,
+                        total_plans,
+                        (
+                            f"Reduced shard {completed}/{total_plans} "
+                            f"with {actual_workers} workers: "
+                            f"{grid_name} chunk {chunk_id}, "
+                            f"{shard_start}:{shard_stop}"
+                        ),
+                    )
+            for future in futures:
+                future.result()
     return checkpoint("complete")
 
 

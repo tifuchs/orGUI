@@ -22,6 +22,7 @@ from .app.mask_config import create_pixel_repair_plan
 from .backend.scans import ScanReference
 from .datautils.xrayutils.reconstruction import (
     _GridSpec,
+    _MIN_REDUCER_WORKER_MEMORY,
     _ReconstructionSpec,
     _TaskManifest,
     _detector_corner_rays,
@@ -1166,6 +1167,14 @@ def reconstruction_execution_settings(job, scan=None, config=None):
         tile_shape = (0, 0)
     return {
         "thread_budget": spec.threads,
+        "maximum_parallel_reducer_workers": min(
+            spec.threads,
+            max(
+                1,
+                spec.memory_budget_bytes
+                // _MIN_REDUCER_WORKER_MEMORY,
+            ),
+        ),
         "native_threads_per_image": max(
             1, min(job.threads_per_image, spec.threads)
         ),
@@ -1524,6 +1533,7 @@ def run_job(path, *, progress=None):
             Path(job.scratch_path) / "reduced",
             verification_cache=verification_cache,
             memory_budget_bytes=effective_memory,
+            workers=spec.threads,
             checkpoint_root=manifest_root,
             progress=(
                 None

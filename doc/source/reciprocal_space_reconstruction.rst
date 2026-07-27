@@ -392,7 +392,8 @@ The execution stages are:
 6. Accumulate records in worker memory until its byte budget is reached.
 7. Write immutable Zstandard-compressed Parquet partitions and manifests.
 8. Reduce partitions in bounded external merge passes into finalized HDF5
-   chunk shards.
+   chunk shards. Contiguous shard ranges are reduced concurrently with private
+   Parquet readers; the global memory budget is divided across reducer workers.
 9. Create the standalone HDF5 file and write each populated spatial chunk once.
 10. Validate the output checksum, register it as an external result, then
     remove map partitions, reduced scratch data, and the asset bundle.
@@ -400,6 +401,15 @@ The execution stages are:
 Interrupted jobs retain scratch data. Cleanup occurs only after successful
 HDF5 close, validation, and checksum calculation. Cleanup errors are recorded
 but do not invalidate a completed scientific result.
+
+Reduction uses up to the global thread budget. The effective worker count is
+also limited to the number of pending shards and to one worker per 64 MiB of
+configured memory. Each worker owns a contiguous range of shard plans and
+private forward-only Parquet readers. This permits parallel reduction within a
+single large bucket without sharing stateful readers or exceeding the global
+memory budget. Mapping-partition verification is parallelized by the same
+limit. Checkpoints and progress callbacks remain serialized on the coordinating
+thread.
 
 Paths
 -----
