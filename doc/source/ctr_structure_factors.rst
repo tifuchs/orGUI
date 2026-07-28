@@ -30,6 +30,41 @@ area or volume normalization is applied.
 and return electrons for one lateral unit cell of their source
 ``UnitCell``.
 
+Semi-infinite bulk amplitude
+-----------------------------
+
+``UnitCell.F_bulk`` sums ``UnitCell.F_uc_bulk_direct`` over an infinite stack
+of bulk repeats along the out-of-plane direction using a closed-form
+geometric series with attenuation:
+
+.. math::
+
+   F_{\mathrm{bulk}}(\mathbf{Q})
+   = \frac{F_{\mathrm{uc,bulk}}(\mathbf{Q})}
+     {1 - \exp\left(-2\pi i\, l_{\mathrm{bulk}} - \mathrm{atten}\right)},
+
+where :math:`l_{\mathrm{bulk}}` is the out-of-plane reciprocal index *after*
+conversion from the reference unit cell via ``refHKLTransform``, i.e. the
+third component of ``refHKLTransform @ (h, k, l)``. This is the same index
+used to phase every atom in ``F_uc_bulk_direct``, so the phase advance per
+bulk repeat in the denominator is consistent with the periodicity actually
+being summed.
+
+.. warning::
+
+   Versions up to and including v1.5.0 used the raw, untransformed ``l`` in
+   this denominator instead of the reference-transformed index. This was only
+   correct when ``refHKLTransform``'s third row equals ``(0, 0, 1)``, i.e.
+   only when the bulk cell's own out-of-plane reciprocal axis exactly
+   coincides with the reference cell's, in both direction and length. Since
+   ``refHKLTransform = B_mat_inv @ rotMatrix @ uc.B_mat`` (see
+   ``UnitCell.setReferenceUnitCell``), this held only for the default case of
+   a component using its own bulk cell as the reference (no ``reference_uc``
+   set). Any explicit ``reference_uc`` whose out-of-plane reciprocal axis
+   differs from the bulk's was affected — including a plain scale difference
+   between the reference and bulk out-of-plane axis length, not only a
+   rotated or reindexed reference.
+
 Surface structure on a rough Film
 ---------------------------------
 

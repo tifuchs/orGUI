@@ -21,6 +21,25 @@ Scientific and analysis additions:
   used in test code, so no migration path is provided; a saved ``.xtal``/
   ``.xpr`` file with a two-parameter ``PoissonSurface`` basis will fail to
   load.
+- Wyckoff-parameterized fit values are now interpreted as absolute atomic
+  positions instead of deltas relative to the Wyckoff position. Wyckoff
+  parameter fitting was development-only and never part of a release, so no
+  migration is provided.
+
+A ***critical bug*** was fixed that affects bulk CTR calculations:
+
+- ``UnitCell.F_bulk``'s semi-infinite geometric lattice sum used the raw,
+  untransformed ``l`` index instead of the index converted by
+  ``refHKLTransform`` when computing the out-of-plane attenuation phase. This
+  was only correct for the default case where a component uses its own bulk
+  cell as the reference (no ``reference_uc`` set); any explicit
+  ``reference_uc`` whose out-of-plane reciprocal axis differs from the
+  bulk's — including a plain scale difference between the reference and bulk
+  out-of-plane axis length, not only a rotated or reindexed reference — gave
+  incorrect bulk structure-factor amplitudes. This bug was present in both
+  the accelerated (numba/C++) and plain-Python code paths in all previous
+  released versions, up to and including v1.5.0. See the CTR structure-factor
+  documentation for details.
 
 
 ## [1.5.0] (2026-06-07)
