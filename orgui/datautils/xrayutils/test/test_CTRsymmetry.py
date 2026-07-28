@@ -21,6 +21,7 @@
 # THE SOFTWARE.
 #
 # ###########################################################################*/
+import copy
 import importlib.util
 import subprocess
 import sys
@@ -407,6 +408,37 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
                 unitcell.basis[coupling.atom_index, column],
                 expected,
             )
+
+    def test_wyckoff_legacy_delta_parameter_dict_matches_absolute_result(self):
+        """A pre-fix, ``value_kind="delta"`` saved Wyckoff parameter dict
+        must reproduce the same basis as the current absolute-value
+        convention, since old saved fits stored the delta from the site's
+        reference value rather than the absolute coordinate."""
+        unitcell = self.make_rutile_110_unitcell()
+        unitcell.addWyckoffParameter("O_4f", "u", absolute_limits=(0.2, 0.4))
+        unitcell.setFitParameters([0.31569])
+        expected_basis = unitcell.basis.copy()
+
+        saved = unitcell.parametersToDict()
+        (key, param_dict), = saved["relative"].items()
+        wyckoff_settings = param_dict["settings"]["wyckoff"]
+        self.assertEqual(wyckoff_settings["value_kind"], "absolute")
+        reference_value = wyckoff_settings["reference_value"]
+
+        # Simulate a parameter dict saved before value_kind="absolute" was
+        # introduced: no reference_value, value_kind="delta", and the stored
+        # value is the delta from the reference rather than the absolute
+        # coordinate.
+        legacy_dict = copy.deepcopy(saved)
+        legacy_settings = legacy_dict["relative"][key]["settings"]["wyckoff"]
+        legacy_settings["value_kind"] = "delta"
+        del legacy_settings["reference_value"]
+        legacy_dict["relative"][key]["value"] = param_dict["value"] - reference_value
+
+        restored = self.make_rutile_110_unitcell()
+        restored.parametersFromDict(legacy_dict)
+
+        np.testing.assert_allclose(restored.basis, expected_basis)
 
     def test_wyckoff_site_parameter_displaces_fixed_rutile_site(self):
         unitcell = self.make_rutile_110_unitcell()
