@@ -136,7 +136,7 @@ def optical_profile(unit_cell, include_coherent_domains=True):
                 spacing += 1.0
             thickness_fraction[index] = spacing
 
-    wavelength = 12.398419843320026 / (unit_cell._E * 1e-3)
+    wavelength = HC_KEV_ANGSTROM / (unit_cell._E * 1e-3)
     scale = 2.8179403262e-5 * wavelength**2 / (2.0 * np.pi)
     if include_coherent_domains:
         domain_matrices = unit_cell.coherentDomainMatrix
@@ -249,7 +249,7 @@ def water_optical_profile(water_model, noUC=30, z_step=None, z_origin=None):
     z_stop = water_onset + noUC * water_model.a[2]
     z = np.arange(z_start, z_stop + 0.5 * z_step, z_step, dtype=np.float64)
     rho_f = water_model.zDensity_G(z, 0.0, 0.0)
-    wavelength = 12.398419843320026 / (water_model._E * 1e-3)
+    wavelength = HC_KEV_ANGSTROM / (water_model._E * 1e-3)
     scale = 2.8179403262e-5 * wavelength**2 / (2.0 * np.pi)
     profile = np.empty((z.size, 3), dtype=np.float64)
     profile[:, 0] = z
