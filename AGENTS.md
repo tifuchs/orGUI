@@ -21,6 +21,12 @@ Read the most local `AGENTS.md` for the files you touch:
   user-facing unit boundaries.
 - `orgui/datautils/xrayutils/AGENTS.md`: scientific core, detector geometry,
   reciprocal-space math, CTR calculations, and related tests.
+- `orgui/reconstruction_*.py`, `orgui/backend/`: no nested `AGENTS.md` yet.
+  Follow this file plus `orgui/datautils/xrayutils/AGENTS.md` — the
+  reconstruction pipeline is scientific/geometry code built on
+  `orgui/datautils/xrayutils/reconstruction.py`, and `orgui/backend/` handles
+  the beamline-specific metadata normalization called out in
+  `orgui/app/AGENTS.md`.
 - `doc/AGENTS.md`: Sphinx documentation source, the changelog/release-notes
   workflow, and what counts as a user-facing change worth documenting.
 
@@ -79,6 +85,7 @@ it:
 - `pytest orgui/datautils/xrayutils/test/test_HKLcalc.py`
 - `pytest orgui/datautils/xrayutils/test/test_DetectorCalibration.py`
 - `pytest orgui/datautils/xrayutils/test/test_CTRcalc.py`
+- `pytest orgui/datautils/xrayutils/test/test_reconstruction*.py`
 
 When changing config-loading or unit-conversion behavior, inspect
 `examples/config_minimal` and the other `examples/config_*` files.
