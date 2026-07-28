@@ -16,6 +16,11 @@ Scientific and analysis additions:
   py3Dmol or Mayavi explicitly, and can incrementally add unit cells to a
   shared viewer. Covalent radii are interpreted consistently by both backends
   and can be adjusted with the dimensionless ``radius_scale`` parameter.
+- ``PoissonSurface``'s basis now requires three parameters (``W``, ``alpha``,
+  ``offset``) instead of two. The previous two-parameter form was only ever
+  used in test code, so no migration path is provided; a saved ``.xtal``/
+  ``.xpr`` file with a two-parameter ``PoissonSurface`` basis will fail to
+  load.
 
 
 ## [1.5.0] (2026-06-07)
