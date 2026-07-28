@@ -2770,6 +2770,62 @@ class TestCTRAccelerationBackendSelection(unittest.TestCase):
         self.assertEqual(CTRuc.CTR_ACCEL_BACKEND, "numpy")
 
 
+class TestUnitCellEmptyCoherentDomains(unittest.TestCase):
+    """A unit cell with zero coherent domains is a legitimate state (e.g. a
+    film layer entirely consumed by an EpitaxyInterface profile, see
+    test_profile_interface_can_consume_entire_film_width). ``np.asarray([])``
+    collapses to shape ``(0,)`` rather than the ``(0, 3, 4)`` the accelerated
+    backends require, which must not raise.
+    """
+
+    def setUp(self):
+        self.original_backend = CTRuc.CTR_ACCEL_BACKEND
+        self.addCleanup(CTRuc.set_accel_backend, self.original_backend)
+        self.unitcell = CTRcalc.UnitCell(
+            [3.0, 3.0, 6.0], [90.0, 90.0, 90.0], name="empty_domains"
+        )
+        self.unitcell.addAtom("C", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0, layer=1)
+        self.unitcell.setEnergy(10000.0)
+        self.unitcell.coherentDomainMatrix = []
+        self.unitcell.coherentDomainOccupancy = []
+        self.h = np.array([0.0])
+        self.k = np.array([0.0])
+        self.l = np.array([0.5])
+
+    def _assert_zero_amplitude(self):
+        np.testing.assert_allclose(
+            self.unitcell.F_uc(self.h, self.k, self.l), 0.0
+        )
+        np.testing.assert_allclose(
+            self.unitcell.F_uc_bulk(self.h, self.k, self.l), 0.0
+        )
+        np.testing.assert_allclose(
+            self.unitcell.F_bulk(self.h, self.k, self.l), 0.0
+        )
+
+    def testEmptyCoherentDomainsNumpyBackend(self):
+        CTRuc.set_accel_backend("numpy")
+        self._assert_zero_amplitude()
+
+    def testEmptyCoherentDomainsNumbaBackend(self):
+        if not CTRuc.ctr_numba_accel_available():
+            self.skipTest(
+                "Cannot perform Numba tests: _CTRcalc_accel library was not "
+                "imported. Is Numba installed?"
+            )
+        CTRuc.set_accel_backend("numba")
+        self._assert_zero_amplitude()
+
+    def testEmptyCoherentDomainsCppBackend(self):
+        if not CTRuc.HAS_CPP_ACCEL:
+            self.skipTest(
+                "Cannot perform C++ tests: _CTRcalc_cpp library was not "
+                "imported. Was the C++ extension built?"
+            )
+        CTRuc.set_accel_backend("cpp")
+        self._assert_zero_amplitude()
+
+
 class TestCTRcalculationNumPy(StructureFactorValidationMixin, unittest.TestCase):
     def setUp(self):
         original_backend = CTRuc.CTR_ACCEL_BACKEND
