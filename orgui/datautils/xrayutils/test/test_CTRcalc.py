@@ -2129,6 +2129,39 @@ class TestLayerStacking(unittest.TestCase):
         self.assertEqual(optical_profile.shape[1], 3)
         self.assertTrue(np.all(np.isfinite(optical_profile)))
 
+        # Value-level regression check, in addition to the isfinite smoke
+        # checks above: these are a frozen snapshot of this module's own
+        # current output (not independently verified against an analytic or
+        # external reference), so a mismatch signals the split-bulk-domain
+        # code path changed behavior, not necessarily that it is now wrong.
+        np.testing.assert_allclose(
+            structure_factor,
+            [10.959877214261 + 24.053170411198j, 0.769317301749 - 1.23830767953j],
+            rtol=1e-8,
+        )
+        np.testing.assert_allclose(
+            density[[0, 100, 200, 300, 400]],
+            [
+                0.0,
+                -1.130402540575 - 0.006963145549j,
+                0.6212434003285 + 0.002480857561j,
+                1.108345606774e-04,
+                0.0,
+            ],
+            atol=1e-9,
+        )
+        np.testing.assert_allclose(np.sum(density), 40.00674724814 + 0.031011485600j, rtol=1e-8)
+        mid_row = optical_profile.shape[0] // 2
+        np.testing.assert_allclose(
+            optical_profile[[0, mid_row, -1]],
+            [
+                [-12.0, -9.65554085169e-10, -8.98126154061e-13],
+                [0.6, 2.222695401541e-06, 2.067477009624e-09],
+                [10.0, 0.0, 0.0],
+            ],
+            atol=1e-9,
+        )
+
 
 class TestLegacyLayeredCTR(unittest.TestCase):
     def test_legacy_xtal_uses_corrected_interface_support(self):
