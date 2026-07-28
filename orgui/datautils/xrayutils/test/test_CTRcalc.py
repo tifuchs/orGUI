@@ -32,6 +32,7 @@ __email__ = "fuchs@physik.uni-kiel.de"
 
 import dataclasses
 import copy
+import importlib.util
 import unittest
 from unittest import mock
 import os
@@ -43,6 +44,9 @@ from ... import util
 from .. import CTRcalc, CTRfilm, CTRplotutil, CTRsymmetry, CTRuc
 from ..CTRdistributions import PoissonProfile, SkellamProfile, SurfaceProfile
 from ..CTRutil import generate_surface_termination_cells
+
+
+HAS_ASE = importlib.util.find_spec("ase") is not None
 
 
 class _FakePy3DmolModel:
@@ -335,6 +339,7 @@ Name   x/frac     y/frac     z/frac     iDW     oDW      occup
         self.assertEqual(str(restored), serialized)
 
 
+@unittest.skipUnless(HAS_ASE, "ase is not installed")
 class TestUnitCellCifImport(unittest.TestCase):
     def test_cif_import_orders_atoms_by_fractional_coordinate(self):
         cif = """data_ordering
@@ -356,10 +361,11 @@ O2 O 0.1 0.8 0.2
 C1 C 0.4 0.2 0.2
 Fe1 Fe 0.9 0.1 0.2
 """
-        with tempfile.NamedTemporaryFile(suffix=".cif", mode="w") as handle:
-            handle.write(cif)
-            handle.flush()
-            unitcell = CTRcalc.UnitCell.fromFile(handle.name)
+        with tempfile.TemporaryDirectory() as directory:
+            cif_path = os.path.join(directory, "ordering.cif")
+            with open(cif_path, "w") as handle:
+                handle.write(cif)
+            unitcell = CTRcalc.UnitCell.fromFile(cif_path)
 
         self.assertEqual(unitcell.names, ["Fe", "C", "O", "O"])
         np.testing.assert_allclose(
