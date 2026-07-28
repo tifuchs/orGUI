@@ -14,11 +14,22 @@ This directory contains the highest-risk scientific code:
 - `CTRfilm.py`: film and epitaxy objects built on top of unit cells.
 - `CTRutil.py`, `CTRplotutil.py`: CTR parsing, data containers, plotting, and
   ANAROD-style import/export paths.
+- `CTRdistributions.py`, `CTRopt.py`, `CTRoptics.py`, `CTRresolution.py`,
+  `CTRstacking.py`, `CTRsymmetry.py`: additional CTR model, optics,
+  resolution, and symmetry helpers.
+- `reconstruction.py`: out-of-core reciprocal-space reconstruction (voxel
+  binning/reduction). `orgui/reconstruction_job.py`, `reconstruction_cli.py`,
+  and `reconstruction_cluster.py` (outside this directory, no nested
+  `AGENTS.md` of their own) build on it and follow the same conventions as
+  this file.
+- `cpp/`: native C++ kernels (`CTRcalc_cpp.cpp`,
+  `reciprocal_reconstruction_cpp.cpp`) backing performance-critical CTR and
+  reconstruction paths.
 - `_CTRcalc_accel.py`: optional numba-accelerated kernels.
 - `element_data.py`, `unitcells/`: scattering-factor data and bundled reference
   structure files.
-- `test/`: regression tests for lattice math, detector conversions, and CTR
-  calculations.
+- `test/`: regression tests for lattice math, detector conversions, CTR
+  calculations, and reconstruction.
 
 Use the repository root instructions together with this file.
 
@@ -75,6 +86,12 @@ rewrite stable code just to restate units.
 - Detector calibration should preserve round-trip behavior for pixel-to-angle
   and angle-to-pixel functions.
 - If adding an exported quantity, document its unit at the point of creation.
+- `cpp/`: keep any Python fallback numerically consistent with the C++
+  kernel, and rebuild the extension before trusting local test results after
+  touching this directory.
+- `reconstruction_cluster.py` distributes work across processes/nodes; treat
+  partial-failure handling and result ordering as correctness, not just
+  performance.
 
 Within the CTR stack, the typical dependency direction is:
 
@@ -100,6 +117,7 @@ Run the narrowest relevant regression test first:
 - `pytest orgui/datautils/xrayutils/test/test_HKLcalc.py`
 - `pytest orgui/datautils/xrayutils/test/test_DetectorCalibration.py`
 - `pytest orgui/datautils/xrayutils/test/test_CTRcalc.py`
+- `pytest orgui/datautils/xrayutils/test/test_reconstruction*.py`
 
 Use `ruff check orgui/datautils/xrayutils` for local lint checks. If a change
 touches config-facing unit conversions, also inspect `examples/config_minimal`
