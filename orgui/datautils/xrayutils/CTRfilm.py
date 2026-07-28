@@ -359,6 +359,17 @@ class _LayerStackingMixin:
             Absolute top height of the object below in Angstrom.
         :param float below_layer:
             Top cyclic layer identifier of the object below.
+        :param LayerState below_state:
+            Optional pre-built layer state for the object below. If given,
+            it is used as-is instead of constructing a fresh
+            ``LayerState(self.layer_cycle, below_layer)``.
+        :param below_component:
+            Optional underlying component (for example a :class:`Film`)
+            passed to this object's ``_bind_underlying_component`` if it
+            defines one, for subclasses (such as ``PoissonSurface``) that
+            need direct access to the component below rather than just its
+            scalar layer metadata. Ignored by subclasses without that
+            method.
         """
         bind_underlying = getattr(self, "_bind_underlying_component", None)
         if bind_underlying is not None:
