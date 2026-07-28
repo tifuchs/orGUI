@@ -2165,6 +2165,151 @@ class TestLegacyLayeredCTR(unittest.TestCase):
         self.assertIsInstance(interface.profile, SkellamProfile)
         self.assertNotIn("support_cursor", interface.toStr())
 
+        # End-to-end structure-factor regression check for the legacy .xtal
+        # fixture (Film + EpitaxyInterface + SkellamProfile). PRELIMINARY,
+        # UNTESTED reference values: computed with this module's own
+        # CTRcalc.SXRDCrystal.F() after the interfacial-strain fix in
+        # EpitaxyInterface (commit beee738) and the F_bulk lattice-sum
+        # denominator fix, but not independently verified against real data
+        # or an analytic result -- unlike test_simple_unitcell_bulk_structure_
+        # factor_matches_reference below, which does compare against real
+        # fit-derived intensities for the un-layered unit-cell + bulk case.
+        # These numbers disagree with the pre-existing CTRs_reference.dat
+        # baseline used by the (deliberately still-failing)
+        # test_legacy_xtal_reconstructs_reference_interface below; which of
+        # the two is correct is an open question, deferred until after other
+        # PR feedback is addressed. If this test starts failing, do not
+        # assume the fresh code is wrong and revert to whatever makes it
+        # pass -- treat it the same as the sibling test: investigate the
+        # discrepancy before changing either the code or these numbers.
+        xtal["RuO2"].basis[0] = 17.0
+        xtal["RuO2"].basis_0[0] = 17.0
+        xtal.atten = 0.01
+        l_values = np.linspace(0.0, 7.25, 2000)[:8]
+        calculated = np.abs(
+            xtal.F(
+                np.zeros(8, dtype=np.float64),
+                np.zeros(8, dtype=np.float64),
+                l_values,
+            )
+        )
+        expected = np.array(
+            [
+                17238.5440045948,
+                7001.2889938137,
+                3852.1662569049,
+                2726.8273234247,
+                2175.489988698,
+                1855.6217274457,
+                1648.0075146735,
+                1501.0723678209,
+            ]
+        )
+        np.testing.assert_allclose(calculated, expected, rtol=2e-5, atol=2e-5)
+
+    def test_legacy_xtal_reconstructs_reference_interface(self):
+        """Original pre-fix regression check against the frozen
+        CTRs_reference.dat baseline, restored verbatim (see git history for
+        commit beee738, "fix: EpitaxyInterface now is again consuming Film
+        so that interfacial strain field is correct").
+
+        This is EXPECTED TO CURRENTLY FAIL: CTRs_reference.dat encodes the
+        pre-beee738 interfacial-strain behavior and was never regenerated
+        against the corrected physics. It is kept, failing, to keep the
+        discrepancy visible rather than silently dropping the check. Two
+        assertions from the original test are omitted because they depend
+        on removed legacy internals (a 2-element EpitaxyInterface.basis and
+        a ``_legacy_support_cursor`` attribute) unrelated to the physics
+        question being tracked here; see
+        test_legacy_xtal_uses_corrected_interface_support above for the
+        current basis format and support-cursor behavior.
+
+        Before merging, determine which side is correct -- the frozen
+        CTRs_reference.dat baseline or the current, corrected code -- rather
+        than resolving the failure by editing either one without
+        investigation. This is deferred pending other PR feedback.
+        """
+        repository_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+        )
+        fixture_root = os.path.join(
+            repository_root, "examples", "CTR", "test"
+        )
+        xtal_path = os.path.join(
+            fixture_root, "0001_fit_2V036_reference.xtal"
+        )
+        reference_path = os.path.join(fixture_root, "CTRs_reference.dat")
+        for path in (xtal_path, reference_path):
+            if not os.path.exists(path):
+                self.skipTest(f"Missing optional CTR fixture: {path}")
+        xtal = CTRcalc.SXRDCrystal.fromFile(
+            xtal_path
+        )
+
+        self.assertIsInstance(xtal["RuO2"], CTRfilm.Film)
+        self.assertIsInstance(xtal["TiO2toRuO2"], CTRfilm.EpitaxyInterface)
+
+        xtal["RuO2"].basis[0] = 17.0
+        xtal["RuO2"].basis_0[0] = 17.0
+        xtal.atten = 0.01
+        reference = np.loadtxt(
+            reference_path,
+            skiprows=1,
+            max_rows=8,
+        )
+        l_values = np.linspace(0.0, 7.25, 2000)[:8]
+        calculated = np.abs(
+            xtal.F(
+                np.zeros(8, dtype=np.float64),
+                np.zeros(8, dtype=np.float64),
+                l_values,
+            )
+        )
+        np.testing.assert_allclose(
+            calculated,
+            reference[:, 3] * xtal.reference_area,
+            rtol=2e-5,
+            atol=2e-5,
+        )
+
+    def test_simple_unitcell_bulk_structure_factor_matches_reference(self):
+        """Sibling check for the "simple" (un-layered unit-cell + bulk,
+        no Film/EpitaxyInterface/profile) case, for contrast with the two
+        Film + EpitaxyInterface tests above. This does not use
+        CTRs_reference.dat, which was generated from the full layered
+        crystal, not a simple bulk-only one (see create_test_data.py in the
+        datautils repository's examples/CTR directory). Instead it reuses
+        testdata/0V12_calculated.xpr and .dat, the same fixtures already
+        validated against real fit-derived reference intensities by
+        TestCTRcalculationNumPy/Numba/Cpp above -- this is real,
+        independently-verified data, not a frozen snapshot of current
+        output. It currently passes, which localizes the
+        CTRs_reference.dat discrepancy above to the layered Film /
+        EpitaxyInterface / SkellamProfile path rather than to the
+        underlying unit-cell or semi-infinite bulk calculation.
+        """
+        fp = os.path.split(__file__)[0]
+        xtal_unitcells = CTRcalc.SXRDCrystal.fromFile(
+            os.path.join(fp, "testdata/0V12_calculated.xpr")
+        )
+        CTRs = CTRplotutil.CTRCollection.fromANAROD(
+            os.path.join(fp, "testdata/0V12_calculated.dat"),
+            RODexport=True,
+        )
+        pt100 = CTRcalc.UnitCell([3.9242, 3.9242, 3.9242], [90.0000, 90.0000, 90.0000])
+        xtal_unitcells.setGlobalReferenceUnitCell(
+            pt100, util.z_rotation(np.deg2rad(45.0))
+        )
+        # This legacy reference file was generated when amplitudes were
+        # normalized by unit-cell volume. Canonical F values in electrons are
+        # therefore larger by the reference-cell volume.
+        reference_scale = pt100.volume
+
+        calc_CTRs = CTRs.generateCollectionFromXtal(xtal_unitcells)
+        for calc, reference in zip(calc_CTRs, CTRs):
+            expected = reference.sfI * reference_scale
+            np.testing.assert_allclose(calc.sfI, expected, rtol=1e-02)
+
 
 class TestStructureFactorNormalization(unittest.TestCase):
     @staticmethod
