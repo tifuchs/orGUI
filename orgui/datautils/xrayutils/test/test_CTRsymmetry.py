@@ -279,6 +279,18 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
         model = CTRsymmetry.model_from_seed(seed, surface_spec, tol=1e-3)
         return model.build_unitcell(element)
 
+    def assert_variables_allclose(self, actual, expected):
+        """Compare Wyckoff ``variables`` dicts, tolerating float rounding.
+
+        pyxtal/spglib can return values that are a few ULP off an exact
+        input (e.g. 0.11999999999999997 instead of 0.12), so this avoids
+        exact dict equality on floats.
+        """
+        self.assertEqual(set(actual), set(expected))
+        np.testing.assert_allclose(
+            [actual[key] for key in expected], [expected[key] for key in expected]
+        )
+
     @staticmethod
     def coupling_factor_vectors(unitcell, site_id):
         grouped = {}
@@ -364,7 +376,7 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
         sites = unitcell.wyckoff_sites()
         self.assertEqual([site["site_id"] for site in sites], ["Ru_2a", "O_4f"])
         self.assertEqual(sites[0]["spacegroup_number"], 136)
-        self.assertEqual(sites[1]["variables"], {"u": 0.30569})
+        self.assert_variables_allclose(sites[1]["variables"], {"u": 0.30569})
         self.assertEqual(sites[1]["status"], "metadata_only")
 
         couplings = unitcell.wyckoff_couplings("O_4f")
@@ -536,7 +548,7 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
             Lattice.hexagonal(4.0, 6.0),
         )
 
-        self.assertEqual(
+        self.assert_variables_allclose(
             unitcell.wyckoff_sites()[0]["variables"],
             {"u": 0.12, "v": 0.27, "w": 0.34},
         )
@@ -638,7 +650,9 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
 
         restored = UnitCell.fromStr(text)
 
-        self.assertEqual(restored.wyckoff_sites()[1]["variables"], {"u": 0.30569})
+        self.assert_variables_allclose(
+            restored.wyckoff_sites()[1]["variables"], {"u": 0.30569}
+        )
         self.assertEqual(len(restored.wyckoff_couplings("O_4f")), 8)
         self.assertGreater(len(restored.wyckoff_site_couplings("Ru_2a")), 0)
         original_couplings = sorted(

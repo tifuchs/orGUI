@@ -2171,18 +2171,10 @@ class TestLayerStacking(unittest.TestCase):
 
 class TestLegacyLayeredCTR(unittest.TestCase):
     def test_legacy_xtal_uses_corrected_interface_support(self):
-        repository_root = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
-        )
-        fixture_root = os.path.join(
-            repository_root, "examples", "CTR", "test"
-        )
+        fixture_root = os.path.join(os.path.dirname(__file__), "testdata")
         xtal_path = os.path.join(
             fixture_root, "0001_fit_2V036_reference.xtal"
         )
-        for path in (xtal_path,):
-            if not os.path.exists(path):
-                self.skipTest(f"Missing optional CTR fixture: {path}")
         xtal = CTRcalc.SXRDCrystal.fromFile(
             xtal_path
         )
@@ -2248,9 +2240,18 @@ class TestLegacyLayeredCTR(unittest.TestCase):
 
     def test_legacy_xtal_reconstructs_reference_interface(self):
         """Original pre-fix regression check against the frozen
-        CTRs_reference.dat baseline, restored verbatim (see git history for
-        commit beee738, "fix: EpitaxyInterface now is again consuming Film
-        so that interfacial strain field is correct").
+        CTRs_reference.dat baseline (see git history for commit beee738,
+        "fix: EpitaxyInterface now is again consuming Film so that
+        interfacial strain field is correct").
+
+        The fixture files live in testdata/ (packaged with the test suite)
+        rather than the repository's examples/CTR/test/ directory, which is
+        not included in installed wheels -- this test used to silently skip
+        on any CI/CD run that installs the package instead of using a
+        source checkout, masking the discrepancy below entirely.
+        testdata/CTRs_reference.dat is trimmed to the header plus the 8 rows
+        this test actually reads (`max_rows=8` below); the full file is
+        still available at examples/CTR/test/CTRs_reference.dat.
 
         This is EXPECTED TO CURRENTLY FAIL: CTRs_reference.dat encodes the
         pre-beee738 interfacial-strain behavior and was never regenerated
@@ -2268,19 +2269,11 @@ class TestLegacyLayeredCTR(unittest.TestCase):
         than resolving the failure by editing either one without
         investigation. This is deferred pending other PR feedback.
         """
-        repository_root = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
-        )
-        fixture_root = os.path.join(
-            repository_root, "examples", "CTR", "test"
-        )
+        fixture_root = os.path.join(os.path.dirname(__file__), "testdata")
         xtal_path = os.path.join(
             fixture_root, "0001_fit_2V036_reference.xtal"
         )
         reference_path = os.path.join(fixture_root, "CTRs_reference.dat")
-        for path in (xtal_path, reference_path):
-            if not os.path.exists(path):
-                self.skipTest(f"Missing optional CTR fixture: {path}")
         xtal = CTRcalc.SXRDCrystal.fromFile(
             xtal_path
         )
@@ -2680,15 +2673,15 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         self.assertAlmostEqual(crystal["surface"].profile.mean_change, 2.0)
 
     def test_example_xtal_and_xpr_describe_same_poisson_stack(self):
-        repository_root = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
-        )
-        example_root = os.path.join(repository_root, "examples", "CTR")
-        xtal_path = os.path.join(example_root, "RuO2_TiO2_Poisson_etching.xtal")
-        xpr_path = os.path.join(example_root, "RuO2_TiO2_Poisson_etching.xpr")
-        for path in (xtal_path, xpr_path):
-            if not os.path.exists(path):
-                self.skipTest(f"Missing optional CTR fixture: {path}")
+        """Fixtures live in testdata/ (packaged with the test suite) rather
+        than examples/CTR/, which is not included in installed wheels --
+        this test used to silently skip on any CI/CD run that installs the
+        package instead of using a source checkout. The full, canonical
+        copies remain at examples/CTR/RuO2_TiO2_Poisson_etching.{xtal,xpr}.
+        """
+        fixture_root = os.path.join(os.path.dirname(__file__), "testdata")
+        xtal_path = os.path.join(fixture_root, "RuO2_TiO2_Poisson_etching.xtal")
+        xpr_path = os.path.join(fixture_root, "RuO2_TiO2_Poisson_etching.xpr")
         xtal = CTRcalc.SXRDCrystal.fromFile(xtal_path)
         xpr = CTRcalc.SXRDCrystal.fromFile(xpr_path)
 
