@@ -1,7 +1,9 @@
 """End-to-end tests for the centralized reconstruction job."""
 
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 import json
+from pathlib import Path
 import threading
 import time
 
@@ -18,6 +20,8 @@ from orgui.reconstruction_job import (
     ReconstructionJob,
     job_status,
     reconstruction_execution_settings,
+    run_cluster_finalize,
+    run_cluster_map_task,
     run_job,
     write_job,
 )
@@ -161,3 +165,79 @@ def test_central_job_runs_resumes_and_cleans_verified_scratch(
         assert np.nanmax(group["intensity"]) == 10.0
         assert np.nanmax(group["contributors"]) == 8
     assert job_status(job_path)["output_sha256"] == first["output_sha256"]
+
+
+def test_cluster_array_tasks_do_not_mutate_job_and_finalizer_collects_them(
+    tmp_path,
+):
+    """Independent array tasks publish manifests before one finalizer writes."""
+    scan = SimulationScan((2, 2), 0.0, 1.0, 2)
+    assets = tmp_path / "scratch" / "job-assets.nxs"
+    assets.parent.mkdir()
+    with h5py.File(assets, "w") as h5file:
+        h5file.attrs["orgui_job_assets"] = 1
+    grid = ReconstructionGrid(
+        minimum=(-20.0, -20.0, -20.0),
+        maximum=(20.0, 20.0, 20.0),
+        step=(20.0, 20.0, 20.0),
+        frame="lab",
+        chunk_shape=(2, 2, 2),
+    )
+    scan_reference = ScanReference.from_scan(scan).to_dict()
+    job = ReconstructionJob(
+        config=config_data_to_json(_config()),
+        scan_reference=scan_reference,
+        grids=[grid.__dict__],
+        scratch_path=str(assets.parent),
+        output_path=str(tmp_path / "cluster-result.h5"),
+        compression="Raw",
+        assets_path=str(assets),
+        assets_sha256=sha256(assets.read_bytes()).hexdigest(),
+        source_fingerprint_sha256=sha256(
+            json.dumps(
+                scan_reference, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
+        threads_per_image=1,
+        accumulation_budget_bytes=None,
+        runtime_threads=2,
+        runtime_memory_bytes=64 * 1024 * 1024,
+        tile_shape=(1, 1),
+        frame_batch=1,
+        expected_map_tasks=2,
+    )
+    job_path = tmp_path / "cluster-job.json"
+    write_job(job, job_path)
+    frozen_job = job_path.read_bytes()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                run_cluster_map_task,
+                job_path,
+                task_index,
+                cpus=1,
+                memory_bytes=64 * 1024 * 1024,
+            )
+            for task_index in range(2)
+        ]
+        first, second = (future.result() for future in futures)
+    assert job_path.read_bytes() == frozen_job
+    assert first["frame_range"] == [0, 1]
+    assert second["frame_range"] == [1, 2]
+    assert job_status(job_path)["map_tasks"] == {
+        "completed": 2,
+        "pending": 0,
+        "total": 2,
+    }
+    assert job_path.read_bytes() == frozen_job
+
+    result = run_cluster_finalize(
+        job_path,
+        cpus=2,
+        memory_bytes=128 * 1024 * 1024,
+    )
+
+    assert result["status"] == "complete"
+    assert Path(result["output_path"]).exists()
+    assert job_status(job_path)["map_tasks"]["completed"] == 2

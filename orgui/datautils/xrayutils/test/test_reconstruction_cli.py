@@ -34,14 +34,22 @@ def test_orgui_dispatches_rsmap_without_starting_gui():
     )
 
 
-def test_cli_only_exposes_job_commands():
-    """The CLI has no independent specification or stage interfaces."""
+def test_cli_exposes_prepared_job_and_cluster_commands():
+    """Cluster stages consume prepared jobs without a specification CLI."""
     parser = reconstruction_cli.build_parser()
     help_text = parser.format_help()
-    for command in ("run", "resume", "status"):
+    for command in (
+        "run",
+        "resume",
+        "status",
+        "cluster-map",
+        "cluster-finalize",
+        "cluster-scripts",
+    ):
         assert command in help_text
+    choices = parser._subparsers._group_actions[0].choices
     for removed in ("preview", "map", "reduce", "finalize"):
-        assert removed not in help_text
+        assert removed not in choices
 
 
 def test_cli_reports_progress_on_stderr(capsys):
@@ -62,3 +70,42 @@ def test_cli_reports_progress_on_stderr(capsys):
     assert "Reducing 1 mapping task" in captured.err
     assert "Complete" in captured.err
     assert '"status": "complete"' in captured.out
+
+
+def test_cluster_map_cli_passes_array_resources(capsys):
+    """Array task IDs and scheduler resources reach the cluster map helper."""
+    captured = {}
+
+    def fake_map(path, task_index, *, cpus, memory_bytes, progress):
+        captured.update(
+            path=path,
+            task_index=task_index,
+            cpus=cpus,
+            memory_bytes=memory_bytes,
+        )
+        progress(1, 1, "Complete")
+        return {"status": "complete"}
+
+    with mock.patch.object(
+        reconstruction_cli, "run_cluster_map_task", fake_map
+    ):
+        reconstruction_cli.main(
+            [
+                "cluster-map",
+                "job.json",
+                "--task-index",
+                "7",
+                "--cpus",
+                "4",
+                "--memory-gib",
+                "16",
+            ]
+        )
+
+    assert captured == {
+        "path": "job.json",
+        "task_index": 7,
+        "cpus": 4,
+        "memory_bytes": 16 * 1024**3,
+    }
+    assert '"status": "complete"' in capsys.readouterr().out

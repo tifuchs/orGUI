@@ -10,6 +10,10 @@ import numpy as np
 from silx.gui import qt
 
 from .. import logger_utils
+from ..reconstruction_cluster import (
+    ClusterSettings,
+    generate_cluster_scripts,
+)
 from ..reconstruction_job import (
     ACCURACY_DEPTHS,
     ReconstructionGrid,
@@ -138,6 +142,7 @@ class ReconstructionDialog(qt.QDialog):
         self.tabs.addTab(self._data_tab(), "Experiment")
         self.tabs.addTab(self._grid_tab(), "Output grids")
         self.tabs.addTab(self._performance_tab(), "Performance")
+        self.tabs.addTab(self._cluster_tab(), "Cluster")
         self.tabs.addTab(self._paths_tab(), "Job and output")
         self.output_tab = qt.QWidget()
         output_layout = qt.QVBoxLayout(self.output_tab)
@@ -155,6 +160,7 @@ class ReconstructionDialog(qt.QDialog):
             ("Preview", self.preview),
             ("Prepare Job", self.prepare),
             ("Run Locally", self.run_local),
+            ("Create Cluster Scripts", self.create_cluster_scripts),
             ("Open Job", self.open_job),
             ("Resume", self.resume),
         ):
@@ -165,6 +171,10 @@ class ReconstructionDialog(qt.QDialog):
                     "Preview": "Estimate coverage, storage, and execution layout.",
                     "Prepare Job": "Freeze the current settings into a resumable job.",
                     "Run Locally": "Prepare and execute the configured job locally.",
+                    "Create Cluster Scripts": (
+                        "Prepare the job and create an SGE or Slurm map array "
+                        "with a dependent reduction/finalization job."
+                    ),
                     "Open Job": "Select an existing reconstruction job JSON file.",
                     "Resume": "Verify and continue the selected prepared job.",
                 }[label]
@@ -641,6 +651,277 @@ class ReconstructionDialog(qt.QDialog):
         layout.addStretch(1)
         return widget
 
+    def _cluster_tab(self):
+        widget = qt.QWidget()
+        outer = qt.QVBoxLayout(widget)
+        scroll = qt.QScrollArea()
+        scroll.setWidgetResizable(True)
+        contents = qt.QWidget()
+        layout = qt.QVBoxLayout(contents)
+
+        scheduler_group = qt.QGroupBox("Scheduler")
+        scheduler_form = qt.QFormLayout(scheduler_group)
+        self.cluster_scheduler = qt.QComboBox()
+        self.cluster_scheduler.addItem("Sun/Grid Engine (SGE)", "sge")
+        self.cluster_scheduler.addItem("Slurm", "slurm")
+        self._add_form_row(
+            scheduler_form,
+            "Scheduler:",
+            self.cluster_scheduler,
+            "Generate SGE qsub scripts or Slurm sbatch scripts. SGE is the "
+            "default and primary target.",
+        )
+        self.cluster_job_name = qt.QLineEdit("orgui-rsmap")
+        self._add_form_row(
+            scheduler_form,
+            "Job name:",
+            self.cluster_job_name,
+            "Scheduler-safe base name used for the map array and finalizer.",
+        )
+        self.cluster_queue = qt.QLineEdit()
+        self._add_form_row(
+            scheduler_form,
+            "Queue / partition:",
+            self.cluster_queue,
+            "Optional SGE queue (-q) or Slurm partition (--partition).",
+        )
+        self.cluster_account = qt.QLineEdit()
+        self._add_form_row(
+            scheduler_form,
+            "Project / account:",
+            self.cluster_account,
+            "Optional SGE project (-P) or Slurm account (--account).",
+        )
+        layout.addWidget(scheduler_group)
+
+        environment_group = qt.QGroupBox("Python environment")
+        environment_form = qt.QFormLayout(environment_group)
+        self.cluster_script_directory = qt.QLineEdit()
+        self._add_form_row(
+            environment_form,
+            "Script directory:",
+            self._path_row(
+                self.cluster_script_directory,
+                "directory",
+                tooltip=(
+                    "Directory receiving map, finalizer, and submission scripts."
+                ),
+            ),
+            "Directory receiving map, finalizer, and submission scripts.",
+        )
+        self.cluster_working_directory = qt.QLineEdit(str(Path.cwd()))
+        self._add_form_row(
+            environment_form,
+            "Working directory:",
+            self._path_row(
+                self.cluster_working_directory,
+                "directory",
+                tooltip="Shared working directory selected before Python starts.",
+            ),
+            "Shared working directory selected before Python starts.",
+        )
+        self.cluster_python = qt.QLineEdit("python")
+        self._add_form_row(
+            environment_form,
+            "Python executable:",
+            self.cluster_python,
+            "Python command available after environment setup, normally "
+            "'python' from the activated orGUI environment.",
+        )
+        self.cluster_environment = qt.QPlainTextEdit()
+        self.cluster_environment.setPlaceholderText(
+            "module load ...\nsource /path/to/venv/bin/activate"
+        )
+        self.cluster_environment.setMaximumHeight(90)
+        self._add_form_row(
+            environment_form,
+            "Setup commands:",
+            self.cluster_environment,
+            "Shell commands run before every task, for example module loads "
+            "and conda or virtual-environment activation.",
+        )
+        layout.addWidget(environment_group)
+
+        map_group = qt.QGroupBox("Mapping array")
+        map_form = qt.QFormLayout(map_group)
+        self.cluster_array_cpus = qt.QSpinBox()
+        self.cluster_array_cpus.setRange(1, 4096)
+        self.cluster_array_cpus.setValue(4)
+        self._add_form_row(
+            map_form,
+            "CPUs / slots per task:",
+            self.cluster_array_cpus,
+            "Native C++ threads used by each independent map-array task.",
+        )
+        self.cluster_array_memory = qt.QDoubleSpinBox()
+        self.cluster_array_memory.setRange(0.25, 1024 * 1024)
+        self.cluster_array_memory.setDecimals(2)
+        self.cluster_array_memory.setValue(16.0)
+        self.cluster_array_memory.setSuffix(" GiB")
+        self._add_form_row(
+            map_form,
+            "Memory per task:",
+            self.cluster_array_memory,
+            "Total RAM budget for one array task. For SGE, the generated "
+            "h_vmem request is divided across the requested slots.",
+        )
+        self.cluster_array_walltime = qt.QLineEdit("24:00:00")
+        self._add_form_row(
+            map_form,
+            "Wall time:",
+            self.cluster_array_walltime,
+            "Scheduler wall-time limit for each mapping task.",
+        )
+        self.cluster_array_concurrency = qt.QSpinBox()
+        self.cluster_array_concurrency.setRange(0, 1000000)
+        self.cluster_array_concurrency.setValue(0)
+        self._add_form_row(
+            map_form,
+            "Maximum concurrent tasks:",
+            self.cluster_array_concurrency,
+            "Optional array throttle (-tc or %N). Zero leaves the scheduler "
+            "limit unchanged.",
+        )
+        self.cluster_summary = qt.QPlainTextEdit()
+        self.cluster_summary.setReadOnly(True)
+        self.cluster_summary.setMaximumHeight(75)
+        self._add_form_row(
+            map_form,
+            "Detected array:",
+            self.cluster_summary,
+            "One array element is created for each detected deterministic "
+            "map task. Prepare the job to update this count.",
+        )
+        layout.addWidget(map_group)
+
+        reduce_group = qt.QGroupBox("Reduction and finalization")
+        reduce_form = qt.QFormLayout(reduce_group)
+        self.cluster_reduce_cpus = qt.QSpinBox()
+        self.cluster_reduce_cpus.setRange(1, 4096)
+        self.cluster_reduce_cpus.setValue(24)
+        self._add_form_row(
+            reduce_form,
+            "CPUs / slots:",
+            self.cluster_reduce_cpus,
+            "Independent CPU count for parallel shard reduction; it need not "
+            "match the map-array task size.",
+        )
+        self.cluster_reduce_memory = qt.QDoubleSpinBox()
+        self.cluster_reduce_memory.setRange(0.25, 1024 * 1024)
+        self.cluster_reduce_memory.setDecimals(2)
+        self.cluster_reduce_memory.setValue(64.0)
+        self.cluster_reduce_memory.setSuffix(" GiB")
+        self._add_form_row(
+            reduce_form,
+            "Memory:",
+            self.cluster_reduce_memory,
+            "Total RAM budget divided among parallel reducer workers.",
+        )
+        self.cluster_reduce_walltime = qt.QLineEdit("24:00:00")
+        self._add_form_row(
+            reduce_form,
+            "Wall time:",
+            self.cluster_reduce_walltime,
+            "Wall-time limit for reduction and final HDF5 creation.",
+        )
+        layout.addWidget(reduce_group)
+
+        advanced_group = qt.QGroupBox("Scheduler-specific settings")
+        advanced_form = qt.QFormLayout(advanced_group)
+        self.cluster_sge_pe = qt.QLineEdit("smp")
+        self._add_form_row(
+            advanced_form,
+            "SGE parallel environment:",
+            self.cluster_sge_pe,
+            "SGE parallel environment requested with -pe, commonly 'smp'.",
+        )
+        self.cluster_sge_memory = qt.QLineEdit("h_vmem")
+        self._add_form_row(
+            advanced_form,
+            "SGE memory resource:",
+            self.cluster_sge_memory,
+            "SGE per-slot complex used for memory requests, commonly h_vmem "
+            "or mem_free.",
+        )
+        self.cluster_array_directives = qt.QPlainTextEdit()
+        self.cluster_array_directives.setMaximumHeight(70)
+        self._add_form_row(
+            advanced_form,
+            "Extra map directives:",
+            self.cluster_array_directives,
+            "Optional scheduler directives, one '#$' or '#SBATCH' line each.",
+        )
+        self.cluster_reduce_directives = qt.QPlainTextEdit()
+        self.cluster_reduce_directives.setMaximumHeight(70)
+        self._add_form_row(
+            advanced_form,
+            "Extra finalizer directives:",
+            self.cluster_reduce_directives,
+            "Optional scheduler directives for reduction/finalization.",
+        )
+        layout.addWidget(advanced_group)
+        layout.addStretch(1)
+        scroll.setWidget(contents)
+        outer.addWidget(scroll)
+        return widget
+
+    def _cluster_settings(self):
+        return ClusterSettings(
+            scheduler=self.cluster_scheduler.currentData(),
+            job_name=self.cluster_job_name.text().strip(),
+            script_directory=self.cluster_script_directory.text().strip(),
+            working_directory=self.cluster_working_directory.text().strip(),
+            python_executable=self.cluster_python.text().strip(),
+            environment_setup=self.cluster_environment.toPlainText(),
+            queue=self.cluster_queue.text().strip(),
+            account=self.cluster_account.text().strip(),
+            array_cpus=self.cluster_array_cpus.value(),
+            array_memory_gib=self.cluster_array_memory.value(),
+            array_walltime=self.cluster_array_walltime.text().strip(),
+            array_concurrency=self.cluster_array_concurrency.value(),
+            reduce_cpus=self.cluster_reduce_cpus.value(),
+            reduce_memory_gib=self.cluster_reduce_memory.value(),
+            reduce_walltime=self.cluster_reduce_walltime.text().strip(),
+            sge_parallel_environment=self.cluster_sge_pe.text().strip(),
+            sge_memory_resource=self.cluster_sge_memory.text().strip(),
+            extra_array_directives=(
+                self.cluster_array_directives.toPlainText()
+            ),
+            extra_reduce_directives=(
+                self.cluster_reduce_directives.toPlainText()
+            ),
+        )
+
+    def _set_cluster_settings(self, values):
+        settings = ClusterSettings.from_dict(values)
+        self.cluster_scheduler.setCurrentIndex(
+            self.cluster_scheduler.findData(settings.scheduler)
+        )
+        self.cluster_job_name.setText(settings.job_name)
+        self.cluster_script_directory.setText(settings.script_directory)
+        self.cluster_working_directory.setText(settings.working_directory)
+        self.cluster_python.setText(settings.python_executable)
+        self.cluster_environment.setPlainText(settings.environment_setup)
+        self.cluster_queue.setText(settings.queue)
+        self.cluster_account.setText(settings.account)
+        self.cluster_array_cpus.setValue(settings.array_cpus)
+        self.cluster_array_memory.setValue(settings.array_memory_gib)
+        self.cluster_array_walltime.setText(settings.array_walltime)
+        self.cluster_array_concurrency.setValue(
+            settings.array_concurrency
+        )
+        self.cluster_reduce_cpus.setValue(settings.reduce_cpus)
+        self.cluster_reduce_memory.setValue(settings.reduce_memory_gib)
+        self.cluster_reduce_walltime.setText(settings.reduce_walltime)
+        self.cluster_sge_pe.setText(settings.sge_parallel_environment)
+        self.cluster_sge_memory.setText(settings.sge_memory_resource)
+        self.cluster_array_directives.setPlainText(
+            settings.extra_array_directives
+        )
+        self.cluster_reduce_directives.setPlainText(
+            settings.extra_reduce_directives
+        )
+
     @staticmethod
     def _set_control_tooltip(control, tooltip):
         widgets = control if isinstance(control, tuple) else (control,)
@@ -732,6 +1013,10 @@ class ReconstructionDialog(qt.QDialog):
             self.scratch_path.setText(str(base / f".{stem}-rsmap-scratch"))
         if not self.output_path.text():
             self.output_path.setText(str(base / f"{stem}-rsmap.h5"))
+        if not self.cluster_script_directory.text():
+            self.cluster_script_directory.setText(
+                str(base / f"{stem}-rsmap-cluster")
+            )
 
     def _show_output(self, description):
         self.preview_output.setPlainText(description)
@@ -1078,6 +1363,18 @@ class ReconstructionDialog(qt.QDialog):
         self.performance_summary.setPlainText(
             json.dumps(settings, indent=2, sort_keys=True)
         )
+        self.cluster_summary.setPlainText(
+            json.dumps(
+                {
+                    "array_tasks": settings["map_tasks"],
+                    "cpus_per_task": self.cluster_array_cpus.value(),
+                    "maximum_concurrent_tasks": (
+                        self.cluster_array_concurrency.value() or "scheduler"
+                    ),
+                },
+                indent=2,
+            )
+        )
         return settings
 
     def _prepare(self):
@@ -1130,6 +1427,7 @@ class ReconstructionDialog(qt.QDialog):
                 * 1024
                 * 1024
             ),
+            cluster_settings=self._cluster_settings().to_dict(),
         )
         self._show_execution_settings(
             job,
@@ -1274,6 +1572,25 @@ class ReconstructionDialog(qt.QDialog):
             self._report_failure("Cannot run reconstruction", error)
 
     @qt.Slot()
+    def create_cluster_scripts(self):
+        """Prepare the current job and create scheduler batch scripts."""
+        try:
+            if self.orgui.fscan is None:
+                job_path = self.job_path.text().strip()
+                if not job_path:
+                    raise ValueError("Select a prepared job JSON path")
+                job = read_job(job_path)
+            else:
+                job = self._prepare()
+                job_path = self.job_path.text().strip()
+            result = generate_cluster_scripts(job_path, job)
+            self._show_output(
+                json.dumps(result, indent=2, sort_keys=True)
+            )
+        except Exception as error:
+            self._report_failure("Cannot create cluster scripts", error)
+
+    @qt.Slot()
     def open_job(self):
         """Open and display an existing prepared job."""
         try:
@@ -1304,6 +1621,7 @@ class ReconstructionDialog(qt.QDialog):
                 else job.compression
             )
             self._refresh_hdf5_summary()
+            self._set_cluster_settings(job.cluster_settings)
             self.grid_table.setRowCount(0)
             for values in job.grids:
                 self._append_grid(ReconstructionGrid(**values))

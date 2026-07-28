@@ -449,6 +449,125 @@ The direct alias is equivalent:
 ``run`` and ``resume`` both verify and continue deterministic task state.
 ``status`` is read-only and prints the current descriptor status as JSON.
 
+Cluster Batch Execution
+-----------------------
+
+The **Cluster** tab generates an SGE or Slurm batch bundle from the same
+prepared job JSON used for local execution. It does not introduce another
+experiment configuration. The bundle contains:
+
+``*-map.sge`` or ``*-map.slurm``
+   A job array with one element per deterministic frame-range map task. Each
+   element reads the immutable job and asset bundle and writes only its own
+   Parquet partitions and map manifest. Array elements never update the shared
+   job JSON, so they may execute concurrently.
+
+``*-finalize.sge`` or ``*-finalize.slurm``
+   A single dependent job. It verifies that every expected array manifest is
+   complete and checksummed, records them in the job JSON, reduces shards with
+   its own CPU and memory allocation, and creates the final HDF5 file.
+
+``*-submit.sh``
+   A convenience submission wrapper. For SGE it captures ``qsub -terse`` and
+   submits the finalizer with ``-hold_jid``. For Slurm it captures
+   ``sbatch --parsable`` and uses ``afterok`` on the complete array. The
+   finalizer always verifies every map task, including on SGE installations
+   where a job hold records completion rather than successful exit.
+
+The scripts require the job JSON, scratch directory, immutable assets, scan
+source, and final output directory to be reachable at the same absolute paths
+from every compute node. Scratch should normally reside on a high-throughput
+shared filesystem or node-local storage explicitly staged by site-specific
+setup commands.
+
+The generated worker commands are also available for inspection and manual
+scheduler integration:
+
+.. code-block:: bash
+
+   orGUI rsmap cluster-map JOB.json --task-index 0 --cpus 4 --memory-gib 16
+   orGUI rsmap cluster-finalize JOB.json --cpus 24 --memory-gib 64
+   orGUI rsmap cluster-scripts JOB.json --output-directory batch
+
+Scheduler Parameters
+~~~~~~~~~~~~~~~~~~~~
+
+``Scheduler``
+   ``SGE`` (default) or ``Slurm``. SGE arrays are one-based and converted to
+   orGUI's zero-based task index. Slurm arrays are generated zero-based.
+
+``Job name``
+   Scheduler-safe base name for the map array and finalizer. Letters, numbers,
+   periods, underscores, and hyphens are accepted.
+
+``Queue / partition``
+   Optional SGE ``-q`` queue or Slurm ``--partition``.
+
+``Project / account``
+   Optional SGE ``-P`` project or Slurm ``--account``.
+
+``Script directory``
+   Destination for the three generated scripts. It defaults beneath the
+   current writable working directory.
+
+``Working directory``
+   Shared directory selected with ``cd`` before environment setup and Python
+   execution.
+
+``Python executable``
+   Python command used to invoke ``orgui.reconstruction_cli`` after environment
+   setup. ``python`` is the portable default; an absolute cluster-environment
+   path can be supplied.
+
+``Setup commands``
+   Verbatim shell lines placed after ``set -euo pipefail`` and ``cd``. Use
+   these for module loading and conda or virtual-environment activation.
+
+``CPUs / slots per mapping task``
+   Native C++ threads used by each array element. This allocation is
+   independent of the number of simultaneously running array elements.
+
+``Memory per mapping task``
+   Total RAM budget passed to one mapping process. Slurm receives it through
+   ``--mem``. SGE memory complexes are normally per-slot, so orGUI divides the
+   total by the slot count and rounds upward.
+
+``Mapping wall time``
+   Per-element SGE ``h_rt`` or Slurm ``--time`` limit.
+
+``Maximum concurrent tasks``
+   Optional array throttle: SGE ``-tc`` or the Slurm ``%N`` array suffix.
+   Zero leaves concurrency to site policy.
+
+``Reduction CPUs / slots``
+   Independent worker capacity for parallel checksum verification and
+   contiguous shard reduction. It may be larger or smaller than the mapping
+   task allocation.
+
+``Reduction memory``
+   Total reducer/finalizer RAM budget. The reducer divides it among active
+   workers and retains bounded shard buffers.
+
+``Reduction wall time``
+   SGE ``h_rt`` or Slurm ``--time`` for the dependent job.
+
+``SGE parallel environment``
+   Name requested through ``-pe``; ``smp`` is the default. It must match the
+   target site's configured shared-memory parallel environment.
+
+``SGE memory resource``
+   Per-slot consumable complex used in ``-l`` requests. ``h_vmem`` is the
+   default, but sites may require ``mem_free`` or another name.
+
+``Extra map/finalizer directives``
+   Optional scheduler-specific header lines. Each non-empty line must start
+   with ``#$`` for SGE or ``#SBATCH`` for Slurm.
+
+See the `Grid Engine qsub reference
+<https://gridengine.eu/mangridengine/htmlman1/qsub.html>`_ and the `Slurm job
+array reference <https://slurm.schedmd.com/job_array.html>`_ for scheduler
+semantics.
+
 Job Descriptor Reference
 ------------------------
 
@@ -541,6 +660,10 @@ inspection, scheduling, and provenance:
 
 ``cleanup_errors``
    Nonfatal failures encountered while deleting verified scratch outputs.
+
+``cluster_settings``
+   Frozen scheduler, environment, map-array resource, reduction-resource, and
+   optional directive settings used to regenerate the batch bundle.
 
 Output File Layout
 ------------------

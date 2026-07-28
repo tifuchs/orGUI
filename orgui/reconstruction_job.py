@@ -146,6 +146,7 @@ class ReconstructionJob:
     output_sha256: str | None = None
     correction_provenance: dict[str, Any] = field(default_factory=dict)
     cleanup_errors: list[str] = field(default_factory=list)
+    cluster_settings: dict[str, Any] = field(default_factory=dict)
     schema_version: int = JOB_SCHEMA_VERSION
 
     def to_dict(self):
@@ -560,6 +561,7 @@ def prepare_job(
     partition_chunk_span=None,
     threads_per_image=4,
     accumulation_budget_bytes=None,
+    cluster_settings=None,
 ):
     """Freeze current orGUI state into an immutable reconstruction job."""
     if gui.fscan is None:
@@ -646,6 +648,7 @@ def prepare_job(
         tile_shape=tile_shape,
         work_block_pixels=work_block_pixels,
         partition_chunk_span=partition_chunk_span,
+        cluster_settings=dict(cluster_settings or {}),
     )
     ranges, tiles = _execution_layout(job, gui.fscan, config)
     job.expected_map_tasks = len(ranges)
@@ -1205,13 +1208,27 @@ def reconstruction_execution_settings(job, scan=None, config=None):
 def job_status(path):
     """Return verified completion state for a job JSON."""
     job = read_job(path)
+    map_manifests = list(job.map_manifests)
+    if job.status != "complete":
+        verify_job(job)
+        scan = job.scan
+        config = job.config_data
+        ranges, tiles = _execution_layout(job, scan, config)
+        discovered = _discover_map_manifests(
+            job,
+            ranges,
+            tiles,
+            job.internal_spec(),
+            verify_partitions=False,
+        )
+        map_manifests = list(discovered.values())
     result = {
         "status": job.status,
         "job_sha256": job.digest,
         "map_tasks": {
-            "completed": len(job.map_manifests),
+            "completed": len(map_manifests),
             "pending": max(
-                0, job.expected_map_tasks - len(job.map_manifests)
+                0, job.expected_map_tasks - len(map_manifests)
             ),
             "total": job.expected_map_tasks,
         },
@@ -1228,8 +1245,6 @@ def job_status(path):
         ],
         "cleanup_errors": job.cleanup_errors,
     }
-    if job.status != "complete":
-        verify_job(job)
     return result
 
 
@@ -1241,6 +1256,7 @@ def _valid_map_manifest(
     spec_hash,
     job_digest,
     verification_cache=None,
+    verify_partitions=True,
 ):
     try:
         manifest = _read_manifest(path)
@@ -1253,16 +1269,279 @@ def _valid_map_manifest(
             and manifest.detector_tile is None
             and manifest.metadata.get("detector_tiles")
             == [list(tile) for tile in detector_tiles]
-            and all(
-                _verify_scratch_file(partition, verification_cache)
-                for partition in manifest.partitions
+            and (
+                not verify_partitions
+                or all(
+                    _verify_scratch_file(partition, verification_cache)
+                    for partition in manifest.partitions
+                )
             )
         )
     except (OSError, ValueError, RuntimeError):
         return False
 
 
-def run_job(path, *, progress=None):
+def _discover_map_manifests(
+    job,
+    ranges,
+    tiles,
+    spec,
+    *,
+    verification_cache=None,
+    only_ranges=None,
+    verify_partitions=True,
+):
+    manifest_root = Path(job.scratch_path) / "manifests"
+    candidates = {
+        str(Path(value).absolute()) for value in job.map_manifests
+    }
+    if manifest_root.exists():
+        candidates.update(
+            str(path.absolute()) for path in manifest_root.glob("*.json")
+        )
+    expected = {
+        tuple(frame_range)
+        for frame_range in (
+            ranges if only_ranges is None else only_ranges
+        )
+    }
+    existing = {}
+    for manifest_path in sorted(candidates):
+        try:
+            manifest = _read_manifest(manifest_path)
+            frame_range = tuple(manifest.frame_range)
+            if (
+                frame_range in expected
+                and _valid_map_manifest(
+                    manifest_path,
+                    frame_range,
+                    tiles,
+                    spec_hash=spec.digest,
+                    job_digest=job.digest,
+                    verification_cache=verification_cache,
+                    verify_partitions=verify_partitions,
+                )
+            ):
+                existing[frame_range] = manifest_path
+        except (OSError, TypeError, ValueError, RuntimeError):
+            continue
+    return existing
+
+
+def _base_provenance(job, config):
+    return {
+        **job.correction_provenance,
+        "job_sha256": job.digest,
+        "user_note": job.user_note,
+        "source_fingerprint_sha256": job.source_fingerprint_sha256,
+        "correction_state": config.corrections.to_dict(),
+        "cross_voxel_covariance": "marginal variances only",
+        "native_build": job.build_metadata,
+    }
+
+
+def _merge_provenance(target, source):
+    for key, value in source.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _merge_provenance(target[key], value)
+        else:
+            target[key] = value
+
+
+def run_cluster_map_task(
+    path,
+    task_index,
+    *,
+    cpus=1,
+    memory_bytes=1024**3,
+    progress=None,
+):
+    """Execute one deterministic cluster map-array task.
+
+    The task writes only its immutable map manifest and Parquet partitions;
+    it never mutates the shared reconstruction job JSON.
+    """
+    path = Path(path).absolute()
+    job = read_job(path)
+    verify_job(job)
+    scan = job.scan
+    config = job.config_data
+    assets = _load_assets(job)
+    spec = job.internal_spec()
+    ranges, tiles = _execution_layout(job, scan, config)
+    task_index = int(task_index)
+    if task_index < 0 or task_index >= len(ranges):
+        raise IndexError(
+            f"Map task index {task_index} is outside 0..{len(ranges) - 1}"
+        )
+    frame_range = ranges[task_index]
+    cpus = max(1, int(cpus))
+    memory_bytes = max(1024**2, int(memory_bytes))
+    verification_cache = set()
+    existing = _discover_map_manifests(
+        job,
+        ranges,
+        tiles,
+        spec,
+        verification_cache=verification_cache,
+        only_ranges=(frame_range,),
+    )
+    if tuple(frame_range) in existing:
+        return {
+            "status": "complete",
+            "reused": True,
+            "task_index": task_index,
+            "frame_range": list(frame_range),
+            "manifest": existing[tuple(frame_range)],
+        }
+    bounds = scan.exposure_angle_bounds(
+        config, fallback=job.angle_fallback
+    )
+    task_bounds = bounds[frame_range[0] : frame_range[1]]
+    stationary = bool(
+        np.array_equal(task_bounds[:, 0], task_bounds[:, 1])
+    )
+    execution_spec = _ReconstructionSpec.from_dict(
+        {
+            **spec.to_dict(),
+            "threads": cpus,
+            "memory_budget_bytes": memory_bytes,
+        }
+    )
+    _, kernel_threads, _, accumulation_budget = _frame_parallelism(
+        execution_spec,
+        tiles,
+        memory_bytes,
+        stationary=stationary,
+        frames_per_task=frame_range[1] - frame_range[0],
+        threads_per_image=cpus,
+        accumulation_budget_bytes=job.accumulation_budget_bytes,
+    )
+    provenance = _base_provenance(job, config)
+    correct = _correction_pipeline(config, scan, assets, provenance)
+    ray_cache = {}
+    for tile in tiles:
+        rays = _detector_corner_rays(config.detector, tile)
+        ray_cache[tuple(tile)] = (rays, _xxh3_128(rays))
+
+    completed = 0
+
+    def image_progress(frame_index, retained_bytes, segments):
+        nonlocal completed
+        completed += 1
+        if progress is not None:
+            progress(
+                completed,
+                frame_range[1] - frame_range[0],
+                (
+                    f"Cluster map task {task_index}; frame {frame_index}; "
+                    f"{retained_bytes / 1024**2:.0f} MiB retained; "
+                    f"{segments} segments flushed"
+                ),
+            )
+
+    manifest = _map_frame_range(
+        spec,
+        scan,
+        config.detector,
+        config.ub_calculator,
+        frame_range,
+        tiles,
+        task_bounds,
+        Path(job.scratch_path) / "map",
+        correction_pipeline=correct,
+        job_digest=job.digest,
+        corner_rays={
+            tile: values[0] for tile, values in ray_cache.items()
+        },
+        corner_rays_fingerprints={
+            tile: values[1] for tile, values in ray_cache.items()
+        },
+        verification_cache=verification_cache,
+        kernel_threads=kernel_threads,
+        kernel_memory_budget_bytes=memory_bytes,
+        accumulation_budget_bytes=accumulation_budget,
+        image_progress=image_progress,
+    )
+    manifest.metadata["correction_provenance"] = provenance
+    manifest_root = Path(job.scratch_path) / "manifests"
+    manifest_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = manifest_root / f"{manifest.task_id}.json"
+    _write_manifest(manifest, manifest_path)
+    return {
+        "status": "complete",
+        "reused": False,
+        "task_index": task_index,
+        "frame_range": list(frame_range),
+        "manifest": str(manifest_path),
+        "partitions": len(manifest.partitions),
+    }
+
+
+def run_cluster_finalize(
+    path,
+    *,
+    cpus=1,
+    memory_bytes=1024**3,
+    progress=None,
+):
+    """Verify all cluster map tasks, then reduce and finalize their job."""
+    path = Path(path).absolute()
+    job = read_job(path)
+    if job.status == "complete":
+        return job_status(path)
+    verify_job(job)
+    scan = job.scan
+    config = job.config_data
+    spec = job.internal_spec()
+    ranges, tiles = _execution_layout(job, scan, config)
+    verification_cache = set()
+    existing = _discover_map_manifests(
+        job,
+        ranges,
+        tiles,
+        spec,
+        verification_cache=verification_cache,
+    )
+    missing = [
+        index
+        for index, frame_range in enumerate(ranges)
+        if tuple(frame_range) not in existing
+    ]
+    if missing:
+        preview = ", ".join(map(str, missing[:20]))
+        suffix = "..." if len(missing) > 20 else ""
+        raise RuntimeError(
+            f"Cannot finalize: {len(missing)} map array tasks are missing "
+            f"({preview}{suffix})"
+        )
+    job.map_manifests = [
+        existing[tuple(frame_range)] for frame_range in ranges
+    ]
+    provenance = _base_provenance(job, config)
+    for manifest_path in job.map_manifests:
+        manifest = _read_manifest(manifest_path)
+        _merge_provenance(
+            provenance,
+            manifest.metadata.get("correction_provenance", {}),
+        )
+    job.correction_provenance = provenance
+    write_job(job, path)
+    return run_job(
+        path,
+        progress=progress,
+        execution_threads=max(1, int(cpus)),
+        execution_memory_bytes=max(1024**2, int(memory_bytes)),
+    )
+
+
+def run_job(
+    path,
+    *,
+    progress=None,
+    execution_threads=None,
+    execution_memory_bytes=None,
+):
     """Run or resume one prepared reconstruction job."""
     path = Path(path).absolute()
     job = read_job(path)
@@ -1280,32 +1559,15 @@ def run_job(path, *, progress=None):
     manifest_root = Path(job.scratch_path) / "manifests"
     manifest_root.mkdir(parents=True, exist_ok=True)
     verification_cache = set()
-    existing = {}
-    for manifest_path in job.map_manifests:
-        try:
-            manifest = _read_manifest(manifest_path)
-            key = tuple(manifest.frame_range)
-            if _valid_map_manifest(
-                manifest_path,
-                key,
-                tiles,
-                spec_hash=spec.digest,
-                job_digest=job.digest,
-                verification_cache=verification_cache,
-            ):
-                existing[key] = manifest_path
-        except (OSError, ValueError, RuntimeError):
-            continue
+    existing = _discover_map_manifests(
+        job,
+        ranges,
+        tiles,
+        spec,
+        verification_cache=verification_cache,
+    )
     job.map_manifests = list(existing.values())
-    provenance = {
-        **job.correction_provenance,
-        "job_sha256": job.digest,
-        "user_note": job.user_note,
-        "source_fingerprint_sha256": job.source_fingerprint_sha256,
-        "correction_state": config.corrections.to_dict(),
-        "cross_voxel_covariance": "marginal variances only",
-        "native_build": job.build_metadata,
-    }
+    provenance = _base_provenance(job, config)
     correct = _correction_pipeline(config, scan, assets, provenance)
     total_tasks = len(ranges)
     completed_tasks = sum(
@@ -1328,7 +1590,14 @@ def run_job(path, *, progress=None):
             ),
         )
     effective_memory = (
-        job.memory_override_bytes or job.runtime_memory_bytes
+        max(1024**2, int(execution_memory_bytes))
+        if execution_memory_bytes is not None
+        else job.memory_override_bytes or job.runtime_memory_bytes
+    )
+    reducer_threads = (
+        max(1, int(execution_threads))
+        if execution_threads is not None
+        else spec.threads
     )
     ray_cache_bytes = sum(
         (tile[1] - tile[0] + 1)
@@ -1494,6 +1763,7 @@ def run_job(path, *, progress=None):
             # This bounded worker wave has finished, so correction provenance
             # is stable while the coordinator updates resumable state.
             for _frame_range, manifest in mapped_frames:
+                manifest.metadata["correction_provenance"] = provenance
                 manifest_path = (
                     manifest_root / f"{manifest.task_id}.json"
                 )
@@ -1533,7 +1803,7 @@ def run_job(path, *, progress=None):
             Path(job.scratch_path) / "reduced",
             verification_cache=verification_cache,
             memory_budget_bytes=effective_memory,
-            workers=spec.threads,
+            workers=reducer_threads,
             checkpoint_root=manifest_root,
             progress=(
                 None

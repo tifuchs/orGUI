@@ -42,6 +42,7 @@ def test_no_scan_actions_are_reported_without_raising(tmp_path, caplog):
     dialog.preview()
     dialog.prepare()
     dialog.run_local()
+    dialog.create_cluster_scripts()
     dialog.resume()
     dialog.refresh_live_state()
 
@@ -49,7 +50,7 @@ def test_no_scan_actions_are_reported_without_raising(tmp_path, caplog):
     records = [
         record for record in caplog.records if hasattr(record, "show_dialog")
     ]
-    assert len(records) >= 5
+    assert len(records) >= 6
     assert all(record.show_dialog is True for record in records)
     assert all(record.dialog_level == logging.WARNING for record in records)
 
@@ -191,6 +192,11 @@ def test_settings_are_grouped_and_have_tooltips(tmp_path):
         "Parallel execution and memory",
         "Advanced settings",
         "Detected execution layout",
+        "Scheduler",
+        "Python environment",
+        "Mapping array",
+        "Reduction and finalization",
+        "Scheduler-specific settings",
         "Job descriptor",
         "Storage",
     } <= group_titles
@@ -234,6 +240,24 @@ def test_settings_are_grouped_and_have_tooltips(tmp_path):
         dialog.work_block[0],
         dialog.partition_span[0],
         dialog.performance_summary,
+        dialog.cluster_scheduler,
+        dialog.cluster_job_name,
+        dialog.cluster_script_directory,
+        dialog.cluster_working_directory,
+        dialog.cluster_python,
+        dialog.cluster_environment,
+        dialog.cluster_array_cpus,
+        dialog.cluster_array_memory,
+        dialog.cluster_array_walltime,
+        dialog.cluster_array_concurrency,
+        dialog.cluster_summary,
+        dialog.cluster_reduce_cpus,
+        dialog.cluster_reduce_memory,
+        dialog.cluster_reduce_walltime,
+        dialog.cluster_sge_pe,
+        dialog.cluster_sge_memory,
+        dialog.cluster_array_directives,
+        dialog.cluster_reduce_directives,
         dialog.job_path,
         dialog.scratch_path,
         dialog.output_path,
@@ -242,6 +266,30 @@ def test_settings_are_grouped_and_have_tooltips(tmp_path):
     assert all(
         dialog.grid_table.horizontalHeaderItem(column).toolTip()
         for column in range(dialog.grid_table.columnCount())
+    )
+
+    dialog.close()
+    dialog._test_parent.close()
+
+
+def test_cluster_tab_uses_sge_defaults_and_separate_reduce_resources(tmp_path):
+    """Cluster settings default to SGE and preserve independent resources."""
+    dialog = _dialog(tmp_path)
+
+    dialog.cluster_array_cpus.setValue(4)
+    dialog.cluster_array_memory.setValue(16)
+    dialog.cluster_reduce_cpus.setValue(32)
+    dialog.cluster_reduce_memory.setValue(128)
+    settings = dialog._cluster_settings()
+
+    assert settings.scheduler == "sge"
+    assert settings.array_cpus == 4
+    assert settings.array_memory_gib == 16
+    assert settings.reduce_cpus == 32
+    assert settings.reduce_memory_gib == 128
+    assert any(
+        dialog.tabs.tabText(index) == "Cluster"
+        for index in range(dialog.tabs.count())
     )
 
     dialog.close()

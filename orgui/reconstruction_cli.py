@@ -7,10 +7,17 @@ import json
 import sys
 import time
 
-from .reconstruction_job import job_status, run_job
+from .reconstruction_cluster import generate_cluster_scripts
+from .reconstruction_job import (
+    job_status,
+    read_job,
+    run_cluster_finalize,
+    run_cluster_map_task,
+    run_job,
+)
 
 
-def _run(arguments):
+def _progress_operation(operation, *args, **kwargs):
     last_report = 0.0
 
     def update(value, maximum, message):
@@ -29,7 +36,40 @@ def _run(arguments):
             )
             last_report = now
 
-    result = run_job(arguments.job, progress=update)
+    result = operation(*args, progress=update, **kwargs)
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def _run(arguments):
+    _progress_operation(run_job, arguments.job)
+
+
+def _cluster_map(arguments):
+    _progress_operation(
+        run_cluster_map_task,
+        arguments.job,
+        arguments.task_index,
+        cpus=arguments.cpus,
+        memory_bytes=int(arguments.memory_gib * 1024**3),
+    )
+
+
+def _cluster_finalize(arguments):
+    _progress_operation(
+        run_cluster_finalize,
+        arguments.job,
+        cpus=arguments.cpus,
+        memory_bytes=int(arguments.memory_gib * 1024**3),
+    )
+
+
+def _cluster_scripts(arguments):
+    job = read_job(arguments.job)
+    result = generate_cluster_scripts(
+        arguments.job,
+        job,
+        output_directory=arguments.output_directory,
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
@@ -54,6 +94,30 @@ def build_parser(prog=None):
     status = commands.add_parser("status", help="Inspect a prepared job")
     status.add_argument("job")
     status.set_defaults(handler=_status)
+    cluster_map = commands.add_parser(
+        "cluster-map",
+        help="Execute one prepared map-array task",
+    )
+    cluster_map.add_argument("job")
+    cluster_map.add_argument("--task-index", type=int, required=True)
+    cluster_map.add_argument("--cpus", type=int, required=True)
+    cluster_map.add_argument("--memory-gib", type=float, required=True)
+    cluster_map.set_defaults(handler=_cluster_map)
+    cluster_finalize = commands.add_parser(
+        "cluster-finalize",
+        help="Reduce and finalize completed cluster map tasks",
+    )
+    cluster_finalize.add_argument("job")
+    cluster_finalize.add_argument("--cpus", type=int, required=True)
+    cluster_finalize.add_argument("--memory-gib", type=float, required=True)
+    cluster_finalize.set_defaults(handler=_cluster_finalize)
+    scripts = commands.add_parser(
+        "cluster-scripts",
+        help="Generate scheduler scripts from a prepared job",
+    )
+    scripts.add_argument("job")
+    scripts.add_argument("--output-directory")
+    scripts.set_defaults(handler=_cluster_scripts)
     return parser
 
 
