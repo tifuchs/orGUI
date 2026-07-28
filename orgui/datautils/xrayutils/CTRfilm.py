@@ -487,6 +487,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         self.below_loc = 0.0
         self.below_H = 0.0
         self.below_layer = -1.0
+        self._coherence_displacement = 0.0
         self._initialize_layer_stacking(kwargs)
 
     def set_ucs(self, uc_top, uc_bottom, **kwargs):
@@ -636,14 +637,20 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         """Return the translated film-side boundary in Angstrom.
 
         The statistical boundary and lower bulk remain at
-        :attr:`loc_absolute`. A Film uses this translated location as the
-        origin of its requested total width, while
+        :attr:`loc_absolute`. The coherent strain displacement accumulated
+        upward from the fixed bulk and the explicit film offset translate the
+        film-side boundary. A Film uses this location as the origin of its
+        requested total width, while
         :attr:`stacking_height_absolute` supplies the physical support it must
         not duplicate.
         """
         if np.any(self._basis_created != self.basis):
             self.createInterfaceCells()
-        return self.loc_absolute + self.basis[3] * self.uc_bottom.a[2]
+        return (
+            self.loc_absolute
+            + self._coherence_displacement
+            + self.basis[3] * self.uc_bottom.a[2]
+        )
 
     @property
     def layer_state(self):
@@ -782,11 +789,6 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             uc_no_loc = int(np.floor(loc_rescaled)) // n_layers
             layer_no_loc = int(np.floor(loc_rescaled)) % n_layers
             loc_remainder = (loc_rescaled % n_layers) % 1
-            coherent_loc_mat = coherent_top[layer_no_loc][uc_no_loc]
-            coherent_loc = (
-                coherent_loc_mat[2, 3]
-                + loc_remainder * coherent_loc_mat[2, 2]
-            ) * a3_top
             ideal_top_loc_mat = ideal_top[layer_no_loc][uc_no_loc]
             ideal_top_loc = (
                 ideal_top_loc_mat[2, 3]
@@ -799,11 +801,41 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             ) * a3_bottom
 
             top_offset = offset * a3_bottom
+            # The lower support boundary is the physical anchor shared by the
+            # coherent field and the unstrained semi-infinite bulk. Translate
+            # both using the ideal lower-lattice boundary location. The
+            # coherent statistical boundary is then free to move by the
+            # displacement accumulated through the strain field. The
+            # displacement at the upper support boundary is passed to every
+            # subsequently stacked component.
+            upper_layer_id = self.layer_order[-1]
+            upper_layer_space = np.diff(
+                self.layerpos,
+                append=self.layerpos[0] + 1,
+            )[-1]
+            upper_boundary = (
+                self.uc_top.layerpos[upper_layer_id] + upper_layer_space
+            )
+            coherent_upper_mat = coherent_top[-1][-1]
+            ideal_upper_mat = ideal_top[-1][-1]
+            coherent_upper = (
+                coherent_upper_mat[2, 3]
+                - ideal_bottom_loc / a3_top
+                + coherent_upper_mat[2, 2] * upper_boundary
+            ) * a3_top
+            ideal_upper = (
+                ideal_upper_mat[2, 3]
+                - ideal_top_loc / a3_top
+                + ideal_upper_mat[2, 2] * upper_boundary
+            ) * a3_top
+            self._coherence_displacement = coherence * (
+                coherent_upper - ideal_upper
+            )
             for i, (uc_t, uc_b) in enumerate(zip(self.top_layers, self.bottom_layers)):
                 for coherent_mat, ideal_mat in zip(coherent_top[i], ideal_top[i]):
                     coherent_mat = np.copy(coherent_mat)
                     ideal_mat = np.copy(ideal_mat)
-                    coherent_mat[2, 3] -= coherent_loc / a3_top
+                    coherent_mat[2, 3] -= ideal_bottom_loc / a3_top
                     ideal_mat[2, 3] -= ideal_top_loc / a3_top
                     interpolated = ideal_mat + coherence * (
                         coherent_mat - ideal_mat
@@ -816,7 +848,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 ):
                     coherent_mat = np.copy(coherent_mat)
                     ideal_mat = np.copy(ideal_mat)
-                    coherent_mat[2, 3] -= coherent_loc / a3_bottom
+                    coherent_mat[2, 3] -= ideal_bottom_loc / a3_bottom
                     ideal_mat[2, 3] -= ideal_bottom_loc / a3_bottom
                     interpolated = ideal_mat + coherence * (
                         coherent_mat - ideal_mat

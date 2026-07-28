@@ -227,11 +227,18 @@ position is
    z(C) = z_0 + C (z_1 - z_0), \qquad 0 \leq C \leq 1.
 
 Thus ``C = 0`` leaves both materials unstrained, while ``C = 1`` gives the
-fully coherent interface.  The ``offset`` parameter translates only the upper
-material and all subsequently stacked components.  It is expressed in
-fractional lower-bulk :math:`c` coordinates, so its physical displacement is
+fully coherent interface.  The coherent field is anchored to the unstrained
+bulk at the lower edge of the represented statistical support.  Its accumulated
+displacement is propagated upward to the upper material and subsequently
+stacked components; it is not removed by forcing the strained and unstrained
+lattices to coincide again at the nominal boundary.
+
+The ``offset`` parameter adds a translation to only the upper material and all
+subsequently stacked components.  It is expressed in fractional lower-bulk
+:math:`c` coordinates, so its physical displacement is
 ``offset * uc_bottom.a[2]`` Angstrom.  Positive offsets point toward increasing
-``z``.  The statistical boundary and the semi-infinite bulk do not move.
+``z``.  The nominal statistical boundary and the semi-infinite bulk do not
+move.
 
 Crystal composition
 -------------------

@@ -1829,7 +1829,8 @@ class TestLayerStacking(unittest.TestCase):
             interface.stacking_height_absolute, interface.height_absolute
         )
         self.assertAlmostEqual(
-            interface.stacking_loc_absolute, interface.loc_absolute
+            interface.stacking_loc_absolute,
+            interface.loc_absolute + interface._coherence_displacement,
         )
         self.assertAlmostEqual(film.pos_absolute, interface.height_absolute)
         self.assertGreater(film.pos_absolute, interface.loc_absolute)
@@ -1971,6 +1972,56 @@ class TestLayerStacking(unittest.TestCase):
             self.assertTrue(
                 np.any(np.asarray(layer.coherentDomainOccupancy[split:]) < 0.0)
             )
+
+    def test_epitaxy_coherent_field_is_anchored_to_deep_bulk(self):
+        top, bottom = self.make_epitaxy_cells()
+        width = 30.0 / bottom.a[2]
+        interface = CTRfilm.EpitaxyInterface(
+            top,
+            bottom,
+            profile=SkellamProfile(
+                width,
+                tail_probability=1e-4,
+            ),
+        )
+        interface.basis[:] = [width, 0.0, 1.0, 0.0]
+        interface.createInterfaceCells()
+
+        lower_layer = interface.bottom_layers[0]
+        split = len(lower_layer.coherentDomainMatrix) // 2
+        addition = lower_layer.coherentDomainMatrix[0]
+        fixed_bulk = lower_layer.coherentDomainMatrix[split]
+        layer_id = interface.layer_order[0]
+        layer_origin = interface.uc_bottom.layerpos[layer_id]
+        addition_origin = (
+            addition[2, 2] * layer_origin + addition[2, 3]
+        ) * lower_layer.a[2]
+        fixed_origin = (
+            fixed_bulk[2, 2] * layer_origin + fixed_bulk[2, 3]
+        ) * lower_layer.a[2]
+
+        self.assertAlmostEqual(addition_origin, fixed_origin)
+        self.assertNotEqual(interface._coherence_displacement, 0.0)
+        self.assertAlmostEqual(
+            interface.stacking_loc_absolute,
+            interface.loc_absolute + interface._coherence_displacement,
+        )
+
+        top_zero, bottom_zero = self.make_epitaxy_cells()
+        incoherent = CTRfilm.EpitaxyInterface(
+            top_zero,
+            bottom_zero,
+            profile=SkellamProfile(
+                width,
+                tail_probability=1e-4,
+            ),
+        )
+        incoherent.basis[:] = [width, 0.0, 0.0, 0.0]
+        incoherent.createInterfaceCells()
+        self.assertAlmostEqual(
+            interface._coherence_displacement,
+            interface.height_absolute - incoherent.height_absolute,
+        )
 
     def test_epitaxy_coherence_interpolates_generated_positions(self):
         incoherent = self.make_epitaxy_interface(coherence=0.0)
@@ -2142,27 +2193,34 @@ class TestLayerStacking(unittest.TestCase):
         # code path changed behavior, not necessarily that it is now wrong.
         np.testing.assert_allclose(
             structure_factor,
-            [10.959877214261 + 24.053170411198j, 0.769317301749 - 1.23830767953j],
+            [
+                12.235092835903 + 23.933759897760j,
+                -1.787823797289 - 0.028488983072j,
+            ],
             rtol=1e-8,
         )
         np.testing.assert_allclose(
             density[[0, 100, 200, 300, 400]],
             [
                 0.0,
-                -1.130402540575 - 0.006963145549j,
-                0.6212434003285 + 0.002480857561j,
-                1.108345606774e-04,
+                -3.115325591995e-03 - 1.894807083594e-05j,
+                4.311764632911e-01 + 2.127681623261e-07j,
+                1.019686887022e-05,
                 0.0,
             ],
             atol=1e-9,
         )
-        np.testing.assert_allclose(np.sum(density), 40.00674724814 + 0.031011485600j, rtol=1e-8)
+        np.testing.assert_allclose(
+            np.sum(density),
+            40.017177763177 + 0.032567796562j,
+            rtol=1e-8,
+        )
         mid_row = optical_profile.shape[0] // 2
         np.testing.assert_allclose(
             optical_profile[[0, mid_row, -1]],
             [
                 [-12.0, -9.65554085169e-10, -8.98126154061e-13],
-                [0.6, 2.222695401541e-06, 2.067477009624e-09],
+                [-0.441200041632, 3.042840635292e-06, 2.830348707724e-09],
                 [10.0, 0.0, 0.0],
             ],
             atol=1e-9,
@@ -2191,7 +2249,8 @@ class TestLegacyLayeredCTR(unittest.TestCase):
             interface.stacking_height_absolute, interface.height_absolute
         )
         self.assertAlmostEqual(
-            interface.stacking_loc_absolute, interface.loc_absolute
+            interface.stacking_loc_absolute,
+            interface.loc_absolute + interface._coherence_displacement,
         )
         self.assertIsInstance(interface.profile, SkellamProfile)
         self.assertNotIn("support_cursor", interface.toStr())
@@ -2200,11 +2259,12 @@ class TestLegacyLayeredCTR(unittest.TestCase):
         # fixture (Film + EpitaxyInterface + SkellamProfile). PRELIMINARY,
         # UNTESTED reference values: computed with this module's own
         # CTRcalc.SXRDCrystal.F() after the interfacial-strain fix in
-        # EpitaxyInterface (commit beee738) and the F_bulk lattice-sum
-        # denominator fix, but not independently verified against real data
-        # or an analytic result -- unlike test_simple_unitcell_bulk_structure_
-        # factor_matches_reference below, which does compare against real
-        # fit-derived intensities for the un-layered unit-cell + bulk case.
+        # EpitaxyInterface (commit beee738), the F_bulk lattice-sum
+        # denominator fix, and the deep-bulk strain-field anchoring fix, but
+        # not independently verified against real data or an analytic result
+        # -- unlike test_simple_unitcell_bulk_structure_factor_matches_
+        # reference below, which does compare against real fit-derived
+        # intensities for the un-layered unit-cell + bulk case.
         # These numbers disagree with the pre-existing CTRs_reference.dat
         # baseline used by the (deliberately still-failing)
         # test_legacy_xtal_reconstructs_reference_interface below; which of
@@ -2227,13 +2287,13 @@ class TestLegacyLayeredCTR(unittest.TestCase):
         expected = np.array(
             [
                 17238.5440045948,
-                7001.2889938137,
-                3852.1662569049,
-                2726.8273234247,
-                2175.489988698,
-                1855.6217274457,
-                1648.0075146735,
-                1501.0723678209,
+                7001.3340402313,
+                3852.2553000918,
+                2726.9468772925,
+                2175.6251991885,
+                1855.7582644482,
+                1648.1329478054,
+                1501.1768061163,
             ]
         )
         np.testing.assert_allclose(calculated, expected, rtol=2e-5, atol=2e-5)
