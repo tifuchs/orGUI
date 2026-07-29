@@ -1,0 +1,13 @@
+option(
+  'native_optimization',
+  type: 'boolean',
+  value: false,
+  description: 'Build C++ extensions with native CPU flags for local benchmarking'
+)
+
+option(
+  'static_xxhash',
+  type: 'boolean',
+  value: false,
+  description: 'Force the pinned static xxHash subproject instead of a system library'
+)

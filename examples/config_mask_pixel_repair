@@ -1,0 +1,63 @@
+[Machine]
+E = 77.0
+SDD = 0.78
+pixelsize = 172e-6
+sizex = 1475
+sizey = 1679
+cpx = 731.0
+cpy = 1587.856
+
+[Lattice]
+a1 = 2.7740
+a2 = 2.7740
+a3 = 6.7960
+alpha1 = 90.0
+alpha2 = 90.0
+alpha3 = 120.0
+refractionindex = 1.1415e-06
+
+[Diffractometer]
+azimuthal_reference = 90
+polarization_axis = 0
+polarization_factor = 1
+mu = 0.1
+chi = 0
+phi = 0
+
+[Settings]
+autoload = True
+compression = Raw
+
+[Mask]
+# Optional invalid/dead-pixel mask.
+# Path may be absolute or relative to this config file. Masks are loaded with
+# FabIO, so EDF, NumPy .npy, and other FabIO-readable 2D image formats are
+# supported. Nonzero/True pixels are invalid and excluded from ROI signal,
+# background, and correction counters unless pixel repair below explicitly
+# repairs a tiny signal-ROI defect.
+mask = masks/dead_pixels.edf
+
+[Mask.PixelRepair]
+# Optional conservative repair of tiny masked defects during ROI summing. This
+# requires the C++ ROI backend.
+#
+# Enable repair of eligible masked pixels in signal ROIs only. Repaired pixels
+# are not used for background ROI sums, fitted-background samples, or
+# background previews.
+enabled = True
+# Maximum connected masked defect size, in pixels, that may be repaired.
+max_component_pixels = 4
+# Maximum row span or column span, in pixels, that may be repaired.
+max_span = 3
+# Local search radius, in pixels, for valid interpolation neighbors.
+radius = 2
+# Minimum original-valid neighboring pixels required for interpolation.
+min_valid_neighbors = 6
+# If True, analytical pyFAI detector gaps are excluded from repair. When pyFAI
+# cannot return an analytical gap mask, or returns no full detector-gap
+# stripes, orGUI falls back to detector module-size metadata when available.
+use_pyfai_gaps = True
+# Fallback detector-gap width in pixels for the module-metadata path. This is
+# used only when module positions are known but the detector gap width is not;
+# it is not a mask dilation radius.
+gap_size_px = 6

@@ -1,4 +1,3 @@
-
 """ID31 beamline code.
 
 Used for this software with permission from Jakub Drnec
@@ -7,22 +6,24 @@ Used for this software with permission from Jakub Drnec
 
 import numpy as np
 
+
 class ID31DiffractLinTilt:
     """
     ID31DiffractLinTilt: transforms linear motors into tilt motor (angular)
 
     Some angular motors are mechanically moved through linear translations.
-    
+
     muoffset has to be set for each experiment since it is dependent on
     the diffractometer alignment!
-    
+
     Adapted version from the ID31 beamline code.
     """
+
     def __init__(self, *args, **kwargs):
         self.config = {}
-        self.config['a'] = 938
-        self.config['b'] = 400
-        self.config['muoffset'] = -0.06442416994811659
+        self.config["a"] = 938
+        self.config["b"] = 400
+        self.config["muoffset"] = -0.06442416994811659
 
     @property
     def a(self):
@@ -64,13 +65,13 @@ class ID31DiffractLinTilt:
         linear = bc - b
         return dict(linear=linear)
 
-    def linai_to_mu(self,linai):
-        positions = {'linear' : linai}
+    def linai_to_mu(self, linai):
+        positions = {"linear": linai}
         tilt = self.calc_from_real(positions)
         return tilt["tilt"] - self.muoffset
 
-    def mu_to_linai(self,mu):
-        ai = mu + self.muoffset #np.linspace(-1.0,1,11) + muoffset
-        tilts = {'tilt' : ai}
+    def mu_to_linai(self, mu):
+        ai = mu + self.muoffset  # np.linspace(-1.0,1,11) + muoffset
+        tilts = {"tilt": ai}
         pos = self.calc_to_real(tilts)
-        return pos['linear']
+        return pos["linear"]

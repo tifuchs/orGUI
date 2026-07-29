@@ -48,3 +48,37 @@ autoload = True
 # database compression (Multiple options are available: For example: Raw, Blosc-lz4-Shuffle-5, LZ4, GZip)
 # see a selected list here: https://github.com/tifuchs/orGUI/issues/16
 compression = Raw
+
+#[Mask]
+## Optional invalid/dead-pixel mask.
+## Path may be absolute or relative to this config file. Masks are loaded with
+## FabIO, so EDF, NumPy .npy, and other FabIO-readable 2D image formats are
+## supported. Nonzero/True pixels are invalid and excluded from ROI signal,
+## background, and correction counters unless pixel repair below explicitly
+## repairs a tiny signal-ROI defect.
+#mask = path/to/mask.edf
+
+#[Mask.PixelRepair]
+## Optional conservative repair of tiny masked defects during ROI summing. This
+## requires the C++ ROI backend. Missing section or enabled=False disables
+## repair.
+## Enable repair of eligible masked pixels in signal ROIs only. Repaired pixels
+## are not used for background ROI sums, fitted-background samples, or
+## background previews.
+#enabled = False
+## Maximum connected masked defect size, in pixels, that may be repaired.
+#max_component_pixels = 4
+## Maximum row span or column span, in pixels, that may be repaired.
+#max_span = 3
+## Local search radius, in pixels, for valid interpolation neighbors.
+#radius = 2
+## Minimum original-valid neighboring pixels required for interpolation.
+#min_valid_neighbors = 6
+## If True, analytical pyFAI detector gaps are excluded from repair. When pyFAI
+## cannot return an analytical gap mask, or returns no full detector-gap
+## stripes, orGUI falls back to detector module-size metadata when available.
+#use_pyfai_gaps = True
+## Fallback detector-gap width in pixels for the module-metadata path. This is
+## used only when module positions are known but the detector gap width is not;
+## it is not a mask dilation radius.
+#gap_size_px = 6

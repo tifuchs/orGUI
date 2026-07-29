@@ -19,6 +19,11 @@ large 2D detectors.
    geometry
    ub_matrix
    image_integration
+   acceleration_backends
    entry_points
+   benchmarks/ctr_accel_backends
+   benchmarks/ctr_zdensity_accel
+   benchmarks/roi_sum_accel
+   api
    release_notes
    developer

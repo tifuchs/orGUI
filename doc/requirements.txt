@@ -1,4 +1,6 @@
 sphinx>=8
 furo
+nbsphinx
+ipykernel
 PySide6
 qtawesome
