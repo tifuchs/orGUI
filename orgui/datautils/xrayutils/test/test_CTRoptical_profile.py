@@ -68,6 +68,19 @@ class TestUnitCellOpticalProfile(unittest.TestCase):
         np.testing.assert_allclose(profile[1, 1], profile[0, 1] / 3.0)
         np.testing.assert_allclose(profile[1, 2], profile[0, 2] / 3.0)
 
+    def test_domain_normal_strain_preserves_areal_optical_content(self):
+        cell = unitcells.unitcell("Pt100")
+        cell.setEnergy(self.energy_eV)
+        unstrained = cell.optical_profile()
+        stretched = np.eye(3, 4)
+        stretched[2, 2] = 2.0
+        cell.coherentDomainMatrix = [stretched]
+        cell.coherentDomainOccupancy = [1.0]
+
+        profile = cell.optical_profile()
+
+        np.testing.assert_allclose(profile[:, 1:], unstrained[:, 1:] / 2.0)
+
     def test_film_and_crystal_combine_layer_profiles(self):
         bulk = unitcells.crystal("TiO2(100)").uc_bulk
         bulk.setEnergy(self.energy_eV)
@@ -106,6 +119,23 @@ class TestUnitCellOpticalProfile(unittest.TestCase):
         )
 
         np.testing.assert_allclose(combined, [[3.2728, 6.0, 8.0], [4.0, 6.0, 7.0]])
+
+    def test_combine_profiles_bounds_full_group_span(self):
+        combined = CTRoptics.combine_profiles(
+            np.array(
+                [
+                    [0.0, 1.0, 0.0],
+                    [0.5, 2.0, 0.0],
+                    [1.0, 4.0, 0.0],
+                ]
+            ),
+            z_tolerance=0.6,
+        )
+
+        np.testing.assert_allclose(
+            combined,
+            [[0.0, 3.0, 0.0], [1.0, 4.0, 0.0]],
+        )
 
     def test_structural_layers_are_added_to_continuous_samples(self):
         combined = CTRoptics.add_structural_to_sampled_profile(

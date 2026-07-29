@@ -162,7 +162,19 @@ def optical_profile(unit_cell, include_coherent_domains=True):
         ):
             domain_matrix = unit_cell.R_mat_inv @ matrix[:, :-1] @ unit_cell.R_mat
             domain_origin = domain_matrix @ origin_vector + matrix[:, -1]
-            contribution = float(occupancy) * optical_density
+            normal_stretch = abs(float(domain_matrix[2, 2]))
+            if not np.isfinite(normal_stretch) or normal_stretch <= 0.0:
+                raise ValueError(
+                    "Coherent-domain transforms must preserve a finite, "
+                    "nonzero surface-normal layer thickness."
+                )
+            # Domain transforms used by Film and EpitaxyInterface encode their
+            # physical out-of-plane strain in the transformed layer spacing.
+            # Preserve each layer's areal electron content when converting
+            # that spacing to a homogeneous volume density.
+            contribution = (
+                float(occupancy) * optical_density / normal_stretch
+            )
             profile[row] = [
                 domain_origin[2] * unit_cell.a[2],
                 contribution.real,
@@ -346,7 +358,12 @@ def combine_profiles(*profiles, z_tolerance=0.6):
     stacked = np.ascontiguousarray(np.concatenate(populated, axis=0), dtype=np.float64)
     order = np.argsort(stacked[:, 0], kind="stable")
     stacked = stacked[order]
-    group_starts = np.r_[0, np.flatnonzero(np.diff(stacked[:, 0]) > z_tolerance) + 1]
+    group_starts = [0]
+    for index in range(1, len(stacked)):
+        group_start = group_starts[-1]
+        if stacked[index, 0] - stacked[group_start, 0] > z_tolerance:
+            group_starts.append(index)
+    group_starts = np.asarray(group_starts, dtype=np.intp)
     group_stops = np.r_[group_starts[1:], len(stacked)]
     combined = np.empty((len(group_starts), 3), dtype=np.float64)
     for index, (start, stop) in enumerate(zip(group_starts, group_stops)):
