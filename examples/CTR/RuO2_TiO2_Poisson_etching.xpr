@@ -104,8 +104,8 @@ layer_behaviour: ignore
 # EpitaxyInterface TiO2toRuO2
 0001 occupancy = 1.00000
 type skellam
-Width/cells Skew/cells
-0.35000    0.00000
+Width/cells Skew/cells StrainCoupling Offset/bulk_frac
+0.35000    0.00000    1.00000    0.00000
 
 TopUnitCell RuO2interf
 return
