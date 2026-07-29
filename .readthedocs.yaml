@@ -4,6 +4,8 @@ build:
   os: ubuntu-24.04
   tools:
     python: "latest"
+  apt_packages:
+    - pandoc
   jobs:
     post_install:
       - python doc/check_rtd_imports.py

@@ -30,9 +30,7 @@ __email__ = "fuchs@physik.uni-kiel.de"
 
 
 import numpy as np
-import datetime
 import re
-sqrt3 = np.sqrt(3)
 import warnings
 import fabio
 import os
@@ -44,151 +42,150 @@ from silx.io import dictdump
 
 from ..scans import Scan
 
+sqrt3 = np.sqrt(3)
+
+
 # not in use!!!
 class P3_Image:
-    def __init__(self, filename,edf=False):
+    def __init__(self, filename, edf=False):
         if edf:
             image = fabio.open(filename)
-            #edf = EdfFile.EdfFile(filename, 'r')
-            #self.header = edf.GetHeader(0)
+            # edf = EdfFile.EdfFile(filename, 'r')
+            # self.header = edf.GetHeader(0)
             self.header = image.header
-            #self.header = edf.GetHeader(0)
+            # self.header = edf.GetHeader(0)
             self.motors = dict()
-            motor_mne = self.header['motor_mne'].split()
-            motor_pos = self.header['motor_pos'].split()
+            motor_mne = self.header["motor_mne"].split()
+            motor_pos = self.header["motor_pos"].split()
             for i in range(len(motor_mne)):
                 self.motors[motor_mne[i]] = float(motor_pos[i])
             self.counters = dict()
-            counter_mne = self.header['counter_mne'].split()
-            counter_pos = self.header['counter_pos'].split()
+            counter_mne = self.header["counter_mne"].split()
+            counter_pos = self.header["counter_pos"].split()
             for i in range(len(counter_mne)):
                 self.counters[counter_mne[i]] = float(counter_pos[i])
             self.img = image.data.astype(np.float64)
-            #self.img = np.array(edf.GetData(0), dtype=float)
+            # self.img = np.array(edf.GetData(0), dtype=float)
         else:
             try:
                 image = fabio.open(filename)
                 self.header = image.header
                 self.img = image.data.astype(np.float64)
             except Exception as e:
-                warnings.warn("Cannot open image, ok only during test run!!! %s" % e)
+                warnings.warn(f"Cannot open image, ok only during test run!!! {e}")
                 self.header = ""
-                #self.img = np.zeros((2880, 2880))
+                # self.img = np.zeros((2880, 2880))
 
-
-
-
-            self.motors = dict() # not available in cbf
-            self.counters = dict() # not available in cbf
-
-
+            self.motors = dict()  # not available in cbf
+            self.counters = dict()  # not available in cbf
 
 
 class PE_Image:
     def __init__(self, filename, dark=None):
-
         with fabio.open(filename) as img:
             self.img = img.data.astype(np.float64)
             self.header = img.header
-        self.motors = dict() # not jet available
-        self.counters = dict() # not jet available
+        self.motors = dict()  # not jet available
+        self.counters = dict()  # not jet available
         if dark is not None:
             self.img -= dark
             # crude repair of images
-            #if np.mean(self.img) < 0:
+            # if np.mean(self.img) < 0:
             #    self.img += 72.2
         self.img = np.fliplr(self.img.T)
 
+
 class H5Fastsweep(Scan):
     def __init__(self, hdffilepath_orNode=None, scanno=None):
-
-
-        #self.scanname = scanname
+        # self.scanname = scanname
         self.cameras = []
         data = None
 
         if hdffilepath_orNode is None:
             return
-        self.hdffilepath_orNode=hdffilepath_orNode
+        self.hdffilepath_orNode = hdffilepath_orNode
 
         if isinstance(hdffilepath_orNode, str):
             self.hdffilepath_orNode = os.path.abspath(hdffilepath_orNode)
-            filepath,filename = os.path.split(self.hdffilepath_orNode)
-            filename_noext,_ = os.path.splitext(filepath)
-            #filename_noext = filename.split('.')[0]
-            self.filename_base = filename_noext #filename_noext[:filename_noext.rfind('_')]
+            filepath, filename = os.path.split(self.hdffilepath_orNode)
+            filename_noext, _ = os.path.splitext(filepath)
+            # filename_noext = filename.split('.')[0]
+            self.filename_base = (
+                filename_noext  # filename_noext[:filename_noext.rfind('_')]
+            )
             with silx.io.open(self.hdffilepath_orNode) as f:
-                #print([d for d in f])
+                # print([d for d in f])
                 for d in f:
-                    scanno_s, subscanno = d.split('.')
+                    scanno_s, subscanno = d.split(".")
                     if int(scanno_s) == scanno:
                         break
                 else:
-                    raise OSError("Scan number %s not found in file" % scanno)
-                self.scanname = '.'.join((scanno_s,subscanno))
+                    raise OSError(f"Scan number {scanno} not found in file")
+                self.scanname = ".".join((scanno_s, subscanno))
 
-                data = dictdump.h5todict(f,self.scanname)
-
+                data = dictdump.h5todict(f, self.scanname)
 
         else:
             hdffilepath = hdffilepath_orNode.local_filename
-            filepath,filename = os.path.split(hdffilepath)
-            filename_noext,_ = os.path.splitext(filepath)
+            filepath, filename = os.path.split(hdffilepath)
+            filename_noext, _ = os.path.splitext(filepath)
             self.filename_base = filename_noext
 
             f = hdffilepath_orNode.file
             for d in f:
-                scanno_s, subscanno = d.split('.')
+                scanno_s, subscanno = d.split(".")
                 if int(scanno_s) == scanno:
                     break
             else:
-                raise OSError("Scan number %s not found in file" % scanno)
-            self.scanname = '.'.join((scanno_s,subscanno))
+                raise OSError(f"Scan number {scanno} not found in file")
+            self.scanname = ".".join((scanno_s, subscanno))
 
-            data = dictdump.h5todict(f,self.scanname)
+            data = dictdump.h5todict(f, self.scanname)
 
-        self.th = data['measurement']['idrz1(encoder)']
+        self.th = data["measurement"]["idrz1(encoder)"]
         dth = np.mean(np.diff(self.th))
         self.th += dth
-        self.th = self.th[1:-1] #last image is missing, first image is dark file
+        self.th = self.th[1:-1]  # last image is missing, first image is dark file
 
-        self.th -= 180.
+        self.th -= 180.0
 
-        #meandt = np.mean(np.diff(datafile.data['time']))
-        self.exposure_time = np.full_like(self.th,1.) #np.diff(datafile.data['time'],append=(datafile.data['time'][-1] + meandt))
-        self.time = data['measurement']['time'][1:-1]
-        #self.th = -1*self.th  # orientation of th is inversed
-        self.omega = -1*self.th
+        # meandt = np.mean(np.diff(datafile.data['time']))
+        self.exposure_time = np.full_like(
+            self.th, 1.0
+        )  # np.diff(datafile.data['time'],append=(datafile.data['time'][-1] + meandt))
+        self.time = data["measurement"]["time"][1:-1]
+        # self.th = -1*self.th  # orientation of th is inversed
+        self.omega = -1 * self.th
 
-
-
-        #self.exposure_time = np.full_like(self.th,self.exposure_time)
+        # self.exposure_time = np.full_like(self.th,self.exposure_time)
         self.directFolder = True
-        self.imagenames = data['measurement']['filename']
-        #from IPython import embed; embed()
-        parsedscanname = re.compile('=\"([^\"]*)\"').findall(str(data['title']))
+        self.imagenames = data["measurement"]["filename"]
+        # from IPython import embed; embed()
+        parsedscanname = re.compile('="([^"]*)"').findall(str(data["title"]))
 
         directory = parsedscanname[1]
-        _,folder = os.path.split(directory)
-        imagefolder = os.path.join(os.path.split(filepath)[0],folder)
+        _, folder = os.path.split(directory)
+        imagefolder = os.path.join(os.path.split(filepath)[0], folder)
 
-        self.filenames = [os.path.join(imagefolder,imgname) for imgname in self.imagenames ]
+        self.filenames = [
+            os.path.join(imagefolder, imgname) for imgname in self.imagenames
+        ]
         with fabio.open(self.filenames[0]) as fiof:
             self.dark = fiof.data
 
         self.filenames = self.filenames[1:-1]
-        #self.set_image_folder(self.path+ "/" + detector )
+        # self.set_image_folder(self.path+ "/" + detector )
         self.nopoints = self.th.size
-        self.axisname = 'th'
-        self.axis = getattr(self,self.axisname)
+        self.axisname = "th"
+        self.axis = getattr(self, self.axisname)
 
     @property
     def auxillary_counters(self):
-        """Optional: provide a list of counters or motor names, that should 
+        """Optional: provide a list of counters or motor names, that should
         be copied into the orGUI data base for further processing.
-        
+
         e.g. return ['exposure_time', 'elapsed_time','time', 'srcur', 'mondio', 'epoch']
-        
+
         after each integration, orGUI will search for these counter names in the Scan
         object and copy the entries into the database.
         """
@@ -198,14 +195,14 @@ class H5Fastsweep(Scan):
     def parse_h5_node(cls, obj):
         ddict = dict()
         scanname = obj.basename
-        scanno, subscanno = scanname.split('.')
-        ddict['scanno'] = int(scanno)
-        ddict['name'] = obj.local_name
+        scanno, subscanno = scanname.split(".")
+        ddict["scanno"] = int(scanno)
+        ddict["name"] = obj.local_name
         return ddict
 
-    def set_th_offset(self,offset):
+    def set_th_offset(self, offset):
         self.th += offset
-        self.omega = -1*self.th
+        self.omega = -1 * self.th
 
     """
     def set_image_folder(self,path_to_folder):
@@ -222,24 +219,25 @@ class H5Fastsweep(Scan):
                 self.filenames.append("%s/%s/%s_%05.cbf" % (path_to_folder,\
                     self.filename_base,self.filename_base,self.first_imageno+i))
     """
-    def get_raw_P3_img(self,img):
-        return PE_Image(self.filenames[img],self.dark)
+
+    def get_raw_P3_img(self, img):
+        return PE_Image(self.filenames[img], self.dark)
 
     # returns single default image!
-    def get_raw_img(self,img):
-        return PE_Image(self.filenames[img],self.dark)
+    def get_raw_img(self, img):
+        return PE_Image(self.filenames[img], self.dark)
 
-    def get_P3_img(self,img):
-        imgdata = PE_Image(self.filenames[img],self.dark)
-        imgdata.counters['Time'] = self.time[img]
-        imgdata.counters['TrigTime'] = self.exposure_time[img]
-        imgdata.counters['th'] = self.th[img]
-        imgdata.counters['om'] = self.omega[img]
+    def get_P3_img(self, img):
+        imgdata = PE_Image(self.filenames[img], self.dark)
+        imgdata.counters["Time"] = self.time[img]
+        imgdata.counters["TrigTime"] = self.exposure_time[img]
+        imgdata.counters["th"] = self.th[img]
+        imgdata.counters["om"] = self.omega[img]
         if self.current is not None:
-            imgdata.counters['srcur'] = self.current[img]
+            imgdata.counters["srcur"] = self.current[img]
         return imgdata
 
-    def __getitem__(self,key):
+    def __getitem__(self, key):
         return self.get_P3_img(key)
 
     def __len__(self):
@@ -248,99 +246,101 @@ class H5Fastsweep(Scan):
 
 # only log file existing
 class XRRScan:
-    def __init__(self,logfilepath,img_prefix="xx",scanno=None):
-        self.path,fname = os.path.split(logfilepath)
-        #fnamewotsuff, suffix = fname.split('.')
-        #prefix, nostr = fnamewotsuff.split('_')
-        #if scanno is None:
+    def __init__(self, logfilepath, img_prefix="xx", scanno=None):
+        self.path, fname = os.path.split(logfilepath)
+        # fnamewotsuff, suffix = fname.split('.')
+        # prefix, nostr = fnamewotsuff.split('_')
+        # if scanno is None:
         #    scanno = int(nostr)
-        #fiofilecorrectedscanno = "%s/%s_%05i.%s" % (self.path,prefix,scanno,suffix)
-        #self.dtime = []
-        #self.current = [] # sr current or some other monitor is missing!
+        # fiofilecorrectedscanno = "%s/%s_%05i.%s" % (self.path,prefix,scanno,suffix)
+        # self.dtime = []
+        # self.current = [] # sr current or some other monitor is missing!
         with open(logfilepath) as logfile:
             line = logfile.readline()
             self.header = []
-            while line.startswith('#'): # in header
-                self.header.append(line.strip('#').strip())
+            while line.startswith("#"):  # in header
+                self.header.append(line.strip("#").strip())
                 lineno = logfile.tell()
                 line = logfile.readline()
             logfile.seek(lineno)
             data = np.genfromtxt(logfile)
-        self.mu = -1*data[:,1]
-        self.th = np.full_like( self.mu,float( self.header[4].split()[-1] ))
+        self.mu = -1 * data[:, 1]
+        self.th = np.full_like(self.mu, float(self.header[4].split()[-1]))
 
-
-        #datafile = FioFile(fiofilecorrectedscanno)
-        #self.th = datafile.data['idrz1']
+        # datafile = FioFile(fiofilecorrectedscanno)
+        # self.th = datafile.data['idrz1']
         # ********** temporary fix *************************************
         self.th -= 80.0
         # **************************************************************
-        #imgfilepath, img_foldername = os.path.split(img_prefix)
-        #imagefoldernumber = int(img_foldername.split('_')[0])
-        #voltagelog = np.genfromtxt("%s/%i_voltage.log" % (imgfilepath,imagefoldernumber))
+        # imgfilepath, img_foldername = os.path.split(img_prefix)
+        # imagefoldernumber = int(img_foldername.split('_')[0])
+        # voltagelog = np.genfromtxt("%s/%i_voltage.log" % (imgfilepath,imagefoldernumber))  # noqa: E501
         # file not saved !!! shit!
 
-        #meandt = np.mean(np.diff(datafile.data['time']))
+        # meandt = np.mean(np.diff(datafile.data['time']))
 
-        self.exposure_time = np.full_like( self.mu,0.5) # for all XRRs in Dec 2019 beamtime
+        self.exposure_time = np.full_like(
+            self.mu, 0.5
+        )  # for all XRRs in Dec 2019 beamtime
 
-        self.time = data[:,0]
-        #self.th = -1*self.th  # orientation of th is inversed
-        self.omega = -1*self.th
-        self.current = data[:,2]
+        self.time = data[:, 0]
+        # self.th = -1*self.th  # orientation of th is inversed
+        self.omega = -1 * self.th
+        self.current = data[:, 2]
 
-
-        #self.exposure_time = np.full_like(self.th,self.exposure_time)
+        # self.exposure_time = np.full_like(self.th,self.exposure_time)
         self.directFolder = True
-        #self.imagenames = datafile.data['filename']
+        # self.imagenames = datafile.data['filename']
 
-        self.imageprefix,fmiddle = img_prefix, "00001.tif"
-        self.imagesuffix = fmiddle.split('.')[-1]
+        self.imageprefix, fmiddle = img_prefix, "00001.tif"
+        self.imagesuffix = fmiddle.split(".")[-1]
         self.first_imageno = 1
 
-        #self.set_image_folder(self.path+ "/" + detector )
+        # self.set_image_folder(self.path+ "/" + detector )
         self.nopoints = self.th.size
 
         self.set_image_folder(img_prefix)
 
-    def set_th_offset(self,offset):
+    def set_th_offset(self, offset):
         self.th += offset
-        self.omega = -1*self.th
+        self.omega = -1 * self.th
 
-    def set_image_folder(self,path_to_folder):
-        #self.filenames = [None]*len(self.th)
+    def set_image_folder(self, path_to_folder):
+        # self.filenames = [None]*len(self.th)
         self.filenames = []
-        basefolder = path_to_folder.split('/')[-1]
-        self.imageprefix = basefolder.split('_')[0]
+        basefolder = path_to_folder.split("/")[-1]
+        self.imageprefix = basefolder.split("_")[0]
         if self.directFolder:
             for i in range(self.th.size):
-                self.filenames.append("%s/%s_%05i.%s" % (path_to_folder,\
-                    self.imageprefix,i+self.first_imageno,self.imagesuffix))
+                self.filenames.append(
+                    f"{path_to_folder}/{self.imageprefix}_{i + self.first_imageno:05d}.{self.imagesuffix}"  # noqa: E501
+                )
         else:
             for i in range(self.th.size):
-                self.filenames.append("%s/%s/%s_%05.cbf" % (path_to_folder,\
-                    self.filename_base,self.filename_base,self.first_imageno+i))
+                self.filenames.append(
+                    f"{path_to_folder}/{self.filename_base}/{self.filename_base}_{self.first_imageno + i:05d}.cbf"  # noqa: E501
+                )
 
-    def get_raw_P3_img(self,img):
+    def get_raw_P3_img(self, img):
         return P3_Image(self.filenames[img])
 
     # returns single default image!
-    def get_raw_img(self,img):
+    def get_raw_img(self, img):
         return P3_Image(self.filenames[img])
 
-    def get_P3_img(self,img):
+    def get_P3_img(self, img):
         imgdata = P3_Image(self.filenames[img])
-        imgdata.counters['Time'] = self.time[img]
-        imgdata.counters['TrigTime'] = self.exposure_time[img]
-        imgdata.counters['th'] = self.th[img]
-        imgdata.counters['om'] = self.omega[img]
+        imgdata.counters["Time"] = self.time[img]
+        imgdata.counters["TrigTime"] = self.exposure_time[img]
+        imgdata.counters["th"] = self.th[img]
+        imgdata.counters["om"] = self.omega[img]
         if self.current is not None:
-            imgdata.counters['srcur'] = self.current[img]
+            imgdata.counters["srcur"] = self.current[img]
         if self.mu is not None:
-            imgdata.counters['mu'] = self.mu[img]
+            imgdata.counters["mu"] = self.mu[img]
         return imgdata
 
-    def __getitem__(self,key):
+    def __getitem__(self, key):
         return self.get_P3_img(key)
 
     def __len__(self):
@@ -348,244 +348,246 @@ class XRRScan:
 
 
 class FioFastsweep:
-    def __init__(self,fiofilepath,img_prefix="xx",scanno=None):
-        self.path,fname = os.path.split(fiofilepath)
-        fnamewotsuff, suffix = fname.split('.')
-        prefix, nostr = fnamewotsuff.split('_')
+    def __init__(self, fiofilepath, img_prefix="xx", scanno=None):
+        self.path, fname = os.path.split(fiofilepath)
+        fnamewotsuff, suffix = fname.split(".")
+        prefix, nostr = fnamewotsuff.split("_")
         if scanno is None:
             scanno = int(nostr)
-        fiofilecorrectedscanno = "%s/%s_%05i.%s" % (self.path,prefix,scanno,suffix)
-        #self.dtime = []
-        #self.current = [] # sr current or some other monitor is missing!
+        fiofilecorrectedscanno = f"{self.path}/{prefix}_{scanno:05d}.{suffix}"
+        # self.dtime = []
+        # self.current = [] # sr current or some other monitor is missing!
         datafile = FioFile(fiofilecorrectedscanno)
-        self.th = datafile.data['idrz1']
+        self.th = datafile.data["idrz1"]
         # ********** temporary fix *************************************
         self.th -= 80.0
         # **************************************************************
-        #imgfilepath, img_foldername = os.path.split(img_prefix)
-        #imagefoldernumber = int(img_foldername.split('_')[0])
-        #voltagelog = np.genfromtxt("%s/%i_voltage.log" % (imgfilepath,imagefoldernumber))
+        # imgfilepath, img_foldername = os.path.split(img_prefix)
+        # imagefoldernumber = int(img_foldername.split('_')[0])
+        # voltagelog = np.genfromtxt("%s/%i_voltage.log" % (imgfilepath,imagefoldernumber))  # noqa: E501
         # file not saved !!! shit!
 
-        meandt = np.mean(np.diff(datafile.data['time']))
-        self.exposure_time = np.diff(datafile.data['time'],append=(datafile.data['time'][-1] + meandt))
-        self.time = datafile.data['time']
-        #self.th = -1*self.th  # orientation of th is inversed
-        self.omega = -1*self.th
+        meandt = np.mean(np.diff(datafile.data["time"]))
+        self.exposure_time = np.diff(
+            datafile.data["time"], append=(datafile.data["time"][-1] + meandt)
+        )
+        self.time = datafile.data["time"]
+        # self.th = -1*self.th  # orientation of th is inversed
+        self.omega = -1 * self.th
 
-
-
-        #self.exposure_time = np.full_like(self.th,self.exposure_time)
+        # self.exposure_time = np.full_like(self.th,self.exposure_time)
         self.directFolder = True
-        self.imagenames = datafile.data['filename']
+        self.imagenames = datafile.data["filename"]
         try:
-            self.imageprefix,fmiddle = self.imagenames[0].split('_')
-            self.imagesuffix = fmiddle.split('.')[-1]
+            self.imageprefix, fmiddle = self.imagenames[0].split("_")
+            self.imagesuffix = fmiddle.split(".")[-1]
             print(self.imageprefix)
-        except:
-            self.imageprefix,fmiddle = img_prefix, "00001.tif"
-            self.imagesuffix = fmiddle.split('.')[-1]
+        except Exception:
+            self.imageprefix, fmiddle = img_prefix, "00001.tif"
+            self.imagesuffix = fmiddle.split(".")[-1]
         self.first_imageno = 1
         self.current = None
-        #self.set_image_folder(self.path+ "/" + detector )
+        # self.set_image_folder(self.path+ "/" + detector )
         self.nopoints = self.th.size
 
-
-
-
-
-    def set_th_offset(self,offset):
+    def set_th_offset(self, offset):
         self.th += offset
-        self.omega = -1*self.th
+        self.omega = -1 * self.th
 
-
-    def set_image_folder(self,path_to_folder):
-        #self.filenames = [None]*len(self.th)
+    def set_image_folder(self, path_to_folder):
+        # self.filenames = [None]*len(self.th)
         self.filenames = []
-        basefolder = path_to_folder.split('/')[-1]
-        self.imageprefix = basefolder.split('_')[0]
+        basefolder = path_to_folder.split("/")[-1]
+        self.imageprefix = basefolder.split("_")[0]
         if self.directFolder:
             for i in range(self.th.size):
-                self.filenames.append("%s/%s_%05i.%s" % (path_to_folder,\
-                    self.imageprefix,i+self.first_imageno,self.imagesuffix))
+                self.filenames.append(
+                    f"{path_to_folder}/{self.imageprefix}_{i + self.first_imageno:05d}.{self.imagesuffix}"  # noqa: E501
+                )
         else:
             for i in range(self.th.size):
-                self.filenames.append("%s/%s/%s_%05.cbf" % (path_to_folder,\
-                    self.filename_base,self.filename_base,self.first_imageno+i))
+                self.filenames.append(
+                    f"{path_to_folder}/{self.filename_base}/{self.filename_base}_{self.first_imageno + i:05d}.cbf"  # noqa: E501
+                )
 
-    def get_raw_P3_img(self,img):
+    def get_raw_P3_img(self, img):
         return P3_Image(self.filenames[img])
 
     # returns single default image!
-    def get_raw_img(self,img):
+    def get_raw_img(self, img):
         return P3_Image(self.filenames[img])
 
-    def get_P3_img(self,img):
+    def get_P3_img(self, img):
         imgdata = P3_Image(self.filenames[img])
-        imgdata.counters['Time'] = self.time[img]
-        imgdata.counters['TrigTime'] = self.exposure_time[img]
-        imgdata.counters['th'] = self.th[img]
-        imgdata.counters['om'] = self.omega[img]
+        imgdata.counters["Time"] = self.time[img]
+        imgdata.counters["TrigTime"] = self.exposure_time[img]
+        imgdata.counters["th"] = self.th[img]
+        imgdata.counters["om"] = self.omega[img]
         if self.current is not None:
-            imgdata.counters['srcur'] = self.current[img]
+            imgdata.counters["srcur"] = self.current[img]
         return imgdata
 
-    def __getitem__(self,key):
+    def __getitem__(self, key):
         return self.get_P3_img(key)
 
     def __len__(self):
         return self.nopoints
+
 
 class FioFastsweep_original:
-    def __init__(self,fiofilepath,scanno=None):
-        self.path,fname = os.path.split(fiofilepath)
-        fnamewotsuff, suffix = fname.split('.')
-        prefix, nostr = fnamewotsuff.split('_')
+    def __init__(self, fiofilepath, scanno=None):
+        self.path, fname = os.path.split(fiofilepath)
+        fnamewotsuff, suffix = fname.split(".")
+        prefix, nostr = fnamewotsuff.split("_")
         if scanno is None:
             scanno = int(nostr)
-        fiofilecorrectedscanno = "%s/%s_%05i.%s" % (self.path,prefix,scanno,suffix)
-        #self.dtime = []
-        #self.current = [] # sr current or some other monitor is missing!
+        fiofilecorrectedscanno = f"{self.path}/{prefix}_{scanno:05d}.{suffix}"
+        # self.dtime = []
+        # self.current = [] # sr current or some other monitor is missing!
         datafile = FioFile(fiofilecorrectedscanno)
-        self.th = datafile.data['idrz1']
-        meandt = np.mean(np.diff(datafile.data['time']))
-        self.exposure_time = np.diff(datafile.data['time'],append=(datafile.data['time'][-1] + meandt))
-        self.time = datafile.data['time']
-        #self.th = -1*self.th  # orientation of th is inversed
-        self.omega = -1*self.th
-        #self.exposure_time = np.full_like(self.th,self.exposure_time)
+        self.th = datafile.data["idrz1"]
+        meandt = np.mean(np.diff(datafile.data["time"]))
+        self.exposure_time = np.diff(
+            datafile.data["time"], append=(datafile.data["time"][-1] + meandt)
+        )
+        self.time = datafile.data["time"]
+        # self.th = -1*self.th  # orientation of th is inversed
+        self.omega = -1 * self.th
+        # self.exposure_time = np.full_like(self.th,self.exposure_time)
         self.directFolder = True
-        self.imagenames = datafile.data['filename']
+        self.imagenames = datafile.data["filename"]
         print(self.imagenames)
-        self.imageprefix,fmiddle = self.imagenames[0].split('_')
-        self.imagesuffix = fmiddle.split('.')[-1]
+        self.imageprefix, fmiddle = self.imagenames[0].split("_")
+        self.imagesuffix = fmiddle.split(".")[-1]
         self.first_imageno = 1
         self.current = None
-        #self.set_image_folder(self.path+ "/" + detector )
+        # self.set_image_folder(self.path+ "/" + detector )
         self.nopoints = self.th.size
 
-
-
-    def set_th_offset(self,offset):
+    def set_th_offset(self, offset):
         self.th += offset
-        self.omega = -1*self.th
+        self.omega = -1 * self.th
 
-
-    def set_image_folder(self,path_to_folder):
-        #self.filenames = [None]*len(self.th)
+    def set_image_folder(self, path_to_folder):
+        # self.filenames = [None]*len(self.th)
         self.filenames = []
         if self.directFolder:
             for i in range(self.th.size):
-                self.filenames.append("%s/%s_%05i.%s" % (path_to_folder,\
-                    self.imageprefix,i+self.first_imageno,self.imagesuffix))
+                self.filenames.append(
+                    f"{path_to_folder}/{self.imageprefix}_{i + self.first_imageno:05d}.{self.imagesuffix}"  # noqa: E501
+                )
         else:
             for i in range(self.th.size):
-                self.filenames.append("%s/%s/%s_%05.cbf" % (path_to_folder,\
-                    self.filename_base,self.filename_base,self.first_imageno+i))
+                self.filenames.append(
+                    f"{path_to_folder}/{self.filename_base}/{self.filename_base}_{self.first_imageno + i:05d}.cbf"  # noqa: E501
+                )
 
-    def get_raw_P3_img(self,img):
+    def get_raw_P3_img(self, img):
         return P3_Image(self.filenames[img])
 
     # returns single default image!
-    def get_raw_img(self,img):
+    def get_raw_img(self, img):
         return P3_Image(self.filenames[img])
 
-    def get_P3_img(self,img):
+    def get_P3_img(self, img):
         imgdata = P3_Image(self.filenames[img])
-        imgdata.counters['Time'] = self.time[img]
-        imgdata.counters['TrigTime'] = self.exposure_time[img]
-        imgdata.counters['th'] = self.th[img]
-        imgdata.counters['om'] = self.omega[img]
+        imgdata.counters["Time"] = self.time[img]
+        imgdata.counters["TrigTime"] = self.exposure_time[img]
+        imgdata.counters["th"] = self.th[img]
+        imgdata.counters["om"] = self.omega[img]
         if self.current is not None:
-            imgdata.counters['srcur'] = self.current[img]
+            imgdata.counters["srcur"] = self.current[img]
         return imgdata
 
-    def __getitem__(self,key):
+    def __getitem__(self, key):
         return self.get_P3_img(key)
 
     def __len__(self):
         return self.nopoints
-
-
 
 
 class CrudeThScan:
-    def __init__(self,logfilepath,detector='PE1',darkfile=None):
-        self.path,_ = os.path.split(logfilepath)
+    def __init__(self, logfilepath, detector="PE1", darkfile=None):
+        self.path, _ = os.path.split(logfilepath)
         self.th = []
         self.dtime = []
         self.current = []
         self.dark = None
         with open(logfilepath) as f:
-            for l in f:
-                if l.startswith('#'):
-                    if 'Exposure time' in l:
+            for l in f:  # noqa: E741
+                if l.startswith("#"):
+                    if "Exposure time" in l:
                         lsp = l.split()
                         self.exposure_time = float(lsp[2][:-1])
                     continue
                 lspl = l.split()
                 self.th.append(float(lspl[0]))
                 self.current.append(float(lspl[2]))
-                self.dtime.append(datetime.strptime(lspl[3] + ' ' + lspl[4],"%Y-%m-%d %H:%M:%S.%f"))
+                self.dtime.append(
+                    datetime.strptime(lspl[3] + " " + lspl[4], "%Y-%m-%d %H:%M:%S.%f")
+                )
             self.th = np.array(self.th)
             self.current = np.array(self.current)
             self.time = []
             for t in self.dtime:
-                self.time.append(t.day*24*3600 + t.hour*3600 + t.minute*60 + t.second + t.microsecond*1e-6)
+                self.time.append(
+                    t.day * 24 * 3600
+                    + t.hour * 3600
+                    + t.minute * 60
+                    + t.second
+                    + t.microsecond * 1e-6
+                )
             self.time = np.array(self.time)
-        #self.th = -1*self.th  # orientation of th is inversed
-        self.omega = -1*self.th
-        self.exposure_time = np.full_like(self.th,self.exposure_time)
+        # self.th = -1*self.th  # orientation of th is inversed
+        self.omega = -1 * self.th
+        self.exposure_time = np.full_like(self.th, self.exposure_time)
         self.directFolder = True
-        self.filename_base = 'pe'
+        self.filename_base = "pe"
         self.first_imageno = 1
-        self.set_image_folder(self.path+ "/" + detector )
+        self.set_image_folder(self.path + "/" + detector)
         self.nopoints = self.th.size
 
         if darkfile is not None:
             with fabio.open(darkfile) as img:
                 self.dark = img.data.astype(np.float64)
 
-
-
-    def set_th_offset(self,offset):
+    def set_th_offset(self, offset):
         self.th += offset
-        self.omega = -1*self.th
+        self.omega = -1 * self.th
 
-
-    def set_image_folder(self,path_to_folder):
-        #self.filenames = [None]*len(self.th)
+    def set_image_folder(self, path_to_folder):
+        # self.filenames = [None]*len(self.th)
         self.filenames = []
         if self.directFolder:
             for i in range(self.th.size):
-                self.filenames.append("%s/%s%05i.tif.gz" % (path_to_folder,\
-                    self.filename_base,self.first_imageno+i))
+                self.filenames.append(
+                    f"{path_to_folder}/{self.filename_base}{self.first_imageno + i:05d}.tif.gz"  # noqa: E501
+                )
         else:
             for i in range(self.th.size):
-                self.filenames.append("%s/%s/%s_%05.cbf" % (path_to_folder,\
-                    self.filename_base,self.filename_base,self.first_imageno+i))
+                self.filenames.append(
+                    f"{path_to_folder}/{self.filename_base}/{self.filename_base}_{self.first_imageno + i:05d}.cbf"  # noqa: E501
+                )
 
-    def get_raw_PE_img(self,img):
-        return PE_Image(self.filenames[img],self.dark)
+    def get_raw_PE_img(self, img):
+        return PE_Image(self.filenames[img], self.dark)
 
     # returns single default image!
-    def get_raw_img(self,img):
-        return PE_Image(self.filenames[img],self.dark)
+    def get_raw_img(self, img):
+        return PE_Image(self.filenames[img], self.dark)
 
-    def get_PE_img(self,img):
-        imgdata = PE_Image(self.filenames[img],self.dark)
-        imgdata.counters['Time'] = self.time[img]
-        imgdata.counters['TrigTime'] = self.exposure_time[img]
-        imgdata.counters['th'] = self.th[img]
-        imgdata.counters['om'] = self.omega[img]
+    def get_PE_img(self, img):
+        imgdata = PE_Image(self.filenames[img], self.dark)
+        imgdata.counters["Time"] = self.time[img]
+        imgdata.counters["TrigTime"] = self.exposure_time[img]
+        imgdata.counters["th"] = self.th[img]
+        imgdata.counters["om"] = self.omega[img]
         if self.current is not None:
-            imgdata.counters['srcur'] = self.current[img]
+            imgdata.counters["srcur"] = self.current[img]
         return imgdata
 
-    def __getitem__(self,key):
+    def __getitem__(self, key):
         return self.get_PE_img(key)
 
     def __len__(self):
         return self.nopoints
-
-

@@ -22,7 +22,7 @@
 #
 # ###########################################################################*/
 __author__ = "Finn Schroeter"
-__credits__ = ['Finn Schroeter']
+__credits__ = ["Finn Schroeter"]
 __copyright__ = "Copyright 2024-2025 Finn Schroeter"
 __license__ = "MIT License"
 __version__ = "1.3.0"
@@ -34,14 +34,14 @@ import numpy as np
 
 from .scans import h5_Image
 
-class ImportImagesScan:
 
+class ImportImagesScan:
     def __init__(self, imgpath):
         self.filename = imgpath
 
         self.inpath = self.find_files()
 
-        if self.inpath == None:
+        if self.inpath is None:
             return
 
         with fabio.open(self.inpath[0] + self.inpath[1][0]) as fabf:
@@ -55,9 +55,9 @@ class ImportImagesScan:
         else:
             self.FramesLastFile = self.FramesPerFile
 
-        self.images = np.zeros((1,*self.shape))
+        self.images = np.zeros((1, *self.shape))
 
-        self.axisname = ''
+        self.axisname = ""
         self.axis = [0]
         self.th = 0
         self.omega = 0
@@ -65,40 +65,46 @@ class ImportImagesScan:
 
         self.title = "manually loaded scan"
 
-        self.nopoints = (len(self.inpath[1])-1)*self.FramesPerFile + self.FramesLastFile
-
+        self.nopoints = (
+            len(self.inpath[1]) - 1
+        ) * self.FramesPerFile + self.FramesLastFile
 
     def find_files(self):
-        re_str = re.compile(r'_\d+' + os.path.splitext(self.filename)[1]) #define search string. It matches a file source with syntax name_0000i.extension -> may need to be adapted
+        re_str = re.compile(
+            r"_\d+" + os.path.splitext(self.filename)[1]
+        )  # define search string. It matches a file source with syntax name_0000i.extension -> may need to be adapted  # noqa: E501
         selected_directory = os.path.dirname(os.path.abspath(self.filename))
-        filenames = ''.join(os.listdir(selected_directory))
+        filenames = "".join(os.listdir(selected_directory))
 
-        found_scanfiles = re_str.findall(filenames) #list of found filenames (suffix only)
-        #found_scannrs = [e[1:-4] for e in found_scanfiles] #only the scan numbers, eg. 00015
+        found_scanfiles = re_str.findall(
+            filenames
+        )  # list of found filenames (suffix only)
+        # found_scannrs = [e[1:-4] for e in found_scanfiles] #only the scan numbers, eg. 00015  # noqa: E501
         if re_str.findall(self.filename) == []:
-            print('Could not load images')
+            print("Could not load images")
             return
         else:
             suffix = re_str.findall(self.filename)[0]
             imagePrefix = self.filename.removesuffix(suffix)
             try:
-                found_scanfiles_no_suffix = [s.split('.')[0] for s in found_scanfiles]
-                found_scanfiles_numbers = [s.split('_')[1] for s in found_scanfiles_no_suffix]
+                found_scanfiles_no_suffix = [s.split(".")[0] for s in found_scanfiles]
+                found_scanfiles_numbers = [
+                    s.split("_")[1] for s in found_scanfiles_no_suffix
+                ]
                 numbers = np.array([int(s) for s in found_scanfiles_numbers])
                 sort_msk = np.argsort(numbers)
                 found_scanfiles = list(np.array(found_scanfiles)[sort_msk])
             except Exception as e:
-                print('Error while sorting images: Images may be not in order: %s' % e)
-            return [imagePrefix,found_scanfiles]
+                print(f"Error while sorting images: Images may be not in order: {e}")
+            return [imagePrefix, found_scanfiles]
 
-    def set_axis(self,axismin,axismax,axis,fixedAxisValue):
-        self.axis = np.linspace(axismin,axismax,self.nopoints)
+    def set_axis(self, axismin, axismax, axis, fixedAxisValue):
+        self.axis = np.linspace(axismin, axismax, self.nopoints)
         self.axisname = axis
-        if axis == 'th':
+        if axis == "th":
             self.th = self.axis
-            self.omega = -1*self.th
+            self.omega = -1 * self.th
             self.mu = fixedAxisValue
-
 
     def __len__(self):
         return self.nopoints

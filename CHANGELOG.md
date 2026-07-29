@@ -3,6 +3,101 @@
 This is the changelog for the software orGUI, written by Timo Fuchs
 
 
+## [Unreleased] (2026-07-19)
+
+Scientific and analysis additions:
+
+- Added interface-based optical ``delta``/``beta`` profiles and layered
+  wavefield calculations for s- and p-polarized X-rays. Scalar and
+  multidimensional angle inputs are supported, and specular reflectivity can
+  be calculated for s, p, or unpolarized incidence. This provides the optical
+  wavefield foundation for future distorted-wave Born approximation (DWBA)
+  calculations; the full distorted-wave scattering amplitude is not included
+  yet.
+- Added optional CTR intensity-resolution modeling with constant or
+  gamma-dependent box and Gaussian functions. Calculations can convolve
+  irregular existing L points or sample the crystal structure factor with
+  deterministic quadrature.
+- Added Poisson-distributed surface occupancies and coherent out-of-plane
+  epitaxy/strain coupling for film-interface models.
+- Added py3Dmol atom-sphere rendering for Jupyter notebooks. ``plot3d`` now
+  selects py3Dmol automatically in a notebook, can be directed to either
+  py3Dmol or Mayavi explicitly, and can incrementally add unit cells to a
+  shared viewer. Covalent radii are interpreted consistently by both backends
+  and can be adjusted with the dimensionless ``radius_scale`` parameter.
+- ``PoissonSurface``'s basis now requires three parameters (``W``, ``alpha``,
+  ``offset``) instead of two. The previous two-parameter form was only ever
+  used in test code, so no migration path is provided; a saved ``.xtal``/
+  ``.xpr`` file with a two-parameter ``PoissonSurface`` basis will fail to
+  load.
+- Wyckoff-parameterized fit values are now interpreted as absolute atomic
+  positions instead of deltas relative to the Wyckoff position. Wyckoff
+  parameter fitting was development-only and never part of a release, so no
+  migration is provided.
+
+Scientific correctness and performance fixes:
+
+- Optical profiles now preserve areal optical content under surface-normal
+  strain, keep ionic forward scattering factors for charged species, avoid
+  merging layers beyond the requested z tolerance, and remain finite at the
+  exact p-polarized critical-angle limit.
+- Optical reflectivity and full wavefield calculations now evaluate angle
+  arrays with NumPy-vectorized kernels while preserving the caller's input
+  shape.
+- Corrected film and epitaxy-interface anchoring, stacking, and support
+  ownership across strained interfaces.
+- Fixed missing support in one-dimensional electron-density calculations and
+  corrected atomic-coordinate stacking when splitting unit cells into layers.
+- Added a C++ electron-density backend and bounded caches for atomic form
+  factors, anomalous scattering factors, and accelerated form-factor lookup.
+
+A ***critical bug*** was fixed that affects bulk CTR calculations:
+
+- ``UnitCell.F_bulk``'s semi-infinite geometric lattice sum used the raw,
+  untransformed ``l`` index instead of the index converted by
+  ``refHKLTransform`` when computing the out-of-plane attenuation phase. This
+  was only correct for the default case where a component uses its own bulk
+  cell as the reference (no ``reference_uc`` set); any explicit
+  ``reference_uc`` whose out-of-plane reciprocal axis differs from the
+  bulk's — including a plain scale difference between the reference and bulk
+  out-of-plane axis length, not only a rotated or reindexed reference — gave
+  incorrect bulk structure-factor amplitudes. This bug was present in both
+  the accelerated (numba/C++) and plain-Python code paths in all previous
+  released versions, up to and including v1.5.0. See the CTR structure-factor
+  documentation for details.
+
+ESRF ID31 beamline support and reciprocal-space display:
+
+- Detector images can now be displayed in reciprocal space. The new ``Q-plot``
+  toolbar action rebins the currently shown image (single image, maximum, or
+  sum) onto a regular grid of in-plane and out-of-plane momentum transfer
+  using pyFAI's ``FiberIntegrator``, which requires pyFAI >= 2025.1. With an
+  older pyFAI the action reports an error and stays disabled. The conversion
+  is equivalent to orGUI's own per-pixel ``QAlpha`` calculation; see the
+  geometry documentation for when to use which.
+- HDF5 files that are still being written can now be refreshed from the GUI.
+  The tree view is rebuilt and the current scan reloaded without restarting
+  the application.
+- Added a ``BlissScan_EBS_p4`` backend for the ID31 Pilatus4 detector, an
+  example backend under ``examples/backend/ID31_EBS_p4_backend.py``, and the
+  ``ch8153`` beamtime.
+- The default backend is now ``id31_default_p4`` and the fallback geometry
+  describes a Pilatus4 4M CdTe detector.
+- Maximum and sum images are now untoggled when the image number changes, and
+  the maximum/sum toolbar icons no longer get out of sync with the displayed
+  image.
+- **BREAKING CHANGE:** HDF5 file locking is now disabled by default
+  (``HDF5_USE_FILE_LOCKING=False``), so that files still open for writing by
+  the acquisition system can be read. A manually set environment variable
+  still wins, and ``--hdflocking`` / ``-l`` restores the previous behavior.
+- **BREAKING CHANGE:** ID31-style scan objects are now recognized from the
+  configured backend class instead of a hardcoded list of beamtime ids. This
+  fixes the ``id31_default_p4`` backend, which the old list did not cover, and
+  makes new ID31 beamtimes work without code changes. Custom backends whose
+  class name does not contain ``BlissScan`` are no longer treated as
+  ID31-style, even if their beamtime id was previously listed.
+
+
 ## [1.5.0] (2026-06-07)
 
 [532b60b](https://github.com/tifuchs/orGUI/commit/532b60bab3073ae9f0ff063a0e119aa9e9957857)...[c574bdf](https://github.com/tifuchs/orGUI/commit/c574bdf0bd5af6fa8258d108e7355c579bfef857)

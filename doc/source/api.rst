@@ -1,8 +1,18 @@
 API
 ===
 
+.. toctree::
+   :maxdepth: 1
+
+   ctr_structure_factors
+   ctr_resolution
+   wyckoff_fitting
+
+GUI API
+-------
+
 Application Entry Point
------------------------
+~~~~~~~~~~~~~~~~~~~~~~~
 
 .. automodule:: orgui.main
    :members:
@@ -10,7 +20,7 @@ Application Entry Point
    :show-inheritance:
 
 Main GUI
---------
+~~~~~~~~
 
 .. automodule:: orgui.app.orGUI
    :members:

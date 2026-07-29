@@ -1,0 +1,37 @@
+[Machine]
+E = 77.0
+SDD = 0.78
+pixelsize = 172e-6
+sizex = 1475
+sizey = 1679
+cpx = 731.0
+cpy = 1587.856
+
+[Lattice]
+a1 = 2.7740
+a2 = 2.7740
+a3 = 6.7960
+alpha1 = 90.0
+alpha2 = 90.0
+alpha3 = 120.0
+refractionindex = 1.1415e-06
+
+[Diffractometer]
+azimuthal_reference = 90
+polarization_axis = 0
+polarization_factor = 1
+mu = 0.1
+chi = 0
+phi = 0
+
+[Settings]
+autoload = True
+compression = Raw
+
+[Mask]
+# Optional invalid/dead-pixel mask.
+# Path may be absolute or relative to this config file. Masks are loaded with
+# FabIO, so EDF, NumPy .npy, and other FabIO-readable 2D image formats are
+# supported. Nonzero/True pixels are invalid and excluded from ROI signal,
+# background, and correction counters.
+mask = masks/dead_pixels.edf

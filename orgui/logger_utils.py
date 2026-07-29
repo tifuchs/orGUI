@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # /*##########################################################################
 #
 # Copyright (c) 2026 Timo Fuchs
@@ -22,9 +21,8 @@
 # THE SOFTWARE.
 #
 # ###########################################################################*/
-"""Module descripiton
+"""Module descripiton"""
 
-"""
 __author__ = "Timo Fuchs"
 __copyright__ = "Copyright 2026 Timo Fuchs"
 __credits__ = []
@@ -32,15 +30,10 @@ __license__ = "MIT License"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
-import os
-import sys
 import logging
 
-from . import __version__
 
 from silx.gui import qt
-from silx.gui import icons
-import numpy as np
 import traceback
 
 from abc import ABC, abstractmethod
@@ -102,7 +95,7 @@ def _get_message_box_dispatcher():
 
 
 class Progress(ABC):
-    def __init__(self, logger_name : str, total: int, title: str = "", **kwargs):
+    def __init__(self, logger_name: str, total: int, title: str = "", **kwargs):
         self.total = total
         self.title = title
 
@@ -113,22 +106,22 @@ class Progress(ABC):
     @abstractmethod
     def finish(self):
         pass
-        
+
     def wasCanceled(self):
         return False
 
 
 class LogProgress(Progress):
-    def __init__(self, logger_name : str, total: int, title: str = "", **kwargs):
+    def __init__(self, logger_name: str, total: int, title: str = "", **kwargs):
         super().__init__(logger_name, total, title)
         self.logger = logging.getLogger(logger_name)
         self.logger.info(f"Start {self.title}")
-        self.logevery = kwargs.get('logevery', 100)
+        self.logevery = kwargs.get("logevery", 100)
 
     def update(self, value: int, message: str = ""):
         if not (value % self.logevery):
             percent = (value / self.total) * 100
-            if message == '':
+            if message == "":
                 self.logger.info(f"PROGRESS:{self.title}:{percent:.1f}%")
             else:
                 self.logger.info(f"PROGRESS:{self.title}:{percent:.1f}%:{message}")
@@ -138,7 +131,14 @@ class LogProgress(Progress):
 
 
 class QtProgress(LogProgress):
-    def __init__(self, logger_name : str ,total: int, title: str = "", parent: qt.QWidget = None, **kwargs):
+    def __init__(
+        self,
+        logger_name: str,
+        total: int,
+        title: str = "",
+        parent: qt.QWidget = None,
+        **kwargs,
+    ):
         super().__init__(logger_name, total, title, **kwargs)
         self.dialog = qt.QProgressDialog(title, "abort", 0, total, parent)
         self.dialog.setWindowTitle(title)
@@ -161,71 +161,90 @@ class QtProgress(LogProgress):
         return self.dialog.wasCanceled()
 
 
-def messagebox_detailed_message(parent, title, text, detailed_text, icon, buttons=qt.QMessageBox.Ok):
+def messagebox_detailed_message(
+    parent, title, text, detailed_text, icon, buttons=qt.QMessageBox.Ok
+):
     diag = qt.QMessageBox(icon, title, text, buttons, parent)
     if detailed_text != "":
         diag.setDetailedText(detailed_text)
     return diag.exec()
 
-def critical_detailed_message(parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok):
-    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Critical, buttons=buttons)
-    
-def warning_detailed_message(parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok):
-    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Warning, buttons=buttons)
 
-def information_detailed_message(parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok):
-    return messagebox_detailed_message(parent, title, text, detailed_text, qt.QMessageBox.Information, buttons=buttons)
+def critical_detailed_message(
+    parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok
+):
+    return messagebox_detailed_message(
+        parent, title, text, detailed_text, qt.QMessageBox.Critical, buttons=buttons
+    )
+
+
+def warning_detailed_message(
+    parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok
+):
+    return messagebox_detailed_message(
+        parent, title, text, detailed_text, qt.QMessageBox.Warning, buttons=buttons
+    )
+
+
+def information_detailed_message(
+    parent, title, text, detailed_text, buttons=qt.QMessageBox.Ok
+):
+    return messagebox_detailed_message(
+        parent, title, text, detailed_text, qt.QMessageBox.Information, buttons=buttons
+    )
 
 
 logger = logging.getLogger("orgui")
 logger.setLevel(logging.INFO)
 
-_LOGGING_CONTEXT = 'None'
+_LOGGING_CONTEXT = "None"
+
 
 def get_logging_context():
     global _LOGGING_CONTEXT
     return _LOGGING_CONTEXT
+
 
 def set_logging_context(context):
     global _LOGGING_CONTEXT, logger
     if context == _LOGGING_CONTEXT:
         return
     for h in logger.handlers[:]:
-        if isinstance(h, (CLIExceptionHandler, MessageBoxHandler)):
+        if isinstance(h, CLIExceptionHandler | MessageBoxHandler):
             logger.removeHandler(h)
             h.close()
-    
-    if context.lower() == 'gui':
+
+    if context.lower() == "gui":
         handler = MessageBoxHandler()
         formatter = logging.Formatter("%(asctime)s: %(levelname)s: %(message)s")
         handler.setFormatter(formatter)
         logger.addHandler(handler)
-        _LOGGING_CONTEXT = 'gui'
-    elif context.lower() == 'cli':
+        _LOGGING_CONTEXT = "gui"
+    elif context.lower() == "cli":
         handler = CLIExceptionHandler()
         formatter = logging.Formatter("%(asctime)s: %(levelname)s: %(message)s")
         handler.setFormatter(formatter)
         logger.addHandler(handler)
-        _LOGGING_CONTEXT = 'cli'
+        _LOGGING_CONTEXT = "cli"
     else:
-        raise ValueError('Logging context %s is unknown.' % context)
-        
-def create_progress_logger(parent : qt.QWidget, total: int, title: str = "") -> Progress:
+        raise ValueError(f"Logging context {context} is unknown.")
+
+
+def create_progress_logger(parent: qt.QWidget, total: int, title: str = "") -> Progress:
     caller_module = inspect.getmodule(inspect.stack()[1][0]).__name__
     context = get_logging_context()
-    if context == 'cli':
+    if context == "cli":
         return LogProgress(caller_module, total, title)
-    elif context == 'gui':
+    elif context == "gui":
         return QtProgress(caller_module, total, title, parent)
     else:
-        raise RuntimeError('Progress logger for context %s is unknown' % context)
+        raise RuntimeError(f"Progress logger for context {context} is unknown")
 
-        
 
 class CLIExceptionHandler(logging.Handler):
     def emit(self, record):
         if record.levelno < logging.ERROR:
-            return # super().emit(record)
+            return  # super().emit(record)
         msg = self.format(record)
 
         if record.levelno >= logging.ERROR:
@@ -235,14 +254,18 @@ class CLIExceptionHandler(logging.Handler):
                     raise exc_value.with_traceback(exc_tb)
             raise RuntimeError(msg)
 
-    
+
 class MessageBoxHandler(logging.Handler):
     def emit(self, record):
-        show_dialog = getattr(record, "show_dialog", False) # only show dialog when explicitly requested
+        show_dialog = getattr(
+            record, "show_dialog", False
+        )  # only show dialog when explicitly requested
         if not show_dialog:
             return
         msg = self.format(record)
-        defaulttitle =  f"{record.levelname} [{record.module}:{record.funcName}:{record.lineno}]"
+        defaulttitle = (
+            f"{record.levelname} [{record.module}:{record.funcName}:{record.lineno}]"
+        )
         title = getattr(record, "title", defaulttitle)
         description = getattr(record, "description", "")
         detailed_text = getattr(record, "detailed_text", "")
@@ -250,8 +273,8 @@ class MessageBoxHandler(logging.Handler):
         show_dialog = getattr(record, "show_dialog", False)
         parent = getattr(record, "parent", None)
         if description != "":
-            msg += '\n' + description
-            
+            msg += "\n" + description
+
         if record.exc_info:
             exc_text = "".join(traceback.format_exception(*record.exc_info))
             detailed_text += exc_text
@@ -264,8 +287,3 @@ class MessageBoxHandler(logging.Handler):
             "detailed_text": detailed_text,
         }
         _get_message_box_dispatcher().show(payload)
-
-
-
-
-

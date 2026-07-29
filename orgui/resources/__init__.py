@@ -29,15 +29,14 @@ __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
 import os
-import glob
-
 from silx.gui import qt
 
 _iconpath = os.path.join(os.path.dirname(__file__), "icons")
 
-def getQicon(name: str):
 
+def getQicon(name: str):
     return qt.QIcon(os.path.join(_iconpath, name))
+
 
 def getSplashScreen(version_number=None):
     pixmap = qt.QPixmap(os.path.join(_iconpath, "logo"))
@@ -48,11 +47,13 @@ def getSplashScreen(version_number=None):
         font = qt.QFont()
         font.setPixelSize(30)
         painter.setFont(font)
-        painter.drawText(720, 403, "version %s" % version_number)
+        painter.drawText(720, 403, f"version {version_number}")
         return pixmap
+
 
 def getDiffractometerPath():
     return os.path.join(_iconpath, "diffractometer_v3.png")
+
 
 def getPath(name):
     return os.path.join(_iconpath, name)

@@ -1,0 +1,234 @@
+"""Compare CTR NumPy and Numba timings on the current host.
+
+Run from the ``benchmarks/`` directory with orGUI already installed in the
+active Python environment:
+
+    python verify_ctr_numba_host.py
+
+For host-to-host comparisons, run the same command on each machine. To avoid
+reusing stale compiled kernels across machines, set a host-local cache first:
+
+    export NUMBA_CACHE_DIR=/tmp/numba-cache-$USER-$(hostname)
+    rm -rf "$NUMBA_CACHE_DIR"
+    python verify_ctr_numba_host.py
+
+To check whether host-specific CPU code generation is responsible for timing
+differences, also test with:
+
+    NUMBA_CPU_NAME=generic python verify_ctr_numba_host.py
+"""
+
+from __future__ import annotations
+
+import os
+import platform
+import statistics
+import subprocess
+import time
+from pathlib import Path
+
+import numpy as np
+
+
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+os.environ.setdefault(
+    "MPLCONFIGDIR",
+    f"/tmp/matplotlib-{os.environ.get('USER', 'orgui')}",
+)
+
+from orgui.datautils import util  # noqa: E402
+from orgui.datautils.xrayutils import CTRcalc, CTRuc  # noqa: E402
+
+
+def print_command_output(command: list[str]) -> None:
+    """Print command output if the command is available."""
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        print(f"{command[0]}: not available")
+        return
+    if completed.stdout:
+        print(completed.stdout.strip())
+    if completed.stderr:
+        print(completed.stderr.strip())
+
+
+def median_time(func, repeats: int) -> float:
+    """Return median runtime in seconds after one warmup call."""
+    func()
+    timings = []
+    for _ in range(repeats):
+        start = time.perf_counter()
+        func()
+        timings.append(time.perf_counter() - start)
+    return statistics.median(timings)
+
+
+def median_cold_cache_time(func, repeats: int) -> float:
+    """Return median C++ timing with the cache cleared before each call."""
+    timings = []
+    for _ in range(repeats):
+        CTRuc.clear_form_factor_cache()
+        start = time.perf_counter()
+        func()
+        timings.append(time.perf_counter() - start)
+    return statistics.median(timings)
+
+
+def load_crystal():
+    """Load the bundled CTR regression crystal."""
+    xpr_path = FIXTURE_DIR / "0V12_calculated.xpr"
+    xtal = CTRcalc.SXRDCrystal.fromFile(xpr_path)
+    pt100 = CTRcalc.UnitCell(
+        [3.9242, 3.9242, 3.9242],
+        [90.0, 90.0, 90.0],
+    )
+    xtal.setGlobalReferenceUnitCell(
+        pt100,
+        util.z_rotation(np.deg2rad(45.0)),
+    )
+    return xtal
+
+
+def set_backend(backend: str) -> None:
+    """Select the CTR acceleration backend."""
+    CTRuc.set_accel_backend(backend)
+
+
+def print_environment() -> None:
+    """Print host, CPU, package, and relevant environment information."""
+    print("=== Host ===")
+    print("host", platform.node())
+    print("platform", platform.platform())
+    print("python", platform.python_version())
+    print("fixture_dir", FIXTURE_DIR)
+
+    print("\n=== CPU ===")
+    print_command_output(
+        [
+            "bash",
+            "-lc",
+            "lscpu | egrep 'Model name|CPU\\(s\\)|Thread|Core|Socket|Flags|NUMA'",
+        ]
+    )
+
+    print("\n=== Packages ===")
+    try:
+        import numba
+
+        print("numba", numba.__version__)
+        try:
+            print("numba_num_threads", numba.get_num_threads())
+        except Exception as exc:
+            print("numba_num_threads", f"unavailable: {exc}")
+    except Exception as exc:
+        print("numba", f"unavailable: {exc}")
+    print("numpy", np.__version__)
+
+    print("\n=== Environment ===")
+    for name in (
+        "NUMBA_CPU_NAME",
+        "NUMBA_CACHE_DIR",
+        "NUMBA_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+    ):
+        print(name, os.environ.get(name))
+
+
+def run_benchmark(repeats: int = 5) -> None:
+    """Run CTR backend timing comparisons."""
+    xtal = load_crystal()
+    print("\n=== CTR Benchmark ===")
+    print("default_backend", CTRuc.CTR_ACCEL_BACKEND)
+    print("cpp_accel_module", CTRuc.HAS_CPP_ACCEL)
+    print("numba_accel_module", CTRuc.HAS_NUMBA_ACCEL)
+    backends = ["numpy"]
+    if CTRuc.HAS_CPP_ACCEL:
+        backends.append("cpp")
+    if CTRuc.HAS_NUMBA_ACCEL:
+        backends.append("numba")
+
+    for n_points in (2_000, 20_000, 200_000):
+        h = np.zeros(n_points, dtype=np.float64)
+        k = np.zeros(n_points, dtype=np.float64)
+        l_values = np.ascontiguousarray(
+            np.linspace(0.05, 7.0, n_points),
+            dtype=np.float64,
+        )
+
+        print(f"\nN {n_points}")
+        for name, func in (
+            ("bulk.F_uc", lambda: xtal.uc_bulk.F_uc(h, k, l_values)),
+            (
+                "bulk.F_bulk",
+                lambda: xtal.uc_bulk.F_bulk(h, k, l_values, xtal.atten),
+            ),
+            ("xtal.F", lambda: xtal.F(h, k, l_values)),
+        ):
+            timings = {}
+            for backend in backends:
+                set_backend(backend)
+                timings[backend] = median_time(func, repeats)
+
+            text = f"{name:12s}"
+            for backend in backends:
+                text += f" {backend}={timings[backend]:.6g}s"
+            for backend in backends:
+                if backend == "numpy":
+                    continue
+                text += (
+                    f" {backend}_speedup="
+                    f"{timings['numpy'] / timings[backend]:.2f}x"
+                )
+            print(text)
+
+        if CTRuc.HAS_CPP_ACCEL:
+            set_backend("cpp")
+
+            def cache_func():
+                """Evaluate the cacheable canonical unit-cell amplitude."""
+                return xtal.uc_bulk.F_uc(h, k, l_values)
+
+            old_budget = CTRuc.form_factor_cache_stats()["budget_bytes"]
+            try:
+                CTRuc.clear_form_factor_cache()
+                CTRuc.reset_form_factor_cache_stats()
+                CTRuc.set_form_factor_cache_budget(0)
+                uncached = median_time(cache_func, repeats)
+                CTRuc.set_form_factor_cache_budget(old_budget)
+                cold = median_cold_cache_time(cache_func, repeats)
+                CTRuc.clear_form_factor_cache()
+                cache_func()
+                warm = median_time(cache_func, repeats)
+                stats = CTRuc.form_factor_cache_stats()
+            finally:
+                CTRuc.clear_form_factor_cache()
+                CTRuc.set_form_factor_cache_budget(old_budget)
+            expected = CTRuc.form_factor_cache_expected_bytes(
+                n_points,
+                stats["species_entries"],
+            )
+            print(
+                "F_uc cache "
+                f"uncached={uncached:.6g}s cold={cold:.6g}s warm={warm:.6g}s "
+                f"hits={stats['hits']} misses={stats['misses']} "
+                f"evictions={stats['evictions']} resident={stats['resident_bytes']}B "
+                f"expected={expected}B"
+            )
+
+
+def main() -> None:
+    """Print environment information and run the benchmark."""
+    print_environment()
+    run_benchmark()
+
+
+if __name__ == "__main__":
+    main()
