@@ -41,6 +41,26 @@ class TestUnitCellOpticalProfile(unittest.TestCase):
         np.testing.assert_allclose(profile[:, 1], delta, rtol=1e-7)
         np.testing.assert_allclose(profile[:, 2], beta, rtol=1e-7)
 
+    def test_ionic_profile_uses_ionic_forward_scattering_factor(self):
+        cell = CTRcalc.UnitCell([10.0, 10.0, 10.0], [90.0, 90.0, 90.0])
+        cell.addAtom("O2-", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0)
+        cell.setEnergy(self.energy_eV)
+
+        profile = cell.optical_profile()
+
+        wavelength = CTRoptics.HC_KEV_ANGSTROM / (self.energy_eV * 1e-3)
+        scale = 2.8179403262e-5 * wavelength**2 / (2.0 * np.pi)
+        ionic_f0 = np.sum(cell.f[0, :5]) + cell.f[0, 10]
+        expected = scale * (
+            ionic_f0 + cell.f[0, 11] + 1j * cell.f[0, 12]
+        ) / cell.volume
+        np.testing.assert_allclose(
+            profile[0, 1:],
+            [expected.real, expected.imag],
+            rtol=1e-14,
+        )
+        self.assertGreater(ionic_f0, xraydb.atomic_number("O"))
+
     def test_tio2_100_has_two_homogeneous_layers(self):
         cell = unitcells.crystal("TiO2(100)").uc_bulk
         cell.setEnergy(self.energy_eV)

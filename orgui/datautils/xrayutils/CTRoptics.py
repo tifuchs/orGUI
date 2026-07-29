@@ -148,12 +148,27 @@ def optical_profile(unit_cell, include_coherent_domains=True):
     profile = np.empty((len(layer_ids) * len(domain_matrices), 3), dtype=np.float64)
     row = 0
     for layer_index, (layer_id, layer_cell) in enumerate(layers.items()):
-        atomic_numbers = np.asarray(
-            [atomic_number(name) for name in layer_cell.names], dtype=np.float64
+        forward_static_factor = np.asarray(
+            [atomic_number(name) for name in layer_cell.names],
+            dtype=np.float64,
         )
+        ionic_species = np.asarray(
+            [name.endswith(("+", "-")) for name in layer_cell.names],
+            dtype=bool,
+        )
+        ionic_forward_factor = (
+            np.sum(layer_cell.f[:, :5], axis=1) + layer_cell.f[:, 10]
+        )
+        forward_static_factor[ionic_species] = ionic_forward_factor[
+            ionic_species
+        ]
         forward_factor = np.sum(
             layer_cell.basis[:, 6]
-            * (atomic_numbers + layer_cell.f[:, 11] + 1j * layer_cell.f[:, 12])
+            * (
+                forward_static_factor
+                + layer_cell.f[:, 11]
+                + 1j * layer_cell.f[:, 12]
+            )
         )
         layer_volume = unit_cell.volume * thickness_fraction[layer_index]
         optical_density = scale * forward_factor / layer_volume
