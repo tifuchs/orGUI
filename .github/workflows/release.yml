@@ -121,15 +121,21 @@ jobs:
           CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
           CIBW_SKIP: "*-musllinux_*"
           CIBW_BUILD_FRONTEND: "build"
-          CIBW_CONFIG_SETTINGS_WINDOWS: "setup-args=--vsenv"
+          CIBW_CONFIG_SETTINGS: "setup-args=-Dstatic_xxhash=true"
+          CIBW_CONFIG_SETTINGS_WINDOWS: 'setup-args="--vsenv -Dstatic_xxhash=true"'
           CIBW_TEST_ENVIRONMENT: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 MPLBACKEND=Agg QT_QPA_PLATFORM=minimal"
           CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_EXTRAS: extendedfilesupport,symmetry
           CIBW_TEST_COMMAND: >-
             python -c "from orgui.datautils.xrayutils import CTRuc;
             assert CTRuc.HAS_CPP_ACCEL;
             CTRuc.set_accel_backend('cpp');
             print('CTR_ACCEL_BACKEND=', CTRuc.CTR_ACCEL_BACKEND)" &&
             pytest --pyargs orgui.datautils.xrayutils.test.test_CTRcalc
+            orgui.datautils.xrayutils.test.test_CTRsymmetry
+            orgui.datautils.xrayutils.test.test_CTRresolution
+            orgui.datautils.xrayutils.test.test_CTRoptical_profile
+            orgui.datautils.xrayutils.test.test_scattering_factor_cache
           CIBW_TEST_SKIP: "*-manylinux_aarch64"
         with:
           output-dir: wheelhouse

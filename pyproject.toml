@@ -2,6 +2,7 @@
 name = 'orGUI'
 dynamic = ['version',]
 license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_LICENSES/*"]
 requires-python = '>=3.10'
 readme = 'README.rst'
 description = 'orGUI: Orientation and Integration with 2D detectors'
@@ -52,8 +53,8 @@ console = ['qtconsole']
 speedup = ['numba']
 extendedfilesupport = ['ase', 'hdf5plugin']
 symmetry = ['pyxtal']
-full = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin', 'pyxtal']
-full-devel = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin', 'pyxtal', 'ruff', 'pyupgrade']
+full = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin', 'pyxtal', 'py3Dmol']
+full-devel = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin', 'pyxtal', 'py3Dmol', 'ruff', 'pyupgrade']
 
 [build-system]
 requires = ["meson-python", "pybind11", "setuptools-scm>=8", "numpy"]

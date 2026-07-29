@@ -73,6 +73,112 @@ from .CTRstacking import (
     resolve_upper_start,
 )
 
+
+_PLOT3D_BACKENDS = ("mayavi", "py3dmol")
+
+
+def _in_jupyter_kernel():
+    """Return whether the current process is attached to an IPython kernel."""
+    try:
+        from IPython import get_ipython
+    except ImportError:
+        return False
+
+    shell = get_ipython()
+    return shell is not None and getattr(shell, "kernel", None) is not None
+
+
+def _figure_plot3d_backend(figure):
+    """Identify an existing plot figure without importing optional backends."""
+    backend = getattr(figure, "_orgui_plot3d_backend", None)
+    if backend in _PLOT3D_BACKENDS:
+        return backend
+
+    module = type(figure).__module__.lower()
+    if "py3dmol" in module:
+        return "py3dmol"
+    if "mayavi" in module or "tvtk" in module:
+        return "mayavi"
+    return None
+
+
+def _prepare_plot3d_figure(backend, figure):
+    """Resolve a 3D plotting backend and return its figure and renderer."""
+    backend = backend.lower()
+    if backend not in (*_PLOT3D_BACKENDS, "auto"):
+        raise ValueError(
+            f"Unknown 3D plotting backend {backend!r}; expected 'auto', "
+            "'mayavi', or 'py3dmol'."
+        )
+
+    figure_backend = None
+    if figure is not None:
+        figure_backend = _figure_plot3d_backend(figure)
+        if backend != "auto" and figure_backend not in (None, backend):
+            raise TypeError(
+                f"The supplied figure uses {figure_backend}, not the requested "
+                f"{backend} backend."
+            )
+
+    if backend == "auto":
+        if figure_backend is not None:
+            candidates = (figure_backend,)
+        elif figure is not None:
+            # Existing callers historically pass Mayavi scene objects.
+            candidates = ("mayavi",)
+        elif _in_jupyter_kernel():
+            candidates = ("py3dmol", "mayavi")
+        else:
+            candidates = ("mayavi", "py3dmol")
+    else:
+        candidates = (backend,)
+
+    errors = {}
+    for candidate in candidates:
+        try:
+            if candidate == "py3dmol":
+                if figure is None:
+                    py3Dmol = importlib.import_module("py3Dmol")
+                    figure = py3Dmol.view()
+                renderer = None
+            else:
+                renderer = importlib.import_module("mayavi.mlab")
+                if figure is None:
+                    figure = renderer.figure()
+        except ImportError as error:
+            errors[candidate] = error
+            continue
+
+        try:
+            figure._orgui_plot3d_backend = candidate
+        except AttributeError:
+            pass
+        return candidate, figure, renderer
+
+    if backend == "auto":
+        message = (
+            "No supported 3D plotting backend is installed. Install py3Dmol "
+            "(included in orGUI[full]) for notebooks or Mayavi for desktop use."
+        )
+    elif backend == "py3dmol":
+        message = (
+            "The py3dmol backend requires py3Dmol. Install orGUI[full] or "
+            "install py3Dmol separately."
+        )
+    else:
+        message = "The mayavi backend requires Mayavi."
+    raise ImportError(message) from next(iter(errors.values()), None)
+
+
+def _rgb_to_hex(color):
+    """Convert an RGB triple in the Mayavi range to a CSS hexadecimal color."""
+    rgb = np.asarray(color, dtype=np.float64)
+    if rgb.shape != (3,):
+        raise ValueError("Atom colors must be RGB triples.")
+    rgb = np.clip(np.rint(rgb * 255), 0, 255).astype(np.uint8)
+    return "#" + "".join(f"{channel:02x}" for channel in rgb)
+
+
 def _import_cpp_accel():
     try:
         return importlib.import_module("orgui.datautils.xrayutils._CTRcalc_cpp")
@@ -179,6 +285,72 @@ def ctr_accel_enabled():
     return CTR_ACCEL_BACKEND != "numpy"
 
 
+def form_factor_cache_stats():
+    """Return process-global C++ Waasmaier form-factor cache statistics.
+
+    The cache is used only by accelerated :meth:`UnitCell.F_uc` calls. Its
+    resident-byte accounting includes retained float64 Q-squared and real
+    form-factor vectors, but not short-lived call snapshots or output arrays.
+    Reuse requires bitwise-identical computed Q-squared arrays and complete
+    13-value scattering rows; numerically near grids intentionally miss.
+
+    :returns: Cache hits, misses, evictions, capacity, and residency details.
+    :rtype: dict
+    :raises RuntimeError: If the C++ acceleration module is unavailable.
+    """
+    if not HAS_CPP_ACCEL:
+        raise RuntimeError("C++ form-factor cache is not available")
+    return _CTRcalc_cpp.form_factor_cache_stats()
+
+
+def clear_form_factor_cache():
+    """Clear all process-global C++ Waasmaier form-factor cache entries."""
+    if not HAS_CPP_ACCEL:
+        raise RuntimeError("C++ form-factor cache is not available")
+    _CTRcalc_cpp.clear_form_factor_cache()
+
+
+def reset_form_factor_cache_stats():
+    """Reset process-global C++ Waasmaier form-factor cache counters.
+
+    Retained entries and the configured capacity are unchanged. Pair this
+    with :func:`clear_form_factor_cache` to start a measurement from an empty
+    cache and zero counters.
+    """
+    if not HAS_CPP_ACCEL:
+        raise RuntimeError("C++ form-factor cache is not available")
+    _CTRcalc_cpp.reset_form_factor_cache_stats()
+
+
+def set_form_factor_cache_budget(bytes):
+    """Set the process-global C++ form-factor cache capacity in bytes.
+
+    :param int bytes: Non-negative cache residency limit in bytes.
+    :raises RuntimeError: If the C++ acceleration module is unavailable.
+    :raises ValueError: If ``bytes`` is negative.
+    """
+    if bytes < 0:
+        raise ValueError("form-factor cache budget must be non-negative")
+    if not HAS_CPP_ACCEL:
+        raise RuntimeError("C++ form-factor cache is not available")
+    _CTRcalc_cpp.set_form_factor_cache_budget(bytes)
+
+
+def form_factor_cache_expected_bytes(points, species):
+    """Return retained float64 bytes for one matching Q-squared grid.
+
+    :param int points: Number of reflections in the Q-squared vector.
+    :param int species: Number of distinct complete 13-value scattering rows.
+    :returns: Q-grid plus one real form-factor vector per species.
+    :rtype: int
+    """
+    if points < 0 or species < 0:
+        raise ValueError("points and species must be non-negative")
+    if not HAS_CPP_ACCEL:
+        raise RuntimeError("C++ form-factor cache is not available")
+    return _CTRcalc_cpp.form_factor_cache_expected_bytes(points, species)
+
+
 def _ctr_accel_module():
     if CTR_ACCEL_BACKEND == "numpy":
         return None
@@ -189,6 +361,20 @@ def _ctr_accel_module():
     raise ValueError(
         "CTR acceleration backend must be 'cpp', 'numba', or 'numpy'"
     )
+
+
+def _coherent_domain_arrays(coherent_domain_matrix, coherent_domain_occupancy):
+    """Return accel-ready coherent domain arrays, handling zero domains.
+
+    ``np.asarray`` on an empty list collapses to shape ``(0,)`` instead of
+    the ``(0, 3, 4)`` the accel bindings require, so the empty case is
+    reshaped explicitly.
+    """
+    matrix = np.asarray(coherent_domain_matrix)
+    if matrix.size == 0:
+        matrix = matrix.reshape((0, 3, 4))
+    occupancy = np.asarray(coherent_domain_occupancy)
+    return matrix, occupancy
 
 
 class WaterModel(Lattice, LinearFitFunctions):
@@ -272,6 +458,50 @@ class WaterModel(Lattice, LinearFitFunctions):
     @pos_absolute.setter
     def pos_absolute(self, pos):
         self._pos_absolute = pos
+
+    @property
+    def height_absolute(self):
+        """Return the water onset height in Angstrom.
+
+        Water is continuous towards positive z and therefore does not advance
+        the structural stacking cursor beyond its onset.
+        """
+        return self.pos_absolute
+
+    @property
+    def loc_absolute(self):
+        """Return the water onset location in Angstrom."""
+        return self.pos_absolute
+
+    @property
+    def stacking_height_absolute(self):
+        """Return the height passed to components above the water model."""
+        return self.pos_absolute
+
+    @property
+    def stacking_loc_absolute(self):
+        """Return the location passed to components above the water model."""
+        return self.pos_absolute
+
+    @property
+    def end_layer_number(self):
+        """Preserve the structural layer number below continuous water."""
+        return getattr(self, "start_layer_number", -1)
+
+    def stack_on(self, below_loc, below_height, below_layer=-1, below_state=None):
+        """Place the water onset at the top of the object below it.
+
+        :param float below_loc:
+            Reference location of the object below in Angstrom.
+        :param float below_height:
+            Top height of the object below in Angstrom.
+        :param float below_layer:
+            Top structural layer identifier of the object below.
+        :param below_state:
+            Accepted for compatibility with other stackable components.
+        """
+        self.start_layer_number = below_layer
+        self.pos_absolute = below_height
 
     def F_uc(self, h, k, l):  # noqa: E741
         """Return the water-model structure factor in electrons.
@@ -443,6 +673,32 @@ class WaterModel(Lattice, LinearFitFunctions):
         for i, name in enumerate(["O", "H", "O2-"]):
             self.f[i, :11] = readWaasmaier(name)
             self.f[i, 11:] = readDispersion(name, E)
+        self.wat_dispersion = (
+            self.f[0, 11]
+            + 2.0 * self.f[1, 11]
+            + 1j * (self.f[0, 12] + 2.0 * self.f[1, 12])
+        )
+
+    def optical_profile(self, noUC=30, z_step=None, z_origin=None):
+        """Return continuous water optical constants sampled towards positive z.
+
+        :param int noUC:
+            Length of the sampled water region in water-model unit cells.
+        :param float z_step:
+            Uniform z sampling interval in Angstrom. Defaults to this model's
+            lattice height.
+        :param float z_origin:
+            Optional atomistic-grid origin in Angstrom used to align samples.
+        :returns:
+            ``(N, 3)`` float64 array containing z in Angstrom, delta, and
+            beta.
+        :rtype: numpy.ndarray
+        """
+        from .CTRoptics import water_optical_profile
+
+        return water_optical_profile(
+            self, noUC=noUC, z_step=z_step, z_origin=z_origin
+        )
         # f1,f2 = UnitCell.special_formfactors['H2O'][1](E)
         # self.wat_dispersion = f1 + 1j*f2
 
@@ -511,9 +767,9 @@ class WaterModel(Lattice, LinearFitFunctions):
                     + erf((z - zpos * self._a[2]) / (np.sqrt(2) * sigma_0 * self._a[2]))
                 )
             )
-            rho = gaussian_filter1d(np.abs(rho), 0.2547 / zstep_mean).astype(
-                np.complex128
-            )  # estimation of water molecular form factor
+            rho_real = gaussian_filter1d(rho.real, 0.2547 / zstep_mean)
+            rho_imag = gaussian_filter1d(rho.imag, 0.2547 / zstep_mean)
+            rho = rho_real + 1j * rho_imag  # estimation of water molecular form factor
         elif self.type == "layered":
             zrange_waterstructure = np.amax(z) / self._a[2] - zpos  # lattice units
             nogausseans_inrange = np.ceil(zrange_waterstructure / d_layering)
@@ -582,9 +838,9 @@ class WaterModel(Lattice, LinearFitFunctions):
                     + erf((z - zpos * self._a[2]) / (np.sqrt(2) * sigma_0 * self._a[2]))
                 )
             )
-            rho = gaussian_filter1d(np.abs(rho), 0.2547 / zstep_mean).astype(
-                np.complex128
-            )  # estimation of water molecular form factor
+            rho_real = gaussian_filter1d(rho.real, 0.2547 / zstep_mean)
+            rho_imag = gaussian_filter1d(rho.imag, 0.2547 / zstep_mean)
+            rho = rho_real + 1j * rho_imag  # estimation of water molecular form factor
             rho_layer, mu_offset = self._1layer_firstGauss()
             rho += rho_layer * np.exp(
                 -((z / self._a[2] - zpos - mu_offset) ** 2) / (2 * sigma2_rel)
@@ -801,9 +1057,24 @@ class WaterModel(Lattice, LinearFitFunctions):
 
 
 class UnitCell(Lattice):
-    parameterOrder = (
-        "Name   x/frac     y/frac     z/frac     iDW     oDW      occup    layerIdx"
+    _atom_column_names = (
+        "Name",
+        "x/frac",
+        "y/frac",
+        "z/frac",
+        "iDW",
+        "oDW",
+        "occup",
+        "layerIdx",
     )
+    _atom_column_widths = (6, 12, 12, 12, 10, 10, 10, 10)
+    _atom_error_column_widths = (6, 24, 24, 24, 22, 22, 22, 14)
+    parameterOrder = "".join(
+        f"{name:<{width}}" if index == 0 else f"{name:>{width}}"
+        for index, (name, width) in enumerate(
+            zip(_atom_column_names, _atom_column_widths)
+        )
+    ).rstrip()
 
     parameterLookup = {"x": 1, "y": 2, "z": 3, "iDW": 4, "oDW": 5, "occ": 6, "layer": 7}
 
@@ -928,7 +1199,8 @@ class UnitCell(Lattice):
                 no_errors = True
         for par in self.parameters["relative"]:
             if par.value is not None:
-                self.basis[par.indices] += par.factors * par.value
+                value = self._relative_internal_value(par, par.value)
+                self.basis[par.indices] += par.factors * value
             else:
                 raise ValueError(
                     f"Can not set basis values from parameters. Value of Parameter {par.name} is None."  # noqa: E501
@@ -944,6 +1216,14 @@ class UnitCell(Lattice):
         self._basis_parvalues = np.copy(self.basis)
         if not no_errors:
             self._errors_parvalues = np.copy(self.errors)
+
+    @staticmethod
+    def _relative_internal_value(parameter, value):
+        """Convert an exposed parameter value to its internal relative delta."""
+        wyckoff = parameter.settings.get("wyckoff", {})
+        if wyckoff.get("value_kind") == "absolute":
+            return value - wyckoff["reference_value"]
+        return value
 
     def clearParameters(self):
         for p in self.parameters:
@@ -1077,12 +1357,34 @@ class UnitCell(Lattice):
         """
 
     def split_in_layers(self, ordered=True):
+        """Return structural layers as views into a contiguously ordered basis.
+
+        Layered ``UnitCell`` objects require atoms in each layer to occupy one
+        contiguous basis block. Native CTR text models must already satisfy
+        this invariant. CIF files imported through ASE are the sole exception:
+        their atom-site order is not crystallographically significant, so their
+        basis may be normalized here when necessary.
+        """
         layer_numbers = np.sort(np.unique(self.basis[:, 7]))
+        noncontiguous_layers = []
+        for layer in layer_numbers:
+            indices = np.flatnonzero(self.basis[:, 7] == layer)
+            if indices.size > 1 and np.any(np.diff(indices) != 1):
+                noncontiguous_layers.append(layer)
+        if noncontiguous_layers:
+            if not getattr(self, "_allow_layer_order_normalization", False):
+                raise ValueError(
+                    "UnitCell layers must occupy contiguous basis rows; "
+                    f"noncontiguous layers: {noncontiguous_layers!r}. "
+                    "Native .xtal/.xpr and manually constructed UnitCells "
+                    "must be written in layer order."
+                )
+            self._reorder_atoms(np.argsort(self.basis[:, 7], kind="stable"))
+
         layers = OrderedDict()
-        if not hasattr(self, "f"):
-            self.setEnergy(
-                10000.0
-            )  # populate f with some values to enable in-place modification
+        has_form_factors = (
+            hasattr(self, "f") and self.f.shape == (self.basis.shape[0], 13)
+        )
 
         for l in layer_numbers:  # noqa: E741
             where = (self.basis[:, 7] == l).nonzero()[0]
@@ -1096,13 +1398,16 @@ class UnitCell(Lattice):
             uc.basis_0 = self.basis_0[idx_low:idx_high]
             uc.dw_increase_constraint = self.dw_increase_constraint[idx_low:idx_high]
             uc._test_special_formfactors()
-            uc.f = self.f[idx_low:idx_high]
+            if has_form_factors:
+                # Each layer owns its array: layer-level fitting must not alter
+                # its parent or sibling form factors.
+                uc.f = np.array(self.f[idx_low:idx_high], copy=True)
+            if has_form_factors and hasattr(self, "_E"):
+                uc._E = self._E
+                uc._formfactor_state = uc._formfactor_state_token()
             uc.refRealTransform = self.refRealTransform
             uc.refHKLTransform = self.refHKLTransform
             layers[l] = uc
-        if len(layer_numbers) == 1:
-            return layers
-
         if self._explicit_layer_cycle is not None:
             cycle = tuple(self._explicit_layer_cycle)
             missing = set(layers) - set(cycle)
@@ -1111,7 +1416,7 @@ class UnitCell(Lattice):
                     f"layer_cycle omits unit-cell layers {sorted(missing)!r}"
                 )
             layers = OrderedDict((n, layers[n]) for n in cycle)
-        elif ordered:
+        elif ordered and len(layer_numbers) > 1:
             avg_height = []
             uc_nms = []
             for uc_l in layers:
@@ -1124,7 +1429,57 @@ class UnitCell(Lattice):
 
             layers = OrderedDict([(n, layers[n]) for n in uc_nms])
 
+        ordered_layers = tuple(layers)
+        origins = []
+        for layer in ordered_layers:
+            origin = self.layerpos.get(float(layer))
+            if origin is None:
+                atom_mask = self.basis[:, 7] == layer
+                origin = float(np.mean(self.basis[atom_mask, 3]))
+            origins.append(float(origin))
+        for index, layer in enumerate(ordered_layers):
+            spacing = origins[(index + 1) % len(ordered_layers)] - origins[index]
+            while spacing <= 0.0:
+                spacing += 1.0
+            layers[layer]._optical_layer_origin = origins[index]
+            layers[layer]._optical_layer_thickness_fraction = spacing
+
         return layers
+
+    def optical_profile(self):
+        """Return homogeneous optical constants for every layer and domain.
+
+        The returned ``(N, 3)`` float64 array has columns ``z`` in Angstrom,
+        ``delta``, and ``beta``. Each row is a domain-transformed layer
+        contribution with coherent-domain occupancy already applied.
+
+        :returns:
+            One row for every structural layer and coherent domain.
+        :rtype: numpy.ndarray
+        :raises ValueError:
+            If :meth:`setEnergy` has not populated the anomalous scattering
+            factors.
+        """
+        from .CTRoptics import optical_profile
+
+        return optical_profile(self)
+
+    def optical_profile_asbulk(self, noUC=30):
+        """Return a finite representation of the semi-infinite bulk profile.
+
+        The unit cell is repeated towards negative z exactly as in
+        :meth:`zDensity_G_asbulk`.
+
+        :param int noUC:
+            Number of unit cells to represent below the termination.
+        :returns:
+            ``(N, 3)`` float64 array containing z in Angstrom, delta, and
+            beta.
+        :rtype: numpy.ndarray
+        """
+        from .CTRoptics import optical_profile_asbulk
+
+        return optical_profile_asbulk(self, noUC=noUC)
 
     @property
     def layers(self):
@@ -1177,6 +1532,47 @@ class UnitCell(Lattice):
         atoms, parindexes = parameter.indices
         atoms = np.asarray(atoms, dtype=np.intp)
         parameter.indices = (old_to_new[atoms], parindexes)
+
+    def _reorder_atoms(self, order):
+        """Reorder atom-aligned state and remap atom-indexed metadata.
+
+        :param numpy.ndarray order:
+            Permutation mapping new basis rows to their old row indices.
+        """
+        order = np.asarray(order, dtype=np.intp)
+        atom_count = self.basis.shape[0]
+        if order.shape != (atom_count,) or not np.array_equal(
+            np.sort(order), np.arange(atom_count, dtype=np.intp)
+        ):
+            raise ValueError("order must be a permutation of UnitCell atom indices.")
+
+        old_to_new = np.empty(atom_count, dtype=np.intp)
+        old_to_new[order] = np.arange(atom_count, dtype=np.intp)
+        for attribute in (
+            "basis",
+            "basis_0",
+            "_basis_parvalues",
+            "errors",
+            "_errors_parvalues",
+            "f",
+            "dw_increase_constraint",
+        ):
+            values = getattr(self, attribute, None)
+            if values is not None and np.size(values):
+                setattr(self, attribute, np.asarray(values)[order])
+        self.names = [self.names[index] for index in order]
+
+        for parameters in self.parameters.values():
+            for parameter in parameters:
+                self._remap_parameter_atom_indices(parameter, old_to_new)
+        layer_map = {layer: layer for layer in np.unique(self.basis[:, 7])}
+        self.symmetry_metadata = self._transform_symmetry_metadata(
+            self.symmetry_metadata,
+            old_to_new,
+            layer_map,
+            np.zeros(2, dtype=np.float64),
+            {layer: 0.0 for layer in layer_map},
+        )
 
     @staticmethod
     def _update_absolute_parameter_values_after_basis_transform(
@@ -1612,6 +2008,59 @@ class UnitCell(Lattice):
             transformed._explicit_layer_cycle = tuple(cycle)
         return transformed
 
+    def as_surface_termination(self, layer, name=None, origin=None):
+        """Return a copy whose complete structure is one surface termination.
+
+        The atomic ``layer`` column is used only as a stacking/termination
+        selector in the returned cell.  All atoms therefore receive the same
+        layer identifier, while their fractional coordinates and fit
+        parameters remain unchanged.  This permits a multi-layer relaxed slab
+        to be selected as one termination with ``layer_behavior='select'``.
+
+        :param float layer:
+            Layer identifier in the primitive Film stacking cycle.
+        :param str name:
+            Optional name for the returned unit cell.
+        :param float origin:
+            Fractional z coordinate in this cell that is placed at the exposed
+            terrace height.  By default the highest structural-layer origin is
+            used.
+        :returns:
+            Independent termination-cell copy.
+        :rtype: UnitCell
+        """
+        transformed = copy.deepcopy(self)
+        if name is not None:
+            transformed.name = name
+        layer = float(layer)
+        if origin is None:
+            origins = list(self.layerpos.values())
+            if origins:
+                origin = max(origins)
+            elif self.basis.size:
+                origin = float(np.max(self.basis[:, 3]))
+            else:
+                origin = 0.0
+        origin = float(origin)
+
+        for values in (
+            transformed.basis,
+            transformed.basis_0,
+            transformed._basis_parvalues,
+        ):
+            if values is not None and values.size:
+                values[:, 7] = layer
+        if transformed.symmetry_metadata is not None:
+            transformed.symmetry_metadata.atoms = tuple(
+                dataclasses.replace(atom, layer=layer)
+                for atom in transformed.symmetry_metadata.atoms
+            )
+        transformed.layerpos = {layer: origin}
+        transformed._explicit_layer_cycle = (layer,)
+        transformed.layer_behavior = "select"
+        transformed._start_layer = layer
+        return transformed
+
     def supercell(self, repeats, symmetry="preserve", name=None):
         """Return a repeated unit-cell copy.
 
@@ -2003,8 +2452,27 @@ class UnitCell(Lattice):
         for dispersion and absorption correction
         in eV
         """
+        shape = (self.basis.shape[0], 13)
+        state = self._formfactor_state_token()
+        if (
+            getattr(self, "_E", None) == E
+            and hasattr(self, "f")
+            and self.f.shape == shape
+            and getattr(self, "_formfactor_state", None) == state
+        ):
+            return
         self._E = E
         self.lookupScatteringFactors(E)
+
+    def _formfactor_state_token(self):
+        """Return the species and special-callback state used by ``self.f``."""
+        special = tuple(
+            (name, id(UnitCell.special_formfactors[name][0]),
+             id(UnitCell.special_formfactors[name][1]))
+            for name in self.names
+            if name in UnitCell.special_formfactors
+        )
+        return tuple(self.names), special
 
     def addFitParameter(self, indexarray, limits=(-np.inf, np.inf), **keyargs):
         """
@@ -2161,6 +2629,224 @@ class UnitCell(Lattice):
             return []
         return self.symmetry_metadata.wyckoff_sites(self.parameters)
 
+    def wyckoff(self, site_id):
+        """Return metadata for one Wyckoff site.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :returns:
+            The matching site metadata dictionary.
+        :rtype:
+            dict
+        :raises ValueError:
+            If this unit cell has no symmetry metadata or the site is unknown.
+        """
+        return self._wyckoff_site(site_id)
+
+    def set_wyckoff_atom_parameter(self, site_id, parameter, value):
+        """Set one field on every generated atom in a Wyckoff site.
+
+        Coordinates are fractional coordinates in the surface unit cell.
+        Coordinate values may be a scalar, applied to every atom, or one value
+        per atom in the order reported by
+        ``wyckoff(site_id)["atom_indices"]``. The site-wide ``iDW``, ``oDW``,
+        and ``occ`` fields require a scalar. Both the active basis and its
+        unfitted baseline are updated.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :param str parameter:
+            One of ``"x"``, ``"y"``, ``"z"``, ``"iDW"``, ``"oDW"``,
+            or ``"occ"``.
+        :param value:
+            Scalar value or one value per generated atom.
+        :raises ValueError:
+            If the parameter is invalid or the value cannot be broadcast to
+            the atoms in the site.
+        """
+        allowed = {"x", "y", "z", "iDW", "oDW", "occ"}
+        if parameter not in allowed:
+            raise ValueError(
+                "parameter must be one of 'x', 'y', 'z', 'iDW', 'oDW', or 'occ'."
+            )
+        site = self.wyckoff(site_id)
+        atoms = np.asarray(site["atom_indices"], dtype=np.intp)
+        if not len(atoms):
+            raise ValueError(f"Wyckoff site {site_id} has no generated atoms.")
+        value_array = np.asarray(value, dtype=np.float64)
+        if parameter in {"iDW", "oDW", "occ"} and value_array.ndim:
+            raise ValueError(f"{parameter} must be a scalar site-wide value.")
+        try:
+            values = np.broadcast_to(
+                value_array,
+                atoms.shape,
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"value must be scalar or contain one value for each of the "
+                f"{len(atoms)} atoms in Wyckoff site {site_id}."
+            ) from error
+
+        column = self.parameterLookup[parameter]
+        self.basis_0[atoms, column] = values
+        self.basis[atoms, column] = values
+        self._update_wyckoff_metadata_from_atom_values(
+            site_id,
+            parameter,
+            atoms,
+            values,
+        )
+        self._refresh_after_baseline_change()
+
+    def set_wyckoff_site_parameter(self, site_id, parameter, value):
+        """Set one representative coordinate or site-wide physical parameter.
+
+        An absolute parent conventional fractional coordinate is propagated to
+        all generated surface-cell atoms through their stored space-group and
+        surface-transform couplings. ``iDW``, ``oDW``, and ``occ`` are applied
+        as scalar values to every atom in the site. Both the active basis and
+        its unfitted baseline are updated.
+
+        :param str site_id:
+            Site identifier returned by :meth:`wyckoff_sites`.
+        :param str parameter:
+            Parent conventional fractional axis ``"x"``, ``"y"``, or
+            ``"z"``; or site-wide ``"iDW"``, ``"oDW"``, or ``"occ"``.
+        :param float value:
+            New absolute coordinate in parent fractional units or scalar
+            physical parameter value.
+        :raises ValueError:
+            If the parameter is invalid or required symmetry metadata is absent.
+        """
+        allowed = {"x", "y", "z", "iDW", "oDW", "occ"}
+        if parameter not in allowed:
+            raise ValueError(
+                "parameter must be one of 'x', 'y', 'z', 'iDW', 'oDW', or 'occ'."
+            )
+        if parameter in {"iDW", "oDW", "occ"}:
+            self.set_wyckoff_atom_parameter(site_id, parameter, value)
+            return
+
+        site = self.wyckoff(site_id)
+        representative = site.get("representative_parent_fractional")
+        if representative is None:
+            raise ValueError(
+                f"Wyckoff site {site_id} has no representative parent coordinate."
+            )
+
+        axis_index = {"x": 0, "y": 1, "z": 2}[parameter]
+        value = float(value)
+        delta = value - representative[axis_index]
+        couplings = [
+            coupling
+            for coupling in self.wyckoff_site_couplings(site_id)
+            if coupling.axis == parameter
+        ]
+        if not couplings:
+            raise ValueError(
+                f"No site-displacement couplings found for Wyckoff site "
+                f"{site_id} and parent axis {parameter}."
+            )
+
+        surface_deltas = {}
+        for coupling in couplings:
+            column = self.parameterLookup[coupling.coordinate]
+            change = delta * coupling.factor
+            self.basis_0[coupling.atom_index, column] += change
+            self.basis[coupling.atom_index, column] += change
+            surface_deltas.setdefault(
+                coupling.atom_index,
+                np.zeros(3, dtype=np.float64),
+            )[{"x": 0, "y": 1, "z": 2}[coupling.coordinate]] += change
+
+        self._update_wyckoff_metadata_from_site_value(
+            site_id,
+            axis_index,
+            value,
+            surface_deltas,
+        )
+        self._refresh_after_baseline_change()
+
+    def _refresh_after_baseline_change(self):
+        self.errors = None
+        self._basis_parvalues = None
+        self._errors_parvalues = None
+
+    def _update_wyckoff_metadata_from_atom_values(
+        self,
+        site_id,
+        parameter,
+        atoms,
+        values,
+    ):
+        model = self.symmetry_metadata
+        if parameter in {"iDW", "oDW", "occ"}:
+            model.sites = tuple(
+                dataclasses.replace(site, **{parameter: float(values[0])})
+                if site.site_id == site_id
+                else site
+                for site in model.sites
+            )
+            return
+
+        coordinate = {"x": 0, "y": 1, "z": 2}[parameter]
+        values_by_atom = dict(zip(atoms.tolist(), values.tolist()))
+        transform = model.surface_spec.transform
+        updated_atoms = []
+        for atom in model.atoms:
+            if atom.atom_index not in values_by_atom:
+                updated_atoms.append(atom)
+                continue
+            surface = np.array(atom.surface_fractional, copy=True)
+            surface_delta = values_by_atom[atom.atom_index] - surface[coordinate]
+            surface[coordinate] = values_by_atom[atom.atom_index]
+            parent = np.array(atom.parent_fractional, copy=True)
+            parent += transform[:, coordinate] * surface_delta
+            updated_atoms.append(
+                dataclasses.replace(
+                    atom,
+                    surface_fractional=surface,
+                    parent_fractional=parent,
+                )
+            )
+        model.atoms = updated_atoms
+
+    def _update_wyckoff_metadata_from_site_value(
+        self,
+        site_id,
+        axis_index,
+        value,
+        surface_deltas,
+    ):
+        model = self.symmetry_metadata
+        model.sites = tuple(
+            dataclasses.replace(
+                site,
+                representative_parent_fractional=tuple(
+                    value if index == axis_index else coordinate
+                    for index, coordinate in enumerate(
+                        site.representative_parent_fractional
+                    )
+                ),
+            )
+            if site.site_id == site_id
+            else site
+            for site in model.sites
+        )
+        transform = model.surface_spec.transform
+        model.atoms = [
+            dataclasses.replace(
+                atom,
+                surface_fractional=np.asarray(atom.surface_fractional)
+                + surface_deltas[atom.atom_index],
+                parent_fractional=np.asarray(atom.parent_fractional)
+                + transform @ surface_deltas[atom.atom_index],
+            )
+            if atom.atom_index in surface_deltas
+            else atom
+            for atom in model.atoms
+        ]
+
     def wyckoff_couplings(self, site_id=None):
         """Return symmetry couplings for generated Wyckoff atom coordinates.
 
@@ -2288,25 +2974,22 @@ class UnitCell(Lattice):
         absolute_limits=None,
         **keyargs,
     ):
-        """Add a symmetry-preserving fit parameter for a Wyckoff variable.
+        """Add an absolute symmetry-preserving Wyckoff variable parameter.
 
-        The stored fit value is the change in the Wyckoff variable from the
-        generated coordinates. For example, fitting rutile oxygen ``u`` adds
-        ``factor * delta_u`` to every generated coordinate that depends on
-        ``u``. Multi-variable Wyckoff sites are fitted by adding one parameter
-        per independent coordinate variable.
+        The exposed fit value is the absolute Wyckoff variable. Internally,
+        its difference from the site's reference value is propagated through
+        every affine coupling, preserving symmetry-equivalent coordinates.
 
         :param str site_id:
             Site identifier returned by :meth:`wyckoff_sites`.
         :param str variable:
             Wyckoff variable name, for example ``"u"``.
         :param tuple limits:
-            Fit limits for the variable change in fractional units.
+            Absolute variable limits in parent fractional units.
         :param tuple absolute_limits:
-            Optional absolute variable limits. These are converted to change
-            limits around the metadata variable value.
+            Deprecated alias for ``limits`` retained for compatibility.
         :returns:
-            Created relative fit parameter.
+            Parameter exposing the absolute Wyckoff variable value.
         :rtype:
             CTRutil.Parameter
         :raises ValueError:
@@ -2320,17 +3003,17 @@ class UnitCell(Lattice):
         if variable not in site["variables"]:
             raise ValueError(f"Wyckoff site {site_id} has no variable {variable}.")
 
-        limits = self._delta_limits(
-            limits,
-            absolute_limits,
-            site["variables"][variable],
-        )
+        if absolute_limits is not None:
+            if limits != (-np.inf, np.inf):
+                raise ValueError("Use either limits or absolute_limits, not both.")
+            limits = absolute_limits
+        reference_value = site["variables"][variable]
         couplings = [
             coupling
             for coupling in self.wyckoff_couplings(site_id)
             if coupling.variable == variable
         ]
-        return self._add_wyckoff_relative_parameter(
+        parameter = self._add_wyckoff_relative_parameter(
             site_id,
             "variable",
             variable,
@@ -2344,6 +3027,13 @@ class UnitCell(Lattice):
             ),
             keyargs,
         )
+        parameter.settings["wyckoff"].update(
+            {
+                "value_kind": "absolute",
+                "reference_value": reference_value,
+            }
+        )
+        return parameter
 
     def addWyckoffParameters(
         self,
@@ -2353,7 +3043,7 @@ class UnitCell(Lattice):
         absolute_limits=None,
         **keyargs,
     ):
-        """Add symmetry-preserving fit parameters for Wyckoff variables.
+        """Add absolute symmetry-preserving Wyckoff variable parameters.
 
         :param str site_id:
             Site identifier returned by :meth:`wyckoff_sites`.
@@ -2363,12 +3053,12 @@ class UnitCell(Lattice):
         :type variables:
             iterable or None
         :param limits:
-            Either one ``(lower, upper)`` tuple applied to every variable or a
-            dictionary mapping variable names to delta limits.
+            One absolute ``(lower, upper)`` tuple for every variable or a
+            dictionary mapping variable names to absolute limits.
         :param absolute_limits:
-            Optional dictionary mapping variable names to absolute limits.
+            Deprecated alias for absolute ``limits`` retained for compatibility.
         :returns:
-            Created relative fit parameters in variable order.
+            Created absolute variable parameters in variable order.
         :rtype:
             list
         :raises ValueError:
@@ -2411,12 +3101,12 @@ class UnitCell(Lattice):
         absolute_limits=None,
         **keyargs,
     ):
-        """Add a symmetry-lowering shift for representative site motion.
+        """Add a relative shift from a symmetry site along a parent direction.
 
-        ``axis`` is a parent conventional fractional coordinate of the
-        representative atom. The stored fit value is a delta from the
-        representative coordinate; generated atoms move through the stored
-        space-group operation and surface-cell transform factors.
+        ``axis`` is a parent conventional-cell direction. The exposed value is
+        a relative displacement from the representative symmetry-site
+        coordinate, not an absolute parent coordinate. Generated atoms move
+        through the stored space-group operation and surface-cell transform.
 
         :param str site_id:
             Site identifier returned by :meth:`wyckoff_sites`.
@@ -2426,8 +3116,8 @@ class UnitCell(Lattice):
         :param tuple limits:
             Fit limits for the coordinate change in parent fractional units.
         :param tuple absolute_limits:
-            Optional absolute parent-coordinate limits, converted to changes
-            around the stored representative coordinate.
+            Optional absolute parent-coordinate bounds converted to relative
+            shift bounds. The fitted value remains a relative displacement.
         :returns:
             Created relative fit parameter.
         :rtype:
@@ -2478,7 +3168,11 @@ class UnitCell(Lattice):
         absolute_limits=None,
         **keyargs,
     ):
-        """Add representative site-displacement shifts for several axes.
+        """Add relative symmetry-site shifts along parent-cell directions.
+
+        Every exposed value is a displacement from the representative
+        symmetry-site coordinate along the selected parent conventional-cell
+        direction; it is not an absolute coordinate.
 
         :param str site_id:
             Site identifier returned by :meth:`wyckoff_sites`.
@@ -2490,7 +3184,8 @@ class UnitCell(Lattice):
             Either one ``(lower, upper)`` tuple applied to every axis or a
             dictionary mapping axis names to delta limits.
         :param absolute_limits:
-            Optional dictionary mapping axis names to absolute limits.
+            Optional absolute parent-coordinate bounds converted to relative
+            shift bounds. The fitted values remain relative displacements.
         :returns:
             Created relative fit parameters in axis order.
         :rtype:
@@ -2599,6 +3294,9 @@ class UnitCell(Lattice):
             val = np.mean(
                 (self.basis[par.indices] - basis_0[par.indices]) / par.factors
             )
+            wyckoff = par.settings.get("wyckoff", {})
+            if wyckoff.get("value_kind") == "absolute":
+                val += wyckoff["reference_value"]
             # if isinstance(par.indices[1], (np.integer,int)):
             #    parameternames = (UnitCell.parameterLookup_inv[par.indices[1]] + '_r',)
             #    atoms = (f"{par.indices[0]}_{self.names[par.indices[0]]}",)
@@ -2645,12 +3343,14 @@ class UnitCell(Lattice):
 
         for par in relpar:
             if recalculate or par.value is None:
-                x0.append(
-                    np.mean(
-                        (self.basis[par.indices] - self.basis_0[par.indices])
-                        / par.factors
-                    )
+                value = np.mean(
+                    (self.basis[par.indices] - self.basis_0[par.indices])
+                    / par.factors
                 )
+                wyckoff = par.settings.get("wyckoff", {})
+                if wyckoff.get("value_kind") == "absolute":
+                    value += wyckoff["reference_value"]
+                x0.append(value)
             else:
                 x0.append(par.value)
             lower.append(par.limits[0])
@@ -2666,7 +3366,8 @@ class UnitCell(Lattice):
             self.basis[par.indices] = val
             par.value = val
         for val, par in zip(x_r, self.parameters["relative"]):
-            self.basis[par.indices] += par.factors * val
+            internal_value = self._relative_internal_value(par, val)
+            self.basis[par.indices] += par.factors * internal_value
             par.value = val
         self._basis_parvalues = np.copy(self.basis)
 
@@ -2725,6 +3426,12 @@ class UnitCell(Lattice):
         return err0
 
     def build_selected_basis(self):
+        # Preserve the legacy default-energy behavior for callers that compute
+        # a structure factor before selecting an energy, while allowing layer
+        # construction itself to remain free of unnecessary database work.
+        if not hasattr(self, "f") or self.f.shape != (self.basis.shape[0], 13):
+            self.setEnergy(getattr(self, "_E", 10000.0))
+
         if self.layer_behaviour == "select":
             if self.start_layer_number == -1.0:
                 warnings.warn(
@@ -2773,6 +3480,9 @@ class UnitCell(Lattice):
         if ctr_accel_enabled():
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
             accel = _ctr_accel_module()
+            domain_matrix, domain_occupancy = _coherent_domain_arrays(
+                self.coherentDomainMatrix, self.coherentDomainOccupancy
+            )
             F = accel.unitcell_F_uc_bulk(
                 h,
                 k,
@@ -2784,8 +3494,8 @@ class UnitCell(Lattice):
                 self.B_mat,
                 self.R_mat,
                 self.R_mat_inv,
-                np.asarray(self.coherentDomainMatrix),
-                np.asarray(self.coherentDomainOccupancy),
+                domain_matrix,
+                domain_occupancy,
                 self.uc_area,
             )
             return F
@@ -2898,6 +3608,9 @@ class UnitCell(Lattice):
         if ctr_accel_enabled() and not self._special_formfactors_present:
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
             accel = _ctr_accel_module()
+            domain_matrix, domain_occupancy = _coherent_domain_arrays(
+                self.coherentDomainMatrix, self.coherentDomainOccupancy
+            )
             F = accel.unitcell_F_uc(
                 h,
                 k,
@@ -2908,8 +3621,8 @@ class UnitCell(Lattice):
                 self.B_mat,
                 self.R_mat,
                 self.R_mat_inv,
-                np.asarray(self.coherentDomainMatrix),
-                np.asarray(self.coherentDomainOccupancy),
+                domain_matrix,
+                domain_occupancy,
                 self.uc_area,
             )
             return F
@@ -2958,7 +3671,9 @@ class UnitCell(Lattice):
         """Return the semi-infinite bulk structure factor in electrons.
 
         The amplitude represents one lateral bulk unit cell. The geometric
-        lattice sum is applied only along the out-of-plane direction.
+        lattice sum is applied only along the out-of-plane direction. Its
+        phase and attenuation follow the bulk-cell repeat after conversion
+        from the configured reference unit cell.
 
         :param numpy.ndarray h:
             Reference-frame reciprocal coordinate in r.l.u.
@@ -2967,35 +3682,42 @@ class UnitCell(Lattice):
         :param numpy.ndarray l:
             Reference-frame reciprocal coordinate in r.l.u.
         :param float atten:
-            Dimensionless attenuation exponent per bulk unit cell.
+            Dimensionless attenuation exponent per reference-cell
+            out-of-plane repeat.
         :returns:
             Complex bulk amplitude in electrons per lateral bulk cell.
         :rtype: numpy.ndarray
         """
         basis, formf, names = self.build_selected_basis()
+        # The reciprocal transform maps reference r.l.u. to bulk r.l.u.;
+        # (2, 2) is the bulk/reference out-of-plane repeat ratio.
+        repeat_atten = atten * abs(self.refHKLTransform[2, 2])
         if ctr_accel_enabled():
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
             accel = _ctr_accel_module()
+            domain_matrix, domain_occupancy = _coherent_domain_arrays(
+                self.coherentDomainMatrix, self.coherentDomainOccupancy
+            )
             F = accel.unitcell_F_bulk(
                 h,
                 k,
                 l,
-                atten,
+                repeat_atten,
                 basis,
                 formf,
                 self.refHKLTransform,
                 self.B_mat,
                 self.R_mat,
                 self.R_mat_inv,
-                np.asarray(self.coherentDomainMatrix),
-                np.asarray(self.coherentDomainOccupancy),
+                domain_matrix,
+                domain_occupancy,
                 self.uc_area,
             )
             return F
         else:
             hkl = self.refHKLTransform @ np.vstack((h, k, l))
-            Fuc = self.F_uc_bulk_direct(*hkl, atten)
-            return Fuc / (1 - np.exp(-2j * np.pi * l - atten))
+            Fuc = self.F_uc_bulk_direct(*hkl, repeat_atten)
+            return Fuc / (1 - np.exp(-2j * np.pi * hkl[2] - repeat_atten))
 
     SQRT2pi = np.sqrt(2 * np.pi)
 
@@ -3037,6 +3759,27 @@ class UnitCell(Lattice):
             warnings.warn(
                 "zDensity: z stepsize is not equal in given z array."
                 "This will result in numerical errors in electron density calculation!"
+            )
+
+        # Special electron-density models are Python callbacks followed by a
+        # SciPy convolution, so they deliberately retain the reference path.
+        # The native kernel implements the standard atomic density expression.
+        if CTR_ACCEL_BACKEND == "cpp" and not any(
+            name in UnitCell.special_eDensity for name in names
+        ):
+            return _CTRcalc_cpp.unitcell_zdensity_g(
+                np.ascontiguousarray(z, dtype=np.float64),
+                h,
+                k,
+                Qpara2,
+                self._a[2],
+                basis,
+                formf,
+                self.R_mat,
+                self.R_mat_inv,
+                np.asarray(self.coherentDomainMatrix),
+                np.asarray(self.coherentDomainOccupancy),
+                self.uc_area,
             )
 
         rho = np.zeros_like(z, dtype=np.complex128)
@@ -3135,13 +3878,20 @@ class UnitCell(Lattice):
         else:
             self.f = np.empty((self.basis.shape[0], 13), dtype=np.float64)
 
-        for i, name in enumerate(self.names):
+        species_indices = OrderedDict()
+        for index, name in enumerate(self.names):
+            species_indices.setdefault(name, []).append(index)
+
+        for name, indices in species_indices.items():
             if name in UnitCell.special_formfactors:
-                self.f[i, :11] = 0.0
-                self.f[i, 11:] = UnitCell.special_formfactors[name][1](E)
+                row = np.zeros(13, dtype=np.float64)
+                row[11:] = UnitCell.special_formfactors[name][1](E)
             else:
-                self.f[i, :11] = readWaasmaier(name)
-                self.f[i, 11:] = readDispersion(name, E)
+                row = np.empty(13, dtype=np.float64)
+                row[:11] = readWaasmaier(name)
+                row[11:] = readDispersion(name, E)
+            self.f[indices] = row
+        self._formfactor_state = self._formfactor_state_token()
         return
 
     def plot3d(
@@ -3154,18 +3904,50 @@ class UnitCell(Lattice):
         figure=None,
         translate=np.array([0.0, 0.0, 0.0]),
         domain=0,
+        backend="auto",
+        radius_scale=1.0,
         **keyargs,
     ):
-        try:
-            from mayavi import mlab
-        except ImportError:
-            warnings.warn("can not import mayavi: 3D plotting not supported")
-            return
+        """Plot atoms as covalent-radius spheres in a 3D viewer.
 
-        if figure is None:
-            figure = mlab.figure()
+        Coordinates and radii passed to either backend are in Angstrom.
+        Reusing the returned figure adds atoms to the existing scene. In a
+        notebook, an already displayed py3Dmol view is updated in place.
+        Assign the result or terminate an incremental call with a semicolon to
+        prevent Jupyter from also rendering the returned view as a new output.
+        The ``resolution`` keyword controls Mayavi spheres only; py3Dmol uses
+        its native sphere rendering.
+
+        :param int ucx: Number of cells along the first lattice direction.
+        :param int ucy: Number of cells along the second lattice direction.
+        :param int ucz: Number of cells along the third lattice direction.
+        :param bool dwon:
+            Sample atom positions using the stored Debye-Waller disorder.
+        :param bool occuon:
+            Randomly omit atoms according to their occupancies.
+        :param figure:
+            Existing Mayavi figure or py3Dmol view to extend.
+        :param numpy.ndarray translate:
+            Fractional translation vector or coherent-domain transform.
+        :param int domain: Index of the coherent-domain matrix.
+        :param str backend:
+            ``"auto"``, ``"mayavi"``, or ``"py3dmol"``. Automatic selection
+            prefers py3Dmol in an IPython kernel and Mayavi otherwise.
+        :param float radius_scale:
+            Positive dimensionless multiplier applied to covalent radii.
+        :returns: The selected backend's figure or view.
+        :raises ValueError: If ``radius_scale`` is not positive and finite.
+        """
+        try:
+            radius_scale = float(radius_scale)
+        except (TypeError, ValueError) as error:
+            raise ValueError("radius_scale must be positive and finite.") from error
+        if not np.isfinite(radius_scale) or radius_scale <= 0:
+            raise ValueError("radius_scale must be positive and finite.")
+
+        backend, figure, mlab = _prepare_plot3d_figure(backend, figure)
         if keyargs.get("useSelected", True):
-            basis, formf, names = self.build_selected_basis()
+            basis, _formf, names = self.build_selected_basis()
         else:
             basis, _formf, names = self.basis, self.f, self.names
         if ucx == 0 or ucy == 0 or ucz == 0:
@@ -3191,7 +3973,10 @@ class UnitCell(Lattice):
         mat = self.coherentDomainMatrix[domain]
         domainmatrix = self.R_mat_inv @ mat[:, :-1] @ self.R_mat
         for i, params in enumerate(basis):
-            radius = cov_radii_array[atomic_number(names[i]) - 1][2] * 2
+            covalent_radius = float(
+                cov_radii_array[atomic_number(names[i]) - 1][2]
+            )
+            sphere_radius = covalent_radius * radius_scale
             # elcolor_c = keyargs.get('color')
             # if elcolor_c is None:
             #    elcolor_c = elements.rgb(int(params[0]))
@@ -3247,17 +4032,48 @@ class UnitCell(Lattice):
 
             if dwon:
                 position_cart = np.random.default_rng().normal(position_cart, sigmas)
-            mlab.points3d(
-                *position_cart,
-                scale_factor=radius,
-                color=elcolors[i],
-                resolution=resolution,
-                figure=figure,
-            )
+            if backend == "mayavi":
+                mlab.points3d(
+                    *position_cart,
+                    scale_factor=2 * sphere_radius,
+                    color=elcolors[i],
+                    resolution=resolution,
+                    figure=figure,
+                )
+            else:
+                valid = np.all(np.isfinite(position_cart), axis=0)
+                positions_valid = position_cart[:, valid].T
+                if positions_valid.size == 0:
+                    continue
+                symbol = cov_radii_array[atomic_number(names[i]) - 1][1]
+                xyz_lines = [
+                    str(len(positions_valid)),
+                    f"orGUI UnitCell {self.name}",
+                ]
+                xyz_lines.extend(
+                    f"{symbol} {position[0]:.16g} {position[1]:.16g} "
+                    f"{position[2]:.16g}"
+                    for position in positions_valid
+                )
+                figure.addModel("\n".join(xyz_lines) + "\n", "xyz")
+                figure.getModel().setStyle(
+                    {},
+                    {
+                        "sphere": {
+                            "color": _rgb_to_hex(elcolors[i]),
+                            "radius": sphere_radius,
+                        }
+                    },
+                )
 
         atomlist = keyargs.get("atomlist")
         if atomlist is not None:
             atomlist.append(self.pos_cart_all(ucx, ucy, ucz, translate))
+
+        if backend == "py3dmol" and not keyargs.get("_defer_update", False):
+            figure.zoomTo()
+            if getattr(figure, "uniqueid", None) is not None:
+                figure.update()
 
         return figure
 
@@ -3365,19 +4181,42 @@ class UnitCell(Lattice):
         name = self.names[no]
         if (self.errors is not None) and showErrors:
             err = self.errors[no][1:]
-            l = []  # noqa: E741
-            for t in zip(param, err):
-                [l.append(ti) for ti in t]
-            return (
-                "{}  ({:.5f} +- {:.5f})  ({:.5f} +- {:.5f})  ({:.5f} +- {:.5f})  ({:.4f} +- {:.4f})  ({:.4f} +- {:.4f})  ({:.4f} +- {:.4f}) ({:.0f} +- {:.0f})".format(  # noqa: E501
-                    name, *l
-                )  # noqa: E501
+            values = [
+                f"({param[index]:.5f} +- {err[index]:.5f})"
+                for index in range(3)
+            ]
+            values.extend(
+                f"({param[index]:.4f} +- {err[index]:.4f})"
+                for index in range(3, 6)
             )
-        else:
-            return "{}     {:.5f}     {:.5f}     {:.5f}  {:.4f}  {:.4f}  {:.4f} {:.0f}".format(  # noqa: E501
-                name,
-                *param,
+            values.append(f"({param[6]:.0f} +- {err[6]:.0f})")
+            return f"{name:<{self._atom_error_column_widths[0]}}" + "".join(
+                f"{value:>{width}}"
+                for value, width in zip(
+                    values,
+                    self._atom_error_column_widths[1:],
+                )
             )
+
+        formats = (".5f", ".5f", ".5f", ".4f", ".4f", ".4f", ".0f")
+        values = [format(value, spec) for value, spec in zip(param, formats)]
+        return f"{name:<{self._atom_column_widths[0]}}" + "".join(
+            f"{value:>{width}}"
+            for value, width in zip(values, self._atom_column_widths[1:])
+        )
+
+    def _parameter_header(self, showErrors=True):
+        widths = (
+            self._atom_error_column_widths
+            if self.errors is not None and showErrors
+            else self._atom_column_widths
+        )
+        return "".join(
+            f"{name:<{width}}" if index == 0 else f"{name:>{width}}"
+            for index, (name, width) in enumerate(
+                zip(self._atom_column_names, widths)
+            )
+        ).rstrip()
 
     def domainsToStr(self):
         s = ""
@@ -3433,7 +4272,7 @@ class UnitCell(Lattice):
 
     def __str__(self):
         st = repr(self) + "\n"
-        st += "id  " + UnitCell.parameterOrder + "\n"
+        st += "id  " + self._parameter_header() + "\n"
         return st + self.parameterStr()
 
     def writeSURfile(self, filename):
@@ -3470,7 +4309,7 @@ class UnitCell(Lattice):
             + self.domainsToStr()
             + self.latticeRODStr()
             + "\n"
-            + UnitCell.parameterOrder
+            + self._parameter_header(showErrors)
             + "\n"
             + self.parameterStr(showErrors=showErrors)
         )
@@ -3541,10 +4380,23 @@ class UnitCell(Lattice):
                     f"File {filename} contains no valid crystal lattice parameters"
                 )
             uc = UnitCell(atoms.cell.lengths(), atoms.cell.angles())
-            coord = atoms.get_scaled_positions()
+            coord = np.mod(atoms.get_scaled_positions(), 1.0)
             symb = atoms.get_chemical_symbols()
-            for sym, xyz in zip(symb, coord):
-                uc.addAtom(sym, xyz, 0.0, 0.0, 1.0)
+            if ext.lower() == ".cif":
+                order = sorted(
+                    range(len(symb)),
+                    key=lambda index: (
+                        coord[index, 2],
+                        coord[index, 1],
+                        coord[index, 0],
+                        symb[index],
+                    ),
+                )
+                uc._allow_layer_order_normalization = True
+            else:
+                order = range(len(symb))
+            for index in order:
+                uc.addAtom(symb[index], coord[index], 0.0, 0.0, 1.0)
             return uc
 
     @classmethod
