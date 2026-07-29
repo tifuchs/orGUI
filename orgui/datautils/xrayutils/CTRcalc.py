@@ -40,6 +40,15 @@ from .CTRutil import ParameterType, Parameter, next_skip_comment
 
 from .CTRuc import WaterModel, UnitCell
 from .CTRfilm import EpitaxyInterface, Film, PoissonSurface
+from .CTRoptics import (
+    _specular_reflection,
+    add_structural_to_sampled_profile,
+    combine_profiles,
+    simplify_profile,
+    solve_wavefield,
+    stratify_profile,
+    top_layer_spacing,
+)
 from .CTRdistributions import PoissonProfile, SkellamProfile  # noqa: F401
 from .CTRstacking import (  # noqa: F401
     LayerCycle,
@@ -77,14 +86,16 @@ class SXRDCrystal:
         :param numpy.ndarray stacking:
             Integer stacking levels for the surface components.
         :param float atten:
-            Dimensionless bulk attenuation exponent per unit cell.
+            Dimensionless bulk attenuation exponent per reference-cell
+            out-of-plane repeat.
         """
         self.uc_bulk = uc_bulk
         self.uc_surface_list = list(uc_surface)
         self.enable_uc_stacking = keyargs.get("enable_stacking", False)
         if not self.enable_uc_stacking:
             for uc in self.uc_surface_list:
-                if isinstance(uc, Film | PoissonSurface | EpitaxyInterface):
+                stackable = Film | PoissonSurface | EpitaxyInterface | WaterModel
+                if isinstance(uc, stackable):
                     self.enable_uc_stacking = True
                     break
 
@@ -253,18 +264,23 @@ class SXRDCrystal:
         layer_state_new = getattr(self.uc_bulk, "layer_state", None)
         layer_number_new = layer_state_new.layer if layer_state_new is not None else -1
         loc_new = 0.0
+        component_new = self.uc_bulk
         for stacking_level in np.unique(self.uc_stacking_ordered):
             below_height = height_new
             below_layer = layer_number_new
             below_loc = loc_new
+            below_component = component_new
             while self.uc_stacking_ordered[i] == stacking_level:
                 uc = self.uc_surface_list_ordered[i]
                 if hasattr(uc, "stack_on"):
+                    stack_kwargs = {"below_state": layer_state_new}
+                    if isinstance(uc, PoissonSurface):
+                        stack_kwargs["below_component"] = below_component
                     uc.stack_on(
                         below_loc,
                         below_height,
                         below_layer,
-                        below_state=layer_state_new,
+                        **stack_kwargs,
                     )
                 else:
                     uc.start_layer_number = below_layer
@@ -279,6 +295,7 @@ class SXRDCrystal:
                     loc_new = uc.loc_absolute
                 layer_number_new = uc.end_layer_number
                 layer_state_new = getattr(uc, "layer_state", None)
+                component_new = uc
                 i += 1
                 if i == len(self.uc_stacking_ordered):
                     return
@@ -512,10 +529,14 @@ class SXRDCrystal:
         ``unitcell="top"``, ``unitcell="bottom"``, or a list in the selection
         dictionary.
 
+        The coupled value and limits are absolute. This method distributes the
+        request to :meth:`UnitCell.addWyckoffParameter` on each selected unit
+        cell and links the resulting absolute parameters by name.
+
         :param dict parameter:
             Component-specific Wyckoff variable selections.
         :param tuple limits:
-            Shared delta limits in fractional units.
+            Shared absolute limits in fractional units.
         :param keyargs:
             Additional coupled-parameter settings such as ``name`` or
             ``prior``.
@@ -528,13 +549,12 @@ class SXRDCrystal:
             parameter,
             kind="coordinate",
             value_key="variable",
-            coupling_getter="wyckoff_couplings",
             limits=limits,
             **keyargs,
         )
 
     def addWyckoffShift(self, parameter, limits=(-np.inf, np.inf), **keyargs):
-        """Add a coupled representative Wyckoff-site shift parameter.
+        """Add coupled relative shifts along parent-cell directions.
 
         ``parameter`` maps crystal component names to Wyckoff shift
         selections. A selection can be ``(site_id, axis)`` or a dictionary with
@@ -546,7 +566,7 @@ class SXRDCrystal:
         :param dict parameter:
             Component-specific Wyckoff shift selections.
         :param tuple limits:
-            Shared parent-coordinate delta limits in fractional units.
+            Shared relative-shift limits in parent fractional units.
         :param keyargs:
             Additional coupled-parameter settings such as ``name`` or
             ``prior``.
@@ -559,7 +579,6 @@ class SXRDCrystal:
             parameter,
             kind="site_displacement",
             value_key="axis",
-            coupling_getter="wyckoff_site_couplings",
             limits=limits,
             **keyargs,
         )
@@ -569,7 +588,6 @@ class SXRDCrystal:
         parameter,
         kind,
         value_key,
-        coupling_getter,
         limits=(-np.inf, np.inf),
         **keyargs,
     ):
@@ -581,47 +599,41 @@ class SXRDCrystal:
         keyargs["name"] = name
         keyargs["prior"] = prior
 
-        component_indices = []
+        targets = []
         for component_key, selection in parameter.items():
-            for component_index, unitcell, site_id, value in self._wyckoff_targets(
-                component_key,
-                selection,
-                value_key,
-            ):
-                couplings = [
-                    coupling
-                    for coupling in getattr(unitcell, coupling_getter)(site_id)
-                    if getattr(coupling, value_key) == value
-                ]
-                if not couplings:
-                    raise ValueError(
-                        f"No Wyckoff {value_key} couplings found for "
-                        f"{component_key!r}, site {site_id!r}, {value_key} "
-                        f"{value!r}."
-                    )
-                atoms = np.asarray(
-                    [coupling.atom_index for coupling in couplings],
-                    dtype=np.intp,
+            targets.extend(
+                (component_key, *target)
+                for target in self._wyckoff_targets(
+                    component_key,
+                    selection,
+                    value_key,
                 )
-                coordinates = tuple(coupling.coordinate for coupling in couplings)
-                factors = np.asarray(
-                    [coupling.factor for coupling in couplings],
-                    dtype=np.float64,
-                )
-                settings = dict(keyargs)
-                settings["wyckoff"] = {
-                    "site_id": site_id,
-                    "kind": kind,
-                    value_key: value,
-                    "value_kind": "delta",
-                }
-                unitcell.addRelParameter(
-                    (atoms, coordinates),
-                    factors,
-                    limits,
+            )
+
+        component_indices = []
+        for component_key, component_index, unitcell, site_id, value in targets:
+            settings = dict(keyargs)
+            if kind == "coordinate":
+                unitcell.addWyckoffParameter(
+                    site_id,
+                    value,
+                    limits=limits,
                     **settings,
                 )
-                component_indices.append(component_index)
+            else:
+                unitcell.addWyckoffShift(
+                    site_id,
+                    value,
+                    limits=limits,
+                    **settings,
+                )
+            component_indices.append(component_index)
+
+        coupled_settings = dict(keyargs)
+        coupled_settings["wyckoff"] = {
+            "kind": kind,
+            "value_kind": "absolute" if kind == "coordinate" else "delta",
+        }
 
         par = Parameter(
             name,
@@ -629,7 +641,7 @@ class SXRDCrystal:
             ParameterType.RELATIVE,
             limits,
             prior,
-            keyargs,
+            coupled_settings,
         )
         self.parameters["coupled"].append(par)
         self._parIdNo += 1
@@ -926,7 +938,7 @@ class SXRDCrystal:
         x = np.asarray(x)
         x_r = x[
             self.fit_metadata_cache["par_idx_sortarray"]
-        ]  # reorder fitpars, this handles coupled parameters
+        ]  # reorder fitpars, including coupled absolute Wyckoff parameters
         x_ucs = x_r[self.fit_metadata_cache["number_xtalpar"] :]
         uc_numberpars = self.fit_metadata_cache["uc_numberpars"]
 
@@ -958,7 +970,7 @@ class SXRDCrystal:
         lim = np.asarray(lim)
         x_r = lim[
             self.fit_metadata_cache["par_idx_sortarray"]
-        ]  # reorder fitpars, this handles coupled parameters
+        ]  # reorder limits, including coupled absolute Wyckoff parameters
         x_ucs = x_r[self.fit_metadata_cache["number_xtalpar"] :]
         uc_numberpars = self.fit_metadata_cache["uc_numberpars"]
 
@@ -1078,6 +1090,192 @@ class SXRDCrystal:
         for uc, w in zip(self.uc_surface_list, self.weights):
             rho += uc.zDensity_G(z, h, k) * w
         return rho
+
+    def optical_profile(self):
+        """Return the combined homogeneous optical profile of this crystal.
+
+        Crystal surface weights are applied directly to ``delta`` and ``beta``.
+        Water is sampled on the top atomistic layer grid. Without water, one
+        vacuum row is appended one top-layer spacing above the highest atomic
+        layer.
+
+        :returns:
+            C-contiguous ``(N, 3)`` array with columns ``z`` in Angstrom,
+            ``delta``, and ``beta``.
+        :rtype: numpy.ndarray
+        :raises NotImplementedError:
+            If a component does not expose an atomistic optical profile.
+        """
+        if self.enable_uc_stacking:
+            self.apply_stacking()
+        profiles = [self.uc_bulk.optical_profile_asbulk()]
+        water_components = []
+        for component, weight in zip(self.uc_surface_list, self.weights):
+            if not hasattr(component, "optical_profile"):
+                raise NotImplementedError(
+                    f"{type(component).__name__} has no atomistic optical profile."
+                )
+            if isinstance(component, WaterModel):
+                water_components.append((component, weight))
+            else:
+                profile = component.optical_profile().copy()
+                profile[:, 1:] *= weight
+                profiles.append(profile)
+        structural_profile = combine_profiles(*profiles)
+        dz = top_layer_spacing(structural_profile)
+        if not water_components:
+            vacuum = np.array(
+                [[structural_profile[-1, 0] + dz, 0.0, 0.0]], dtype=np.float64
+            )
+            return np.ascontiguousarray(
+                np.concatenate((structural_profile, vacuum), axis=0)
+            )
+        water_profiles = []
+        z_origin = structural_profile[-1, 0]
+        for component, weight in water_components:
+            profile = component.optical_profile(
+                z_step=dz, z_origin=z_origin
+            ).copy()
+            profile[:, 1:] *= weight
+            water_profiles.append(profile)
+        return add_structural_to_sampled_profile(
+            structural_profile, *water_profiles
+        )
+
+    def simplified_optical_profile(
+        self, delta_tolerance=1e-9, beta_tolerance=None
+    ):
+        """Return a thickness-conserving simplified optical profile.
+
+        :param float delta_tolerance:
+            Maximum delta range within a merged finite layer.
+        :param float beta_tolerance:
+            Maximum beta range within a merged finite layer. Defaults to the
+            delta tolerance.
+        :returns:
+            Simplified ``(N, 3)`` optical profile.
+        :rtype: numpy.ndarray
+        """
+        return simplify_profile(
+            self.optical_profile(), delta_tolerance, beta_tolerance
+        )
+
+    def stratified_optical_profile(
+        self, delta_tolerance=1e-9, beta_tolerance=None
+    ):
+        """Return optical media and their physical interface positions.
+
+        Profile z coordinates are centers of homogeneous media. Interfaces
+        are centered between adjacent samples before optional simplification;
+        merged media retain those original outer boundaries.
+
+        :param float delta_tolerance:
+            Maximum delta range within a merged finite layer. Pass ``None``
+            to retain every sampled medium.
+        :param float beta_tolerance:
+            Maximum beta range within a merged finite layer. Defaults to the
+            delta tolerance when simplification is requested.
+        :returns:
+            Layer-center optical constants and substrate-to-ambient edges.
+        :rtype: CTRoptics.StratifiedProfile
+        """
+        return stratify_profile(
+            self.optical_profile(), delta_tolerance, beta_tolerance
+        )
+
+    def wavefield(
+        self,
+        alpha,
+        polarization="s",
+        delta_tolerance=1e-9,
+        beta_tolerance=None,
+    ):
+        """Return the unperturbed layered electric field.
+
+        The field follows the Renaud convention with downward and upward
+        amplitudes ``A_plus`` and ``A_minus``. Slabs are ordered from the
+        incident medium towards the substrate.
+
+        :param float or numpy.ndarray alpha:
+            Glancing incidence angle or angle array in degrees inside the
+            incident medium. For arrays, wavefield quantities have the layer
+            axis first followed by the original angle-array shape.
+        :param str polarization:
+            ``"s"`` or ``"p"``.
+        :param float delta_tolerance:
+            Maximum delta range used to simplify adjacent layers. Pass
+            ``None`` to disable simplification.
+        :param float beta_tolerance:
+            Optional beta simplification tolerance. Defaults to the delta
+            tolerance when simplification is requested.
+        :returns:
+            Layer amplitudes, normal wavevectors, and sampled electric field.
+        :rtype: CTRoptics.Wavefield
+        """
+        profile = self.stratified_optical_profile(
+            delta_tolerance, beta_tolerance
+        )
+        return solve_wavefield(
+            profile.values,
+            self.uc_bulk._E,
+            alpha,
+            polarization,
+            boundaries=profile.boundaries,
+        )
+
+    def specular_reflectivity(
+        self,
+        alpha,
+        polarization="s",
+        delta_tolerance=1e-9,
+        beta_tolerance=None,
+    ):
+        """Return scalar optical specular reflectivity.
+
+        :param float or numpy.ndarray alpha:
+            Glancing incidence angle or angles in degrees inside the incident
+            medium.
+        :param str polarization:
+            ``"s"``, ``"p"``, or ``"unpolarized"``. Unpolarized intensity
+            is the equal incoherent average of s and p reflectivity.
+        :param float delta_tolerance:
+            Maximum delta range used to simplify adjacent layers. Pass
+            ``None`` to disable simplification.
+        :param float beta_tolerance:
+            Optional beta simplification tolerance. Defaults to the delta
+            tolerance when simplification is requested.
+        :returns:
+            Reflectivity with the same scalar/array shape as ``alpha``.
+        :rtype: float or numpy.ndarray
+        """
+        if polarization not in {"s", "p", "unpolarized"}:
+            raise ValueError(
+                "polarization must be 's', 'p', or 'unpolarized'."
+            )
+        alpha_array = np.asarray(alpha, dtype=np.float64)
+        scalar = alpha_array.ndim == 0
+        angles = np.atleast_1d(alpha_array).ravel()
+        profile = self.stratified_optical_profile(
+            delta_tolerance, beta_tolerance
+        )
+
+        def reflectivity(pol):
+            reflection = _specular_reflection(
+                profile.values,
+                self.uc_bulk._E,
+                angles,
+                pol,
+                boundaries=profile.boundaries,
+            )
+            return np.abs(reflection) ** 2
+
+        if polarization == "unpolarized":
+            result = 0.5 * (reflectivity("s") + reflectivity("p"))
+        else:
+            result = reflectivity(polarization)
+        if scalar:
+            return float(result[0])
+        return result.reshape(alpha_array.shape)
 
     def toRODStr(self):
         s = f"E = {self.uc_bulk._E * 1e-3:.5f} keV\n"
@@ -1215,23 +1413,69 @@ class SXRDCrystal:
         occuon=False,
         figure=None,
         translate=np.array([0.0, 0.0, 0.0]),
+        backend="auto",
+        radius_scale=1.0,
         **keyargs,
     ):
-        try:
-            from mayavi import mlab
-        except ImportError:
-            warnings.warn("can not import mayavi: 3D plotting not supported")
-            return
+        """Plot the bulk and surface unit cells in one 3D viewer.
 
-        if figure is None:
-            figure = mlab.figure()
+        Coordinates and radii passed to either backend are in Angstrom.
+        Assign the result or terminate an incremental call with a semicolon to
+        prevent Jupyter from also rendering the returned view as a new output.
+
+        :param int ucx: Number of cells along the first lattice direction.
+        :param int ucy: Number of cells along the second lattice direction.
+        :param int ucz: Number of bulk cells along the third lattice direction.
+        :param bool dwon:
+            Sample atom positions using the stored Debye-Waller disorder.
+        :param bool occuon:
+            Randomly omit atoms according to their occupancies.
+        :param figure:
+            Existing Mayavi figure or py3Dmol view to extend.
+        :param numpy.ndarray translate:
+            Fractional translation retained for API compatibility.
+        :param str backend:
+            ``"auto"``, ``"mayavi"``, or ``"py3dmol"``.
+        :param float radius_scale:
+            Positive dimensionless multiplier applied to covalent radii.
+        :returns: The selected backend's shared figure or view.
+        """
+        keyargs["_defer_update"] = True
 
         for mat in self.uc_bulk.coherentDomainMatrix:
-            self.uc_bulk.plot3d(ucx, ucy, ucz, dwon, occuon, figure, mat, **keyargs)
+            figure = self.uc_bulk.plot3d(
+                ucx,
+                ucy,
+                ucz,
+                dwon,
+                occuon,
+                figure,
+                mat,
+                backend=backend,
+                radius_scale=radius_scale,
+                **keyargs,
+            )
 
         for uc in self.uc_surface_list:
             for mat in uc.coherentDomainMatrix:
-                uc.plot3d(ucx, ucy, 1, dwon, occuon, figure, mat, **keyargs)
+                figure = uc.plot3d(
+                    ucx,
+                    ucy,
+                    1,
+                    dwon,
+                    occuon,
+                    figure,
+                    mat,
+                    backend=backend,
+                    radius_scale=radius_scale,
+                    **keyargs,
+                )
+
+        if getattr(figure, "_orgui_plot3d_backend", None) == "py3dmol":
+            figure.zoomTo()
+            if getattr(figure, "uniqueid", None) is not None:
+                figure.update()
+        return figure
 
     def getUcNames(self):
         return [uc.name for uc in self.uc_surface_list] + ["bulk"]

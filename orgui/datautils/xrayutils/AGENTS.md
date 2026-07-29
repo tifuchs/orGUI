@@ -100,6 +100,10 @@ Run the narrowest relevant regression test first:
 - `pytest orgui/datautils/xrayutils/test/test_HKLcalc.py`
 - `pytest orgui/datautils/xrayutils/test/test_DetectorCalibration.py`
 - `pytest orgui/datautils/xrayutils/test/test_CTRcalc.py`
+- `pytest orgui/datautils/xrayutils/test/test_CTRsymmetry.py`
+- `pytest orgui/datautils/xrayutils/test/test_CTRresolution.py`
+- `pytest orgui/datautils/xrayutils/test/test_CTRoptical_profile.py`
+- `pytest orgui/datautils/xrayutils/test/test_scattering_factor_cache.py`
 
 Use `ruff check orgui/datautils/xrayutils` for local lint checks. If a change
 touches config-facing unit conversions, also inspect `examples/config_minimal`

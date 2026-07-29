@@ -580,13 +580,30 @@ class CTR:
         phi=0.0,
         **keyargs,
     ):
+        """Calculate and store Vlieg z-mode angles in radians.
+
+        :param HKLVlieg.VliegAngles vliegangles:
+            Angle calculator configured for the CTR reference lattice.
+        :param float fixedangle:
+            Fixed incidence or exit angle in rad.
+        :param str fixed:
+            Angle constraint: ``"in"``, ``"out"``, or ``"eq"``.
+        :param float chi:
+            Fixed chi angle in rad.
+        :param float phi:
+            Fixed phi angle in rad.
+        :returns:
+            Structured records containing alpha, delta, gamma, omega, chi,
+            and phi in rad.
+        :rtype: numpy.recarray
+        """
         l = self.l  # noqa: E741
         h = self.harr
         k = self.karr
         hkl = np.vstack((h, k, l))
 
         pos = vliegangles.anglesZmode(
-            hkl, fixedangle, fixed="in", chi=0, phi=0, **keyargs
+            hkl, fixedangle, fixed=fixed, chi=chi, phi=phi, **keyargs
         )
         dt = np.dtype(
             [
@@ -805,6 +822,45 @@ class CTRCollection(list):
     def convertToF(self):
         for ctr in self:
             ctr.convertToF()
+
+    def calcAnglesZmode(
+        self,
+        vliegangles,
+        fixedangle=np.deg2rad(0.1),
+        fixed="in",
+        chi=0.0,
+        phi=0.0,
+        **keyargs,
+    ):
+        """Calculate and store Vlieg z-mode angles for every CTR.
+
+        All angle arguments and returned angle records are in rad.
+
+        :param HKLVlieg.VliegAngles vliegangles:
+            Angle calculator configured for the CTR reference lattice.
+        :param float fixedangle:
+            Fixed incidence or exit angle in rad.
+        :param str fixed:
+            Angle constraint: ``"in"``, ``"out"``, or ``"eq"``.
+        :param float chi:
+            Fixed chi angle in rad.
+        :param float phi:
+            Fixed phi angle in rad.
+        :returns:
+            One structured angle-record array per CTR.
+        :rtype: list[numpy.recarray]
+        """
+        return [
+            ctr.calcAnglesZmode(
+                vliegangles,
+                fixedangle=fixedangle,
+                fixed=fixed,
+                chi=chi,
+                phi=phi,
+                **keyargs,
+            )
+            for ctr in self
+        ]
 
     def generateAverage(self, step_size=None, **kwargs):
         """Creates a new CTRCollection with CTRs, which were individually

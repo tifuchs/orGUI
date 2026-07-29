@@ -12,3 +12,4 @@ qtconsole
 ase 
 hdf5plugin
 PyOpenGL
+py3Dmol

@@ -10,6 +10,8 @@
 __pycache__/
 dist/
 build/
+subprojects/xxHash-0.8.2/
+subprojects/.wraplock
 orgui.egg-info/
 orgui/_version.py
 benchmarks/roi_sum_results.json

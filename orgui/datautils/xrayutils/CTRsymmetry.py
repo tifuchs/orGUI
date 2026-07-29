@@ -46,6 +46,8 @@ SYMMETRY_SECTION_HEADERS = {
     "surface_transform:",
     "wyckoff_sites:",
     "wyckoff_atoms:",
+    "wyckoff_coupling_matrices:",
+    "wyckoff_site_coupling_matrices:",
     "wyckoff_couplings:",
     "wyckoff_site_couplings:",
 }
@@ -392,6 +394,9 @@ class SurfaceSymmetryModel:
                     "element": site.element,
                     "wyckoff_label": site.wyckoff_label,
                     "variables": variables,
+                    "occ": site.occ,
+                    "iDW": site.iDW,
+                    "oDW": site.oDW,
                     "representative_parent_fractional": (
                         None
                         if site.representative_parent_fractional is None
@@ -965,10 +970,35 @@ def symmetry_metadata_to_lines(model):
                 ]
             )
         )
+    coordinate_matrices, coordinate_matrix_ids = _compact_coupling_matrices(model)
+    site_matrices, site_matrix_ids = _compact_site_coupling_matrices(model)
+    lines.append("wyckoff_coupling_matrices:")
+    lines.append("  matrix_id variables factors_by_surface_coordinate")
+    for matrix_id, variables, matrix in coordinate_matrices:
+        lines.append(
+            "  "
+            + " ".join(
+                [
+                    matrix_id,
+                    ",".join(variables),
+                    *_format_values(matrix.ravel()).split(),
+                ]
+            )
+        )
+    lines.append("wyckoff_site_coupling_matrices:")
+    lines.append("  matrix_id parent_to_surface_jacobian")
+    for matrix_id, matrix in site_matrices:
+        lines.append(
+            "  "
+            + " ".join(
+                [matrix_id, *_format_values(matrix.ravel()).split()]
+            )
+        )
     lines.append("wyckoff_atoms:")
     lines.append(
         "  atom_index element site_id wyckoff_label "
-        "parent_x parent_y parent_z surface_x surface_y surface_z layer"
+        "parent_x parent_y parent_z surface_x surface_y surface_z layer "
+        "coupling_matrix site_coupling_matrix"
     )
     for atom in model.atoms:
         values = [
@@ -979,40 +1009,62 @@ def symmetry_metadata_to_lines(model):
             *_format_values(atom.parent_fractional).split(),
             *_format_values(atom.surface_fractional).split(),
             _format_float(atom.layer),
+            coordinate_matrix_ids.get(atom.atom_index, "-"),
+            site_matrix_ids.get(atom.atom_index, "-"),
         ]
         lines.append("  " + " ".join(values))
-    lines.append("wyckoff_couplings:")
-    lines.append("  atom_index coordinate site_id variable constant factor")
-    for coupling in model.wyckoff_couplings():
-        lines.append(
-            "  "
-            + " ".join(
-                [
-                    str(coupling.atom_index),
-                    coupling.coordinate,
-                    coupling.site_id,
-                    coupling.variable,
-                    _format_float(coupling.constant),
-                    _format_float(coupling.factor),
-                ]
-            )
-        )
-    lines.append("wyckoff_site_couplings:")
-    lines.append("  atom_index coordinate site_id axis factor")
-    for coupling in model.wyckoff_site_couplings():
-        lines.append(
-            "  "
-            + " ".join(
-                [
-                    str(coupling.atom_index),
-                    coupling.coordinate,
-                    coupling.site_id,
-                    coupling.axis,
-                    _format_float(coupling.factor),
-                ]
-            )
-        )
     return lines
+
+
+def _compact_coupling_matrices(model):
+    matrices = []
+    matrix_ids = {}
+    known = {}
+    sites = {site.site_id: site for site in model.sites}
+    coordinate_index = {name: index for index, name in enumerate(COORDINATE_NAMES)}
+    for atom in model.atoms:
+        variables = tuple(sites[atom.site_id].variables)
+        if not atom.couplings:
+            continue
+        variable_index = {name: index for index, name in enumerate(variables)}
+        matrix = np.zeros((3, len(variables)), dtype=np.float64)
+        for coupling in atom.couplings:
+            matrix[
+                coordinate_index[coupling.coordinate],
+                variable_index[coupling.variable],
+            ] = coupling.factor
+        key = (variables, tuple(_format_float(value) for value in matrix.ravel()))
+        matrix_id = known.get(key)
+        if matrix_id is None:
+            matrix_id = f"c{len(matrices)}"
+            known[key] = matrix_id
+            matrices.append((matrix_id, variables, matrix))
+        matrix_ids[atom.atom_index] = matrix_id
+    return matrices, matrix_ids
+
+
+def _compact_site_coupling_matrices(model):
+    matrices = []
+    matrix_ids = {}
+    known = {}
+    coordinate_index = {name: index for index, name in enumerate(COORDINATE_NAMES)}
+    for atom in model.atoms:
+        if not atom.site_couplings:
+            continue
+        matrix = np.zeros((3, 3), dtype=np.float64)
+        for coupling in atom.site_couplings:
+            matrix[
+                coordinate_index[coupling.coordinate],
+                coordinate_index[coupling.axis],
+            ] = coupling.factor
+        key = tuple(_format_float(value) for value in matrix.ravel())
+        matrix_id = known.get(key)
+        if matrix_id is None:
+            matrix_id = f"s{len(matrices)}"
+            known[key] = matrix_id
+            matrices.append((matrix_id, matrix))
+        matrix_ids[atom.atom_index] = matrix_id
+    return matrices, matrix_ids
 
 
 def symmetry_metadata_from_lines(lines, unitcell=None):
@@ -1042,6 +1094,8 @@ def symmetry_metadata_from_lines(lines, unitcell=None):
     atoms = []
     couplings_by_atom = {}
     site_couplings_by_atom = {}
+    coupling_matrices = {}
+    site_coupling_matrices = {}
     sections = _collect_sections(cleaned)
 
     if "spacegroup" in sections:
@@ -1102,6 +1156,21 @@ def symmetry_metadata_from_lines(lines, unitcell=None):
             )
         )
 
+    for row in _data_rows(sections.get("wyckoff_coupling_matrices", [])):
+        parts = row.split()
+        variables = tuple(parts[1].split(","))
+        coupling_matrices[parts[0]] = (
+            variables,
+            np.asarray(parts[2:], dtype=np.float64).reshape(3, len(variables)),
+        )
+
+    for row in _data_rows(sections.get("wyckoff_site_coupling_matrices", [])):
+        parts = row.split()
+        site_coupling_matrices[parts[0]] = np.asarray(
+            parts[1:],
+            dtype=np.float64,
+        ).reshape(3, 3)
+
     for row in _data_rows(sections.get("wyckoff_couplings", [])):
         parts = row.split()
         coupling = WyckoffCoupling(
@@ -1128,14 +1197,55 @@ def symmetry_metadata_from_lines(lines, unitcell=None):
     for row in _data_rows(sections.get("wyckoff_atoms", [])):
         parts = row.split()
         atom_index = int(parts[0])
+        site_id = parts[2]
+        surface_fractional = np.asarray(parts[7:10], dtype=np.float64)
+        if len(parts) >= 13 and parts[11] != "-":
+            variables, matrix = coupling_matrices[parts[11]]
+            site = next(site for site in site_specs if site.site_id == site_id)
+            variable_values = np.asarray(
+                [site.variables[variable] for variable in variables],
+                dtype=np.float64,
+            )
+            for coordinate_index, coordinate in enumerate(COORDINATE_NAMES):
+                constant = surface_fractional[coordinate_index] - (
+                    matrix[coordinate_index] @ variable_values
+                )
+                for variable_index, variable in enumerate(variables):
+                    factor = matrix[coordinate_index, variable_index]
+                    if not math.isclose(factor, 0.0, abs_tol=1e-12):
+                        couplings_by_atom.setdefault(atom_index, []).append(
+                            WyckoffCoupling(
+                                atom_index=atom_index,
+                                coordinate=coordinate,
+                                variable=variable,
+                                constant=float(constant),
+                                factor=float(factor),
+                                site_id=site_id,
+                            )
+                        )
+        if len(parts) >= 13 and parts[12] != "-":
+            matrix = site_coupling_matrices[parts[12]]
+            for coordinate_index, coordinate in enumerate(COORDINATE_NAMES):
+                for axis_index, axis in enumerate(COORDINATE_NAMES):
+                    factor = matrix[coordinate_index, axis_index]
+                    if not math.isclose(factor, 0.0, abs_tol=1e-12):
+                        site_couplings_by_atom.setdefault(atom_index, []).append(
+                            WyckoffSiteCoupling(
+                                atom_index=atom_index,
+                                coordinate=coordinate,
+                                axis=axis,
+                                factor=float(factor),
+                                site_id=site_id,
+                            )
+                        )
         atoms.append(
             GeneratedWyckoffAtom(
                 atom_index=atom_index,
                 element=parts[1],
-                site_id=parts[2],
+                site_id=site_id,
                 wyckoff_label=parts[3],
                 parent_fractional=np.asarray(parts[4:7], dtype=np.float64),
-                surface_fractional=np.asarray(parts[7:10], dtype=np.float64),
+                surface_fractional=surface_fractional,
                 layer=int(float(parts[10])),
                 couplings=tuple(couplings_by_atom.get(atom_index, ())),
                 site_couplings=tuple(site_couplings_by_atom.get(atom_index, ())),
@@ -1423,6 +1533,7 @@ def _data_rows(rows):
         if stripped.split()[0] in {
             "site_id",
             "atom_index",
+            "matrix_id",
         }:
             continue
         yield stripped
