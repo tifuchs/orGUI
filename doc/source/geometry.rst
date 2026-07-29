@@ -130,32 +130,29 @@ where a reflection falls, but it cannot be handed to an image widget directly.
 On a regular grid with ``FiberIntegrator``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+.. warning::
+
+   The ``Q-plot`` and the :mod:`orgui.app.qconversion` module are
+   **experimental**. They live in the application layer, not in
+   ``orgui.datautils.xrayutils``, precisely so that they are not mistaken for
+   the production reciprocal-space code. The conventions described here may
+   still change.
+
 This is the route used by the ``Q-plot`` action. pyFAI's ``FiberIntegrator``
 computes the same per-pixel momentum transfer and additionally **rebins** the
 intensities onto a regular grid, which is what makes the result displayable as
-an image:
+an image. orGUI drives it through :mod:`orgui.app.qconversion`, which supplies
+pyFAI with orGUI's own angle conventions:
 
 .. code-block:: python
 
-   from pyFAI.integrator.fiber import FiberIntegrator
+   from orgui.app import qconversion
 
-   fi = FiberIntegrator(
-       dist=detectorCal.dist,
-       poni1=detectorCal.poni1,
-       poni2=detectorCal.poni2,
-       wavelength=detectorCal.wavelength,
-       rot1=detectorCal.rot1,
-       rot2=detectorCal.rot2,
-       rot3=detectorCal.rot3,
-       detector=detectorCal.detector,
-   )
-   res = fi.integrate2d_grazing_incidence(
+   res = qconversion.integrateImage(
+       detectorCal,
        image,
-       sample_orientation=4,      # depends on the azimuthal reference, see below
-       incident_angle=alpha_i,
-       tilt_angle=0,
-       unit_ip="qip_A^-1",
-       unit_oop="qoop_A^-1",
+       alpha_i,                 # incidence angle in rad
+       frame="Q_alpha",         # see "Reciprocal-space frames" below
    )
 
    res.intensity     # rebinned image, shape (npt_oop, npt_ip)
@@ -196,47 +193,124 @@ is needed. Use ``FiberIntegrator`` when a complete image has to be shown or
 exported in reciprocal-space coordinates, and accept that the rebinning
 quantises positions to the width of one grid cell.
 
-Sample orientation and sign conventions
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Reciprocal-space frames
+~~~~~~~~~~~~~~~~~~~~~~~
 
-The two routes place the surface normal on the detector differently. orGUI
-derives it from the azimuthal reference of the detector calibration, while
-pyFAI expects the EXIF-style ``sample_orientation`` argument. The ``Q-plot``
-action maps one onto the other:
+``QAlpha`` returns the momentum transfer in the **alpha frame**, the frame of
+the sample surface. The drop-down next to the ``Q-plot`` action selects which
+frame the image is displayed in; the remaining frames are reached by undoing
+the sample rotations, following
+:math:`\vec{H} = UB^{-1}\,\Phi^{-1}\,X^{-1}\,\Omega^{-1}\,\vec{Q}_\alpha`.
 
 .. list-table::
    :header-rows: 1
-   :widths: 34 33 33
+   :widths: 20 46 34
 
-   * - Azimuthal reference
-     - ``sample_orientation``
-     - Flipped plot axis
-   * - 0 degrees
-     - 7
-     - none
-   * - 90 degrees (default)
-     - 4
-     - vertical
-   * - 180 degrees
-     - 8
-     - horizontal
-   * - 270 degrees
-     - 1
-     - none
+   * - Frame
+     - Reached from the alpha frame by
+     - Defined for
+   * - ``Q_alpha``
+     - nothing, this is the default
+     - any image
+   * - ``Q_lab``
+     - the ``alpha`` rotation
+     - any image
+   * - ``Q_omega``
+     - undoing ``omega``
+     - a single image only
+   * - ``Q_chi``
+     - undoing ``omega`` and ``chi``
+     - a single image only
+   * - ``Q_phi``
+     - undoing ``omega``, ``chi`` and ``phi``
+     - a single image only
+   * - ``Q_cryst``
+     - additionally undoing the orientation matrix ``U``
+     - a single image only
 
-pyFAI pairs each orientation with an in-plane mirrored partner -- (6, 7),
-(3, 4), (5, 8) and (1, 2). Partners return an identical :math:`q_\perp` and
-differ only in the **sign** of :math:`q_\parallel`. Because ``QAlpha`` returns
-the unsigned radial in-plane component, both members of a pair are equally
-correct for it; the sign is a display convention, which is why the ``Q-plot``
-action flips a plot axis for some orientations.
+For every frame the out-of-plane component is the ``z`` axis of that frame and
+the in-plane component is the radial component in its ``xy`` plane. Maximum and
+sum images combine many ``omega`` angles, so the frames that undo ``omega`` are
+refused for them. ``Q_cryst`` additionally needs the orientation matrix.
 
-With that convention fixed, the two routes agree to numerical precision. This
-is verified in ``orgui/datautils/xrayutils/test/test_q_conversion.py``, which
-compares them per pixel for flat and tilted detectors at several incidence
-angles, and additionally checks that a single bright pixel is placed by
-``integrate2d_grazing_incidence`` within one grid cell of the position
-predicted by ``QAlpha``.
+``Q_cryst`` is the Cartesian reciprocal-space frame of the crystal, so it holds
+:math:`B\vec{H}`. Multiplying ``Q_phi`` by :math:`UB^{-1}`, or equivalently
+``Q_cryst`` by :math:`B^{-1}`, gives the reciprocal lattice coordinates
+:math:`\vec{H} = (h, k, l)^T`, the same result as
+:meth:`~orgui.datautils.xrayutils.HKLVlieg.VliegAngles.anglesToHkl`.
+
+Why orGUI supplies its own pyFAI units
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+pyFAI's built-in fiber units cannot express orGUI's geometry, for two
+independent reasons.
+
+**The azimuth is continuous, ``sample_orientation`` is not.** pyFAI's
+``sample_orientation`` is the EXIF dihedral group acting on the image array, so
+it only spans quarter turns. It describes how the image array is laid out, not
+where the sample sits. orGUI's azimuthal reference rotates the ``alpha``
+rotation axis about the incident beam and takes arbitrary values, so it is
+passed through ``tilt_angle`` instead, while ``sample_orientation`` stays at the
+identity:
+
+.. math::
+
+   \mathrm{tilt\_angle} = -\left(\mathrm{azimuth} + \frac{\pi}{2}\right)
+
+The quarter turn is the offset between orGUI's azimuthal reference and pyFAI's
+fiber convention. Encoding the azimuth in ``sample_orientation`` instead would
+only be correct for azimuths that are exact multiples of 90 degrees.
+
+**The rotations are composed in the opposite order.** pyFAI combines the
+incidence and tilt rotations extrinsically, about fixed axes, as
+:math:`R_x(-\mathrm{tilt})\,R_y(\mathrm{incidence})`. In orGUI the azimuth
+rotates the ``alpha`` axis itself, so the incidence rotation has to be applied
+about the *already rotated* axis,
+:math:`R_y(\mathrm{incidence})\,R_x(-\mathrm{tilt})`. The two agree only when
+one of the two angles vanishes.
+
+:mod:`~orgui.app.qconversion` therefore builds its own
+``pyFAI.units.UnitFiber`` objects that implement orGUI's convention, and hands
+them to ``FiberIntegrator``. pyFAI still performs the rebinning; only the
+coordinate definition is replaced.
+
+With that in place the two routes agree to numerical precision. This is
+verified in ``orgui/app/test/test_q_conversion.py``, which compares them per
+pixel for flat and tilted detectors, at several incidence angles and at
+azimuths that are deliberately not multiples of 90 degrees. The same file
+checks that ``Q_phi`` reproduces ``anglesToHkl``, that ``Q_cryst`` reproduces
+:math:`B\vec{H}`, that every frame preserves :math:`|\vec{Q}|`, and that a
+single bright pixel is placed by the rebinning within one grid cell of the
+position predicted by ``QAlpha``.
+
+Performance
+~~~~~~~~~~~
+
+Detector images are large, so the conversion is collapsed into a single affine
+relation before any pixel data is touched. With
+:math:`n = |(x, y, z)|` every component reduces to
+
+.. math::
+
+   q_j = k \left( \frac{G_{j0} x + G_{j1} y + G_{j2} z}{n} - c_j \right)
+
+where the matrix :math:`G` and the offset :math:`\vec{c}` absorb the sample
+orientation map, the beam and incidence rotations, the axis relabelling and the
+frame rotation. A compiled kernel,
+``orgui/app/cpp/qconversion_cpp.cpp``, evaluates both displayed quantities in a
+single pass; a plain numpy implementation is used when the extension has not
+been built. The result is cached, because pyFAI evaluates the in-plane and the
+out-of-plane unit separately but passes the same pixel positions to both, so an
+image is converted once rather than twice.
+
+On a 6.2 megapixel Pilatus 6M the compiled kernel converts a full image in
+roughly 50 ms, and the second unit evaluation is served from the cache.
+
+.. note::
+
+   ``numexpr`` is deliberately not used here. Version 2.11.0 returns wrong
+   results for a small fraction of multi-threaded evaluations of expressions of
+   this kind, which is not acceptable for a coordinate transform.
 
 Further Reading
 ---------------

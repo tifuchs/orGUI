@@ -66,15 +66,42 @@ A ***critical bug*** was fixed that affects bulk CTR calculations:
   released versions, up to and including v1.5.0. See the CTR structure-factor
   documentation for details.
 
+GUI fixes:
+
+- Cancelling or resetting the machine parameter or the crystal parameter
+  dialog now restores the configuration that was active when the dialog was
+  opened. Both dialogs apply every edit immediately, so restoring the widgets
+  alone left the edited values active, and the discarded configuration stayed
+  in use until it was overwritten or a config file was loaded.
+
 ESRF ID31 beamline support and reciprocal-space display:
 
 - Detector images can now be displayed in reciprocal space. The new ``Q-plot``
   toolbar action rebins the currently shown image (single image, maximum, or
   sum) onto a regular grid of in-plane and out-of-plane momentum transfer
   using pyFAI's ``FiberIntegrator``, which requires pyFAI >= 2025.1. With an
-  older pyFAI the action reports an error and stays disabled. The conversion
-  is equivalent to orGUI's own per-pixel ``QAlpha`` calculation; see the
-  geometry documentation for when to use which.
+  older pyFAI the action reports an error and stays disabled. A drop-down next
+  to the action selects the reciprocal-space frame: ``Q_alpha`` (the surface
+  frame returned by ``QAlpha``, the default), ``Q_lab``, ``Q_omega``,
+  ``Q_chi``, ``Q_phi`` and ``Q_cryst``. The frames that undo the ``omega``
+  rotation are only defined for a single image and are refused for maximum and
+  sum images. **This feature is experimental and its conventions may still
+  change.**
+- The reciprocal-space conversion lives in the new module
+  ``orgui.app.qconversion`` and is exact for arbitrary azimuthal references.
+  It is deliberately part of the application layer rather than of
+  ``orgui.datautils.xrayutils``, so that it is not mistaken for production
+  reciprocal-space code. pyFAI's ``sample_orientation`` flag can only express
+  quarter turns and its rotations are composed about fixed axes, neither of
+  which matches orGUI's continuous azimuth convention, so orGUI supplies
+  ``FiberIntegrator`` with its own unit definitions. The result agrees with the
+  per-pixel ``QAlpha`` calculation to numerical precision; see the geometry
+  documentation for when to use which.
+- Added the compiled extension ``_qconversion_cpp``, which converts a full
+  detector image in a single pass. A 6.2 megapixel Pilatus 6M image is
+  converted in roughly 50 ms; a numpy implementation is used when the extension
+  has not been built. The pyFAI integrator is reused while the conversion is
+  unchanged, so stepping through images no longer resets it for every image.
 - HDF5 files that are still being written can now be refreshed from the GUI.
   The tree view is rebuilt and the current scan reloaded without restarting
   the application.
@@ -86,6 +113,10 @@ ESRF ID31 beamline support and reciprocal-space display:
 - Maximum and sum images are now untoggled when the image number changes, and
   the maximum/sum toolbar icons no longer get out of sync with the displayed
   image.
+- The Q-plot now stays switched on and follows the display instead of being
+  turned off. It is rebuilt when the image number changes, when the maximum or
+  sum image is toggled, when the frame is changed, and when the machine angles,
+  the azimuthal reference, the energy or the orientation matrix are edited.
 - **BREAKING CHANGE:** HDF5 file locking is now disabled by default
   (``HDF5_USE_FILE_LOCKING=False``), so that files still open for writing by
   the acquisition system can be read. A manually set environment variable

@@ -37,6 +37,7 @@ import copy
 import sys
 import os
 import re
+from contextlib import contextmanager
 from silx.gui import qt
 
 from io import StringIO
@@ -56,10 +57,6 @@ from silx.utils.weakref import WeakMethodProxy
 from silx.gui.plot.Profile import ProfileToolBar
 from silx.gui.plot.tools.roi import RegionOfInterestManager
 from silx.gui.plot.actions import control as control_actions
-
-import pyFAI
-import pyFAI.version
-from packaging.version import Version
 
 import traceback
 
@@ -82,6 +79,7 @@ from .. import resources
 
 import numpy as np
 from ..datautils.xrayutils import HKLVlieg, CTRcalc
+from . import qconversion
 from ..datautils.xrayutils import ReciprocalNavigation as rn
 
 # legacy import:
@@ -97,9 +95,7 @@ except Exception:
 
 # Reciprocal-space (Q) conversion of detector images relies on pyFAI's
 # FiberIntegrator, which was introduced in pyFAI 2025.1.
-HAS_FIBER_INTEGRATOR = Version(pyFAI.version) >= Version("2025.1")
-if HAS_FIBER_INTEGRATOR:
-    from pyFAI.integrator.fiber import FiberIntegrator
+HAS_FIBER_INTEGRATOR = qconversion.HAS_FIBER_INTEGRATOR
 
 try:
     from . import _roi_sum_accel
@@ -187,8 +183,27 @@ class orGUI(qt.QMainWindow):
         )
         self.plotAgainstQAct = qt.QAction("Q-plot", self)
         self.plotAgainstQAct.setCheckable(True)
+        self.plotAgainstQAct.setToolTip(
+            "Experimental: show the image in reciprocal space coordinates. "
+            "The intensities are rebinned onto a regular grid."
+        )
         self.plotAgainstQAct.toggled.connect(self._convertImagetoQ)
         toolbar.addAction(self.plotAgainstQAct)
+
+        self.qFrameSelector = qt.QComboBox()
+        for frame in qconversion.FRAMES:
+            self.qFrameSelector.addItem(qconversion.FRAME_LABELS[frame], frame)
+        self.qFrameSelector.setCurrentIndex(
+            qconversion.FRAMES.index(qconversion.DEFAULT_FRAME)
+        )
+        self.qFrameSelector.setToolTip(
+            "Experimental: reciprocal space frame used by the Q-plot"
+        )
+        self.qFrameSelector.currentIndexChanged.connect(self._onQFrameChanged)
+        toolbar.addWidget(self.qFrameSelector)
+        self._qPlotExperimentalWarned = False
+        self._qPlotPreviousYInverted = None
+        self._qPlotRefreshing = False
         self.centralPlot.addToolBar(toolbar)
         self.maskManager = MaskManager()
         self.maskConfigDialog = MaskConfigDialog(self.maskManager, self)
@@ -351,6 +366,9 @@ class orGUI(qt.QMainWindow):
 
         self.ubcalc.sigPlottableMachineParamsChanged.connect(self._onPlotMachineParams)
         self.ubcalc.sigReplotRequest.connect(self.updatePlotItems)
+        # the Q-plot coordinates depend on the machine angles, the azimuthal
+        # reference, the energy and, for the crystal frame, on U
+        self.ubcalc.sigReplotRequest.connect(self._refreshQPlot)
         self.allimgsum = None
         self.allimgmax = None
         self.reflectionSel.setSizePolicy(
@@ -3872,24 +3890,24 @@ ub : gui for UB matrix and angle calculations
                 )
                 return
             self.scanSelector.slider.setValue(imageno)
-            if self.plotAgainstQAct.isChecked():
-                self.plotAgainstQAct.setChecked(False)
-            if self.scanSelector.showMaxAct.isChecked():
-                self.scanSelector.showMaxAct.setChecked(False)
-            if self.scanSelector.showSumAct.isChecked():
-                self.scanSelector.showSumAct.setChecked(False)
-            self.plotImage(self.scanSelector.slider.value())
+            with self._suspendedQPlot():
+                if self.scanSelector.showMaxAct.isChecked():
+                    self.scanSelector.showMaxAct.setChecked(False)
+                if self.scanSelector.showSumAct.isChecked():
+                    self.scanSelector.showSumAct.setChecked(False)
+                self.plotImage(self.scanSelector.slider.value())
+            self._refreshQPlot()
 
     def _onSliderValueChanged(self, value):
         """GUI/CLI hint: replot the image selected by the scan slider."""
         if self.fscan is not None:
-            if self.plotAgainstQAct.isChecked():
-                self.plotAgainstQAct.setChecked(False)
-            if self.scanSelector.showMaxAct.isChecked():
-                self.scanSelector.showMaxAct.setChecked(False)
-            if self.scanSelector.showSumAct.isChecked():
-                self.scanSelector.showSumAct.setChecked(False)
-            self.plotImage(value)
+            with self._suspendedQPlot():
+                if self.scanSelector.showMaxAct.isChecked():
+                    self.scanSelector.showMaxAct.setChecked(False)
+                if self.scanSelector.showSumAct.isChecked():
+                    self.scanSelector.showSumAct.setChecked(False)
+                self.plotImage(value)
+            self._refreshQPlot()
         # print(self.centralPlot._callback)
 
     def _onLoadAll(self):
@@ -3989,8 +4007,6 @@ ub : gui for UB matrix and angle calculations
 
     def _onMaxToggled(self, value):
         """GUI/CLI hint: toggle display of the precomputed maximum image."""
-        if self.plotAgainstQAct.isChecked():
-            self.plotAgainstQAct.setChecked(False)
         if self.scanSelector.showSumAct.isChecked():
             self.scanSelector.showSumAct.setChecked(False)
         if value:
@@ -4021,7 +4037,7 @@ ub : gui for UB matrix and angle calculations
                     z=1,
                 )
                 self.centralPlot.setActiveImage(self.currentAddImageLabel)
-                self.scanSelector.alphaslider.setLegend(self.currentAddImageLabel)
+                self.scanSelector.alphaslider.setLegend("special")
                 if not self.scanSelector.showMaxAct.isChecked():
                     self.scanSelector.showMaxAct.setChecked(True)
             else:
@@ -4031,11 +4047,11 @@ ub : gui for UB matrix and angle calculations
                 self.centralPlot.setActiveImage(self.currentImageLabel)
                 self.centralPlot.removeImage(self.currentAddImageLabel)
                 self.currentAddImageLabel = None
+        # the displayed data changed, so the Q-plot has to follow
+        self._refreshQPlot()
 
     def _onSumToggled(self, value):
         """GUI/CLI hint: toggle display of the precomputed summed image."""
-        if self.plotAgainstQAct.isChecked():
-            self.plotAgainstQAct.setChecked(False)
         if self.scanSelector.showMaxAct.isChecked():
             self.scanSelector.showMaxAct.setChecked(False)
         if value:
@@ -4066,7 +4082,7 @@ ub : gui for UB matrix and angle calculations
                     z=1,
                 )
                 self.centralPlot.setActiveImage(self.currentAddImageLabel)
-                self.scanSelector.alphaslider.setLegend(self.currentAddImageLabel)
+                self.scanSelector.alphaslider.setLegend("special")
                 if not self.scanSelector.showSumAct.isChecked():
                     self.scanSelector.showSumAct.setChecked(True)
             else:
@@ -4076,6 +4092,8 @@ ub : gui for UB matrix and angle calculations
                 self.centralPlot.setActiveImage(self.currentImageLabel)
                 self.centralPlot.removeImage(self.currentAddImageLabel)
                 self.currentAddImageLabel = None
+        # the displayed data changed, so the Q-plot has to follow
+        self._refreshQPlot()
 
     def _roi_preview_enabled(self):
         """Return whether fitted-background ROI preview should alter the image."""
@@ -4091,34 +4109,65 @@ ub : gui for UB matrix and angle calculations
         roi.setColor("blue" if self._roi_preview_enabled() else "red")
         roi.setBgStyle("pink", "-", roi.getLineWidth())
 
-    def _qConversionSampleOrientation(self):
-        """Return the pyFAI sample orientation for the current azimuthal reference.
+    def _selectedQFrame(self):
+        """Return the reciprocal space frame selected for the Q-plot."""
+        frame = self.qFrameSelector.currentData()
+        if frame not in qconversion.FRAMES:
+            return qconversion.DEFAULT_FRAME
+        return frame
 
-        The azimuthal reference fixes where the surface normal points on the
-        detector, which in pyFAI terms is the EXIF-style ``sample_orientation``.
-        The second return value tells whether the vertical (``"y"``), the
-        horizontal (``"x"``) or no (``None``) plot axis has to be flipped so
-        that the converted image keeps the same handedness as the pixel image.
+    def _onQFrameChanged(self, index):
+        """GUI hint: re-render the Q-plot after the frame selection changed."""
+        del index
+        self._refreshQPlot()
+
+    def _refreshQPlot(self, *args):
+        """GUI hint: rebuild the Q-plot so that it follows the current state.
+
+        Called whenever something the conversion depends on changed: the
+        displayed image, the machine angles, the azimuthal reference, the
+        energy or the orientation matrix. The conversion replaces the previous
+        reciprocal-space image, so the Q-plot stays switched on. Does nothing
+        while the Q-plot is off, or while a caller batches several changes by
+        holding ``_qPlotRefreshing``.
         """
-        azim = self.ubcalc.detectorCal.getAzimuthalReference()
-        if -np.pi / 4 < azim < np.pi / 4:
-            return 7, None
-        elif np.pi / 4 < azim < np.pi * 3 / 4:
-            return 4, "y"
-        elif np.pi * 3 / 4 < azim < np.pi * 5 / 4:
-            return 8, "x"
-        else:
-            return 1, None
+        del args
+        if not self.plotAgainstQAct.isChecked() or self._qPlotRefreshing:
+            return
+        self._qPlotRefreshing = True
+        try:
+            self._convertImagetoQ(True)
+        finally:
+            self._qPlotRefreshing = False
+
+    @contextmanager
+    def _suspendedQPlot(self):
+        """Batch several changes into a single Q-plot rebuild."""
+        previous = self._qPlotRefreshing
+        self._qPlotRefreshing = True
+        try:
+            yield
+        finally:
+            self._qPlotRefreshing = previous
+
+    def _qPlotAngles(self):
+        """Return the alpha and omega angles used for the current Q-plot."""
+        try:
+            return self.getMuOm(self.scanSelector.slider.value())
+        except Exception:
+            return self.ubcalc.mu, 0.0
 
     def _convertImagetoQ(self, value):
         """GUI/CLI hint: toggle display of the image in reciprocal space.
 
-        The currently displayed image is rebinned onto a regular grid of
-        in-plane and out-of-plane momentum transfer using pyFAI's
-        ``FiberIntegrator``. The per-pixel momentum transfer used everywhere
-        else in orGUI is calculated by
-        :meth:`~orgui.datautils.xrayutils.HKLVlieg.VliegAngles.QAlpha`; both
-        routes are equivalent, see the geometry section of the documentation.
+        **Experimental.** The currently displayed image is rebinned onto a
+        regular grid of in-plane and out-of-plane momentum transfer by
+        :func:`~orgui.app.qconversion.integrateImage`, which
+        drives pyFAI's ``FiberIntegrator`` with orGUI's own angle conventions.
+        The frame is taken from the frame selector next to the action and
+        defaults to the alpha (surface) frame, which is what
+        :meth:`~orgui.datautils.xrayutils.HKLVlieg.VliegAngles.QAlpha` returns.
+        See the geometry section of the documentation.
         """
         if value:
             # check if conversion possible
@@ -4190,6 +4239,27 @@ ub : gui for UB matrix and angle calculations
                 self.plotAgainstQAct.setChecked(False)
                 return
 
+            frame = self._selectedQFrame()
+            if (showmax or showsum) and frame in qconversion.FRAMES_REQUIRING_OMEGA:
+                logger.error(
+                    "Q conversion failed: frame not defined for max/sum images",
+                    extra={
+                        "title": "Cannot convert image to Q",
+                        "description": f"The maximum and sum images combine many omega angles, so the {qconversion.FRAME_LABELS[frame]} frame is not defined for them. Use the {qconversion.FRAME_LABELS['Q_alpha']} or {qconversion.FRAME_LABELS['Q_lab']} frame instead.",  # noqa: E501
+                        "show_dialog": True,
+                        "dialog_level": logging.ERROR,
+                        "parent": self,
+                    },
+                )
+                self.plotAgainstQAct.setChecked(False)
+                return
+
+            if not self._qPlotExperimentalWarned:
+                logger.warning(
+                    "The Q-plot is experimental and its conventions may still change."
+                )
+                self._qPlotExperimentalWarned = True
+
             # hide scan image, remove max/sum image
             for i in self.centralPlot.getAllImages():
                 if i.getLegend() == "scan_image":
@@ -4197,80 +4267,53 @@ ub : gui for UB matrix and angle calculations
                 else:
                     self.centralPlot.removeImage(i)
 
-            # determine sample orientation
-            orientation, flipaxis = self._qConversionSampleOrientation()
-            if flipaxis == "y":
-                self.centralPlot.setYAxisInverted(
-                    not self.centralPlot.isYAxisInverted()
-                )
-            elif flipaxis == "x":
-                self.centralPlot.setXAxisInverted(
-                    not self.centralPlot.isXAxisInverted()
-                )
+            # Reciprocal space is plotted with the ordinate pointing upwards,
+            # unlike the image convention used for the pixel coordinates. The
+            # previous state is only recorded when the Q-plot is entered, so
+            # that rebuilding it in place does not overwrite it.
+            if self._qPlotPreviousYInverted is None:
+                self._qPlotPreviousYInverted = self.centralPlot.isYAxisInverted()
+            self.centralPlot.setYAxisInverted(False)
+            self.centralPlot.setXAxisInverted(False)
 
             # perform conversion into Q coordinates
-            detectorCal = self.ubcalc.detectorCal
-            fi = FiberIntegrator(
-                dist=detectorCal.dist,
-                poni1=detectorCal.poni1,
-                poni2=detectorCal.poni2,
-                wavelength=detectorCal.wavelength,
-                rot1=detectorCal.rot1,
-                rot2=detectorCal.rot2,
-                rot3=detectorCal.rot3,
-                detector=detectorCal.detector,
-            )
-            res2d = fi.integrate2d_grazing_incidence(
+            alpha, omega = self._qPlotAngles()
+            res2d = qconversion.integrateImage(
+                self.ubcalc.detectorCal,
                 data,
-                sample_orientation=orientation,
-                incident_angle=self.ubcalc.mu,
-                tilt_angle=0,
-                unit_oop="qoop_A^-1",
-                unit_ip="qip_A^-1",
+                alpha,
+                frame=frame,
+                omega=omega,
+                chi=self.ubcalc.chi,
+                phi=self.ubcalc.phi,
+                U=self.ubcalc.ubCal.getU(),
             )
 
-            # plot generated image
+            # plot generated image, q_par on the abscissa and q_perp on the
+            # ordinate for every frame
             oopmin, oopmax = np.min(res2d.outofplane), np.max(res2d.outofplane)
             ipmin, ipmax = np.min(res2d.inplane), np.max(res2d.inplane)
-            orig_ip, orig_oop = res2d.inplane[0], res2d.outofplane[0]
             scale_ip = (ipmax - ipmin) / res2d.inplane.size
             scale_oop = (oopmax - oopmin) / res2d.outofplane.size
-            if orientation in [1, 4]:  # specular axis on vertical detector axis
-                self.currentAddImageLabel = self.centralPlot.addImage(
-                    res2d.intensity,
-                    legend="qImage",
-                    replace=False,
-                    resetzoom=False,
-                    copy=True,
-                    z=2,
-                    xlabel=r"q$_\parallel / \, \AA^{-1}$",
-                    ylabel=r"q$_\perp / \, \AA^{-1}$",
-                    scale=(scale_ip, scale_oop),
-                    origin=(orig_ip, orig_oop),
-                )
-                # apply correct zoom
-                self.centralPlot.getXAxis().setLimits(ipmin, ipmax)
-                self.centralPlot.getYAxis().setLimits(oopmin, oopmax)
-            else:  # specular axis on horizontal detector axis
-                self.currentAddImageLabel = self.centralPlot.addImage(
-                    res2d.intensity.T,
-                    legend="qImage",
-                    replace=False,
-                    resetzoom=False,
-                    copy=True,
-                    z=2,
-                    xlabel=r"q$_\perp / \, \AA^{-1}$",
-                    ylabel=r"q$_\parallel / \, \AA^{-1}$",
-                    scale=(scale_oop, scale_ip),
-                    origin=(orig_oop, orig_ip),
-                )
-                # apply correct zoom
-                self.centralPlot.getYAxis().setLimits(ipmin, ipmax)
-                self.centralPlot.getXAxis().setLimits(oopmin, oopmax)
+            self.currentAddImageLabel = self.centralPlot.addImage(
+                res2d.intensity,
+                legend="qImage",
+                replace=False,
+                resetzoom=False,
+                copy=True,
+                z=2,
+                xlabel=r"q$_\parallel / \, \AA^{-1}$",
+                ylabel=r"q$_\perp / \, \AA^{-1}$",
+                scale=(scale_ip, scale_oop),
+                origin=(res2d.inplane[0], res2d.outofplane[0]),
+            )
+            self.centralPlot.getXAxis().setLimits(ipmin, ipmax)
+            self.centralPlot.getYAxis().setLimits(oopmin, oopmax)
 
-            # apply active plot settings
+            # apply active plot settings; the alpha slider expects a legend,
+            # not the image item that addImage returns
             self.centralPlot.setActiveImage(self.currentAddImageLabel)
-            self.scanSelector.alphaslider.setLegend(self.currentAddImageLabel)
+            self.scanSelector.alphaslider.setLegend("qImage")
 
         else:
             # restore status from before
@@ -4313,21 +4356,10 @@ ub : gui for UB matrix and angle calculations
                     self.currentAddImageLabel = None
                     self.centralPlot.setActiveImage(self.currentImageLabel)
 
-                # restore status of xaxis and yaxis
-                if (
-                    self.fscan is not None
-                    and self.fscan.axisname != "mu"
-                    and HAS_FIBER_INTEGRATOR
-                ):
-                    _, flipaxis = self._qConversionSampleOrientation()
-                    if flipaxis == "y":
-                        self.centralPlot.setYAxisInverted(
-                            not self.centralPlot.isYAxisInverted()
-                        )
-                    elif flipaxis == "x":
-                        self.centralPlot.setXAxisInverted(
-                            not self.centralPlot.isXAxisInverted()
-                        )
+                # restore the image convention of the pixel coordinates
+                if self._qPlotPreviousYInverted is not None:
+                    self.centralPlot.setYAxisInverted(self._qPlotPreviousYInverted)
+                    self._qPlotPreviousYInverted = None
 
                 # apply correct zoom for pixel coordinates
                 self.centralPlot.resetZoom()
@@ -5190,7 +5222,8 @@ ub : gui for UB matrix and angle calculations
                         )
                 else:
                     [
-                        l.append(np.array([[0, 0], [0, 0]])) for l in roi_lists[1:]  # noqa: E741
+                        l.append(np.array([[0, 0], [0, 0]]))
+                        for l in roi_lists[1:]  # noqa: E741
                     ]  # will result in zeros, convert to np.nan later
                     roi_lists[0].append(np.array([[0, 0], [0, 0]]))
                 if hkl_del_gam_2[i, -1]:
@@ -5206,11 +5239,13 @@ ub : gui for UB matrix and angle calculations
                         )
                 else:
                     [
-                        l.append(np.array([[0, 0], [0, 0]])) for l in roi_lists[1:]  # noqa: E741
+                        l.append(np.array([[0, 0], [0, 0]]))
+                        for l in roi_lists[1:]  # noqa: E741
                     ]  # will result in zeros, convert to np.nan later
                     roi_lists[0].append(np.array([[0, 0], [0, 0]]))
                 roi_lists = [
-                    np.ascontiguousarray(np.stack(l), dtype=np.int64) for l in roi_lists  # noqa: E741
+                    np.ascontiguousarray(np.stack(l), dtype=np.int64)
+                    for l in roi_lists  # noqa: E741
                 ]
                 roi_lists_accel.append(roi_lists)
 

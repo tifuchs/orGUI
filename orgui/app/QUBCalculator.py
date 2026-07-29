@@ -2485,8 +2485,18 @@ class QMachineParametersDialog(qt.QDialog):
         super().hideEvent(event)
 
     def resetParameters(self):
+        """Restore the parameters that were active when the dialog was opened.
+
+        The individual editors apply their changes immediately, so restoring
+        the widgets is not enough: the saved parameters have to be applied
+        again, otherwise the edited configuration stays active. They are
+        emitted directly rather than read back from the widgets, so that the
+        limited precision of the spin boxes cannot alter them.
+        """
+        if self.savedParams is None:
+            return
         self.machineparams.setValues(self.savedParams)
-        # self.machineparams._onAnyValueChanged()
+        self.machineparams.sigMachineParamsChanged.emit(self.savedParams)
 
     def onCancel(self):
         self.resetParameters()
@@ -2540,9 +2550,14 @@ class QCrystalParameterDialog(qt.QDialog):
         super().hideEvent(event)
 
     def resetParameters(self):
+        """Restore the crystal that was active when the dialog was opened.
+
+        As for the machine parameters, the editors apply their changes
+        immediately, so the saved crystal has to be applied again.
+        """
         if self.savedParams is not None:
             self.crystalparams.setValues(*self.savedParams)
-            # self.crystalparams._onAnyValueChanged()
+            self.crystalparams.sigCrystalParamsChanged.emit(*self.savedParams)
 
     def onCancel(self):
         self.resetParameters()

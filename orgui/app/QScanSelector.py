@@ -171,7 +171,9 @@ class QScanSelector(qt.QMainWindow):
         qt.QLabel("Backend:", btidsplit)
         self.btid = qt.QComboBox(btidsplit)
         [self.btid.addItem(bt) for bt in backends.fscans]
-        self.btid.setCurrentText("id31_default")
+        # keep the manual selection in sync with the beamtime autodetect
+        # fallback, so both paths default to the same backend
+        self.btid.setCurrentText(backends.default_beamtime)
 
         self._selectBackendBtn = qt.QPushButton("...", btidsplit)
         width = self._selectBackendBtn.fontMetrics().boundingRect("  ...  ").width() + 7
