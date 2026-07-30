@@ -323,7 +323,7 @@ ub : gui for UB matrix and angle calculations
         logger.info("loading orGUI")
         mainWindow = orGUI(configfile)
         mainWindow.numberthreads = ncpu
-        app.aboutToQuit.connect(mainWindow.database.close)
+        app.aboutToQuit.connect(mainWindow.database.closeSafe)
 
         namespace = {"app": app, "orgui": mainWindow, "ub": mainWindow.ubcalc}
 
@@ -332,14 +332,14 @@ ub : gui for UB matrix and angle calculations
             try:
                 namespace = runpy.run_path(options.input, init_globals=namespace)
             except Exception:
-                mainWindow.database.close()
+                mainWindow.database.closeSafe()
                 app.quit()
                 raise
 
             logger.info(f"Completed batch script {options.input}")
             if not options.keeprunning:
                 logger.info("All tasks completed. Application will now exit.")
-                mainWindow.database.close()
+                mainWindow.database.closeSafe()
                 app.quit()
                 return
 
@@ -348,7 +348,7 @@ ub : gui for UB matrix and angle calculations
             try:
                 ipshell(local_ns=namespace)
             finally:
-                mainWindow.database.close()
+                mainWindow.database.closeSafe()
                 app.quit()
     else:
         raise Exception(f"{options.configfile} is no file")
@@ -406,7 +406,7 @@ def _start_GUI(options, ncpu):
         qr = mainWindow.frameGeometry()
         qr.moveCenter(current_screen.geometry().center())
         mainWindow.move(qr.topLeft())
-        app.aboutToQuit.connect(mainWindow.database.close)
+        app.aboutToQuit.connect(mainWindow.database.closeSafe)
         namespace = {"app": app, "orgui": mainWindow, "ub": mainWindow.ubcalc}
         if options.input:
             logger.info(f"Run batch script {options.input}")
@@ -417,7 +417,7 @@ def _start_GUI(options, ncpu):
             logger.info(f"Completed batch script {options.input}")
             if not options.keeprunning:
                 logger.info("All tasks completed. Application will now exit.")
-                mainWindow.database.close()
+                mainWindow.database.closeSafe()
                 app.quit()
                 return
         if hasattr(mainWindow, "console_dockwidget"):
