@@ -9,10 +9,21 @@ Unreleased (2026-07-19)
 
 Scientific and analysis additions:
 
+- Added interface-based optical ``delta``/``beta`` profiles and layered wavefield calculations for s- and p-polarized X-rays. Scalar and multidimensional angle inputs are supported, and specular reflectivity can be calculated for s, p, or unpolarized incidence. This provides the optical wavefield foundation for future distorted-wave Born approximation (DWBA) calculations; the full distorted-wave scattering amplitude is not included yet.
 - Added optional CTR intensity-resolution modeling with constant or gamma-dependent box and Gaussian functions. Calculations can convolve irregular existing L points or sample the crystal structure factor with deterministic quadrature.
+- Added Poisson-distributed surface occupancies and coherent out-of-plane epitaxy/strain coupling for film-interface models.
 - Added py3Dmol atom-sphere rendering for Jupyter notebooks. ``plot3d`` now selects py3Dmol automatically in a notebook, can be directed to either py3Dmol or Mayavi explicitly, and can incrementally add unit cells to a shared viewer. Covalent radii are interpreted consistently by both backends and can be adjusted with the dimensionless ``radius_scale`` parameter.
 - ``PoissonSurface``'s basis now requires three parameters (``W``, ``alpha``, ``offset``) instead of two. The previous two-parameter form was only ever used in test code, so no migration path is provided; a saved ``.xtal``/ ``.xpr`` file with a two-parameter ``PoissonSurface`` basis will fail to load.
 - Wyckoff-parameterized fit values are now interpreted as absolute atomic positions instead of deltas relative to the Wyckoff position. Wyckoff parameter fitting was development-only and never part of a release, so no migration is provided.
+
+Scientific correctness and performance fixes:
+
+- Corrected ``EpitaxyInterface`` to accumulate the strain-coupled height of every structural layer. The previous calculation advanced a complete unit cell using only its final layer's strain, creating a layer-cycle-periodic displacement and artificial quasi-Bragg intensity at systematic extinctions for broad interfaces.
+- Optical profiles now preserve areal optical content under surface-normal strain, keep ionic forward scattering factors for charged species, avoid merging layers beyond the requested z tolerance, and remain finite at the exact p-polarized critical-angle limit.
+- Optical reflectivity and full wavefield calculations now evaluate angle arrays with NumPy-vectorized kernels while preserving the caller's input shape.
+- Corrected film and epitaxy-interface anchoring, stacking, and support ownership across strained interfaces.
+- Fixed missing support in one-dimensional electron-density calculations and corrected atomic-coordinate stacking when splitting unit cells into layers.
+- Added a C++ electron-density backend and bounded caches for atomic form factors, anomalous scattering factors, and accelerated form-factor lookup.
 
 A ***critical bug*** was fixed that affects bulk CTR calculations:
 
