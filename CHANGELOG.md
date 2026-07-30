@@ -66,6 +66,17 @@ A ***critical bug*** was fixed that affects bulk CTR calculations:
   released versions, up to and including v1.5.0. See the CTR structure-factor
   documentation for details.
 
+GUI changes:
+
+- The position readout of the image plot now shows ``HKL`` as a single
+  bracketed triplet instead of three separate ``H``, ``K`` and ``L`` fields,
+  and reports the momentum transfer of the selected reciprocal-space frame as
+  ``Q[alpha]``, ``Q[lab]``, ``Q[omega]``, ``Q[chi]``, ``Q[phi]`` or
+  ``Q[cryst]``. The field is relabelled when the frame selection changes.
+  Both triplets are shown with five decimals, and the two fields are sized so
+  that the full triplet is visible instead of being elided. Pixel coordinates
+  are shown with two decimals, which is the space this needs.
+
 GUI fixes:
 
 - Cancelling or resetting the machine parameter or the crystal parameter
