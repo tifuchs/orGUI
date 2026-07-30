@@ -272,7 +272,7 @@ class orGUI(qt.QMainWindow):
 
         self.scanSelector.sigROIChanged.connect(self.updateROI)
         self.scanSelector.sigROIChanged.connect(self._onROITrackingChanged)
-        self.scanSelector.sigROIintegrate.connect(self.integrateROI)
+        self.scanSelector.sigROIintegrate.connect(self._onIntegrateROI)
         self.scanSelector.sigSearchHKL.connect(self.onSearchHKLforStaticROI)
 
         self.scanSelector.excludeImageAct.toggled.connect(self._onToggleExcludeImage)
@@ -1308,6 +1308,70 @@ ub : gui for UB matrix and angle calculations
         ro_name = "rocking_static"
         return self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
 
+    def _onIntegrateROI(self):
+        """GUI-only: integrate the active ROI and report unexpected errors.
+
+        The integration reads the scan images and writes into the database.
+        Both can fail at any time, e.g. if a drive is disconnected during the
+        integration. Such an error must not terminate orGUI.
+
+        :returns: Status dictionary of :meth:`integrateROI`.
+        :rtype: dict
+        """
+        try:
+            return self.integrateROI()
+        except Exception as e:
+            logger.error(
+                "Error during integration.",
+                exc_info=True,
+                extra={
+                    "title": "Error during integration",
+                    "description": f"Error during integration:\n{e}\n"
+                    "The integration was aborted.",
+                    "show_dialog": True,
+                    "parent": self,
+                },
+            )
+            return {
+                "status": "error",
+                "message": "Error during integration",
+                "traceback": traceback.format_exc(),
+            }
+
+    def _saveIntegrationResult(self, nxdict, description):
+        """Write an integration result into the database.
+
+        Writing can fail at any time, e.g. if the drive with the database was
+        disconnected during the integration. This must be reported to the
+        user instead of terminating orGUI.
+
+        :param dict nxdict: NeXus data to add to the database.
+        :param str description: Description of the data, used in messages.
+        :returns: None on success, an error status dictionary otherwise.
+        :rtype: dict or None
+        """
+        try:
+            self.database.add_nxdict(nxdict)
+        except Exception as e:
+            logger.error(
+                "Cannot save the integrated data into the database.",
+                exc_info=True,
+                extra={
+                    "title": "Cannot save integrated data",
+                    "description": f"Cannot save {description} into the "
+                    f"database:\n{e}\nCreate a new database at an available "
+                    "location and integrate the scan again.",
+                    "show_dialog": True,
+                    "parent": self,
+                },
+            )
+            return {
+                "status": "error",
+                "message": "Cannot save the integrated data into the database",
+                "traceback": traceback.format_exc(),
+            }
+        return None
+
     def rocking_integrate(self, xylist, rois, hkl_del_gam, refldict, name):
         """Integrate rocking-scan images over prepared ROIs.
 
@@ -1353,8 +1417,8 @@ ub : gui for UB matrix and angle calculations
                 "message": "No image found in current scan",
                 "traceback": traceback.format_exc(),
             }
-        if self.database.nxfile is None:
-            logger.exception(
+        if not self.database.isOpen():
+            logger.error(
                 "Cannot integrate scan: No database available.",
                 extra={
                     "title": "Cannot integrate scan",
@@ -2227,7 +2291,11 @@ ub : gui for UB matrix and angle calculations
 
         data_2d_structured[self.activescanname]["measurement"][name]["rois"] = rois
 
-        self.database.add_nxdict(data_2d_structured)
+        error = self._saveIntegrationResult(
+            data_2d_structured, f"the rocking scan integration {name}"
+        )
+        if error is not None:
+            return error
         logger.info(f"Rocking integration succeeded and data saved with name {name}")
         return {"status": "success"}
 
@@ -4700,8 +4768,8 @@ ub : gui for UB matrix and angle calculations
                 "message": "No image found in current scan",
                 "traceback": traceback.format_exc(),
             }
-        if self.database.nxfile is None:
-            logger.exception(
+        if not self.database.isOpen():
+            logger.error(
                 "Cannot perform stationary scan integration: no database available.",
                 extra={
                     "title": "Cannot integrate scan",
@@ -5567,7 +5635,11 @@ ub : gui for UB matrix and angle calculations
 
             names_to_log += availname2
 
-        self.database.add_nxdict(data)
+        error = self._saveIntegrationResult(
+            data, f"the scan integration {names_to_log}"
+        )
+        if error is not None:
+            return error
         logger.info(f"stationary scan integrated and saved with name(s) {names_to_log}")
         return {"status": "success"}
 
@@ -5840,8 +5912,12 @@ ub : gui for UB matrix and angle calculations
             )
 
     def closeEvent(self, event):
-        """GUI/CLI hint: close the database before the main window closes."""
-        self.database.close()
+        """GUI/CLI hint: close the database before the main window closes.
+
+        A database file which cannot be closed properly, e.g. on a
+        disconnected drive, must not prevent orGUI from closing.
+        """
+        self.database.closeSafe(show_dialog=True)
         super().closeEvent(event)
 
 
@@ -6383,7 +6459,8 @@ class UncaughtHook(qt.QObject):
                                 "Cannot save database.",
                                 traceback.format_exc(),
                             )
-                    self.orgui.database.close()
+                    # must not raise again inside the exception hook
+                    self.orgui.database.closeSafe()
             else:
                 print("No QApplication instance available.")
             sys.exit(1)
