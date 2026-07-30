@@ -28,6 +28,10 @@ A ***critical bug*** was fixed that affects bulk CTR calculations:
 
 - ``UnitCell.F_bulk``'s semi-infinite geometric lattice sum used the raw, untransformed ``l`` index instead of the index converted by ``refHKLTransform`` when computing the out-of-plane attenuation phase. This was only correct for the default case where a component uses its own bulk cell as the reference (no ``reference_uc`` set); any explicit ``reference_uc`` whose out-of-plane reciprocal axis differs from the bulk's — including a plain scale difference between the reference and bulk out-of-plane axis length, not only a rotated or reindexed reference — gave incorrect bulk structure-factor amplitudes. This bug was present in both the accelerated (numba/C++) and plain-Python code paths in all previous released versions, up to and including v1.5.0. See the CTR structure-factor documentation for details.
 
+GUI changes:
+
+- The position readout of the image plot now shows ``HKL`` as a single bracketed triplet instead of three separate ``H``, ``K`` and ``L`` fields, and reports the momentum transfer of the selected reciprocal-space frame as ``Q[alpha]``, ``Q[lab]``, ``Q[omega]``, ``Q[chi]``, ``Q[phi]`` or ``Q[cryst]``. The field is relabelled when the frame selection changes. Both triplets are shown with five decimals, and the two fields are sized so that the full triplet is visible instead of being elided. Pixel coordinates are shown with two decimals, which is the space this needs.
+
 GUI fixes:
 
 - Cancelling or resetting the machine parameter or the crystal parameter dialog now restores the configuration that was active when the dialog was opened. Both dialogs apply every edit immediately, so restoring the widgets alone left the edited values active, and the discarded configuration stayed in use until it was overwritten or a config file was loaded.

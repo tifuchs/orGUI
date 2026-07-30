@@ -57,6 +57,7 @@ from silx.utils.weakref import WeakMethodProxy
 from silx.gui.plot.Profile import ProfileToolBar
 from silx.gui.plot.tools.roi import RegionOfInterestManager
 from silx.gui.plot.actions import control as control_actions
+from silx.gui.widgets.ElidedLabel import ElidedLabel
 
 import traceback
 
@@ -3135,29 +3136,53 @@ ub : gui for UB matrix and angle calculations
         """
 
         def xyToHKL(x, y):
-            """CLI-safe: convert detector pixels to hkl and detector angles."""
-            # print("xytoHKL:")
-            # print("x,y = %s, %s" % (x,y))
+            """CLI-safe: convert detector pixels to hkl, angles and Q.
+
+            :returns:
+                ``[h, k, l, delta, gamma, Qx, Qy, Qz]``, with the angles in
+                degrees and the momentum transfer of the currently selected
+                reciprocal-space frame in inverse Angstrom.
+            """
             if self.fscan is None:
-                return np.array([np.nan, np.nan, np.nan, np.nan, np.nan])
+                return np.full(8, np.nan)
             mu, om = self.getMuOm(self.imageno)
             gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(
                 np.array([y]), np.array([x]), mu
             )
-            # print(self.ubcalc.detectorCal)
-            # print(x,y)
-            # print(self.ubcalc.detectorCal.tth(np.array([y]),np.array([x])))
             pos = [mu, delta[0], gamma[0], om, self.ubcalc.chi, self.ubcalc.phi]
             pos = HKLVlieg.crystalAngles(pos, self.ubcalc.n)
-            hkl = np.concatenate(
+            return np.concatenate(
                 (
                     np.array(self.ubcalc.angles.anglesToHkl(*pos)),
                     np.rad2deg([delta[0], gamma[0]]),
+                    self._qInSelectedFrame(pos),
                 )
             )
-            return hkl
 
         return xyToHKL
+
+    def _qInSelectedFrame(self, pos):
+        """Momentum transfer of one pixel in the selected reciprocal frame.
+
+        :param pos:
+            Refracted ``[alpha, delta, gamma, omega, chi, phi]`` angles in rad.
+        :returns:
+            ``(Qx, Qy, Qz)`` in inverse Angstrom, or NaN when the frame cannot
+            be evaluated, for example ``Q_cryst`` without an orientation matrix.
+        :rtype: numpy.ndarray
+        """
+        try:
+            rotation = qconversion.frameMatrix(
+                self._selectedQFrame(),
+                alpha=pos[0],
+                omega=pos[3],
+                chi=pos[4],
+                phi=pos[5],
+                U=self.ubcalc.ubCal.getU(),
+            )
+            return rotation @ self.ubcalc.angles.QAlpha(pos[0], pos[1], pos[2])
+        except Exception:
+            return np.full(3, np.nan)
 
     def getMuOm(self, imageno=None):
         """Return mu and omega for an image or the whole active scan.
@@ -4117,8 +4142,9 @@ ub : gui for UB matrix and angle calculations
         return frame
 
     def _onQFrameChanged(self, index):
-        """GUI hint: re-render the Q-plot after the frame selection changed."""
+        """GUI hint: follow the frame selection in the readout and the Q-plot."""
         del index
+        self.centralPlot.setQFrame(self._selectedQFrame())
         self._refreshQPlot()
 
     def _refreshQPlot(self, *args):
@@ -6190,19 +6216,88 @@ ub : gui for UB matrix and angle calculations
         super().closeEvent(event)
 
 
+def formatPositionTriplet(values):
+    """Format three numbers as ``[a b c]`` for the plot position readout.
+
+    :param values: three numbers.
+    :returns: the formatted triplet, or a placeholder if any value is not
+        finite, which is the case while no scan is loaded.
+    :rtype: str
+    """
+    values = np.asarray(values, dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        return "------"
+    return "[{:.5f} {:.5f} {:.5f}]".format(*values)
+
+
+def qFieldName(frame):
+    """Name of the reciprocal-space field in the plot position readout.
+
+    :param str frame: one of :data:`qconversion.FRAMES`.
+    :returns: for example ``"Q[alpha]"``.
+    :rtype: str
+    """
+    return f"Q[{qconversion.frameShortName(frame)}]"
+
+
+def isPositionTripletField(name):
+    """Whether a position readout field holds a bracketed triplet."""
+    return name == "HKL" or name.startswith("Q[")
+
+
+# Widest triplet the readout should be able to show without eliding. Five
+# decimals are the minimum useful precision for hkl and for Q.
+POSITION_TRIPLET_TEMPLATE = "[-99.99999 -99.99999 -99.99999]"
+
+# The remaining fields hold a pixel coordinate, a detector angle or a data
+# value such as "10, Masked". silx reserves about fourteen hash characters for
+# each of them, which is wider than any of those values and takes space the
+# triplets need. The width of a field is its share of the summed size hints, so
+# this is a balance rather than a maximum: made much smaller, the scalar fields
+# starve when the window is narrow; made much larger, the triplets are elided
+# again.
+POSITION_SCALAR_TEMPLATE = "-99999.99999"
+
+
+class _PositionLabel(ElidedLabel):
+    """Position readout label whose size hint matches its content.
+
+    silx sizes every readout field alike, for about fourteen hash characters.
+    That elides the last component of a triplet while leaving the scalar fields
+    wider than they need to be. Only the size *hint* is set here, not the
+    minimum width, so the window can still be made as narrow as before. The
+    hint never falls below the current text, and anything elided remains
+    available as a tooltip, which ``ElidedLabel`` provides by default.
+    """
+
+    def __init__(self, template, parent=None):
+        super().__init__(parent)
+        self._template = template
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        width = self.fontMetrics().boundingRect(self._template).width()
+        return qt.QSize(max(hint.width(), width), hint.height())
+
+
 class Plot2DHKL(silx.gui.plot.PlotWindow):
     sigKeyPressDelete = qt.pyqtSignal()
 
     def __init__(self, xyHKLConverter, parent=None, backend=None):
         """GUI-only: initialize the image plot with hkl position readout."""
         self.xyHKLConverter = xyHKLConverter
+        self._qFieldName = qFieldName(qconversion.DEFAULT_FRAME)
 
         posInfo = [
-            ("X", lambda x, y: x),
-            ("Y", lambda x, y: y),
-            ("H", lambda x, y: self.xyHKLConverter(x, y)[0]),
-            ("K", lambda x, y: self.xyHKLConverter(x, y)[1]),
-            ("L", lambda x, y: self.xyHKLConverter(x, y)[2]),
+            # pixel coordinates need no more than sub-pixel precision, and the
+            # space is needed for the hkl and Q triplets
+            ("X", lambda x, y: f"{x:.2f}"),
+            ("Y", lambda x, y: f"{y:.2f}"),
+            ("HKL", lambda x, y: formatPositionTriplet(self.xyHKLConverter(x, y)[:3])),
+            (
+                self._qFieldName,
+                lambda x, y: formatPositionTriplet(self.xyHKLConverter(x, y)[5:8]),
+            ),
             ("del", lambda x, y: self.xyHKLConverter(x, y)[3]),
             ("gam", lambda x, y: self.xyHKLConverter(x, y)[4]),
             ("Data", WeakMethodProxy(self._getImageValue)),
@@ -6227,6 +6322,8 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
             roi=False,
             mask=True,
         )
+
+        self._tunePositionFieldWidths()
 
         if parent is None:
             self.setWindowTitle("Plot2D")
@@ -6256,6 +6353,60 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
         if key == qt.Qt.Key_Delete and not event.isAutoRepeat():
             self.sigKeyPressDelete.emit()
         super().keyPressEvent(event)
+
+    def _tunePositionFieldWidths(self):
+        """Size every readout field for the content it actually shows.
+
+        The triplet fields get room for all three components, and the scalar
+        fields give back the width silx reserves for them but never uses.
+
+        .. note::
+           GUI-only.
+        """
+        positionInfo = self.getPositionInfoWidget()
+        # silx keeps the content widgets in a private list; leave the readout
+        # untouched if that ever changes
+        fields = getattr(positionInfo, "_fields", None)
+        if not fields:
+            return
+        layout = positionInfo.layout()
+        for index, (widget, name, converter) in enumerate(list(fields)):
+            template = (
+                POSITION_TRIPLET_TEMPLATE
+                if isPositionTripletField(name)
+                else POSITION_SCALAR_TEMPLATE
+            )
+            replacement = _PositionLabel(template, positionInfo)
+            replacement.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+            replacement.setText(widget.text())
+            layout.replaceWidget(widget, replacement)
+            widget.setParent(None)
+            widget.deleteLater()
+            fields[index] = (replacement, name, converter)
+
+    def setQFrame(self, frame):
+        """Relabel the reciprocal-space field for the selected frame.
+
+        silx builds the field titles once, so the existing title widget is
+        renamed in place. The displayed values follow automatically, because
+        the converter reads the selected frame when it is called.
+
+        .. note::
+           GUI-only.
+        """
+        name = qFieldName(frame)
+        if name == self._qFieldName:
+            return
+
+        positionInfo = self.getPositionInfoWidget()
+        if positionInfo is not None:
+            previous = f"<b>{self._qFieldName}:</b>"
+            for widget in positionInfo.findChildren(qt.QLabel):
+                if widget.text() == previous:
+                    widget.setText(f"<b>{name}:</b>")
+                    break
+            positionInfo.updateInfo()
+        self._qFieldName = name
 
     def setXyHKLconverter(self, xyHKLConverter):
         """Set the pixel-to-hkl converter used by the plot readout.

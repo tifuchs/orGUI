@@ -152,6 +152,17 @@ def hasKernel():
     return kernel() is not None
 
 
+def frameShortName(frame):
+    """Return the frame name without the leading ``Q_``, for compact labels.
+
+    :param str frame: one of :data:`FRAMES`.
+    :returns: for example ``"alpha"`` for ``"Q_alpha"``.
+    """
+    if frame not in FRAMES:
+        raise ValueError(f"Unknown frame {frame!r}, expected one of {FRAMES}")
+    return frame[len("Q_") :]
+
+
 def tiltAngleFromAzimuth(azimuth):
     """Return the pyFAI ``tilt_angle`` reproducing an orGUI azimuthal reference.
 
