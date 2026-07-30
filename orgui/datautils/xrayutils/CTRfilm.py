@@ -763,23 +763,46 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
             mat_0 = np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
 
-            ratio_top = a3_bottom / a3_top
-            ratio_bottom = 1 / ratio_top
             coupled_top = [[] for _ in self.top_layers]
             coupled_bottom = [[] for _ in self.bottom_layers]
             ideal_top = [[] for _ in self.top_layers]
             ideal_bottom = [[] for _ in self.bottom_layers]
             coupled_height = 0.0
+            top_layer_space = np.diff(
+                self.layerpos,
+                append=self.layerpos[0] + 1.0,
+            )
+            bottom_layerpos = _unwrapped_layer_positions(
+                np.array(
+                    [
+                        self.uc_bottom.layerpos[layer_id]
+                        for layer_id in self._layer_ids
+                    ]
+                ),
+                self._layer_order_indices,
+            )
+            bottom_layer_space = np.diff(
+                bottom_layerpos,
+                append=bottom_layerpos[0] + 1.0,
+            )
 
             for cycle_index, (p_t, p_b) in enumerate(
                 zip(probability_top, probability_bottom)
             ):
-                top_strains = p_t + ratio_top * p_b
-                bottom_strains = ratio_bottom * p_t + p_b
-                physical_top_index = np.flatnonzero(
-                    self._layer_order_indices == n_layers - 1
-                )[0]
-                cell_height = a3_top * top_strains[physical_top_index]
+                # Accumulate the coherent height one structural layer at a
+                # time. Using a single layer's strain for the whole unit-cell
+                # cycle creates a displacement modulation with the layer-cycle
+                # period and leaks intensity into systematic extinctions.
+                physical_layer_heights = (
+                    p_t * a3_top * top_layer_space
+                    + p_b * a3_bottom * bottom_layer_space
+                )
+                top_strains = physical_layer_heights / (
+                    a3_top * top_layer_space
+                )
+                bottom_strains = physical_layer_heights / (
+                    a3_bottom * bottom_layer_space
+                )
 
                 for i, (uc_t, uc_b) in enumerate(
                     zip(self.top_layers, self.bottom_layers)
@@ -787,27 +810,34 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                     mat_top_i = np.copy(mat_0)
                     top_strain_and_h = top_strains[i]
                     mat_top_i[2, 2] = top_strain_and_h
-                    relative_layer_position = self.layerpos[i] - self.layerpos[0]
+                    relative_top_position = (
+                        self.layerpos[i] - self.layerpos[0]
+                    )
                     top_layer_offset = (
-                        relative_layer_position
+                        relative_top_position
                         - (self.uc_top.layerpos[self.layer_order[i]])
                     )
                     mat_top_i[2, 3] = (
                         coupled_height / a3_top
-                        + top_strain_and_h * top_layer_offset
+                        - top_strain_and_h
+                        * self.uc_top.layerpos[self.layer_order[i]]
                     )
                     coupled_top[i].append(mat_top_i)
 
                     mat_bottom_i = np.copy(mat_0)
                     bottom_strain_and_h = bottom_strains[i]
                     mat_bottom_i[2, 2] = bottom_strain_and_h
+                    relative_bottom_position = (
+                        bottom_layerpos[i] - bottom_layerpos[0]
+                    )
                     bottom_layer_offset = (
-                        relative_layer_position
+                        relative_bottom_position
                         - (self.uc_bottom.layerpos[self.layer_order[i]])
                     )
                     mat_bottom_i[2, 3] = (
                         coupled_height / a3_bottom
-                        + bottom_strain_and_h * bottom_layer_offset
+                        - bottom_strain_and_h
+                        * self.uc_bottom.layerpos[self.layer_order[i]]
                     )
                     coupled_bottom[i].append(mat_bottom_i)
 
@@ -818,7 +848,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                     ideal_bottom_i = np.copy(mat_0)
                     ideal_bottom_i[2, 3] = cycle_index + bottom_layer_offset
                     ideal_bottom[i].append(ideal_bottom_i)
-                coupled_height += cell_height
+                    coupled_height += physical_layer_heights[i]
 
             loc_rescaled = loc - unitcells[0]
             uc_no_loc = int(np.floor(loc_rescaled)) // n_layers

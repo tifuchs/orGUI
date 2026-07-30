@@ -37,6 +37,11 @@ Scientific and analysis additions:
 
 Scientific correctness and performance fixes:
 
+- Corrected ``EpitaxyInterface`` to accumulate the strain-coupled height of
+  every structural layer. The previous calculation advanced a complete unit
+  cell using only its final layer's strain, creating a layer-cycle-periodic
+  displacement and artificial quasi-Bragg intensity at systematic extinctions
+  for broad interfaces.
 - Optical profiles now preserve areal optical content under surface-normal
   strain, keep ionic forward scattering factors for charged species, avoid
   merging layers beyond the requested z tolerance, and remain finite at the
