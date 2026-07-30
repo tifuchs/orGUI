@@ -37,6 +37,15 @@ Scientific and analysis additions:
 
 Scientific correctness and performance fixes:
 
+- Corrected the reciprocal-coordinate transform of the Film reference slabs
+  generated for multi-cell ``PoissonSurface`` terminations. Previously, these
+  slabs retained the underlying one-cell transform, so surface-minus-Film
+  replacement failed to cancel for a bulk-equivalent supercell and introduced
+  artificial finite-slab oscillations into calculated CTRs.
+- Corrected ``PoissonSurface`` etching to retain every empty structural layer
+  that subtracts material from the underlying Film. Deterministic negative
+  integer widths now remove exactly the requested number of layers and retain
+  the correct exposed termination and surface height.
 - Corrected ``EpitaxyInterface`` to accumulate the strain-coupled height of
   every structural layer. The previous calculation advanced a complete unit
   cell using only its final layer's strain, creating a layer-cycle-periodic
