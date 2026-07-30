@@ -45,24 +45,29 @@ class ResolutionFunction(ABC):
 
     The effective full width is
 
-    ``delta_l_0 + delta_l_1 * abs(sin(gamma))``.
+    ``delta_l_0 + delta_l_1 * abs(sin(gamma)) +
+    delta_l_2 * abs(sin(delta))``.
 
     The full central HKL coordinates and angle record are accepted by
-    :meth:`width` so future resolution models can depend on more than gamma.
+    :meth:`width` so resolution models can depend on diffractometer angles.
 
     :param float delta_l_0:
         Constant L-width contribution in r.l.u.
     :param float delta_l_1:
         Gamma-dependent L-width contribution in r.l.u.
+    :param float delta_l_2:
+        Delta-dependent L-width contribution in r.l.u.
     """
 
     delta_l_0: float
     delta_l_1: float = 0.0
+    delta_l_2: float = 0.0
 
     def __post_init__(self):
         for name, value in (
             ("delta_l_0", self.delta_l_0),
             ("delta_l_1", self.delta_l_1),
+            ("delta_l_2", self.delta_l_2),
         ):
             if not np.isscalar(value) or not np.isfinite(value) or value < 0.0:
                 raise ValueError(f"{name} must be a finite, nonnegative scalar")
@@ -77,7 +82,8 @@ class ResolutionFunction(ABC):
         :param numpy.ndarray l:
             L coordinates in r.l.u.
         :param angles:
-            Optional structured angle array containing ``gamma`` in rad.
+            Optional structured angle array containing the enabled ``gamma``
+            and/or ``delta`` fields in rad.
         :returns:
             Effective L widths in r.l.u., broadcast to the HKL shape.
         :rtype: numpy.ndarray
@@ -96,29 +102,41 @@ class ResolutionFunction(ABC):
             ) from exc
 
         widths = np.full(l_array.shape, float(self.delta_l_0), dtype=np.float64)
-        if self.delta_l_1 == 0.0:
+        if self.delta_l_1 == 0.0 and self.delta_l_2 == 0.0:
             return widths
 
         if angles is None:
             raise ValueError(
-                "Gamma-dependent resolution requires CTR angle records; "
+                "Angle-dependent resolution requires CTR angle records; "
                 "call CTRCollection.calcAnglesZmode first"
             )
-        try:
-            gamma = np.asarray(angles["gamma"], dtype=np.float64)
-        except (KeyError, TypeError, ValueError, IndexError) as exc:
-            raise ValueError(
-                "Gamma-dependent resolution requires an angle field named 'gamma'"
-            ) from exc
-        try:
-            gamma = np.broadcast_to(gamma, l_array.shape)
-        except ValueError as exc:
-            raise ValueError(
-                "Gamma angles must have the same shape as the CTR points"
-            ) from exc
-        if not np.all(np.isfinite(gamma)):
-            raise ValueError("Gamma angles must be finite and expressed in radians")
-        widths += self.delta_l_1 * np.abs(np.sin(gamma))
+
+        for coefficient, angle_name in (
+            (self.delta_l_1, "gamma"),
+            (self.delta_l_2, "delta"),
+        ):
+            if coefficient == 0.0:
+                continue
+            try:
+                angle = np.asarray(angles[angle_name], dtype=np.float64)
+            except (KeyError, TypeError, ValueError, IndexError) as exc:
+                raise ValueError(
+                    "Angle-dependent resolution requires an angle field named "
+                    f"'{angle_name}'"
+                ) from exc
+            try:
+                angle = np.broadcast_to(angle, l_array.shape)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{angle_name.capitalize()} angles must have the same shape "
+                    "as the CTR points"
+                ) from exc
+            if not np.all(np.isfinite(angle)):
+                raise ValueError(
+                    f"{angle_name.capitalize()} angles must be finite and "
+                    "expressed in radians"
+                )
+            widths += coefficient * np.abs(np.sin(angle))
         return widths
 
     @abstractmethod
