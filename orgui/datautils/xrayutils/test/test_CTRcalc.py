@@ -428,11 +428,6 @@ class TestPoissonSurface(unittest.TestCase):
         lower, upper = surface.profile.support()
         offsets = np.arange(lower, upper + 1)
         material = surface.profile.occupancy(offsets)
-        top_stop = np.flatnonzero(
-            material > surface.profile.tail_probability
-        )[-1] + 1
-        offsets = offsets[:top_stop]
-        material = material[:top_stop]
         expected_surface = 0.75 * surface.profile.surface_occupancy(offsets)
         expected_film = 0.75 * (material - (offsets < 0))
         expected_reference = -expected_surface
@@ -685,6 +680,87 @@ class TestPoissonSurface(unittest.TestCase):
         self.assertTrue(np.all(etching_film_occupancy < 0))
         self.assertAlmostEqual(etching.mean_height_absolute, 6.0)
 
+    def test_integer_etching_retains_all_removed_film_layers(self):
+        layered_cell = copy.deepcopy(self.unitcell)
+        layered_cell.layerpos = {0.0: 0.0, 1.0: 0.5}
+        film = CTRfilm.Film(copy.deepcopy(layered_cell))
+        film.basis[0] = 2.0
+        film.createLayers()
+        surface = CTRfilm.PoissonSurface(
+            copy.deepcopy(layered_cell),
+            profile=PoissonProfile(mean_change=-2.0, alpha=0.0),
+        )
+        surface.stack_on(
+            0.0,
+            film.height_absolute,
+            film.end_layer_number,
+            below_state=film.layer_state,
+            below_component=film,
+        )
+
+        film_corrections = np.concatenate(
+            [layer.coherentDomainOccupancy for layer in surface.film_layer_ucs]
+        )
+        removed_film = film_corrections[
+            np.abs(film_corrections) > surface.profile.tail_probability
+        ]
+        np.testing.assert_allclose(
+            np.sort(removed_film),
+            [-0.75, -0.75],
+        )
+        self.assertAlmostEqual(np.sum(removed_film), -1.5)
+        self.assertAlmostEqual(
+            surface.height_absolute,
+            surface.mean_height_absolute,
+        )
+
+    def test_integer_etching_matches_equivalent_sharp_thinner_film(self):
+        ell = np.linspace(0.1, 2.7, 31)
+        zeros = np.zeros_like(ell)
+        density_z = np.linspace(-2.0, 18.0, 101)
+
+        for removed_layers in (1, 2):
+            rough_film = CTRfilm.Film(
+                copy.deepcopy(self.unitcell),
+                name="film",
+            )
+            rough_film.basis[0] = 4.0
+            surface = CTRfilm.PoissonSurface(
+                copy.deepcopy(self.unitcell),
+                profile=PoissonProfile(
+                    mean_change=-float(removed_layers),
+                    alpha=0.0,
+                ),
+                name="surface",
+            )
+            rough = CTRcalc.SXRDCrystal(
+                copy.deepcopy(self.unitcell),
+                rough_film,
+                surface,
+                stacking=np.array([1, 2]),
+            )
+
+            sharp_film = CTRfilm.Film(
+                copy.deepcopy(self.unitcell),
+                name="film",
+            )
+            sharp_film.basis[0] = 4.0 - removed_layers
+            sharp = CTRcalc.SXRDCrystal(
+                copy.deepcopy(self.unitcell),
+                sharp_film,
+                stacking=np.array([1]),
+            )
+
+            np.testing.assert_allclose(
+                rough.F(zeros, zeros, ell),
+                sharp.F(zeros, zeros, ell),
+            )
+            np.testing.assert_allclose(
+                rough.zDensity_G(density_z, 0, 0),
+                sharp.zDensity_G(density_z, 0, 0),
+                atol=1e-14,
+            )
+
     def test_offset_is_an_independent_fit_parameter(self):
         surface = CTRfilm.PoissonSurface(
             self.unitcell,
@@ -730,6 +806,39 @@ class TestPoissonSurface(unittest.TestCase):
             0.0,
         )
         np.testing.assert_allclose(surface.optical_profile()[:, 1:], 0.0)
+
+    def test_identical_supercell_terminations_use_global_reference(self):
+        film_cell = copy.deepcopy(self.unitcell)
+        surface_slab = copy.deepcopy(self.unitcell).supercell((1, 1, 2))
+        terminations = generate_surface_termination_cells(
+            surface_slab,
+            film_cell.layer_cycle.layers,
+        )
+        film = CTRfilm.Film(film_cell, name="film")
+        film.basis[0] = 2.0
+        surface = CTRfilm.PoissonSurface(
+            terminations,
+            profile=PoissonProfile(mean_change=0.0),
+        )
+        crystal = CTRcalc.SXRDCrystal(
+            self.unitcell, film, surface, stacking=np.array([1, 2])
+        )
+
+        crystal.apply_stacking()
+
+        for layer, surface_uc in surface._termination_views.items():
+            reference_uc = surface._film_termination_ucs[layer]
+            np.testing.assert_allclose(
+                reference_uc.refHKLTransform,
+                surface_uc.refHKLTransform,
+            )
+        h = np.zeros(3)
+        ell = np.linspace(0.1, 0.3, 3)
+        np.testing.assert_allclose(
+            surface.F_uc(h, h, ell),
+            0.0,
+            atol=1e-12,
+        )
 
     def test_zero_width_replaces_top_film_layer_with_surface_structure(self):
         film_cell = copy.deepcopy(self.unitcell)

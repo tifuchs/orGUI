@@ -1864,6 +1864,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         self.below_H = 0.0
         self.below_layer = -1.0
         self.underlying_film = None
+        self._reference_unitcell = None
+        self._reference_rotation = np.identity(3)
         self._film_layer_ucs_base = []
         self.film_layer_ucs = []
         self._initialize_layer_stacking(kwargs)
@@ -2031,6 +2033,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
         self.underlying_film = component
         self._film_layer_ucs_base = [film_layers[layer] for layer in film_layer_ids]
+        if self._reference_unitcell is not None:
+            self.setReferenceUnitCell(
+                self._reference_unitcell,
+                self._reference_rotation,
+            )
         self._set_layer_order(self.layer_order, self._layer_order_indices)
         self._basis_created = np.full_like(self.basis, np.nan)
 
@@ -2043,6 +2050,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             Optional 3-by-3 rotation from the reference frame into the surface
             crystal frame.
         """
+        self._reference_unitcell = uc
+        self._reference_rotation = np.asarray(rotMatrix, dtype=np.float64)
         for cell in self._owned_unitcells():
             cell.setReferenceUnitCell(uc, rotMatrix)
         for cell in getattr(self, "_termination_views", {}).values():
@@ -2149,9 +2158,6 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         )
         if represented_material.size == 0:
             raise ValueError("Poisson surface profile has no represented material")
-        top_stop = represented_material[-1] + 1
-        layer_numbers = layer_numbers[:top_stop]
-        material_occupancy = material_occupancy[:top_stop]
         surface_occupancy = profile.surface_occupancy(layer_numbers)
         sharp_film_occupancy = (layer_numbers < 0).astype(np.float64)
         film_correction_occupancy = material_occupancy - sharp_film_occupancy
@@ -2161,6 +2167,10 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         layer_numbers = layer_numbers[represented]
         surface_occupancy = surface_occupancy[represented]
         film_correction_occupancy = film_correction_occupancy[represented]
+        exposed_layers = layer_numbers[surface_occupancy > tail_probability]
+        if exposed_layers.size == 0:
+            raise ValueError("Poisson surface profile has no represented surface")
+        top_surface_layer = exposed_layers[-1]
         layers_to_create = len(layer_numbers)
         for uc in self.layer_ucs:
             uc.coherentDomainMatrix = []
@@ -2234,11 +2244,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
         if layers_to_create:
             self._end_layer_number = self.layer_order[
-                int(layer_numbers[-1] % n_layers_in_uc)
+                int(top_surface_layer % n_layers_in_uc)
             ]
             top_relative = (
-                layer_numbers[-1] // n_layers_in_uc
-                + self.layerpos[int(layer_numbers[-1] % n_layers_in_uc)]
+                top_surface_layer // n_layers_in_uc
+                + self.layerpos[int(top_surface_layer % n_layers_in_uc)]
                 - self.layerpos[0]
             )
             layer_spacing = self.underlying_film.unitcell.a[2] / n_layers_in_uc
