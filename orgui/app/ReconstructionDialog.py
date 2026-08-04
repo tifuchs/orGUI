@@ -135,6 +135,10 @@ class ReconstructionDialog(qt.QDialog):
             self.orgui.reconstruction_chunk_shape = (64, 64, 64)
         if not hasattr(self.orgui, "reconstruction_compression_override"):
             self.orgui.reconstruction_compression_override = None
+        if not hasattr(self.orgui, "reconstruction_normalize_exposure"):
+            self.orgui.reconstruction_normalize_exposure = True
+        if not hasattr(self.orgui, "reconstruction_monitor_corrections"):
+            self.orgui.reconstruction_monitor_corrections = ()
         self.setWindowTitle("Reciprocal-space reconstruction")
         self.resize(1100, 760)
         layout = qt.QVBoxLayout(self)
@@ -264,7 +268,52 @@ class ReconstructionDialog(qt.QDialog):
             "Optional free-text note embedded in the job descriptor and output.",
         )
         layout.addWidget(metadata_group)
+
+        normalization_group = qt.QGroupBox("Exposure and monitor normalization")
+        normalization_form = qt.QFormLayout(normalization_group)
+        self.normalize_exposure = qt.QCheckBox("Normalize by exposure time")
+        self.normalize_exposure.setChecked(
+            bool(self.orgui.reconstruction_normalize_exposure)
+        )
+        self.normalize_exposure.toggled.connect(
+            self._on_normalize_exposure_changed
+        )
+        self._add_form_row(
+            normalization_form,
+            "",
+            self.normalize_exposure,
+            "Divide each frame by its exposure time when the scan backend "
+            "provides one. Applies only to reciprocal-space reconstruction.",
+        )
+        self.monitor_corrections = qt.QLineEdit()
+        self.monitor_corrections.setPlaceholderText(
+            "Optional scan counters, comma-separated"
+        )
+        self.monitor_corrections.setText(
+            ", ".join(self.orgui.reconstruction_monitor_corrections)
+        )
+        self.monitor_corrections.editingFinished.connect(
+            self._on_monitor_corrections_changed
+        )
+        self._add_form_row(
+            normalization_form,
+            "Monitor corrections:",
+            self.monitor_corrections,
+            "Counters applied as divisive monitor normalizations. Applies "
+            "only to reciprocal-space reconstruction.",
+        )
+        layout.addWidget(normalization_group)
         return widget
+
+    def _on_normalize_exposure_changed(self, checked):
+        self.orgui.reconstruction_normalize_exposure = bool(checked)
+
+    def _on_monitor_corrections_changed(self):
+        self.orgui.reconstruction_monitor_corrections = tuple(
+            value.strip()
+            for value in self.monitor_corrections.text().split(",")
+            if value.strip()
+        )
 
     def _grid_tab(self):
         widget = qt.QWidget()

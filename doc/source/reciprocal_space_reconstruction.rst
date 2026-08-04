@@ -103,6 +103,17 @@ Corrections and Exclusions
 ``User note``
    Optional free text stored in the job descriptor and final provenance.
 
+``Normalize by exposure time``
+   Divides each frame by its exposure time when the active scan backend
+   provides one. Enabled by default. This setting is specific to
+   reconstruction and does not affect ROI/CTR image integration.
+
+``Monitor corrections``
+   Comma-separated scan counter names applied as divisive monitor
+   normalizations, each with uncertainty propagated when the backend
+   exposes a matching ``<name>_variance`` counter. This setting is specific
+   to reconstruction and does not affect ROI/CTR image integration.
+
 Output Grid Parameters
 ----------------------
 

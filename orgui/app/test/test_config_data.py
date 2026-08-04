@@ -160,8 +160,6 @@ def test_enabled_pixel_repair_implies_mask_correction():
                 "mask": False,
                 "solidAngle": False,
                 "polarization": False,
-                "normalizeExposure": True,
-                "monitorCorrections": (),
             }
         ),
         maskManager=SimpleNamespace(
@@ -170,12 +168,39 @@ def test_enabled_pixel_repair_implies_mask_correction():
         excludedImagesDialog=SimpleNamespace(
             getData=lambda: np.empty(0, dtype=np.int64)
         ),
+        reconstruction_normalize_exposure=False,
+        reconstruction_monitor_corrections=("mondio",),
     )
 
     captured = ConfigData.from_gui(gui)
 
     assert captured.corrections.repair_masked_pixels is True
     assert captured.corrections.use_mask is True
+    assert captured.corrections.normalize_exposure is False
+    assert captured.corrections.monitor_corrections == ("mondio",)
+
+
+def test_apply_to_gui_sets_reconstruction_normalization_attributes():
+    config = _make_config()
+    config.corrections = CorrectionState(
+        normalize_exposure=False, monitor_corrections=("mondio",)
+    )
+    gui = SimpleNamespace(
+        ubcalc=SimpleNamespace(
+            detectorCal=config.detector,
+            crystal=config.unit_cell,
+            ubCal=config.ub_calculator,
+            mu=config.mu,
+            chi=config.chi,
+            phi=config.phi,
+            n=config.refraction_index,
+        ),
+    )
+
+    config.apply_to_gui(gui)
+
+    assert gui.reconstruction_normalize_exposure is False
+    assert gui.reconstruction_monitor_corrections == ("mondio",)
 
 
 def test_snapshot_assets_serializes_active_mask(tmp_path):

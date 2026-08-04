@@ -379,10 +379,10 @@ class ConfigData:
                     getattr(repair, "gap_size_px", 1)
                 ),
                 normalize_exposure=bool(
-                    options.get("normalizeExposure", True)
+                    getattr(gui, "reconstruction_normalize_exposure", True)
                 ),
                 monitor_corrections=tuple(
-                    options.get("monitorCorrections", ())
+                    getattr(gui, "reconstruction_monitor_corrections", ())
                 ),
                 excluded_frames=tuple(
                     sorted(
@@ -441,12 +441,10 @@ class ConfigData:
                     "mask": self.corrections.use_mask,
                     "solidAngle": self.corrections.use_solid_angle,
                     "polarization": self.corrections.use_polarization,
-                    "normalizeExposure": self.corrections.normalize_exposure,
-                    "monitorCorrections": (
-                        self.corrections.monitor_corrections
-                    ),
                 }
             )
+        gui.reconstruction_normalize_exposure = self.corrections.normalize_exposure
+        gui.reconstruction_monitor_corrections = self.corrections.monitor_corrections
         if (
             hasattr(gui, "maskManager")
             and self.corrections.repair_max_component_pixels is not None

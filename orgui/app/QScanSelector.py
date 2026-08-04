@@ -724,25 +724,11 @@ class QScanSelector(qt.QMainWindow):
         self.useLorentzBox.setEnabled(False)
         self.useSolidAngleBox = qt.QCheckBox("Solid angle correction")
         self.usePolarizationBox = qt.QCheckBox("Polarization correction")
-        self.normalizeExposureBox = qt.QCheckBox("Normalize by exposure time")
-        self.normalizeExposureBox.setChecked(True)
-        self.monitorCorrectionsEdit = qt.QLineEdit()
-        self.monitorCorrectionsEdit.setPlaceholderText(
-            "Optional scan counters, comma-separated"
-        )
-        self.monitorCorrectionsEdit.setToolTip(
-            "Counters are applied as divisive monitor normalizations."
-        )
 
         optionsGroupLayout.addWidget(self.useMaskBox, 0, 0)
         optionsGroupLayout.addWidget(self.useLorentzBox, 1, 0)
         optionsGroupLayout.addWidget(self.useSolidAngleBox, 0, 1)
         optionsGroupLayout.addWidget(self.usePolarizationBox, 1, 1)
-        optionsGroupLayout.addWidget(self.normalizeExposureBox, 2, 0, 1, 2)
-        optionsGroupLayout.addWidget(
-            qt.QLabel("Monitor corrections:"), 3, 0
-        )
-        optionsGroupLayout.addWidget(self.monitorCorrectionsEdit, 3, 1)
 
         optionsGroup.setLayout(optionsGroupLayout)
 
@@ -860,12 +846,6 @@ class QScanSelector(qt.QMainWindow):
                 self.useSolidAngleBox.setChecked(ddict[key])
             elif key == "polarization":
                 self.usePolarizationBox.setChecked(ddict[key])
-            elif key == "normalizeExposure":
-                self.normalizeExposureBox.setChecked(ddict[key])
-            elif key == "monitorCorrections":
-                self.monitorCorrectionsEdit.setText(
-                    ", ".join(map(str, ddict[key]))
-                )
             elif key == "advanced":
                 self.roioptions.set_parameters(ddict[key])
 
@@ -874,12 +854,6 @@ class QScanSelector(qt.QMainWindow):
         ddict["mask"] = self.useMaskBox.isChecked()
         ddict["solidAngle"] = self.useSolidAngleBox.isChecked()
         ddict["polarization"] = self.usePolarizationBox.isChecked()
-        ddict["normalizeExposure"] = self.normalizeExposureBox.isChecked()
-        ddict["monitorCorrections"] = tuple(
-            value.strip()
-            for value in self.monitorCorrectionsEdit.text().split(",")
-            if value.strip()
-        )
         ddict["advanced"] = self.roioptions.get_parameters()
         return ddict
 
