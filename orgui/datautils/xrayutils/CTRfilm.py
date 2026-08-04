@@ -763,23 +763,46 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
             mat_0 = np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
 
-            ratio_top = a3_bottom / a3_top
-            ratio_bottom = 1 / ratio_top
             coupled_top = [[] for _ in self.top_layers]
             coupled_bottom = [[] for _ in self.bottom_layers]
             ideal_top = [[] for _ in self.top_layers]
             ideal_bottom = [[] for _ in self.bottom_layers]
             coupled_height = 0.0
+            top_layer_space = np.diff(
+                self.layerpos,
+                append=self.layerpos[0] + 1.0,
+            )
+            bottom_layerpos = _unwrapped_layer_positions(
+                np.array(
+                    [
+                        self.uc_bottom.layerpos[layer_id]
+                        for layer_id in self._layer_ids
+                    ]
+                ),
+                self._layer_order_indices,
+            )
+            bottom_layer_space = np.diff(
+                bottom_layerpos,
+                append=bottom_layerpos[0] + 1.0,
+            )
 
             for cycle_index, (p_t, p_b) in enumerate(
                 zip(probability_top, probability_bottom)
             ):
-                top_strains = p_t + ratio_top * p_b
-                bottom_strains = ratio_bottom * p_t + p_b
-                physical_top_index = np.flatnonzero(
-                    self._layer_order_indices == n_layers - 1
-                )[0]
-                cell_height = a3_top * top_strains[physical_top_index]
+                # Accumulate the coherent height one structural layer at a
+                # time. Using a single layer's strain for the whole unit-cell
+                # cycle creates a displacement modulation with the layer-cycle
+                # period and leaks intensity into systematic extinctions.
+                physical_layer_heights = (
+                    p_t * a3_top * top_layer_space
+                    + p_b * a3_bottom * bottom_layer_space
+                )
+                top_strains = physical_layer_heights / (
+                    a3_top * top_layer_space
+                )
+                bottom_strains = physical_layer_heights / (
+                    a3_bottom * bottom_layer_space
+                )
 
                 for i, (uc_t, uc_b) in enumerate(
                     zip(self.top_layers, self.bottom_layers)
@@ -787,27 +810,34 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                     mat_top_i = np.copy(mat_0)
                     top_strain_and_h = top_strains[i]
                     mat_top_i[2, 2] = top_strain_and_h
-                    relative_layer_position = self.layerpos[i] - self.layerpos[0]
+                    relative_top_position = (
+                        self.layerpos[i] - self.layerpos[0]
+                    )
                     top_layer_offset = (
-                        relative_layer_position
+                        relative_top_position
                         - (self.uc_top.layerpos[self.layer_order[i]])
                     )
                     mat_top_i[2, 3] = (
                         coupled_height / a3_top
-                        + top_strain_and_h * top_layer_offset
+                        - top_strain_and_h
+                        * self.uc_top.layerpos[self.layer_order[i]]
                     )
                     coupled_top[i].append(mat_top_i)
 
                     mat_bottom_i = np.copy(mat_0)
                     bottom_strain_and_h = bottom_strains[i]
                     mat_bottom_i[2, 2] = bottom_strain_and_h
+                    relative_bottom_position = (
+                        bottom_layerpos[i] - bottom_layerpos[0]
+                    )
                     bottom_layer_offset = (
-                        relative_layer_position
+                        relative_bottom_position
                         - (self.uc_bottom.layerpos[self.layer_order[i]])
                     )
                     mat_bottom_i[2, 3] = (
                         coupled_height / a3_bottom
-                        + bottom_strain_and_h * bottom_layer_offset
+                        - bottom_strain_and_h
+                        * self.uc_bottom.layerpos[self.layer_order[i]]
                     )
                     coupled_bottom[i].append(mat_bottom_i)
 
@@ -818,7 +848,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                     ideal_bottom_i = np.copy(mat_0)
                     ideal_bottom_i[2, 3] = cycle_index + bottom_layer_offset
                     ideal_bottom[i].append(ideal_bottom_i)
-                coupled_height += cell_height
+                    coupled_height += physical_layer_heights[i]
 
             loc_rescaled = loc - unitcells[0]
             uc_no_loc = int(np.floor(loc_rescaled)) // n_layers
@@ -1834,6 +1864,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         self.below_H = 0.0
         self.below_layer = -1.0
         self.underlying_film = None
+        self._reference_unitcell = None
+        self._reference_rotation = np.identity(3)
         self._film_layer_ucs_base = []
         self.film_layer_ucs = []
         self._initialize_layer_stacking(kwargs)
@@ -2001,6 +2033,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
         self.underlying_film = component
         self._film_layer_ucs_base = [film_layers[layer] for layer in film_layer_ids]
+        if self._reference_unitcell is not None:
+            self.setReferenceUnitCell(
+                self._reference_unitcell,
+                self._reference_rotation,
+            )
         self._set_layer_order(self.layer_order, self._layer_order_indices)
         self._basis_created = np.full_like(self.basis, np.nan)
 
@@ -2013,6 +2050,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             Optional 3-by-3 rotation from the reference frame into the surface
             crystal frame.
         """
+        self._reference_unitcell = uc
+        self._reference_rotation = np.asarray(rotMatrix, dtype=np.float64)
         for cell in self._owned_unitcells():
             cell.setReferenceUnitCell(uc, rotMatrix)
         for cell in getattr(self, "_termination_views", {}).values():
@@ -2119,9 +2158,6 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         )
         if represented_material.size == 0:
             raise ValueError("Poisson surface profile has no represented material")
-        top_stop = represented_material[-1] + 1
-        layer_numbers = layer_numbers[:top_stop]
-        material_occupancy = material_occupancy[:top_stop]
         surface_occupancy = profile.surface_occupancy(layer_numbers)
         sharp_film_occupancy = (layer_numbers < 0).astype(np.float64)
         film_correction_occupancy = material_occupancy - sharp_film_occupancy
@@ -2131,6 +2167,10 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         layer_numbers = layer_numbers[represented]
         surface_occupancy = surface_occupancy[represented]
         film_correction_occupancy = film_correction_occupancy[represented]
+        exposed_layers = layer_numbers[surface_occupancy > tail_probability]
+        if exposed_layers.size == 0:
+            raise ValueError("Poisson surface profile has no represented surface")
+        top_surface_layer = exposed_layers[-1]
         layers_to_create = len(layer_numbers)
         for uc in self.layer_ucs:
             uc.coherentDomainMatrix = []
@@ -2204,11 +2244,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
         if layers_to_create:
             self._end_layer_number = self.layer_order[
-                int(layer_numbers[-1] % n_layers_in_uc)
+                int(top_surface_layer % n_layers_in_uc)
             ]
             top_relative = (
-                layer_numbers[-1] // n_layers_in_uc
-                + self.layerpos[int(layer_numbers[-1] % n_layers_in_uc)]
+                top_surface_layer // n_layers_in_uc
+                + self.layerpos[int(top_surface_layer % n_layers_in_uc)]
                 - self.layerpos[0]
             )
             layer_spacing = self.underlying_film.unitcell.a[2] / n_layers_in_uc
