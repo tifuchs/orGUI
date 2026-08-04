@@ -40,6 +40,7 @@ import copy
 from silx.io import dictdump
 from silx.io import specfile
 import silx.io
+import silx.io.h5py_utils  # noqa: F401  (registers silx.io.h5py_utils for attribute access)
 
 from .ID31DiffractLinTilt import ID31DiffractLinTilt
 from ..scans import Scan
@@ -118,6 +119,17 @@ class PE_Image:
         self.img = np.array(image.data)
         # detector was mounted rotated by 90deg to the right
         self.img = np.rot90(self.img, 3)
+
+
+def _scanTitle(h5file, name):
+    """Title of one scan, falling back to its name when there is none."""
+    try:
+        title = h5file[name + "/title"][()]
+    except Exception:
+        return name
+    if isinstance(title, bytes):
+        return title.decode()
+    return str(title)
 
 
 # currently only set up for th scans in TOMO session, cbf fileformat
@@ -219,6 +231,29 @@ class Fastscan(Scan):
     def __len__(self):
         return self.nopoints
 
+    @classmethod
+    def listScans(cls, h5file):
+        """List the scans of a BLISS ``"<scan>.<subscan>"`` file.
+
+        Only the ``.1`` subscan is a selectable scan, the others belong to the
+        same measurement. The scan number is the integer in front of the dot,
+        the same one :meth:`parse_h5_node` reports, and the label is the scan
+        title stored in the file.
+        """
+        entries = []
+        for name in h5file:
+            name = str(name)
+            scan, dot, subscan = name.rpartition(".")
+            if not dot or subscan != "1":
+                continue
+            try:
+                scanno = int(scan.split("_")[-1])
+            except ValueError:
+                continue
+            entries.append((scanno, _scanTitle(h5file, name)))
+        entries.sort(key=lambda entry: entry[0])
+        return entries
+
 
 class BlissScan_EBS(Fastscan):
     def __init__(
@@ -247,7 +282,7 @@ class BlissScan_EBS(Fastscan):
             self.filename_base = (
                 filename_noext  # filename_noext[:filename_noext.rfind('_')]
             )
-            with silx.io.open(hdffilepath_orNode) as f:
+            with silx.io.h5py_utils.File(hdffilepath_orNode) as f:
                 # print([d for d in f])
                 for d in f:
                     scansuffix = d.split("_")[-1]
@@ -635,7 +670,7 @@ class BlissScan_EBS_p4(Fastscan):
             self.filename_base = (
                 filename_noext  # filename_noext[:filename_noext.rfind('_')]
             )
-            with silx.io.open(hdffilepath_orNode) as f:
+            with silx.io.h5py_utils.File(hdffilepath_orNode) as f:
                 # print([d for d in f])
                 for d in f:
                     scansuffix = d.split("_")[-1]
@@ -1136,6 +1171,32 @@ class BlissScan(Fastscan):
         ddict["scanno"] = scanno
         ddict["name"] = obj.local_name.strip("/")
         return ddict
+
+    @classmethod
+    def listScans(cls, h5file):
+        """List the scans of a pre-EBS BLISS file, named ``"<command>_<no>"``.
+
+        This overrides the ``"<scan>.<subscan>"`` implementation of
+        :class:`Fastscan`, which does not apply here: the scans of this legacy
+        format are named after the command that recorded them, ``ascan_12``,
+        ``dscan_3`` and so on, and there are no subscans.
+
+        The identifier is the group name rather than the scan number, because
+        that is what ``__init__`` takes and what
+        :func:`~orgui.backend.backends.openScan` passes it for this beamtime.
+        The entries are ordered by the trailing scan number, the way
+        :meth:`parse_h5_node` reads it.
+        """
+        entries = []
+        for name in h5file:
+            name = str(name)
+            try:
+                scanno = int(name.split("_")[-1])
+            except ValueError:
+                continue
+            entries.append((scanno, name))
+        entries.sort(key=lambda entry: entry[0])
+        return [(name, _scanTitle(h5file, name)) for _scanno, name in entries]
 
     @property
     def auxillary_counters(self):
