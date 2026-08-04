@@ -145,12 +145,25 @@ class _StubPositionInfo:
 
 class _StubPlot:
     def __init__(self):
+        self._qFrame = "Q_alpha"
+        self._qPlotActive = False
         self._qFieldName = "Q[alpha]"
-        self.titles = [_StubTitle("<b>HKL:</b>"), _StubTitle("<b>Q[alpha]:</b>")]
+        self._axisFieldNames = ("X", "Y")
+        self.titles = [
+            _StubTitle("<b>X:</b>"),
+            _StubTitle("<b>Y:</b>"),
+            _StubTitle("<b>HKL:</b>"),
+            _StubTitle("<b>Q[alpha]:</b>"),
+        ]
         self.positionInfo = _StubPositionInfo(self.titles)
 
     def getPositionInfoWidget(self):
         return self.positionInfo
+
+    # exercised through the real implementations
+    _renamePositionField = orGUI.Plot2DHKL._renamePositionField
+    _updatePositionFieldNames = orGUI.Plot2DHKL._updatePositionFieldNames
+    _formatAxisValue = orGUI.Plot2DHKL._formatAxisValue
 
 
 @pytest.mark.parametrize("frame, name", sorted(EXPECTED_FIELD_NAMES.items()))
@@ -159,8 +172,9 @@ def test_selecting_a_frame_relabels_only_the_q_field(frame, name):
 
     orGUI.Plot2DHKL.setQFrame(plot, frame)
 
-    assert plot.titles[1].text() == f"<b>{name}:</b>"
-    assert plot.titles[0].text() == "<b>HKL:</b>"  # untouched
+    assert plot.titles[3].text() == f"<b>{name}:</b>"
+    assert plot.titles[2].text() == "<b>HKL:</b>"  # untouched
+    assert [t.text() for t in plot.titles[:2]] == ["<b>X:</b>", "<b>Y:</b>"]
     assert plot._qFieldName == name
 
 
@@ -170,7 +184,7 @@ def test_reselecting_the_same_frame_is_a_noop():
     orGUI.Plot2DHKL.setQFrame(plot, "Q_alpha")
 
     assert plot.positionInfo.updates == 0
-    assert plot.titles[1].text() == "<b>Q[alpha]:</b>"
+    assert plot.titles[3].text() == "<b>Q[alpha]:</b>"
 
 
 def test_relabelling_refreshes_the_displayed_values():
@@ -179,3 +193,63 @@ def test_relabelling_refreshes_the_displayed_values():
     orGUI.Plot2DHKL.setQFrame(plot, "Q_phi")
 
     assert plot.positionInfo.updates == 1
+
+
+def test_axis_fields_are_pixels_while_the_q_plot_is_off():
+    assert orGUI.axisFieldNames("Q_alpha", False) == ("X", "Y")
+
+
+@pytest.mark.parametrize("frame", qconversion.FRAMES)
+def test_axis_fields_name_the_momentum_transfer_in_the_q_plot(frame):
+    """The Q-plot axes are momentum transfer, so ``X``/``Y`` would be wrong."""
+    short = qconversion.frameShortName(frame)
+
+    assert orGUI.axisFieldNames(frame, True) == (
+        f"q_par[{short}]",
+        f"q_perp[{short}]",
+    )
+
+
+def test_switching_on_the_q_plot_relabels_the_axis_fields():
+    plot = _StubPlot()
+
+    orGUI.Plot2DHKL.setQPlotActive(plot, True)
+
+    assert [t.text() for t in plot.titles[:2]] == [
+        "<b>q_par[alpha]:</b>",
+        "<b>q_perp[alpha]:</b>",
+    ]
+    assert plot.titles[3].text() == "<b>Q[alpha]:</b>"  # untouched
+
+
+def test_switching_off_the_q_plot_restores_the_pixel_fields():
+    plot = _StubPlot()
+
+    orGUI.Plot2DHKL.setQPlotActive(plot, True)
+    orGUI.Plot2DHKL.setQPlotActive(plot, False)
+
+    assert [t.text() for t in plot.titles[:2]] == ["<b>X:</b>", "<b>Y:</b>"]
+
+
+def test_changing_the_frame_follows_through_to_the_axis_fields():
+    plot = _StubPlot()
+
+    orGUI.Plot2DHKL.setQPlotActive(plot, True)
+    orGUI.Plot2DHKL.setQFrame(plot, "Q_phi")
+
+    assert [t.text() for t in plot.titles[:2]] == [
+        "<b>q_par[phi]:</b>",
+        "<b>q_perp[phi]:</b>",
+    ]
+    assert plot.titles[3].text() == "<b>Q[phi]:</b>"
+
+
+def test_axis_values_gain_precision_in_the_q_plot():
+    """Sub-pixel precision is enough for pixels, but not for inverse Angstrom."""
+    plot = _StubPlot()
+
+    assert orGUI.Plot2DHKL._formatAxisValue(plot, 1234.5678) == "1234.57"
+
+    orGUI.Plot2DHKL.setQPlotActive(plot, True)
+
+    assert orGUI.Plot2DHKL._formatAxisValue(plot, 1.2345678) == "1.23457"

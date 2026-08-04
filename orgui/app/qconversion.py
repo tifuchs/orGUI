@@ -82,6 +82,10 @@ AZIMUTH_OFFSET = np.pi / 2
 # Kept at the identity on purpose, see the module docstring.
 SAMPLE_ORIENTATION = 1
 
+# Relative slack allowed when inverting the projection, so that a coordinate
+# right on the horizon of the accessible region is not rejected by round-off.
+_EWALD_TOLERANCE = 1e-9
+
 FRAMES = ("Q_alpha", "Q_lab", "Q_omega", "Q_chi", "Q_phi", "Q_cryst")
 DEFAULT_FRAME = "Q_alpha"
 
@@ -470,6 +474,161 @@ def qComponents(
     )
 
 
+def beamDirection(frame, alpha=0.0, omega=0.0, chi=0.0, phi=0.0, U=None):
+    """Unit vector along the incident beam, expressed in ``frame``.
+
+    In the alpha frame the beam is ``(0, cos alpha, -sin alpha)``, which is the
+    vector :meth:`~orgui.datautils.xrayutils.HKLVlieg.VliegAngles.QAlpha`
+    subtracts from the outgoing direction. It is the same vector as the ``c``
+    returned by :func:`conversionCoefficients`, which is the beam column of the
+    collapsed conversion.
+
+    :param str frame: one of :data:`FRAMES`.
+    :param float alpha: incidence angle in rad.
+    :param float omega, chi, phi: sample circle angles in rad.
+    :param U: orientation matrix, required for :data:`FRAMES_REQUIRING_U`.
+    :returns: unit vector of shape ``(3,)``.
+    """
+    rotation = frameMatrix(frame, alpha=alpha, omega=omega, chi=chi, phi=phi, U=U)
+    return rotation @ np.array([0.0, np.cos(alpha), -np.sin(alpha)])
+
+
+def qFromIpOop(
+    frame,
+    q_ip,
+    q_oop,
+    k,
+    alpha=0.0,
+    omega=0.0,
+    chi=0.0,
+    phi=0.0,
+    U=None,
+):
+    """Momentum transfer vectors that project onto one Q-plot coordinate.
+
+    This inverts the projection performed by :func:`qIpOop`, which keeps the
+    out-of-plane component and collapses the two in-plane components into their
+    radial distance, signed by ``Qx``. The missing information is recovered from
+    the Ewald condition: with ``q = Q / k`` and the beam direction ``c`` of
+    :func:`beamDirection`, the outgoing direction ``q + c`` is a unit vector, so
+
+    .. code-block:: text
+
+        |q|^2 + 2 q.c = 0
+
+    which is *linear* in ``qx`` and ``qy`` once ``qz`` and ``|q|`` are known.
+    Intersecting that line with the circle ``qx^2 + qy^2 = (q_ip / k)^2`` leaves
+    at most two solutions, of which only those with ``sign(Qx) == sign(q_ip)``
+    reproduce the sign convention of :func:`qIpOop`.
+
+    In the alpha frame the beam has no ``x`` component, the line is parallel to
+    the ``x`` axis and the sign condition always leaves a single solution. In
+    the rotated frames the beam generally does have one, and both solutions can
+    carry the same sign; the caller has to decide between them, for example by
+    keeping the one that falls onto the detector.
+
+    ``k``, ``q_ip`` and ``q_oop`` must share the same unit, and the result is
+    returned in that unit. Note that :func:`qIpOop` works in inverse nanometre
+    while orGUI's own reciprocal space is in inverse Angstrom.
+
+    :param str frame: one of :data:`FRAMES`.
+    :param float q_ip: in-plane coordinate, signed as in :func:`qIpOop`.
+    :param float q_oop: out-of-plane coordinate.
+    :param float k: magnitude of the wave vector.
+    :param float alpha: incidence angle in rad.
+    :param float omega, chi, phi: sample circle angles in rad.
+    :param U: orientation matrix, required for :data:`FRAMES_REQUIRING_U`.
+    :returns:
+        Tuple of zero, one or two momentum transfer vectors of shape ``(3,)``,
+        expressed in ``frame``. Empty when the coordinate is outside the part
+        of reciprocal space the Ewald sphere can reach.
+    :rtype: tuple[numpy.ndarray, ...]
+    """
+    q_ip = float(q_ip)
+    q_oop = float(q_oop)
+    k = float(k)
+    if not np.isfinite([q_ip, q_oop, k]).all() or k == 0.0:
+        return ()
+
+    c = beamDirection(frame, alpha=alpha, omega=omega, chi=chi, phi=phi, U=U)
+
+    # everything below is in units of k, so that the Ewald sphere is the unit
+    # sphere around the tip of the incident wave vector
+    radius = abs(q_ip) / k
+    q_z = q_oop / k
+    squared_length = radius * radius + q_z * q_z
+
+    # c[0] * q_x + c[1] * q_y = offset, from the Ewald condition
+    offset = -0.5 * squared_length - c[2] * q_z
+    normal_length = c[0] * c[0] + c[1] * c[1]
+    if normal_length <= 0.0:
+        # the beam is along z, so the condition no longer constrains the plane
+        return ()
+
+    # distance from the origin to the line, compared with the circle radius
+    half_chord_squared = radius * radius - offset * offset / normal_length
+    if half_chord_squared < 0.0:
+        # tolerate round-off on the horizon of the accessible region
+        if half_chord_squared < -_EWALD_TOLERANCE * max(radius * radius, 1.0):
+            return ()
+        half_chord_squared = 0.0
+    half_chord = np.sqrt(half_chord_squared / normal_length)
+
+    # foot of the perpendicular from the origin onto the line
+    foot_x = c[0] * offset / normal_length
+    foot_y = c[1] * offset / normal_length
+
+    solutions = []
+    for sign in (1.0, -1.0):
+        q_x = foot_x - sign * c[1] * half_chord
+        q_y = foot_y + sign * c[0] * half_chord
+        # np.copysign in qIpOop signs the radius by Qx, so a solution is only
+        # valid when its Qx carries the sign of the requested in-plane value
+        if q_ip != 0.0 and np.sign(q_x) != np.sign(q_ip):
+            continue
+        solutions.append(k * np.array([q_x, q_y, q_z]))
+        if half_chord == 0.0:
+            # the line touches the circle, both signs give the same point
+            break
+    return tuple(solutions)
+
+
+def detectorAngles(
+    Q, k, frame=DEFAULT_FRAME, alpha=0.0, omega=0.0, chi=0.0, phi=0.0, U=None
+):
+    """Detector angles producing a momentum transfer expressed in ``frame``.
+
+    The momentum transfer is rotated back into the alpha frame, where
+    ``Q / k + c`` is the outgoing unit direction
+    ``(sin delta cos gamma, cos delta cos gamma, sin gamma)`` of
+    :meth:`~orgui.datautils.xrayutils.HKLVlieg.VliegAngles.QAlpha`.
+
+    :param Q: momentum transfer of ``frame``, shape ``(3,)``.
+    :param float k: magnitude of the wave vector, in the unit of ``Q``.
+    :param str frame: one of :data:`FRAMES`.
+    :param float alpha: incidence angle in rad.
+    :param float omega, chi, phi: sample circle angles in rad.
+    :param U: orientation matrix, required for :data:`FRAMES_REQUIRING_U`.
+    :returns: ``(delta, gamma)`` in rad, or ``None`` when ``Q`` is not on the
+        Ewald sphere and the direction cannot be normalised.
+    :rtype: tuple[float, float] or None
+    """
+    rotation = frameMatrix(frame, alpha=alpha, omega=omega, chi=chi, phi=phi, U=U)
+    q_alpha = np.linalg.inv(rotation) @ np.asarray(Q, dtype=np.float64)
+    direction = q_alpha / float(k) + np.array([0.0, np.cos(alpha), -np.sin(alpha)])
+
+    norm = np.linalg.norm(direction)
+    if not np.isfinite(norm) or norm == 0.0:
+        return None
+    # the caller may have built Q from a rounded plot coordinate, so normalise
+    # instead of insisting on an exactly unit direction
+    direction = direction / norm
+
+    gamma = np.arcsin(np.clip(direction[2], -1.0, 1.0))
+    delta = np.arctan2(direction[0], direction[1])
+    return float(delta), float(gamma)
+
+
 def fiberUnits(frame=DEFAULT_FRAME, omega=0.0, chi=0.0, phi=0.0, U=None):
     """Build the in-plane and out-of-plane pyFAI units for ``frame``.
 
@@ -544,6 +703,65 @@ def fiberUnits(frame=DEFAULT_FRAME, omega=0.0, chi=0.0, phi=0.0, U=None):
         positive=False,
     )
     return unit_ip, unit_oop
+
+
+def outOfPlaneIncreasesWithRow(
+    detectorCal, alpha, frame=DEFAULT_FRAME, omega=0.0, chi=0.0, phi=0.0, U=None
+):
+    """Whether the out-of-plane coordinate grows with the detector row index.
+
+    The detector image is displayed with the row index increasing downwards,
+    while the Q-plot draws the out-of-plane coordinate upwards. The two only
+    agree visually when the out-of-plane coordinate *de*creases with the row
+    index, which is the ordinary upward-scattering case.
+
+    An azimuthal reference that points the surface normal the other way -- the
+    inverted, downward-scattering geometry used at ID31 -- reverses this, and
+    the reciprocal-space image then appears vertically mirrored with respect to
+    the detector image. The caller can invert the Q-plot's ordinate to
+    compensate.
+
+    Only the sign matters here, so the wave vector and the beam offset drop
+    out of the comparison and no wavelength is needed.
+
+    :param detectorCal: :class:`DetectorCalibration.Detector2D_SXRD`.
+    :param float alpha: incidence angle in rad.
+    :param str frame: one of :data:`FRAMES`.
+    :param float omega, chi, phi: sample circle angles in rad.
+    :param U: orientation matrix, required for :data:`FRAMES_REQUIRING_U`.
+    :rtype: bool
+    """
+    shape = detectorCal.detector.shape
+    rows = np.array([0.0, float(shape[0] - 1)])
+    cols = np.full(2, 0.5 * (shape[1] - 1))
+    param = np.array(
+        [
+            detectorCal.dist,
+            detectorCal.poni1,
+            detectorCal.poni2,
+            detectorCal.rot1,
+            detectorCal.rot2,
+            detectorCal.rot3,
+        ],
+        dtype=np.float64,
+    )
+    z, y, x = detectorCal.calc_pos_zyx(d1=rows, d2=cols, param=param, do_parallax=True)
+
+    G, _ = conversionCoefficients(
+        frame,
+        incident_angle=alpha,
+        tilt_angle=tiltAngleFromAzimuth(detectorCal.getAzimuthalReference()),
+        omega=omega,
+        chi=chi,
+        phi=phi,
+        U=U,
+    )
+    # the out-of-plane component up to the positive factor k and a constant
+    # offset, both of which cancel in the comparison
+    direction = np.stack([x, y, z], axis=-1)
+    direction = direction / np.linalg.norm(direction, axis=-1, keepdims=True)
+    out_of_plane = direction @ G[2]
+    return bool(out_of_plane[1] > out_of_plane[0])
 
 
 def integrateImage(

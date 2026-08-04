@@ -182,7 +182,7 @@ class orGUI(qt.QMainWindow):
         toolbar.addAction(
             control_actions.OpenGLAction(parent=toolbar, plot=self.centralPlot)
         )
-        self.plotAgainstQAct = qt.QAction("Q-plot", self)
+        self.plotAgainstQAct = qt.QAction(resources.getQicon("q-plot"), "Q-plot", self)
         self.plotAgainstQAct.setCheckable(True)
         self.plotAgainstQAct.setToolTip(
             "Experimental: show the image in reciprocal space coordinates. "
@@ -204,6 +204,7 @@ class orGUI(qt.QMainWindow):
         toolbar.addWidget(self.qFrameSelector)
         self._qPlotExperimentalWarned = False
         self._qPlotPreviousYInverted = None
+        self._qPlotPreviousXInverted = None
         self._qPlotRefreshing = False
         self.centralPlot.addToolBar(toolbar)
         self.maskManager = MaskManager()
@@ -3136,30 +3137,134 @@ ub : gui for UB matrix and angle calculations
         """
 
         def xyToHKL(x, y):
-            """CLI-safe: convert detector pixels to hkl, angles and Q.
+            """CLI-safe: convert plot coordinates to hkl, angles and Q.
+
+            The plot coordinates are detector pixels, or the in-plane and
+            out-of-plane momentum transfer while the Q-plot is switched on. In
+            the latter case they are converted back to detector angles first, so
+            that both modes report the same hkl and the same detector angles for
+            the same point of the sample.
+
+            The momentum transfer is the one belonging to the displayed
+            coordinates: it is refraction corrected in pixel mode, like
+            everywhere else in orGUI, and unrefracted in the Q-plot, where the
+            axes are unrefracted as well. Reporting the corrected value there
+            would contradict the position the cursor is at.
 
             :returns:
                 ``[h, k, l, delta, gamma, Qx, Qy, Qz]``, with the angles in
                 degrees and the momentum transfer of the currently selected
-                reciprocal-space frame in inverse Angstrom.
+                reciprocal-space frame in inverse Angstrom. All-NaN when the
+                position does not correspond to a point on the detector.
             """
             if self.fscan is None:
                 return np.full(8, np.nan)
-            mu, om = self.getMuOm(self.imageno)
-            gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(
-                np.array([y]), np.array([x]), mu
-            )
-            pos = [mu, delta[0], gamma[0], om, self.ubcalc.chi, self.ubcalc.phi]
+            if self.plotAgainstQAct.isChecked():
+                resolved = self._qPlotToPosition(x, y)
+                if resolved is None:
+                    return np.full(8, np.nan)
+                mu, om, delta, gamma, Q = resolved
+            else:
+                mu, om = self.getMuOm(self.imageno)
+                gamma_arr, delta_arr = self.ubcalc.detectorCal.surfaceAnglesPoint(
+                    np.array([y]), np.array([x]), mu
+                )
+                delta, gamma = delta_arr[0], gamma_arr[0]
+                Q = None
+            pos = [mu, delta, gamma, om, self.ubcalc.chi, self.ubcalc.phi]
             pos = HKLVlieg.crystalAngles(pos, self.ubcalc.n)
             return np.concatenate(
                 (
                     np.array(self.ubcalc.angles.anglesToHkl(*pos)),
-                    np.rad2deg([delta[0], gamma[0]]),
-                    self._qInSelectedFrame(pos),
+                    np.rad2deg([delta, gamma]),
+                    self._qInSelectedFrame(pos) if Q is None else Q,
                 )
             )
 
         return xyToHKL
+
+    def _qPlotOrientationMatrix(self):
+        """Orientation matrix for the Q-plot, or ``None`` when unavailable."""
+        try:
+            return self.ubcalc.ubCal.getU()
+        except Exception:
+            return None
+
+    def _qPlotToPosition(self, q_ip, q_oop):
+        """Momentum transfer and detector angles of one point of the Q-plot.
+
+        Inverts the projection of :func:`~orgui.app.qconversion.qIpOop` with
+        :func:`~orgui.app.qconversion.qFromIpOop`. The alpha frame always has a
+        unique solution; the rotated frames can have two, and the one that falls
+        onto the detector is kept. That test doubles as the check whether the
+        position is covered by the image at all: the rebinned grid is
+        rectangular and reaches beyond the detector.
+
+        The returned momentum transfer is the exact reconstruction, so its
+        in-plane and out-of-plane components are the requested coordinates. No
+        refraction correction is applied, because the Q-plot axes carry none
+        either.
+
+        :returns:
+            ``(mu, omega, delta, gamma, Q)`` with the angles in rad and ``Q``
+            in the selected frame in inverse Angstrom, or ``None`` when the
+            position is not on the detector.
+        :rtype: tuple or None
+        """
+        frame = self._selectedQFrame()
+        # the angles the displayed Q-plot was built with, so that the readout
+        # inverts the conversion that actually produced the image
+        alpha, omega = self._qPlotAngles()
+        try:
+            solutions = qconversion.qFromIpOop(
+                frame,
+                q_ip,
+                q_oop,
+                self.ubcalc.ubCal.getK(),
+                alpha=alpha,
+                omega=omega,
+                chi=self.ubcalc.chi,
+                phi=self.ubcalc.phi,
+                U=self._qPlotOrientationMatrix(),
+            )
+        except Exception:
+            return None
+
+        for Q in solutions:
+            try:
+                angles = qconversion.detectorAngles(
+                    Q,
+                    self.ubcalc.ubCal.getK(),
+                    frame=frame,
+                    alpha=alpha,
+                    omega=omega,
+                    chi=self.ubcalc.chi,
+                    phi=self.ubcalc.phi,
+                    U=self._qPlotOrientationMatrix(),
+                )
+            except Exception:
+                continue
+            if angles is None:
+                continue
+            delta, gamma = angles
+            if self._isOnDetector(delta, gamma, alpha):
+                return alpha, omega, delta, gamma, Q
+        return None
+
+    def _isOnDetector(self, delta, gamma, alpha):
+        """Whether the surface-frame angles hit the active detector."""
+        dc = self.ubcalc.detectorCal
+        try:
+            yx = dc.pixelsSurfaceAngles(
+                np.array([gamma]), np.array([delta]), np.array([alpha])
+            )
+        except Exception:
+            return False
+        yx = np.asarray(yx).reshape(-1, 2)[0]
+        if not np.all(np.isfinite(yx)):
+            return False
+        shape = dc.detector.shape
+        return 0 <= yx[0] < shape[0] and 0 <= yx[1] < shape[1]
 
     def _qInSelectedFrame(self, pos):
         """Momentum transfer of one pixel in the selected reciprocal frame.
@@ -4286,6 +4391,48 @@ ub : gui for UB matrix and angle calculations
                 )
                 self._qPlotExperimentalWarned = True
 
+            # perform conversion into Q coordinates before touching the plot,
+            # so that a failure leaves the display as it was
+            alpha, omega = self._qPlotAngles()
+            try:
+                res2d = qconversion.integrateImage(
+                    self.ubcalc.detectorCal,
+                    data,
+                    alpha,
+                    frame=frame,
+                    omega=omega,
+                    chi=self.ubcalc.chi,
+                    phi=self.ubcalc.phi,
+                    U=self.ubcalc.ubCal.getU(),
+                )
+                # An inverted geometry, such as the downward scattering setup
+                # at ID31, has the out-of-plane coordinate growing towards the
+                # bottom of the detector image. Drawing it upwards anyway would
+                # show the reciprocal-space image mirrored with respect to the
+                # detector image, so the ordinate follows the geometry.
+                flipOrdinate = qconversion.outOfPlaneIncreasesWithRow(
+                    self.ubcalc.detectorCal,
+                    alpha,
+                    frame=frame,
+                    omega=omega,
+                    chi=self.ubcalc.chi,
+                    phi=self.ubcalc.phi,
+                    U=self._qPlotOrientationMatrix(),
+                )
+            except Exception:
+                logger.error(
+                    "Q conversion failed",
+                    extra={
+                        "title": "Cannot convert image to Q",
+                        "description": f"The conversion into the {qconversion.FRAME_LABELS[frame]} frame failed:\n{traceback.format_exc()}",  # noqa: E501
+                        "show_dialog": True,
+                        "dialog_level": logging.ERROR,
+                        "parent": self,
+                    },
+                )
+                self.plotAgainstQAct.setChecked(False)
+                return
+
             # hide scan image, remove max/sum image
             for i in self.centralPlot.getAllImages():
                 if i.getLegend() == "scan_image":
@@ -4293,27 +4440,17 @@ ub : gui for UB matrix and angle calculations
                 else:
                     self.centralPlot.removeImage(i)
 
-            # Reciprocal space is plotted with the ordinate pointing upwards,
-            # unlike the image convention used for the pixel coordinates. The
-            # previous state is only recorded when the Q-plot is entered, so
-            # that rebuilding it in place does not overwrite it.
+            # Reciprocal space is plotted with the ordinate along the
+            # out-of-plane coordinate, unlike the image convention used for the
+            # pixel coordinates. The previous state is only recorded when the
+            # Q-plot is entered, so that rebuilding it in place does not
+            # overwrite it.
             if self._qPlotPreviousYInverted is None:
                 self._qPlotPreviousYInverted = self.centralPlot.isYAxisInverted()
-            self.centralPlot.setYAxisInverted(False)
+            if self._qPlotPreviousXInverted is None:
+                self._qPlotPreviousXInverted = self.centralPlot.isXAxisInverted()
+            self.centralPlot.setYAxisInverted(flipOrdinate)
             self.centralPlot.setXAxisInverted(False)
-
-            # perform conversion into Q coordinates
-            alpha, omega = self._qPlotAngles()
-            res2d = qconversion.integrateImage(
-                self.ubcalc.detectorCal,
-                data,
-                alpha,
-                frame=frame,
-                omega=omega,
-                chi=self.ubcalc.chi,
-                phi=self.ubcalc.phi,
-                U=self.ubcalc.ubCal.getU(),
-            )
 
             # plot generated image, q_par on the abscissa and q_perp on the
             # ordinate for every frame
@@ -4341,16 +4478,38 @@ ub : gui for UB matrix and angle calculations
             self.centralPlot.setActiveImage(self.currentAddImageLabel)
             self.scanSelector.alphaslider.setLegend("qImage")
 
-        else:
-            # restore status from before
-            if self.currentAddImageLabel is not None:
-                # show scan image, delete qImage
-                for i in self.centralPlot.getAllImages():
-                    if i.getLegend() == "scan_image":
-                        i.setVisible(True)
-                    elif i.getLegend() == "qImage":
-                        self.centralPlot.removeImage(i)
+            # the axes now hold momentum transfer, so the readout has to invert
+            # the conversion instead of reading detector pixels
+            self.centralPlot.setQPlotActive(True)
 
+        else:
+            self.centralPlot.setQPlotActive(False)
+
+            # Restore the axis orientation of the pixel coordinates. This only
+            # depends on what was recorded when the Q-plot was entered, so it
+            # must not be tied to the max/sum image below: a conversion that
+            # failed after the axes were flipped would otherwise leave them
+            # flipped for good.
+            restored = False
+            if self._qPlotPreviousYInverted is not None:
+                self.centralPlot.setYAxisInverted(self._qPlotPreviousYInverted)
+                self._qPlotPreviousYInverted = None
+                restored = True
+            if self._qPlotPreviousXInverted is not None:
+                self.centralPlot.setXAxisInverted(self._qPlotPreviousXInverted)
+                self._qPlotPreviousXInverted = None
+                restored = True
+
+            # show scan image, delete qImage
+            hadQImage = False
+            for i in self.centralPlot.getAllImages():
+                if i.getLegend() == "scan_image":
+                    i.setVisible(True)
+                elif i.getLegend() == "qImage":
+                    self.centralPlot.removeImage(i)
+                    hadQImage = True
+
+            if hadQImage or self.currentAddImageLabel is not None:
                 # plot max/sum, set correct active image
                 if (
                     self.scanSelector.showMaxAct.isChecked()
@@ -4382,12 +4541,8 @@ ub : gui for UB matrix and angle calculations
                     self.currentAddImageLabel = None
                     self.centralPlot.setActiveImage(self.currentImageLabel)
 
-                # restore the image convention of the pixel coordinates
-                if self._qPlotPreviousYInverted is not None:
-                    self.centralPlot.setYAxisInverted(self._qPlotPreviousYInverted)
-                    self._qPlotPreviousYInverted = None
-
-                # apply correct zoom for pixel coordinates
+            # apply correct zoom for pixel coordinates
+            if restored or hadQImage:
                 self.centralPlot.resetZoom()
 
     def _roi_array_from_key(self, key):
@@ -6245,6 +6400,23 @@ def isPositionTripletField(name):
     return name == "HKL" or name.startswith("Q[")
 
 
+def axisFieldNames(frame, qPlotActive):
+    """Names of the two plot axis fields in the position readout.
+
+    While the Q-plot is on, the abscissa and the ordinate are the in-plane and
+    the out-of-plane momentum transfer of the selected frame, not pixels.
+
+    :param str frame: one of :data:`qconversion.FRAMES`.
+    :param bool qPlotActive: whether the Q-plot is switched on.
+    :returns: ``(abscissa, ordinate)`` field names.
+    :rtype: tuple[str, str]
+    """
+    if not qPlotActive:
+        return ("X", "Y")
+    short = qconversion.frameShortName(frame)
+    return (f"q_par[{short}]", f"q_perp[{short}]")
+
+
 # Widest triplet the readout should be able to show without eliding. Five
 # decimals are the minimum useful precision for hkl and for Q.
 POSITION_TRIPLET_TEMPLATE = "[-99.99999 -99.99999 -99.99999]"
@@ -6286,13 +6458,16 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
     def __init__(self, xyHKLConverter, parent=None, backend=None):
         """GUI-only: initialize the image plot with hkl position readout."""
         self.xyHKLConverter = xyHKLConverter
-        self._qFieldName = qFieldName(qconversion.DEFAULT_FRAME)
+        self._qFrame = qconversion.DEFAULT_FRAME
+        self._qPlotActive = False
+        self._qFieldName = qFieldName(self._qFrame)
+        self._axisFieldNames = axisFieldNames(self._qFrame, self._qPlotActive)
 
         posInfo = [
             # pixel coordinates need no more than sub-pixel precision, and the
             # space is needed for the hkl and Q triplets
-            ("X", lambda x, y: f"{x:.2f}"),
-            ("Y", lambda x, y: f"{y:.2f}"),
+            (self._axisFieldNames[0], lambda x, y: self._formatAxisValue(x)),
+            (self._axisFieldNames[1], lambda x, y: self._formatAxisValue(y)),
             ("HKL", lambda x, y: formatPositionTriplet(self.xyHKLConverter(x, y)[:3])),
             (
                 self._qFieldName,
@@ -6384,29 +6559,78 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
             widget.deleteLater()
             fields[index] = (replacement, name, converter)
 
-    def setQFrame(self, frame):
-        """Relabel the reciprocal-space field for the selected frame.
+    def _formatAxisValue(self, value):
+        """Format an abscissa or ordinate value for the position readout.
 
-        silx builds the field titles once, so the existing title widget is
-        renamed in place. The displayed values follow automatically, because
-        the converter reads the selected frame when it is called.
+        Pixel coordinates need no more than sub-pixel precision, while the
+        momentum transfer shown while the Q-plot is on needs the same five
+        decimals as the hkl and Q triplets.
 
         .. note::
            GUI-only.
         """
-        name = qFieldName(frame)
-        if name == self._qFieldName:
+        return f"{value:.5f}" if self._qPlotActive else f"{value:.2f}"
+
+    def _renamePositionField(self, previous, name):
+        """Rename one position readout field title in place.
+
+        silx builds the field titles once, so the existing title widget is
+        renamed rather than the readout rebuilt. The displayed values follow
+        automatically, because the converters read the current state when they
+        are called.
+
+        .. note::
+           GUI-only.
+        """
+        if previous == name:
             return
+        positionInfo = self.getPositionInfoWidget()
+        if positionInfo is None:
+            return
+        old = f"<b>{previous}:</b>"
+        for widget in positionInfo.findChildren(qt.QLabel):
+            if widget.text() == old:
+                widget.setText(f"<b>{name}:</b>")
+                break
+
+    def _updatePositionFieldNames(self):
+        """Apply the field titles that match the current frame and plot mode.
+
+        .. note::
+           GUI-only.
+        """
+        qFieldNameNew = qFieldName(self._qFrame)
+        axisNames = axisFieldNames(self._qFrame, self._qPlotActive)
+        if qFieldNameNew == self._qFieldName and axisNames == self._axisFieldNames:
+            return
+
+        self._renamePositionField(self._qFieldName, qFieldNameNew)
+        for previous, name in zip(self._axisFieldNames, axisNames):
+            self._renamePositionField(previous, name)
+        self._qFieldName = qFieldNameNew
+        self._axisFieldNames = axisNames
 
         positionInfo = self.getPositionInfoWidget()
         if positionInfo is not None:
-            previous = f"<b>{self._qFieldName}:</b>"
-            for widget in positionInfo.findChildren(qt.QLabel):
-                if widget.text() == previous:
-                    widget.setText(f"<b>{name}:</b>")
-                    break
             positionInfo.updateInfo()
-        self._qFieldName = name
+
+    def setQFrame(self, frame):
+        """Select the reciprocal-space frame the readout describes.
+
+        .. note::
+           GUI-only.
+        """
+        self._qFrame = frame
+        self._updatePositionFieldNames()
+
+    def setQPlotActive(self, active):
+        """Tell the readout whether the axes hold momentum transfer or pixels.
+
+        .. note::
+           GUI-only.
+        """
+        self._qPlotActive = bool(active)
+        self._updatePositionFieldNames()
 
     def setXyHKLconverter(self, xyHKLConverter):
         """Set the pixel-to-hkl converter used by the plot readout.

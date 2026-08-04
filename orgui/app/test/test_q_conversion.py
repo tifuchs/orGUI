@@ -263,6 +263,155 @@ class TestFrames(unittest.TestCase):
         self.assertEqual(set(qconversion.FRAME_LABELS), set(qconversion.FRAMES))
 
 
+class TestInverseConversion(unittest.TestCase):
+    """The Q-plot readout inverts the projection, so it must round-trip.
+
+    The forward conversion keeps the out-of-plane component and collapses the
+    two in-plane components into their radial distance. The inverse recovers
+    the discarded direction from the Ewald condition, so a coordinate taken
+    from the forward conversion has to lead back to the same detector angles.
+
+    These tests do not need pyFAI's rebinning, only the geometry.
+    """
+
+    SAMPLE_ANGLES = dict(
+        omega=np.deg2rad(23.0), chi=np.deg2rad(4.0), phi=np.deg2rad(-7.0)
+    )
+
+    def _forward(self, frame, alpha_i, delta, gamma, ub):
+        """``(Q, q_ip, q_oop)`` of one detector angle pair, in the frame."""
+        angles = HKLVlieg.VliegAngles(ub)
+        q_alpha = angles.QAlpha(
+            np.asarray(alpha_i), np.asarray(delta), np.asarray(gamma)
+        )
+        rotation = qconversion.frameMatrix(
+            frame, alpha=alpha_i, U=ub.getU(), **self.SAMPLE_ANGLES
+        )
+        Q = rotation @ q_alpha
+        # the signing convention of qIpOop
+        return Q, np.copysign(np.hypot(Q[0], Q[1]), Q[0]), Q[2]
+
+    def test_round_trip_recovers_the_detector_angles(self):
+        ub = _ub_calculator()
+        k = ub.getK()
+        for frame in qconversion.FRAMES:
+            for alpha_deg in INCIDENCE_ANGLES:
+                for delta_deg, gamma_deg in ((12.0, 4.0), (-31.5, 22.0), (48.0, -3.0)):
+                    with self.subTest(
+                        frame=frame, alpha_i=alpha_deg, delta=delta_deg, gamma=gamma_deg
+                    ):
+                        alpha_i = np.deg2rad(alpha_deg)
+                        delta, gamma = np.deg2rad([delta_deg, gamma_deg])
+                        Q, q_ip, q_oop = self._forward(frame, alpha_i, delta, gamma, ub)
+
+                        solutions = qconversion.qFromIpOop(
+                            frame,
+                            q_ip,
+                            q_oop,
+                            k,
+                            alpha=alpha_i,
+                            U=ub.getU(),
+                            **self.SAMPLE_ANGLES,
+                        )
+
+                        self.assertTrue(solutions)
+                        # the true momentum transfer is among the solutions
+                        best = min(solutions, key=lambda s: np.linalg.norm(s - Q))
+                        np.testing.assert_allclose(best, Q, atol=1e-9)
+
+                        recovered = qconversion.detectorAngles(
+                            best,
+                            k,
+                            frame=frame,
+                            alpha=alpha_i,
+                            U=ub.getU(),
+                            **self.SAMPLE_ANGLES,
+                        )
+                        np.testing.assert_allclose(recovered, (delta, gamma), atol=1e-9)
+
+    def test_the_alpha_frame_is_never_ambiguous(self):
+        """The beam has no x component there, so the sign fixes the solution.
+
+        This is why the default frame needs no disambiguation at all.
+        """
+        ub = _ub_calculator()
+        rng = np.random.default_rng(20260803)
+        for _ in range(200):
+            alpha_i = np.deg2rad(rng.uniform(0.0, 3.0))
+            delta = np.deg2rad(rng.uniform(-70.0, 70.0))
+            gamma = np.deg2rad(rng.uniform(-20.0, 60.0))
+            _, q_ip, q_oop = self._forward("Q_alpha", alpha_i, delta, gamma, ub)
+
+            solutions = qconversion.qFromIpOop(
+                "Q_alpha", q_ip, q_oop, ub.getK(), alpha=alpha_i
+            )
+
+            self.assertEqual(len(solutions), 1)
+
+    def test_solutions_keep_the_sign_of_the_in_plane_coordinate(self):
+        ub = _ub_calculator()
+        for frame in qconversion.FRAMES:
+            for delta_deg in (-40.0, -5.0, 5.0, 40.0):
+                with self.subTest(frame=frame, delta=delta_deg):
+                    alpha_i = np.deg2rad(0.6)
+                    delta = np.deg2rad(delta_deg)
+                    gamma = np.deg2rad(14.0)
+                    _, q_ip, q_oop = self._forward(frame, alpha_i, delta, gamma, ub)
+
+                    solutions = qconversion.qFromIpOop(
+                        frame,
+                        q_ip,
+                        q_oop,
+                        ub.getK(),
+                        alpha=alpha_i,
+                        U=ub.getU(),
+                        **self.SAMPLE_ANGLES,
+                    )
+
+                    self.assertTrue(solutions)
+                    for Q in solutions:
+                        self.assertEqual(np.sign(Q[0]), np.sign(q_ip))
+
+    def test_unreachable_coordinates_have_no_solution(self):
+        """Beyond the Ewald sphere nothing can be reported."""
+        ub = _ub_calculator()
+
+        solutions = qconversion.qFromIpOop(
+            "Q_alpha", 10.0 * ub.getK(), 0.0, ub.getK(), alpha=np.deg2rad(0.6)
+        )
+
+        self.assertEqual(solutions, ())
+
+    def test_non_finite_coordinates_have_no_solution(self):
+        ub = _ub_calculator()
+        for q_ip, q_oop in ((np.nan, 0.0), (0.0, np.inf)):
+            with self.subTest(q_ip=q_ip, q_oop=q_oop):
+                self.assertEqual(
+                    qconversion.qFromIpOop("Q_alpha", q_ip, q_oop, ub.getK()), ()
+                )
+
+    def test_beam_direction_matches_the_collapsed_conversion(self):
+        """``beamDirection`` must be the ``c`` of the forward conversion."""
+        for frame in qconversion.FRAMES:
+            for alpha_deg in INCIDENCE_ANGLES:
+                with self.subTest(frame=frame, alpha_i=alpha_deg):
+                    ub = _ub_calculator()
+                    alpha_i = np.deg2rad(alpha_deg)
+                    _, c = qconversion.conversionCoefficients(
+                        frame,
+                        incident_angle=alpha_i,
+                        tilt_angle=0.83,
+                        U=ub.getU(),
+                        **self.SAMPLE_ANGLES,
+                    )
+
+                    beam = qconversion.beamDirection(
+                        frame, alpha=alpha_i, U=ub.getU(), **self.SAMPLE_ANGLES
+                    )
+
+                    np.testing.assert_allclose(beam, c, atol=1e-12)
+
+
 @requires_fiber
 class TestIntegrateImage(unittest.TestCase):
     """The rebinned map places intensity where QAlpha predicts."""
