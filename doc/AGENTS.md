@@ -127,10 +127,15 @@ Two automations walk commits since the last release tag and draft
 in this file and never touch `master` or hand-edit `source/release_notes.rst`
 directly; this file is the durable reference they read for conventions.
 
-- **`.github/workflows/docs-sync.yml`** (durable): runs on every push to
-  `master` via the `anthropics/claude-code-action`. It force-updates a
-  `docs/auto-sync` branch with any missing changelog/doc entries and never
-  opens a pull request — review and merge that branch manually. Requires a
+- **`.github/workflows/docs-sync.yml`** (durable): runs daily on a schedule
+  (`push` is not a supported trigger event for `anthropics/claude-code-action`)
+  against the current tip of `master`, plus manual `workflow_dispatch`. A
+  `check-open-pr` gate job runs first and skips the sync entirely if a PR
+  from `docs/auto-sync` is already open — this avoids force-pushing new
+  commits underneath a PR while it's still awaiting review (e.g. if nobody
+  gets to it for a week). It force-updates the `docs/auto-sync` branch with
+  any missing changelog/doc entries and never opens a pull request itself —
+  review and merge that branch (and open the PR) manually. Requires a
   `CLAUDE_CODE_OAUTH_TOKEN` repository secret (generated via `claude
   setup-token` from a Claude Pro/Max subscription, not a metered API key).
 - A local, session-scoped `CronCreate` task (set up ad hoc in a Claude Code

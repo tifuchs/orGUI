@@ -36,7 +36,7 @@ from .. import logger_utils
 import copy
 import sys
 import os
-import re
+from contextlib import contextmanager
 from silx.gui import qt
 
 from io import StringIO
@@ -56,6 +56,7 @@ from silx.utils.weakref import WeakMethodProxy
 from silx.gui.plot.Profile import ProfileToolBar
 from silx.gui.plot.tools.roi import RegionOfInterestManager
 from silx.gui.plot.actions import control as control_actions
+from silx.gui.widgets.ElidedLabel import ElidedLabel
 
 import traceback
 
@@ -80,6 +81,7 @@ from .. import resources
 
 import numpy as np
 from ..datautils.xrayutils import HKLVlieg, CTRcalc
+from . import qconversion
 from ..datautils.xrayutils import ReciprocalNavigation as rn
 
 # legacy import:
@@ -92,6 +94,10 @@ try:
     from silx.gui import console
 except Exception:
     console = False
+
+# Reciprocal-space (Q) conversion of detector images relies on pyFAI's
+# FiberIntegrator, which was introduced in pyFAI 2025.1.
+HAS_FIBER_INTEGRATOR = qconversion.HAS_FIBER_INTEGRATOR
 
 try:
     from . import _roi_sum_accel
@@ -179,6 +185,30 @@ class orGUI(qt.QMainWindow):
         toolbar.addAction(
             control_actions.OpenGLAction(parent=toolbar, plot=self.centralPlot)
         )
+        self.plotAgainstQAct = qt.QAction(resources.getQicon("q-plot"), "Q-plot", self)
+        self.plotAgainstQAct.setCheckable(True)
+        self.plotAgainstQAct.setToolTip(
+            "Experimental: show the image in reciprocal space coordinates. "
+            "The intensities are rebinned onto a regular grid."
+        )
+        self.plotAgainstQAct.toggled.connect(self._convertImagetoQ)
+        toolbar.addAction(self.plotAgainstQAct)
+
+        self.qFrameSelector = qt.QComboBox()
+        for frame in qconversion.FRAMES:
+            self.qFrameSelector.addItem(qconversion.FRAME_LABELS[frame], frame)
+        self.qFrameSelector.setCurrentIndex(
+            qconversion.FRAMES.index(qconversion.DEFAULT_FRAME)
+        )
+        self.qFrameSelector.setToolTip(
+            "Experimental: reciprocal space frame used by the Q-plot"
+        )
+        self.qFrameSelector.currentIndexChanged.connect(self._onQFrameChanged)
+        toolbar.addWidget(self.qFrameSelector)
+        self._qPlotExperimentalWarned = False
+        self._qPlotPreviousYInverted = None
+        self._qPlotPreviousXInverted = None
+        self._qPlotRefreshing = False
         self.centralPlot.addToolBar(toolbar)
         self.maskManager = MaskManager()
         self.maskConfigDialog = MaskConfigDialog(self.maskManager, self)
@@ -260,6 +290,7 @@ class orGUI(qt.QMainWindow):
 
         self.roPkIntegrTab = RockingPeakIntegrator(self.database)
 
+        self.scanSelector.sigRefreshH5.connect(self._onRefreshH5)
         self.scanSelector.sigImageNoChanged.connect(self._onSliderValueChanged)
 
         self.scanSelector.sigImagePathChanged.connect(self._onImagePathChanged)
@@ -276,7 +307,7 @@ class orGUI(qt.QMainWindow):
 
         self.scanSelector.sigROIChanged.connect(self.updateROI)
         self.scanSelector.sigROIChanged.connect(self._onROITrackingChanged)
-        self.scanSelector.sigROIintegrate.connect(self.integrateROI)
+        self.scanSelector.sigROIintegrate.connect(self._onIntegrateROI)
         self.scanSelector.sigSearchHKL.connect(self.onSearchHKLforStaticROI)
 
         self.scanSelector.excludeImageAct.toggled.connect(self._onToggleExcludeImage)
@@ -340,6 +371,9 @@ class orGUI(qt.QMainWindow):
 
         self.ubcalc.sigPlottableMachineParamsChanged.connect(self._onPlotMachineParams)
         self.ubcalc.sigReplotRequest.connect(self.updatePlotItems)
+        # the Q-plot coordinates depend on the machine angles, the azimuthal
+        # reference, the energy and, for the crystal frame, on U
+        self.ubcalc.sigReplotRequest.connect(self._refreshQPlot)
         self.allimgsum = None
         self.allimgmax = None
         self.reflectionSel.setSizePolicy(
@@ -623,6 +657,45 @@ ub : gui for UB matrix and angle calculations
         if col_gaps.size == 0:
             col_gaps = np.empty((0, 2), dtype=np.int32)
         return use_repair, repair, row_gaps, col_gaps
+
+    def _onRefreshH5(self):
+        """GUI/CLI hint: re-read the open HDF5 file and reload the current scan.
+
+        When the file is still being written by the acquisition system, the
+        tree view has to be rebuilt and the scan reloaded, otherwise the nodes
+        keep pointing at stale links. For console use the equivalent manual
+        recipe is::
+
+            self.fscan = None
+            for i in self.centralPlot.getAllImages():
+                if 'scan' in i.getLegend():
+                    self.centralPlot.removeImage(i)
+            self.currentAddImageLabel = None
+        """
+        self.scanSelector._onDoRefresh()  # update the treeview
+
+        # Reloading the scan must not regenerate the max/sum images, so the
+        # auto load and beamtime autodetect options are disabled temporarily.
+        autoload = self.autoLoadAct.isChecked()
+        bt_autodetect = self.scanSelector.bt_autodetect_enable.isChecked()
+        if autoload:
+            self.autoLoadAct.setChecked(False)
+        if bt_autodetect:
+            self.scanSelector.bt_autodetect_enable.setChecked(False)
+
+        # very important! this seems to unlock the file somehow
+        self.scanSelector._onLoadScan()
+
+        # restore auto load and bt autodetect
+        if autoload:
+            self.autoLoadAct.setChecked(True)
+        if bt_autodetect:
+            self.scanSelector.bt_autodetect_enable.setChecked(True)
+
+        self.images_loaded = True
+        # expanding here is safe, in contrast to during the tree rebuild
+        self.scanSelector.hdfTreeView.expandToDepth(0)
+        # todo: restore all expanded branches as they were before
 
     def _removeAllIntegrPlotCurves(self):
         """CLI-capable: clear all integration curves from the plot widget."""
@@ -1337,6 +1410,70 @@ ub : gui for UB matrix and angle calculations
         ro_name = "rocking_static"
         return self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
 
+    def _onIntegrateROI(self):
+        """GUI-only: integrate the active ROI and report unexpected errors.
+
+        The integration reads the scan images and writes into the database.
+        Both can fail at any time, e.g. if a drive is disconnected during the
+        integration. Such an error must not terminate orGUI.
+
+        :returns: Status dictionary of :meth:`integrateROI`.
+        :rtype: dict
+        """
+        try:
+            return self.integrateROI()
+        except Exception as e:
+            logger.error(
+                "Error during integration.",
+                exc_info=True,
+                extra={
+                    "title": "Error during integration",
+                    "description": f"Error during integration:\n{e}\n"
+                    "The integration was aborted.",
+                    "show_dialog": True,
+                    "parent": self,
+                },
+            )
+            return {
+                "status": "error",
+                "message": "Error during integration",
+                "traceback": traceback.format_exc(),
+            }
+
+    def _saveIntegrationResult(self, nxdict, description):
+        """Write an integration result into the database.
+
+        Writing can fail at any time, e.g. if the drive with the database was
+        disconnected during the integration. This must be reported to the
+        user instead of terminating orGUI.
+
+        :param dict nxdict: NeXus data to add to the database.
+        :param str description: Description of the data, used in messages.
+        :returns: None on success, an error status dictionary otherwise.
+        :rtype: dict or None
+        """
+        try:
+            self.database.add_nxdict(nxdict)
+        except Exception as e:
+            logger.error(
+                "Cannot save the integrated data into the database.",
+                exc_info=True,
+                extra={
+                    "title": "Cannot save integrated data",
+                    "description": f"Cannot save {description} into the "
+                    f"database:\n{e}\nCreate a new database at an available "
+                    "location and integrate the scan again.",
+                    "show_dialog": True,
+                    "parent": self,
+                },
+            )
+            return {
+                "status": "error",
+                "message": "Cannot save the integrated data into the database",
+                "traceback": traceback.format_exc(),
+            }
+        return None
+
     def rocking_integrate(self, xylist, rois, hkl_del_gam, refldict, name):
         """Integrate rocking-scan images over prepared ROIs.
 
@@ -1382,8 +1519,8 @@ ub : gui for UB matrix and angle calculations
                 "message": "No image found in current scan",
                 "traceback": traceback.format_exc(),
             }
-        if self.database.nxfile is None:
-            logger.exception(
+        if not self.database.isOpen():
+            logger.error(
                 "Cannot integrate scan: No database available.",
                 extra={
                     "title": "Cannot integrate scan",
@@ -2256,7 +2393,11 @@ ub : gui for UB matrix and angle calculations
 
         data_2d_structured[self.activescanname]["measurement"][name]["rois"] = rois
 
-        self.database.add_nxdict(data_2d_structured)
+        error = self._saveIntegrationResult(
+            data_2d_structured, f"the rocking scan integration {name}"
+        )
+        if error is not None:
+            return error
         logger.info(f"Rocking integration succeeded and data saved with name {name}")
         return {"status": "success"}
 
@@ -3090,29 +3231,157 @@ ub : gui for UB matrix and angle calculations
         """
 
         def xyToHKL(x, y):
-            """CLI-safe: convert detector pixels to hkl and detector angles."""
-            # print("xytoHKL:")
-            # print("x,y = %s, %s" % (x,y))
+            """CLI-safe: convert plot coordinates to hkl, angles and Q.
+
+            The plot coordinates are detector pixels, or the in-plane and
+            out-of-plane momentum transfer while the Q-plot is switched on. In
+            the latter case they are converted back to detector angles first, so
+            that both modes report the same hkl and the same detector angles for
+            the same point of the sample.
+
+            The momentum transfer is the one belonging to the displayed
+            coordinates: it is refraction corrected in pixel mode, like
+            everywhere else in orGUI, and unrefracted in the Q-plot, where the
+            axes are unrefracted as well. Reporting the corrected value there
+            would contradict the position the cursor is at.
+
+            :returns:
+                ``[h, k, l, delta, gamma, Qx, Qy, Qz]``, with the angles in
+                degrees and the momentum transfer of the currently selected
+                reciprocal-space frame in inverse Angstrom. All-NaN when the
+                position does not correspond to a point on the detector.
+            """
             if self.fscan is None:
-                return np.array([np.nan, np.nan, np.nan, np.nan, np.nan])
-            mu, om = self.getMuOm(self.imageno)
-            gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(
-                np.array([y]), np.array([x]), mu
-            )
-            # print(self.ubcalc.detectorCal)
-            # print(x,y)
-            # print(self.ubcalc.detectorCal.tth(np.array([y]),np.array([x])))
-            pos = [mu, delta[0], gamma[0], om, self.ubcalc.chi, self.ubcalc.phi]
+                return np.full(8, np.nan)
+            if self.plotAgainstQAct.isChecked():
+                resolved = self._qPlotToPosition(x, y)
+                if resolved is None:
+                    return np.full(8, np.nan)
+                mu, om, delta, gamma, Q = resolved
+            else:
+                mu, om = self.getMuOm(self.imageno)
+                gamma_arr, delta_arr = self.ubcalc.detectorCal.surfaceAnglesPoint(
+                    np.array([y]), np.array([x]), mu
+                )
+                delta, gamma = delta_arr[0], gamma_arr[0]
+                Q = None
+            pos = [mu, delta, gamma, om, self.ubcalc.chi, self.ubcalc.phi]
             pos = HKLVlieg.crystalAngles(pos, self.ubcalc.n)
-            hkl = np.concatenate(
+            return np.concatenate(
                 (
                     np.array(self.ubcalc.angles.anglesToHkl(*pos)),
-                    np.rad2deg([delta[0], gamma[0]]),
+                    np.rad2deg([delta, gamma]),
+                    self._qInSelectedFrame(pos) if Q is None else Q,
                 )
             )
-            return hkl
 
         return xyToHKL
+
+    def _qPlotOrientationMatrix(self):
+        """Orientation matrix for the Q-plot, or ``None`` when unavailable."""
+        try:
+            return self.ubcalc.ubCal.getU()
+        except Exception:
+            return None
+
+    def _qPlotToPosition(self, q_ip, q_oop):
+        """Momentum transfer and detector angles of one point of the Q-plot.
+
+        Inverts the projection of :func:`~orgui.app.qconversion.qIpOop` with
+        :func:`~orgui.app.qconversion.qFromIpOop`. The alpha frame always has a
+        unique solution; the rotated frames can have two, and the one that falls
+        onto the detector is kept. That test doubles as the check whether the
+        position is covered by the image at all: the rebinned grid is
+        rectangular and reaches beyond the detector.
+
+        The returned momentum transfer is the exact reconstruction, so its
+        in-plane and out-of-plane components are the requested coordinates. No
+        refraction correction is applied, because the Q-plot axes carry none
+        either.
+
+        :returns:
+            ``(mu, omega, delta, gamma, Q)`` with the angles in rad and ``Q``
+            in the selected frame in inverse Angstrom, or ``None`` when the
+            position is not on the detector.
+        :rtype: tuple or None
+        """
+        frame = self._selectedQFrame()
+        # the angles the displayed Q-plot was built with, so that the readout
+        # inverts the conversion that actually produced the image
+        alpha, omega = self._qPlotAngles()
+        try:
+            solutions = qconversion.qFromIpOop(
+                frame,
+                q_ip,
+                q_oop,
+                self.ubcalc.ubCal.getK(),
+                alpha=alpha,
+                omega=omega,
+                chi=self.ubcalc.chi,
+                phi=self.ubcalc.phi,
+                U=self._qPlotOrientationMatrix(),
+            )
+        except Exception:
+            return None
+
+        for Q in solutions:
+            try:
+                angles = qconversion.detectorAngles(
+                    Q,
+                    self.ubcalc.ubCal.getK(),
+                    frame=frame,
+                    alpha=alpha,
+                    omega=omega,
+                    chi=self.ubcalc.chi,
+                    phi=self.ubcalc.phi,
+                    U=self._qPlotOrientationMatrix(),
+                )
+            except Exception:
+                continue
+            if angles is None:
+                continue
+            delta, gamma = angles
+            if self._isOnDetector(delta, gamma, alpha):
+                return alpha, omega, delta, gamma, Q
+        return None
+
+    def _isOnDetector(self, delta, gamma, alpha):
+        """Whether the surface-frame angles hit the active detector."""
+        dc = self.ubcalc.detectorCal
+        try:
+            yx = dc.pixelsSurfaceAngles(
+                np.array([gamma]), np.array([delta]), np.array([alpha])
+            )
+        except Exception:
+            return False
+        yx = np.asarray(yx).reshape(-1, 2)[0]
+        if not np.all(np.isfinite(yx)):
+            return False
+        shape = dc.detector.shape
+        return 0 <= yx[0] < shape[0] and 0 <= yx[1] < shape[1]
+
+    def _qInSelectedFrame(self, pos):
+        """Momentum transfer of one pixel in the selected reciprocal frame.
+
+        :param pos:
+            Refracted ``[alpha, delta, gamma, omega, chi, phi]`` angles in rad.
+        :returns:
+            ``(Qx, Qy, Qz)`` in inverse Angstrom, or NaN when the frame cannot
+            be evaluated, for example ``Q_cryst`` without an orientation matrix.
+        :rtype: numpy.ndarray
+        """
+        try:
+            rotation = qconversion.frameMatrix(
+                self._selectedQFrame(),
+                alpha=pos[0],
+                omega=pos[3],
+                chi=pos[4],
+                phi=pos[5],
+                U=self.ubcalc.ubCal.getU(),
+            )
+            return rotation @ self.ubcalc.angles.QAlpha(pos[0], pos[1], pos[2])
+        except Exception:
+            return np.full(3, np.nan)
 
     def getMuOm(self, imageno=None):
         """Return mu and omega for an image or the whole active scan.
@@ -3312,6 +3581,84 @@ ub : gui for UB matrix and angle calculations
                     traceback.format_exc(),
                 )
 
+    @staticmethod
+    def _scanEntriesFromBackend(backendcls, h5file):
+        """Ask the backend to list the scans of an opened file.
+
+        This is the fast path of the segmented scan loader. The backend may
+        return bare identifiers or ``(identifier, label)`` pairs, see
+        :meth:`~orgui.backend.scans.Scan.listScans`.
+
+        The identifier is whatever the backend is opened with. It is reported
+        as both ``scanno`` and ``name`` because
+        :func:`~orgui.backend.backends.openScan` reads one or the other
+        depending on the beamtime, and only the backend knows which of the two
+        its constructor wants.
+
+        :returns:
+            List of ``(ddict, label)``, where ``ddict`` holds the keys
+            identifying the scan and ``label`` may be ``None``. ``None`` when
+            the backend does not implement ``listScans``.
+        :rtype: list or None
+
+        .. note::
+           CLI-safe.
+        """
+        try:
+            listed = backendcls.listScans(h5file)
+        except NotImplementedError:
+            return None
+
+        entries = []
+        for entry in listed:
+            if isinstance(entry, tuple):
+                identifier, label = entry
+            else:
+                identifier, label = entry, None
+            entries.append(({"scanno": identifier, "name": str(identifier)}, label))
+        return entries
+
+    @staticmethod
+    def _scanEntriesFromNodes(backendcls, model, rootIndex):
+        """List the scans of an opened file through ``parse_h5_node``.
+
+        Fallback for backends that do not implement ``listScans``. Every entry
+        of the file root is wrapped in the same :class:`silx.gui.hdf5.H5Node`
+        the tree hands to the backend when a single scan is opened, and its own
+        ``parse_h5_node`` result is kept unchanged. The segmented loader and
+        the normal loader therefore cannot disagree about what a scan is called
+        or how it is numbered.
+
+        An entry counts as a scan when ``parse_h5_node`` returns a ``scanno``
+        for it. Entries it raises on, or reports without a ``scanno``, are not
+        scans and are skipped. Scan numbers seen more than once are reported
+        once, which is what collapses the subscans of one measurement.
+
+        :returns: list of ``(ddict, label)`` with ``label`` always ``None``.
+        :rtype: list
+
+        .. note::
+           GUI-only, it needs the HDF5 tree model.
+        """
+        entries = []
+        seen = set()
+        for row in range(model.rowCount(rootIndex)):
+            index = model.index(row, 0, rootIndex)
+            item = model.data(index, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_ITEM_ROLE)
+            if item is None:
+                continue
+            try:
+                ddict = backendcls.parse_h5_node(silx.gui.hdf5.H5Node(item))
+            except Exception:
+                continue
+            if not isinstance(ddict, dict) or ddict.get("scanno") is None:
+                continue
+            if ddict["scanno"] in seen:
+                continue
+            seen.add(ddict["scanno"])
+            entries.append((dict(ddict), None))
+        return entries
+
     def _onLoadInterlacedScan(self):
         """GUI-only: build an interlaced scan from selected HDF5 scans."""
         # GUI function to concatenate multiple scans into one
@@ -3334,61 +3681,37 @@ ub : gui for UB matrix and angle calculations
 
         # address the root node to correctly get the scan names
         if rootI.parent().isValid():
-            h5file = model.data(
-                model.parent(rootI), role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE
+            rootI = model.parent(rootI)
+        h5file = model.data(rootI, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE)
+
+        # Which entries of the file are scans, and how they are addressed, is a
+        # property of the file format, so the backend is asked instead of the
+        # naming convention being guessed here. Backends that implement
+        # listScans answer directly; for the others every entry is run through
+        # their own parse_h5_node.
+        backendcls = backends.fscans[self.scanSelector.btid.currentText()]
+        try:
+            entries = self._scanEntriesFromBackend(backendcls, h5file)
+            if entries is None:
+                entries = self._scanEntriesFromNodes(backendcls, model, rootI)
+        except Exception:
+            qutils.warning_detailed_message(
+                self,
+                "Can not create interlaced scan",
+                f"Can not list the scans of this file with the "
+                f"{backendcls.__name__} backend.",
+                traceback.format_exc(),
             )
-        else:
-            h5file = model.data(
-                rootI, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE
+            return
+        if not entries:
+            qutils.warning_detailed_message(
+                self,
+                "Can not create interlaced scan",
+                f"The {backendcls.__name__} backend did not find any scan in "
+                "this file.",
+                "",
             )
-
-        isID31 = self.scanSelector.btid.currentText() in [
-            "ch5523",
-            "ch5700",
-            "ch5918",
-            "ch6392",
-            "ch7131",
-            "ch7149",
-            "ch7856",
-            "ch8153",
-            "id31_default",
-        ]
-        kl_full = list(h5file.keys())
-        kl = np.empty(0, dtype=int)
-        for i in kl_full:
-            if isID31:
-                pattern = r"\.\d"
-                result = re.findall(pattern, i)[0][1:]
-                if result == "1":
-                    # select only scan names which are ending on suffix '.1' (fast counters of id31 hdf5 format)  # noqa: E501
-                    kl = np.append(kl, i)
-            else:
-                kl = np.append(kl, i)
-
-        # separate scan nr and delete duplicates suffixes
-        if isID31:
-            # try to get the scan nr and '/title' from the hdf5 file
-            nr = np.empty(0, dtype=int)
-            name = np.empty(0, dtype=str)
-
-            for i in kl:
-                pattern = r"\d+\."
-                result = re.findall(pattern, i)
-                name = np.append(name, h5file[i + "/title"])
-                nr = np.append(nr, int(result[0][:-1]))
-
-            lsort = np.argsort(nr)[::1]
-            nr = nr[lsort]
-            name = name[lsort]
-        else:
-            nr = np.empty(0, dtype=int)
-            name = np.empty(0, dtype=str)
-            for nth, i in enumerate(kl):
-                name = np.append(name, i)
-                nr = np.append(
-                    nr, nth + 1
-                )  # create scan nr list with ascending integers, starting with 1
-                # This will later be used to address the subscans, so check if your scans are handled like this!!!  # noqa: E501
+            return
 
         # open GUI dialog to select which scans to combine
         interlacedSelectDialog = qt.QDialog()
@@ -3400,17 +3723,13 @@ ub : gui for UB matrix and angle calculations
         b = qt.QFormLayout()
         box = qt.QGroupBox()
         scanBoxes = []
-        # labels = []
-        for i, item in enumerate(nr):
+        for ddict, label in entries:
             ithScanBox = qt.QCheckBox()
             scanBoxes.append(ithScanBox)
-            # labels.append(qt.QLabel('Scan '+str(item)+':'+str(name[i][2:-1])))
-            if isID31:
-                b.addRow(
-                    qt.QLabel("Scan " + str(item) + ": " + name[i].decode()), ithScanBox
-                )
-            else:
-                b.addRow(qt.QLabel("Scan " + str(item) + ": " + name[i]), ithScanBox)
+            # the label is the scan title where the backend provides one, and
+            # the scan name otherwise
+            description = label if label is not None else ddict.get("name", "")
+            b.addRow(qt.QLabel(f"Scan {ddict['scanno']}: {description}"), ithScanBox)
 
         box.setLayout(b)
         a.setWidget(box)
@@ -3454,21 +3773,19 @@ ub : gui for UB matrix and angle calculations
             return
 
         # generate scan objects for selected scans
-        selectedScans = []
-        for i, j in enumerate(scanBoxes):
-            if j.isChecked():
-                selectedScans.append(nr[i])
-                # selectedScans.append(name[i])
+        selectedScans = [
+            ddict for (ddict, _label), box in zip(entries, scanBoxes) if box.isChecked()
+        ]
 
         nodes = list(self.scanSelector.hdfTreeView.selectedH5Nodes())
         obj = nodes[0]
 
         scansegments = []
-        for i in selectedScans:
-            ddict = dict()
-            ddict["scanno"] = int(i)
+        for selected in selectedScans:
+            # the keys identifying the scan come from the backend, so that a
+            # backend addressed by name rather than by number also works
+            ddict = dict(selected)
             ddict["file"] = obj.local_filename
-            # ddict['node'] = kl[i]
             ddict["beamtime"] = IS_btid.currentText()
             try:
                 scansegments.append(backends.openScan(IS_btid.currentText(), ddict))
@@ -3497,7 +3814,7 @@ ub : gui for UB matrix and angle calculations
         self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
         self.activescanname = "{}-segmentedScan {} {}-{}".format(
             self.fscan.axisname,
-            ",".join(str(itemNr) for itemNr in selectedScans),
+            ",".join(str(ddict["scanno"]) for ddict in selectedScans),
             np.amin(self.fscan.axis),
             np.amax(self.fscan.axis),
         )
@@ -3850,12 +4167,24 @@ ub : gui for UB matrix and angle calculations
                 )
                 return
             self.scanSelector.slider.setValue(imageno)
-            self.plotImage(self.scanSelector.slider.value())
+            with self._suspendedQPlot():
+                if self.scanSelector.showMaxAct.isChecked():
+                    self.scanSelector.showMaxAct.setChecked(False)
+                if self.scanSelector.showSumAct.isChecked():
+                    self.scanSelector.showSumAct.setChecked(False)
+                self.plotImage(self.scanSelector.slider.value())
+            self._refreshQPlot()
 
     def _onSliderValueChanged(self, value):
         """GUI/CLI hint: replot the image selected by the scan slider."""
         if self.fscan is not None:
-            self.plotImage(value)
+            with self._suspendedQPlot():
+                if self.scanSelector.showMaxAct.isChecked():
+                    self.scanSelector.showMaxAct.setChecked(False)
+                if self.scanSelector.showSumAct.isChecked():
+                    self.scanSelector.showSumAct.setChecked(False)
+                self.plotImage(value)
+            self._refreshQPlot()
         # print(self.centralPlot._callback)
 
     def _onLoadAll(self):
@@ -3985,7 +4314,9 @@ ub : gui for UB matrix and angle calculations
                     z=1,
                 )
                 self.centralPlot.setActiveImage(self.currentAddImageLabel)
-                self.scanSelector.alphaslider.setLegend(self.currentAddImageLabel)
+                self.scanSelector.alphaslider.setLegend("special")
+                if not self.scanSelector.showMaxAct.isChecked():
+                    self.scanSelector.showMaxAct.setChecked(True)
             else:
                 self.scanSelector.showMaxAct.setChecked(False)
         else:
@@ -3993,6 +4324,8 @@ ub : gui for UB matrix and angle calculations
                 self.centralPlot.setActiveImage(self.currentImageLabel)
                 self.centralPlot.removeImage(self.currentAddImageLabel)
                 self.currentAddImageLabel = None
+        # the displayed data changed, so the Q-plot has to follow
+        self._refreshQPlot()
 
     def _onSumToggled(self, value):
         """GUI/CLI hint: toggle display of the precomputed summed image."""
@@ -4026,7 +4359,9 @@ ub : gui for UB matrix and angle calculations
                     z=1,
                 )
                 self.centralPlot.setActiveImage(self.currentAddImageLabel)
-                self.scanSelector.alphaslider.setLegend(self.currentAddImageLabel)
+                self.scanSelector.alphaslider.setLegend("special")
+                if not self.scanSelector.showSumAct.isChecked():
+                    self.scanSelector.showSumAct.setChecked(True)
             else:
                 self.scanSelector.showSumAct.setChecked(False)
         else:
@@ -4034,6 +4369,8 @@ ub : gui for UB matrix and angle calculations
                 self.centralPlot.setActiveImage(self.currentImageLabel)
                 self.centralPlot.removeImage(self.currentAddImageLabel)
                 self.currentAddImageLabel = None
+        # the displayed data changed, so the Q-plot has to follow
+        self._refreshQPlot()
 
     def _roi_preview_enabled(self):
         """Return whether fitted-background ROI preview should alter the image."""
@@ -4048,6 +4385,312 @@ ub : gui for UB matrix and angle calculations
         """Color a center ROI according to fitted-background preview state."""
         roi.setColor("blue" if self._roi_preview_enabled() else "red")
         roi.setBgStyle("pink", "-", roi.getLineWidth())
+
+    def _selectedQFrame(self):
+        """Return the reciprocal space frame selected for the Q-plot."""
+        frame = self.qFrameSelector.currentData()
+        if frame not in qconversion.FRAMES:
+            return qconversion.DEFAULT_FRAME
+        return frame
+
+    def _onQFrameChanged(self, index):
+        """GUI hint: follow the frame selection in the readout and the Q-plot."""
+        del index
+        self.centralPlot.setQFrame(self._selectedQFrame())
+        self._refreshQPlot()
+
+    def _refreshQPlot(self, *args):
+        """GUI hint: rebuild the Q-plot so that it follows the current state.
+
+        Called whenever something the conversion depends on changed: the
+        displayed image, the machine angles, the azimuthal reference, the
+        energy or the orientation matrix. The conversion replaces the previous
+        reciprocal-space image, so the Q-plot stays switched on. Does nothing
+        while the Q-plot is off, or while a caller batches several changes by
+        holding ``_qPlotRefreshing``.
+        """
+        del args
+        if not self.plotAgainstQAct.isChecked() or self._qPlotRefreshing:
+            return
+        self._qPlotRefreshing = True
+        try:
+            self._convertImagetoQ(True)
+        finally:
+            self._qPlotRefreshing = False
+
+    @contextmanager
+    def _suspendedQPlot(self):
+        """Batch several changes into a single Q-plot rebuild."""
+        previous = self._qPlotRefreshing
+        self._qPlotRefreshing = True
+        try:
+            yield
+        finally:
+            self._qPlotRefreshing = previous
+
+    def _qPlotAngles(self):
+        """Return the alpha and omega angles used for the current Q-plot."""
+        try:
+            return self.getMuOm(self.scanSelector.slider.value())
+        except Exception:
+            return self.ubcalc.mu, 0.0
+
+    def _convertImagetoQ(self, value):
+        """GUI/CLI hint: toggle display of the image in reciprocal space.
+
+        **Experimental.** The currently displayed image is rebinned onto a
+        regular grid of in-plane and out-of-plane momentum transfer by
+        :func:`~orgui.app.qconversion.integrateImage`, which
+        drives pyFAI's ``FiberIntegrator`` with orGUI's own angle conventions.
+        The frame is taken from the frame selector next to the action and
+        defaults to the alpha (surface) frame, which is what
+        :meth:`~orgui.datautils.xrayutils.HKLVlieg.VliegAngles.QAlpha` returns.
+        See the geometry section of the documentation.
+        """
+        if value:
+            # check if conversion possible
+            if not HAS_FIBER_INTEGRATOR:
+                logger.error(
+                    "Q conversion requires pyFAI >= 2025.1",
+                    extra={
+                        "title": "Cannot convert image to Q",
+                        "description": "Conversion of the image to Q requires pyFAI >= 2025.1. Please update pyFAI.",  # noqa: E501
+                        "show_dialog": True,
+                        "dialog_level": logging.ERROR,
+                        "parent": self,
+                    },
+                )
+                self.plotAgainstQAct.setChecked(False)
+                return
+            if self.fscan is None:
+                logger.error(
+                    "Q conversion failed: no scan loaded",
+                    extra={
+                        "title": "Cannot convert image to Q",
+                        "description": "No scan loaded!",
+                        "show_dialog": True,
+                        "dialog_level": logging.ERROR,
+                        "parent": self,
+                    },
+                )
+                self.plotAgainstQAct.setChecked(False)
+                return
+            if self.fscan.axisname == "mu":
+                logger.error(
+                    "Q conversion failed: mu scan",
+                    extra={
+                        "title": "Cannot convert image to Q",
+                        "description": "Conversion not implemented for mu scans!",
+                        "show_dialog": True,
+                        "dialog_level": logging.ERROR,
+                        "parent": self,
+                    },
+                )
+                self.plotAgainstQAct.setChecked(False)
+                return
+
+            # select the data to convert before touching the plot, so that a
+            # failure leaves the displayed images untouched
+            showmax = self.scanSelector.showMaxAct.isChecked()
+            showsum = self.scanSelector.showSumAct.isChecked()
+            if showmax:
+                data = self.allimgmax
+            elif showsum:
+                data = self.allimgsum
+            else:
+                data = None
+                for i in self.centralPlot.getAllImages():
+                    if i.getLegend() == "scan_image":
+                        data = i.getData()
+                        break
+            if data is None:
+                logger.error(
+                    "Q conversion failed: no image available",
+                    extra={
+                        "title": "Cannot convert image to Q",
+                        "description": "No image available for the conversion!",
+                        "show_dialog": True,
+                        "dialog_level": logging.ERROR,
+                        "parent": self,
+                    },
+                )
+                self.plotAgainstQAct.setChecked(False)
+                return
+
+            frame = self._selectedQFrame()
+            if (showmax or showsum) and frame in qconversion.FRAMES_REQUIRING_OMEGA:
+                logger.error(
+                    "Q conversion failed: frame not defined for max/sum images",
+                    extra={
+                        "title": "Cannot convert image to Q",
+                        "description": f"The maximum and sum images combine many omega angles, so the {qconversion.FRAME_LABELS[frame]} frame is not defined for them. Use the {qconversion.FRAME_LABELS['Q_alpha']} or {qconversion.FRAME_LABELS['Q_lab']} frame instead.",  # noqa: E501
+                        "show_dialog": True,
+                        "dialog_level": logging.ERROR,
+                        "parent": self,
+                    },
+                )
+                self.plotAgainstQAct.setChecked(False)
+                return
+
+            if not self._qPlotExperimentalWarned:
+                logger.warning(
+                    "The Q-plot is experimental and its conventions may still change."
+                )
+                self._qPlotExperimentalWarned = True
+
+            # perform conversion into Q coordinates before touching the plot,
+            # so that a failure leaves the display as it was
+            alpha, omega = self._qPlotAngles()
+            try:
+                res2d = qconversion.integrateImage(
+                    self.ubcalc.detectorCal,
+                    data,
+                    alpha,
+                    frame=frame,
+                    omega=omega,
+                    chi=self.ubcalc.chi,
+                    phi=self.ubcalc.phi,
+                    U=self.ubcalc.ubCal.getU(),
+                )
+                # An inverted geometry, such as the downward scattering setup
+                # at ID31, has the out-of-plane coordinate growing towards the
+                # bottom of the detector image. Drawing it upwards anyway would
+                # show the reciprocal-space image mirrored with respect to the
+                # detector image, so the ordinate follows the geometry.
+                flipOrdinate = qconversion.outOfPlaneIncreasesWithRow(
+                    self.ubcalc.detectorCal,
+                    alpha,
+                    frame=frame,
+                    omega=omega,
+                    chi=self.ubcalc.chi,
+                    phi=self.ubcalc.phi,
+                    U=self._qPlotOrientationMatrix(),
+                )
+            except Exception:
+                logger.error(
+                    "Q conversion failed",
+                    extra={
+                        "title": "Cannot convert image to Q",
+                        "description": f"The conversion into the {qconversion.FRAME_LABELS[frame]} frame failed:\n{traceback.format_exc()}",  # noqa: E501
+                        "show_dialog": True,
+                        "dialog_level": logging.ERROR,
+                        "parent": self,
+                    },
+                )
+                self.plotAgainstQAct.setChecked(False)
+                return
+
+            # hide scan image, remove max/sum image
+            for i in self.centralPlot.getAllImages():
+                if i.getLegend() == "scan_image":
+                    i.setVisible(False)
+                else:
+                    self.centralPlot.removeImage(i)
+
+            # Reciprocal space is plotted with the ordinate along the
+            # out-of-plane coordinate, unlike the image convention used for the
+            # pixel coordinates. The previous state is only recorded when the
+            # Q-plot is entered, so that rebuilding it in place does not
+            # overwrite it.
+            if self._qPlotPreviousYInverted is None:
+                self._qPlotPreviousYInverted = self.centralPlot.isYAxisInverted()
+            if self._qPlotPreviousXInverted is None:
+                self._qPlotPreviousXInverted = self.centralPlot.isXAxisInverted()
+            self.centralPlot.setYAxisInverted(flipOrdinate)
+            self.centralPlot.setXAxisInverted(False)
+
+            # plot generated image, q_par on the abscissa and q_perp on the
+            # ordinate for every frame
+            oopmin, oopmax = np.min(res2d.outofplane), np.max(res2d.outofplane)
+            ipmin, ipmax = np.min(res2d.inplane), np.max(res2d.inplane)
+            scale_ip = (ipmax - ipmin) / res2d.inplane.size
+            scale_oop = (oopmax - oopmin) / res2d.outofplane.size
+            self.currentAddImageLabel = self.centralPlot.addImage(
+                res2d.intensity,
+                legend="qImage",
+                replace=False,
+                resetzoom=False,
+                copy=True,
+                z=2,
+                xlabel=r"q$_\parallel / \, \AA^{-1}$",
+                ylabel=r"q$_\perp / \, \AA^{-1}$",
+                scale=(scale_ip, scale_oop),
+                origin=(res2d.inplane[0], res2d.outofplane[0]),
+            )
+            self.centralPlot.getXAxis().setLimits(ipmin, ipmax)
+            self.centralPlot.getYAxis().setLimits(oopmin, oopmax)
+
+            # apply active plot settings; the alpha slider expects a legend,
+            # not the image item that addImage returns
+            self.centralPlot.setActiveImage(self.currentAddImageLabel)
+            self.scanSelector.alphaslider.setLegend("qImage")
+
+            # the axes now hold momentum transfer, so the readout has to invert
+            # the conversion instead of reading detector pixels
+            self.centralPlot.setQPlotActive(True)
+
+        else:
+            self.centralPlot.setQPlotActive(False)
+
+            # Restore the axis orientation of the pixel coordinates. This only
+            # depends on what was recorded when the Q-plot was entered, so it
+            # must not be tied to the max/sum image below: a conversion that
+            # failed after the axes were flipped would otherwise leave them
+            # flipped for good.
+            restored = False
+            if self._qPlotPreviousYInverted is not None:
+                self.centralPlot.setYAxisInverted(self._qPlotPreviousYInverted)
+                self._qPlotPreviousYInverted = None
+                restored = True
+            if self._qPlotPreviousXInverted is not None:
+                self.centralPlot.setXAxisInverted(self._qPlotPreviousXInverted)
+                self._qPlotPreviousXInverted = None
+                restored = True
+
+            # show scan image, delete qImage
+            hadQImage = False
+            for i in self.centralPlot.getAllImages():
+                if i.getLegend() == "scan_image":
+                    i.setVisible(True)
+                elif i.getLegend() == "qImage":
+                    self.centralPlot.removeImage(i)
+                    hadQImage = True
+
+            if hadQImage or self.currentAddImageLabel is not None:
+                # plot max/sum, set correct active image
+                if (
+                    self.scanSelector.showMaxAct.isChecked()
+                    and self.allimgmax is not None
+                ):
+                    self.currentAddImageLabel = self.centralPlot.addImage(
+                        self.allimgmax,
+                        legend="special",
+                        replace=False,
+                        resetzoom=False,
+                        copy=True,
+                        z=1,
+                    )
+                    self.centralPlot.setActiveImage(self.currentAddImageLabel)
+                elif (
+                    self.scanSelector.showSumAct.isChecked()
+                    and self.allimgsum is not None
+                ):
+                    self.currentAddImageLabel = self.centralPlot.addImage(
+                        self.allimgsum,
+                        legend="special",
+                        replace=False,
+                        resetzoom=False,
+                        copy=True,
+                        z=1,
+                    )
+                    self.centralPlot.setActiveImage(self.currentAddImageLabel)
+                else:
+                    self.currentAddImageLabel = None
+                    self.centralPlot.setActiveImage(self.currentImageLabel)
+
+            # apply correct zoom for pixel coordinates
+            if restored or hadQImage:
+                self.centralPlot.resetZoom()
 
     def _roi_array_from_key(self, key):
         """Convert one ROI slice key to the compiled ``(1, 2, 2)`` format."""
@@ -4727,8 +5370,8 @@ ub : gui for UB matrix and angle calculations
                 "message": "No image found in current scan",
                 "traceback": traceback.format_exc(),
             }
-        if self.database.nxfile is None:
-            logger.exception(
+        if not self.database.isOpen():
+            logger.error(
                 "Cannot perform stationary scan integration: no database available.",
                 extra={
                     "title": "Cannot integrate scan",
@@ -4907,7 +5550,8 @@ ub : gui for UB matrix and angle calculations
                         )
                 else:
                     [
-                        l.append(np.array([[0, 0], [0, 0]])) for l in roi_lists[1:]  # noqa: E741
+                        l.append(np.array([[0, 0], [0, 0]]))
+                        for l in roi_lists[1:]  # noqa: E741
                     ]  # will result in zeros, convert to np.nan later
                     roi_lists[0].append(np.array([[0, 0], [0, 0]]))
                 if hkl_del_gam_2[i, -1]:
@@ -4923,11 +5567,13 @@ ub : gui for UB matrix and angle calculations
                         )
                 else:
                     [
-                        l.append(np.array([[0, 0], [0, 0]])) for l in roi_lists[1:]  # noqa: E741
+                        l.append(np.array([[0, 0], [0, 0]]))
+                        for l in roi_lists[1:]  # noqa: E741
                     ]  # will result in zeros, convert to np.nan later
                     roi_lists[0].append(np.array([[0, 0], [0, 0]]))
                 roi_lists = [
-                    np.ascontiguousarray(np.stack(l), dtype=np.int64) for l in roi_lists  # noqa: E741
+                    np.ascontiguousarray(np.stack(l), dtype=np.int64)
+                    for l in roi_lists  # noqa: E741
                 ]
                 roi_lists_accel.append(roi_lists)
 
@@ -5594,7 +6240,11 @@ ub : gui for UB matrix and angle calculations
 
             names_to_log += availname2
 
-        self.database.add_nxdict(data)
+        error = self._saveIntegrationResult(
+            data, f"the scan integration {names_to_log}"
+        )
+        if error is not None:
+            return error
         logger.info(f"stationary scan integrated and saved with name(s) {names_to_log}")
         return {"status": "success"}
 
@@ -5867,9 +6517,94 @@ ub : gui for UB matrix and angle calculations
             )
 
     def closeEvent(self, event):
-        """GUI/CLI hint: close the database before the main window closes."""
-        self.database.close()
+        """GUI/CLI hint: close the database before the main window closes.
+
+        A database file which cannot be closed properly, e.g. on a
+        disconnected drive, must not prevent orGUI from closing.
+        """
+        self.database.closeSafe(show_dialog=True)
         super().closeEvent(event)
+
+
+def formatPositionTriplet(values):
+    """Format three numbers as ``[a b c]`` for the plot position readout.
+
+    :param values: three numbers.
+    :returns: the formatted triplet, or a placeholder if any value is not
+        finite, which is the case while no scan is loaded.
+    :rtype: str
+    """
+    values = np.asarray(values, dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        return "------"
+    return "[{:.5f} {:.5f} {:.5f}]".format(*values)
+
+
+def qFieldName(frame):
+    """Name of the reciprocal-space field in the plot position readout.
+
+    :param str frame: one of :data:`qconversion.FRAMES`.
+    :returns: for example ``"Q[alpha]"``.
+    :rtype: str
+    """
+    return f"Q[{qconversion.frameShortName(frame)}]"
+
+
+def isPositionTripletField(name):
+    """Whether a position readout field holds a bracketed triplet."""
+    return name == "HKL" or name.startswith("Q[")
+
+
+def axisFieldNames(frame, qPlotActive):
+    """Names of the two plot axis fields in the position readout.
+
+    While the Q-plot is on, the abscissa and the ordinate are the in-plane and
+    the out-of-plane momentum transfer of the selected frame, not pixels.
+
+    :param str frame: one of :data:`qconversion.FRAMES`.
+    :param bool qPlotActive: whether the Q-plot is switched on.
+    :returns: ``(abscissa, ordinate)`` field names.
+    :rtype: tuple[str, str]
+    """
+    if not qPlotActive:
+        return ("X", "Y")
+    short = qconversion.frameShortName(frame)
+    return (f"q_par[{short}]", f"q_perp[{short}]")
+
+
+# Widest triplet the readout should be able to show without eliding. Five
+# decimals are the minimum useful precision for hkl and for Q.
+POSITION_TRIPLET_TEMPLATE = "[-99.99999 -99.99999 -99.99999]"
+
+# The remaining fields hold a pixel coordinate, a detector angle or a data
+# value such as "10, Masked". silx reserves about fourteen hash characters for
+# each of them, which is wider than any of those values and takes space the
+# triplets need. The width of a field is its share of the summed size hints, so
+# this is a balance rather than a maximum: made much smaller, the scalar fields
+# starve when the window is narrow; made much larger, the triplets are elided
+# again.
+POSITION_SCALAR_TEMPLATE = "-99999.99999"
+
+
+class _PositionLabel(ElidedLabel):
+    """Position readout label whose size hint matches its content.
+
+    silx sizes every readout field alike, for about fourteen hash characters.
+    That elides the last component of a triplet while leaving the scalar fields
+    wider than they need to be. Only the size *hint* is set here, not the
+    minimum width, so the window can still be made as narrow as before. The
+    hint never falls below the current text, and anything elided remains
+    available as a tooltip, which ``ElidedLabel`` provides by default.
+    """
+
+    def __init__(self, template, parent=None):
+        super().__init__(parent)
+        self._template = template
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        width = self.fontMetrics().boundingRect(self._template).width()
+        return qt.QSize(max(hint.width(), width), hint.height())
 
 
 class Plot2DHKL(silx.gui.plot.PlotWindow):
@@ -5878,13 +6613,21 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
     def __init__(self, xyHKLConverter, parent=None, backend=None):
         """GUI-only: initialize the image plot with hkl position readout."""
         self.xyHKLConverter = xyHKLConverter
+        self._qFrame = qconversion.DEFAULT_FRAME
+        self._qPlotActive = False
+        self._qFieldName = qFieldName(self._qFrame)
+        self._axisFieldNames = axisFieldNames(self._qFrame, self._qPlotActive)
 
         posInfo = [
-            ("X", lambda x, y: x),
-            ("Y", lambda x, y: y),
-            ("H", lambda x, y: self.xyHKLConverter(x, y)[0]),
-            ("K", lambda x, y: self.xyHKLConverter(x, y)[1]),
-            ("L", lambda x, y: self.xyHKLConverter(x, y)[2]),
+            # pixel coordinates need no more than sub-pixel precision, and the
+            # space is needed for the hkl and Q triplets
+            (self._axisFieldNames[0], lambda x, y: self._formatAxisValue(x)),
+            (self._axisFieldNames[1], lambda x, y: self._formatAxisValue(y)),
+            ("HKL", lambda x, y: formatPositionTriplet(self.xyHKLConverter(x, y)[:3])),
+            (
+                self._qFieldName,
+                lambda x, y: formatPositionTriplet(self.xyHKLConverter(x, y)[5:8]),
+            ),
             ("del", lambda x, y: self.xyHKLConverter(x, y)[3]),
             ("gam", lambda x, y: self.xyHKLConverter(x, y)[4]),
             ("Data", WeakMethodProxy(self._getImageValue)),
@@ -5909,6 +6652,8 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
             roi=False,
             mask=True,
         )
+
+        self._tunePositionFieldWidths()
 
         if parent is None:
             self.setWindowTitle("Plot2D")
@@ -5938,6 +6683,109 @@ class Plot2DHKL(silx.gui.plot.PlotWindow):
         if key == qt.Qt.Key_Delete and not event.isAutoRepeat():
             self.sigKeyPressDelete.emit()
         super().keyPressEvent(event)
+
+    def _tunePositionFieldWidths(self):
+        """Size every readout field for the content it actually shows.
+
+        The triplet fields get room for all three components, and the scalar
+        fields give back the width silx reserves for them but never uses.
+
+        .. note::
+           GUI-only.
+        """
+        positionInfo = self.getPositionInfoWidget()
+        # silx keeps the content widgets in a private list; leave the readout
+        # untouched if that ever changes
+        fields = getattr(positionInfo, "_fields", None)
+        if not fields:
+            return
+        layout = positionInfo.layout()
+        for index, (widget, name, converter) in enumerate(list(fields)):
+            template = (
+                POSITION_TRIPLET_TEMPLATE
+                if isPositionTripletField(name)
+                else POSITION_SCALAR_TEMPLATE
+            )
+            replacement = _PositionLabel(template, positionInfo)
+            replacement.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+            replacement.setText(widget.text())
+            layout.replaceWidget(widget, replacement)
+            widget.setParent(None)
+            widget.deleteLater()
+            fields[index] = (replacement, name, converter)
+
+    def _formatAxisValue(self, value):
+        """Format an abscissa or ordinate value for the position readout.
+
+        Pixel coordinates need no more than sub-pixel precision, while the
+        momentum transfer shown while the Q-plot is on needs the same five
+        decimals as the hkl and Q triplets.
+
+        .. note::
+           GUI-only.
+        """
+        return f"{value:.5f}" if self._qPlotActive else f"{value:.2f}"
+
+    def _renamePositionField(self, previous, name):
+        """Rename one position readout field title in place.
+
+        silx builds the field titles once, so the existing title widget is
+        renamed rather than the readout rebuilt. The displayed values follow
+        automatically, because the converters read the current state when they
+        are called.
+
+        .. note::
+           GUI-only.
+        """
+        if previous == name:
+            return
+        positionInfo = self.getPositionInfoWidget()
+        if positionInfo is None:
+            return
+        old = f"<b>{previous}:</b>"
+        for widget in positionInfo.findChildren(qt.QLabel):
+            if widget.text() == old:
+                widget.setText(f"<b>{name}:</b>")
+                break
+
+    def _updatePositionFieldNames(self):
+        """Apply the field titles that match the current frame and plot mode.
+
+        .. note::
+           GUI-only.
+        """
+        qFieldNameNew = qFieldName(self._qFrame)
+        axisNames = axisFieldNames(self._qFrame, self._qPlotActive)
+        if qFieldNameNew == self._qFieldName and axisNames == self._axisFieldNames:
+            return
+
+        self._renamePositionField(self._qFieldName, qFieldNameNew)
+        for previous, name in zip(self._axisFieldNames, axisNames):
+            self._renamePositionField(previous, name)
+        self._qFieldName = qFieldNameNew
+        self._axisFieldNames = axisNames
+
+        positionInfo = self.getPositionInfoWidget()
+        if positionInfo is not None:
+            positionInfo.updateInfo()
+
+    def setQFrame(self, frame):
+        """Select the reciprocal-space frame the readout describes.
+
+        .. note::
+           GUI-only.
+        """
+        self._qFrame = frame
+        self._updatePositionFieldNames()
+
+    def setQPlotActive(self, active):
+        """Tell the readout whether the axes hold momentum transfer or pixels.
+
+        .. note::
+           GUI-only.
+        """
+        self._qPlotActive = bool(active)
+        self._updatePositionFieldNames()
 
     def setXyHKLconverter(self, xyHKLConverter):
         """Set the pixel-to-hkl converter used by the plot readout.
@@ -6410,7 +7258,8 @@ class UncaughtHook(qt.QObject):
                                 "Cannot save database.",
                                 traceback.format_exc(),
                             )
-                    self.orgui.database.close()
+                    # must not raise again inside the exception hook
+                    self.orgui.database.closeSafe()
             else:
                 print("No QApplication instance available.")
             sys.exit(1)

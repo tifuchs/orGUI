@@ -2,8 +2,9 @@ CTR Resolution Modeling
 =======================
 
 ``CTRresolution`` supplies optional instrumental-resolution broadening for
-calculated crystal truncation rods. It does not change ``SXRDCrystal.F`` or
-enable broadening implicitly in fitting code.
+calculated crystal truncation rods. It does not change ``SXRDCrystal.F``.
+``CTRopt`` can opt into the same sampled broadening for calculated fit
+amplitudes.
 
 Intensity and output convention
 -------------------------------
@@ -34,14 +35,16 @@ effective width is in reciprocal lattice units:
 
 .. math::
 
-   \Delta L = \Delta L_0 + \Delta L_1\lvert\sin(\gamma)\rvert.
+   \Delta L = \Delta L_0 + \Delta L_1\lvert\sin(\gamma)\rvert
+   + \Delta L_2\lvert\sin(\delta)\rvert.
 
-Here ``gamma`` is the Vlieg out-of-plane detector angle in radians. For a box,
+Here ``gamma`` and ``delta`` are Vlieg detector angles in radians. For a box,
 ``DeltaL`` is the complete support width. For a Gaussian it is the full width
-at half maximum (FWHM). Setting ``delta_l_1=0`` creates a constant function;
-setting both contributions to zero disables broadening.
+at half maximum (FWHM). Setting both angle-dependent contributions to zero
+creates a constant function; setting all contributions to zero disables
+broadening.
 
-Gamma-dependent models require angle records on their input collection. They
+Angle-dependent models require angle records on their input collection. They
 can be calculated for all rods at once:
 
 .. code-block:: python
@@ -101,9 +104,46 @@ defaults to 25.
    )
 
 The central point's gamma determines the width of all quadrature samples for
-that point. H and K remain fixed. This first implementation therefore models
-only out-of-plane L resolution; a future in-plane model can use the H, K, L,
-and complete angle context accepted by ``ResolutionFunction.width``.
+that point; the same applies to delta when ``delta_l_2`` is nonzero. H and K
+remain fixed. This implementation therefore models only out-of-plane L
+resolution.
+
+Fitting resolution widths
+-------------------------
+
+Use :meth:`CTRopt.CTROptimizer.fit_resolution` to include the three resolution
+widths directly in an optimizer's parameter vector. They are always the first
+three parameters, in ``delta_l_0``, ``delta_l_1``, ``delta_l_2`` order, and use
+r.l.u. bounds. Angle-dependent widths require cached Z-mode angle records;
+calculate them once because they depend on the fixed CTR geometry and
+experimental setup, not on the fitted widths.
+
+.. code-block:: python
+
+   from orgui.datautils.xrayutils import CTRopt, CTRresolution
+
+   optimizer = CTRopt.CTROptAngleCorrection(crystal, measured_ctrs)
+   optimizer.calc_resolution_angles_zmode(angle_calculator, fixedangle=0.1)
+   optimizer.fit_resolution(
+       CTRresolution.GaussianResolution(0.015, 0.08, 0.02),
+       lower_bounds=(0.0, 0.0, 0.0),
+       higher_bounds=(0.1, 0.2, 0.1),
+   )
+   optimizer.prepareFit()
+   parameters = optimizer.get_parameters()
+
+For ``CTROptAngleCorrection``, fit traces label these leading values as
+``resolution_delta_l_0``, ``resolution_delta_l_1``, and
+``resolution_delta_l_2``. Their estimated standard errors are stored in
+``optimizer.resolution_errors`` after statistics are evaluated.
+
+``fit_resolution(..., calculation="sample")`` is the default and evaluates
+the crystal at quadrature points. Use ``calculation="convolve"`` to convolve
+calculated values on the existing L grid instead; this is typically faster for
+fits but inherits the sampling limitations of :func:`fast_convolve`. In both
+modes, the optimizer retains a separate ``calculated_CTRs`` collection whose
+``sfI`` arrays are updated once per parameter assignment; experimental CTRs
+are not modified.
 
 A complete runnable comparison using the bundled CTR reference data is in
 ``examples/CTR/ctr_resolution_example.ipynb``.

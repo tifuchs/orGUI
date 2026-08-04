@@ -32,7 +32,7 @@ import numpy as np
 import xraydb
 import warnings
 import json
-from functools import cache
+from functools import cache, lru_cache
 
 # random.seed(45)
 from collections import OrderedDict
@@ -680,9 +680,15 @@ def readWaasmaier(element):
     return np.array(_readWaasmaier_cached(_normalize_species(element)))
 
 
-@cache
+@lru_cache(maxsize=100_000)
 def _readDispersion_cached(element, energy):
-    """Read immutable dispersion terms for a normalized species and energy."""
+    """Read immutable dispersion terms for a normalized species and energy.
+
+    Unlike :func:`_readWaasmaier_cached`, whose key space is bounded by the
+    small set of known elements/ions, ``energy`` is a continuous value, so
+    an unbounded cache could grow without limit over an energy scan in a
+    long-running batch job. Bounded with an LRU eviction policy instead.
+    """
     return (
         xraydb.f1_chantler(atomic_number(element), energy),
         xraydb.f2_chantler(atomic_number(element), energy),

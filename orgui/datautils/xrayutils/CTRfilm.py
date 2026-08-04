@@ -359,6 +359,17 @@ class _LayerStackingMixin:
             Absolute top height of the object below in Angstrom.
         :param float below_layer:
             Top cyclic layer identifier of the object below.
+        :param LayerState below_state:
+            Optional pre-built layer state for the object below. If given,
+            it is used as-is instead of constructing a fresh
+            ``LayerState(self.layer_cycle, below_layer)``.
+        :param below_component:
+            Optional underlying component (for example a :class:`Film`)
+            passed to this object's ``_bind_underlying_component`` if it
+            defines one, for subclasses (such as ``PoissonSurface``) that
+            need direct access to the component below rather than just its
+            scalar layer metadata. Ignored by subclasses without that
+            method.
         """
         bind_underlying = getattr(self, "_bind_underlying_component", None)
         if bind_underlying is not None:
@@ -408,19 +419,31 @@ def _parse_float_metadata(string, name, default):
 
 
 class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
-    """A distributed, coherently strained interface between two lattices.
+    """A distributed, strain-coupled interface between two lattices.
 
     The statistical profile controls the upper- and lower-material
-    occupancies. ``C`` controls the out-of-plane coherence: zero leaves both
-    materials on their independent, unstrained lattices, while one linearly
-    moves every generated position to the fully coherent strain field.
-    ``offset`` translates only the upper material and subsequently stacked
-    components by ``offset * uc_bottom.a[2]`` Angstrom.
+    occupancies. ``strain_coupling`` controls the out-of-plane lattice
+    transition: zero leaves both materials on their independent, unstrained
+    lattices, while one linearly moves every generated position to the fully
+    strain-coupled field. The strain-coupling-dependent coordinate is
+
+    ``z = z_unstrained + strain_coupling * (z_coupled - z_unstrained)``.
+
+    At zero strain coupling, ``offset`` is a rigid registry shift between the
+    independent film and bulk lattices: the upper material moves and the lower
+    material remains fixed. At full strain coupling, the offset is accommodated
+    by a displacement field proportional to the statistical upper-material
+    occupancy and shared by both material additions. Intermediate strain
+    coupling linearly interpolates between those endpoint geometries.
 
     The semi-infinite lower bulk remains on its unstrained lattice. Generated
     lower-material domains therefore add the distributed material at its
-    coherence-dependent positions and separately subtract the sharp bulk at
-    its original positions.
+    strain-coupling-dependent positions and separately subtract the sharp bulk
+    at its original positions.
+
+    New interfaces default to ``strain_coupling = 1`` and ``offset = 0``.
+    Text models and HDF5 fit settings written by orGUI v1.5.0 contained only
+    Width and Skew; loading them supplies those same defaults.
 
     :param UnitCell uc_top:
         Upper (film-side) interface unit cell.
@@ -430,13 +453,26 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         Statistical interface model. Currently only ``"skellam"``.
     """
 
-    parameterOrder = "Width/cells Skew/cells Coherence Offset/bulk_frac"
+    parameterOrder = (
+        "Width/cells Skew/cells StrainCoupling Offset/bulk_frac"
+    )
+    legacyParameterOrder = "Width/cells Skew/cells"
 
-    parameterLookup = {"W": 0, "S": 1, "C": 2, "offset": 3}
+    parameterLookup = {
+        "W": 0,
+        "S": 1,
+        "strain_coupling": 2,
+        "offset": 3,
+    }
 
     avail_types = ["skellam"]
 
-    parameterLookup_inv = {0: "W", 1: "S", 2: "C", 3: "offset"}
+    parameterLookup_inv = {
+        0: "W",
+        1: "S",
+        2: "strain_coupling",
+        3: "offset",
+    }
 
     def __init__(self, uc_top, uc_bottom, type="skellam", **kwargs):
         """
@@ -476,6 +512,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         self.below_loc = 0.0
         self.below_H = 0.0
         self.below_layer = -1.0
+        self._strain_coupling_displacement = 0.0
         self._initialize_layer_stacking(kwargs)
 
     def set_ucs(self, uc_top, uc_bottom, **kwargs):
@@ -625,14 +662,25 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         """Return the translated film-side boundary in Angstrom.
 
         The statistical boundary and lower bulk remain at
-        :attr:`loc_absolute`. A Film uses this translated location as the
-        origin of its requested total width, while
+        :attr:`loc_absolute`. The strain displacement accumulated upward from
+        the fixed bulk and the explicit film offset translate the film-side
+        boundary. A Film uses this location as the origin of its requested
+        total width, while
         :attr:`stacking_height_absolute` supplies the physical support it must
         not duplicate.
         """
         if np.any(self._basis_created != self.basis):
             self.createInterfaceCells()
-        return self.loc_absolute + self.basis[3] * self.uc_bottom.a[2]
+        return (
+            self.loc_absolute
+            + self._strain_coupling_displacement
+            + self._offset_absolute
+        )
+
+    @property
+    def _offset_absolute(self):
+        """Return the coupling-independent upper-material offset in Angstrom."""
+        return self.basis[3] * self.uc_bottom.a[2]
 
     @property
     def layer_state(self):
@@ -679,9 +727,14 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 (unitcells >= loc).astype(np.float64).reshape((-1, n_layers))
             )
             sharp_bottom = 1.0 - sharp_top
-            coherence = self.basis[2]
-            if not np.isfinite(coherence) or not 0.0 <= coherence <= 1.0:
-                raise ValueError("EpitaxyInterface coherence must be between 0 and 1")
+            strain_coupling = self.basis[2]
+            if (
+                not np.isfinite(strain_coupling)
+                or not 0.0 <= strain_coupling <= 1.0
+            ):
+                raise ValueError(
+                    "EpitaxyInterface strain_coupling must be between 0 and 1"
+                )
             offset = self.basis[3]
             if not np.isfinite(offset):
                 raise ValueError("EpitaxyInterface offset must be finite")
@@ -710,23 +763,46 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
             mat_0 = np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
 
-            ratio_top = a3_bottom / a3_top
-            ratio_bottom = 1 / ratio_top
-            coherent_top = [[] for _ in self.top_layers]
-            coherent_bottom = [[] for _ in self.bottom_layers]
+            coupled_top = [[] for _ in self.top_layers]
+            coupled_bottom = [[] for _ in self.bottom_layers]
             ideal_top = [[] for _ in self.top_layers]
             ideal_bottom = [[] for _ in self.bottom_layers]
-            coherent_height = 0.0
+            coupled_height = 0.0
+            top_layer_space = np.diff(
+                self.layerpos,
+                append=self.layerpos[0] + 1.0,
+            )
+            bottom_layerpos = _unwrapped_layer_positions(
+                np.array(
+                    [
+                        self.uc_bottom.layerpos[layer_id]
+                        for layer_id in self._layer_ids
+                    ]
+                ),
+                self._layer_order_indices,
+            )
+            bottom_layer_space = np.diff(
+                bottom_layerpos,
+                append=bottom_layerpos[0] + 1.0,
+            )
 
             for cycle_index, (p_t, p_b) in enumerate(
                 zip(probability_top, probability_bottom)
             ):
-                top_strains = p_t + ratio_top * p_b
-                bottom_strains = ratio_bottom * p_t + p_b
-                physical_top_index = np.flatnonzero(
-                    self._layer_order_indices == n_layers - 1
-                )[0]
-                cell_height = a3_top * top_strains[physical_top_index]
+                # Accumulate the coherent height one structural layer at a
+                # time. Using a single layer's strain for the whole unit-cell
+                # cycle creates a displacement modulation with the layer-cycle
+                # period and leaks intensity into systematic extinctions.
+                physical_layer_heights = (
+                    p_t * a3_top * top_layer_space
+                    + p_b * a3_bottom * bottom_layer_space
+                )
+                top_strains = physical_layer_heights / (
+                    a3_top * top_layer_space
+                )
+                bottom_strains = physical_layer_heights / (
+                    a3_bottom * bottom_layer_space
+                )
 
                 for i, (uc_t, uc_b) in enumerate(
                     zip(self.top_layers, self.bottom_layers)
@@ -734,29 +810,36 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                     mat_top_i = np.copy(mat_0)
                     top_strain_and_h = top_strains[i]
                     mat_top_i[2, 2] = top_strain_and_h
-                    relative_layer_position = self.layerpos[i] - self.layerpos[0]
+                    relative_top_position = (
+                        self.layerpos[i] - self.layerpos[0]
+                    )
                     top_layer_offset = (
-                        relative_layer_position
+                        relative_top_position
                         - (self.uc_top.layerpos[self.layer_order[i]])
                     )
                     mat_top_i[2, 3] = (
-                        coherent_height / a3_top
-                        + top_strain_and_h * top_layer_offset
+                        coupled_height / a3_top
+                        - top_strain_and_h
+                        * self.uc_top.layerpos[self.layer_order[i]]
                     )
-                    coherent_top[i].append(mat_top_i)
+                    coupled_top[i].append(mat_top_i)
 
                     mat_bottom_i = np.copy(mat_0)
                     bottom_strain_and_h = bottom_strains[i]
                     mat_bottom_i[2, 2] = bottom_strain_and_h
+                    relative_bottom_position = (
+                        bottom_layerpos[i] - bottom_layerpos[0]
+                    )
                     bottom_layer_offset = (
-                        relative_layer_position
+                        relative_bottom_position
                         - (self.uc_bottom.layerpos[self.layer_order[i]])
                     )
                     mat_bottom_i[2, 3] = (
-                        coherent_height / a3_bottom
-                        + bottom_strain_and_h * bottom_layer_offset
+                        coupled_height / a3_bottom
+                        - bottom_strain_and_h
+                        * self.uc_bottom.layerpos[self.layer_order[i]]
                     )
-                    coherent_bottom[i].append(mat_bottom_i)
+                    coupled_bottom[i].append(mat_bottom_i)
 
                     ideal_top_i = np.copy(mat_0)
                     ideal_top_i[2, 3] = cycle_index + top_layer_offset
@@ -765,17 +848,12 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                     ideal_bottom_i = np.copy(mat_0)
                     ideal_bottom_i[2, 3] = cycle_index + bottom_layer_offset
                     ideal_bottom[i].append(ideal_bottom_i)
-                coherent_height += cell_height
+                    coupled_height += physical_layer_heights[i]
 
             loc_rescaled = loc - unitcells[0]
             uc_no_loc = int(np.floor(loc_rescaled)) // n_layers
             layer_no_loc = int(np.floor(loc_rescaled)) % n_layers
             loc_remainder = (loc_rescaled % n_layers) % 1
-            coherent_loc_mat = coherent_top[layer_no_loc][uc_no_loc]
-            coherent_loc = (
-                coherent_loc_mat[2, 3]
-                + loc_remainder * coherent_loc_mat[2, 2]
-            ) * a3_top
             ideal_top_loc_mat = ideal_top[layer_no_loc][uc_no_loc]
             ideal_top_loc = (
                 ideal_top_loc_mat[2, 3]
@@ -787,28 +865,90 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 + loc_remainder * ideal_bottom_loc_mat[2, 2]
             ) * a3_bottom
 
-            top_offset = offset * a3_bottom
+            offset_absolute = self._offset_absolute
+            occupancy_low = np.min(probability_top)
+            occupancy_span = np.max(probability_top) - occupancy_low
+            if occupancy_span == 0.0:
+                if offset_absolute != 0.0:
+                    raise ValueError(
+                        "EpitaxyInterface offset requires an occupancy profile "
+                        "that spans the film-bulk transition"
+                    )
+                offset_profile = np.zeros_like(probability_top)
+            else:
+                # Normalize the represented occupancy profile so truncating
+                # its statistical tails does not leave a displacement jump at
+                # either stacking boundary.
+                offset_profile = (
+                    offset_absolute
+                    * (probability_top - occupancy_low)
+                    / occupancy_span
+                )
+            # The lower support boundary is the physical anchor shared by the
+            # strain-coupled field and the unstrained semi-infinite bulk.
+            # Translate
+            # both using the ideal lower-lattice boundary location. The
+            # coupled statistical boundary is then free to move by the
+            # displacement accumulated through the strain field. The
+            # displacement at the upper support boundary is passed to every
+            # subsequently stacked component.
+            upper_layer_id = self.layer_order[-1]
+            upper_layer_space = np.diff(
+                self.layerpos,
+                append=self.layerpos[0] + 1,
+            )[-1]
+            upper_boundary = (
+                self.uc_top.layerpos[upper_layer_id] + upper_layer_space
+            )
+            coupled_upper_mat = coupled_top[-1][-1]
+            ideal_upper_mat = ideal_top[-1][-1]
+            coupled_upper = (
+                coupled_upper_mat[2, 3]
+                - ideal_bottom_loc / a3_top
+                + coupled_upper_mat[2, 2] * upper_boundary
+            ) * a3_top
+            ideal_upper = (
+                ideal_upper_mat[2, 3]
+                - ideal_top_loc / a3_top
+                + ideal_upper_mat[2, 2] * upper_boundary
+            ) * a3_top
+            self._strain_coupling_displacement = strain_coupling * (
+                coupled_upper - ideal_upper
+            )
             for i, (uc_t, uc_b) in enumerate(zip(self.top_layers, self.bottom_layers)):
-                for coherent_mat, ideal_mat in zip(coherent_top[i], ideal_top[i]):
-                    coherent_mat = np.copy(coherent_mat)
+                for coupled_mat, ideal_mat, profile_offset in zip(
+                    coupled_top[i],
+                    ideal_top[i],
+                    offset_profile[:, i],
+                ):
+                    coupled_mat = np.copy(coupled_mat)
                     ideal_mat = np.copy(ideal_mat)
-                    coherent_mat[2, 3] -= coherent_loc / a3_top
+                    coupled_mat[2, 3] -= ideal_bottom_loc / a3_top
                     ideal_mat[2, 3] -= ideal_top_loc / a3_top
-                    interpolated = ideal_mat + coherence * (
-                        coherent_mat - ideal_mat
+                    interpolated = ideal_mat + strain_coupling * (
+                        coupled_mat - ideal_mat
+                    )
+                    top_offset = (
+                        (1.0 - strain_coupling) * offset_absolute
+                        + strain_coupling * profile_offset
                     )
                     interpolated[2, 3] += top_offset / a3_top
                     uc_t.coherentDomainMatrix.append(interpolated)
 
-                for coherent_mat, ideal_mat in zip(
-                    coherent_bottom[i], ideal_bottom[i]
+                for coupled_mat, ideal_mat, profile_offset in zip(
+                    coupled_bottom[i],
+                    ideal_bottom[i],
+                    offset_profile[:, i],
                 ):
-                    coherent_mat = np.copy(coherent_mat)
+                    coupled_mat = np.copy(coupled_mat)
                     ideal_mat = np.copy(ideal_mat)
-                    coherent_mat[2, 3] -= coherent_loc / a3_bottom
+                    coupled_mat[2, 3] -= ideal_bottom_loc / a3_bottom
                     ideal_mat[2, 3] -= ideal_bottom_loc / a3_bottom
-                    interpolated = ideal_mat + coherence * (
-                        coherent_mat - ideal_mat
+                    interpolated = ideal_mat + strain_coupling * (
+                        coupled_mat - ideal_mat
+                    )
+                    interpolated[2, 3] += (
+                        strain_coupling * profile_offset / a3_bottom
                     )
                     uc_b.coherentDomainMatrix.append(interpolated)
 
@@ -1003,9 +1143,31 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         self.uc_bottom.clearParameters()
 
     def parametersFromDict(self, d, override_values=True):
+        """Restore fit settings, including v1.5.0 HDF5 companions.
+
+        Two-element legacy baselines are expanded from ``[Width, Skew]`` to
+        ``[Width, Skew, 1, 0]`` before applying the stored fit parameters.
+
+        :param dict d:
+            Interface fit settings decoded from the companion HDF5 file.
+        :param bool override_values:
+            Apply stored fit-parameter values to the interface basis.
+        """
         self.uc_top.parametersFromDict(d["unitcells"]["top"], override_values)
         self.uc_bottom.parametersFromDict(d["unitcells"]["bottom"], override_values)
-        super().parametersFromDict(d, override_values)
+        interface_parameters = dict(d)
+        basis_0 = np.asarray(interface_parameters["basis_0"], dtype=np.float64)
+        if basis_0.size == 2:
+            # orGUI v1.5.0 HDF5 companions stored only Width and Skew.
+            # Preserve their fully strain-coupled, zero-offset behavior.
+            basis_0 = np.concatenate((basis_0, [1.0, 0.0]))
+        elif basis_0.size != 4:
+            raise ValueError(
+                "EpitaxyInterface fit settings require either the v1.5.0 "
+                "Width/Skew basis or the current four-parameter basis"
+            )
+        interface_parameters["basis_0"] = basis_0
+        super().parametersFromDict(interface_parameters, override_values)
 
     def updateFromParameters(self):
         """Update basis from the values stored in the Parameters"""
@@ -1046,6 +1208,18 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
     @classmethod
     def fromStr(cls, string):
+        """Deserialize a current or v1.5.0 text interface.
+
+        The v1.5.0 two-parameter representation is upgraded to a fully
+        strain-coupled, zero-offset interface.
+
+        :param str string:
+            Serialized EpitaxyInterface section from an ``.xtal`` or ``.xpr``
+            model.
+        :returns:
+            Reconstructed interface.
+        :rtype: EpitaxyInterface
+        """
         with util.StringIO(string) as f:
             # parse header
             line = next_skip_comment(f).split()
@@ -1062,9 +1236,12 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             ep_type = line[1].lower()
 
             statistics = dict()
+            parameter_header = None
             line = next_skip_comment(f)
             while "Width" in line or "=" in line:  # parameter header or statistics line
-                if "=" in line:
+                if "Width" in line:
+                    parameter_header = line.strip()
+                elif "=" in line:
                     try:
                         splitted = [n.split(",") for n in line.split("=")]
                         splitted = [item for sublist in splitted for item in sublist]
@@ -1073,6 +1250,15 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                     except Exception:
                         print(f"Cannot read statistics string: {line}")
                 line = next_skip_comment(f)
+            if parameter_header not in (
+                cls.parameterOrder,
+                cls.legacyParameterOrder,
+            ):
+                raise ValueError(
+                    "EpitaxyInterface parameter header must be either "
+                    f"'{cls.parameterOrder}' or the v1.5.0 header "
+                    f"'{cls.legacyParameterOrder}'"
+                )
             # epitaxy parameters
             sline = line.split()
             if "+-" in sline:
@@ -1085,14 +1271,18 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             else:
                 basis = np.array(sline, dtype=np.float64)
                 errors = None
-            if basis.size == 2:
+            expected_size = (
+                2 if parameter_header == cls.legacyParameterOrder else 4
+            )
+            if basis.size != expected_size:
+                raise ValueError(
+                    f"EpitaxyInterface header '{parameter_header}' requires "
+                    f"{expected_size} parameter values"
+                )
+            if expected_size == 2:
                 basis = np.concatenate((basis, [1.0, 0.0]))
                 if errors is not None:
                     errors = np.concatenate((errors, [np.nan, np.nan]))
-            elif basis.size != 4:
-                raise ValueError(
-                    "EpitaxyInterface requires Width, Skew, Coherence, and Offset"
-                )
 
         # very explicit searching for the lines containing TopUnitCell and BottomUnitCell:  # noqa: E501
         sp_str = string.splitlines()
@@ -1674,6 +1864,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         self.below_H = 0.0
         self.below_layer = -1.0
         self.underlying_film = None
+        self._reference_unitcell = None
+        self._reference_rotation = np.identity(3)
         self._film_layer_ucs_base = []
         self.film_layer_ucs = []
         self._initialize_layer_stacking(kwargs)
@@ -1841,6 +2033,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
         self.underlying_film = component
         self._film_layer_ucs_base = [film_layers[layer] for layer in film_layer_ids]
+        if self._reference_unitcell is not None:
+            self.setReferenceUnitCell(
+                self._reference_unitcell,
+                self._reference_rotation,
+            )
         self._set_layer_order(self.layer_order, self._layer_order_indices)
         self._basis_created = np.full_like(self.basis, np.nan)
 
@@ -1853,6 +2050,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             Optional 3-by-3 rotation from the reference frame into the surface
             crystal frame.
         """
+        self._reference_unitcell = uc
+        self._reference_rotation = np.asarray(rotMatrix, dtype=np.float64)
         for cell in self._owned_unitcells():
             cell.setReferenceUnitCell(uc, rotMatrix)
         for cell in getattr(self, "_termination_views", {}).values():
@@ -1959,9 +2158,6 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         )
         if represented_material.size == 0:
             raise ValueError("Poisson surface profile has no represented material")
-        top_stop = represented_material[-1] + 1
-        layer_numbers = layer_numbers[:top_stop]
-        material_occupancy = material_occupancy[:top_stop]
         surface_occupancy = profile.surface_occupancy(layer_numbers)
         sharp_film_occupancy = (layer_numbers < 0).astype(np.float64)
         film_correction_occupancy = material_occupancy - sharp_film_occupancy
@@ -1971,6 +2167,10 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         layer_numbers = layer_numbers[represented]
         surface_occupancy = surface_occupancy[represented]
         film_correction_occupancy = film_correction_occupancy[represented]
+        exposed_layers = layer_numbers[surface_occupancy > tail_probability]
+        if exposed_layers.size == 0:
+            raise ValueError("Poisson surface profile has no represented surface")
+        top_surface_layer = exposed_layers[-1]
         layers_to_create = len(layer_numbers)
         for uc in self.layer_ucs:
             uc.coherentDomainMatrix = []
@@ -2044,11 +2244,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
         if layers_to_create:
             self._end_layer_number = self.layer_order[
-                int(layer_numbers[-1] % n_layers_in_uc)
+                int(top_surface_layer % n_layers_in_uc)
             ]
             top_relative = (
-                layer_numbers[-1] // n_layers_in_uc
-                + self.layerpos[int(layer_numbers[-1] % n_layers_in_uc)]
+                top_surface_layer // n_layers_in_uc
+                + self.layerpos[int(top_surface_layer % n_layers_in_uc)]
                 - self.layerpos[0]
             )
             layer_spacing = self.underlying_film.unitcell.a[2] / n_layers_in_uc

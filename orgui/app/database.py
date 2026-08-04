@@ -70,6 +70,12 @@ class DBCloseError(IOError):
     pass
 
 
+class DBUnavailableError(IOError):
+    """Raised if an operation requires a database file, but none is open."""
+
+    pass
+
+
 DEFAULT_FILTERS = {  # Filters available with h5py/libhdf5
     "Raw": None,
     "GZip": "gzip",
@@ -181,9 +187,23 @@ class DataBase(qt.QMainWindow):
         self.view.doubleClicked.connect(self._onNEXUSDoubleClicked)
         self.view.addContextMenuCallback(self.nexus_treeview_callback)
 
-        self.temp_directory = tempfile.TemporaryDirectory(dir=os.path.join(os.getcwd()))
-        tempfilepath = os.path.join(self.temp_directory.name, "orgui_database.h5")
-        self.createNewDBFile(tempfilepath)
+        try:
+            self.openTemporaryDatabase()
+        except Exception:
+            # orGUI must start up even without a writable location for the
+            # scratch database, e.g. if the drive with the working directory
+            # is disconnected or read only.
+            logger.error(
+                "Cannot create the initial temporary database.",
+                exc_info=True,
+                extra={
+                    "title": "Cannot create database",
+                    "description": "Cannot create the initial temporary database. "
+                    "Create a new database before saving any data.",
+                    "show_dialog": True,
+                    "parent": self,
+                },
+            )
         # self.add_nxdict(gauss)
         # self.add_nxdict(gauss)
         self.setCentralWidget(self.view)
@@ -212,16 +232,31 @@ class DataBase(qt.QMainWindow):
 
         self.addToolBar(toolbar)
 
-    def _onNEXUSDoubleClicked(self, index):  # ToDo add try except with popup message!
-        nodes = list(self.view.selectedH5Nodes())
-        if len(nodes) > 0:
-            obj = nodes[0]
-            if obj.ntype is h5py.Dataset:
-                roi_node = self.get_roinode(obj.h5py_object)
-                if roi_node is not None:
-                    self.plot_signal_callback(roi_node, obj)
-                    return
-            self.plot_default(obj.h5py_object)
+    def _onNEXUSDoubleClicked(self, index):
+        try:
+            nodes = list(self.view.selectedH5Nodes())
+            if len(nodes) > 0:
+                obj = nodes[0]
+                if obj.ntype is h5py.Dataset:
+                    roi_node = self.get_roinode(obj.h5py_object)
+                    if roi_node is not None:
+                        self.plot_signal_callback(roi_node, obj)
+                        return
+                self.plot_default(obj.h5py_object)
+        except Exception as e:
+            # reading the database can fail at any time, e.g. if the drive
+            # with the database was disconnected.
+            logger.error(
+                "Cannot read the selected database entry.",
+                exc_info=True,
+                extra={
+                    "title": "Cannot read database",
+                    "description": f"Cannot read the selected database entry:\n{e}",
+                    "show_dialog": True,
+                    "dialog_level": logging.WARNING,
+                    "parent": self,
+                },
+            )
 
     def plot_default(self, h5py_object):
         try:
@@ -262,11 +297,35 @@ class DataBase(qt.QMainWindow):
             obj = obj.parent
 
     def nexus_treeview_callback(self, event):
+        """Fill the context menu of the database tree view.
+
+        Building the menu reads attributes from the database file, which can
+        fail at any time, e.g. if the drive with the database was
+        disconnected. Such errors must not escape into the Qt event loop.
+        """
+        try:
+            self._fillNexusTreeviewMenu(event)
+        except Exception as e:
+            logger.error(
+                "Cannot create the context menu of the database entry.",
+                exc_info=True,
+                extra={
+                    "title": "Cannot read database",
+                    "description": f"Cannot read the selected database entry:\n{e}",
+                    "show_dialog": True,
+                    "dialog_level": logging.WARNING,
+                    "parent": self,
+                },
+            )
+
+    def _fillNexusTreeviewMenu(self, event):
         objects = list(event.source().selectedH5Nodes())
+        if not objects:
+            return
         obj = objects[0]  # for single selection
         menu = event.menu()
         action = qt.QAction("Refresh", menu)
-        action.triggered.connect(lambda: self.hdf5model.synchronizeH5pyObject(obj))
+        action.triggered.connect(lambda: self.onRefreshNode(obj))
         menu.addAction(action)
         action = qt.QAction("details", menu)
         action.triggered.connect(lambda: self.view_data_callback(obj))
@@ -295,7 +354,7 @@ class DataBase(qt.QMainWindow):
                     menu.addAction(action)
                 menu.addSeparator()
                 action = qt.QAction("delete", menu)
-                action.triggered.connect(lambda: self.delete_node(obj.h5py_object))
+                action.triggered.connect(lambda: self.onDeleteNode(obj.h5py_object))
                 menu.addAction(action)
 
             elif meta and "rocking" in meta:
@@ -307,7 +366,7 @@ class DataBase(qt.QMainWindow):
                 menu.addAction(action)
                 menu.addSeparator()
                 action = qt.QAction("delete", menu)
-                action.triggered.connect(lambda: self.delete_node(obj.h5py_object))
+                action.triggered.connect(lambda: self.onDeleteNode(obj.h5py_object))
                 menu.addAction(action)
 
             if meta and "scan" in meta:
@@ -401,6 +460,8 @@ class DataBase(qt.QMainWindow):
                     "parent": self,
                 },
             )
+        finally:
+            self._ensureDatabaseAvailable()
 
     def onNewDatabase(self):
         fileTypeDict = {"NEXUS Files (*.h5)": ".h5", "All files (*)": ""}
@@ -448,6 +509,8 @@ class DataBase(qt.QMainWindow):
                     "parent": self,
                 },
             )
+        finally:
+            self._ensureDatabaseAvailable()
 
     def onSaveDBFile(self):
         fileTypeDict = {"NEXUS Files (*.h5)": ".h5", "All files (*)": ""}
@@ -503,25 +566,21 @@ class DataBase(qt.QMainWindow):
                     "parent": self,
                 },
             )
+        finally:
+            self._ensureDatabaseAvailable()
 
     def saveNewDBFile(self, filename):
-        alldata = nxtodict(self.nxfile)
+        alldata = nxtodict(self._requireOpenFile())
         self.createNewDBFile(filename, alldata)
 
     def saveDBFile(self, filename):
-        alldata = nxtodict(self.nxfile)
+        alldata = nxtodict(self._requireOpenFile())
         dicttonx(
             alldata, filename, create_dataset_args={"compression": self.compression}
         )
 
     def createNewDBFile(self, filename, datadict=None):
-        if self.nxfile is not None:
-            try:
-                self.close()
-            except Exception as e:
-                raise DBCloseError(
-                    "Cannot close previous database file.\nThe database might be corrupted."  # noqa: E501
-                ) from e  # convert to common IOError since can also be RuntimeError
+        self._closePreviousDBFile()
 
         fileattrs = {
             "@NX_class": "NXroot",
@@ -540,13 +599,7 @@ class DataBase(qt.QMainWindow):
         self.openDBFile(filename)
 
     def openDBFile(self, filename):
-        if self.nxfile is not None:
-            try:
-                self.close()
-            except Exception as e:
-                raise DBCloseError(
-                    "Cannot close previous database file.\nThe database might be corrupted."  # noqa: E501
-                ) from e  # convert to common IOError since can also be RuntimeError
+        self._closePreviousDBFile()
         self.nxfile = silx.io.h5py_utils.File(filename, "a")
         self._filepath = filename
         while self.hdf5model.hasPendingOperations():
@@ -555,12 +608,120 @@ class DataBase(qt.QMainWindow):
         self.hdf5model.insertH5pyObject(self.nxfile)
         self.view.expandToDepth(0)
 
-    def add_nxdict(self, nxentry, update_mode="add", h5path="/"):
+    def _closePreviousDBFile(self):
+        """Close the currently open database file, if there is any.
+
+        :raises DBCloseError:
+            If the database file cannot be closed properly. The database is
+            detached from orGUI in any case, so that a new database file can
+            be created or opened afterwards.
+        """
         if self.nxfile is None:
-            raise Exception("No database file open.")
+            return
+        try:
+            self.close()
+        except Exception as e:
+            raise DBCloseError(
+                "Cannot close previous database file.\nThe database might be corrupted."  # noqa: E501
+            ) from e  # convert to common IOError since can also be RuntimeError
+
+    def isOpen(self):
+        """Whether a usable database file is currently open.
+
+        Returns False if the database was never opened, or if the file handle
+        was closed, e.g. after a failed write to a disconnected drive.
+
+        :rtype: bool
+        """
+        return bool(self.nxfile)
+
+    def _requireOpenFile(self):
+        """Return the open database file.
+
+        :raises DBUnavailableError: If no database file is open.
+        """
+        if not self.isOpen():
+            raise DBUnavailableError(
+                "No database file open. Create or open a database first."
+            )
+        return self.nxfile
+
+    def openTemporaryDatabase(self):
+        """Create and open a scratch database in a temporary directory.
+
+        Used at startup and as a fallback if the database on disk became
+        unavailable, so that orGUI stays operational.
+        """
+        # close first: this discards the previous temporary directory
+        self._closePreviousDBFile()
+        self.temp_directory = self._createTempDirectory()
+        self.createNewDBFile(
+            os.path.join(self.temp_directory.name, "orgui_database.h5")
+        )
+
+    @staticmethod
+    def _createTempDirectory():
+        """Create the temporary directory of the scratch database.
+
+        The working directory is preferred, since it is usually located on the
+        same drive as the measured data. If it is not writable, e.g. because
+        the drive was disconnected, the system temporary directory is used.
+        """
+        try:
+            return tempfile.TemporaryDirectory(
+                dir=os.getcwd(), ignore_cleanup_errors=True
+            )
+        except OSError:
+            logger.warning(
+                "Cannot create a temporary database directory in %s. "
+                "Using the system temporary directory instead.",
+                os.getcwd(),
+                exc_info=True,
+            )
+            return tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+
+    def _ensureDatabaseAvailable(self):
+        """Fall back to a temporary database if no database file is open.
+
+        Called after a failed attempt to create or open a database file, so
+        that data can still be saved somewhere and orGUI keeps operating.
+        """
+        if self.isOpen():
+            return
+        try:
+            self.openTemporaryDatabase()
+        except Exception:
+            logger.error(
+                "Cannot create a temporary database.",
+                exc_info=True,
+                extra={
+                    "title": "No database available",
+                    "description": "Cannot create a temporary database. "
+                    "No data can be saved until a new database is created.",
+                    "show_dialog": True,
+                    "parent": self,
+                },
+            )
+            return
+        logger.warning(
+            "No database file available, created the temporary database %s.",
+            self._filepath,
+            extra={
+                "title": "Temporary database created",
+                "description": "No database file is available. Created the "
+                f"temporary database\n{self._filepath}\n"
+                "Save the database to a permanent location to keep the data.",
+                "show_dialog": True,
+                "dialog_level": logging.WARNING,
+                "parent": self,
+            },
+        )
+
+    def add_nxdict(self, nxentry, update_mode="add", h5path="/"):
+        nxfile = self._requireOpenFile()
         dicttonx(
             nxentry,
-            self.nxfile,
+            nxfile,
             h5path=h5path,
             update_mode="add",
             create_dataset_args={"compression": self.compression},
@@ -568,7 +729,7 @@ class DataBase(qt.QMainWindow):
         while self.hdf5model.hasPendingOperations():
             qt.QApplication.processEvents()
             time.sleep(0.01)
-        self.hdf5model.synchronizeH5pyObject(self.nxfile)
+        self.hdf5model.synchronizeH5pyObject(nxfile)
         self.view.expandToDepth(0)
 
     def register_external_result(
@@ -595,7 +756,7 @@ class DataBase(qt.QMainWindow):
         """Write the default config group for a scan."""
         if config is None:
             config = ConfigData.from_gui(self.config_target)
-        group = self.nxfile[scan_name]
+        group = self._requireOpenFile()[scan_name]
         self.config_handler.create_dataset_args = {"compression": self.compression}
         return self.config_handler.write_scan_config(group, config)
 
@@ -603,7 +764,7 @@ class DataBase(qt.QMainWindow):
         """Write the config group used for an integration result."""
         if config is None:
             config = ConfigData.from_gui(self.config_target)
-        group = self.nxfile[integration_path]
+        group = self._requireOpenFile()[integration_path]
         self.config_handler.create_dataset_args = {"compression": self.compression}
         return self.config_handler.write_integration_config(group, config)
 
@@ -616,9 +777,64 @@ class DataBase(qt.QMainWindow):
             ),  # noqa: E501
         )
         if btn == qt.QMessageBox.Yes:
+            self.onDeleteNode(obj)
+
+    def onDeleteNode(self, obj):
+        """Delete a node from the database and report errors to the user."""
+        try:
             self.delete_node(obj)
+        except Exception as e:
+            logger.error(
+                "Cannot delete entry from the database.",
+                exc_info=True,
+                extra={
+                    "title": "Cannot delete database entry",
+                    "description": f"Cannot delete entry from the database:\n{e}",
+                    "show_dialog": True,
+                    "dialog_level": logging.WARNING,
+                    "parent": self,
+                },
+            )
+
+    def onRefreshNode(self, obj):
+        """Reload a database entry in the tree view, reporting errors."""
+        try:
+            self.hdf5model.synchronizeH5pyObject(obj)
+        except Exception as e:
+            logger.error(
+                "Cannot refresh the database entry.",
+                exc_info=True,
+                extra={
+                    "title": "Cannot refresh database entry",
+                    "description": f"Cannot refresh the database entry:\n{e}",
+                    "show_dialog": True,
+                    "dialog_level": logging.WARNING,
+                    "parent": self,
+                },
+            )
 
     def onShowRoIntegrate(self, obj):
+        try:
+            h5_obj = self._findRockingScanGroup(obj)
+        except Exception as e:
+            logger.error(
+                "Cannot read the rocking scan from the database.",
+                exc_info=True,
+                extra={
+                    "title": "Cannot read database",
+                    "description": f"Cannot read the rocking scan:\n{e}",
+                    "show_dialog": True,
+                    "dialog_level": logging.WARNING,
+                    "parent": self,
+                },
+            )
+            return
+        if h5_obj is None:
+            return  # invalid dataset
+        self.sigChangeRockingScan.emit(h5_obj.name)
+
+    def _findRockingScanGroup(self, obj):
+        """Return the rocking scan group of a database entry, or None."""
         meta = obj.h5py_object.attrs.get("orgui_meta", False)
         h5_obj = obj.h5py_object
         while h5_obj.name != "/":  # search for rocking scan group
@@ -636,19 +852,19 @@ class DataBase(qt.QMainWindow):
                 self,
             )
             msgbox.exec()
-            return  # invalid dataset
+            return None  # invalid dataset
 
-        dir_name = h5_obj.name
-        self.sigChangeRockingScan.emit(dir_name)
+        return h5_obj
 
     def delete_node(self, obj):
+        nxfile = self._requireOpenFile()
         basename = obj.name.split("/")[-1]
         objpar = obj.parent
         del objpar[basename]
         while self.hdf5model.hasPendingOperations():
             qt.QApplication.processEvents()
             time.sleep(0.01)
-        self.hdf5model.synchronizeH5pyObject(self.nxfile)
+        self.hdf5model.synchronizeH5pyObject(nxfile)
         self.view.expandToDepth(0)
 
     def onRenameNode(self, obj):
@@ -661,52 +877,153 @@ class DataBase(qt.QMainWindow):
             basename,
         )
         if success and newname != "":
-            self.rename_node(obj, newname)
+            try:
+                self.rename_node(obj, newname)
+            except Exception as e:
+                logger.error(
+                    "Cannot rename entry in the database.",
+                    exc_info=True,
+                    extra={
+                        "title": "Cannot rename database entry",
+                        "description": f"Cannot rename entry {basename}:\n{e}",
+                        "show_dialog": True,
+                        "dialog_level": logging.WARNING,
+                        "parent": self,
+                    },
+                )
 
     def rename_node(self, obj, newname):
+        nxfile = self._requireOpenFile()
         basename = obj.name.split("/")[-1]
         objpar = obj.parent
         objpar.move(basename, newname)
         while self.hdf5model.hasPendingOperations():
             qt.QApplication.processEvents()
             time.sleep(0.01)
-        self.hdf5model.synchronizeH5pyObject(self.nxfile)
+        self.hdf5model.synchronizeH5pyObject(nxfile)
         self.view.expandToDepth(0)
 
     def close(self):
-        if self.nxfile is not None:
-            timer = 1
-            if self.hdf5model.hasPendingOperations():
-                qt.QApplication.processEvents()
-            while self.hdf5model.hasPendingOperations() and timer < 6000:
-                time.sleep(0.01)
-                if not (timer % 1000):
-                    qt.QApplication.processEvents()
-                timer += 1
-            if timer == 6000:
-                raise Exception(
-                    "Timeout on hdf5 model operation, This is probably a bug, or a very long writing operation occurs, please report if this is a long writing opertion"  # noqa: E501
-                )
-            self.hdf5model.removeH5pyObject(self.nxfile)
-            timer = 1
-            while self.hdf5model.hasPendingOperations() and timer < 6000:
-                time.sleep(0.01)
-                if not (timer % 1000):
-                    qt.QApplication.processEvents()
-                timer += 1
-            if timer == 6000:
-                raise Exception(
-                    "Timeout on hdf5 model operation, This is probably a bug, or a very long writing operation occurs, please report if this is a long writing opertion"  # noqa: E501
-                )
+        """Close the database file and detach it from the tree view.
+
+        orGUI always detaches from the database file, even if it cannot be
+        closed properly, e.g. if the drive with the database was disconnected.
+        A new database can therefore be created or opened afterwards, also
+        after this method raised an error.
+
+        :raises DBCloseError:
+            If pending database operations do not finish in time. The database
+            file is not closed in this case, since closing it while the tree
+            model reads it can crash the application.
+        :raises Exception:
+            The error raised by h5py if the file cannot be closed properly,
+            usually a RuntimeError or an OSError. The database file might be
+            corrupted in this case.
+        """
+        if self.nxfile is None:
+            return
+        # keep the file open on timeout, the tree model might still read it.
+        self._waitForPendingOperations()
+
+        nxfile = self.nxfile
+        self.nxfile = None  # the file handle must not be used any longer
+        try:
+            self._detachFromTreeView(nxfile)
+            self._waitForPendingOperations()
             try:
-                self.nxfile.close()
-            except RuntimeError:
-                self.nxfile = None
+                nxfile.close()
+            except Exception:
                 logger.error(
                     "Closing of database file failed. The database file might be corrupted!",  # noqa: E501
                     exc_info=True,
                 )
                 raise
+        finally:
+            self._discardTempDirectory()
 
-            if hasattr(self, "temp_directory"):
-                del self.temp_directory
+    def closeSafe(self, show_dialog=False):
+        """Close the database file, without raising on error.
+
+        Used on shutdown paths, where a failed close must not escape into the
+        Qt event loop or the exception hook.
+
+        :param bool show_dialog:
+            Notify the user with a message box if the database file could not
+            be closed properly.
+        :returns: True if the database file was closed properly.
+        :rtype: bool
+        """
+        try:
+            self.close()
+        except Exception:
+            # logged as a warning on purpose: in cli context, error records
+            # re-raise the exception, see orgui.logger_utils.
+            logger.warning(
+                "Cannot close the database file. The database might be corrupted!",
+                exc_info=True,
+                extra={
+                    "title": "The database might be corrupted",
+                    "description": "Cannot close the database file properly. "
+                    "The data written since the last save might be lost.",
+                    "show_dialog": show_dialog,
+                    "dialog_level": logging.ERROR,
+                    "parent": self,
+                },
+            )
+            return False
+        return True
+
+    def _waitForPendingOperations(self, timeout=60.0):
+        """Wait until the tree model finished its asynchronous operations.
+
+        :param float timeout: Maximum waiting time in seconds.
+        :raises DBCloseError: If the operations did not finish in time.
+        """
+        deadline = time.monotonic() + timeout
+        while self.hdf5model.hasPendingOperations():
+            if time.monotonic() > deadline:
+                raise DBCloseError(
+                    "Timeout on hdf5 model operation. This is probably a bug, or a "
+                    "very long writing operation occurs. Please report this if no "
+                    "long writing operation is running."
+                )
+            # the pending operations of the tree model only finish if Qt can
+            # process events, see also add_nxdict.
+            qt.QApplication.processEvents()
+            time.sleep(0.01)
+
+    def _detachFromTreeView(self, nxfile):
+        """Remove a database file from the tree view. Does not raise.
+
+        Removing the item reads from the file, which can fail if the file
+        became unavailable. orGUI has to detach from it in any case.
+        """
+        # logged as warnings on purpose: in cli context, error records re-raise
+        # the exception, see orgui.logger_utils.
+        try:
+            self.hdf5model.removeH5pyObject(nxfile)
+        except Exception:
+            logger.warning(
+                "Cannot remove the database from the tree view. "
+                "Clearing the tree view instead.",
+                exc_info=True,
+            )
+            try:
+                self.hdf5model.clear()
+            except Exception:
+                logger.warning("Cannot clear the database tree view.", exc_info=True)
+
+    def _discardTempDirectory(self):
+        """Delete the temporary directory of the scratch database, if any."""
+        temp_directory = getattr(self, "temp_directory", None)
+        if temp_directory is None:
+            return
+        del self.temp_directory
+        try:
+            temp_directory.cleanup()
+        except Exception:
+            logger.warning(
+                "Cannot remove the temporary database directory %s.",
+                temp_directory.name,
+                exc_info=True,
+            )

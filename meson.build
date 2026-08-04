@@ -233,6 +233,14 @@ py.extension_module(
   subdir: 'orgui/app'
 )
 
+py.extension_module(
+  '_qconversion_cpp',
+  files('orgui/app/cpp/qconversion_cpp.cpp'),
+  dependencies: [pybind11_dep],
+  install: true,
+  subdir: 'orgui/app'
+)
+
 install_subdir(
   'orgui',
   install_dir: py.get_install_dir(),
