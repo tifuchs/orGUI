@@ -5,6 +5,7 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <pybind11/numpy.h>
@@ -358,6 +359,369 @@ void repair_masked_pixels_inplace(
         }
     }
 }
+
+struct PlannedRepairCandidate {
+    py::ssize_t index;
+    double inverse_distance2;
+    unsigned char sides;
+};
+
+struct PlannedRepairComponent {
+    std::vector<py::ssize_t> targets;
+    std::vector<PlannedRepairCandidate> candidates;
+    bool median;
+};
+
+int side_count(const unsigned char sides) {
+    return static_cast<int>(sides & 1U)
+        + static_cast<int>((sides >> 1U) & 1U)
+        + static_cast<int>((sides >> 2U) & 1U)
+        + static_cast<int>((sides >> 3U) & 1U);
+}
+
+class PixelRepairPlan {
+public:
+    PixelRepairPlan(
+        const BoolArray2D mask,
+        const IntArray2D row_gaps,
+        const IntArray2D col_gaps,
+        const int max_component_pixels,
+        const int max_span,
+        const int radius,
+        const int min_valid_neighbors
+    )
+        : max_component_pixels_(max_component_pixels),
+          max_span_(max_span),
+          radius_(radius),
+          min_valid_neighbors_(min_valid_neighbors) {
+        const auto mask_info = mask.request();
+        const auto row_gap_info = row_gaps.request();
+        const auto col_gap_info = col_gaps.request();
+        require_ndim(mask_info, 2, "mask");
+        require_intervals_shape(row_gap_info, "row_gaps");
+        require_intervals_shape(col_gap_info, "col_gaps");
+        if (max_component_pixels < 1 || max_span < 1 || radius < 1
+            || min_valid_neighbors < 1) {
+            throw py::value_error("repair settings must be positive");
+        }
+        height_ = mask_info.shape[0];
+        width_ = mask_info.shape[1];
+        size_ = mask_info.size;
+        const bool *mask_data = bool_ptr(mask_info);
+        const std::int32_t *row_gap_data = int32_ptr(row_gap_info);
+        const std::int32_t *col_gap_data = int32_ptr(col_gap_info);
+        mask_.resize(static_cast<std::size_t>(size_));
+        {
+            py::gil_scoped_release release;
+            for (py::ssize_t index = 0; index < size_; ++index) {
+                mask_[static_cast<std::size_t>(index)] =
+                    static_cast<unsigned char>(mask_data[index]);
+            }
+            build(
+                row_gap_data,
+                row_gap_info,
+                col_gap_data,
+                col_gap_info
+            );
+        }
+    }
+
+    py::tuple apply_inplace(Array2D intensity, Array2D variance) const {
+        const auto intensity_info = intensity.request();
+        const auto variance_info = variance.request();
+        require_ndim(intensity_info, 2, "intensity");
+        require_same_image_shape(intensity_info, variance_info, "variance");
+        if (
+            intensity_info.shape[0] != height_
+            || intensity_info.shape[1] != width_
+        ) {
+            throw py::value_error(
+                "intensity and variance must match the repair-plan shape"
+            );
+        }
+        BoolArray2D remaining({height_, width_});
+        BoolArray2D repaired({height_, width_});
+        const auto remaining_info = remaining.request();
+        const auto repaired_info = repaired.request();
+        double *intensity_data = mutable_double_ptr(intensity_info);
+        double *variance_data = mutable_double_ptr(variance_info);
+        bool *remaining_data = static_cast<bool *>(remaining_info.ptr);
+        bool *repaired_data = static_cast<bool *>(repaired_info.ptr);
+        {
+            py::gil_scoped_release release;
+            for (py::ssize_t index = 0; index < size_; ++index) {
+                remaining_data[index] =
+                    mask_[static_cast<std::size_t>(index)] != 0;
+                repaired_data[index] = false;
+            }
+            std::vector<const PlannedRepairCandidate *> valid;
+            std::vector<std::pair<double, py::ssize_t>> ordered;
+            for (const PlannedRepairComponent &component : components_) {
+                valid.clear();
+                unsigned char sides = 0;
+                for (const PlannedRepairCandidate &candidate
+                     : component.candidates) {
+                    if (!std::isfinite(intensity_data[candidate.index])) {
+                        continue;
+                    }
+                    valid.push_back(&candidate);
+                    sides = static_cast<unsigned char>(
+                        sides | candidate.sides
+                    );
+                }
+                if (
+                    static_cast<int>(valid.size()) < min_valid_neighbors_
+                    || side_count(sides) < 2
+                ) {
+                    continue;
+                }
+                double value = 0.0;
+                double value_variance = 0.0;
+                if (component.median) {
+                    ordered.clear();
+                    ordered.reserve(valid.size());
+                    for (const PlannedRepairCandidate *candidate : valid) {
+                        ordered.emplace_back(
+                            intensity_data[candidate->index],
+                            candidate->index
+                        );
+                    }
+                    std::stable_sort(
+                        ordered.begin(),
+                        ordered.end(),
+                        [](const auto &left, const auto &right) {
+                            return left.first < right.first;
+                        }
+                    );
+                    const std::size_t middle = ordered.size() / 2;
+                    if (ordered.size() % 2 == 0) {
+                        const auto &lower = ordered[middle - 1];
+                        const auto &upper = ordered[middle];
+                        value = 0.5 * (lower.first + upper.first);
+                        value_variance = 0.25 * (
+                            variance_data[lower.second]
+                            + variance_data[upper.second]
+                        );
+                    } else {
+                        const auto &selected = ordered[middle];
+                        value = selected.first;
+                        value_variance = variance_data[selected.second];
+                    }
+                } else {
+                    double total_weight = 0.0;
+                    for (const PlannedRepairCandidate *candidate : valid) {
+                        total_weight += candidate->inverse_distance2;
+                    }
+                    for (const PlannedRepairCandidate *candidate : valid) {
+                        const double weight =
+                            candidate->inverse_distance2 / total_weight;
+                        value += intensity_data[candidate->index] * weight;
+                        value_variance += (
+                            variance_data[candidate->index] * weight * weight
+                        );
+                    }
+                }
+                for (const py::ssize_t target : component.targets) {
+                    intensity_data[target] = value;
+                    variance_data[target] = value_variance;
+                    remaining_data[target] = false;
+                    repaired_data[target] = true;
+                }
+            }
+        }
+        return py::make_tuple(remaining, repaired);
+    }
+
+    py::dict configuration() const {
+        py::dict result;
+        result["shape"] = py::make_tuple(height_, width_);
+        result["components"] = components_.size();
+        result["repairable_pixels"] = repairable_pixels_;
+        result["max_component_pixels"] = max_component_pixels_;
+        result["max_span"] = max_span_;
+        result["radius"] = radius_;
+        result["min_valid_neighbors"] = min_valid_neighbors_;
+        return result;
+    }
+
+private:
+    void build(
+        const std::int32_t *row_gaps,
+        const py::buffer_info &row_gap_info,
+        const std::int32_t *col_gaps,
+        const py::buffer_info &col_gap_info
+    ) {
+        std::vector<unsigned char> visited(
+            static_cast<std::size_t>(size_),
+            0
+        );
+        for (py::ssize_t initial = 0; initial < size_; ++initial) {
+            if (
+                visited[static_cast<std::size_t>(initial)]
+                || mask_[static_cast<std::size_t>(initial)] == 0
+            ) {
+                continue;
+            }
+            std::vector<py::ssize_t> component;
+            std::queue<py::ssize_t> pending;
+            visited[static_cast<std::size_t>(initial)] = 1;
+            pending.push(initial);
+            while (!pending.empty()) {
+                const py::ssize_t current = pending.front();
+                pending.pop();
+                component.push_back(current);
+                const py::ssize_t row = current / width_;
+                const py::ssize_t column = current % width_;
+                const py::ssize_t neighbors[4][2] = {
+                    {row - 1, column},
+                    {row + 1, column},
+                    {row, column - 1},
+                    {row, column + 1},
+                };
+                for (const auto &neighbor : neighbors) {
+                    const py::ssize_t next_row = neighbor[0];
+                    const py::ssize_t next_column = neighbor[1];
+                    if (
+                        next_row < 0 || next_column < 0
+                        || next_row >= height_ || next_column >= width_
+                    ) {
+                        continue;
+                    }
+                    const py::ssize_t next =
+                        next_row * width_ + next_column;
+                    if (
+                        !visited[static_cast<std::size_t>(next)]
+                        && mask_[static_cast<std::size_t>(next)] != 0
+                    ) {
+                        visited[static_cast<std::size_t>(next)] = 1;
+                        pending.push(next);
+                    }
+                }
+            }
+            if (
+                component.empty()
+                || static_cast<int>(component.size())
+                    > max_component_pixels_
+                || touches_gap(
+                    component,
+                    width_,
+                    row_gaps,
+                    row_gap_info,
+                    col_gaps,
+                    col_gap_info
+                )
+            ) {
+                continue;
+            }
+            py::ssize_t row_min = height_;
+            py::ssize_t row_max = -1;
+            py::ssize_t column_min = width_;
+            py::ssize_t column_max = -1;
+            for (const py::ssize_t target : component) {
+                const py::ssize_t row = target / width_;
+                const py::ssize_t column = target % width_;
+                row_min = std::min(row_min, row);
+                row_max = std::max(row_max, row);
+                column_min = std::min(column_min, column);
+                column_max = std::max(column_max, column);
+            }
+            if (
+                row_max - row_min + 1 > max_span_
+                || column_max - column_min + 1 > max_span_
+            ) {
+                continue;
+            }
+            PlannedRepairComponent plan;
+            plan.targets = component;
+            plan.median = component.size() == 1;
+            unsigned char available_sides = 0;
+            for (
+                py::ssize_t row = std::max<py::ssize_t>(
+                    0, row_min - radius_
+                );
+                row <= std::min<py::ssize_t>(
+                    height_ - 1, row_max + radius_
+                );
+                ++row
+            ) {
+                for (
+                    py::ssize_t column = std::max<py::ssize_t>(
+                        0, column_min - radius_
+                    );
+                    column <= std::min<py::ssize_t>(
+                        width_ - 1, column_max + radius_
+                    );
+                    ++column
+                ) {
+                    const py::ssize_t index = row * width_ + column;
+                    if (mask_[static_cast<std::size_t>(index)] != 0) {
+                        continue;
+                    }
+                    double distance2 =
+                        std::numeric_limits<double>::infinity();
+                    for (const py::ssize_t target : component) {
+                        const double delta_row = static_cast<double>(
+                            row - target / width_
+                        );
+                        const double delta_column = static_cast<double>(
+                            column - target % width_
+                        );
+                        distance2 = std::min(
+                            distance2,
+                            delta_row * delta_row
+                                + delta_column * delta_column
+                        );
+                    }
+                    if (
+                        distance2 <= 0.0
+                        || distance2 > radius_ * radius_
+                    ) {
+                        continue;
+                    }
+                    unsigned char sides = 0;
+                    if (column < column_min) {
+                        sides = static_cast<unsigned char>(sides | 1U);
+                    }
+                    if (column > column_max) {
+                        sides = static_cast<unsigned char>(sides | 2U);
+                    }
+                    if (row < row_min) {
+                        sides = static_cast<unsigned char>(sides | 4U);
+                    }
+                    if (row > row_max) {
+                        sides = static_cast<unsigned char>(sides | 8U);
+                    }
+                    available_sides = static_cast<unsigned char>(
+                        available_sides | sides
+                    );
+                    plan.candidates.push_back(
+                        {index, 1.0 / distance2, sides}
+                    );
+                }
+            }
+            if (
+                static_cast<int>(plan.candidates.size())
+                    < min_valid_neighbors_
+                || side_count(available_sides) < 2
+            ) {
+                continue;
+            }
+            repairable_pixels_ += plan.targets.size();
+            components_.push_back(std::move(plan));
+        }
+    }
+
+    py::ssize_t height_ = 0;
+    py::ssize_t width_ = 0;
+    py::ssize_t size_ = 0;
+    int max_component_pixels_;
+    int max_span_;
+    int radius_;
+    int min_valid_neighbors_;
+    std::size_t repairable_pixels_ = 0;
+    std::vector<unsigned char> mask_;
+    std::vector<PlannedRepairComponent> components_;
+};
 
 RoiSums sum_roi_with_mask(
     const double *image_data,
@@ -1685,6 +2049,35 @@ void calcMaxSum_bg(
 
 PYBIND11_MODULE(_roi_sum_cpp, module) {
     module.doc() = "CPU C++ acceleration kernels for ROI image summing.";
+    py::class_<PixelRepairPlan>(module, "PixelRepairPlan")
+        .def(
+            py::init<
+                const BoolArray2D,
+                const IntArray2D,
+                const IntArray2D,
+                int,
+                int,
+                int,
+                int
+            >(),
+            py::arg("mask"),
+            py::arg("row_gaps"),
+            py::arg("column_gaps"),
+            py::arg("max_component_pixels") = 4,
+            py::arg("max_span") = 3,
+            py::arg("radius") = 2,
+            py::arg("min_valid_neighbors") = 6
+        )
+        .def(
+            "apply_inplace",
+            &PixelRepairPlan::apply_inplace,
+            py::arg("intensity"),
+            py::arg("variance")
+        )
+        .def(
+            "configuration",
+            &PixelRepairPlan::configuration
+        );
     module.def("processImage_Carr", &processImage_Carr);
     module.def("processImage_bg_Carr", &processImage_bg_Carr);
     module.def(

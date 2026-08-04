@@ -105,6 +105,12 @@ class ImportImagesScan:
             self.th = self.axis
             self.omega = -1 * self.th
             self.mu = fixedAxisValue
+        elif axis == "mu":
+            self.mu = self.axis
+            self.th = fixedAxisValue
+            self.omega = -1 * self.th
+        else:
+            raise ValueError(f"{axis} is not an implemented scan axis.")
 
     def __len__(self):
         return self.nopoints

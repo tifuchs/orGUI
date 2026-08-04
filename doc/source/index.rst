@@ -19,6 +19,7 @@ large 2D detectors.
    geometry
    ub_matrix
    image_integration
+   reciprocal_space_reconstruction
    acceleration_backends
    entry_points
    benchmarks/ctr_accel_backends

@@ -56,6 +56,12 @@ ESRF ID31 beamline support and reciprocal-space display:
 - **BREAKING CHANGE:** HDF5 file locking is now disabled by default (``HDF5_USE_FILE_LOCKING=False``), so that files still open for writing by the acquisition system can be read. A manually set environment variable still wins, and ``--hdflocking`` / ``-l`` restores the previous behavior.
 - **BREAKING CHANGE:** the segmented ("interlaced") scan loader no longer guesses a file's layout from a hardcoded list of beamtime ids. Backends can now answer directly with the new optional ``Scan.listScans`` classmethod, which returns the scan identifiers -- numbers such as ``[1, 2, 10]``, names such as ``["ascan_12", "dscan_3"]``, or ``(identifier, label)`` pairs to label the rows of the selection dialog. Backends that do not implement it are handled by applying their own ``parse_h5_node`` to every entry of the file root, which requires no backend change but relies on ``parse_h5_node`` raising for entries that are not scans. Either way the loader can no longer disagree with how the same backend opens a single scan. This fixes the ``id31_default_p4`` backend, which the old list did not cover, and makes custom backends work regardless of what their class is called -- the example backend under ``examples/backend/ID31_EBS_p4_backend.py`` was itself affected. Backends addressed by a name rather than by a number are now supported here as well, which makes segmented scans work for the legacy ``ch5523`` beamtime for the first time: it was listed as ID31-style, so the loader looked for a ``"<scan>.<subscan>"`` name its files never had and raised before showing the dialog. Subscans such as ``1.10`` are no longer mistaken for the ``1.1`` fast-counter subscan.
 
+Reciprocal-space reconstruction:
+
+- Added a centralized, out-of-core reciprocal-space reconstruction pipeline. A new "Reconstruct reciprocal space" dialog (Configuration menu) defines HKL/Q output grids, previews coverage and storage cost, and prepares, runs, and resumes jobs. Jobs can run locally, as SGE/Slurm cluster batch arrays with parallel submap reduction, or from the command line via a new ``reconstruction_cli`` entry point.
+- Added a shared HDF5 output-settings dialog (chunk shape, compression) reachable from both the reconstruction dialog and the Configuration menu.
+- Exposure-time normalization and monitor-counter corrections now live in the reconstruction dialog rather than the shared scan-options panel, since they affect reconstruction output only, not ROI/CTR image integration.
+
 1.5.0 (2026-06-07)
 ------------------
 
