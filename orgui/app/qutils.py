@@ -28,9 +28,41 @@ __version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
+import logging
+
 from silx.gui import qt
 from silx.gui import icons
+from silx.gui.hdf5.Hdf5TreeModel import Hdf5TreeModel
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+class RobustHdf5TreeModel(Hdf5TreeModel):
+    """HDF5 tree model which tolerates files that cannot be closed.
+
+    :class:`Hdf5TreeModel` closes the files it owns when the corresponding
+    item is removed from the model. h5py raises if the file cannot be written
+    on close, e.g. if the drive holding the file was disconnected. Such an
+    error aborts the removal of the item and propagates into the Qt event
+    loop, which terminates orGUI (issue #23).
+
+    This model logs the error instead and removes the item, so that the user
+    can continue to work with the remaining files.
+    """
+
+    def _closeFileIfOwned(self, node):
+        try:
+            super()._closeFileIfOwned(node)
+        except Exception:
+            filename = getattr(node.obj, "filename", "")
+            # logged as a warning on purpose: in cli context, error records
+            # re-raise the exception, see orgui.logger_utils.
+            logger.warning(
+                "Closing of file %s failed. The file might be corrupted!",
+                filename,
+                exc_info=True,
+            )
 
 
 def messagebox_detailed_message(
