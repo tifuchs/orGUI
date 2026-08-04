@@ -10,6 +10,13 @@ Unreleased (2026-07-19)
 Scientific and analysis additions:
 
 - Added optional CTR intensity-resolution modeling with constant or gamma-dependent box and Gaussian functions. Calculations can convolve irregular existing L points or sample the crystal structure factor with deterministic quadrature.
+- Added py3Dmol atom-sphere rendering for Jupyter notebooks. ``plot3d`` now selects py3Dmol automatically in a notebook, can be directed to either py3Dmol or Mayavi explicitly, and can incrementally add unit cells to a shared viewer. Covalent radii are interpreted consistently by both backends and can be adjusted with the dimensionless ``radius_scale`` parameter.
+
+Reciprocal-space reconstruction:
+
+- Added a centralized, out-of-core reciprocal-space reconstruction pipeline. A new "Reconstruct reciprocal space" dialog (Configuration menu) defines HKL/Q output grids, previews coverage and storage cost, and prepares, runs, and resumes jobs. Jobs can run locally, as SGE/Slurm cluster batch arrays with parallel submap reduction, or from the command line via a new ``reconstruction_cli`` entry point.
+- Added a shared HDF5 output-settings dialog (chunk shape, compression) reachable from both the reconstruction dialog and the Configuration menu.
+- Exposure-time normalization and monitor-counter corrections now live in the reconstruction dialog rather than the shared scan-options panel, since they affect reconstruction output only, not ROI/CTR image integration.
 
 1.5.0 (2026-06-07)
 ------------------

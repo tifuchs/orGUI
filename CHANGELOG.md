@@ -17,6 +17,20 @@ Scientific and analysis additions:
   shared viewer. Covalent radii are interpreted consistently by both backends
   and can be adjusted with the dimensionless ``radius_scale`` parameter.
 
+Reciprocal-space reconstruction:
+
+- Added a centralized, out-of-core reciprocal-space reconstruction pipeline.
+  A new "Reconstruct reciprocal space" dialog (Configuration menu) defines
+  HKL/Q output grids, previews coverage and storage cost, and prepares,
+  runs, and resumes jobs. Jobs can run locally, as SGE/Slurm cluster batch
+  arrays with parallel submap reduction, or from the command line via a new
+  ``reconstruction_cli`` entry point.
+- Added a shared HDF5 output-settings dialog (chunk shape, compression)
+  reachable from both the reconstruction dialog and the Configuration menu.
+- Exposure-time normalization and monitor-counter corrections now live in
+  the reconstruction dialog rather than the shared scan-options panel, since
+  they affect reconstruction output only, not ROI/CTR image integration.
+
 
 ## [1.5.0] (2026-06-07)
 
