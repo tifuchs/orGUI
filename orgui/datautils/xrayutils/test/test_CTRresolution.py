@@ -4,14 +4,18 @@ import unittest
 
 import numpy as np
 
-from .. import CTRplotutil, CTRresolution
+from .. import CTRopt, CTRplotutil, CTRresolution
 
 
-def _angles(gamma):
+def _angles(gamma, delta=None):
     gamma = np.asarray(gamma, dtype=np.float64)
     zeros = np.zeros_like(gamma)
+    if delta is None:
+        delta = zeros
+    else:
+        delta = np.asarray(delta, dtype=np.float64)
     return np.rec.fromarrays(
-        [zeros, zeros, gamma, zeros, zeros, zeros],
+        [zeros, delta, gamma, zeros, zeros, zeros],
         names="alpha,delta,gamma,omega,chi,phi",
     )
 
@@ -24,19 +28,46 @@ class QuadraticCrystal:
         return np.asarray(l, dtype=np.complex128)
 
 
+class FitCrystal:
+    """Minimal crystal interface used to verify optimizer resolution fitting."""
+
+    fitparnames = ["crystal_scale"]
+    priors = []
+
+    def __init__(self):
+        self.parameters = np.array([1.0])
+        self.errors = None
+
+    def F(self, h, k, l):  # noqa: N802,E741
+        return self.parameters[0] * (1.0 + np.asarray(l, dtype=np.float64) ** 2)
+
+    def getStartParamAndLimits(self):
+        return self.parameters.copy(), np.array([0.5]), np.array([2.0])
+
+    def getInitialParameters(self):
+        return self.parameters.copy()
+
+    def setParameters(self, parameters):
+        self.parameters = np.asarray(parameters, dtype=np.float64)
+
+    def setFitErrors(self, errors):
+        self.errors = np.asarray(errors, dtype=np.float64)
+
+
 class TestResolutionFunctions(unittest.TestCase):
-    def test_constant_and_gamma_dependent_widths(self):
+    def test_constant_gamma_and_delta_dependent_widths(self):
         h = np.array([0.0, 1.0, 2.0])
         l = np.array([0.1, 0.2, 0.3])  # noqa: E741
         gamma = np.array([0.0, np.pi / 6.0, np.pi / 2.0])
+        delta = np.array([0.0, np.pi / 2.0, -np.pi / 6.0])
 
         constant = CTRresolution.BoxResolution(0.2)
-        varying = CTRresolution.GaussianResolution(0.2, 0.4)
+        varying = CTRresolution.GaussianResolution(0.2, 0.4, 0.6)
 
         np.testing.assert_allclose(constant.width(h, h, l), 0.2)
         np.testing.assert_allclose(
-            varying.width(h, h, l, _angles(gamma)),
-            [0.2, 0.4, 0.6],
+            varying.width(h, h, l, _angles(gamma, delta)),
+            [0.2, 0.4 + 0.6, 0.6 + 0.3],
         )
 
     def test_box_full_width_and_gaussian_fwhm(self):
@@ -59,6 +90,8 @@ class TestResolutionFunctions(unittest.TestCase):
                     CTRresolution.BoxResolution(value)
         with self.assertRaises(ValueError):
             CTRresolution.GaussianResolution(0.1, -0.2)
+        with self.assertRaises(ValueError):
+            CTRresolution.GaussianResolution(0.1, 0.2, -0.3)
 
     def test_gamma_dependent_width_requires_angle_records(self):
         resolution = CTRresolution.BoxResolution(0.1, 0.2)
@@ -237,6 +270,122 @@ class RecordingAngles:
         values = np.zeros((count, 6), dtype=np.float64)
         values[:, 2] = np.arange(count) + 0.25
         return values
+
+
+class TestOptimizerResolutionFit(unittest.TestCase):
+    def _ctrs(self):
+        l = np.array([0.2, 0.7, 1.4, 2.1])  # noqa: E741
+        ctr = CTRplotutil.CTR((1.0, 0.0), l, np.ones_like(l), np.full_like(l, 0.1))
+        ctr.angles = _angles(
+            np.array([0.0, 0.2, 0.4, 0.6]),
+            np.array([0.1, 0.3, 0.5, 0.7]),
+        )
+        return CTRplotutil.CTRCollection([ctr])
+
+    def test_resolution_widths_are_leading_native_fit_parameters(self):
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), self._ctrs())
+        optimizer.fit_resolution(
+            CTRresolution.GaussianResolution(0.1, 0.2, 0.3),
+            lower_bounds=[0.0, 0.0, 0.0],
+            higher_bounds=[0.5, 0.6, 0.7],
+        )
+        optimizer.prepareFit()
+
+        np.testing.assert_allclose(
+            optimizer.get_parameters(), [0.1, 0.2, 0.3, 1.0]
+        )
+        self.assertIsNotNone(optimizer.calculated_CTRs)
+        np.testing.assert_allclose(optimizer.get_bounds()[0], [0.0, 0.0, 0.0, 0.5])
+        np.testing.assert_allclose(optimizer.get_bounds()[1], [0.5, 0.6, 0.7, 2.0])
+
+        optimizer.set_parameters([0.4, 0.5, 0.6, 1.5])
+        self.assertEqual(
+            optimizer.resolution, CTRresolution.GaussianResolution(0.4, 0.5, 0.6)
+        )
+        np.testing.assert_allclose(optimizer.xtal.parameters, [1.5])
+
+    def test_resolution_parameters_change_the_fitted_objective(self):
+        ctrs = self._ctrs()
+        crystal = FitCrystal()
+        expected_resolution = CTRresolution.GaussianResolution(0.15, 0.1, 0.2)
+        observed = CTRresolution.sample_structure_factor(
+            ctrs, crystal, expected_resolution
+        )
+        ctrs[0].sfI = observed[0].sfI
+
+        optimizer = CTRopt.CTROptimizer(crystal, ctrs)
+        optimizer.fit_resolution(
+            CTRresolution.GaussianResolution(0.05, 0.05, 0.05),
+            lower_bounds=[0.0, 0.0, 0.0],
+            higher_bounds=[0.5, 0.5, 0.5],
+        )
+        optimizer.prepareFit()
+
+        matched = optimizer.weighted_residues([0.15, 0.1, 0.2, 1.0])
+        mismatched = optimizer.weighted_residues([0.05, 0.05, 0.05, 1.0])
+
+        np.testing.assert_allclose(matched, 0.0, atol=1e-12)
+        self.assertGreater(np.linalg.norm(mismatched), 1e-3)
+
+    def test_fast_convolution_populates_a_separate_calculated_ctr_cache(self):
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), self._ctrs())
+        optimizer.fit_resolution(
+            CTRresolution.BoxResolution(1.2, 0.0, 0.0),
+            lower_bounds=[0.0, 0.0, 0.0],
+            higher_bounds=[2.0, 0.5, 0.5],
+            calculation="convolve",
+        )
+        optimizer.prepareFit()
+        optimizer.weighted_residues(optimizer.get_parameters())
+
+        self.assertEqual(optimizer.resolution_calculation, "convolve")
+        self.assertIsNot(optimizer.calculated_CTRs, optimizer.CTRs)
+        raw = np.abs(
+            optimizer.xtal.F(
+                optimizer.CTRs[0].harr, optimizer.CTRs[0].karr, optimizer.CTRs[0].l
+            )
+        )
+        self.assertGreater(
+            np.linalg.norm(optimizer.calculated_CTRs[0].sfI - raw), 1e-3
+        )
+
+    def test_invalid_resolution_calculation_is_rejected(self):
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), self._ctrs())
+        with self.assertRaisesRegex(ValueError, "sample.*convolve"):
+            optimizer.set_resolution_calculation("invalid")
+
+    def test_prepare_fit_requires_cached_angles_for_angle_dependent_resolution(self):
+        ctrs = CTRplotutil.CTRCollection(
+            [CTRplotutil.CTR((1.0, 0.0), [0.2, 0.7], [1.0, 1.0], [0.1, 0.1])]
+        )
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), ctrs)
+        optimizer.fit_resolution(
+            CTRresolution.GaussianResolution(0.1, 0.2, 0.0),
+            lower_bounds=[0.0, 0.0, 0.0],
+            higher_bounds=[0.5, 0.5, 0.5],
+        )
+
+        with self.assertRaisesRegex(ValueError, "angle records"):
+            optimizer.prepareFit()
+
+    def test_angle_optimizer_exposes_resolution_parameter_names(self):
+        optimizer = CTRopt.CTROptAngleCorrection(FitCrystal(), self._ctrs())
+        optimizer.fit_resolution(
+            CTRresolution.BoxResolution(0.1, 0.2, 0.3),
+            lower_bounds=[0.0, 0.0, 0.0],
+            higher_bounds=[0.5, 0.5, 0.5],
+        )
+        optimizer.prepareFit()
+
+        self.assertEqual(
+            optimizer.fitparnames[:3],
+            [
+                "resolution_delta_l_0",
+                "resolution_delta_l_1",
+                "resolution_delta_l_2",
+            ],
+        )
+        np.testing.assert_allclose(optimizer.get_parameters(), [0.1, 0.2, 0.3, 1.0])
 
 
 class TestCollectionAngleAPI(unittest.TestCase):
