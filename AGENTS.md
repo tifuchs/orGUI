@@ -21,6 +21,8 @@ Read the most local `AGENTS.md` for the files you touch:
   user-facing unit boundaries.
 - `orgui/datautils/xrayutils/AGENTS.md`: scientific core, detector geometry,
   reciprocal-space math, CTR calculations, and related tests.
+- `doc/AGENTS.md`: Sphinx documentation source, the changelog/release-notes
+  workflow, and what counts as a user-facing change worth documenting.
 
 Do not add another nested `AGENTS.md` unless it supplies critical local guidance
 that would otherwise distract unrelated work.

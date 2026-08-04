@@ -150,17 +150,17 @@ def main():
         "-l",
         dest="locking",
         action="store_true",
-        help="HDF5_USE_FILE_LOCKING=True (default)",
+        help="HDF5_USE_FILE_LOCKING=True",
     )
     locking_parser.add_argument(
         "--no-hdflocking",
         "-nl",
         dest="locking",
         action="store_false",
-        help="HDF5_USE_FILE_LOCKING=False",
+        help="HDF5_USE_FILE_LOCKING=False (default)",
     )
 
-    parser.set_defaults(locking=True)
+    parser.set_defaults(locking=False)
 
     options = parser.parse_args()
 
