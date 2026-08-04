@@ -239,6 +239,67 @@ refused for them. ``Q_cryst`` additionally needs the orientation matrix.
 :math:`\vec{H} = (h, k, l)^T`, the same result as
 :meth:`~orgui.datautils.xrayutils.HKLVlieg.VliegAngles.anglesToHkl`.
 
+Orientation of the Q-plot
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The detector image is displayed with the row index increasing downwards. The
+``Q-plot`` keeps that visual orientation, so that a feature seen on the
+detector is found in the same place of the reciprocal-space image.
+
+In the ordinary upward-scattering geometry the out-of-plane coordinate
+*de*creases with the row index, and the ordinate points upwards as usual. An
+azimuthal reference that points the surface normal the other way — the
+inverted, downward-scattering setup used at ID31 — reverses this: ``gamma``
+comes out negative over the whole detector and :math:`q_\perp` grows towards
+the bottom of the image. Drawing it upwards anyway would show the
+reciprocal-space image mirrored, so orGUI inverts the ordinate in that case.
+
+The direction is derived from the detector calibration by
+:func:`~orgui.app.qconversion.outOfPlaneIncreasesWithRow`, which compares the
+out-of-plane coordinate of the top and the bottom of the detector. No beamline
+is special-cased. The abscissa always runs from left to right.
+
+The position readout in the Q-plot
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+While the ``Q-plot`` is on, the abscissa and the ordinate hold momentum
+transfer instead of detector pixels. The readout below the plot therefore
+labels them ``q_par[<frame>]`` and ``q_perp[<frame>]``, and obtains the
+remaining fields by inverting the conversion, so that a point of the Q-plot
+reports the same ``HKL``, ``del``, ``gam`` and ``Q`` as the pixel it was
+rebinned from.
+
+The projection keeps :math:`Q_z` and collapses :math:`Q_x` and :math:`Q_y`
+into their radial distance, signed by :math:`Q_x`. The discarded direction is
+recovered from the Ewald condition: with :math:`\vec{q} = \vec{Q}/K` and the
+incident beam direction :math:`\vec{c}`, the outgoing direction
+:math:`\vec{q} + \vec{c}` is a unit vector, so
+
+.. math::
+
+   |\vec{q}|^2 + 2\,\vec{q}\cdot\vec{c} = 0,
+
+which is *linear* in :math:`q_x` and :math:`q_y` once :math:`q_z` and
+:math:`|\vec{q}|` are known. Intersecting that line with the circle
+:math:`q_x^2 + q_y^2 = (q_\parallel/K)^2` leaves at most two solutions, of
+which only those with :math:`\mathrm{sign}(Q_x) = \mathrm{sign}(q_\parallel)`
+reproduce the sign convention above.
+
+In the ``Q_alpha`` frame the beam is :math:`(0, \cos\alpha, -\sin\alpha)` and
+has no ``x`` component, so the line is parallel to the ``x`` axis and the sign
+condition always leaves a single solution. In the rotated frames the beam
+generally does have one and both solutions can carry the same sign; orGUI then
+keeps the one that falls onto the detector. That test doubles as the check
+whether the position is covered by the image at all, because the rebinned grid
+is rectangular and reaches beyond the detector. Positions that no pixel maps
+to are shown as ``------``.
+
+The reported ``Q`` is the reconstructed vector itself, so its in-plane and
+out-of-plane components are exactly the coordinates the cursor is at. Unlike
+in pixel mode it carries no refraction correction, because the Q-plot axes
+carry none either; ``HKL`` is refraction corrected in both modes, as
+everywhere else in orGUI.
+
 Why orGUI supplies its own pyFAI units
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
