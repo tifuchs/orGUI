@@ -36,7 +36,6 @@ from .. import logger_utils
 import copy
 import sys
 import os
-import re
 from contextlib import contextmanager
 from silx.gui import qt
 
@@ -3487,6 +3486,84 @@ ub : gui for UB matrix and angle calculations
                     traceback.format_exc(),
                 )
 
+    @staticmethod
+    def _scanEntriesFromBackend(backendcls, h5file):
+        """Ask the backend to list the scans of an opened file.
+
+        This is the fast path of the segmented scan loader. The backend may
+        return bare identifiers or ``(identifier, label)`` pairs, see
+        :meth:`~orgui.backend.scans.Scan.listScans`.
+
+        The identifier is whatever the backend is opened with. It is reported
+        as both ``scanno`` and ``name`` because
+        :func:`~orgui.backend.backends.openScan` reads one or the other
+        depending on the beamtime, and only the backend knows which of the two
+        its constructor wants.
+
+        :returns:
+            List of ``(ddict, label)``, where ``ddict`` holds the keys
+            identifying the scan and ``label`` may be ``None``. ``None`` when
+            the backend does not implement ``listScans``.
+        :rtype: list or None
+
+        .. note::
+           CLI-safe.
+        """
+        try:
+            listed = backendcls.listScans(h5file)
+        except NotImplementedError:
+            return None
+
+        entries = []
+        for entry in listed:
+            if isinstance(entry, tuple):
+                identifier, label = entry
+            else:
+                identifier, label = entry, None
+            entries.append(({"scanno": identifier, "name": str(identifier)}, label))
+        return entries
+
+    @staticmethod
+    def _scanEntriesFromNodes(backendcls, model, rootIndex):
+        """List the scans of an opened file through ``parse_h5_node``.
+
+        Fallback for backends that do not implement ``listScans``. Every entry
+        of the file root is wrapped in the same :class:`silx.gui.hdf5.H5Node`
+        the tree hands to the backend when a single scan is opened, and its own
+        ``parse_h5_node`` result is kept unchanged. The segmented loader and
+        the normal loader therefore cannot disagree about what a scan is called
+        or how it is numbered.
+
+        An entry counts as a scan when ``parse_h5_node`` returns a ``scanno``
+        for it. Entries it raises on, or reports without a ``scanno``, are not
+        scans and are skipped. Scan numbers seen more than once are reported
+        once, which is what collapses the subscans of one measurement.
+
+        :returns: list of ``(ddict, label)`` with ``label`` always ``None``.
+        :rtype: list
+
+        .. note::
+           GUI-only, it needs the HDF5 tree model.
+        """
+        entries = []
+        seen = set()
+        for row in range(model.rowCount(rootIndex)):
+            index = model.index(row, 0, rootIndex)
+            item = model.data(index, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_ITEM_ROLE)
+            if item is None:
+                continue
+            try:
+                ddict = backendcls.parse_h5_node(silx.gui.hdf5.H5Node(item))
+            except Exception:
+                continue
+            if not isinstance(ddict, dict) or ddict.get("scanno") is None:
+                continue
+            if ddict["scanno"] in seen:
+                continue
+            seen.add(ddict["scanno"])
+            entries.append((dict(ddict), None))
+        return entries
+
     def _onLoadInterlacedScan(self):
         """GUI-only: build an interlaced scan from selected HDF5 scans."""
         # GUI function to concatenate multiple scans into one
@@ -3509,56 +3586,37 @@ ub : gui for UB matrix and angle calculations
 
         # address the root node to correctly get the scan names
         if rootI.parent().isValid():
-            h5file = model.data(
-                model.parent(rootI), role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE
-            )
-        else:
-            h5file = model.data(
-                rootI, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE
-            )
+            rootI = model.parent(rootI)
+        h5file = model.data(rootI, role=silx.gui.hdf5.Hdf5TreeModel.H5PY_OBJECT_ROLE)
 
-        # Bliss/ID31-style files use the "<scan>.<subscan>" naming convention.
-        # Detect them from the configured backend class rather than from a
-        # hardcoded list of beamtime ids, so new ID31 beamtimes (and the
-        # id31_default_p4 backend) are covered automatically.
+        # Which entries of the file are scans, and how they are addressed, is a
+        # property of the file format, so the backend is asked instead of the
+        # naming convention being guessed here. Backends that implement
+        # listScans answer directly; for the others every entry is run through
+        # their own parse_h5_node.
         backendcls = backends.fscans[self.scanSelector.btid.currentText()]
-        isID31 = "BlissScan" in backendcls.__name__
-        kl_full = list(h5file.keys())
-        kl = np.empty(0, dtype=int)
-        for i in kl_full:
-            if isID31:
-                pattern = r"\.\d"
-                result = re.findall(pattern, i)[0][1:]
-                if result == "1":
-                    # select only scan names which are ending on suffix '.1' (fast counters of id31 hdf5 format)  # noqa: E501
-                    kl = np.append(kl, i)
-            else:
-                kl = np.append(kl, i)
-
-        # separate scan nr and delete duplicates suffixes
-        if isID31:
-            # try to get the scan nr and '/title' from the hdf5 file
-            nr = np.empty(0, dtype=int)
-            name = np.empty(0, dtype=str)
-
-            for i in kl:
-                pattern = r"\d+\."
-                result = re.findall(pattern, i)
-                name = np.append(name, h5file[i + "/title"])
-                nr = np.append(nr, int(result[0][:-1]))
-
-            lsort = np.argsort(nr)[::1]
-            nr = nr[lsort]
-            name = name[lsort]
-        else:
-            nr = np.empty(0, dtype=int)
-            name = np.empty(0, dtype=str)
-            for nth, i in enumerate(kl):
-                name = np.append(name, i)
-                nr = np.append(
-                    nr, nth + 1
-                )  # create scan nr list with ascending integers, starting with 1
-                # This will later be used to address the subscans, so check if your scans are handled like this!!!  # noqa: E501
+        try:
+            entries = self._scanEntriesFromBackend(backendcls, h5file)
+            if entries is None:
+                entries = self._scanEntriesFromNodes(backendcls, model, rootI)
+        except Exception:
+            qutils.warning_detailed_message(
+                self,
+                "Can not create interlaced scan",
+                f"Can not list the scans of this file with the "
+                f"{backendcls.__name__} backend.",
+                traceback.format_exc(),
+            )
+            return
+        if not entries:
+            qutils.warning_detailed_message(
+                self,
+                "Can not create interlaced scan",
+                f"The {backendcls.__name__} backend did not find any scan in "
+                "this file.",
+                "",
+            )
+            return
 
         # open GUI dialog to select which scans to combine
         interlacedSelectDialog = qt.QDialog()
@@ -3570,17 +3628,13 @@ ub : gui for UB matrix and angle calculations
         b = qt.QFormLayout()
         box = qt.QGroupBox()
         scanBoxes = []
-        # labels = []
-        for i, item in enumerate(nr):
+        for ddict, label in entries:
             ithScanBox = qt.QCheckBox()
             scanBoxes.append(ithScanBox)
-            # labels.append(qt.QLabel('Scan '+str(item)+':'+str(name[i][2:-1])))
-            if isID31:
-                b.addRow(
-                    qt.QLabel("Scan " + str(item) + ": " + name[i].decode()), ithScanBox
-                )
-            else:
-                b.addRow(qt.QLabel("Scan " + str(item) + ": " + name[i]), ithScanBox)
+            # the label is the scan title where the backend provides one, and
+            # the scan name otherwise
+            description = label if label is not None else ddict.get("name", "")
+            b.addRow(qt.QLabel(f"Scan {ddict['scanno']}: {description}"), ithScanBox)
 
         box.setLayout(b)
         a.setWidget(box)
@@ -3624,21 +3678,19 @@ ub : gui for UB matrix and angle calculations
             return
 
         # generate scan objects for selected scans
-        selectedScans = []
-        for i, j in enumerate(scanBoxes):
-            if j.isChecked():
-                selectedScans.append(nr[i])
-                # selectedScans.append(name[i])
+        selectedScans = [
+            ddict for (ddict, _label), box in zip(entries, scanBoxes) if box.isChecked()
+        ]
 
         nodes = list(self.scanSelector.hdfTreeView.selectedH5Nodes())
         obj = nodes[0]
 
         scansegments = []
-        for i in selectedScans:
-            ddict = dict()
-            ddict["scanno"] = int(i)
+        for selected in selectedScans:
+            # the keys identifying the scan come from the backend, so that a
+            # backend addressed by name rather than by number also works
+            ddict = dict(selected)
             ddict["file"] = obj.local_filename
-            # ddict['node'] = kl[i]
             ddict["beamtime"] = IS_btid.currentText()
             try:
                 scansegments.append(backends.openScan(IS_btid.currentText(), ddict))
@@ -3667,7 +3719,7 @@ ub : gui for UB matrix and angle calculations
         self.scanSelector.setAxis(self.fscan.axis, self.fscan.axisname)
         self.activescanname = "{}-segmentedScan {} {}-{}".format(
             self.fscan.axisname,
-            ",".join(str(itemNr) for itemNr in selectedScans),
+            ",".join(str(ddict["scanno"]) for ddict in selectedScans),
             np.amin(self.fscan.axis),
             np.amax(self.fscan.axis),
         )

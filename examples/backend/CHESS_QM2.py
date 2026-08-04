@@ -239,6 +239,43 @@ class QM2_backend_2026(Scan):
         ddict['name'] = obj.local_name
         return ddict
 
+    @classmethod
+    def listScans(cls, h5file):
+        """list every scan in the file, for the segmented scan loader.
+
+        Optional. Without it orGUI calls parse_h5_node on every entry of the
+        file root instead, which gives the same answer but has to walk the
+        tree. The file is already open and is handed in, so unlike __init__
+        this does not have to deal with a path or a node.
+
+        Every group of the root is a scan, named as in SPEC files, i.e.
+        1.1, 1.2, 1.3, ... The identifier is the scan number in front of the
+        dot, because that is what __init__ takes. It looks up the first group
+        whose scan number matches, so a scan number is reported once even when
+        the file holds several subscans for it - offering the others would let
+        one be selected and a different one be opened.
+        """
+        entries = []
+        seen = set()
+        for name in h5file:
+            name = str(name)
+            try:
+                scanno = int(name.split('.')[0])
+            except ValueError:
+                continue # not a scan, e.g. an instrument or metadata group
+            if scanno in seen:
+                continue
+            seen.add(scanno)
+            try:
+                title = h5file[name + '/title'][()]
+            except Exception:
+                title = name
+            if isinstance(title, bytes):
+                title = title.decode()
+            entries.append((scanno, str(title)))
+        entries.sort(key=lambda entry: entry[0])
+        return entries
+
     # returns single image, attempts to use the default camera!
     def get_raw_img(self,img, **kwargs):
         imagepath = os.path.join(self.imagefolder, self.image_prefix + ("%05i" % img) + self.image_suffix)
