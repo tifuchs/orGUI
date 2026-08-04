@@ -35,7 +35,12 @@ def _import_cpp_backend():
         return importlib.import_module("orgui.app._roi_sum_cpp")
     except ModuleNotFoundError as package_error:
         repo_root = Path(__file__).resolve().parents[2]
-        candidates = sorted((repo_root / "build").glob("cp*/_roi_sum_cpp*.so"))
+        candidates = sorted(
+            (
+                *(repo_root / "build").glob("cp*/_roi_sum_cpp*.so"),
+                *(repo_root / "build").glob("cp*/_roi_sum_cpp*.pyd"),
+            )
+        )
         if not candidates:
             raise package_error
         extension_path = candidates[-1]
@@ -167,6 +172,9 @@ except Exception:
     _cpp_backend = None
 
 HAS_CPP_BACKEND = _cpp_backend is not None
+PixelRepairPlan = (
+    None if _cpp_backend is None else getattr(_cpp_backend, "PixelRepairPlan", None)
+)
 HAS_NUMBA_BACKEND = False
 HAS_ACCEL_BACKEND = ROI_ACCEL_BACKEND != "numpy"
 _bind_backend(ROI_ACCEL_BACKEND, _counter_backend)

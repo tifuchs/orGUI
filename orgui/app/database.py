@@ -40,6 +40,7 @@ import silx.io.utils
 import h5py
 
 import datetime
+import json
 import os
 import traceback
 import time
@@ -51,6 +52,18 @@ import logging
 from silx.io.dictdump import dicttonx, nxtodict
 
 logger = logging.getLogger(__name__)
+
+
+def config_data_to_json(config):
+    """Convert :class:`ConfigData` to the central JSON representation."""
+    if not isinstance(config, ConfigData):
+        raise TypeError("config must be a ConfigData instance")
+    return config.to_json_dict()
+
+
+def config_data_from_json(values):
+    """Create :class:`ConfigData` from the central JSON representation."""
+    return ConfigData.from_json_dict(values)
 
 
 class DBCloseError(IOError):
@@ -718,6 +731,26 @@ class DataBase(qt.QMainWindow):
             time.sleep(0.01)
         self.hdf5model.synchronizeH5pyObject(nxfile)
         self.view.expandToDepth(0)
+
+    def register_external_result(
+        self, path, checksum, grids, status, job_digest
+    ):
+        """Register a standalone reconstruction without copying its datasets."""
+        self.add_nxdict(
+            {
+                "external_reconstructions": {
+                    job_digest[:16]: {
+                        "@NX_class": "NXnote",
+                        "@orgui_meta": "external_reconstruction",
+                        "path": os.path.abspath(path),
+                        "sha256": checksum,
+                        "status": status,
+                        "grids_json": json.dumps(grids, sort_keys=True),
+                        "job_sha256": job_digest,
+                    }
+                }
+            }
+        )
 
     def write_scan_config(self, scan_name, config=None):
         """Write the default config group for a scan."""

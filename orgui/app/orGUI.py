@@ -67,6 +67,8 @@ from .QUBCalculator import QUBCalculator
 from .peak1Dintegr import RockingPeakIntegrator
 from .ArrayTableDialog import ArrayTableDialog
 from .MaskConfigDialog import MaskConfigDialog
+from .HDF5SettingsDialog import HDF5SettingsDialog
+from .ReconstructionDialog import ReconstructionDialog
 from .bgroi import RectangleBgROI
 from .database import DataBase, FILTERS
 from .mask_config import MaskManager
@@ -164,6 +166,8 @@ class orGUI(qt.QMainWindow):
         )
         self.maxMemory = MAX_MEMORY
         self.maxROIs = MAX_ROIS_DISPLAY
+        self.reconstruction_chunk_shape = (64, 64, 64)
+        self.reconstruction_compression_override = None
 
         self.filedialogdir = os.getcwd()
 
@@ -443,7 +447,7 @@ class orGUI(qt.QMainWindow):
         self.backgroundImageAct.setCheckable(True)
         self.backgroundImageAct.setChecked(False)
 
-        self.dbCompressionAct = qt.QAction("Database compression", self)
+        self.dbCompressionAct = qt.QAction("HDF5 settings", self)
         self.dbCompressionAct.triggered.connect(self._onChangeDBCompression)
         self.maskConfigAct = qt.QAction("Mask", self)
         self.maskConfigAct.triggered.connect(self._onShowMaskConfig)
@@ -549,6 +553,8 @@ ub : gui for UB matrix and angle calculations
         rs = menu_bar.addMenu("&Reciprocal space")
         rs.addAction(calcCTRsAvailableAct)
         rs.addAction(editUAct)
+        reconstructionAct = rs.addAction("Reconstruct reciprocal space")
+        reconstructionAct.triggered.connect(self._onShowReconstruction)
 
         simul = menu_bar.addMenu("&Simulation")
 
@@ -586,6 +592,29 @@ ub : gui for UB matrix and angle calculations
         if mask is not None:
             self.centralPlot.setSelectionMask(
                 np.ascontiguousarray(mask, dtype=np.uint8)
+            )
+
+    # GUI-only: user-triggered reciprocal-space reconstruction dialog.
+    def _onShowReconstruction(self):
+        """Open the reciprocal-space reconstruction workflow."""
+        try:
+            if not hasattr(self, "_reconstruction_dialog"):
+                self._reconstruction_dialog = ReconstructionDialog(self)
+            self._reconstruction_dialog.show()
+            self._reconstruction_dialog.raise_()
+        except Exception:
+            logger.warning(
+                "Cannot open reciprocal-space reconstruction.",
+                exc_info=True,
+                extra={
+                    "title": "Cannot open reconstruction",
+                    "description": (
+                        "The reconstruction dialog could not be initialized."
+                    ),
+                    "show_dialog": True,
+                    "dialog_level": logging.WARNING,
+                    "parent": self,
+                },
             )
 
     # GUI-only: user-triggered mask configuration dialog.
@@ -2613,23 +2642,21 @@ ub : gui for UB matrix and angle calculations
             self.maxROIs = rois
 
     def _onChangeDBCompression(self):
-        """GUI-only: ask the user for the database compression filter."""
-        filter_names = list(FILTERS.keys())
-        currentCompression = self.database.compression
-        for fn in filter_names:
-            if currentCompression == FILTERS[fn]:
-                break
-        idx = filter_names.index(fn)
-        selection, success = qt.QInputDialog.getItem(
+        """GUI-only: edit shared HDF5 reconstruction output settings."""
+        dialog = HDF5SettingsDialog(
+            self.database.compression,
+            self.reconstruction_chunk_shape,
+            self.reconstruction_compression_override,
             self,
-            "Data compression settings",
-            "Available data base compression methods:\n(See discussion under https://github.com/tifuchs/orGUI/issues/16)\nRecommended: Blosc-lz4-Shuffle-5",  # noqa: E501
-            filter_names,
-            idx,
-            False,
         )
-        if success:
-            self.database.compression = FILTERS[selection]
+        if dialog.exec() == qt.QDialog.Accepted:
+            self.database.compression = FILTERS[
+                dialog.database_compression_name
+            ]
+            self.reconstruction_chunk_shape = dialog.chunk_shape
+            self.reconstruction_compression_override = (
+                dialog.compression_override
+            )
 
     def calcBraggRefl(self):
         """Calculate and display available Bragg reflections for the scan.

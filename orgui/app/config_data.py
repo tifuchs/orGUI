@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import configparser
 import datetime
+import json
 from dataclasses import dataclass, field
+from typing import Any
 
 import h5py
 import numpy as np
@@ -28,6 +30,67 @@ from silx.io.dictdump import dicttonx, nxtodict
 from ..datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
 
 SCHEMA_VERSION = 1
+
+
+def _json_value(value):
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_value(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, bytes):
+        return value.decode()
+    return value
+
+
+@dataclass
+class CorrectionState:
+    """Persist the correction selections shared by orGUI workflows.
+
+    Large mask, background, and variance arrays are stored in a job asset
+    bundle. The corresponding fields here identify datasets in that bundle.
+    """
+
+    use_mask: bool = False
+    use_background: bool = False
+    use_solid_angle: bool = False
+    use_polarization: bool = False
+    repair_masked_pixels: bool = False
+    repair_max_component_pixels: int | None = None
+    repair_max_span: int | None = None
+    repair_radius: int | None = None
+    repair_min_valid_neighbors: int | None = None
+    repair_use_pyfai_gaps: bool = True
+    repair_gap_size_px: int = 1
+    normalize_exposure: bool = True
+    monitor_corrections: tuple[str, ...] = ()
+    excluded_frames: tuple[int, ...] = ()
+    mask_asset: str | None = None
+    background_asset: str | None = None
+    background_variance_asset: str | None = None
+    uncertainty_provenance: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible correction-state dictionary."""
+        result = _json_value(self.__dict__)
+        result["monitor_corrections"] = list(self.monitor_corrections)
+        result["excluded_frames"] = list(self.excluded_frames)
+        return result
+
+    @classmethod
+    def from_dict(cls, values):
+        """Build correction state from a JSON-compatible dictionary."""
+        values = dict(values or {})
+        values["monitor_corrections"] = tuple(
+            values.get("monitor_corrections", ())
+        )
+        values["excluded_frames"] = tuple(
+            int(value) for value in values.get("excluded_frames", ())
+        )
+        return cls(**values)
 
 
 def _as_text(value):
@@ -53,7 +116,8 @@ def _string_array(strings):
 
 def _read_string_array(data):
     array = np.asarray(data)
-    if array.dtype == np.uint8 and array.ndim == 2:
+    if array.dtype.kind in "iu" and array.ndim == 2:
+        array = array.astype(np.uint8, copy=False)
         return [bytes(row[row != 0]).decode("utf-8") for row in array]
     return [_as_text(value) for value in data]
 
@@ -208,6 +272,7 @@ class ConfigData:
     phi: float = 0.0
     refraction_index: float = 1.0
     reference_reflections: list = field(default_factory=list)
+    corrections: CorrectionState = field(default_factory=CorrectionState)
     orgui: dict = field(default_factory=dict)
 
     @classmethod
@@ -284,6 +349,49 @@ class ConfigData:
         cell = unit_cell_from_nxdict(unit_cell_to_nxdict(ub_widget.crystal))
         ub_calculator = HKLVlieg.UBCalculator(cell, ub_widget.ubCal.getEnergy())
         ub_calculator.setU(ub_widget.ubCal.getU())
+        corrections = CorrectionState()
+        if hasattr(gui, "scanSelector"):
+            options = gui.scanSelector.get_integration_options()
+            repair = getattr(getattr(gui, "maskManager", None), "settings", None)
+            repair = getattr(repair, "pixel_repair", None)
+            repair_enabled = bool(getattr(repair, "enabled", False))
+            excluded = getattr(gui, "excludedImagesDialog", None)
+            excluded = () if excluded is None else excluded.getData()
+            corrections = CorrectionState(
+                use_mask=bool(options.get("mask", False)) or repair_enabled,
+                use_background=getattr(gui, "background_image", None)
+                is not None,
+                use_solid_angle=bool(options.get("solidAngle", False)),
+                use_polarization=bool(options.get("polarization", False)),
+                repair_masked_pixels=repair_enabled,
+                repair_max_component_pixels=getattr(
+                    repair, "max_component_pixels", None
+                ),
+                repair_max_span=getattr(repair, "max_span", None),
+                repair_radius=getattr(repair, "radius", None),
+                repair_min_valid_neighbors=getattr(
+                    repair, "min_valid_neighbors", None
+                ),
+                repair_use_pyfai_gaps=bool(
+                    getattr(repair, "use_pyfai_gaps", True)
+                ),
+                repair_gap_size_px=int(
+                    getattr(repair, "gap_size_px", 1)
+                ),
+                normalize_exposure=bool(
+                    getattr(gui, "reconstruction_normalize_exposure", True)
+                ),
+                monitor_corrections=tuple(
+                    getattr(gui, "reconstruction_monitor_corrections", ())
+                ),
+                excluded_frames=tuple(
+                    sorted(
+                        int(value)
+                        for value in np.asarray(excluded).ravel()
+                        if int(value) >= 0
+                    )
+                ),
+            )
         return cls(
             detector=ub_widget.detectorCal,
             unit_cell=cell,
@@ -293,6 +401,7 @@ class ConfigData:
             phi=getattr(ub_widget, "phi", 0.0),
             refraction_index=getattr(ub_widget, "n", 1.0),
             reference_reflections=reflections,
+            corrections=corrections,
         )
 
     def apply_to_gui(self, gui):
@@ -326,6 +435,44 @@ class ConfigData:
             )
         if hasattr(gui, "reflectionSel"):
             gui.reflectionSel.setReflections(self.reference_reflections)
+        if hasattr(gui, "scanSelector"):
+            gui.scanSelector.set_integration_options(
+                {
+                    "mask": self.corrections.use_mask,
+                    "solidAngle": self.corrections.use_solid_angle,
+                    "polarization": self.corrections.use_polarization,
+                }
+            )
+        gui.reconstruction_normalize_exposure = self.corrections.normalize_exposure
+        gui.reconstruction_monitor_corrections = self.corrections.monitor_corrections
+        if (
+            hasattr(gui, "maskManager")
+            and self.corrections.repair_max_component_pixels is not None
+        ):
+            from .mask_config import PixelRepairSettings
+
+            gui.maskManager.set_pixel_repair_settings(
+                PixelRepairSettings(
+                    enabled=self.corrections.repair_masked_pixels,
+                    max_component_pixels=(
+                        self.corrections.repair_max_component_pixels
+                    ),
+                    max_span=self.corrections.repair_max_span,
+                    radius=self.corrections.repair_radius,
+                    min_valid_neighbors=(
+                        self.corrections.repair_min_valid_neighbors
+                    ),
+                    use_pyfai_gaps=(
+                        self.corrections.repair_use_pyfai_gaps
+                    ),
+                    gap_size_px=self.corrections.repair_gap_size_px,
+                )
+            )
+        if hasattr(gui, "excludedImagesDialog"):
+            excluded = np.asarray(
+                self.corrections.excluded_frames or (-1,), dtype=np.int64
+            )
+            gui.excludedImagesDialog.updateArrayData(excluded)
         if hasattr(ub_widget, "updateReflectionMismatch"):
             ub_widget.updateReflectionMismatch()
 
@@ -364,6 +511,12 @@ class ConfigData:
                     "@wavelength_unit": "Angstrom",
                 },
                 "refraction_index": self.refraction_index,
+                "integration_corrections": {
+                    "@NX_class": "NXcollection",
+                    "json": json.dumps(
+                        self.corrections.to_dict(), sort_keys=True
+                    ),
+                },
                 **self.orgui,
             },
         }
@@ -383,6 +536,16 @@ class ConfigData:
         ub_calculator = HKLVlieg.UBCalculator(unit_cell, energy)
         ub_calculator.setU(np.asarray(nxdict["sample"]["orientation_matrix"]))
         diffrac = nxdict.get("orgui", {}).get("diffractometer", {})
+        correction_json = (
+            nxdict.get("orgui", {})
+            .get("integration_corrections", {})
+            .get("json", "{}")
+        )
+        correction_json = np.asarray(correction_json)
+        if correction_json.shape == ():
+            correction_json = correction_json.item()
+        if isinstance(correction_json, bytes):
+            correction_json = correction_json.decode()
         return cls(
             detector=detector,
             unit_cell=unit_cell,
@@ -394,7 +557,17 @@ class ConfigData:
                 nxdict.get("orgui", {}).get("refraction_index", 1.0)
             ),
             reference_reflections=reflections_from_nxdict(nxdict),
+            corrections=CorrectionState.from_dict(json.loads(correction_json)),
         )
+
+    def to_json_dict(self) -> dict[str, Any]:
+        """Serialize this configuration through the central NeXus schema."""
+        return _json_value(self.to_nxdict(role="reconstruction"))
+
+    @classmethod
+    def from_json_dict(cls, values):
+        """Deserialize a central configuration JSON dictionary."""
+        return cls.from_nxdict(dict(values))
 
 
 class ConfigHandler:

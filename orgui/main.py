@@ -78,12 +78,19 @@ coordinate can be subsequently calculated.
 epilog = """The reflection list allows calculation of binned reciprocal
 space using the HESXRD backends of binoculars."""
 
-usage = "orGUI [options] configfile"
+usage = """orGUI [options] [configfile]
+       orGUI rsmap ..."""
 
 defaultconfigfile = os.path.expanduser("~/orgui")
 
 
 def main():
+    """Launch the GUI or dispatch an orGUI command."""
+    if len(sys.argv) > 1 and sys.argv[1] == "rsmap":
+        from .reconstruction_cli import main as reconstruction_main
+
+        return reconstruction_main(sys.argv[2:], prog="orGUI rsmap")
+
     parser = ArgumentParser(usage=usage, description=description, epilog=epilog)
     parser.add_argument(
         "configfile",

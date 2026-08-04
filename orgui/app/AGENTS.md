@@ -9,6 +9,9 @@ This directory contains GUI components and user workflows:
 - `database.py`: config loading, detector/crystal setup, Nexus/HDF5 handling.
 - `QScanSelector.py`, `ROIutils.py`, `orGUI.py`: integration and image
   workflows.
+- `ReconstructionDialog.py`: GUI front-end for the out-of-core reciprocal-space
+  reconstruction pipeline (`orgui/reconstruction_job.py`,
+  `reconstruction_cli.py`, `reconstruction_cluster.py`).
 - Dialogs and tests under this directory cover user-facing behavior and GUI
   regressions.
 

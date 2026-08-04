@@ -3,7 +3,13 @@ import configparser
 import numpy as np
 import pytest
 
-from orgui.app.mask_config import MaskManager, parse_mask_settings
+from orgui.app.mask_config import (
+    MaskManager,
+    create_pixel_repair_plan,
+    parse_mask_settings,
+    repair_intensity_variance,
+)
+from orgui.app._roi_sum_accel import PixelRepairPlan
 
 
 def test_mask_without_pixel_repair_disables_repair(tmp_path):
@@ -143,3 +149,63 @@ def test_mask_manager_shape_mismatch_returns_none(caplog):
 
     assert manager.get_mask((3, 2)) is None
     assert "does not match image shape" in caplog.text
+
+
+@pytest.mark.skipif(
+    PixelRepairPlan is None,
+    reason="The active native ROI extension has no PixelRepairPlan",
+)
+def test_native_repair_plan_matches_single_pixel_reference():
+    intensity = np.arange(49, dtype=np.float64).reshape(7, 7)
+    variance = np.linspace(1.0, 2.0, 49).reshape(7, 7)
+    mask = np.zeros((7, 7), dtype=bool)
+    mask[3, 3] = True
+    settings = {
+        "max_component_pixels": 4,
+        "max_span": 3,
+        "radius": 2,
+        "min_valid_neighbors": 6,
+    }
+    expected = repair_intensity_variance(
+        intensity, variance, mask, **settings
+    )
+    plan = create_pixel_repair_plan(mask, **settings)
+    actual_intensity = intensity.copy()
+    actual_variance = variance.copy()
+
+    remaining, repaired = plan.apply_inplace(
+        actual_intensity, actual_variance
+    )
+
+    np.testing.assert_allclose(actual_intensity, expected[0])
+    np.testing.assert_allclose(actual_variance, expected[1])
+    np.testing.assert_array_equal(remaining, expected[2])
+    np.testing.assert_array_equal(repaired, expected[3])
+    assert plan.configuration()["repairable_pixels"] == 1
+
+
+@pytest.mark.skipif(
+    PixelRepairPlan is None,
+    reason="The active native ROI extension has no PixelRepairPlan",
+)
+def test_native_repair_plan_reuses_component_geometry():
+    mask = np.zeros((9, 9), dtype=bool)
+    mask[4, 4:6] = True
+    plan = create_pixel_repair_plan(
+        mask,
+        max_component_pixels=4,
+        max_span=3,
+        radius=2,
+        min_valid_neighbors=6,
+    )
+
+    for scale in (1.0, 2.0):
+        intensity = (
+            np.arange(81, dtype=np.float64).reshape(9, 9) * scale
+        )
+        variance = np.ones((9, 9), dtype=np.float64)
+        remaining, repaired = plan.apply_inplace(intensity, variance)
+
+        assert repaired[4, 4:6].all()
+        assert not remaining[4, 4:6].any()
+        assert intensity[4, 4] == intensity[4, 5]

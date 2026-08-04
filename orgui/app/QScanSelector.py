@@ -50,7 +50,6 @@ from ..backend import backends, scans
 from . import qutils
 from .QReflectionSelector import QReflectionAnglesDialog
 from .QHKLDialog import HKLDialog
-import runpy
 
 from contextlib import contextmanager
 
@@ -1061,25 +1060,7 @@ class QScanSelector(qt.QMainWindow):
             # qutils.warning_detailed_message(self, "Cannot load backend", "Cannot load backend", traceback.format_exc())  # noqa: E501
 
     def loadBackendFile(self, filename):
-        backend_file = runpy.run_path(filename)
-        found_backends = []
-        for e in backend_file:
-            try:
-                if (
-                    issubclass(backend_file[e], scans.Scan)
-                    and backend_file[e] != scans.Scan
-                ):
-                    found_backends.append((e, backend_file[e]))
-            except Exception:
-                pass
-                # traceback.print_exc()
-        if not found_backends:
-            raise ValueError(f"Found no backend in file {filename}")
-        if len(found_backends) > 1:
-            raise ValueError(
-                f"Found more than one Scan class in backend file {filename}. Only one is permitted"  # noqa: E501
-            )
-        name, scancls = found_backends[0]
+        name, scancls = scans.load_scan_backend_file(filename)
         self.btid.addItem(name)
         backends.fscans[name] = scancls
         self.btid.setCurrentText(name)

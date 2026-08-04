@@ -135,6 +135,9 @@ def _scanTitle(h5file, name):
 # currently only set up for th scans in TOMO session, cbf fileformat
 class Fastscan(Scan):
     def __init__(self, fastscan_specfile, scanno):
+        self.fastscan_specfile = os.path.abspath(fastscan_specfile)
+        self.scanno = int(scanno)
+        self._scan_reference_args = [self.fastscan_specfile, self.scanno]
         id31_fastscan_spec = specfile.Specfile(fastscan_specfile)
         scan = id31_fastscan_spec[scanno - 1]
         filename_line = scan.header("C next_image_file")[0]
@@ -170,10 +173,13 @@ class Fastscan(Scan):
             )
         )
         scan = id31_fastscan_spec[scanno]
-        self.th = np.mean(
-            [scan.datacol("th_UpPos"), scan.datacol("th_DownPos")], axis=0
-        )
+        th_up = scan.datacol("th_UpPos")
+        th_down = scan.datacol("th_DownPos")
+        self.th = np.mean([th_up, th_down], axis=0)
         self.omega = -1 * self.th
+        self.omega_bounds_rad = np.deg2rad(
+            np.column_stack((-th_up, -th_down))
+        )
         self.exposure_time = scan.datacol("TrigTime")
         commands = scan.command().split()
         self.nopoints = int(commands[-4])
@@ -184,6 +190,7 @@ class Fastscan(Scan):
     def set_th_offset(self, offset):
         self.th += offset
         self.omega = -1 * self.th
+        self.omega_bounds_rad -= np.deg2rad(offset)
 
     def set_image_folder(self, path_to_folder):
         # self.filenames = [None]*len(self.th)
@@ -398,6 +405,14 @@ class BlissScan_EBS(Fastscan):
                     data_1["measurement"]["th_trig"][: self.nopoints]
                     + data_1["measurement"]["th_delta"][: self.nopoints] / 2
                 )
+                th_start = data_1["measurement"]["th_trig"][: self.nopoints]
+                th_stop = (
+                    th_start
+                    + data_1["measurement"]["th_delta"][: self.nopoints]
+                )
+                self.omega_bounds_rad = np.deg2rad(
+                    np.column_stack((-th_start, -th_stop))
+                )
             self.axisname = "th"
             self.mu = self.positioners["mu"]
 
@@ -423,6 +438,21 @@ class BlissScan_EBS(Fastscan):
                 self.linai = (
                     data_1["measurement"]["linai_trig"][: self.nopoints]
                     + data_1["measurement"]["linai_delta"][: self.nopoints] / 2
+                )
+                linai_start = data_1["measurement"]["linai_trig"][
+                    : self.nopoints
+                ]
+                linai_stop = (
+                    linai_start
+                    + data_1["measurement"]["linai_delta"][: self.nopoints]
+                )
+                self.alpha_bounds_rad = np.deg2rad(
+                    np.column_stack(
+                        (
+                            lintomu.linai_to_mu(linai_start),
+                            lintomu.linai_to_mu(linai_stop),
+                        )
+                    )
                 )
             self.mu = lintomu.linai_to_mu(self.linai)
             self.axisname = "mu"
@@ -793,6 +823,14 @@ class BlissScan_EBS_p4(Fastscan):
                     data_1["measurement"]["th_trig"][: self.nopoints]
                     + data_1["measurement"]["th_delta"][: self.nopoints] / 2
                 )
+                th_start = data_1["measurement"]["th_trig"][: self.nopoints]
+                th_stop = (
+                    th_start
+                    + data_1["measurement"]["th_delta"][: self.nopoints]
+                )
+                self.omega_bounds_rad = np.deg2rad(
+                    np.column_stack((-th_start, -th_stop))
+                )
             self.axisname = "th"
             self.mu = self.positioners["mu"]
 
@@ -828,6 +866,21 @@ class BlissScan_EBS_p4(Fastscan):
                 self.linai = (
                     data_1["measurement"]["linai_trig"][: self.nopoints]
                     + data_1["measurement"]["linai_delta"][: self.nopoints] / 2
+                )
+                linai_start = data_1["measurement"]["linai_trig"][
+                    : self.nopoints
+                ]
+                linai_stop = (
+                    linai_start
+                    + data_1["measurement"]["linai_delta"][: self.nopoints]
+                )
+                self.alpha_bounds_rad = np.deg2rad(
+                    np.column_stack(
+                        (
+                            lintomu.linai_to_mu(linai_start),
+                            lintomu.linai_to_mu(linai_stop),
+                        )
+                    )
                 )
             self.mu = lintomu.linai_to_mu(self.linai)
             self.axisname = "mu"
@@ -1054,6 +1107,8 @@ class BlissScan_EBS_p4(Fastscan):
 class BlissScan(Fastscan):
     def __init__(self, hdffilepath, scanname):
         hdffilepath = os.path.abspath(hdffilepath)
+        self.hdffilepath_orNode = hdffilepath
+        self._scan_reference_args = [hdffilepath, scanname]
         filepath, filename = os.path.split(hdffilepath)
         self.filepath = filepath
         # print(filepath,filename)

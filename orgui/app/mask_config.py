@@ -151,6 +151,184 @@ def parse_mask_settings(config, base_dir=None):
     return MaskSettings(mask=mask_path, pixel_repair=repair)
 
 
+def repair_intensity_variance(
+    intensity,
+    variance,
+    mask,
+    *,
+    max_component_pixels,
+    max_span,
+    radius,
+    min_valid_neighbors,
+    row_gaps=(),
+    column_gaps=(),
+):
+    """Repair masked defects and propagate interpolation-weight variance.
+
+    This follows the existing ROI repair policy: isolated pixels use the
+    median of surrounding valid pixels, while larger accepted components use
+    inverse-distance weighting. Returned masks remain ``True`` for defects
+    that cannot be repaired.
+
+    :returns:
+        Repaired intensity, marginal variance, remaining mask, and repaired
+        pixel mask.
+    """
+    intensity = np.asarray(intensity, dtype=np.float64).copy()
+    variance = np.asarray(variance, dtype=np.float64).copy()
+    mask = np.asarray(mask, dtype=bool)
+    if intensity.shape != variance.shape or intensity.shape != mask.shape:
+        raise ValueError("intensity, variance, and mask shapes must match")
+    height, width = mask.shape
+    visited = np.zeros(mask.shape, dtype=bool)
+    repaired = np.zeros(mask.shape, dtype=bool)
+    remaining = mask.copy()
+    row_gaps = tuple(tuple(map(int, interval)) for interval in row_gaps)
+    column_gaps = tuple(tuple(map(int, interval)) for interval in column_gaps)
+
+    def touches_gap(component):
+        for row, column in component:
+            if any(start - 1 <= row <= stop for start, stop in row_gaps):
+                return True
+            if any(start - 1 <= column <= stop for start, stop in column_gaps):
+                return True
+        return False
+
+    for initial_row, initial_column in zip(*np.nonzero(mask & ~visited)):
+        stack = [(int(initial_row), int(initial_column))]
+        visited[initial_row, initial_column] = True
+        component = []
+        while stack:
+            row, column = stack.pop()
+            component.append((row, column))
+            for next_row, next_column in (
+                (row - 1, column),
+                (row + 1, column),
+                (row, column - 1),
+                (row, column + 1),
+            ):
+                if (
+                    0 <= next_row < height
+                    and 0 <= next_column < width
+                    and mask[next_row, next_column]
+                    and not visited[next_row, next_column]
+                ):
+                    visited[next_row, next_column] = True
+                    stack.append((next_row, next_column))
+        rows = [item[0] for item in component]
+        columns = [item[1] for item in component]
+        if (
+            len(component) > max_component_pixels
+            or max(rows) - min(rows) + 1 > max_span
+            or max(columns) - min(columns) + 1 > max_span
+            or touches_gap(component)
+        ):
+            continue
+        neighbors = []
+        sides = set()
+        for row in range(
+            max(0, min(rows) - radius),
+            min(height, max(rows) + radius + 1),
+        ):
+            for column in range(
+                max(0, min(columns) - radius),
+                min(width, max(columns) + radius + 1),
+            ):
+                if mask[row, column] or not np.isfinite(intensity[row, column]):
+                    continue
+                distance2 = min(
+                    (row - item_row) ** 2 + (column - item_column) ** 2
+                    for item_row, item_column in component
+                )
+                if distance2 <= 0 or distance2 > radius**2:
+                    continue
+                neighbors.append((row, column, 1.0 / distance2))
+                if column < min(columns):
+                    sides.add("left")
+                if column > max(columns):
+                    sides.add("right")
+                if row < min(rows):
+                    sides.add("top")
+                if row > max(rows):
+                    sides.add("bottom")
+        if len(neighbors) < min_valid_neighbors or len(sides) < 2:
+            continue
+        if len(component) == 1:
+            ordered = sorted(
+                neighbors, key=lambda item: intensity[item[0], item[1]]
+            )
+            middle = len(ordered) // 2
+            selected = (
+                [(ordered[middle][0], ordered[middle][1], 1.0)]
+                if len(ordered) % 2
+                else [
+                    (ordered[middle - 1][0], ordered[middle - 1][1], 0.5),
+                    (ordered[middle][0], ordered[middle][1], 0.5),
+                ]
+            )
+        else:
+            total_weight = sum(item[2] for item in neighbors)
+            selected = [
+                (row, column, weight / total_weight)
+                for row, column, weight in neighbors
+            ]
+        value = sum(
+            intensity[row, column] * weight
+            for row, column, weight in selected
+        )
+        value_variance = sum(
+            variance[row, column] * weight**2
+            for row, column, weight in selected
+        )
+        for row, column in component:
+            intensity[row, column] = value
+            variance[row, column] = value_variance
+            repaired[row, column] = True
+            remaining[row, column] = False
+    return intensity, variance, remaining, repaired
+
+
+def create_pixel_repair_plan(
+    mask,
+    *,
+    max_component_pixels,
+    max_span,
+    radius,
+    min_valid_neighbors,
+    row_gaps=(),
+    column_gaps=(),
+):
+    """Create a reusable native repair plan for a constant detector mask.
+
+    The connected components, admissible neighbors, interpolation distances,
+    and detector-gap exclusions are computed once. Applying the returned plan
+    to an image and variance array modifies both arrays in place and releases
+    the Python GIL for the numerical work.
+
+    :raises RuntimeError:
+        If the native ROI extension is unavailable.
+    """
+    from ._roi_sum_accel import PixelRepairPlan
+
+    if PixelRepairPlan is None:
+        raise RuntimeError(
+            "Native pixel repair is required for reciprocal-space mapping"
+        )
+    row_gaps = np.ascontiguousarray(row_gaps, dtype=np.int32).reshape(-1, 2)
+    column_gaps = np.ascontiguousarray(
+        column_gaps, dtype=np.int32
+    ).reshape(-1, 2)
+    return PixelRepairPlan(
+        np.ascontiguousarray(mask, dtype=bool),
+        row_gaps,
+        column_gaps,
+        int(max_component_pixels),
+        int(max_span),
+        int(radius),
+        int(min_valid_neighbors),
+    )
+
+
 class MaskManager:
     """Manage detector mask state without depending on Qt widgets."""
 
