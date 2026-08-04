@@ -110,7 +110,9 @@ Required Scan Methods
 
 ``parse_h5_node(cls, node)``
    Return a dictionary with at least ``scanno`` and ``name`` for a scan node
-   double clicked in the Nexus tree.
+   double clicked in the Nexus tree. It is expected to **raise** for a node
+   that is not a scan: the segmented scan loader uses that to tell scans apart
+   from the other entries of a file, see below.
 
 ``__len__()``
    Return the number of images or points in the scan.
@@ -122,6 +124,63 @@ Required Scan Methods
 ``__getitem__(i)``
    Optional but convenient. The examples implement this by returning
    ``get_raw_img(i)``.
+
+How a Scan Is Identified
+------------------------
+
+orGUI carries two fields for a scan, and a backend may need both when they
+differ:
+
+``scanno``
+   The scan number shown in the GUI. It is an integer, because the scan number
+   selector is a spin box.
+
+``name``
+   A free-form identifier. Most backends do not need it, but a backend whose
+   constructor takes a *name* rather than a number is opened with this one --
+   ``BlissScan`` (beamtime ``ch5523``) reads its scans as ``ascan_12``,
+   ``dscan_3`` and so on, and uses the name as an HDF5 group key.
+
+Which of the two is passed to the constructor is decided per beamtime in
+``orgui.backend.backends.openScan``.
+
+Listing Scans for the Segmented Scan Loader
+-------------------------------------------
+
+The segmented ("interlaced") scan loader has to know every scan in a file
+*before* any scan object exists, so it cannot use ``parse_h5_node`` on a single
+selected node the way normal scan loading does. Backends can answer directly
+with the optional ``listScans`` classmethod:
+
+.. code-block:: python
+
+   from orgui.backend.scans import Scan
+
+   class MyBackend(Scan):
+
+       @classmethod
+       def listScans(cls, h5file):
+           return [1, 2, 10]                          # scan numbers
+           # or
+           return ["ascan_12", "dscan_3"]             # scan names
+           # or, with a label for the selection dialog
+           return [(1, "ascan th 0 90 90 1"), (2, "dscan mu 0 1 20 1")]
+
+Return whatever your ``__init__`` accepts as its scan identifier. It is passed
+back untouched when the scan is opened, and only converted to ``str`` for
+display, so a backend addressed by name works exactly like one addressed by
+number. Do not use ``float`` for BLISS style ``"<scan>.<subscan>"`` names --
+``1.1`` and ``1.10`` are the same float.
+
+**Implementing this is optional.** A backend that does not implement it gets
+the fallback: orGUI applies the backend's own ``parse_h5_node`` to every entry
+of the file root, keeps the entries that yield a ``scanno``, and collapses
+repeated scan numbers so the subscans of one measurement appear once. That
+needs no extra code in the backend and cannot disagree with normal scan
+loading, but it has to walk the tree, and it depends on ``parse_h5_node``
+raising for entries that are not scans.
+
+Nothing here depends on the name of the backend class or on the beamtime id.
 
 Image Objects
 -------------
