@@ -36,6 +36,7 @@ import warnings
 from .. import util
 
 from .CTRcalc import SXRDCrystal
+from . import CTRresolution
 
 from scipy import stats
 
@@ -48,27 +49,229 @@ class CTROptimizer:
         self.CTRs.sort(key=lambda x: abs(x.hk[0]) + abs(x.hk[1]))
         self.xtal = copy.deepcopy(xtal)
         self.scaling = util.get_scale_chi2
+        self.resolution = None
+        self.resolution_calculation = "sample"
+        self._fit_resolution = False
+        self._resolution_bounds = None
+        self.resolution_errors = None
+        self.calculated_CTRs = None
+        self._resolution_input_ctrs = None
+
+    def set_resolution(self, resolution, calculation=None):
+        """Set the L-direction resolution model used for calculated CTRs.
+
+        :param CTRresolution.ResolutionFunction resolution:
+            Resolution model evaluated in r.l.u. along each CTR. Pass ``None``
+            to use unbroadened structure factors.
+        :param str calculation:
+            Optional resolution calculation mode: ``"sample"`` evaluates
+            structure factors at quadrature points, while ``"convolve"``
+            convolves calculated values on the existing L grid.
+        :raises TypeError:
+            If ``resolution`` is neither ``None`` nor a resolution model.
+        """
+        if resolution is not None and not isinstance(
+            resolution, CTRresolution.ResolutionFunction
+        ):
+            raise TypeError("resolution must be a ResolutionFunction or None")
+        self.resolution = resolution
+        if calculation is not None:
+            self.set_resolution_calculation(calculation)
+        self._invalidate_resolution_cache()
+
+    def set_resolution_calculation(self, calculation):
+        """Set how resolution-broadened calculated CTRs are evaluated.
+
+        :param str calculation:
+            ``"sample"`` for quadrature sampling of ``crystal.F`` or
+            ``"convolve"`` for fast convolution on the existing L grid.
+        :raises ValueError:
+            If ``calculation`` is not a supported mode.
+        """
+        if calculation not in {"sample", "convolve"}:
+            raise ValueError("calculation must be 'sample' or 'convolve'")
+        self.resolution_calculation = calculation
+        self._invalidate_resolution_cache()
+
+    def calc_resolution_angles_zmode(
+        self, vliegangles, fixedangle=np.deg2rad(0.1), fixed="in", **keyargs
+    ):
+        """Calculate and cache Z-mode angles used by an angle-dependent model.
+
+        The cached angle records are attached to the optimizer's CTR geometry.
+        Their values are in rad and remain valid while the HKL coordinates and
+        experimental geometry are unchanged.
+
+        :param HKLVlieg.VliegAngles vliegangles:
+            Angle calculator configured for the CTR reference lattice.
+        :param float fixedangle:
+            Fixed incidence or exit angle in rad.
+        :param str fixed:
+            Whether ``fixedangle`` fixes the incident (``"in"``) or exit
+            (``"out"``) beam angle.
+        :returns:
+            Cached structured angle records, one per CTR.
+        :rtype: list[numpy.recarray]
+        """
+        angles = self.CTRs.calcAnglesZmode(
+            vliegangles, fixedangle=fixedangle, fixed=fixed, **keyargs
+        )
+        self._resolution_input_ctrs = None
+        self._invalidate_resolution_cache()
+        return angles
+
+    def fit_resolution(
+        self, resolution, lower_bounds, higher_bounds, calculation="sample"
+    ):
+        """Include all three resolution widths in the fit parameter array.
+
+        Resolution parameters occupy the leading three entries of the
+        optimizer parameter array in this order: ``delta_l_0``, ``delta_l_1``,
+        and ``delta_l_2``. The widths and their bounds are in r.l.u.
+
+        :param CTRresolution.ResolutionFunction resolution:
+            Initial box or Gaussian resolution model.
+        :param sequence lower_bounds:
+            Three finite lower bounds for the resolution widths in r.l.u.
+        :param sequence higher_bounds:
+            Three finite upper bounds for the resolution widths in r.l.u.
+        :param str calculation:
+            ``"sample"`` for quadrature sampling or ``"convolve"`` for
+            fast convolution on the measured L grid.
+        :raises TypeError:
+            If ``resolution`` is not a resolution model.
+        :raises ValueError:
+            If either bound sequence does not contain three valid bounds.
+        """
+        self.set_resolution(resolution, calculation=calculation)
+        lower_bounds = np.asarray(lower_bounds, dtype=np.float64)
+        higher_bounds = np.asarray(higher_bounds, dtype=np.float64)
+        if lower_bounds.shape != (3,) or higher_bounds.shape != (3,):
+            raise ValueError("Resolution bounds must each contain three values")
+        if (
+            not np.all(np.isfinite(lower_bounds))
+            or not np.all(np.isfinite(higher_bounds))
+            or np.any(lower_bounds < 0.0)
+            or np.any(lower_bounds > higher_bounds)
+        ):
+            raise ValueError("Resolution bounds must be finite and nonnegative")
+        self._fit_resolution = True
+        self._resolution_bounds = (lower_bounds, higher_bounds)
+
+    def _resolution_parameters(self):
+        """Return the resolution-width fit parameters in r.l.u."""
+        return np.asarray(
+            (
+                self.resolution.delta_l_0,
+                self.resolution.delta_l_1,
+                self.resolution.delta_l_2,
+            ),
+            dtype=np.float64,
+        )
+
+    def _set_resolution_parameters(self, parameters):
+        """Set the fitted resolution widths from a three-value parameter slice."""
+        values = np.asarray(parameters, dtype=np.float64)
+        if values.shape != (3,):
+            raise ValueError("Resolution fit parameters must contain three values")
+        self.resolution = type(self.resolution)(*values)
+        self._invalidate_resolution_cache()
+
+    def _invalidate_resolution_cache(self):
+        """Discard calculated amplitudes after geometry or model changes."""
+        self.calculated_CTRs = None
+
+    def _resolution_input_collection(self):
+        """Return the reusable unbroadened input for fast convolution."""
+        if self._resolution_input_ctrs is None:
+            self._resolution_input_ctrs = copy.deepcopy(self.CTRs)
+        return self._resolution_input_ctrs
+
+    def _update_resolution_cache(self):
+        """Calculate and cache resolution-broadened amplitudes for all CTRs.
+
+        ``sample_structure_factor`` currently returns a collection rather than
+        accepting an output buffer. A flattened-array kernel would avoid this
+        remaining collection allocation in future performance work.
+        """
+        if self.resolution is None:
+            self.calculated_CTRs = None
+            return
+        if self.resolution_calculation == "sample":
+            self.calculated_CTRs = CTRresolution.sample_structure_factor(
+                self.CTRs, self.xtal, self.resolution
+            )
+            return
+
+        input_ctrs = self._resolution_input_collection()
+        for source, calculated in zip(self.CTRs, input_ctrs):
+            calculated.sfI = np.abs(self.xtal.F(source.harr, source.karr, source.l))
+        self.calculated_CTRs = CTRresolution.fast_convolve(
+            input_ctrs, self.resolution
+        )
+
+    def _append_resolution_bounds(self, bounds):
+        """Prefix native resolution bounds when resolution fitting is enabled."""
+        if not self._fit_resolution:
+            return bounds
+        return (
+            np.concatenate((self._resolution_bounds[0], bounds[0])),
+            np.concatenate((self._resolution_bounds[1], bounds[1])),
+        )
+
+    def _split_resolution_parameters(self, parameters):
+        """Split leading resolution parameters from an optimizer vector."""
+        if not self._fit_resolution:
+            return parameters
+        self._set_resolution_parameters(parameters[:3])
+        return parameters[3:]
+
+    def _calculated_amplitude(self, ctr, index):
+        """Return the calculated amplitude for one CTR, with resolution."""
+        if self.resolution is None:
+            return np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+        if self.calculated_CTRs is None:
+            self._update_resolution_cache()
+        return self.calculated_CTRs[index].sfI
 
     def prepareFit(self):
+        """Prepare crystal and optional resolution parameters for fitting.
+
+        When a resolution model is configured, this validates any required
+        cached angle records and calculates the initial ``calculated_CTRs``
+        cache before the optimizer begins evaluating trial parameters.
+        """
         self.startp, self.lower_bounds, self.higher_bounds = (
             self.xtal.getStartParamAndLimits()
         )
-        self.bounds = (self.lower_bounds, self.higher_bounds)
+        self.bounds = self._append_resolution_bounds(
+            (self.lower_bounds, self.higher_bounds)
+        )
         for ctr in self.CTRs:
             ctr.invrelerrsqrd_weight = ctr.weight * ctr.err**-2
+        self._update_resolution_cache()
 
     def get_bounds(self):
         return self.bounds
 
     def get_parameters(self):
-        return self.xtal.getInitialParameters()
+        parameters = self.xtal.getInitialParameters()
+        if self._fit_resolution:
+            parameters = np.concatenate((self._resolution_parameters(), parameters))
+        return parameters
+
+    def set_parameters(self, x):
+        """Set crystal and, when enabled, resolution fit parameters."""
+        x = self._split_resolution_parameters(x)
+        self.xtal.setParameters(x)
+        self._update_resolution_cache()
 
     def weighted_residues2(self, x=None):
         if x is not None:
-            self.xtal.setParameters(x)
+            self.set_parameters(x)
         residues = []
         for i, ctr in enumerate(self.CTRs):
-            F_theo = np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+            F_theo = self._calculated_amplitude(ctr, i)
             scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
             residues.append(
                 (ctr.invrelerrsqrd_weight / scale**2)
@@ -78,10 +281,10 @@ class CTROptimizer:
 
     def residues(self, x=None):
         if x is not None:
-            self.xtal.setParameters(x)
+            self.set_parameters(x)
         residues = []
         for i, ctr in enumerate(self.CTRs):
-            F_theo = np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+            F_theo = self._calculated_amplitude(ctr, i)
             scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
             residues.append(ctr.sfI * scale - F_theo)
         return np.concatenate(residues)
@@ -103,21 +306,21 @@ class CTROptimizer:
 
     def flat_Fcalc(self, x=None):
         if x is not None:
-            self.xtal.setParameters(x)
+            self.set_parameters(x)
         F = []
         for i, ctr in enumerate(self.CTRs):
-            F_theo = np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+            F_theo = self._calculated_amplitude(ctr, i)
             scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
             F.append(F_theo / scale)
         return np.concatenate(F)
 
     def Rfactor(self, x=None):
         if x is not None:
-            self.xtal.setParameters(x)
+            self.set_parameters(x)
         residues = []
         Fobs = []
         for i, ctr in enumerate(self.CTRs):
-            F_theo = np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+            F_theo = self._calculated_amplitude(ctr, i)
             scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
             residues.append(np.abs(ctr.sfI * scale - F_theo))
             Fobs.append(np.abs(ctr.sfI * scale))
@@ -127,10 +330,10 @@ class CTROptimizer:
 
     def weighted_residues(self, x=None):
         if x is not None:
-            self.xtal.setParameters(x)
+            self.set_parameters(x)
         residues = []
         for i, ctr in enumerate(self.CTRs):
-            F_theo = np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+            F_theo = self._calculated_amplitude(ctr, i)
             scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
             residues.append(
                 np.sqrt(ctr.weight) * ((ctr.sfI * scale - F_theo) / (ctr.err * scale))
@@ -138,10 +341,10 @@ class CTROptimizer:
         return np.concatenate(residues)
 
     def fitness(self, x):
-        self.xtal.setParameters(x)
+        self.set_parameters(x)
         sumchi2 = 0.0
         for i, ctr in enumerate(self.CTRs):
-            F_theo = np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+            F_theo = self._calculated_amplitude(ctr, i)
             scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
             sumchi2 += np.sum(
                 (ctr.invrelerrsqrd_weight / scale**2)
@@ -150,7 +353,7 @@ class CTROptimizer:
         return [sumchi2]
 
     def statistics(self, x):
-        self.xtal.setParameters(x)
+        self.set_parameters(x)
         residues2 = self.weighted_residues2()
 
         Rfactor = self.Rfactor()
@@ -167,8 +370,12 @@ class CTROptimizer:
         pcov = util.leastsq_covariance(self.weighted_residues, x)
 
         self.errors = np.sqrt(np.diag(pcov) * chi2_red)
-        self.xtal.setFitErrors(self.errors)
-        self.xtal.setParameters(x)
+        if self._fit_resolution:
+            self.resolution_errors = self.errors[:3]
+            self.xtal.setFitErrors(self.errors[3:])
+        else:
+            self.xtal.setFitErrors(self.errors)
+        self.set_parameters(x)
 
         stat["Chisqr"] = chi2_result
         stat["nodatapoints"] = residues2.size
@@ -186,7 +393,7 @@ class CTROptimizer:
             DeprecationWarning,
         )
 
-        self.xtal.setParameters(x)
+        self.set_parameters(x)
         residues2 = self.weighted_residues2()
 
         # variance = np.concatenate([ctr.err**2 for ctr in self.CTRs])
@@ -201,8 +408,12 @@ class CTROptimizer:
         pcov = util.leastsq_covariance(self.residues, x)
 
         errors = np.sqrt(np.diag(pcov) * chi2_red)
-        self.xtal.setFitErrors(errors)
-        self.xtal.setParameters(x)
+        if self._fit_resolution:
+            self.resolution_errors = errors[:3]
+            self.xtal.setFitErrors(errors[3:])
+        else:
+            self.xtal.setFitErrors(errors)
+        self.set_parameters(x)
 
         return chi2_result, chi2_red, pvalue, residues2.size
 
@@ -324,6 +535,12 @@ class CTROptAngleCorrection(CTROptimizer):
         del self.callbacks[idx]
 
     def prepareFit(self, phaselim=[0, 2 * np.pi], amplim=[0, 0.75], start=[0.0, 0.0]):
+        """Prepare angle-correction and optional resolution fit state.
+
+        Resolution setup validates cached angles and calculates the initial
+        ``calculated_CTRs`` cache. Its three native parameters prefix all
+        callback, angle-correction, and crystal parameters.
+        """
         self.startp, self.lower_bounds, self.higher_bounds = (
             self.xtal.getStartParamAndLimits()
         )
@@ -343,12 +560,20 @@ class CTROptAngleCorrection(CTROptimizer):
                 np.concatenate((cb.bounds[0], self.bounds[0])),
                 np.concatenate((cb.bounds[1], self.bounds[1])),
             )
+        self.bounds = self._append_resolution_bounds(self.bounds)
 
         if self.dw_zconstraints:
             constr = self.get_inequalconstraints()
             self.nic = constr.size
-        self.fitparnames = self.xtal.fitparnames
+        self.fitparnames = list(self.xtal.fitparnames)
+        if self._fit_resolution:
+            self.fitparnames = [
+                "resolution_delta_l_0",
+                "resolution_delta_l_1",
+                "resolution_delta_l_2",
+            ] + self.fitparnames
         self.priors = self.xtal.priors
+        self._update_resolution_cache()
 
     def get_inequalconstraints(self):
         constraints = []
@@ -374,7 +599,7 @@ class CTROptAngleCorrection(CTROptimizer):
         F_err = []
         if self.useAnglecorr:
             for i, ctr in enumerate(self.CTRs):
-                F_theo = np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+                F_theo = self._calculated_amplitude(ctr, i)
                 if hasattr(ctr, "angles"):
                     anglecorr = self.get_anglecorrection(ctr.angles["omega"])
                 else:
@@ -424,9 +649,12 @@ class CTROptAngleCorrection(CTROptimizer):
 
         for cb in reversed(self.callbacks):
             pars = np.concatenate((cb.get_parameters(self.xtal), pars))
+        if self._fit_resolution:
+            pars = np.concatenate((self._resolution_parameters(), pars))
         return pars
 
     def set_parameters(self, x):
+        x = self._split_resolution_parameters(x)
         counter = 0
         for cb in self.callbacks:
             cb.set_parameters(self.xtal, x[counter : counter + cb.n_pars])
@@ -439,9 +667,14 @@ class CTROptAngleCorrection(CTROptimizer):
             self.xtal.setParameters(x[2:])
         else:
             self.xtal.setParameters(x)
+        self._update_resolution_cache()
 
     def set_errors(self, xerror):
         self.errors = xerror
+
+        if self._fit_resolution:
+            self.resolution_errors = xerror[:3]
+            xerror = xerror[3:]
 
         counter = 0
         for cb in self.callbacks:
@@ -481,7 +714,7 @@ class CTROptAngleCorrection(CTROptimizer):
         F_t = []
         F_err = []
         for i, ctr in enumerate(self.CTRs):
-            F_theo = np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+            F_theo = self._calculated_amplitude(ctr, i)
             if hasattr(ctr, "angles"):
                 anglecorr = self.get_anglecorrection(ctr.angles["omega"])
             else:
@@ -513,7 +746,7 @@ class CTROptAngleCorrection(CTROptimizer):
         F_t = []
         F_err = []
         for i, ctr in enumerate(self.CTRs):
-            F_theo = np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+            F_theo = self._calculated_amplitude(ctr, i)
             if hasattr(ctr, "angles"):
                 anglecorr = self.get_anglecorrection(ctr.angles["omega"])
             else:
@@ -552,7 +785,7 @@ class CTROptAngleCorrection(CTROptimizer):
         F_t = []
         F_err = []
         for i, ctr in enumerate(self.CTRs):
-            F_theo = np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+            F_theo = self._calculated_amplitude(ctr, i)
             if hasattr(ctr, "angles"):
                 anglecorr = self.get_anglecorrection(ctr.angles["omega"])
             else:
@@ -589,7 +822,7 @@ class CTROptAngleCorrection(CTROptimizer):
         F_err = []
         scaled_errors = []
         for i, ctr in enumerate(self.CTRs):
-            F_theo = np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+            F_theo = self._calculated_amplitude(ctr, i)
             if hasattr(ctr, "angles"):
                 anglecorr = self.get_anglecorrection(ctr.angles["omega"])
             else:

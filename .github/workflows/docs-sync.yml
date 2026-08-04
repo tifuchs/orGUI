@@ -1,0 +1,118 @@
+name: Docs Sync
+
+"on":
+  schedule:
+    - cron: "37 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: read
+
+concurrency:
+  group: docs-sync
+  cancel-in-progress: false
+
+jobs:
+  check-open-pr:
+    runs-on: ubuntu-latest
+    outputs:
+      has_open_pr: ${{ steps.check.outputs.has_open_pr }}
+    steps:
+      - name: Check for an open docs/auto-sync PR
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh pr list --repo "${{ github.repository }}" --head docs/auto-sync --state open --json number --jq 'length')
+          echo "has_open_pr=$([ "$count" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  doc-sync:
+    needs: check-open-pr
+    if: needs.check-open-pr.outputs.has_open_pr == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            COMMIT: ${{ github.sha }}
+
+            You are running the orGUI automated doc-sync job, triggered on a daily
+            schedule against the current tip of master. Read `doc/AGENTS.md` first — it
+            is the authoritative reference for
+            what counts as user-facing, how to write CHANGELOG.md entries, how topic
+            rst pages are organized, and what never to hand-edit. Also skim the root
+            `AGENTS.md` instruction tree and follow whichever nested `AGENTS.md`
+            (`orgui/app/AGENTS.md`, `orgui/datautils/xrayutils/AGENTS.md`) covers the
+            files a given commit touches.
+
+            ## Determine the commit range
+
+            Find the latest release tag reachable from this commit:
+            `git describe --tags --abbrev=0 --match "v*" ${{ github.sha }}`. Review
+            every commit in `<that tag>..${{ github.sha }}` (newest first — prioritize
+            the most recent commits since they're most likely undocumented), using
+            `git log --oneline` for the list and `git show <sha>` to judge intent from
+            the actual diff, not just the message.
+
+            ## Prepare the review branch
+
+            All edits land on a dedicated `docs/auto-sync` branch, never on `master`,
+            and this job never opens a pull request:
+
+            1. `git fetch origin docs/auto-sync` (ignore failure if it doesn't exist
+               yet).
+            2. If `origin/docs/auto-sync` exists: `git checkout -B docs/auto-sync
+               origin/docs/auto-sync`, then `git merge origin/master --no-edit` to
+               bring in the commit that triggered this run. If the merge conflicts,
+               stop and report the conflict instead of forcing a resolution.
+            3. If it doesn't exist yet: `git checkout -b docs/auto-sync`.
+
+            ## For each commit in range
+
+            1. Decide if it is user-facing per `doc/AGENTS.md`'s criteria (GUI/CLI
+               behavior, config fields, calculation results/scientific conventions,
+               public API contracts, packaging — not pure refactors/tests/CI/comment-only
+               changes). Use judgment from the diff, not the commit message wording or
+               the `cliff.toml` grouping heuristic.
+            2. If user-facing: check whether `CHANGELOG.md`'s `## [Unreleased]` section
+               already covers it (read its current content first — do not duplicate).
+               If not, add a short prose bullet under a fitting existing or new theme
+               heading matching the existing style (see the `[1.5.0]` section as the
+               pattern). Do not write `###`-style generated-group headings by hand.
+            3. If the change clearly affects an existing `doc/source/*.rst` topic page
+               (e.g. reconstruction changes -> `reciprocal_space_reconstruction.rst`,
+               CTR model changes -> `ctr_structure_factors.rst`), check if that page
+               already reflects it; if not, make a small, localized edit. Don't create
+               a new page unless nothing existing fits, and if you do, add it to the
+               toctree in `source/index.rst`. Skip the edit if you can't verify a
+               scientific convention/unit statement from the diff — check the
+               underlying code and its local `AGENTS.md` instead of guessing.
+            4. Skip anything not clearly user-facing, and skip anything already
+               documented.
+
+            ## Regenerate and commit
+
+            After any `CHANGELOG.md` edits, regenerate the release notes page:
+            `python3 doc/generate_release_notes.py`. Never hand-edit
+            `doc/source/release_notes.rst`.
+
+            If you made any changes, commit them with a Conventional Commit message,
+            `docs` type, e.g. `docs: sync changelog and topic pages for <range>`. Then
+            push: try `git push origin HEAD:docs/auto-sync` first; if that's rejected
+            as non-fast-forward (it shouldn't be, since you just merged), use
+            `git push --force-with-lease origin HEAD:docs/auto-sync` — this branch is
+            fully owned by this job, so force-with-lease is expected there, but never
+            push to `master` and never use a bare `--force`.
+
+            If there was nothing new to document, make no commit and do not push.
+
+          claude_args: |
+            --allowedTools "Read,Write,Edit,Grep,Glob,Bash(git:*),Bash(python3:*)"

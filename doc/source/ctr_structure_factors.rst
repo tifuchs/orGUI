@@ -240,6 +240,21 @@ the linear interpolation
    z_m(\kappa,0)
    = z_{0,m} + \kappa\left(z_1-z_{0,m}\right).
 
+For the fully strain-coupled discrete profile, every structural layer supplies
+its own physical interval.  If :math:`d_{\mathrm{top},i}` and
+:math:`d_{\mathrm{bottom},i}` are the upper- and lower-lattice intervals for
+layer :math:`i`, the coupled interval is
+
+.. math::
+
+   d_{1,i}
+   = P_i d_{\mathrm{top},i}
+     + (1-P_i)d_{\mathrm{bottom},i},
+
+and the layer origins are the cumulative sum of these intervals.  The
+calculation must therefore accumulate all structural layers independently;
+one layer's strain cannot represent a complete multi-layer unit-cell cycle.
+
 The ``offset`` parameter :math:`o` is expressed in fractional lower-bulk
 :math:`c` coordinates.  Its physical displacement is
 
