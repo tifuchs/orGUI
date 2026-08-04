@@ -41,6 +41,7 @@ from .CTRutil import ParameterType, Parameter, next_skip_comment
 from .CTRuc import WaterModel, UnitCell
 from .CTRfilm import EpitaxyInterface, Film, PoissonSurface
 from .CTRoptics import (
+    _specular_reflection,
     add_structural_to_sampled_profile,
     combine_profiles,
     simplify_profile,
@@ -1195,8 +1196,10 @@ class SXRDCrystal:
         amplitudes ``A_plus`` and ``A_minus``. Slabs are ordered from the
         incident medium towards the substrate.
 
-        :param float alpha:
-            Glancing incidence angle in degrees inside the incident medium.
+        :param float or numpy.ndarray alpha:
+            Glancing incidence angle or angle array in degrees inside the
+            incident medium. For arrays, wavefield quantities have the layer
+            axis first followed by the original angle-array shape.
         :param str polarization:
             ``"s"`` or ``"p"``.
         :param float delta_tolerance:
@@ -1251,28 +1254,20 @@ class SXRDCrystal:
             )
         alpha_array = np.asarray(alpha, dtype=np.float64)
         scalar = alpha_array.ndim == 0
-        angles = np.atleast_1d(alpha_array)
+        angles = np.atleast_1d(alpha_array).ravel()
         profile = self.stratified_optical_profile(
             delta_tolerance, beta_tolerance
         )
 
         def reflectivity(pol):
-            return np.asarray(
-                [
-                    abs(
-                        solve_wavefield(
-                            profile.values,
-                            self.uc_bulk._E,
-                            angle,
-                            pol,
-                            boundaries=profile.boundaries,
-                        ).r_S
-                    )
-                    ** 2
-                    for angle in angles
-                ],
-                dtype=np.float64,
+            reflection = _specular_reflection(
+                profile.values,
+                self.uc_bulk._E,
+                angles,
+                pol,
+                boundaries=profile.boundaries,
             )
+            return np.abs(reflection) ** 2
 
         if polarization == "unpolarized":
             result = 0.5 * (reflectivity("s") + reflectivity("p"))

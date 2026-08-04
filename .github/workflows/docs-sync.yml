@@ -1,20 +1,36 @@
 name: Docs Sync
 
 "on":
-  push:
-    branches:
-      - master
+  schedule:
+    - cron: "37 4 * * *"
+  workflow_dispatch: {}
 
 permissions:
   contents: write
   id-token: write
+  pull-requests: read
 
 concurrency:
   group: docs-sync
   cancel-in-progress: false
 
 jobs:
+  check-open-pr:
+    runs-on: ubuntu-latest
+    outputs:
+      has_open_pr: ${{ steps.check.outputs.has_open_pr }}
+    steps:
+      - name: Check for an open docs/auto-sync PR
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh pr list --repo "${{ github.repository }}" --head docs/auto-sync --state open --json number --jq 'length')
+          echo "has_open_pr=$([ "$count" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
   doc-sync:
+    needs: check-open-pr
+    if: needs.check-open-pr.outputs.has_open_pr == 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -28,8 +44,9 @@ jobs:
             REPO: ${{ github.repository }}
             COMMIT: ${{ github.sha }}
 
-            You are running the orGUI automated doc-sync job, triggered by a push to
-            master. Read `doc/AGENTS.md` first — it is the authoritative reference for
+            You are running the orGUI automated doc-sync job, triggered on a daily
+            schedule against the current tip of master. Read `doc/AGENTS.md` first — it
+            is the authoritative reference for
             what counts as user-facing, how to write CHANGELOG.md entries, how topic
             rst pages are organized, and what never to hand-edit. Also skim the root
             `AGENTS.md` instruction tree and follow whichever nested `AGENTS.md`

@@ -363,6 +363,20 @@ def _ctr_accel_module():
     )
 
 
+def _coherent_domain_arrays(coherent_domain_matrix, coherent_domain_occupancy):
+    """Return accel-ready coherent domain arrays, handling zero domains.
+
+    ``np.asarray`` on an empty list collapses to shape ``(0,)`` instead of
+    the ``(0, 3, 4)`` the accel bindings require, so the empty case is
+    reshaped explicitly.
+    """
+    matrix = np.asarray(coherent_domain_matrix)
+    if matrix.size == 0:
+        matrix = matrix.reshape((0, 3, 4))
+    occupancy = np.asarray(coherent_domain_occupancy)
+    return matrix, occupancy
+
+
 class WaterModel(Lattice, LinearFitFunctions):
     # path = os.path.split(__file__)[0]
 
@@ -3466,6 +3480,9 @@ class UnitCell(Lattice):
         if ctr_accel_enabled():
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
             accel = _ctr_accel_module()
+            domain_matrix, domain_occupancy = _coherent_domain_arrays(
+                self.coherentDomainMatrix, self.coherentDomainOccupancy
+            )
             F = accel.unitcell_F_uc_bulk(
                 h,
                 k,
@@ -3477,8 +3494,8 @@ class UnitCell(Lattice):
                 self.B_mat,
                 self.R_mat,
                 self.R_mat_inv,
-                np.asarray(self.coherentDomainMatrix),
-                np.asarray(self.coherentDomainOccupancy),
+                domain_matrix,
+                domain_occupancy,
                 self.uc_area,
             )
             return F
@@ -3591,6 +3608,9 @@ class UnitCell(Lattice):
         if ctr_accel_enabled() and not self._special_formfactors_present:
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
             accel = _ctr_accel_module()
+            domain_matrix, domain_occupancy = _coherent_domain_arrays(
+                self.coherentDomainMatrix, self.coherentDomainOccupancy
+            )
             F = accel.unitcell_F_uc(
                 h,
                 k,
@@ -3601,8 +3621,8 @@ class UnitCell(Lattice):
                 self.B_mat,
                 self.R_mat,
                 self.R_mat_inv,
-                np.asarray(self.coherentDomainMatrix),
-                np.asarray(self.coherentDomainOccupancy),
+                domain_matrix,
+                domain_occupancy,
                 self.uc_area,
             )
             return F
@@ -3675,6 +3695,9 @@ class UnitCell(Lattice):
         if ctr_accel_enabled():
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
             accel = _ctr_accel_module()
+            domain_matrix, domain_occupancy = _coherent_domain_arrays(
+                self.coherentDomainMatrix, self.coherentDomainOccupancy
+            )
             F = accel.unitcell_F_bulk(
                 h,
                 k,
@@ -3686,8 +3709,8 @@ class UnitCell(Lattice):
                 self.B_mat,
                 self.R_mat,
                 self.R_mat_inv,
-                np.asarray(self.coherentDomainMatrix),
-                np.asarray(self.coherentDomainOccupancy),
+                domain_matrix,
+                domain_occupancy,
                 self.uc_area,
             )
             return F

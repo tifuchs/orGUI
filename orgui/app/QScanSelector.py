@@ -36,7 +36,6 @@ from dateutil import parser as dateparser
 
 from silx.gui import qt
 
-from silx.gui.hdf5.Hdf5TreeModel import Hdf5TreeModel
 from silx.gui import icons
 from silx.gui.plot.AlphaSlider import NamedImageAlphaSlider
 # from silx.gui.widgets import HorizontalSliderWithBrowser
@@ -78,6 +77,7 @@ class QScanSelector(qt.QMainWindow):
     sigROIChanged = qt.pyqtSignal()
     sigROIintegrate = qt.pyqtSignal()
     sigSearchHKL = qt.pyqtSignal(list)
+    sigRefreshH5 = qt.pyqtSignal()
 
     def __init__(self, parentmainwindow, parent=None):
         qt.QMainWindow.__init__(self, parent=None)
@@ -106,7 +106,7 @@ class QScanSelector(qt.QMainWindow):
         self.hdfTreeView = silx.gui.hdf5.Hdf5TreeView(self)
         self.hdfTreeView.setSortingEnabled(True)
         self.hdfTreeView.addContextMenuCallback(self.nexus_treeview_callback)
-        self.hdf5model = Hdf5TreeModel(self.hdfTreeView, ownFiles=True)
+        self.hdf5model = qutils.RobustHdf5TreeModel(self.hdfTreeView, ownFiles=True)
         self.hdfTreeView.setModel(self.hdf5model)
         self.hdfTreeView.setExpandsOnDoubleClick(False)
         self.hdf5model.setFileMoveEnabled(True)
@@ -169,7 +169,9 @@ class QScanSelector(qt.QMainWindow):
         qt.QLabel("Backend:", btidsplit)
         self.btid = qt.QComboBox(btidsplit)
         [self.btid.addItem(bt) for bt in backends.fscans]
-        self.btid.setCurrentText("id31_default")
+        # keep the manual selection in sync with the beamtime autodetect
+        # fallback, so both paths default to the same backend
+        self.btid.setCurrentText(backends.default_beamtime)
 
         self._selectBackendBtn = qt.QPushButton("...", btidsplit)
         width = self._selectBackendBtn.fontMetrics().boundingRect("  ...  ").width() + 7
@@ -1120,7 +1122,24 @@ class QScanSelector(qt.QMainWindow):
         objects = list(self.hdfTreeView.selectedH5Nodes())
         if len(objects) > 0:
             obj = objects[0]
-            self.hdf5model.removeH5pyObject(obj.file)
+            try:
+                self.hdf5model.removeH5pyObject(obj.file)
+            except Exception as e:
+                # reading a file on a disconnected drive raises in h5py, which
+                # must not terminate orGUI, see issue #23.
+                logger.error(
+                    "Cannot close the data file properly.",
+                    exc_info=True,
+                    extra={
+                        "title": "Cannot close file",
+                        "description": f"Cannot close the data file properly:\n{e}\n"
+                        "The file might be corrupted. If it is still listed, "
+                        "use 'refresh file' to rebuild the file list.",
+                        "show_dialog": True,
+                        "dialog_level": logging.WARNING,
+                        "parent": self,
+                    },
+                )
 
     def nexus_treeview_callback(self, event):
         objects = list(event.source().selectedH5Nodes())
@@ -1128,7 +1147,7 @@ class QScanSelector(qt.QMainWindow):
             obj = objects[0]  # for single selection
             menu = event.menu()
             action = qt.QAction("Refresh", menu)
-            action.triggered.connect(lambda: self.hdf5model.synchronizeH5pyObject(obj))
+            action.triggered.connect(lambda: self._synchronizeH5pyObject(obj))
             # menu.addAction(action)
             # if obj.ntype is h5py.Dataset:
             action = qt.QAction("display data", menu)
@@ -1143,7 +1162,24 @@ class QScanSelector(qt.QMainWindow):
         objects = list(self.hdfTreeView.selectedH5Nodes())
         if len(objects) > 0:
             obj = objects[0]
+            self._synchronizeH5pyObject(obj)
+
+    def _synchronizeH5pyObject(self, obj):
+        """Reload a data file in the tree view and report errors."""
+        try:
             self.hdf5model.synchronizeH5pyObject(obj)
+        except Exception as e:
+            logger.error(
+                "Cannot refresh the data file.",
+                exc_info=True,
+                extra={
+                    "title": "Cannot refresh file",
+                    "description": f"Cannot refresh the data file:\n{e}",
+                    "show_dialog": True,
+                    "dialog_level": logging.WARNING,
+                    "parent": self,
+                },
+            )
 
     def __getRelativePath(self, model, rootIndex, index):
         """Returns a relative path from an index to his rootIndex.
@@ -1165,12 +1201,35 @@ class QScanSelector(qt.QMainWindow):
         raise ValueError("index is not a children of the rootIndex")
 
     def _onRefreshFile(self):
-        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        # The refresh is driven by orGUI, which has to drop the fscan object
+        # (to avoid broken links) and possibly scan_image and
+        # currentAddImageLabel (to avoid a crash) before the tree is rebuilt.
+        self.sigRefreshH5.emit()
 
+    def _onDoRefresh(self):
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            self._refreshFileTreeView()
+        except Exception as e:
+            # rebuilding the tree view reads all open files, which fails if
+            # one of them became unavailable.
+            logger.error(
+                "Cannot refresh the file tree view.",
+                exc_info=True,
+                extra={
+                    "title": "Cannot refresh file",
+                    "description": f"Cannot refresh the file tree view:\n{e}",
+                    "show_dialog": True,
+                    "parent": self,
+                },
+            )
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+
+    def _refreshFileTreeView(self):
         selection = self.hdfTreeView.selectionModel()
         indexes = selection.selectedIndexes()
         if indexes == []:
-            qt.QApplication.restoreOverrideCursor()
             qt.QMessageBox.warning(
                 self, "No file selected", "Cannot refresh file: No file selected."
             )
@@ -1205,6 +1264,7 @@ class QScanSelector(qt.QMainWindow):
         model.clear()
         """
         import gc
+        gc.collect() # to collect all not anymore used/bound objects
         for obj in gc.get_objects():   # Browse through ALL objects
             if isinstance(obj, Hdf5TreeModel):
                 try:
@@ -1219,6 +1279,7 @@ class QScanSelector(qt.QMainWindow):
                     pass # Was already closed
         """
 
+        # why create a new tree view? silx view handles resync differently...
         self.createTreeView()
 
         maintab = self.mainwidget.findChildren(qt.QTabWidget)[0]
@@ -1228,22 +1289,36 @@ class QScanSelector(qt.QMainWindow):
 
         modelnew = self.hdfTreeView.findHdf5TreeModel()
         for h5, filename in h5files:
-            modelnew.insertFile(filename, 0)
+            try:
+                modelnew.insertFile(filename, 0)
+            except Exception as e:
+                logger.error(
+                    "Cannot reload the data file %s.",
+                    filename,
+                    exc_info=True,
+                    extra={
+                        "title": "Cannot reload file",
+                        "description": f"Cannot reload the data file {filename}:\n{e}",
+                        "show_dialog": True,
+                        "dialog_level": logging.WARNING,
+                        "parent": self,
+                    },
+                )
 
+        # self.hdfTreeView.expandToDepth(0) # this call here can cause the nodes to have broken links!!!  # noqa: E501
         # self.__expandNodesFromPaths(self.hdfTreeView, index, paths)
         # self.hdf5model.appendFile(filename)
-        qt.QApplication.restoreOverrideCursor()
 
     def createTreeView(self):
         self.hdfTreeView = silx.gui.hdf5.Hdf5TreeView(self)
         self.hdfTreeView.setSortingEnabled(True)
         self.hdfTreeView.addContextMenuCallback(self.nexus_treeview_callback)
-        self.hdf5model = Hdf5TreeModel(self.hdfTreeView, ownFiles=True)
+        self.hdf5model = qutils.RobustHdf5TreeModel(self.hdfTreeView, ownFiles=True)
         self.hdfTreeView.setModel(self.hdf5model)
         self.hdfTreeView.setExpandsOnDoubleClick(False)
         self.hdf5model.setFileMoveEnabled(True)
 
-        self.hdf5model.sigH5pyObjectLoaded.connect(self.__h5FileLoaded)
+        # self.hdf5model.sigH5pyObjectLoaded.connect(self.__h5FileLoaded)
         self.hdf5model.sigH5pyObjectRemoved.connect(self.__h5FileRemoved)
         self.hdf5model.sigH5pyObjectSynchronized.connect(self.__h5FileSynchonized)
 

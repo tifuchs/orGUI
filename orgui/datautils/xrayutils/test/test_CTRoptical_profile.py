@@ -41,6 +41,26 @@ class TestUnitCellOpticalProfile(unittest.TestCase):
         np.testing.assert_allclose(profile[:, 1], delta, rtol=1e-7)
         np.testing.assert_allclose(profile[:, 2], beta, rtol=1e-7)
 
+    def test_ionic_profile_uses_ionic_forward_scattering_factor(self):
+        cell = CTRcalc.UnitCell([10.0, 10.0, 10.0], [90.0, 90.0, 90.0])
+        cell.addAtom("O2-", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0)
+        cell.setEnergy(self.energy_eV)
+
+        profile = cell.optical_profile()
+
+        wavelength = CTRoptics.HC_KEV_ANGSTROM / (self.energy_eV * 1e-3)
+        scale = 2.8179403262e-5 * wavelength**2 / (2.0 * np.pi)
+        ionic_f0 = np.sum(cell.f[0, :5]) + cell.f[0, 10]
+        expected = scale * (
+            ionic_f0 + cell.f[0, 11] + 1j * cell.f[0, 12]
+        ) / cell.volume
+        np.testing.assert_allclose(
+            profile[0, 1:],
+            [expected.real, expected.imag],
+            rtol=1e-14,
+        )
+        self.assertGreater(ionic_f0, xraydb.atomic_number("O"))
+
     def test_tio2_100_has_two_homogeneous_layers(self):
         cell = unitcells.crystal("TiO2(100)").uc_bulk
         cell.setEnergy(self.energy_eV)
@@ -67,6 +87,19 @@ class TestUnitCellOpticalProfile(unittest.TestCase):
         np.testing.assert_allclose(profile[:, 0], [0.0, 0.25 * cell.a[2]])
         np.testing.assert_allclose(profile[1, 1], profile[0, 1] / 3.0)
         np.testing.assert_allclose(profile[1, 2], profile[0, 2] / 3.0)
+
+    def test_domain_normal_strain_preserves_areal_optical_content(self):
+        cell = unitcells.unitcell("Pt100")
+        cell.setEnergy(self.energy_eV)
+        unstrained = cell.optical_profile()
+        stretched = np.eye(3, 4)
+        stretched[2, 2] = 2.0
+        cell.coherentDomainMatrix = [stretched]
+        cell.coherentDomainOccupancy = [1.0]
+
+        profile = cell.optical_profile()
+
+        np.testing.assert_allclose(profile[:, 1:], unstrained[:, 1:] / 2.0)
 
     def test_film_and_crystal_combine_layer_profiles(self):
         bulk = unitcells.crystal("TiO2(100)").uc_bulk
@@ -106,6 +139,23 @@ class TestUnitCellOpticalProfile(unittest.TestCase):
         )
 
         np.testing.assert_allclose(combined, [[3.2728, 6.0, 8.0], [4.0, 6.0, 7.0]])
+
+    def test_combine_profiles_bounds_full_group_span(self):
+        combined = CTRoptics.combine_profiles(
+            np.array(
+                [
+                    [0.0, 1.0, 0.0],
+                    [0.5, 2.0, 0.0],
+                    [1.0, 4.0, 0.0],
+                ]
+            ),
+            z_tolerance=0.6,
+        )
+
+        np.testing.assert_allclose(
+            combined,
+            [[0.0, 3.0, 0.0], [1.0, 4.0, 0.0]],
+        )
 
     def test_structural_layers_are_added_to_continuous_samples(self):
         combined = CTRoptics.add_structural_to_sampled_profile(
@@ -350,6 +400,125 @@ class TestLayeredWavefield(unittest.TestCase):
         self.assertLess(abs(above.r_S) ** 2, 1.0)
         self.assertLess((-below.kz[-1]).imag, 0.0)
 
+    def test_p_polarization_is_finite_at_exact_substrate_critical_angle(self):
+        delta = 1.0e-5
+        profile = np.array([[-10.0, delta, 0.0], [0.0, 0.0, 0.0]])
+        alpha_c = np.rad2deg(np.arccos(1.0 - delta))
+
+        field = CTRoptics.solve_wavefield(
+            profile, self.energy_eV, alpha_c, "p"
+        )
+
+        np.testing.assert_allclose(-field.kz[-1], 0.0, atol=0.0)
+        np.testing.assert_allclose(field.r_S, -1.0, rtol=1e-14)
+        np.testing.assert_allclose(field.t_S, 0.0, atol=0.0)
+        self.assertTrue(np.all(np.isfinite(field.psi)))
+        self.assertTrue(np.all(np.isfinite(field.A_plus)))
+        self.assertTrue(np.all(np.isfinite(field.A_minus)))
+
+    def test_p_polarization_is_continuous_at_internal_critical_angle(self):
+        delta = 1.0e-5
+        profile = np.array(
+            [
+                [-40.0, 2.0 * delta, 0.0],
+                [-10.0, delta, 0.0],
+                [20.0, 0.0, 0.0],
+            ]
+        )
+        alpha_c = np.rad2deg(np.arccos(1.0 - delta))
+
+        exact = CTRoptics.solve_wavefield(
+            profile, self.energy_eV, alpha_c, "p"
+        )
+        below = CTRoptics.solve_wavefield(
+            profile, self.energy_eV, alpha_c * (1.0 - 1.0e-8), "p"
+        )
+        above = CTRoptics.solve_wavefield(
+            profile, self.energy_eV, alpha_c * (1.0 + 1.0e-8), "p"
+        )
+
+        np.testing.assert_allclose(-exact.kz[1], 0.0, atol=0.0)
+        self.assertTrue(np.all(np.isfinite(exact.psi)))
+        self.assertTrue(np.isfinite(exact.r_S))
+        np.testing.assert_allclose(below.r_S, exact.r_S, rtol=1e-7)
+        np.testing.assert_allclose(above.r_S, exact.r_S, rtol=1e-7)
+        np.testing.assert_allclose(below.psi, exact.psi, rtol=1e-7)
+        np.testing.assert_allclose(above.psi, exact.psi, rtol=1e-7)
+
+    def test_vectorized_reflection_matches_scalar_wavefields(self):
+        delta = 1.0e-5
+        profile = np.array(
+            [
+                [-40.0, 2.0 * delta, 0.0],
+                [-10.0, delta, 0.0],
+                [20.0, 0.0, 0.0],
+            ]
+        )
+        alpha_c = np.rad2deg(np.arccos(1.0 - delta))
+        angles = np.array([0.1, alpha_c, 0.5, 1.0])
+
+        for polarization in ("s", "p"):
+            actual = CTRoptics._specular_reflection(
+                profile, self.energy_eV, angles, polarization
+            )
+            expected = np.array(
+                [
+                    CTRoptics.solve_wavefield(
+                        profile, self.energy_eV, angle, polarization
+                    ).r_S
+                    for angle in angles
+                ]
+            )
+
+            np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+    def test_vectorized_wavefield_matches_scalar_wavefields(self):
+        delta = 1.0e-5
+        profile = np.array(
+            [
+                [-40.0, 2.0 * delta, 0.0],
+                [-10.0, delta, 0.0],
+                [20.0, 0.0, 0.0],
+            ]
+        )
+        alpha_c = np.rad2deg(np.arccos(1.0 - delta))
+        angles = np.array([[0.1, alpha_c], [0.5, 1.0]])
+
+        vector = CTRoptics.solve_wavefield(
+            profile, self.energy_eV, angles, "p"
+        )
+
+        self.assertEqual(vector.psi.shape, (len(profile), *angles.shape))
+        self.assertEqual(vector.kz.shape, (len(profile), *angles.shape))
+        self.assertEqual(vector.A_plus.shape, (len(profile), *angles.shape))
+        self.assertEqual(vector.A_minus.shape, (len(profile), *angles.shape))
+        self.assertEqual(vector.r_S.shape, angles.shape)
+        self.assertEqual(vector.t_S.shape, angles.shape)
+        for index in np.ndindex(angles.shape):
+            scalar = CTRoptics.solve_wavefield(
+                profile, self.energy_eV, angles[index], "p"
+            )
+            np.testing.assert_allclose(
+                vector.psi[(slice(None), *index)],
+                scalar.psi,
+                rtol=1e-12,
+                atol=1e-12,
+            )
+            np.testing.assert_allclose(
+                vector.A_plus[(slice(None), *index)],
+                scalar.A_plus,
+                rtol=1e-12,
+                atol=1e-12,
+            )
+            np.testing.assert_allclose(
+                vector.A_minus[(slice(None), *index)],
+                scalar.A_minus,
+                rtol=1e-12,
+                atol=1e-12,
+            )
+            np.testing.assert_allclose(vector.r_S[index], scalar.r_S)
+            np.testing.assert_allclose(vector.t_S[index], scalar.t_S)
+
     def test_one_film_matches_analytic_slab_expression(self):
         thickness = 35.0
         profile = np.array(
@@ -385,6 +554,11 @@ class TestLayeredWavefield(unittest.TestCase):
         np.testing.assert_allclose(unpolarized, 0.5 * (s + p))
         self.assertIsInstance(crystal.specular_reflectivity(1.0), float)
         self.assertEqual(crystal.wavefield(1.0).polarization, "s")
+        grid = angles.reshape(1, -1)
+        np.testing.assert_allclose(
+            crystal.specular_reflectivity(grid, "p"),
+            p.reshape(1, -1),
+        )
 
     def test_crystal_simplification_removes_redundant_bulk_layers(self):
         bulk = unitcells.unitcell("Pt100")

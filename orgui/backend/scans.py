@@ -100,6 +100,44 @@ class Scan(ABC):
     def parse_h5_node(cls, node):
         pass
 
+    @classmethod
+    def listScans(cls, h5file):
+        """Optional: the scans an opened HDF5 file contains.
+
+        Used by the segmented ("interlaced") scan loader to fill its selection
+        dialog, which has to know about every scan in the file before any scan
+        object exists.
+
+        Return whatever your ``__init__`` accepts as its scan identifier, which
+        is the same thing :meth:`parse_h5_node` reports for a single node:
+
+        .. code-block:: python
+
+            return [1, 2, 10]                  # scan numbers
+            return ["ascan_12", "dscan_3"]     # scan names
+
+        Optionally pair each identifier with a label shown in the dialog:
+
+        .. code-block:: python
+
+            return [(1, "ascan th 0 90 90 1"), (2, "dscan mu 0 1 20 1")]
+
+        Do not use ``float`` for BLISS style ``"<scan>.<subscan>"`` names:
+        ``1.1`` and ``1.10`` are the same float. Integers, strings and numpy
+        integers are all fine, the identifier is passed on untouched and is
+        only converted to ``str`` for display.
+
+        Implementing this is optional. Without it orGUI calls
+        :meth:`parse_h5_node` on every entry of the file root instead, which
+        needs no extra code in the backend but is slower, and which relies on
+        ``parse_h5_node`` raising for entries that are not scans.
+
+        :param h5file: an open h5py-like file object.
+        :returns: identifiers, or ``(identifier, label)`` pairs.
+        :rtype: list
+        """
+        raise NotImplementedError(f"{cls.__name__} does not implement listScans")
+
     @abstractmethod
     def __len__(self):
         """returns the number of entries in the scan."""

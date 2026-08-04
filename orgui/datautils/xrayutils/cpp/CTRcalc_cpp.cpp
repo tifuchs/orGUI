@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 #include <xxhash.h>
@@ -43,6 +44,9 @@ struct CachedSpecies {
     std::array<double, 13> row;
     Hash128 hash;
     std::shared_ptr<const std::vector<double>> values;
+    // Valid once inserted into FormFactorCache::lru_; lets touch() splice
+    // this entry to the LRU tail in O(1) instead of scanning lru_.
+    std::list<std::shared_ptr<CachedSpecies>>::iterator lru_it;
 };
 
 struct CachedQGrid {
@@ -108,6 +112,7 @@ public:
             new_grid->hash = q_hash;
             grids_.push_back(new_grid);
             grid = std::prev(grids_.end());
+            grid_index_[q_hash.low].push_back(grid);
             resident_bytes_ += q_bytes;
         }
         auto species = std::make_shared<CachedSpecies>();
@@ -116,6 +121,7 @@ public:
         species->values = std::make_shared<const std::vector<double>>(std::move(values));
         (*grid)->species.push_back(species);
         lru_.push_back(species);
+        species->lru_it = std::prev(lru_.end());
         resident_bytes_ += values_bytes;
         evict_to_budget();
         return species->values;
@@ -124,6 +130,7 @@ public:
     void clear() {
         std::lock_guard<std::mutex> lock(mutex_);
         grids_.clear();
+        grid_index_.clear();
         lru_.clear();
         resident_bytes_ = 0;
     }
@@ -157,8 +164,16 @@ public:
 private:
     using GridList = std::list<std::shared_ptr<CachedQGrid>>;
 
+    // Bucketed by the low 64 bits of the Q-grid's hash; find_grid still
+    // verifies the full 128-bit hash and the raw Q2 values within a bucket,
+    // so a same-bucket collision can only cost extra comparisons, never a
+    // wrong result.
     GridList::iterator find_grid(const std::vector<double> &q2, const Hash128 &hash) {
-        for (auto grid = grids_.begin(); grid != grids_.end(); ++grid) {
+        const auto bucket = grid_index_.find(hash.low);
+        if (bucket == grid_index_.end()) {
+            return grids_.end();
+        }
+        for (const auto &grid : bucket->second) {
             const auto &stored = *(*grid)->q2;
             if (same_hash((*grid)->hash, hash) && stored.size() == q2.size()
                 && std::memcmp(stored.data(), q2.data(), q2.size() * sizeof(double)) == 0) {
@@ -169,12 +184,7 @@ private:
     }
 
     void touch(const std::shared_ptr<CachedSpecies> &species) {
-        for (auto item = lru_.begin(); item != lru_.end(); ++item) {
-            if (*item == species) {
-                lru_.splice(lru_.end(), lru_, item);
-                return;
-            }
-        }
+        lru_.splice(lru_.end(), lru_, species->lru_it);
     }
 
     void evict_to_budget() {
@@ -190,6 +200,14 @@ private:
                         ++evictions_;
                         if (entries.empty()) {
                             resident_bytes_ -= (*grid)->q2->size() * sizeof(double);
+                            auto &bucket = grid_index_[(*grid)->hash.low];
+                            bucket.erase(
+                                std::remove(bucket.begin(), bucket.end(), grid),
+                                bucket.end()
+                            );
+                            if (bucket.empty()) {
+                                grid_index_.erase((*grid)->hash.low);
+                            }
                             grids_.erase(grid);
                         }
                         goto evicted;
@@ -202,6 +220,7 @@ private:
 
     std::mutex mutex_;
     GridList grids_;
+    std::unordered_map<std::uint64_t, std::vector<GridList::iterator>> grid_index_;
     std::list<std::shared_ptr<CachedSpecies>> lru_;
     std::size_t budget_bytes_ = form_factor_cache_default_budget;
     std::size_t resident_bytes_ = 0;
