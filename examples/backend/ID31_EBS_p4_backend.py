@@ -1,6 +1,6 @@
 # /*##########################################################################
 #
-# Copyright (c) 2020-2026 Timo Fuchs
+# Copyright (c) 2020-2026 Timo Fuchs, Finn Schröter
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -400,6 +400,41 @@ class ID31_EBS_p4_2026(Scan):
             scansuffix = scanname
         scanno, _subscanno = scansuffix.split(".")
         return {"scanno": int(scanno), "name": obj.local_name}
+
+    @classmethod
+    def listScans(cls, h5file):
+        """List the scans in the file, for the segmented scan loader.
+
+        Optional. Without it orGUI falls back to calling
+        :meth:`parse_h5_node` on every entry of the file root, which gives the
+        same answer but has to walk the tree. Implemented here because the
+        BLISS naming makes it a few lines: keep the ``.1`` subscan, which is
+        the one holding the fast counters, and report the scan number in front
+        of the dot together with the scan title as a label.
+
+        :param h5file: an open h5py-like file object.
+        :returns: ``(scanno, title)`` pairs, sorted by scan number.
+        :rtype: list
+        """
+        entries = []
+        for name in h5file:
+            name = str(name)
+            scan, dot, subscan = name.rpartition(".")
+            if not dot or subscan != "1":
+                continue
+            try:
+                scanno = int(scan.split("_")[-1])
+            except ValueError:
+                continue
+            try:
+                title = h5file[name + "/title"][()]
+            except Exception:
+                title = name
+            if isinstance(title, bytes):
+                title = title.decode()
+            entries.append((scanno, str(title)))
+        entries.sort(key=lambda entry: entry[0])
+        return entries
 
     @property
     def auxillary_counters(self):
