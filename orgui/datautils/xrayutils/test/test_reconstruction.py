@@ -18,6 +18,8 @@ from orgui.reconstruction_job import _correction_pipeline, derive_grid
 from orgui.datautils.xrayutils.reconstruction import (
     _GridSpec,
     _ReconstructionSpec,
+    _calibration_probe,
+    _files_per_job,
     _finalize_reconstruction,
     _map_frame_range,
     _map_partition,
@@ -81,6 +83,32 @@ def test_grid_validates_effective_hdf5_chunk_bytes():
             frame="hkl",
             chunk_shape=(1024, 1024, 1024),
         )
+
+
+def test_files_per_job_formula_floors_at_checkpoint_count():
+    """The checkpoint-count floor wins when data comfortably fits budget."""
+    assert _files_per_job(0, 24e9, checkpoint_count=10) == 10
+    assert _files_per_job(6e9, 24e9, checkpoint_count=10) == 10
+    # Right at the boundary: ceil(24e9 / 24e9) == 1, still below the floor.
+    assert _files_per_job(24e9, 24e9, checkpoint_count=10) == 10
+
+
+def test_files_per_job_formula_scales_with_data_volume():
+    """The data-volume term wins once it exceeds the checkpoint-count floor."""
+    assert _files_per_job(129.7e9, 4e9, checkpoint_count=10) == 33
+    assert _files_per_job(129.7e9, 8e9, checkpoint_count=10) == 17
+    assert _files_per_job(129.7e9, 13e9, checkpoint_count=10) == 10
+    # Exact multiples must not be rounded up unnecessarily.
+    assert _files_per_job(100.0, 10.0, checkpoint_count=1) == 10
+
+
+def test_files_per_job_formula_rejects_invalid_inputs():
+    with pytest.raises(ValueError, match="checkpoint_count"):
+        _files_per_job(1.0, 1.0, checkpoint_count=0)
+    with pytest.raises(ValueError, match="ram_budget_bytes"):
+        _files_per_job(1.0, 0.0, checkpoint_count=1)
+    with pytest.raises(ValueError, match="job_data_bytes"):
+        _files_per_job(-1.0, 1.0, checkpoint_count=1)
 
 
 def _kernel(frame="lab", *, threads=1, max_depth=2, ub=None):
@@ -426,6 +454,59 @@ def test_center_only_profiles_one_coordinate_per_valid_pixel():
     assert profile["valid_pixels"] == 5
     assert profile["coordinate_evaluations"] == 5
     assert profile["maximum_weights_per_pixel"] == 1
+
+
+def test_calibration_probe_returns_positive_byte_estimate():
+    """The probe samples real pixels and reports positive per-pixel rates."""
+    rows, columns = 40, 40
+    mask = np.zeros((rows, columns), dtype=bool)
+    mask[0, 0] = True  # one excluded pixel, well away from every tile drawn
+
+    result = _calibration_probe(
+        _kernel(max_depth=0, threads=1),
+        mask,
+        _constant_rays(rows, columns),
+        np.zeros(4),
+        np.zeros(4),
+        budget_seconds=0.05,
+        max_sample_pixels=2000,
+        rng=np.random.default_rng(0),
+    )
+
+    assert result["kernel_threads"] == 1
+    assert result["sampled_pixels"] > 0
+    assert result["seconds_per_pixel"] >= 0.0
+    assert result["records_per_pixel"] >= 0.0
+
+
+def test_calibration_probe_scales_sample_size_with_budget():
+    """A larger wall-time budget samples more pixels, not fewer."""
+    rows, columns = 60, 60
+    mask = np.zeros((rows, columns), dtype=bool)
+    rays = _constant_rays(rows, columns)
+
+    small_budget = _calibration_probe(
+        _kernel(max_depth=0, threads=1),
+        mask,
+        rays,
+        np.zeros(4),
+        np.zeros(4),
+        budget_seconds=0.01,
+        max_sample_pixels=2000,
+        rng=np.random.default_rng(0),
+    )
+    large_budget = _calibration_probe(
+        _kernel(max_depth=0, threads=1),
+        mask,
+        rays,
+        np.zeros(4),
+        np.zeros(4),
+        budget_seconds=0.05,
+        max_sample_pixels=2000,
+        rng=np.random.default_rng(0),
+    )
+
+    assert large_budget["sampled_pixels"] >= small_budget["sampled_pixels"]
 
 
 def test_footprint_split_conserves_weight_and_pixel_variance():

@@ -21,11 +21,14 @@ from .app.database import FILTERS, config_data_from_json, config_data_to_json
 from .app.mask_config import create_pixel_repair_plan
 from .backend.scans import ScanReference
 from .datautils.xrayutils.reconstruction import (
+    _CHECKPOINT_BYTES_PER_ROW,
     _GridSpec,
     _MIN_REDUCER_WORKER_MEMORY,
     _ReconstructionSpec,
     _TaskManifest,
+    _calibration_probe_all_grids,
     _detector_corner_rays,
+    _files_per_job,
     _finalize_reconstruction,
     _map_frame_range,
     _read_manifest,
@@ -539,6 +542,151 @@ def estimate_geometry_steps(
             "geometry-matched 3-D steps cannot be estimated"
         )
     return tuple(float(value) for value in steps)
+
+
+def estimate_checkpoint_plan(
+    config,
+    scan,
+    grids,
+    *,
+    max_depth,
+    threads,
+    ram_budget_bytes,
+    checkpoint_count,
+    angle_fallback="stationary",
+    mask=None,
+    budget_seconds=0.1,
+    memory_budget_bytes=None,
+):
+    """Estimate per-grid job data volume and checkpoint file counts.
+
+    Mirrors :func:`derive_grid`/:func:`estimate_geometry_steps`'s sampling
+    idiom -- a single representative included frame's real angle bounds and
+    a real detector mask if the caller has one, with dummy pixel values,
+    since mapping cost and voxel occupancy depend only on geometry and the
+    mask (see the design doc's calibration-probe rationale). Bounded to a
+    small wall-time budget, so it is safe to call live, before a job is
+    prepared, e.g. from the GUI on every settings change.
+
+    :param config:
+        Central :class:`ConfigData` experiment snapshot.
+    :param scan:
+        Active scan backend providing exposure angle bounds in radians and
+        ``get_raw_img`` (not called by this function -- no image data is
+        loaded).
+    :param grids:
+        Iterable of :class:`ReconstructionGrid` or grid-spec-compatible
+        mappings, same convention as :func:`prepare_job`'s ``grids``
+        parameter.
+    :param int max_depth:
+        Adaptive footprint-splitting depth the estimate should reflect.
+    :param int threads:
+        Native kernel thread count the estimate should reflect.
+    :param float ram_budget_bytes:
+        Combined memory budget for the whole job -- the user's own
+        resource request, never a hardcoded value.
+    :param int checkpoint_count:
+        User-requested minimum number of checkpoint files.
+    :param str angle_fallback:
+        ``"stationary"`` or ``"midpoint"``, passed through to
+        ``scan.exposure_angle_bounds``.
+    :param mask:
+        Optional boolean detector mask (``True`` = excluded), shape
+        matching ``config.detector.detector.shape``. If ``None``, every
+        pixel is treated as valid. The estimate is only as good as the
+        mask it is given -- callers with a real mask available (a live
+        GUI's detector mask, or a prepared job's assets) should supply it.
+    :param float budget_seconds:
+        Wall-time budget for the underlying calibration probe.
+    :param memory_budget_bytes:
+        Optional override for the native kernel's own memory-budget
+        precheck; defaults to ``ram_budget_bytes``.
+    :returns:
+        Dict with ``per_grid`` (mapping ``grid_name`` ->
+        ``{"job_data_bytes_estimate", "files_per_job"}``) and
+        ``files_total`` (sum of ``files_per_job`` across grids).
+    :rtype: dict
+    :raises ValueError:
+        If ``checkpoint_count``/``ram_budget_bytes`` are not positive, no
+        frames are included, or ``mask``'s shape does not match the
+        detector.
+    """
+    checkpoint_count = int(checkpoint_count)
+    if checkpoint_count < 1:
+        raise ValueError("checkpoint_count must be at least one")
+    if ram_budget_bytes <= 0:
+        raise ValueError("ram_budget_bytes must be positive")
+
+    detector = config.detector
+    rows, columns = detector.detector.shape
+    if mask is None:
+        mask = np.zeros((rows, columns), dtype=bool)
+    else:
+        mask = np.ascontiguousarray(mask, dtype=bool)
+        if mask.shape != (rows, columns):
+            raise ValueError("mask shape must match the detector shape")
+
+    excluded = set(config.corrections.excluded_frames)
+    included = [index for index in range(len(scan)) if index not in excluded]
+    if not included:
+        raise ValueError("No included frames are available for estimation")
+    representative_frame = included[len(included) // 2]
+
+    bounds = scan.exposure_angle_bounds(config, fallback=angle_fallback)
+    angles_start = np.ascontiguousarray(bounds[representative_frame, 0])
+    angles_end = np.ascontiguousarray(bounds[representative_frame, 1])
+    corner_rays = _detector_corner_rays(detector, (0, rows, 0, columns))
+
+    grid_values = [
+        asdict(grid) if isinstance(grid, ReconstructionGrid) else dict(grid)
+        for grid in grids
+    ]
+    if not grid_values:
+        raise ValueError("At least one reconstruction grid is required")
+    grid_specs = tuple(_GridSpec(**values) for values in grid_values)
+    spec = _ReconstructionSpec(
+        grids=grid_specs,
+        max_depth=max_depth,
+        threads=threads,
+        memory_budget_bytes=(
+            memory_budget_bytes
+            if memory_budget_bytes is not None
+            else ram_budget_bytes
+        ),
+    )
+
+    probe = _calibration_probe_all_grids(
+        spec,
+        config.ub_calculator,
+        mask,
+        corner_rays,
+        angles_start,
+        angles_end,
+        budget_seconds=budget_seconds,
+        kernel_threads=threads,
+    )
+
+    valid_pixels = int((~mask).sum())
+    frame_count = len(included)
+    per_grid = {}
+    files_total = 0
+    for grid_name, result in probe.items():
+        job_data_bytes_estimate = (
+            result["records_per_pixel"]
+            * _CHECKPOINT_BYTES_PER_ROW
+            * valid_pixels
+            * frame_count
+        )
+        files_per_job = _files_per_job(
+            job_data_bytes_estimate, ram_budget_bytes, checkpoint_count
+        )
+        per_grid[grid_name] = {
+            "job_data_bytes_estimate": job_data_bytes_estimate,
+            "files_per_job": files_per_job,
+        }
+        files_total += files_per_job
+
+    return {"per_grid": per_grid, "files_total": files_total}
 
 
 def prepare_job(

@@ -21,6 +21,7 @@ import math
 import os
 from pathlib import Path
 from queue import Queue
+import time
 from typing import Any
 
 import h5py
@@ -38,6 +39,11 @@ _PARTIAL_COLUMNS = (
 _Q_FRAMES = {"lab", "alpha", "omega", "chi", "phi", "crystal"}
 _ALL_FRAMES = _Q_FRAMES | {"hkl"}
 _MIN_REDUCER_WORKER_MEMORY = 64 * 1024**2
+_CHECKPOINT_BYTES_PER_ROW = 48
+"""Fixed on-the-wire row size for the six ``_PARTIAL_COLUMNS`` fields
+(two uint64 key columns, three float64 value columns, one uint64 count
+column -- 6 * 8 bytes). Used to convert calibration-probe record counts
+into byte estimates for the checkpoint file-count formula."""
 
 
 def _triple(values, name, dtype=float):
@@ -330,6 +336,207 @@ def _kernel_for_grid(
             else memory_budget_bytes
         ),
     )
+
+
+def _files_per_job(job_data_bytes, ram_budget_bytes, checkpoint_count) -> int:
+    """Minimum number of resumable checkpoint files for one job.
+
+    ``checkpoint_count`` is a floor, not a target: the result exceeds it
+    whenever the estimated data volume would not otherwise fit the memory
+    budget across that many files.
+
+    :param float job_data_bytes:
+        Estimated **reduced** (post in-frame-dedup) record volume for the
+        job's frame-range slice. Not raw per-pixel/per-corner records.
+    :param float ram_budget_bytes:
+        Combined memory budget for the whole job (all threads, one node) --
+        the user's own resource request, never a hardcoded value.
+    :param int checkpoint_count:
+        User-requested minimum number of checkpoint files.
+    :returns:
+        ``max(checkpoint_count, ceil(job_data_bytes / ram_budget_bytes))``.
+    :rtype: int
+    :raises ValueError:
+        If ``checkpoint_count`` or ``ram_budget_bytes`` are not positive, or
+        ``job_data_bytes`` is negative.
+    """
+    checkpoint_count = int(checkpoint_count)
+    if checkpoint_count < 1:
+        raise ValueError("checkpoint_count must be at least one")
+    if ram_budget_bytes <= 0:
+        raise ValueError("ram_budget_bytes must be positive")
+    if job_data_bytes < 0:
+        raise ValueError("job_data_bytes must not be negative")
+    files_for_memory = math.ceil(job_data_bytes / ram_budget_bytes)
+    return max(checkpoint_count, files_for_memory)
+
+
+def _calibration_probe(
+    kernel,
+    mask,
+    corner_rays,
+    angles_start,
+    angles_end,
+    *,
+    budget_seconds=0.1,
+    kernel_threads=1,
+    bootstrap_tile=16,
+    sample_tiles=9,
+    min_sample_pixels=256,
+    max_sample_pixels=2_000_000,
+    rng=None,
+):
+    """Estimate per-pixel mapping cost and record volume, live, in-budget.
+
+    Runs the native kernel on small tiles scattered across the real
+    detector mask with dummy (zero) intensity/variance: coordinate-
+    evaluation cost and voxel occupancy depend only on geometry and the
+    mask, not on pixel values, so no image data or disk I/O is needed.
+    Bounded to ``budget_seconds`` wall time (a two-pass design: a tiny
+    bootstrap tile first estimates the per-pixel rate, then a properly
+    sized, stratified sample spends the remaining budget), so it is safe
+    to call live, e.g. from the GUI, on every settings change.
+
+    The returned rate is specific to the machine, job settings, and sample
+    this call happened to draw -- it must be measured fresh for every job,
+    never cached or hardcoded across jobs or machines.
+
+    :param kernel:
+        A constructed ``ReconstructionKernel`` (already encodes
+        ``max_depth`` and its native thread count).
+    :param np.ndarray mask:
+        Boolean mask for the full detector, shape ``(rows, columns)``.
+        ``True`` marks excluded pixels, matching the kernel's convention.
+    :param np.ndarray corner_rays:
+        Full-detector corner rays, shape ``(rows + 1, columns + 1, 3)``.
+    :param np.ndarray angles_start:
+        Shape ``(4,)`` diffractometer angles in radians at exposure start.
+    :param np.ndarray angles_end:
+        Shape ``(4,)`` diffractometer angles in radians at exposure end.
+    :param float budget_seconds:
+        Wall-time budget for the whole probe, including the bootstrap pass.
+    :param int kernel_threads:
+        Recorded in the result as bookkeeping only; does not affect
+        ``kernel``'s own configured thread count.
+    :param int bootstrap_tile:
+        Side length in pixels of the bootstrap tile.
+    :param int sample_tiles:
+        Number of scattered tiles sampled in the sized pass.
+    :param int min_sample_pixels, max_sample_pixels:
+        Clamp on the sized pass's total target sample size.
+    :param rng:
+        Optional :class:`numpy.random.Generator` for deterministic tests;
+        defaults to a fresh, unseeded generator.
+    :returns:
+        Dict with ``kernel_threads``, ``sampled_pixels``,
+        ``sampled_seconds``, ``seconds_per_pixel`` (kernel CPU-seconds per
+        sampled pixel), and ``records_per_pixel`` (post-dedup records per
+        sampled pixel).
+    :rtype: dict
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    rows, columns = mask.shape
+    started = time.perf_counter()
+
+    def sample_tile(row_start, row_stop, column_start, column_stop):
+        tile_shape = (row_stop - row_start, column_stop - column_start)
+        intensity = np.zeros(tile_shape, dtype=np.float64)
+        variance = np.zeros(tile_shape, dtype=np.float64)
+        tile_mask = np.ascontiguousarray(
+            mask[row_start:row_stop, column_start:column_stop]
+        )
+        tile_rays = np.ascontiguousarray(
+            corner_rays[row_start : row_stop + 1, column_start : column_stop + 1]
+        )
+        result = kernel.accumulate(
+            intensity, variance, tile_mask, tile_rays,
+            angles_start, angles_end, True,
+        )
+        profile = result["_profile"]
+        pixels = tile_shape[0] * tile_shape[1]
+        return (
+            pixels,
+            float(profile["block_mapping_cpu_seconds"]),
+            int(profile["reduced_block_records"]),
+        )
+
+    bootstrap_side = max(1, min(int(bootstrap_tile), rows, columns))
+    total_pixels, total_seconds, total_records = sample_tile(
+        0, bootstrap_side, 0, bootstrap_side
+    )
+    elapsed = time.perf_counter() - started
+    rate = total_seconds / max(1, total_pixels)
+
+    remaining_budget = budget_seconds - elapsed
+    if remaining_budget > 0 and rate > 0:
+        target_pixels = int(
+            min(max(remaining_budget / rate, min_sample_pixels), max_sample_pixels)
+        )
+        tile_side = max(1, int(math.sqrt(target_pixels / max(1, sample_tiles))))
+        tile_side = min(tile_side, rows, columns)
+        for _ in range(int(sample_tiles)):
+            if time.perf_counter() - started >= budget_seconds:
+                break
+            row_start = int(rng.integers(0, max(1, rows - tile_side + 1)))
+            column_start = int(rng.integers(0, max(1, columns - tile_side + 1)))
+            pixels, seconds, records = sample_tile(
+                row_start, row_start + tile_side,
+                column_start, column_start + tile_side,
+            )
+            total_pixels += pixels
+            total_seconds += seconds
+            total_records += records
+
+    return {
+        "kernel_threads": int(kernel_threads),
+        "sampled_pixels": total_pixels,
+        "sampled_seconds": total_seconds,
+        "seconds_per_pixel": total_seconds / max(1, total_pixels),
+        "records_per_pixel": total_records / max(1, total_pixels),
+    }
+
+
+def _calibration_probe_all_grids(
+    spec,
+    ub_calculator,
+    mask,
+    corner_rays,
+    angles_start,
+    angles_end,
+    *,
+    budget_seconds=0.1,
+    kernel_threads=None,
+):
+    """Run :func:`_calibration_probe` once per grid in ``spec.grids``.
+
+    Reuses the same sampled-tile geometry (mask, corner rays, angles)
+    across every grid -- only the kernel differs per grid, so no new
+    geometry sampling is needed per grid (see the design doc's multi-grid
+    calibration-probe extension). The overall ``budget_seconds`` is split
+    evenly across grids.
+
+    :returns:
+        Dict keyed by ``grid.grid_name``, values are
+        :func:`_calibration_probe` result dicts.
+    :rtype: dict[str, dict]
+    """
+    per_grid_budget = budget_seconds / max(1, len(spec.grids))
+    results = {}
+    for grid in spec.grids:
+        kernel = _kernel_for_grid(spec, grid, ub_calculator, threads=kernel_threads)
+        results[grid.grid_name] = _calibration_probe(
+            kernel,
+            mask,
+            corner_rays,
+            angles_start,
+            angles_end,
+            budget_seconds=per_grid_budget,
+            kernel_threads=(
+                kernel_threads if kernel_threads is not None else spec.threads
+            ),
+        )
+    return results
 
 
 def _empty_batch() -> dict[str, np.ndarray]:
