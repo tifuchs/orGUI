@@ -58,9 +58,10 @@ ESRF ID31 beamline support and reciprocal-space display:
 
 Reciprocal-space reconstruction:
 
-- Added a centralized, out-of-core reciprocal-space reconstruction pipeline. A new "Reconstruct reciprocal space" dialog (Configuration menu) defines HKL/Q output grids, previews coverage and storage cost, and prepares, runs, and resumes jobs. Jobs can run locally, as SGE/Slurm cluster batch arrays with parallel submap reduction, or from the command line via a new ``reconstruction_cli`` entry point.
+- Added a centralized, out-of-core reciprocal-space reconstruction pipeline. A new "Reconstruct reciprocal space" dialog (Configuration menu) defines HKL/Q output grids, previews coverage and storage cost, and prepares, runs, and resumes jobs locally or from the command line via a new ``reconstruction_cli`` entry point.
 - Added a shared HDF5 output-settings dialog (chunk shape, compression) reachable from both the reconstruction dialog and the Configuration menu.
 - Exposure-time normalization and monitor-counter corrections now live in the reconstruction dialog rather than the shared scan-options panel, since they affect reconstruction output only, not ROI/CTR image integration.
+- Replaced the Parquet-based scratch format and its separate reduce phase with checkpointed HDF5 scratch files: scratch/checkpoint file count is now driven by data volume versus the configured memory budget (a small, user-configurable ``Checkpoint count`` floor, default 10), not by output grid chunking. This fixes a real crash (``OSError: Too many open files``) that the old chunk-driven file count could trigger on a large production job, and removes the ``pyarrow`` dependency (``orGUI[reconstruction]`` now only needs ``hdf5plugin``). Reduction is now folded into mapping instead of running as a separate pass. Multi-node cluster batch execution (SGE/Slurm job arrays) is temporarily unavailable while it is reworked for the new scratch format; single-node ``run``/``resume`` is unaffected.
 
 1.5.0 (2026-06-07)
 ------------------

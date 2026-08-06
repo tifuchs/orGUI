@@ -591,18 +591,21 @@ class ReconstructionDialog(qt.QDialog):
             self.work_block[0],
             block_tooltip,
         )
-        partition_tooltip = (
-            "Number of consecutive HDF5 chunk IDs grouped into one Parquet "
-            "partition range."
+        checkpoint_tooltip = (
+            "Minimum number of resumable HDF5 checkpoint files per output "
+            "grid. A floor, not a target: the actual count exceeds it when "
+            "the estimated data volume would not otherwise fit the memory "
+            "budget across that many files."
         )
-        self.partition_span = self._optional_spin(
-            1, 100000000, partition_tooltip
-        )
+        self.checkpoint_count = qt.QSpinBox()
+        self.checkpoint_count.setRange(1, 100000)
+        self.checkpoint_count.setValue(10)
+        self.checkpoint_count.setToolTip(checkpoint_tooltip)
         self._add_form_row(
             advanced_form,
-            "Parquet chunk span:",
-            self.partition_span[0],
-            partition_tooltip,
+            "Checkpoint count:",
+            self.checkpoint_count,
+            checkpoint_tooltip,
         )
         layout.addWidget(advanced_group)
 
@@ -1403,7 +1406,6 @@ class ReconstructionDialog(qt.QDialog):
             (self.tile_rows, tile_rows),
             (self.tile_columns, tile_columns),
             (self.work_block, settings["native_work_block_pixels"]),
-            (self.partition_span, settings["parquet_chunk_span"]),
         ):
             self._set_detected_value(control, value)
         self.threads_per_image.setValue(
@@ -1467,7 +1469,7 @@ class ReconstructionDialog(qt.QDialog):
                 else (tile_rows, tile_columns)
             ),
             work_block_pixels=self._optional_value(self.work_block),
-            partition_chunk_span=self._optional_value(self.partition_span),
+            checkpoint_count=self.checkpoint_count.value(),
             threads_per_image=self.threads_per_image.value(),
             accumulation_budget_bytes=(
                 None

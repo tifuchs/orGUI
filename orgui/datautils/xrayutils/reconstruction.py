@@ -2,8 +2,8 @@
 
 The numerical hot path is implemented by
 ``_reciprocal_reconstruction_cpp``.  This module owns the scientific Python
-boundary, uncertainty propagation, immutable Parquet task products, and final
-NeXus/HDF5 serialization.
+boundary, uncertainty propagation, checkpointed HDF5 scratch storage, and
+final NeXus/HDF5 serialization.
 
 Momentum-transfer grids use ``Angstrom^-1``.  HKL grids use reciprocal lattice
 units.  All diffractometer angles accepted here are in radians.
@@ -12,15 +12,14 @@ units.  All diffractometer angles accepted here are in radians.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from hashlib import sha256
+import bisect
 import importlib
 import json
 import math
-import os
+import re
 from pathlib import Path
-from queue import Queue
 import threading
 import time
 from typing import Any
@@ -39,12 +38,13 @@ _PARTIAL_COLUMNS = (
 )
 _Q_FRAMES = {"lab", "alpha", "omega", "chi", "phi", "crystal"}
 _ALL_FRAMES = _Q_FRAMES | {"hkl"}
-_MIN_REDUCER_WORKER_MEMORY = 64 * 1024**2
 _CHECKPOINT_BYTES_PER_ROW = 48
 """Fixed on-the-wire row size for the six ``_PARTIAL_COLUMNS`` fields
 (two uint64 key columns, three float64 value columns, one uint64 count
 column -- 6 * 8 bytes). Used to convert calibration-probe record counts
 into byte estimates for the checkpoint file-count formula."""
+
+_CHECKPOINT_PART_PATTERN = re.compile(r"^ckpt(?P<index>\d+)_p(?P<part>\d+)\.h5$")
 
 
 def _triple(values, name, dtype=float):
@@ -138,14 +138,14 @@ class _GridSpec:
 
 @dataclass(frozen=True)
 class _ReconstructionSpec:
-    """Configuration shared by mapping, reduction, and finalization."""
+    """Configuration shared by mapping, checkpointing, and finalization."""
 
     grids: tuple[_GridSpec, ...]
     max_depth: int = 2
     threads: int = 1
     work_block_pixels: int = 4096
     memory_budget_bytes: int = 512 * 1024 * 1024
-    partition_chunk_span: int = 256
+    checkpoint_count: int = 10
     compression: str = "bitshuffle-lz4"
     infer_angle_bounds: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -169,8 +169,8 @@ class _ReconstructionSpec:
             raise ValueError("work_block_pixels must be positive")
         if self.memory_budget_bytes < 1024 * 1024:
             raise ValueError("memory_budget_bytes must be at least 1 MiB")
-        if self.partition_chunk_span < 1:
-            raise ValueError("partition_chunk_span must be positive")
+        if self.checkpoint_count < 1:
+            raise ValueError("checkpoint_count must be at least one")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""
@@ -192,72 +192,6 @@ class _ReconstructionSpec:
             self.to_dict(), sort_keys=True, separators=(",", ":"), default=str
         ).encode("utf-8")
         return sha256(encoded).hexdigest()
-
-
-@dataclass
-class _PartitionFile:
-    """One immutable Parquet object produced by a mapping task."""
-
-    grid_name: str
-    bucket: int
-    uri: str
-    rows: int
-    checksum: str
-    size_bytes: int | None = None
-
-
-@dataclass
-class _ChunkFile:
-    """One reduced Parquet shard belonging to one output spatial chunk."""
-
-    grid_name: str
-    chunk_id: int
-    shard_start: int
-    shard_stop: int
-    uri: str
-    rows: int
-    checksum: str
-    size_bytes: int | None = None
-
-
-@dataclass
-class _TaskManifest:
-    """Serializable, restart-safe mapping or reduction task manifest."""
-
-    kind: str
-    task_id: str
-    spec_hash: str
-    status: str
-    spec: dict[str, Any]
-    frame_range: tuple[int, int] | None = None
-    detector_tile: tuple[int, int, int, int] | None = None
-    partitions: list[_PartitionFile] = field(default_factory=list)
-    chunks: list[_ChunkFile] = field(default_factory=list)
-    source_tasks: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-compatible manifest."""
-        result = asdict(self)
-        return result
-
-    @classmethod
-    def from_dict(cls, values: Mapping[str, Any]):
-        """Deserialize a task manifest."""
-        data = dict(values)
-        data["partitions"] = [
-            value if isinstance(value, _PartitionFile) else _PartitionFile(**value)
-            for value in data.get("partitions", [])
-        ]
-        data["chunks"] = [
-            value if isinstance(value, _ChunkFile) else _ChunkFile(**value)
-            for value in data.get("chunks", [])
-        ]
-        if data.get("frame_range") is not None:
-            data["frame_range"] = tuple(data["frame_range"])
-        if data.get("detector_tile") is not None:
-            data["detector_tile"] = tuple(data["detector_tile"])
-        return cls(**data)
 
 
 def _native_module():
@@ -695,7 +629,7 @@ def _write_checkpoint(batch, path, *, spec_digest, metadata=None, chunk_rows=655
     Checksummed inline while the data is already in memory (Sec8), not by
     re-reading the file afterward. Written atomically -- to ``.tmp``, then
     ``.replace()`` -- matching the pattern already used by
-    :func:`_write_manifest` and :func:`_finalize_reconstruction`.
+    :func:`_finalize_reconstruction`.
 
     :param batch:
         A native record batch (dict of the six ``_PARTIAL_COLUMNS``
@@ -703,9 +637,9 @@ def _write_checkpoint(batch, path, *, spec_digest, metadata=None, chunk_rows=655
     :param path:
         Destination path for the checkpoint file.
     :param str spec_digest:
-        The job's ``_ReconstructionSpec.digest``, stored as an HDF5
-        attribute so resume can detect a stale checkpoint by comparing
-        digests (design doc Sec11) without a separate manifest registry.
+        The job's resume-identity digest, stored as an HDF5 attribute so
+        resume can detect a stale checkpoint by comparing digests (design
+        doc Sec11) without a separate manifest registry.
     :param dict metadata:
         Optional extra JSON-serializable scalar attributes to store (e.g.
         checkpoint index, grid name, frame range).
@@ -785,279 +719,215 @@ def _verify_checkpoint(path, *, spec_digest, full=False) -> bool:
     return True
 
 
-def _require_pyarrow():
-    try:
-        import pyarrow as pa
-        import pyarrow.fs as pafs
-        import pyarrow.parquet as pq
-    except ImportError as exc:
-        raise RuntimeError(
-            "Parquet reconstruction storage requires the optional 'pyarrow' "
-            "dependency."
-        ) from exc
-    return pa, pafs, pq
+def _checkpoint_part_path(checkpoint_dir, grid_name, index, part):
+    """Path of one checkpoint part file (design doc Sec9/Sec10/Sec11)."""
+    return (
+        Path(checkpoint_dir)
+        / grid_name
+        / f"ckpt{int(index):04d}_p{int(part):04d}.h5"
+    )
 
 
-def _filesystem_path(uri):
-    _, pafs, _ = _require_pyarrow()
-    text = os.fspath(uri)
-    if "://" not in text:
-        path = str(Path(text).absolute())
-        return pafs.LocalFileSystem(), path
-    return pafs.FileSystem.from_uri(text)
+class _CheckpointRouter:
+    """Route each frame's per-grid reduced batch to its checkpoint file.
 
+    Owns the state one job's mapping phase shares across every
+    concurrently running frame-range worker: which planned checkpoint a
+    given frame belongs to per grid (Sec5/Sec12), the live in-memory
+    :class:`_CheckpointAccumulator` for each currently active checkpoint
+    (Sec9), and the safety-valve mid-range split when a checkpoint's own
+    memory-budget share is exceeded before its planned frame range drains
+    (Sec10). :meth:`route` is safe to call concurrently from multiple
+    frame workers; routing decisions for the whole job currently serialize
+    behind one lock, since per-call bookkeeping cost is small relative to
+    the image-load/correction/kernel work that happens before a worker
+    ever calls :meth:`route` (mirroring Sec9's own rationale for why one
+    lock per checkpoint is cheap enough) -- splitting this into a
+    finer-grained per-checkpoint lock is a candidate throughput
+    refinement for the Sec7 thread-allocation phase, not a correctness
+    concern here.
 
-def _write_parquet(batch, uri, metadata):
-    pa, _, pq = _require_pyarrow()
-    filesystem, path = _filesystem_path(uri)
-    parent = str(Path(path).parent).replace("\\", "/")
-    try:
-        filesystem.create_dir(parent, recursive=True)
-    except (NotImplementedError, OSError):
-        pass
-    table = pa.table({name: batch[name] for name in _PARTIAL_COLUMNS})
-    encoded_metadata = {
-        str(key).encode("utf-8"): json.dumps(value, sort_keys=True).encode("utf-8")
-        for key, value in metadata.items()
-    }
-    table = table.replace_schema_metadata(encoded_metadata)
-    pq.write_table(table, path, filesystem=filesystem, compression="zstd")
+    Each planned checkpoint (one contiguous frame range per grid, decided
+    once at prepare time and passed in via ``boundaries``) is written as
+    one or more numbered "part" files under
+    ``checkpoint_dir/{grid_name}/ckpt{index:04d}_p{part:04d}.h5``: exactly
+    one part in the common case, more than one only when the safety valve
+    trips mid-range. Every part file records how many distinct frames
+    contributed to it (``frames_covered`` attribute); a planned checkpoint
+    is resumable exactly when its parts' ``frames_covered`` values sum to
+    its full planned frame count (see :func:`_discover_checkpoint_state`).
+    """
 
+    def __init__(
+        self,
+        boundaries: Mapping[str, Iterable[tuple[int, int]]],
+        *,
+        spec_digest: str,
+        checkpoint_dir,
+        active_budget_bytes: int,
+        resumed: Iterable[tuple[str, int]] = (),
+    ):
+        self._lock = threading.Lock()
+        self._spec_digest = spec_digest
+        self._checkpoint_dir = Path(checkpoint_dir)
+        self._active_budget_bytes = max(1, int(active_budget_bytes))
+        self._boundaries = {
+            grid_name: [tuple(map(int, item)) for item in ranges]
+            for grid_name, ranges in boundaries.items()
+        }
+        self._starts = {
+            grid_name: [item[0] for item in ranges]
+            for grid_name, ranges in self._boundaries.items()
+        }
+        self._resumed = set(resumed)
+        self._accumulators: dict[tuple[str, int], _CheckpointAccumulator] = {}
+        self._parts: dict[tuple[str, int], int] = {}
+        self._frames_in_part: dict[tuple[str, int], int] = {}
+        self._remaining: dict[tuple[str, int], int] = {}
+        for grid_name, ranges in self._boundaries.items():
+            for index, (start, stop) in enumerate(ranges):
+                key = (grid_name, index)
+                self._remaining[key] = 0 if key in self._resumed else stop - start
+        self.written: list[Path] = []
 
-def _read_parquet(uri):
-    _, _, pq = _require_pyarrow()
-    filesystem, path = _filesystem_path(uri)
-    table = pq.read_table(path, filesystem=filesystem, columns=list(_PARTIAL_COLUMNS))
-    return {name: table[name].to_numpy() for name in _PARTIAL_COLUMNS}
+    def checkpoint_index_for_frame(self, grid_name, frame_index) -> int:
+        """Return the planned checkpoint index containing ``frame_index``."""
+        starts = self._starts[grid_name]
+        position = bisect.bisect_right(starts, int(frame_index)) - 1
+        if position < 0:
+            raise ValueError(
+                f"Frame {frame_index} precedes grid {grid_name!r}'s first "
+                "planned checkpoint boundary"
+            )
+        start, stop = self._boundaries[grid_name][position]
+        if not start <= frame_index < stop:
+            raise ValueError(
+                f"Frame {frame_index} is outside grid {grid_name!r}'s "
+                "planned checkpoint boundaries"
+            )
+        return position
 
+    def route(self, grid_name, frame_index, batch) -> None:
+        """Insert one frame's reduced batch into its checkpoint accumulator.
 
-class _ParquetRangeReader:
-    """Stream monotonically increasing key ranges from sorted Parquet."""
+        A no-op if that ``(grid, checkpoint)`` was already resumed from a
+        previous run. May flush the checkpoint (or a part of it, under the
+        Sec10 safety valve) to disk; the write itself happens without
+        holding the router's lock.
+        """
+        index = self.checkpoint_index_for_frame(grid_name, frame_index)
+        key = (grid_name, index)
+        to_flush = None
+        with self._lock:
+            if key in self._resumed:
+                return
+            accumulator = self._accumulators.get(key)
+            if accumulator is None:
+                accumulator = _CheckpointAccumulator()
+                self._accumulators[key] = accumulator
+            accumulator.insert(batch)
+            self._frames_in_part[key] = self._frames_in_part.get(key, 0) + 1
+            self._remaining[key] -= 1
+            done = self._remaining[key] <= 0
+            over_budget = accumulator.should_flush(self._active_budget_bytes)
+            if done or over_budget:
+                del self._accumulators[key]
+                part = self._parts.get(key, 0)
+                self._parts[key] = part + 1
+                frames_covered = self._frames_in_part.pop(key, 0)
+                to_flush = (accumulator, part, frames_covered)
+        if to_flush is not None:
+            accumulator, part, frames_covered = to_flush
+            self._write_part(grid_name, index, part, accumulator, frames_covered)
 
-    def __init__(self, uri, *, batch_size=131072, use_threads=True):
-        _, _, pq = _require_pyarrow()
-        filesystem, path = _filesystem_path(uri)
-        self.parquet = pq.ParquetFile(path, filesystem=filesystem)
-        names = self.parquet.schema_arrow.names
-        self.chunk_column = names.index("chunk_id")
-        self.local_column = names.index("local_voxel_id")
-        self.batch_size = int(batch_size)
-        self.use_threads = bool(use_threads)
-        self.iterator = None
-        self.batch = None
-        self.position = 0
-        self.previous_key = None
-
-    def _start(self, chunk_id, local_start):
-        row_groups = []
-        for index in range(self.parquet.metadata.num_row_groups):
-            metadata = self.parquet.metadata.row_group(index)
-            chunk_statistics = metadata.column(
-                self.chunk_column
-            ).statistics
-            if (
-                chunk_statistics is not None
-                and chunk_statistics.has_min_max
-                and int(chunk_statistics.max) < chunk_id
-            ):
-                continue
-            if (
-                chunk_statistics is not None
-                and chunk_statistics.has_min_max
-                and int(chunk_statistics.max) == chunk_id
-            ):
-                local_statistics = metadata.column(
-                    self.local_column
-                ).statistics
-                if (
-                    local_statistics is not None
-                    and local_statistics.has_min_max
-                    and int(local_statistics.max) < local_start
-                ):
-                    continue
-            row_groups.append(index)
-        self.iterator = self.parquet.iter_batches(
-            batch_size=self.batch_size,
-            row_groups=row_groups,
-            columns=list(_PARTIAL_COLUMNS),
-            use_threads=self.use_threads,
+    def _write_part(self, grid_name, index, part, accumulator, frames_covered):
+        batch = accumulator.finalize()
+        path = _checkpoint_part_path(self._checkpoint_dir, grid_name, index, part)
+        _write_checkpoint(
+            batch,
+            path,
+            spec_digest=self._spec_digest,
+            metadata={
+                "checkpoint_index": index,
+                "grid_name": grid_name,
+                "part": part,
+                "frames_covered": frames_covered,
+            },
         )
-
-    def _advance(self):
-        try:
-            record_batch = next(self.iterator)
-        except StopIteration:
-            self.batch = None
-            return False
-        self.batch = {
-            name: record_batch.column(name).to_numpy(zero_copy_only=False)
-            for name in _PARTIAL_COLUMNS
-        }
-        self.position = 0
-        return True
-
-    def read(self, chunk_id, local_start, local_stop):
-        """Read one exact range without revisiting earlier Parquet data."""
-        key = (int(chunk_id), int(local_start))
-        if self.previous_key is not None and key < self.previous_key:
-            raise ValueError("Parquet ranges must be requested in sorted order")
-        self.previous_key = key
-        if self.iterator is None:
-            self._start(chunk_id, local_start)
-        parts = []
-        while self.batch is not None or self._advance():
-            chunks = self.batch["chunk_id"]
-            position = self.position
-            if position >= chunks.size:
-                self.batch = None
-                continue
-            position += int(
-                np.searchsorted(
-                    chunks[position:],
-                    np.uint64(chunk_id),
-                    side="left",
-                )
-            )
-            if position >= chunks.size:
-                self.batch = None
-                continue
-            current_chunk = int(chunks[position])
-            if current_chunk > chunk_id:
-                self.position = position
-                break
-            chunk_stop = int(
-                np.searchsorted(
-                    chunks,
-                    np.uint64(chunk_id),
-                    side="right",
-                    sorter=None,
-                )
-            )
-            local = self.batch["local_voxel_id"]
-            start = position + int(
-                np.searchsorted(
-                    local[position:chunk_stop],
-                    np.uint64(local_start),
-                    side="left",
-                )
-            )
-            stop = position + int(
-                np.searchsorted(
-                    local[position:chunk_stop],
-                    np.uint64(local_stop),
-                    side="left",
-                )
-            )
-            if stop > start:
-                parts.append(
-                    {
-                        name: values[start:stop]
-                        for name, values in self.batch.items()
-                    }
-                )
-            self.position = stop
-            if stop < chunk_stop:
-                break
-            self.position = chunk_stop
-            if chunk_stop < chunks.size:
-                break
-            self.batch = None
-        if not parts:
-            return _empty_batch()
-        if len(parts) == 1:
-            return parts[0]
-        return {
-            name: np.concatenate([part[name] for part in parts])
-            for name in _PARTIAL_COLUMNS
-        }
+        with self._lock:
+            self.written.append(path)
 
 
-def _uri_checksum_and_size(uri):
-    filesystem, path = _filesystem_path(uri)
-    digest = sha256()
-    size = 0
-    with filesystem.open_input_file(path) as stream:
-        while True:
-            block = stream.read(8 * 1024 * 1024)
-            if not block:
-                break
-            digest.update(block)
-            size += len(block)
-    return digest.hexdigest(), size
+def _discover_checkpoint_state(
+    checkpoint_dir, boundaries, spec_digest, *, cleanup_stale=False
+):
+    """Determine which planned checkpoints are already fully resumable.
 
+    A planned ``(grid_name, index)`` checkpoint is resumable when its
+    on-disk part files (Sec9/Sec10/Sec11) all carry a matching
+    ``spec_sha256`` attribute and their ``frames_covered`` values sum to
+    exactly its planned frame count -- the whole resume mechanism, with no
+    separate manifest registry (design doc Sec11), extended one level to
+    accommodate the Sec10 safety valve's occasional multi-part checkpoints.
 
-def _uri_checksum(uri):
-    return _uri_checksum_and_size(uri)[0]
-
-
-def _uri_size(uri):
-    filesystem, path = _filesystem_path(uri)
-    size = int(filesystem.get_file_info(path).size)
-    if size < 0:
-        raise OSError(f"Could not determine scratch-file size: {uri}")
-    return size
-
-
-def _mark_scratch_verified(file, verification_cache):
-    if verification_cache is not None:
-        verification_cache.add((file.uri, file.checksum))
-
-
-def _verify_scratch_file(file, verification_cache=None):
-    key = (file.uri, file.checksum)
-    if verification_cache is not None and key in verification_cache:
-        return True
-    if file.size_bytes is not None and _uri_size(file.uri) != file.size_bytes:
-        raise OSError(f"Scratch-file size mismatch: {file.uri}")
-    if _uri_checksum(file.uri) != file.checksum:
-        raise OSError(f"Checksum mismatch for {file.uri}")
-    if verification_cache is not None:
-        verification_cache.add(key)
-    return True
-
-
-def _join_uri(base, *parts):
-    base = os.fspath(base).rstrip("/\\")
-    separator = "/" if "://" in base else os.sep
-    return separator.join((base, *(str(part).strip("/\\") for part in parts)))
-
-
-def _jsonable(value):
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return repr(value)
-
-
-def _write_manifest(manifest: _TaskManifest, uri):
-    """Write a task manifest atomically on a local filesystem."""
-    path = Path(uri)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(
-        json.dumps(manifest.to_dict(), indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    temporary.replace(path)
-    return str(path)
-
-
-def _read_manifest(value) -> _TaskManifest:
-    """Read a manifest path or normalize an existing manifest."""
-    if isinstance(value, _TaskManifest):
-        return value
-    if isinstance(value, Mapping):
-        return _TaskManifest.from_dict(value)
-    return _TaskManifest.from_dict(
-        json.loads(Path(value).read_text(encoding="utf-8"))
-    )
+    :param checkpoint_dir:
+        Root scratch directory containing one subdirectory per grid.
+    :param boundaries:
+        ``dict[grid_name, list[(start, stop)]]`` -- the job's persisted
+        checkpoint plan (design doc Sec5/Sec11: computed once, never
+        recomputed on resume).
+    :param str spec_digest:
+        The job's resume-identity digest.
+    :param bool cleanup_stale:
+        If true, delete on-disk part files for any planned checkpoint
+        found to be stale/partial/corrupt, so a following mapping run
+        starts that checkpoint from a clean slate. Leave false when only
+        inspecting status.
+    :returns:
+        ``(resumed, files)``: ``resumed`` is the set of fully-resumable
+        ``(grid_name, index)`` pairs; ``files`` is
+        ``dict[grid_name, list[Path]]`` of every valid checkpoint part
+        file found, grouped by grid -- directly usable as
+        :func:`_finalize_reconstruction`'s checkpoint-file input once
+        every planned checkpoint is resumed.
+    :rtype: tuple[set, dict]
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    resumed = set()
+    files: dict[str, list[Path]] = {}
+    for grid_name, ranges in boundaries.items():
+        grid_dir = checkpoint_dir / grid_name
+        files[grid_name] = []
+        by_index: dict[int, list[Path]] = {}
+        if grid_dir.is_dir():
+            for path in sorted(grid_dir.glob("ckpt*_p*.h5")):
+                match = _CHECKPOINT_PART_PATTERN.match(path.name)
+                if match is None:
+                    continue
+                by_index.setdefault(int(match.group("index")), []).append(path)
+        for index, (start, stop) in enumerate(ranges):
+            planned_frames = stop - start
+            covered = 0
+            valid_parts = []
+            for path in by_index.get(index, ()):
+                try:
+                    with h5py.File(path, "r") as h5file:
+                        if h5file.attrs.get("spec_sha256") != spec_digest:
+                            continue
+                        covered += int(h5file.attrs.get("frames_covered", 0))
+                        valid_parts.append(path)
+                except (OSError, KeyError):
+                    continue
+            if valid_parts and covered == planned_frames:
+                resumed.add((grid_name, index))
+                files[grid_name].extend(valid_parts)
+            elif cleanup_stale:
+                for path in by_index.get(index, ()):
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+    return resumed, files
 
 
 def _map_frame_range(
@@ -1068,43 +938,38 @@ def _map_frame_range(
     frame_range,
     detector_tiles,
     angle_bounds_rad,
-    output_uri,
+    router: _CheckpointRouter,
     *,
     correction_pipeline: Callable,
-    job_digest: str,
     image_payloads: Mapping[int, object] | None = None,
     corner_rays: Mapping[tuple[int, int, int, int], np.ndarray] | None = None,
-    corner_rays_fingerprints: Mapping[
-        tuple[int, int, int, int], str
-    ]
-    | None = None,
-    verification_cache: set[tuple[str, str]] | None = None,
     kernel_threads: int | None = None,
     kernel_memory_budget_bytes: int | None = None,
-    accumulation_budget_bytes: int = 64 * 1024 * 1024,
-    image_progress: Callable[[int, int, int], None] | None = None,
-) -> _TaskManifest:
-    """Map a streaming frame range and write byte-bounded Parquet partials.
+    image_progress: Callable[[int], None] | None = None,
+) -> None:
+    """Map a streaming frame range, routing each frame's per-grid reduced
+    batch to ``router`` instead of writing scratch partitions.
 
     ``angle_bounds_rad`` must have shape ``(frames, 2, 4)`` in the order
-    ``alpha, omega, chi, phi``. The central correction object may provide a
-    ``correct_frame`` method, which is called once before detector tiling.
-    This preserves full-detector pixel-repair neighborhoods and avoids
-    repeating static corrections for every tile. The tile callback remains
+    ``alpha, omega, chi, phi``. The correction object may provide a
+    ``correct_frame`` method, called once per image before detector
+    tiling, to preserve full-detector pixel-repair neighborhoods and avoid
+    repeating static corrections per tile; the tile callback remains
     available for correction objects without that method.
 
-    Every image is loaded once, then all detector tiles are processed. Reduced
-    native records are retained until ``accumulation_budget_bytes`` would be
-    exceeded, at which point they are reduced across images and written as one
-    deterministic Parquet segment.
+    Every image is loaded once; all detector tiles and all of ``spec``'s
+    output grids are processed from that one load before moving to the
+    next frame. ``router`` is shared across every concurrently running
+    frame range in the job and is internally thread-safe -- this function
+    keeps no scratch-file or memory-accumulation state of its own.
 
-    ``image_payloads``, ``corner_rays``, ``corner_rays_fingerprints``,
-    ``verification_cache``, ``kernel_threads``,
-    ``kernel_memory_budget_bytes``, and ``accumulation_budget_bytes`` are local
-    execution controls. They do not alter scientific values.
-
-    ``image_progress`` is called after each completed image with the frame
-    index, retained-record bytes, and number of flushed segments.
+    :param _CheckpointRouter router:
+        The job's shared checkpoint router.
+    :param image_payloads, corner_rays, kernel_threads,
+        kernel_memory_budget_bytes:
+        Local execution controls; they do not alter scientific values.
+    :param image_progress:
+        Called with each frame index once it has been fully routed.
     """
     start, stop = map(int, frame_range)
     if start < 0 or stop <= start or stop > len(scan):
@@ -1132,20 +997,13 @@ def _map_frame_range(
         raise ValueError("angle_bounds_rad contains non-finite values")
     if not callable(correction_pipeline):
         raise TypeError("correction_pipeline must be the central job correction")
-    if not job_digest:
-        raise ValueError("job_digest is required")
-    if accumulation_budget_bytes < 1:
-        raise ValueError("accumulation_budget_bytes must be positive")
     ray_arrays = {}
-    ray_fingerprints = {}
     for detector_tile in detector_tiles:
         row_start, row_stop, column_start, column_stop = detector_tile
         rays = (
             _detector_corner_rays(detector, detector_tile)
             if corner_rays is None or detector_tile not in corner_rays
-            else np.ascontiguousarray(
-                corner_rays[detector_tile], dtype=np.float64
-            )
+            else np.ascontiguousarray(corner_rays[detector_tile], dtype=np.float64)
         )
         expected_ray_shape = (
             row_stop - row_start + 1,
@@ -1153,80 +1011,8 @@ def _map_frame_range(
             3,
         )
         if rays.shape != expected_ray_shape:
-            raise ValueError(
-                f"corner_rays must have shape {expected_ray_shape}"
-            )
+            raise ValueError(f"corner_rays must have shape {expected_ray_shape}")
         ray_arrays[detector_tile] = rays
-        fingerprint = (
-            None
-            if corner_rays_fingerprints is None
-            else corner_rays_fingerprints.get(detector_tile)
-        )
-        if fingerprint is None:
-            fingerprint = _xxh3_128(rays)
-        elif not isinstance(fingerprint, str) or len(fingerprint) != 32:
-            raise ValueError(
-                "Corner-ray fingerprints must be 32-character "
-                "XXH3-128 digests"
-            )
-        ray_fingerprints[detector_tile] = fingerprint
-    ub = np.ascontiguousarray(ub_calculator.getUB(), dtype=np.float64)
-    u = np.ascontiguousarray(ub_calculator.getU(), dtype=np.float64)
-    angle_bounds_fingerprint = _xxh3_128(bounds)
-    ub_fingerprint = _xxh3_128(ub)
-    u_fingerprint = _xxh3_128(u)
-    wavevector = float(ub_calculator.getK())
-    detector_config = (
-        _jsonable(detector.get_config()) if hasattr(detector, "get_config") else None
-    )
-    base_context = {
-        "job_sha256": job_digest,
-        "ub": ub.tolist(),
-        "u": u.tolist(),
-        "wavevector_A^-1": wavevector,
-        "detector": detector_config,
-    }
-    base_context_hash = sha256(
-        json.dumps(base_context, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    scientific_components = {
-        "algorithm": "xxh3-128-components-v1",
-        "job_sha256": job_digest,
-        "angle_bounds_xxh3_128": angle_bounds_fingerprint,
-        "corner_rays_xxh3_128": [
-            {
-                "detector_tile": list(detector_tile),
-                "digest": ray_fingerprints[detector_tile],
-            }
-            for detector_tile in detector_tiles
-        ],
-        "ub_xxh3_128": ub_fingerprint,
-        "u_xxh3_128": u_fingerprint,
-        "wavevector_A^-1": wavevector,
-    }
-    scientific_context_hash = sha256(
-        json.dumps(
-            scientific_components, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-    ).hexdigest()
-    scientific_context = {
-        **base_context,
-        "base_context_sha256": base_context_hash,
-        **scientific_components,
-        "scientific_context_sha256": scientific_context_hash,
-        "detector_tiles": [list(detector_tile) for detector_tile in detector_tiles],
-    }
-    task_seed = {
-        "spec": spec.digest,
-        "frame_range": [start, stop],
-        "detector_tiles": [
-            list(detector_tile) for detector_tile in detector_tiles
-        ],
-        "scientific_context": scientific_context_hash,
-    }
-    task_id = sha256(
-        json.dumps(task_seed, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()[:24]
     kernels = {
         grid.grid_name: _kernel_for_grid(
             spec,
@@ -1237,63 +1023,6 @@ def _map_frame_range(
         )
         for grid in spec.grids
     }
-    grid_batches: dict[str, list[Mapping[str, np.ndarray]]] = {
-        grid.grid_name: [] for grid in spec.grids
-    }
-    accumulated_bytes = 0
-    segment_index = 0
-    partitions = []
-
-    def flush():
-        nonlocal accumulated_bytes, segment_index
-        if not any(grid_batches.values()):
-            return
-        for grid in spec.grids:
-            batch = _reduce_batches(grid_batches[grid.grid_name])
-            if batch["chunk_id"].size == 0:
-                continue
-            buckets = batch["chunk_id"] // spec.partition_chunk_span
-            for bucket in np.unique(buckets):
-                selected = buckets == bucket
-                subset = {
-                    name: values[selected] for name, values in batch.items()
-                }
-                uri = _join_uri(
-                    output_uri,
-                    f"grid={grid.grid_name}",
-                    f"bucket={int(bucket):08d}",
-                    (
-                        f"task={task_id}-"
-                        f"segment={segment_index:06d}.parquet"
-                    ),
-                )
-                _write_parquet(
-                    subset,
-                    uri,
-                    {
-                        "spec_hash": spec.digest,
-                        "task_id": task_id,
-                        "segment": segment_index,
-                        "grid_name": grid.grid_name,
-                        "bucket": int(bucket),
-                    },
-                )
-                checksum, size_bytes = _uri_checksum_and_size(uri)
-                partition = _PartitionFile(
-                    grid_name=grid.grid_name,
-                    bucket=int(bucket),
-                    uri=uri,
-                    rows=int(subset["chunk_id"].size),
-                    checksum=checksum,
-                    size_bytes=size_bytes,
-                )
-                _mark_scratch_verified(partition, verification_cache)
-                partitions.append(partition)
-        for batches in grid_batches.values():
-            batches.clear()
-        accumulated_bytes = 0
-        segment_index += 1
-
     for offset, frame_index in enumerate(range(start, stop)):
         image_payload = (
             scan.get_raw_img(frame_index)
@@ -1301,19 +1030,23 @@ def _map_frame_range(
             else image_payloads[frame_index]
         )
         image = np.asarray(image_payload.img)
-        frame_correction = getattr(
-            correction_pipeline, "correct_frame", None
-        )
+        frame_correction = getattr(correction_pipeline, "correct_frame", None)
         corrected_frame = (
             frame_correction(image_payload, image, frame_index)
             if callable(frame_correction)
             else None
         )
+        # Collect every tile's contribution per grid, then route exactly
+        # once per (frame, grid) -- the router's remaining-frame countdown
+        # (Sec9/Sec10) counts frames, not tile-level route() calls, so a
+        # multi-tile frame must be merged down to one routed batch per grid
+        # before reaching it.
+        tile_batches: dict[str, list[Mapping[str, np.ndarray]]] = {
+            grid.grid_name: [] for grid in spec.grids
+        }
         for detector_tile in detector_tiles:
             row_start, row_stop, column_start, column_stop = detector_tile
-            selection = np.s_[
-                row_start:row_stop, column_start:column_stop
-            ]
+            selection = np.s_[row_start:row_stop, column_start:column_stop]
             if corrected_frame is None:
                 intensity, variance, mask = correction_pipeline(
                     image_payload,
@@ -1337,531 +1070,12 @@ def _map_frame_range(
                     np.ascontiguousarray(bounds[offset, 0]),
                     np.ascontiguousarray(bounds[offset, 1]),
                 )
-                batch_bytes = sum(
-                    np.asarray(values).nbytes for values in batch.values()
-                )
-                if (
-                    accumulated_bytes
-                    and accumulated_bytes + batch_bytes
-                    > accumulation_budget_bytes
-                ):
-                    flush()
-                grid_batches[grid.grid_name].append(batch)
-                accumulated_bytes += batch_bytes
-                if accumulated_bytes >= accumulation_budget_bytes:
-                    flush()
+                tile_batches[grid.grid_name].append(batch)
+        for grid in spec.grids:
+            merged = _reduce_batches(tile_batches[grid.grid_name])
+            router.route(grid.grid_name, frame_index, merged)
         if image_progress is not None:
-            image_progress(
-                frame_index,
-                accumulated_bytes,
-                segment_index,
-            )
-    flush()
-    scientific_context["accumulation_segments"] = segment_index
-    return _TaskManifest(
-        kind="map",
-        task_id=task_id,
-        spec_hash=spec.digest,
-        status="complete",
-        spec=spec.to_dict(),
-        frame_range=(start, stop),
-        detector_tile=None,
-        partitions=partitions,
-        metadata=scientific_context,
-    )
-
-
-def _map_partition(
-    spec: _ReconstructionSpec,
-    scan,
-    detector,
-    ub_calculator,
-    frame_range,
-    detector_tile,
-    angle_bounds_rad,
-    output_uri,
-    *,
-    correction_pipeline: Callable,
-    job_digest: str,
-    image_payloads: Mapping[int, object] | None = None,
-    corner_rays: np.ndarray | None = None,
-    corner_rays_fingerprint: str | None = None,
-    verification_cache: set[tuple[str, str]] | None = None,
-    kernel_threads: int | None = None,
-    kernel_memory_budget_bytes: int | None = None,
-    accumulation_budget_bytes: int = 64 * 1024 * 1024,
-    image_progress: Callable[[int, int, int], None] | None = None,
-) -> _TaskManifest:
-    """Map one detector tile through the streaming range implementation."""
-    tile = tuple(map(int, detector_tile))
-    result = _map_frame_range(
-        spec,
-        scan,
-        detector,
-        ub_calculator,
-        frame_range,
-        (tile,),
-        angle_bounds_rad,
-        output_uri,
-        correction_pipeline=correction_pipeline,
-        job_digest=job_digest,
-        image_payloads=image_payloads,
-        corner_rays=None if corner_rays is None else {tile: corner_rays},
-        corner_rays_fingerprints=(
-            None
-            if corner_rays_fingerprint is None
-            else {tile: corner_rays_fingerprint}
-        ),
-        verification_cache=verification_cache,
-        kernel_threads=kernel_threads,
-        kernel_memory_budget_bytes=kernel_memory_budget_bytes,
-        accumulation_budget_bytes=accumulation_budget_bytes,
-        image_progress=image_progress,
-    )
-    result.detector_tile = tile
-    return result
-
-
-def _reduce_partition(
-    manifest_set,
-    output_uri,
-    *,
-    verification_cache: set[tuple[str, str]] | None = None,
-    memory_budget_bytes: int = 1024**3,
-    workers: int = 1,
-    progress: Callable[[int, int, str], None] | None = None,
-    checkpoint_root=None,
-) -> _TaskManifest:
-    """Externally reduce mapping partitions into bounded chunk shards.
-
-    Contiguous shard ranges run concurrently with private forward-only
-    Parquet readers. The total memory budget is divided between workers.
-    """
-    memory_budget_bytes = max(1, int(memory_budget_bytes))
-    requested_workers = max(1, int(workers))
-    worker_limit = max(
-        1,
-        memory_budget_bytes // _MIN_REDUCER_WORKER_MEMORY,
-    )
-    configured_workers = min(requested_workers, worker_limit)
-    worker_memory_budget = max(
-        1,
-        memory_budget_bytes // configured_workers,
-    )
-    manifests = [_read_manifest(value) for value in manifest_set]
-    if not manifests:
-        raise ValueError("At least one mapping manifest is required")
-    if any(manifest.kind != "map" for manifest in manifests):
-        raise ValueError("reduce_partition accepts mapping manifests only")
-    spec_hashes = {manifest.spec_hash for manifest in manifests}
-    if len(spec_hashes) != 1:
-        raise ValueError("All mapping manifests must use the same specification")
-    spec = _ReconstructionSpec.from_dict(manifests[0].spec)
-    base_contexts = {
-        manifest.metadata.get("base_context_sha256") for manifest in manifests
-    }
-    if len(base_contexts) != 1:
-        raise ValueError(
-            "Mapping manifests contain different geometry, inputs, or correction "
-            "identities"
-        )
-    grouped: dict[tuple[str, int], list[_PartitionFile]] = {}
-    for manifest in manifests:
-        if manifest.status != "complete":
-            raise ValueError(f"Mapping task {manifest.task_id} is not complete")
-        for partition in manifest.partitions:
-            grouped.setdefault((partition.grid_name, partition.bucket), []).append(
-                partition
-            )
-    source_tasks = sorted(manifest.task_id for manifest in manifests)
-    reduce_id = sha256(
-        (spec.digest + "\0" + "\0".join(source_tasks)).encode("utf-8")
-    ).hexdigest()[:24]
-    base_metadata = {
-        **{
-            key: value
-            for key, value in manifests[0].metadata.items()
-            if key
-            not in {
-                "angle_bounds_sha256",
-                "corner_rays_sha256",
-                "angle_bounds_xxh3_128",
-                "corner_rays_xxh3_128",
-                "ub_xxh3_128",
-                "u_xxh3_128",
-                "scientific_context_sha256",
-            }
-        },
-        "source_scientific_contexts": {
-            manifest.task_id: manifest.metadata.get(
-                "scientific_context_sha256"
-            )
-            for manifest in manifests
-        },
-    }
-    grid_by_name = {grid.grid_name: grid for grid in spec.grids}
-    local_span = max(
-        256 * 1024,
-        min(
-            4 * 1024 * 1024,
-            worker_memory_budget // (8 * 48),
-        ),
-    )
-    plans = []
-    for (grid_name, bucket), partitions in sorted(grouped.items()):
-        grid = grid_by_name[grid_name]
-        chunk_grid = tuple(
-            math.ceil(size / chunk)
-            for size, chunk in zip(grid.shape, grid.chunk_shape)
-        )
-        total_chunks = math.prod(chunk_grid)
-        chunk_start = bucket * spec.partition_chunk_span
-        chunk_stop = min(
-            total_chunks,
-            (bucket + 1) * spec.partition_chunk_span,
-        )
-        for chunk_id in range(chunk_start, chunk_stop):
-            coordinates = _chunk_coordinates(chunk_id, grid)
-            local_shape = tuple(
-                min(chunk, size - coordinate * chunk)
-                for coordinate, chunk, size in zip(
-                    coordinates,
-                    grid.chunk_shape,
-                    grid.shape,
-                )
-            )
-            local_stop = (
-                (local_shape[0] - 1)
-                * grid.chunk_shape[1]
-                * grid.chunk_shape[2]
-                + (local_shape[1] - 1) * grid.chunk_shape[2]
-                + local_shape[2]
-            )
-            for shard_start in range(0, local_stop, local_span):
-                plans.append(
-                    (
-                        grid_name,
-                        bucket,
-                        chunk_id,
-                        shard_start,
-                        min(shard_start + local_span, local_stop),
-                        tuple(sorted(partitions, key=lambda item: item.uri)),
-                    )
-                )
-
-    checkpoint_path = (
-        None
-        if checkpoint_root is None
-        else Path(checkpoint_root) / f"{reduce_id}.json"
-    )
-    chunks = []
-    completed_shards = set()
-    if checkpoint_path is not None and checkpoint_path.exists():
-        try:
-            checkpoint = _read_manifest(checkpoint_path)
-            if (
-                checkpoint.kind != "reduce"
-                or checkpoint.task_id != reduce_id
-                or checkpoint.spec_hash != spec.digest
-                or checkpoint.source_tasks != source_tasks
-            ):
-                raise ValueError("Reduction checkpoint identity mismatch")
-            for chunk in checkpoint.chunks:
-                if _verify_scratch_file(chunk, verification_cache):
-                    chunks.append(chunk)
-            completed_shards.update(
-                checkpoint.metadata.get("completed_shards", ())
-            )
-        except (OSError, ValueError, RuntimeError, TypeError):
-            chunks = []
-            completed_shards.clear()
-
-    def shard_key(grid_name, chunk_id, shard_start, shard_stop):
-        return (
-            f"{grid_name}:{chunk_id}:"
-            f"{shard_start}:{shard_stop}"
-        )
-
-    def checkpoint(status):
-        ordered_chunks = sorted(
-            chunks,
-            key=lambda item: (
-                item.grid_name,
-                item.chunk_id,
-                item.shard_start,
-                item.shard_stop,
-                item.uri,
-            ),
-        )
-        manifest = _TaskManifest(
-            kind="reduce",
-            task_id=reduce_id,
-            spec_hash=spec.digest,
-            status=status,
-            spec=spec.to_dict(),
-            chunks=ordered_chunks,
-            source_tasks=source_tasks,
-            metadata={
-                **base_metadata,
-                "local_voxel_shard_span": local_span,
-                "reducer_worker_capacity": configured_workers,
-                "reducer_workers_used": actual_workers,
-                "reducer_memory_bytes_per_worker": worker_memory_budget,
-                "completed_shards": sorted(completed_shards),
-            },
-        )
-        if checkpoint_path is not None:
-            _write_manifest(manifest, checkpoint_path)
-        return manifest
-
-    existing = {
-        shard_key(
-            chunk.grid_name,
-            chunk.chunk_id,
-            chunk.shard_start,
-            chunk.shard_stop,
-        )
-        for chunk in chunks
-    }
-    checkpoint_interval = 64
-    total_plans = len(plans)
-    completed = 0
-    active_plans = []
-    for plan in plans:
-        grid_name, _, chunk_id, shard_start, shard_stop, _ = plan
-        key = shard_key(
-            grid_name,
-            chunk_id,
-            shard_start,
-            shard_stop,
-        )
-        if key in existing or key in completed_shards:
-            completed += 1
-            if progress is not None:
-                progress(
-                    completed,
-                    total_plans,
-                    f"Reusing reduced shard {completed}/{total_plans}",
-                )
-            continue
-        active_plans.append(plan)
-
-    actual_workers = min(configured_workers, len(active_plans))
-    worker_memory_budget = max(
-        1,
-        memory_budget_bytes // max(1, actual_workers),
-    )
-
-    active_partitions = {
-        (partition.uri, partition.checksum): partition
-        for plan in active_plans
-        for partition in plan[5]
-    }
-    partitions_to_verify = [
-        partition
-        for key, partition in active_partitions.items()
-        if verification_cache is None or key not in verification_cache
-    ]
-    if partitions_to_verify:
-        verification_workers = min(
-            actual_workers,
-            len(partitions_to_verify),
-        )
-        with ThreadPoolExecutor(
-            max_workers=verification_workers
-        ) as executor:
-            futures = {
-                executor.submit(
-                    _verify_scratch_file,
-                    partition,
-                    None,
-                ): partition
-                for partition in partitions_to_verify
-            }
-            for verified, future in enumerate(
-                as_completed(futures),
-                start=1,
-            ):
-                partition = futures[future]
-                future.result()
-                _mark_scratch_verified(partition, verification_cache)
-                if progress is not None:
-                    progress(
-                        completed,
-                        total_plans,
-                        (
-                            "Verified mapping partition "
-                            f"{verified}/{len(partitions_to_verify)} "
-                            f"with {verification_workers} workers"
-                        ),
-                    )
-
-    result_queue = Queue()
-
-    def reduce_plan_batch(plan_batch):
-        readers = {}
-        active_group = None
-        try:
-            for (
-                grid_name,
-                bucket,
-                chunk_id,
-                shard_start,
-                shard_stop,
-                partitions,
-            ) in plan_batch:
-                group_key = (grid_name, bucket)
-                if group_key != active_group:
-                    readers.clear()
-                    active_group = group_key
-                for partition in partitions:
-                    if partition.uri in readers:
-                        continue
-                    batch_rows = max(
-                        4096,
-                        min(
-                            131072,
-                            worker_memory_budget
-                            // (max(1, len(partitions)) * 48 * 4),
-                        ),
-                    )
-                    readers[partition.uri] = _ParquetRangeReader(
-                        partition.uri,
-                        batch_size=batch_rows,
-                        use_threads=actual_workers == 1,
-                    )
-                levels = []
-                for partition in partitions:
-                    batch = readers[partition.uri].read(
-                        chunk_id,
-                        shard_start,
-                        shard_stop,
-                    )
-                    if not batch["chunk_id"].size:
-                        continue
-                    level = 0
-                    while level < len(levels) and levels[level] is not None:
-                        batch = _merge_sorted_batches(levels[level], batch)
-                        levels[level] = None
-                        level += 1
-                    if level == len(levels):
-                        levels.append(batch)
-                    else:
-                        levels[level] = batch
-                reduced = _empty_batch()
-                for batch in reversed(levels):
-                    if batch is not None:
-                        reduced = _merge_sorted_batches(reduced, batch)
-                chunk = None
-                if reduced["chunk_id"].size:
-                    uri = _join_uri(
-                        output_uri,
-                        f"grid={grid_name}",
-                        (
-                            f"chunk={int(chunk_id):016d}-"
-                            f"shard={shard_start:016d}-{shard_stop:016d}.parquet"
-                        ),
-                    )
-                    _write_parquet(
-                        reduced,
-                        uri,
-                        {
-                            "spec_hash": spec.digest,
-                            "reduce_id": reduce_id,
-                            "grid_name": grid_name,
-                            "chunk_id": int(chunk_id),
-                            "shard_start": shard_start,
-                            "shard_stop": shard_stop,
-                            "source_bucket": bucket,
-                        },
-                    )
-                    checksum, size_bytes = _uri_checksum_and_size(uri)
-                    chunk = _ChunkFile(
-                        grid_name=grid_name,
-                        chunk_id=int(chunk_id),
-                        shard_start=shard_start,
-                        shard_stop=shard_stop,
-                        uri=uri,
-                        rows=int(reduced["chunk_id"].size),
-                        checksum=checksum,
-                        size_bytes=size_bytes,
-                    )
-                result_queue.put(
-                    (
-                        shard_key(
-                            grid_name,
-                            chunk_id,
-                            shard_start,
-                            shard_stop,
-                        ),
-                        chunk,
-                        grid_name,
-                        chunk_id,
-                        shard_start,
-                        shard_stop,
-                    )
-                )
-        finally:
-            result_queue.put(None)
-
-    if active_plans:
-        plans_per_worker, extra = divmod(
-            len(active_plans),
-            actual_workers,
-        )
-        plan_batches = []
-        start = 0
-        for worker_index in range(actual_workers):
-            stop = start + plans_per_worker + (worker_index < extra)
-            plan_batches.append(active_plans[start:stop])
-            start = stop
-
-        with ThreadPoolExecutor(max_workers=actual_workers) as executor:
-            futures = [
-                executor.submit(reduce_plan_batch, batch)
-                for batch in plan_batches
-            ]
-            finished_workers = 0
-            while finished_workers < len(futures):
-                outcome = result_queue.get()
-                if outcome is None:
-                    finished_workers += 1
-                    continue
-                (
-                    key,
-                    chunk,
-                    grid_name,
-                    chunk_id,
-                    shard_start,
-                    shard_stop,
-                ) = outcome
-                if chunk is not None:
-                    _mark_scratch_verified(chunk, verification_cache)
-                    chunks.append(chunk)
-                completed_shards.add(key)
-                completed += 1
-                if (
-                    checkpoint_path is not None
-                    and (
-                        completed % checkpoint_interval == 0
-                        or completed == total_plans
-                    )
-                ):
-                    checkpoint("running")
-                if progress is not None:
-                    progress(
-                        completed,
-                        total_plans,
-                        (
-                            f"Reduced shard {completed}/{total_plans} "
-                            f"with {actual_workers} workers: "
-                            f"{grid_name} chunk {chunk_id}, "
-                            f"{shard_start}:{shard_stop}"
-                        ),
-                    )
-            for future in futures:
-                future.result()
-    return checkpoint("complete")
+            image_progress(frame_index)
 
 
 def _compression_kwargs(name):
@@ -1903,75 +1117,175 @@ def _chunk_coordinates(chunk_id, grid):
     return chunk_x, chunk_y, chunk_z
 
 
-def _write_chunk(
-    group,
-    grid,
-    chunk_files,
-    verification_cache=None,
-):
-    chunk_files = sorted(chunk_files, key=lambda item: item.shard_start)
-    if not chunk_files:
-        return
-    chunk_id = chunk_files[0].chunk_id
-    if any(chunk.chunk_id != chunk_id for chunk in chunk_files):
-        raise ValueError("Reduced shard group contains multiple chunks")
+class _CheckpointRangeReader:
+    """Stream monotonically increasing ``(chunk_id, local_voxel_id)`` ranges
+    from one checkpoint HDF5 file, without loading it into memory at once.
+
+    Structurally mirrors the retired Parquet-era range reader: a
+    forward-only cursor over sorted rows, refilled in windows of
+    ``batch_rows``. Checkpoint files are internally sorted by
+    ``(chunk_id, local_voxel_id)`` (Sec8/Sec9's tree-merge guarantee), so
+    no per-row-group statistics are needed to skip ahead -- a plain
+    forward scan is sufficient, and :meth:`read` requires callers to
+    request ranges in non-decreasing order, exactly as the old reader did.
+    """
+
+    def __init__(self, path, *, batch_rows=131072):
+        self._file = h5py.File(path, "r")
+        self._total_rows = int(self._file["chunk_id"].shape[0])
+        self._batch_rows = max(1, int(batch_rows))
+        self._cursor = 0
+        self.batch = None
+        self.position = 0
+        self.previous_key = None
+
+    def close(self):
+        """Close the underlying HDF5 file."""
+        self._file.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+
+    def _advance(self):
+        if self._cursor >= self._total_rows:
+            self.batch = None
+            return False
+        stop = min(self._total_rows, self._cursor + self._batch_rows)
+        self.batch = {
+            name: self._file[name][self._cursor : stop] for name in _PARTIAL_COLUMNS
+        }
+        self._cursor = stop
+        self.position = 0
+        return True
+
+    def read(self, chunk_id, local_start, local_stop):
+        """Read one exact range without revisiting earlier checkpoint data."""
+        key = (int(chunk_id), int(local_start))
+        if self.previous_key is not None and key < self.previous_key:
+            raise ValueError("Checkpoint ranges must be requested in sorted order")
+        self.previous_key = key
+        parts = []
+        while self.batch is not None or self._advance():
+            chunks = self.batch["chunk_id"]
+            position = self.position
+            if position >= chunks.size:
+                self.batch = None
+                continue
+            position += int(
+                np.searchsorted(chunks[position:], np.uint64(chunk_id), side="left")
+            )
+            if position >= chunks.size:
+                self.batch = None
+                continue
+            current_chunk = int(chunks[position])
+            if current_chunk > chunk_id:
+                self.position = position
+                break
+            chunk_stop = int(
+                np.searchsorted(chunks, np.uint64(chunk_id), side="right")
+            )
+            local = self.batch["local_voxel_id"]
+            start = position + int(
+                np.searchsorted(
+                    local[position:chunk_stop], np.uint64(local_start), side="left"
+                )
+            )
+            stop = position + int(
+                np.searchsorted(
+                    local[position:chunk_stop], np.uint64(local_stop), side="left"
+                )
+            )
+            if stop > start:
+                parts.append(
+                    {name: values[start:stop] for name, values in self.batch.items()}
+                )
+            self.position = stop
+            if stop < chunk_stop:
+                break
+            self.position = chunk_stop
+            if chunk_stop < chunks.size:
+                break
+            self.batch = None
+        if not parts:
+            return _empty_batch()
+        if len(parts) == 1:
+            return parts[0]
+        return {
+            name: np.concatenate([part[name] for part in parts])
+            for name in _PARTIAL_COLUMNS
+        }
+
+
+def _write_chunk_from_checkpoints(group, grid, readers, chunk_id):
+    """Merge every checkpoint's contribution to one chunk and write it.
+
+    Different checkpoints can legitimately contain overlapping
+    ``(chunk_id, local_voxel_id)`` records -- unlike the retired
+    reduce-phase Parquet shards, which were already deduplicated against
+    each other before finalize ran, checkpoints are only deduplicated
+    within their own frame range (Sec9). The Sec9 tree-merge is reused
+    here, across checkpoints instead of across frames, to combine them
+    before writing.
+    """
     coordinates = _chunk_coordinates(chunk_id, grid)
     starts = tuple(
-        coordinate * chunk
-        for coordinate, chunk in zip(coordinates, grid.chunk_shape)
+        coordinate * chunk for coordinate, chunk in zip(coordinates, grid.chunk_shape)
     )
     stops = tuple(
         min(start + chunk, size)
         for start, chunk, size in zip(starts, grid.chunk_shape, grid.shape)
     )
     local_shape = tuple(stop - start for start, stop in zip(starts, stops))
+    local_stop = (
+        (local_shape[0] - 1) * grid.chunk_shape[1] * grid.chunk_shape[2]
+        + (local_shape[1] - 1) * grid.chunk_shape[2]
+        + local_shape[2]
+    )
+    levels = []
+    for reader in readers:
+        batch = reader.read(chunk_id, 0, local_stop)
+        if batch["chunk_id"].size:
+            _tree_insert(levels, batch)
+    reduced = _tree_finalize(levels)
+    if not reduced["chunk_id"].size:
+        return
+    if np.any(reduced["chunk_id"] != np.uint64(chunk_id)):
+        raise ValueError(f"Checkpoint data for chunk {chunk_id} is inconsistent")
+    local = reduced["local_voxel_id"].astype(np.uint64, copy=False)
+    local_x, remainder = np.divmod(
+        local, np.uint64(grid.chunk_shape[1] * grid.chunk_shape[2])
+    )
+    local_y, local_z = np.divmod(remainder, np.uint64(grid.chunk_shape[2]))
+    valid = (
+        (local_x < local_shape[0])
+        & (local_y < local_shape[1])
+        & (local_z < local_shape[2])
+    )
+    if not np.all(valid):
+        raise ValueError(f"Chunk {chunk_id} contains an invalid local voxel ID")
+    index = (
+        local_x.astype(int),
+        local_y.astype(int),
+        local_z.astype(int),
+    )
     weighted_intensity = np.zeros(local_shape, dtype=np.float64)
     weighted_variance = np.zeros(local_shape, dtype=np.float64)
     weight = np.zeros(local_shape, dtype=np.float64)
     contributors = np.zeros(local_shape, dtype=np.uint64)
-    for chunk_file in chunk_files:
-        _verify_scratch_file(chunk_file, verification_cache)
-        batch = _read_parquet(chunk_file.uri)
-        if batch["chunk_id"].size and np.any(
-            batch["chunk_id"] != np.uint64(chunk_id)
-        ):
-            raise ValueError(f"{chunk_file.uri} contains more than one chunk")
-        local = batch["local_voxel_id"].astype(np.uint64, copy=False)
-        if local.size and (
-            np.any(local < np.uint64(chunk_file.shard_start))
-            or np.any(local >= np.uint64(chunk_file.shard_stop))
-        ):
-            raise ValueError(
-                f"{chunk_file.uri} contains records outside its shard"
-            )
-        local_x, remainder = np.divmod(
-            local, np.uint64(grid.chunk_shape[1] * grid.chunk_shape[2])
-        )
-        local_y, local_z = np.divmod(
-            remainder,
-            np.uint64(grid.chunk_shape[2]),
-        )
-        valid = (
-            (local_x < local_shape[0])
-            & (local_y < local_shape[1])
-            & (local_z < local_shape[2])
-        )
-        if not np.all(valid):
-            raise ValueError(
-                f"{chunk_file.uri} contains an invalid local voxel ID"
-            )
-        index = (
-            local_x.astype(int),
-            local_y.astype(int),
-            local_z.astype(int),
-        )
-        weighted_intensity[index] = batch["weighted_intensity"]
-        weighted_variance[index] = batch["weighted_variance"]
-        weight[index] = batch["weight"]
-        contributors[index] = batch["contributors"]
+    weighted_intensity[index] = reduced["weighted_intensity"]
+    weighted_variance[index] = reduced["weighted_variance"]
+    weight[index] = reduced["weight"]
+    contributors[index] = reduced["contributors"]
     populated = weight > 0
     weighted_intensity[~populated] = np.nan
     weighted_variance[~populated] = np.nan
+    # Divides variance by weight twice (i.e. by weight**2), matching the
+    # pre-existing reduce/finalize behavior this rewrite must not silently
+    # change (AGENTS.md: scientific conventions are not this refactor's to
+    # alter).
     np.divide(
         weighted_intensity,
         weight,
@@ -1998,37 +1312,39 @@ def _write_chunk(
 
 
 def _finalize_reconstruction(
-    manifest_set,
+    spec: _ReconstructionSpec,
+    checkpoint_files: Mapping[str, Iterable],
     output_path,
     *,
     provenance: Mapping[str, Any] | None = None,
+    scientific_context: Mapping[str, Any] | None = None,
     config=None,
     chunk_progress: Callable | None = None,
-    verification_cache: set[tuple[str, str]] | None = None,
 ):
-    """Create a conventional HDF5 reconstruction from reduced chunk files."""
-    manifests = [_read_manifest(value) for value in manifest_set]
-    if not manifests:
-        raise ValueError("At least one reduction manifest is required")
-    if any(manifest.kind != "reduce" for manifest in manifests):
-        raise ValueError("finalize_reconstruction accepts reduction manifests only")
-    spec_hashes = {manifest.spec_hash for manifest in manifests}
-    if len(spec_hashes) != 1:
-        raise ValueError("Reduction manifests use different specifications")
-    spec = _ReconstructionSpec.from_dict(manifests[0].spec)
+    """Create the final HDF5 reconstruction directly from checkpoint files.
+
+    Replaces the retired reduce-then-finalize two-step: each grid's output
+    chunks are streamed and merged directly from its checkpoint part files
+    (Sec9's tree-merge, reused across checkpoints instead of across
+    frames), with no intermediate reduced-shard files. Memory-bounded the
+    same way mapping was -- at most one window's worth of data from each
+    reader is ever materialized at a time
+    (:class:`_CheckpointRangeReader`), never a whole grid's total data
+    volume at once.
+
+    :param _ReconstructionSpec spec:
+        The job's specification (grids, compression, ...). Unlike the
+        retired manifest-based path, this is supplied directly by the
+        caller rather than reconstructed from scratch-file metadata.
+    :param checkpoint_files:
+        ``dict[grid_name, Iterable[path]]`` -- every checkpoint part file
+        to merge for each grid, e.g. from
+        :func:`_discover_checkpoint_state`.
+    """
     grid_by_name = {grid.grid_name: grid for grid in spec.grids}
-    chunk_files = {}
-    for manifest in manifests:
-        if manifest.status != "complete":
-            raise ValueError(f"Reduction task {manifest.task_id} is not complete")
-        for chunk in manifest.chunks:
-            key = (chunk.grid_name, chunk.chunk_id)
-            chunk_files.setdefault(key, []).append(chunk)
-    for key, shards in chunk_files.items():
-        ordered = sorted(shards, key=lambda item: item.shard_start)
-        for previous, current in zip(ordered, ordered[1:]):
-            if current.shard_start < previous.shard_stop:
-                raise ValueError(f"Overlapping reduced shards for chunk {key}")
+    unknown = set(checkpoint_files) - set(grid_by_name)
+    if unknown:
+        raise ValueError(f"Unknown grid(s) in checkpoint files: {sorted(unknown)}")
     output_path = Path(output_path).absolute()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_name(output_path.name + ".tmp")
@@ -2049,10 +1365,13 @@ def _finalize_reconstruction(
                 "provenance_json",
                 data=json.dumps(dict(provenance), sort_keys=True, default=str),
             )
-        process.create_dataset(
-            "scientific_context_json",
-            data=json.dumps(manifests[0].metadata, sort_keys=True, default=str),
-        )
+        if scientific_context:
+            process.create_dataset(
+                "scientific_context_json",
+                data=json.dumps(
+                    dict(scientific_context), sort_keys=True, default=str
+                ),
+            )
         process.create_dataset(
             "marginal_variance_warning",
             data=(
@@ -2126,19 +1445,34 @@ def _finalize_reconstruction(
                 **compression,
             )
             groups[grid.grid_name] = group
-        for written, ((grid_name, _), chunk_shards) in enumerate(
-            sorted(chunk_files.items()), start=1
-        ):
-            if grid_name not in grid_by_name:
-                raise ValueError(f"Unknown grid in chunk manifest: {grid_name}")
-            _write_chunk(
-                groups[grid_name],
-                grid_by_name[grid_name],
-                chunk_shards,
-                verification_cache,
-            )
-            if chunk_progress is not None:
-                chunk_progress(written, len(chunk_files))
+        per_grid_chunks = {}
+        for grid in spec.grids:
+            paths = [Path(path) for path in checkpoint_files.get(grid.grid_name, ())]
+            populated: set[int] = set()
+            for path in paths:
+                with h5py.File(path, "r") as source:
+                    populated.update(
+                        int(value) for value in np.unique(source["chunk_id"][()])
+                    )
+            per_grid_chunks[grid.grid_name] = (paths, sorted(populated))
+        total_chunks = sum(len(chunks) for _paths, chunks in per_grid_chunks.values())
+        written = 0
+        for grid in spec.grids:
+            paths, chunk_ids = per_grid_chunks[grid.grid_name]
+            readers = []
+            try:
+                for path in paths:
+                    readers.append(_CheckpointRangeReader(path))
+                for chunk_id in chunk_ids:
+                    _write_chunk_from_checkpoints(
+                        groups[grid.grid_name], grid, readers, chunk_id
+                    )
+                    written += 1
+                    if chunk_progress is not None:
+                        chunk_progress(written, total_chunks)
+            finally:
+                for reader in readers:
+                    reader.close()
         h5file.flush()
     temporary_path.replace(output_path)
     with h5py.File(output_path, "r") as h5file:
@@ -2155,13 +1489,12 @@ def _finalize_reconstruction(
     with output_path.open("rb") as stream:
         while block := stream.read(8 * 1024 * 1024):
             digest.update(block)
-    result = {
+    return {
         "path": str(output_path),
         "sha256": digest.hexdigest(),
         "bytes": output_path.stat().st_size,
-        "chunks_written": len(chunk_files),
+        "chunks_written": total_chunks,
     }
-    return result
 
 
 __all__ = []

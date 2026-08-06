@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import threading
-
-import h5py
 import numpy as np
 import pytest
 
@@ -13,21 +9,16 @@ from orgui.backend.scans import h5_Image
 from orgui.app.config_data import CorrectionState
 from orgui.app.mask_config import repair_intensity_variance
 from orgui.datautils.xrayutils import HKLVlieg
-import orgui.datautils.xrayutils.reconstruction as reconstruction
 from orgui.reconstruction_job import _correction_pipeline, derive_grid
 from orgui.datautils.xrayutils.reconstruction import (
+    _CheckpointRouter,
     _GridSpec,
     _ReconstructionSpec,
     _calibration_probe,
     _files_per_job,
-    _finalize_reconstruction,
     _map_frame_range,
-    _map_partition,
     _merge_sorted_batches,
-    _read_parquet,
     _reduce_batches,
-    _reduce_partition,
-    _write_manifest,
 )
 
 
@@ -592,8 +583,19 @@ def test_derive_grid_uses_native_corner_ray_interface():
         assert np.all(np.asarray(grid.maximum) > np.asarray(grid.minimum))
 
 
-def test_map_partition_accepts_local_image_and_ray_caches(tmp_path):
-    pytest.importorskip("pyarrow")
+def _router(
+    boundaries, *, tmp_path, spec_digest="test-digest", budget=1024**3, resumed=()
+):
+    return _CheckpointRouter(
+        boundaries,
+        spec_digest=spec_digest,
+        checkpoint_dir=tmp_path / "checkpoints",
+        active_budget_bytes=budget,
+        resumed=resumed,
+    )
+
+
+def test_map_frame_range_routes_batches_and_skips_resumed_checkpoints(tmp_path):
     grid = _GridSpec(
         minimum=(-1.0, -1.0, -1.0),
         maximum=(1.0, 1.0, 1.0),
@@ -602,36 +604,45 @@ def test_map_partition_accepts_local_image_and_ray_caches(tmp_path):
         chunk_shape=(2, 2, 2),
     )
     spec = _ReconstructionSpec(grids=(grid,), max_depth=0)
-    scan = _FakeScan([10.0])
-    detector = _FakeDetector()
-    payload = h5_Image(np.array([[10.0]], dtype=np.float64))
+    scan = _FakeScan([10.0, 20.0])
 
-    _map_partition(
-        spec,
-        scan,
-        detector,
-        _FakeUB(),
-        (0, 1),
-        (0, 1, 0, 1),
-        np.zeros((1, 2, 4), dtype=np.float64),
-        tmp_path / "map",
-        correction_pipeline=lambda payload, raw, frame, tile: (
+    def correction(payload, raw, frame, tile):
+        return (
             raw.astype(np.float64),
             np.maximum(raw, 0).astype(np.float64),
             np.zeros(raw.shape, dtype=bool),
-        ),
-        job_digest="cache-test",
-        image_payloads={0: payload},
-        corner_rays=_constant_rays(1, 1),
+        )
+
+    router = _router(
+        {grid.grid_name: [(0, 1), (1, 2)]},
+        tmp_path=tmp_path,
+        resumed={(grid.grid_name, 1)},
     )
 
-    assert scan.image_loads == 0
-    assert detector.ray_calculations == 0
+    _map_frame_range(
+        spec,
+        scan,
+        _FakeDetector(),
+        _FakeUB(),
+        (0, 2),
+        ((0, 1, 0, 1),),
+        np.zeros((2, 2, 4), dtype=np.float64),
+        router,
+        correction_pipeline=correction,
+        corner_rays={(0, 1, 0, 1): _constant_rays(1, 1)},
+    )
+
+    # Both frames were loaded (mapping is not resume-aware per frame; the
+    # caller decides which scheduling ranges are worth submitting), but
+    # only checkpoint 0's file was written -- checkpoint 1 was pre-resumed.
+    assert scan.image_loads == 2
+    written_indices = {
+        int(path.name.split("_")[0][len("ckpt"):]) for path in router.written
+    }
+    assert written_indices == {0}
 
 
 def test_map_frame_range_corrects_once_before_tiling(tmp_path):
-    pytest.importorskip("pyarrow")
-
     class Detector:
         detector = type("PyfaiDetector", (), {"shape": (1, 2)})()
 
@@ -669,6 +680,7 @@ def test_map_frame_range_corrects_once_before_tiling(tmp_path):
     )
     spec = _ReconstructionSpec(grids=(grid,), max_depth=0)
     tiles = ((0, 1, 0, 1), (0, 1, 1, 2))
+    router = _router({grid.grid_name: [(0, 1)]}, tmp_path=tmp_path)
 
     _map_frame_range(
         spec,
@@ -678,9 +690,8 @@ def test_map_frame_range_corrects_once_before_tiling(tmp_path):
         (0, 1),
         tiles,
         np.zeros((1, 2, 4), dtype=np.float64),
-        tmp_path / "map",
+        router,
         correction_pipeline=correction,
-        job_digest="full-frame-correction",
         corner_rays={
             tiles[0]: _constant_rays(1, 1),
             tiles[1]: _constant_rays(1, 1),
@@ -688,302 +699,4 @@ def test_map_frame_range_corrects_once_before_tiling(tmp_path):
     )
 
     assert calls == {"frame": 1, "tile": 0}
-
-
-def test_streaming_accumulator_flushes_by_retained_bytes(tmp_path):
-    """A larger byte ceiling combines images before Parquet serialization."""
-    pytest.importorskip("pyarrow")
-    grid = _GridSpec(
-        minimum=(-1.0, -1.0, -1.0),
-        maximum=(1.0, 1.0, 1.0),
-        step=(1.0, 1.0, 1.0),
-        frame="lab",
-        chunk_shape=(2, 2, 2),
-    )
-    spec = _ReconstructionSpec(grids=(grid,), max_depth=0)
-    bounds = np.zeros((3, 2, 4), dtype=np.float64)
-    tile = (0, 1, 0, 1)
-
-    def correction(payload, raw, frame, detector_tile):
-        return (
-            raw.astype(np.float64),
-            np.maximum(raw, 0).astype(np.float64),
-            np.zeros(raw.shape, dtype=bool),
-        )
-
-    small_scan = _FakeScan([10.0, 20.0, 30.0])
-    image_updates = []
-    small = _map_frame_range(
-        spec,
-        small_scan,
-        _FakeDetector(),
-        _FakeUB(),
-        (0, 3),
-        (tile,),
-        bounds,
-        tmp_path / "small",
-        correction_pipeline=correction,
-        job_digest="small-accumulator",
-        corner_rays={tile: _constant_rays(1, 1)},
-        accumulation_budget_bytes=1,
-        image_progress=lambda frame, retained, segments: image_updates.append(
-            (frame, retained, segments)
-        ),
-    )
-    large_scan = _FakeScan([10.0, 20.0, 30.0])
-    large = _map_frame_range(
-        spec,
-        large_scan,
-        _FakeDetector(),
-        _FakeUB(),
-        (0, 3),
-        (tile,),
-        bounds,
-        tmp_path / "large",
-        correction_pipeline=correction,
-        job_digest="large-accumulator",
-        corner_rays={tile: _constant_rays(1, 1)},
-        accumulation_budget_bytes=1024**2,
-    )
-
-    assert small_scan.image_loads == 3
-    assert large_scan.image_loads == 3
-    assert [update[0] for update in image_updates] == [0, 1, 2]
-    assert small.metadata["accumulation_segments"] == 3
-    assert large.metadata["accumulation_segments"] == 1
-    assert len(small.partitions) == 3
-    assert len(large.partitions) == 1
-    small_batch = _reduce_batches(
-        _read_parquet(partition.uri) for partition in small.partitions
-    )
-    large_batch = _reduce_batches(
-        _read_parquet(partition.uri) for partition in large.partitions
-    )
-    for name in small_batch:
-        np.testing.assert_array_equal(small_batch[name], large_batch[name])
-
-
-def test_parquet_reduce_and_hdf5_finalize(tmp_path, monkeypatch):
-    pytest.importorskip("pyarrow")
-    checksum_calls = []
-    original_checksum = reconstruction._uri_checksum_and_size
-
-    def counted_checksum(uri):
-        checksum_calls.append(str(uri))
-        return original_checksum(uri)
-
-    monkeypatch.setattr(
-        reconstruction, "_uri_checksum_and_size", counted_checksum
-    )
-    verification_cache = set()
-    grid = _GridSpec(
-        minimum=(-1.0, -1.0, -1.0),
-        maximum=(1.0, 1.0, 1.0),
-        step=(1.0, 1.0, 1.0),
-        frame="lab",
-        chunk_shape=(2, 2, 2),
-    )
-    spec = _ReconstructionSpec(
-        grids=(grid,),
-        max_depth=1,
-        threads=2,
-        compression="gzip",
-    )
-    scan = _FakeScan([10.0, 20.0])
-    bounds = np.zeros((1, 2, 4), dtype=np.float64)
-    map_manifests = []
-    for frame in range(2):
-        manifest = _map_partition(
-            spec,
-            scan,
-            _FakeDetector(),
-            _FakeUB(),
-            (frame, frame + 1),
-            (0, 1, 0, 1),
-            bounds,
-            tmp_path / "map",
-            correction_pipeline=lambda payload, raw, frame, tile: (
-                raw.astype(np.float64),
-                np.maximum(raw, 0).astype(np.float64),
-                np.zeros(raw.shape, dtype=bool),
-            ),
-            job_digest="test-job",
-            verification_cache=verification_cache,
-        )
-        path = tmp_path / f"map-{frame}.json"
-        _write_manifest(manifest, path)
-        map_manifests.append(path)
-
-    reduced = _reduce_partition(
-        map_manifests,
-        tmp_path / "reduced",
-        verification_cache=verification_cache,
-    )
-    reduced_path = tmp_path / "reduced.json"
-    _write_manifest(reduced, reduced_path)
-    output = tmp_path / "result.h5"
-    result = _finalize_reconstruction(
-        [reduced_path],
-        output,
-        verification_cache=verification_cache,
-    )
-
-    assert result["chunks_written"] == 1
-    assert len(checksum_calls) == 3
-    assert all(
-        partition.size_bytes
-        for path in map_manifests
-        for partition in reconstruction._read_manifest(path).partitions
-    )
-    assert all(chunk.size_bytes for chunk in reduced.chunks)
-    with h5py.File(output, "r") as h5file:
-        group = h5file["entry/reconstruction/results/q_lab"]
-        assert group.attrs["NX_class"] == "NXdata"
-        assert group["intensity"][1, 1, 1] == 15.0
-        assert group["variance"][1, 1, 1] == 7.5
-        assert group["weight"][1, 1, 1] == 2.0
-        assert group["contributors"][1, 1, 1] == 2
-        assert np.isnan(group["intensity"][0, 0, 0])
-        saved = json.loads(h5file["entry/reconstruction/configuration_json"][()])
-        assert saved["grids"][0]["frame"] == "lab"
-
-
-def test_reduce_shards_large_chunk_and_reuses_checkpoint(tmp_path, monkeypatch):
-    """Large chunks reduce by bounded local ranges and resume by shard."""
-    pytest.importorskip("pyarrow")
-    grid = _GridSpec(
-        minimum=(0.0, 0.0, 0.0),
-        maximum=(1.0, 1.0, 300000.0),
-        step=(1.0, 1.0, 1.0),
-        frame="lab",
-        chunk_shape=(1, 1, 300000),
-    )
-    spec = _ReconstructionSpec(
-        grids=(grid,),
-        max_depth=0,
-        threads=1,
-        compression="gzip",
-    )
-    manifest_paths = []
-    for task_index, intensities in enumerate(
-        ([2.0, 4.0, 6.0], [3.0, 5.0, 7.0])
-    ):
-        batch = {
-            "chunk_id": np.zeros(3, dtype=np.uint64),
-            "local_voxel_id": np.array(
-                [1, 260000, 299999], dtype=np.uint64
-            ),
-            "weighted_intensity": np.asarray(
-                intensities, dtype=np.float64
-            ),
-            "weighted_variance": np.ones(3, dtype=np.float64),
-            "weight": np.ones(3, dtype=np.float64),
-            "contributors": np.ones(3, dtype=np.uint64),
-        }
-        partition_path = tmp_path / f"map-{task_index}.parquet"
-        reconstruction._write_parquet(batch, partition_path, {})
-        checksum, size_bytes = reconstruction._uri_checksum_and_size(
-            partition_path
-        )
-        manifest = reconstruction._TaskManifest(
-            kind="map",
-            task_id=f"map-{task_index}",
-            spec_hash=spec.digest,
-            status="complete",
-            spec=spec.to_dict(),
-            partitions=[
-                reconstruction._PartitionFile(
-                    grid_name=grid.grid_name,
-                    bucket=0,
-                    uri=str(partition_path),
-                    rows=3,
-                    checksum=checksum,
-                    size_bytes=size_bytes,
-                )
-            ],
-            metadata={"base_context_sha256": "same-context"},
-        )
-        manifest_path = tmp_path / f"map-{task_index}.json"
-        _write_manifest(manifest, manifest_path)
-        manifest_paths.append(manifest_path)
-
-    progress = []
-    verification_cache = set()
-    reducer_threads = set()
-    reducer_lock = threading.Lock()
-    reducer_barrier = threading.Barrier(2)
-    original_read = reconstruction._ParquetRangeReader.read
-
-    def observed_read(reader, *args):
-        thread_id = threading.get_ident()
-        with reducer_lock:
-            first_read = thread_id not in reducer_threads
-            reducer_threads.add(thread_id)
-        if first_read:
-            reducer_barrier.wait(timeout=5)
-        return original_read(reader, *args)
-
-    monkeypatch.setattr(
-        reconstruction._ParquetRangeReader,
-        "read",
-        observed_read,
-    )
-    reduced = _reduce_partition(
-        manifest_paths,
-        tmp_path / "reduced",
-        verification_cache=verification_cache,
-        memory_budget_bytes=128 * 1024**2,
-        workers=2,
-        progress=lambda current, total, message: progress.append(
-            (current, total, message)
-        ),
-        checkpoint_root=tmp_path / "manifests",
-    )
-
-    assert reduced.status == "complete"
-    assert len(reduced.chunks) == 2
-    assert {chunk.shard_start for chunk in reduced.chunks} == {0, 262144}
-    assert reduced.metadata["reducer_worker_capacity"] == 2
-    assert reduced.metadata["reducer_workers_used"] == 2
-    assert (
-        reduced.metadata["reducer_memory_bytes_per_worker"]
-        == 64 * 1024**2
-    )
-    assert len(reducer_threads) == 2
-    assert progress[-1][:2] == (2, 2)
-
-    def unexpected_read(*args, **kwargs):
-        raise AssertionError("completed shards must not read source Parquet")
-
-    monkeypatch.setattr(
-        reconstruction._ParquetRangeReader, "read", unexpected_read
-    )
-    resumed = _reduce_partition(
-        manifest_paths,
-        tmp_path / "reduced",
-        verification_cache=verification_cache,
-        memory_budget_bytes=128 * 1024**2,
-        workers=2,
-        checkpoint_root=tmp_path / "manifests",
-    )
-    assert resumed.status == "complete"
-    assert len(resumed.chunks) == 2
-
-    reduced_path = tmp_path / "reduced.json"
-    _write_manifest(resumed, reduced_path)
-    output = tmp_path / "sharded-result.h5"
-    _finalize_reconstruction(
-        [reduced_path],
-        output,
-        verification_cache=verification_cache,
-    )
-    with h5py.File(output, "r") as h5file:
-        group = h5file["entry/reconstruction/results/q_lab"]
-        np.testing.assert_array_equal(
-            group["intensity"][0, 0, [1, 260000, 299999]],
-            [2.5, 4.5, 6.5],
-        )
-        np.testing.assert_array_equal(
-            group["contributors"][0, 0, [1, 260000, 299999]],
-            [2, 2, 2],
-        )
+    assert len(router.written) == 1

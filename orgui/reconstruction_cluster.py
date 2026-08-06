@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import math
-from pathlib import Path
 import re
 import shlex
 
@@ -212,111 +211,8 @@ def generate_cluster_scripts(job_path, job, output_directory=None):
         Paths keyed by ``map``, ``finalize``, and ``submit``.
     :rtype: dict
     """
-    if job.expected_map_tasks < 1:
-        raise ValueError("Prepared job contains no mapping tasks")
-    settings = ClusterSettings.from_dict(job.cluster_settings)
-    job_path = Path(job_path).absolute()
-    directory = Path(
-        output_directory
-        or settings.script_directory
-        or job_path.parent / f"{job_path.stem}-cluster"
-    ).absolute()
-    directory.mkdir(parents=True, exist_ok=True)
-    working_directory = Path(
-        settings.working_directory or job_path.parent
-    ).absolute()
-    suffix = "sge" if settings.scheduler == "sge" else "slurm"
-    map_path = directory / f"{settings.job_name}-map.{suffix}"
-    finalize_path = directory / f"{settings.job_name}-finalize.{suffix}"
-    submit_path = directory / f"{settings.job_name}-submit.sh"
-    preamble = _script_preamble(settings, working_directory)
-
-    if settings.scheduler == "sge":
-        map_index = '"$((SGE_TASK_ID - 1))"'
-        map_directives = _sge_directives(
-            settings, array_tasks=job.expected_map_tasks
-        )
-        finalize_directives = _sge_directives(settings)
-    else:
-        map_index = '"${SLURM_ARRAY_TASK_ID}"'
-        map_directives = _slurm_directives(
-            settings, array_tasks=job.expected_map_tasks
-        )
-        finalize_directives = _slurm_directives(settings)
-
-    map_command = _python_command(
-        settings,
-        (
-            "cluster-map",
-            job_path,
-            "--task-index",
-            "__ARRAY_INDEX__",
-            "--cpus",
-            settings.array_cpus,
-            "--memory-gib",
-            settings.array_memory_gib,
-        ),
-    ).replace(_quote("__ARRAY_INDEX__"), map_index)
-    finalize_command = _python_command(
-        settings,
-        (
-            "cluster-finalize",
-            job_path,
-            "--cpus",
-            settings.reduce_cpus,
-            "--memory-gib",
-            settings.reduce_memory_gib,
-        ),
+    raise NotImplementedError(
+        "Cluster script generation is being reworked for the checkpoint "
+        "architecture (design doc Sec13) and is not yet available in this "
+        "build. Run the job with 'run'/'resume' on a single node instead."
     )
-    map_text = "\n".join(
-        ["#!/usr/bin/env bash", *map_directives, "", *preamble, map_command, ""]
-    )
-    finalize_text = "\n".join(
-        [
-            "#!/usr/bin/env bash",
-            *finalize_directives,
-            "",
-            *preamble,
-            finalize_command,
-            "",
-        ]
-    )
-    if settings.scheduler == "sge":
-        submit_lines = [
-            "#!/usr/bin/env bash",
-            "set -euo pipefail",
-            f"map_job_id=$(qsub -terse {_quote(map_path)})",
-            'map_job_id="${map_job_id%%.*}"',
-            (
-                f'qsub -hold_jid "$map_job_id" '
-                f"{_quote(finalize_path)}"
-            ),
-            'echo "Submitted SGE map array ${map_job_id} and finalizer"',
-            "",
-        ]
-    else:
-        submit_lines = [
-            "#!/usr/bin/env bash",
-            "set -euo pipefail",
-            f"map_job_id=$(sbatch --parsable {_quote(map_path)})",
-            'map_job_id="${map_job_id%%;*}"',
-            (
-                f'sbatch --dependency="afterok:${{map_job_id}}" '
-                f"{_quote(finalize_path)}"
-            ),
-            'echo "Submitted Slurm map array ${map_job_id} and finalizer"',
-            "",
-        ]
-    for path, text in (
-        (map_path, map_text),
-        (finalize_path, finalize_text),
-        (submit_path, "\n".join(submit_lines)),
-    ):
-        path.write_text(text, encoding="utf-8", newline="\n")
-    return {
-        "scheduler": settings.scheduler,
-        "map": str(map_path),
-        "finalize": str(finalize_path),
-        "submit": str(submit_path),
-        "array_tasks": job.expected_map_tasks,
-    }

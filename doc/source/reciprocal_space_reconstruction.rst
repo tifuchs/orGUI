@@ -6,7 +6,7 @@ into one or more regular three-dimensional HKL or momentum-transfer grids. It
 is designed for data sets that are much larger than memory. Pixel geometry,
 angle transforms, adaptive footprint splitting, and local accumulation run in
 a C++17 extension. Python coordinates scan loading, corrections, resumable
-tasks, Parquet scratch records, and final NeXus/HDF5 output.
+checkpointed HDF5 scratch records, and final NeXus/HDF5 output.
 
 The experiment configuration is not entered a second time. Reconstruction uses
 the active orGUI scan, detector calibration, crystal, UB matrix, mask,
@@ -17,9 +17,10 @@ checksummed, resumable snapshot.
 Installation
 ------------
 
-The native reconstruction extension is built with orGUI. PyArrow is required
-for the out-of-core scratch format, and ``hdf5plugin`` makes the optional HDF5
-filters registered by orGUI available:
+The native reconstruction extension is built with orGUI. ``hdf5plugin`` makes
+the optional HDF5 filters registered by orGUI -- including the
+``bitshuffle-lz4`` filter used by the out-of-core checkpoint scratch format --
+available:
 
 .. code-block:: bash
 
@@ -300,10 +301,11 @@ job.
    conversion.
 
 ``Accumulation per worker``
-   Maximum reduced-record memory retained by each image worker before records
-   are merged and flushed as a larger Parquet segment. A larger value reduces
-   small files and repeated merges but consumes more RAM. The global budget
-   reserves transient merge and conversion memory in addition to this value.
+   Optional conservative per-image-worker memory margin used only to size
+   ``concurrent image workers`` (larger values leave more headroom and admit
+   fewer concurrent workers). It no longer sizes a Parquet flush buffer -- the
+   checkpoint scratch format has no per-worker segment file of its own to
+   tune.
 
 ``Frames per task``
    Consecutive included frames in one deterministic resumable map task.
@@ -323,10 +325,13 @@ job.
    for native threads to share a tile; very small blocks add scheduling,
    sorting, and merge overhead.
 
-``Parquet chunk span``
-   Number of consecutive HDF5 spatial chunk IDs grouped into a coarse Parquet
-   partition range. Larger spans create fewer, larger files; smaller spans
-   narrow reducer reads but increase object count.
+``Checkpoint count``
+   Minimum number of resumable HDF5 checkpoint files per output grid,
+   default 10. A floor, not a target: the actual count exceeds it whenever
+   the estimated data volume would not otherwise fit the memory budget
+   across that many files. Checkpoint frame-range boundaries are computed
+   once from a calibration estimate when the job is prepared and never
+   recomputed on resume.
 
 The detected summary also reports frame tasks, detector tiles, total map tasks,
 concurrent image workers, memory per image, and effective accumulation memory.
@@ -397,30 +402,35 @@ The execution stages are:
 
 1. Verify the job JSON, scan reference, source fingerprint, and asset checksum.
 2. Precompute detector corner-ray lattices for bounded tiles.
-3. Load and correct images in parallel.
-4. Map tiles in the native kernel, releasing the Python GIL.
-5. Sort and locally reduce compact records keyed by HDF5 chunk and voxel IDs.
-6. Accumulate records in worker memory until its byte budget is reached.
-7. Write immutable Zstandard-compressed Parquet partitions and manifests.
-8. Reduce partitions in bounded external merge passes into finalized HDF5
-   chunk shards. Contiguous shard ranges are reduced concurrently with private
-   Parquet readers; the global memory budget is divided across reducer workers.
-9. Create the standalone HDF5 file and write each populated spatial chunk once.
-10. Validate the output checksum, register it as an external result, then
-    remove map partitions, reduced scratch data, and the asset bundle.
+3. Divide included frames into a small number of contiguous per-grid
+   checkpoint frame ranges, sized from a live calibration estimate of data
+   volume versus the memory budget (a floor of ``Checkpoint count`` files,
+   exceeded only when data volume requires it). Boundaries are computed once
+   when the job is prepared and persisted in the job JSON.
+4. Load and correct images in parallel.
+5. Map tiles in the native kernel, releasing the Python GIL, and route each
+   frame's reduced records directly to the checkpoint accumulator for the
+   grid and frame range it belongs to.
+6. Merge each frame's records into its checkpoint's in-memory tree as it
+   arrives (an amortized :math:`O(\log N)` insert per frame, not a full
+   re-sort). When a checkpoint's frame range finishes -- or its own share of
+   the memory budget is exceeded first, in which case it splits into an
+   extra file -- write it as an immutable, checksummed HDF5 checkpoint file.
+7. Once every planned checkpoint is present and its checksum verified,
+   stream each output grid's populated spatial chunks directly from its
+   checkpoint files (merging any records checkpoints have in common),
+   writing each chunk to the standalone HDF5 file exactly once.
+8. Validate the output checksum, register it as an external result, then
+   remove the checkpoint files and the asset bundle.
 
-Interrupted jobs retain scratch data. Cleanup occurs only after successful
+Interrupted jobs retain checkpoint data. Cleanup occurs only after successful
 HDF5 close, validation, and checksum calculation. Cleanup errors are recorded
 but do not invalidate a completed scientific result.
 
-Reduction uses up to the global thread budget. The effective worker count is
-also limited to the number of pending shards and to one worker per 64 MiB of
-configured memory. Each worker owns a contiguous range of shard plans and
-private forward-only Parquet readers. This permits parallel reduction within a
-single large bucket without sharing stateful readers or exceeding the global
-memory budget. Mapping-partition verification is parallelized by the same
-limit. Checkpoints and progress callbacks remain serialized on the coordinating
-thread.
+Resuming a job re-verifies each planned checkpoint's presence and checksum
+directly -- there is no separate manifest registry to consult. A planned
+checkpoint already fully covered by valid, checksummed files on disk is
+skipped; anything else is remapped from scratch.
 
 Paths
 -----
@@ -430,8 +440,8 @@ Paths
    metadata, task state, and checksums.
 
 ``Scratch directory``
-   Writable per-job directory for the asset bundle, map partitions, reduction
-   shards, and manifests. It should normally be on fast local storage.
+   Writable per-job directory for the asset bundle and checkpoint files. It
+   should normally be on fast local storage.
 
 ``Standalone HDF5``
    Final NeXus-style output file. Defaults are created under the current
@@ -463,121 +473,14 @@ The direct alias is equivalent:
 Cluster Batch Execution
 -----------------------
 
-The **Cluster** tab generates an SGE or Slurm batch bundle from the same
-prepared job JSON used for local execution. It does not introduce another
-experiment configuration. The bundle contains:
+.. note::
 
-``*-map.sge`` or ``*-map.slurm``
-   A job array with one element per deterministic frame-range map task. Each
-   element reads the immutable job and asset bundle and writes only its own
-   Parquet partitions and map manifest. Array elements never update the shared
-   job JSON, so they may execute concurrently.
-
-``*-finalize.sge`` or ``*-finalize.slurm``
-   A single dependent job. It verifies that every expected array manifest is
-   complete and checksummed, records them in the job JSON, reduces shards with
-   its own CPU and memory allocation, and creates the final HDF5 file.
-
-``*-submit.sh``
-   A convenience submission wrapper. For SGE it captures ``qsub -terse`` and
-   submits the finalizer with ``-hold_jid``. For Slurm it captures
-   ``sbatch --parsable`` and uses ``afterok`` on the complete array. The
-   finalizer always verifies every map task, including on SGE installations
-   where a job hold records completion rather than successful exit.
-
-The scripts require the job JSON, scratch directory, immutable assets, scan
-source, and final output directory to be reachable at the same absolute paths
-from every compute node. Scratch should normally reside on a high-throughput
-shared filesystem or node-local storage explicitly staged by site-specific
-setup commands.
-
-The generated worker commands are also available for inspection and manual
-scheduler integration:
-
-.. code-block:: bash
-
-   orGUI rsmap cluster-map JOB.json --task-index 0 --cpus 4 --memory-gib 16
-   orGUI rsmap cluster-finalize JOB.json --cpus 24 --memory-gib 64
-   orGUI rsmap cluster-scripts JOB.json --output-directory batch
-
-Scheduler Parameters
-~~~~~~~~~~~~~~~~~~~~
-
-``Scheduler``
-   ``SGE`` (default) or ``Slurm``. SGE arrays are one-based and converted to
-   orGUI's zero-based task index. Slurm arrays are generated zero-based.
-
-``Job name``
-   Scheduler-safe base name for the map array and finalizer. Letters, numbers,
-   periods, underscores, and hyphens are accepted.
-
-``Queue / partition``
-   Optional SGE ``-q`` queue or Slurm ``--partition``.
-
-``Project / account``
-   Optional SGE ``-P`` project or Slurm ``--account``.
-
-``Script directory``
-   Destination for the three generated scripts. It defaults beneath the
-   current writable working directory.
-
-``Working directory``
-   Shared directory selected with ``cd`` before environment setup and Python
-   execution.
-
-``Python executable``
-   Python command used to invoke ``orgui.reconstruction_cli`` after environment
-   setup. ``python`` is the portable default; an absolute cluster-environment
-   path can be supplied.
-
-``Setup commands``
-   Verbatim shell lines placed after ``set -euo pipefail`` and ``cd``. Use
-   these for module loading and conda or virtual-environment activation.
-
-``CPUs / slots per mapping task``
-   Native C++ threads used by each array element. This allocation is
-   independent of the number of simultaneously running array elements.
-
-``Memory per mapping task``
-   Total RAM budget passed to one mapping process. Slurm receives it through
-   ``--mem``. SGE memory complexes are normally per-slot, so orGUI divides the
-   total by the slot count and rounds upward.
-
-``Mapping wall time``
-   Per-element SGE ``h_rt`` or Slurm ``--time`` limit.
-
-``Maximum concurrent tasks``
-   Optional array throttle: SGE ``-tc`` or the Slurm ``%N`` array suffix.
-   Zero leaves concurrency to site policy.
-
-``Reduction CPUs / slots``
-   Independent worker capacity for parallel checksum verification and
-   contiguous shard reduction. It may be larger or smaller than the mapping
-   task allocation.
-
-``Reduction memory``
-   Total reducer/finalizer RAM budget. The reducer divides it among active
-   workers and retains bounded shard buffers.
-
-``Reduction wall time``
-   SGE ``h_rt`` or Slurm ``--time`` for the dependent job.
-
-``SGE parallel environment``
-   Name requested through ``-pe``; ``smp`` is the default. It must match the
-   target site's configured shared-memory parallel environment.
-
-``SGE memory resource``
-   Per-slot consumable complex used in ``-l`` requests. ``h_vmem`` is the
-   default, but sites may require ``mem_free`` or another name.
-
-``Extra map/finalizer directives``
-   Optional scheduler-specific header lines. Each non-empty line must start
-   with ``#$`` for SGE or ``#SBATCH`` for Slurm.
-
-See the `Grid Engine qsub reference
-<https://gridengine.eu/mangridengine/htmlman1/qsub.html>`_ and the `Slurm job
-array reference <https://slurm.schedmd.com/job_array.html>`_ for scheduler
-semantics.
+   Multi-node cluster execution is being reworked for the checkpoint scratch
+   architecture and is temporarily unavailable: ``cluster-map``,
+   ``cluster-finalize``, and ``cluster-scripts`` (and the **Cluster** tab's
+   script-generation button) raise a clear "not yet available" error rather
+   than run. Run jobs with ``run``/``resume`` on a single node until cluster
+   support returns. This section will be rewritten once it does.
 
 Job Descriptor Reference
 ------------------------
@@ -646,21 +549,23 @@ inspection, scheduling, and provenance:
 ``work_block_pixels``
    Optional native scheduling-block override.
 
-``partition_chunk_span``
-   Optional Parquet chunk-range override.
+``checkpoint_count``
+   Minimum number of resumable HDF5 checkpoint files per output grid. A
+   floor, not a target: the actual count exceeds it when the estimated
+   data volume would not otherwise fit the memory budget across that many
+   files.
+
+``checkpoint_plan``
+   Per-grid list of contiguous frame-range checkpoint boundaries, computed
+   once from a calibration estimate when the job is prepared and never
+   recomputed on resume.
 
 ``user_note``
    Optional free-text provenance.
 
-``expected_map_tasks``
-   Number of deterministic map tasks in the prepared layout.
-
 ``status``
-   Current job state, such as ``prepared``, ``mapping``, ``reducing``,
-   ``finalizing``, or ``complete``.
-
-``map_manifests``, ``reduction_manifest``
-   Completed scratch task manifests used for retry and resume.
+   Current job state, such as ``prepared``, ``mapping``, ``finalizing``,
+   or ``complete``.
 
 ``output_sha256``
    Final standalone-file checksum after verified completion.
@@ -704,8 +609,6 @@ Practical Guidance
 * Start with ``Balanced`` depth and the 10-percent geometry estimator.
 * Check interval counts and the dense size estimate before preparing.
 * Put scratch data on fast local SSD when possible.
-* Increase accumulation memory to reduce small Parquet files only when the
-  total memory budget has sufficient headroom.
 * Keep enough native blocks per tile to occupy all native threads.
 * Prefer automatic tiling and task sizing until representative benchmarks
   justify overrides.

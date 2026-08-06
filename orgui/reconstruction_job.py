@@ -22,24 +22,19 @@ from .app.mask_config import create_pixel_repair_plan
 from .backend.scans import ScanReference
 from .datautils.xrayutils.reconstruction import (
     _CHECKPOINT_BYTES_PER_ROW,
+    _CheckpointRouter,
     _GridSpec,
-    _MIN_REDUCER_WORKER_MEMORY,
     _ReconstructionSpec,
-    _TaskManifest,
     _calibration_probe_all_grids,
     _detector_corner_rays,
+    _discover_checkpoint_state,
     _files_per_job,
     _finalize_reconstruction,
     _map_frame_range,
-    _read_manifest,
-    _reduce_partition,
-    _verify_scratch_file,
-    _write_manifest,
-    _xxh3_128,
 )
 
 
-JOB_SCHEMA_VERSION = 3
+JOB_SCHEMA_VERSION = 4
 ACCURACY_DEPTHS = {
     "center": 0,
     "low": 1,
@@ -51,6 +46,9 @@ ACCURACY_DEPTHS = {
 AUTO_MAX_FRAMES_PER_TASK = 64
 ACCUMULATION_TRANSIENT_FACTOR = 3
 AUTO_MAX_ACCUMULATION_BYTES = 2 * 1024**3
+MAX_CONCURRENT_ACTIVE_CHECKPOINTS = 2
+"""Design doc Sec10: how many checkpoints (per grid) may have live,
+non-empty accumulator state at once -- small and fixed, not user-facing."""
 
 
 def _build_metadata():
@@ -129,6 +127,8 @@ class ReconstructionJob:
     source_fingerprint_sha256: str
     threads_per_image: int
     accumulation_budget_bytes: int | None
+    checkpoint_count: int = 10
+    checkpoint_plan: dict[str, list[list[int]]] = field(default_factory=dict)
     build_metadata: dict[str, Any] = field(default_factory=dict)
     runtime_threads: int = 1
     runtime_memory_bytes: int = 6_000 * 1024 * 1024
@@ -140,12 +140,8 @@ class ReconstructionJob:
     frame_batch: int | None = None
     tile_shape: tuple[int, int] | None = None
     work_block_pixels: int | None = None
-    partition_chunk_span: int | None = None
     user_note: str = ""
     status: str = "prepared"
-    expected_map_tasks: int = 0
-    map_manifests: list[str] = field(default_factory=list)
-    reduction_manifest: str | None = None
     output_sha256: str | None = None
     correction_provenance: dict[str, Any] = field(default_factory=dict)
     cleanup_errors: list[str] = field(default_factory=list)
@@ -168,12 +164,19 @@ class ReconstructionJob:
 
     @property
     def digest(self):
-        """Return the immutable scientific job digest."""
+        """Return the immutable scientific job digest.
+
+        Also used as every checkpoint file's resume-identity fingerprint
+        (design doc Sec11) -- stronger than the bare
+        ``_ReconstructionSpec.digest``, since it also covers scan/config
+        identity, so two different jobs that happen to share identical
+        grid/depth/thread settings can never be mistaken for each other's
+        checkpoints even if they were prepared into the same scratch path.
+        """
         values = self.to_dict()
         for key in (
             "status",
-            "map_manifests",
-            "reduction_manifest",
+            "checkpoint_plan",
             "output_sha256",
             "correction_provenance",
             "cleanup_errors",
@@ -206,16 +209,13 @@ class ReconstructionJob:
         work_block = self.work_block_pixels or max(
             1024, min(65536, memory // max(threads * 256, 1))
         )
-        chunk_span = self.partition_chunk_span or max(
-            16, min(4096, memory // (64**3 * 32))
-        )
         return _ReconstructionSpec(
             grids=tuple(_GridSpec(**grid) for grid in self.grids),
             max_depth=depth,
             threads=threads,
             work_block_pixels=work_block,
             memory_budget_bytes=memory,
-            partition_chunk_span=chunk_span,
+            checkpoint_count=self.checkpoint_count,
             compression=f"database:{self.compression}",
             infer_angle_bounds=self.angle_fallback == "midpoint",
         )
@@ -689,6 +689,44 @@ def estimate_checkpoint_plan(
     return {"per_grid": per_grid, "files_total": files_total}
 
 
+def _included_ranges(count, excluded, batch_size):
+    included = [index for index in range(count) if index not in excluded]
+    ranges = []
+    start = None
+    previous = None
+    for index in included:
+        if (
+            start is None
+            or index != previous + 1
+            or index - start >= batch_size
+        ):
+            if start is not None:
+                ranges.append((start, previous + 1))
+            start = index
+        previous = index
+    if start is not None:
+        ranges.append((start, previous + 1))
+    return ranges
+
+
+def _checkpoint_frame_ranges(count, excluded, files_per_job):
+    """Contiguous, exclusion-respecting frame ranges for one grid's planned
+    checkpoints (design doc Sec5/Sec11).
+
+    Splits all included frames into ``files_per_job`` roughly equal
+    contiguous groups by reusing :func:`_included_ranges`'s existing
+    gap-respecting batching. An excluded-frame gap forces an extra
+    boundary regardless of target size, which can produce a few more
+    ranges than ``files_per_job`` -- consistent with ``files_per_job``
+    being a floor, not an exact count (Sec4).
+    """
+    included_count = sum(1 for index in range(count) if index not in excluded)
+    if included_count == 0:
+        return []
+    batch_size = max(1, math.ceil(included_count / max(1, int(files_per_job))))
+    return _included_ranges(count, excluded, batch_size)
+
+
 def prepare_job(
     gui,
     job_path,
@@ -706,9 +744,9 @@ def prepare_job(
     frame_batch=None,
     tile_shape=None,
     work_block_pixels=None,
-    partition_chunk_span=None,
     threads_per_image=4,
     accumulation_budget_bytes=None,
+    checkpoint_count=10,
     cluster_settings=None,
 ):
     """Freeze current orGUI state into an immutable reconstruction job."""
@@ -726,6 +764,8 @@ def prepare_job(
         )
     if int(threads_per_image) < 1:
         raise ValueError("Threads per image must be at least one")
+    if int(checkpoint_count) < 1:
+        raise ValueError("checkpoint_count must be at least one")
     if (
         accumulation_budget_bytes is not None
         and int(accumulation_budget_bytes) < 1024**2
@@ -783,6 +823,7 @@ def prepare_job(
             if accumulation_budget_bytes is None
             else int(accumulation_budget_bytes)
         ),
+        checkpoint_count=int(checkpoint_count),
         build_metadata=_build_metadata(),
         runtime_threads=max(1, int(gui.numberthreads)),
         runtime_memory_bytes=max(1, int(gui.maxMemory * 1024 * 1024)),
@@ -795,11 +836,37 @@ def prepare_job(
         frame_batch=frame_batch,
         tile_shape=tile_shape,
         work_block_pixels=work_block_pixels,
-        partition_chunk_span=partition_chunk_span,
         cluster_settings=dict(cluster_settings or {}),
     )
-    ranges, tiles = _execution_layout(job, gui.fscan, config)
-    job.expected_map_tasks = len(ranges)
+    depth = (
+        job.advanced_depth
+        if job.advanced_depth is not None
+        else ACCURACY_DEPTHS[job.accuracy]
+    )
+    threads = job.thread_override or job.runtime_threads
+    memory = job.memory_override_bytes or job.runtime_memory_bytes
+    mask = _load_assets(job).get("mask")
+    plan = estimate_checkpoint_plan(
+        config,
+        gui.fscan,
+        grid_values,
+        max_depth=depth,
+        threads=threads,
+        ram_budget_bytes=memory,
+        checkpoint_count=job.checkpoint_count,
+        angle_fallback=angle_fallback,
+        mask=mask,
+    )
+    excluded = set(config.corrections.excluded_frames)
+    job.checkpoint_plan = {
+        grid_name: [
+            list(item)
+            for item in _checkpoint_frame_ranges(
+                len(gui.fscan), excluded, estimate["files_per_job"]
+            )
+        ]
+        for grid_name, estimate in plan["per_grid"].items()
+    }
     write_job(job, job_path)
     return job
 
@@ -1033,26 +1100,6 @@ def _correction_pipeline(config, scan, assets, provenance):
     return correct
 
 
-def _included_ranges(count, excluded, batch_size):
-    included = [index for index in range(count) if index not in excluded]
-    ranges = []
-    start = None
-    previous = None
-    for index in included:
-        if (
-            start is None
-            or index != previous + 1
-            or index - start >= batch_size
-        ):
-            if start is not None:
-                ranges.append((start, previous + 1))
-            start = index
-        previous = index
-    if start is not None:
-        ranges.append((start, previous + 1))
-    return ranges
-
-
 def _execution_layout(job, scan, config):
     rows, columns = config.detector.detector.shape
     effective_memory = (
@@ -1140,6 +1187,16 @@ def _frame_parallelism(
     records are retained, so the unattainable bound in which every footprint
     leaf survives for the complete detector must not be multiplied by the
     number of image workers.
+
+    ``accumulation_budget_bytes``/the returned ``accumulation`` value model a
+    per-worker retained-record buffer from the retired Parquet-era mapping
+    path; the checkpoint-routing path (design doc Sec9) has no equivalent
+    per-worker buffer of its own; ``run_job`` computes the checkpoint
+    accumulators' own memory budget separately (Sec10) and does not forward
+    this value onward. Kept unchanged here (this function belongs to the
+    still-unimplemented Sec7 thread-allocation phase) so a caller-supplied
+    ``accumulation_budget_bytes`` still conservatively bounds
+    ``image_workers``.
 
     :param _ReconstructionSpec spec:
         Frozen reconstruction compute settings.
@@ -1318,14 +1375,6 @@ def reconstruction_execution_settings(job, scan=None, config=None):
         tile_shape = (0, 0)
     return {
         "thread_budget": spec.threads,
-        "maximum_parallel_reducer_workers": min(
-            spec.threads,
-            max(
-                1,
-                spec.memory_budget_bytes
-                // _MIN_REDUCER_WORKER_MEMORY,
-            ),
-        ),
         "native_threads_per_image": max(
             1, min(job.threads_per_image, spec.threads)
         ),
@@ -1342,7 +1391,7 @@ def reconstruction_execution_settings(job, scan=None, config=None):
         ),
         "detector_tile_shape": tile_shape,
         "native_work_block_pixels": spec.work_block_pixels,
-        "parquet_chunk_span": spec.partition_chunk_span,
+        "checkpoint_count": spec.checkpoint_count,
         "frame_tasks": len(ranges),
         "detector_tiles": len(tiles),
         "map_tasks": len(ranges),
@@ -1353,34 +1402,35 @@ def reconstruction_execution_settings(job, scan=None, config=None):
     }
 
 
+def _job_checkpoint_boundaries(job):
+    return {
+        grid_name: [tuple(item) for item in items]
+        for grid_name, items in job.checkpoint_plan.items()
+    }
+
+
 def job_status(path):
     """Return verified completion state for a job JSON."""
     job = read_job(path)
-    map_manifests = list(job.map_manifests)
+    boundaries = _job_checkpoint_boundaries(job)
+    total_checkpoints = sum(len(items) for items in boundaries.values())
     if job.status != "complete":
         verify_job(job)
-        scan = job.scan
-        config = job.config_data
-        ranges, tiles = _execution_layout(job, scan, config)
-        discovered = _discover_map_manifests(
-            job,
-            ranges,
-            tiles,
-            job.internal_spec(),
-            verify_partitions=False,
+        checkpoint_dir = Path(job.scratch_path) / "checkpoints"
+        resumed, _files = _discover_checkpoint_state(
+            checkpoint_dir, boundaries, job.digest
         )
-        map_manifests = list(discovered.values())
+        completed_checkpoints = len(resumed)
+    else:
+        completed_checkpoints = total_checkpoints
     result = {
         "status": job.status,
         "job_sha256": job.digest,
-        "map_tasks": {
-            "completed": len(map_manifests),
-            "pending": max(
-                0, job.expected_map_tasks - len(map_manifests)
-            ),
-            "total": job.expected_map_tasks,
+        "checkpoints": {
+            "completed": completed_checkpoints,
+            "pending": max(0, total_checkpoints - completed_checkpoints),
+            "total": total_checkpoints,
         },
-        "reduction_manifest": job.reduction_manifest,
         "output_path": job.output_path,
         "output_sha256": job.output_sha256,
         "grids": [
@@ -1396,86 +1446,6 @@ def job_status(path):
     return result
 
 
-def _valid_map_manifest(
-    path,
-    frame_range,
-    detector_tiles,
-    *,
-    spec_hash,
-    job_digest,
-    verification_cache=None,
-    verify_partitions=True,
-):
-    try:
-        manifest = _read_manifest(path)
-        return (
-            manifest.kind == "map"
-            and manifest.status == "complete"
-            and manifest.spec_hash == spec_hash
-            and manifest.metadata.get("job_sha256") == job_digest
-            and tuple(manifest.frame_range) == tuple(frame_range)
-            and manifest.detector_tile is None
-            and manifest.metadata.get("detector_tiles")
-            == [list(tile) for tile in detector_tiles]
-            and (
-                not verify_partitions
-                or all(
-                    _verify_scratch_file(partition, verification_cache)
-                    for partition in manifest.partitions
-                )
-            )
-        )
-    except (OSError, ValueError, RuntimeError):
-        return False
-
-
-def _discover_map_manifests(
-    job,
-    ranges,
-    tiles,
-    spec,
-    *,
-    verification_cache=None,
-    only_ranges=None,
-    verify_partitions=True,
-):
-    manifest_root = Path(job.scratch_path) / "manifests"
-    candidates = {
-        str(Path(value).absolute()) for value in job.map_manifests
-    }
-    if manifest_root.exists():
-        candidates.update(
-            str(path.absolute()) for path in manifest_root.glob("*.json")
-        )
-    expected = {
-        tuple(frame_range)
-        for frame_range in (
-            ranges if only_ranges is None else only_ranges
-        )
-    }
-    existing = {}
-    for manifest_path in sorted(candidates):
-        try:
-            manifest = _read_manifest(manifest_path)
-            frame_range = tuple(manifest.frame_range)
-            if (
-                frame_range in expected
-                and _valid_map_manifest(
-                    manifest_path,
-                    frame_range,
-                    tiles,
-                    spec_hash=spec.digest,
-                    job_digest=job.digest,
-                    verification_cache=verification_cache,
-                    verify_partitions=verify_partitions,
-                )
-            ):
-                existing[frame_range] = manifest_path
-        except (OSError, TypeError, ValueError, RuntimeError):
-            continue
-    return existing
-
-
 def _base_provenance(job, config):
     return {
         **job.correction_provenance,
@@ -1488,14 +1458,6 @@ def _base_provenance(job, config):
     }
 
 
-def _merge_provenance(target, source):
-    for key, value in source.items():
-        if isinstance(value, dict) and isinstance(target.get(key), dict):
-            _merge_provenance(target[key], value)
-        else:
-            target[key] = value
-
-
 def run_cluster_map_task(
     path,
     task_index,
@@ -1504,126 +1466,21 @@ def run_cluster_map_task(
     memory_bytes=1024**3,
     progress=None,
 ):
-    """Execute one deterministic cluster map-array task.
+    """Execute one cluster map-array task.
 
-    The task writes only its immutable map manifest and Parquet partitions;
-    it never mutates the shared reconstruction job JSON.
+    Not yet implemented: cluster execution is being reworked for the
+    checkpoint architecture (design doc Sec13), where each array task is a
+    full independent node running the whole single-node pipeline against
+    its own disjoint frame-range slice -- a structurally different split
+    from the retired Parquet-era wiring this replaces (one frame-range
+    mapping task feeding a shared job-wide reduce). Run the job with
+    ``run``/``resume`` on a single node until cluster support lands.
     """
-    path = Path(path).absolute()
-    job = read_job(path)
-    verify_job(job)
-    scan = job.scan
-    config = job.config_data
-    assets = _load_assets(job)
-    spec = job.internal_spec()
-    ranges, tiles = _execution_layout(job, scan, config)
-    task_index = int(task_index)
-    if task_index < 0 or task_index >= len(ranges):
-        raise IndexError(
-            f"Map task index {task_index} is outside 0..{len(ranges) - 1}"
-        )
-    frame_range = ranges[task_index]
-    cpus = max(1, int(cpus))
-    memory_bytes = max(1024**2, int(memory_bytes))
-    verification_cache = set()
-    existing = _discover_map_manifests(
-        job,
-        ranges,
-        tiles,
-        spec,
-        verification_cache=verification_cache,
-        only_ranges=(frame_range,),
+    raise NotImplementedError(
+        "Cluster execution is being reworked for the checkpoint "
+        "architecture (design doc Sec13) and is not yet available in this "
+        "build. Use 'run'/'resume' on a single node instead."
     )
-    if tuple(frame_range) in existing:
-        return {
-            "status": "complete",
-            "reused": True,
-            "task_index": task_index,
-            "frame_range": list(frame_range),
-            "manifest": existing[tuple(frame_range)],
-        }
-    bounds = scan.exposure_angle_bounds(
-        config, fallback=job.angle_fallback
-    )
-    task_bounds = bounds[frame_range[0] : frame_range[1]]
-    stationary = bool(
-        np.array_equal(task_bounds[:, 0], task_bounds[:, 1])
-    )
-    execution_spec = _ReconstructionSpec.from_dict(
-        {
-            **spec.to_dict(),
-            "threads": cpus,
-            "memory_budget_bytes": memory_bytes,
-        }
-    )
-    _, kernel_threads, _, accumulation_budget = _frame_parallelism(
-        execution_spec,
-        tiles,
-        memory_bytes,
-        stationary=stationary,
-        frames_per_task=frame_range[1] - frame_range[0],
-        threads_per_image=cpus,
-        accumulation_budget_bytes=job.accumulation_budget_bytes,
-    )
-    provenance = _base_provenance(job, config)
-    correct = _correction_pipeline(config, scan, assets, provenance)
-    ray_cache = {}
-    for tile in tiles:
-        rays = _detector_corner_rays(config.detector, tile)
-        ray_cache[tuple(tile)] = (rays, _xxh3_128(rays))
-
-    completed = 0
-
-    def image_progress(frame_index, retained_bytes, segments):
-        nonlocal completed
-        completed += 1
-        if progress is not None:
-            progress(
-                completed,
-                frame_range[1] - frame_range[0],
-                (
-                    f"Cluster map task {task_index}; frame {frame_index}; "
-                    f"{retained_bytes / 1024**2:.0f} MiB retained; "
-                    f"{segments} segments flushed"
-                ),
-            )
-
-    manifest = _map_frame_range(
-        spec,
-        scan,
-        config.detector,
-        config.ub_calculator,
-        frame_range,
-        tiles,
-        task_bounds,
-        Path(job.scratch_path) / "map",
-        correction_pipeline=correct,
-        job_digest=job.digest,
-        corner_rays={
-            tile: values[0] for tile, values in ray_cache.items()
-        },
-        corner_rays_fingerprints={
-            tile: values[1] for tile, values in ray_cache.items()
-        },
-        verification_cache=verification_cache,
-        kernel_threads=kernel_threads,
-        kernel_memory_budget_bytes=memory_bytes,
-        accumulation_budget_bytes=accumulation_budget,
-        image_progress=image_progress,
-    )
-    manifest.metadata["correction_provenance"] = provenance
-    manifest_root = Path(job.scratch_path) / "manifests"
-    manifest_root.mkdir(parents=True, exist_ok=True)
-    manifest_path = manifest_root / f"{manifest.task_id}.json"
-    _write_manifest(manifest, manifest_path)
-    return {
-        "status": "complete",
-        "reused": False,
-        "task_index": task_index,
-        "frame_range": list(frame_range),
-        "manifest": str(manifest_path),
-        "partitions": len(manifest.partitions),
-    }
 
 
 def run_cluster_finalize(
@@ -1633,53 +1490,14 @@ def run_cluster_finalize(
     memory_bytes=1024**3,
     progress=None,
 ):
-    """Verify all cluster map tasks, then reduce and finalize their job."""
-    path = Path(path).absolute()
-    job = read_job(path)
-    if job.status == "complete":
-        return job_status(path)
-    verify_job(job)
-    scan = job.scan
-    config = job.config_data
-    spec = job.internal_spec()
-    ranges, tiles = _execution_layout(job, scan, config)
-    verification_cache = set()
-    existing = _discover_map_manifests(
-        job,
-        ranges,
-        tiles,
-        spec,
-        verification_cache=verification_cache,
-    )
-    missing = [
-        index
-        for index, frame_range in enumerate(ranges)
-        if tuple(frame_range) not in existing
-    ]
-    if missing:
-        preview = ", ".join(map(str, missing[:20]))
-        suffix = "..." if len(missing) > 20 else ""
-        raise RuntimeError(
-            f"Cannot finalize: {len(missing)} map array tasks are missing "
-            f"({preview}{suffix})"
-        )
-    job.map_manifests = [
-        existing[tuple(frame_range)] for frame_range in ranges
-    ]
-    provenance = _base_provenance(job, config)
-    for manifest_path in job.map_manifests:
-        manifest = _read_manifest(manifest_path)
-        _merge_provenance(
-            provenance,
-            manifest.metadata.get("correction_provenance", {}),
-        )
-    job.correction_provenance = provenance
-    write_job(job, path)
-    return run_job(
-        path,
-        progress=progress,
-        execution_threads=max(1, int(cpus)),
-        execution_memory_bytes=max(1024**2, int(memory_bytes)),
+    """Verify all cluster map tasks, then finalize their job.
+
+    Not yet implemented -- see :func:`run_cluster_map_task`.
+    """
+    raise NotImplementedError(
+        "Cluster execution is being reworked for the checkpoint "
+        "architecture (design doc Sec13) and is not yet available in this "
+        "build. Use 'run'/'resume' on a single node instead."
     )
 
 
@@ -1687,7 +1505,6 @@ def run_job(
     path,
     *,
     progress=None,
-    execution_threads=None,
     execution_memory_bytes=None,
 ):
     """Run or resume one prepared reconstruction job."""
@@ -1704,49 +1521,57 @@ def run_job(
         config, fallback=job.angle_fallback
     )
     ranges, tiles = _execution_layout(job, scan, config)
-    manifest_root = Path(job.scratch_path) / "manifests"
-    manifest_root.mkdir(parents=True, exist_ok=True)
-    verification_cache = set()
-    existing = _discover_map_manifests(
-        job,
-        ranges,
-        tiles,
-        spec,
-        verification_cache=verification_cache,
-    )
-    job.map_manifests = list(existing.values())
-    provenance = _base_provenance(job, config)
-    correct = _correction_pipeline(config, scan, assets, provenance)
-    total_tasks = len(ranges)
-    completed_tasks = sum(
-        tuple(frame_range) in existing
-        for frame_range in ranges
-    )
-    total_images = sum(stop - start for start, stop in ranges)
-    completed_images = sum(
-        stop - start
-        for start, stop in ranges
-        if (start, stop) in existing
-    )
-    if progress is not None:
-        progress(
-            completed_images,
-            total_images + 2,
-            (
-                f"Mapping images {completed_images}/{total_images} "
-                f"({completed_tasks}/{total_tasks} tasks committed)"
-            ),
-        )
+    checkpoint_dir = Path(job.scratch_path) / "checkpoints"
+    boundaries = _job_checkpoint_boundaries(job)
+
     effective_memory = (
         max(1024**2, int(execution_memory_bytes))
         if execution_memory_bytes is not None
         else job.memory_override_bytes or job.runtime_memory_bytes
     )
-    reducer_threads = (
-        max(1, int(execution_threads))
-        if execution_threads is not None
-        else spec.threads
+    number_of_grids = max(1, len(spec.grids))
+    active_budget_bytes = max(
+        1024**2,
+        effective_memory
+        // (MAX_CONCURRENT_ACTIVE_CHECKPOINTS * number_of_grids),
     )
+
+    resumed, _existing_files = _discover_checkpoint_state(
+        checkpoint_dir, boundaries, job.digest, cleanup_stale=True
+    )
+    router = _CheckpointRouter(
+        boundaries,
+        spec_digest=job.digest,
+        checkpoint_dir=checkpoint_dir,
+        active_budget_bytes=active_budget_bytes,
+        resumed=resumed,
+    )
+    provenance = _base_provenance(job, config)
+    correct = _correction_pipeline(config, scan, assets, provenance)
+
+    def range_is_resumed(frame_range):
+        start, stop = frame_range
+        for grid_name in boundaries:
+            for frame_index in range(start, stop):
+                index = router.checkpoint_index_for_frame(grid_name, frame_index)
+                if (grid_name, index) not in resumed:
+                    return False
+        return True
+
+    pending_ranges = [
+        frame_range for frame_range in ranges if not range_is_resumed(frame_range)
+    ]
+    total_images = sum(stop - start for start, stop in ranges)
+    completed_images = total_images - sum(
+        stop - start for start, stop in pending_ranges
+    )
+    if progress is not None:
+        progress(
+            completed_images,
+            total_images + 1,
+            f"Mapping images {completed_images}/{total_images}",
+        )
+
     ray_cache_bytes = sum(
         (tile[1] - tile[0] + 1)
         * (tile[3] - tile[2] + 1)
@@ -1758,100 +1583,71 @@ def run_job(
     ray_cache = {}
     if cache_detector_rays:
         for tile in tiles:
-            rays = _detector_corner_rays(config.detector, tile)
-            ray_cache[tuple(tile)] = (rays, _xxh3_128(rays))
-
-    pending_frames = [
-        frame_range
-        for frame_range in ranges
-        if tuple(frame_range) not in existing
-    ]
+            ray_cache[tuple(tile)] = _detector_corner_rays(config.detector, tile)
 
     worker_limits = []
     kernel_thread_limits = []
-    accumulation_limits = []
     scheduler_memory = max(
         1024**2,
         effective_memory - (ray_cache_bytes if cache_detector_rays else 0),
     )
-    for frame_range in pending_frames:
+    for frame_range in pending_ranges:
         task_bounds = bounds[frame_range[0] : frame_range[1]]
         stationary = bool(
             np.array_equal(task_bounds[:, 0], task_bounds[:, 1])
         )
-        (
-            image_limit,
-            native_threads,
-            _worker_memory,
-            accumulation_limit,
-        ) = _frame_parallelism(
-            spec,
-            tiles,
-            scheduler_memory,
-            stationary=stationary,
-            frames_per_task=frame_range[1] - frame_range[0],
-            threads_per_image=job.threads_per_image,
-            accumulation_budget_bytes=job.accumulation_budget_bytes,
+        image_limit, native_threads, _worker_memory, _accumulation_limit = (
+            _frame_parallelism(
+                spec,
+                tiles,
+                scheduler_memory,
+                stationary=stationary,
+                frames_per_task=frame_range[1] - frame_range[0],
+                threads_per_image=job.threads_per_image,
+                accumulation_budget_bytes=job.accumulation_budget_bytes,
+            )
         )
         worker_limits.append(image_limit)
         kernel_thread_limits.append(native_threads)
-        accumulation_limits.append(accumulation_limit)
     image_workers = (
-        min(len(pending_frames), min(worker_limits))
-        if worker_limits
-        else 1
+        min(len(pending_ranges), min(worker_limits)) if worker_limits else 1
     )
-    kernel_threads = (
-        min(kernel_thread_limits) if kernel_thread_limits else 1
-    )
-    accumulation_budget = (
-        min(accumulation_limits) if accumulation_limits else 1024**2
-    )
+    kernel_threads = min(kernel_thread_limits) if kernel_thread_limits else 1
     # The native budget is a per-call guard. The scheduler independently
     # bounds the aggregate worker working set above.
     kernel_memory_budget = effective_memory
+
     progress_events = SimpleQueue()
     cancellation = Event()
     mapped_images = completed_images
-    parallel_mapping = image_workers > 1
 
-    def publish_image_progress(frame_index, retained_bytes, segments):
+    def publish_image_progress(frame_index):
         if cancellation.is_set():
             raise RuntimeError("Reconstruction mapping cancelled")
-        event = (frame_index, retained_bytes, segments)
-        if parallel_mapping:
-            progress_events.put(event)
-        else:
-            report_image_progress(event)
-
-    def report_image_progress(event):
-        nonlocal mapped_images
-        frame_index, retained_bytes, segments = event
-        mapped_images += 1
-        if progress is not None:
-            progress(
-                mapped_images,
-                total_images + 2,
-                (
-                    f"Mapping images {mapped_images}/{total_images}; "
-                    f"frame {frame_index}; "
-                    f"{completed_tasks}/{total_tasks} tasks committed; "
-                    f"{retained_bytes / 1024**2:.0f} MiB retained; "
-                    f"{segments} segments flushed"
-                ),
-            )
+        progress_events.put(frame_index)
 
     def drain_progress_events():
+        nonlocal mapped_images
         while True:
             try:
-                event = progress_events.get_nowait()
+                progress_events.get_nowait()
             except Empty:
                 return
-            report_image_progress(event)
+            mapped_images += 1
+            if progress is not None:
+                progress(
+                    mapped_images,
+                    total_images + 1,
+                    (
+                        f"Mapping images {mapped_images}/{total_images} "
+                        f"({image_workers} image workers, "
+                        f"{kernel_threads} native threads/image)"
+                    ),
+                )
 
     def map_frame(frame_range):
         task_bounds = bounds[frame_range[0] : frame_range[1]]
-        return frame_range, _map_frame_range(
+        _map_frame_range(
             spec,
             scan,
             config.detector,
@@ -1859,21 +1655,14 @@ def run_job(
             frame_range,
             tiles,
             task_bounds,
-            Path(job.scratch_path) / "map",
+            router,
             correction_pipeline=correct,
-            job_digest=job.digest,
-            corner_rays={
-                tile: values[0] for tile, values in ray_cache.items()
-            },
-            corner_rays_fingerprints={
-                tile: values[1] for tile, values in ray_cache.items()
-            },
-            verification_cache=verification_cache,
+            corner_rays=ray_cache if cache_detector_rays else None,
             kernel_threads=kernel_threads,
             kernel_memory_budget_bytes=kernel_memory_budget,
-            accumulation_budget_bytes=accumulation_budget,
             image_progress=publish_image_progress,
         )
+        return frame_range
 
     executor = (
         None
@@ -1884,18 +1673,16 @@ def run_job(
         )
     )
     try:
-        for wave_start in range(0, len(pending_frames), image_workers):
-            wave = pending_frames[
-                wave_start : wave_start + image_workers
-            ]
+        for wave_start in range(0, len(pending_ranges), image_workers):
+            wave = pending_ranges[wave_start : wave_start + image_workers]
             if executor is None:
-                mapped_frames = [map_frame(frame_task) for frame_task in wave]
+                for frame_task in wave:
+                    map_frame(frame_task)
+                    drain_progress_events()
             else:
                 future_set = {
-                    executor.submit(map_frame, frame_task)
-                    for frame_task in wave
+                    executor.submit(map_frame, frame_task) for frame_task in wave
                 }
-                mapped_frames = []
                 while future_set:
                     done, future_set = wait(
                         future_set,
@@ -1903,113 +1690,59 @@ def run_job(
                         return_when=FIRST_COMPLETED,
                     )
                     drain_progress_events()
-                    mapped_frames.extend(
-                        future.result() for future in done
-                    )
+                    for future in done:
+                        future.result()
                 drain_progress_events()
-                mapped_frames.sort(key=lambda item: item[0])
-            # This bounded worker wave has finished, so correction provenance
-            # is stable while the coordinator updates resumable state.
-            for _frame_range, manifest in mapped_frames:
-                manifest.metadata["correction_provenance"] = provenance
-                manifest_path = (
-                    manifest_root / f"{manifest.task_id}.json"
-                )
-                _write_manifest(manifest, manifest_path)
-                job.map_manifests.append(str(manifest_path))
-                completed_tasks += 1
-            job.correction_provenance = provenance
-            write_job(job, path)
-            if progress is not None:
-                progress(
-                    mapped_images,
-                    total_images + 2,
-                    (
-                        f"Mapping images {mapped_images}/{total_images}; "
-                        f"{completed_tasks}/{total_tasks} tasks committed "
-                        f"({image_workers} image workers, "
-                        f"{kernel_threads} native threads/image, "
-                        f"{accumulation_budget / 1024**2:.0f} MiB "
-                        "accumulation/worker)"
-                    ),
-                )
     except BaseException:
         cancellation.set()
         raise
     finally:
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
+
     if progress is not None:
-        progress(
-            total_images,
-            total_images + 2,
-            f"Reducing {len(job.map_manifests)} mapping tasks",
+        progress(total_images, total_images + 1, "Verifying checkpoints")
+    resumed_after, checkpoint_files = _discover_checkpoint_state(
+        checkpoint_dir, boundaries, job.digest, cleanup_stale=False
+    )
+    expected = {
+        (grid_name, index)
+        for grid_name, ranges_for_grid in boundaries.items()
+        for index in range(len(ranges_for_grid))
+    }
+    missing = expected - resumed_after
+    if missing:
+        raise RuntimeError(
+            "Reconstruction mapping did not produce "
+            f"{len(missing)} expected checkpoint(s): {sorted(missing)[:10]}"
         )
-    if job.map_manifests:
-        reduced = _reduce_partition(
-            job.map_manifests,
-            Path(job.scratch_path) / "reduced",
-            verification_cache=verification_cache,
-            memory_budget_bytes=effective_memory,
-            workers=reducer_threads,
-            checkpoint_root=manifest_root,
-            progress=(
-                None
-                if progress is None
-                else lambda done, count, message: progress(
-                    total_images,
-                    total_images + 2,
-                    f"Reducing shards {done}/{count}: {message}",
-                )
-            ),
-        )
-    else:
-        reduced = _TaskManifest(
-            kind="reduce",
-            task_id=sha256((spec.digest + job.digest).encode()).hexdigest()[:24],
-            spec_hash=spec.digest,
-            status="complete",
-            spec=spec.to_dict(),
-            metadata={"job_sha256": job.digest, "empty_input": True},
-        )
-    reduced_path = manifest_root / f"{reduced.task_id}.json"
-    _write_manifest(reduced, reduced_path)
-    job.reduction_manifest = str(reduced_path)
+    job.correction_provenance = provenance
     job.status = "finalizing"
     write_job(job, path)
     if progress is not None:
-        progress(
-            total_images + 1,
-            total_images + 2,
-            "Finalizing HDF5",
-        )
+        progress(total_images, total_images + 1, "Finalizing HDF5")
     result = _finalize_reconstruction(
-        [reduced_path],
+        spec,
+        checkpoint_files,
         job.output_path,
         provenance={
             **provenance,
             "scan_reference": job.scan_reference,
         },
         config=config,
-        verification_cache=verification_cache,
         chunk_progress=(
             None
             if progress is None
             else lambda written, count: progress(
+                total_images,
                 total_images + 1,
-                total_images + 2,
                 f"Finalizing HDF5 chunk {written}/{count}",
             )
         ),
     )
     job.output_sha256 = result["sha256"]
     job.status = "complete"
-    for target in (
-        Path(job.scratch_path) / "map",
-        Path(job.scratch_path) / "reduced",
-        manifest_root,
-        Path(job.assets_path),
-    ):
+    for target in (checkpoint_dir, Path(job.assets_path)):
         try:
             if target.is_dir():
                 shutil.rmtree(target)
@@ -2019,5 +1752,5 @@ def run_job(
             job.cleanup_errors.append(f"{target}: {error}")
     write_job(job, path)
     if progress is not None:
-        progress(total_images + 2, total_images + 2, "Complete")
+        progress(total_images + 1, total_images + 1, "Complete")
     return job_status(path)
