@@ -21,6 +21,7 @@ import math
 import os
 from pathlib import Path
 from queue import Queue
+import threading
 import time
 from typing import Any
 
@@ -550,25 +551,57 @@ def _empty_batch() -> dict[str, np.ndarray]:
     }
 
 
-def _reduce_batches(batches: Iterable[Mapping[str, np.ndarray]]):
-    levels = []
-    for batch in batches:
-        if not np.asarray(batch["chunk_id"]).size:
-            continue
-        level = 0
-        while level < len(levels) and levels[level] is not None:
-            batch = _merge_sorted_batches(levels[level], batch)
-            levels[level] = None
-            level += 1
-        if level == len(levels):
-            levels.append(batch)
-        else:
-            levels[level] = batch
+def _tree_insert(levels, batch):
+    """Insert one already-reduced batch into a binary-counter merge tree.
+
+    Mutates ``levels`` in place: descends occupied levels, merging and
+    cascading exactly as this insert step always has inside
+    :func:`_reduce_batches`, so calling this once per batch incrementally
+    (as batches become available over time) is behaviorally identical to
+    building the whole ``levels`` list from a pre-collected batch list up
+    front. This is the mechanism :class:`_CheckpointAccumulator` reuses to
+    merge frames into a checkpoint as they finish, rather than only once at
+    the end.
+
+    :param list levels:
+        Mutable list of ``batch | None``, one slot per tree level.
+    :param batch:
+        A native record batch (dict of the six ``_PARTIAL_COLUMNS``
+        arrays), already reduced/sorted.
+    """
+    if not np.asarray(batch["chunk_id"]).size:
+        return
+    level = 0
+    while level < len(levels) and levels[level] is not None:
+        batch = _merge_sorted_batches(levels[level], batch)
+        levels[level] = None
+        level += 1
+    if level == len(levels):
+        levels.append(batch)
+    else:
+        levels[level] = batch
+
+
+def _tree_finalize(levels):
+    """Fold whatever ``levels`` remain into one merged batch.
+
+    :param list levels:
+        The same ``levels`` list :func:`_tree_insert` maintains.
+    :returns:
+        One merged, sorted, deduplicated native record batch.
+    """
     result = _empty_batch()
     for batch in reversed(levels):
         if batch is not None:
             result = _merge_sorted_batches(result, batch)
     return result
+
+
+def _reduce_batches(batches: Iterable[Mapping[str, np.ndarray]]):
+    levels = []
+    for batch in batches:
+        _tree_insert(levels, batch)
+    return _tree_finalize(levels)
 
 
 def _merge_sorted_batches(left, right):
@@ -583,6 +616,173 @@ def _merge_sorted_batches(left, right):
         for name in _PARTIAL_COLUMNS
     ]
     return _native_module().merge_sorted_batches(*arguments)
+
+
+class _CheckpointAccumulator:
+    """In-memory tree-merge accumulator for one checkpoint's records.
+
+    Not grid-aware: callers key a ``dict[(checkpoint_index, grid_name),
+    _CheckpointAccumulator]`` externally (design doc Sec9/Sec12) -- this
+    class only tracks one grid's records for one checkpoint. Thread-safe:
+    :meth:`insert` may be called concurrently by multiple worker threads
+    finishing different frames; the lock protects only the amortized
+    O(log N) binary-counter bookkeeping (:func:`_tree_insert`), not the
+    expensive per-frame kernel work that happens before a caller ever
+    calls :meth:`insert` -- this is what keeps contention low even under
+    many concurrent workers (design doc Sec9).
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._levels: list = []
+        self._byte_total = 0
+
+    def insert(self, batch):
+        """Merge one already-reduced batch into this checkpoint's tree.
+
+        :param batch:
+            A native record batch (dict of the six ``_PARTIAL_COLUMNS``
+            arrays), already reduced/sorted -- e.g. one frame's kernel
+            output.
+        """
+        batch_bytes = sum(np.asarray(values).nbytes for values in batch.values())
+        with self._lock:
+            _tree_insert(self._levels, batch)
+            self._byte_total += batch_bytes
+
+    def should_flush(self, budget_bytes) -> bool:
+        """Whether the running byte total has crossed ``budget_bytes``."""
+        with self._lock:
+            return self._byte_total >= budget_bytes
+
+    def finalize(self):
+        """Fold remaining levels into one merged batch, then reset.
+
+        :returns:
+            The folded batch -- see :func:`_tree_finalize`.
+        """
+        with self._lock:
+            result = _tree_finalize(self._levels)
+            self._levels = []
+            self._byte_total = 0
+        return result
+
+
+def _checkpoint_batch_digest(batch) -> str:
+    """XXH3-128 over the batch's six columns, concatenated in
+    ``_PARTIAL_COLUMNS`` order. Shared by :func:`_write_checkpoint` (hashed
+    while the data is already in memory, not by re-reading the file
+    afterward) and :func:`_verify_checkpoint`'s full re-verify path (which
+    must re-derive the digest the same way to compare against it)."""
+    return _xxh3_128(
+        np.concatenate(
+            [
+                np.ascontiguousarray(batch[name]).view(np.uint8)
+                for name in _PARTIAL_COLUMNS
+            ]
+        )
+    )
+
+
+def _write_checkpoint(batch, path, *, spec_digest, metadata=None, chunk_rows=65536):
+    """Write one reduced record batch as a checkpoint HDF5 file.
+
+    Columnar layout (design doc Sec8): one dataset per ``_PARTIAL_COLUMNS``
+    field, ``bitshuffle-lz4`` compression, chunked at ``chunk_rows`` rows --
+    the measured best-performing configuration (Sec8), used unconditionally
+    for checkpoints regardless of the job's own final-output
+    ``compression`` setting, since checkpoints are internal scratch data.
+    Checksummed inline while the data is already in memory (Sec8), not by
+    re-reading the file afterward. Written atomically -- to ``.tmp``, then
+    ``.replace()`` -- matching the pattern already used by
+    :func:`_write_manifest` and :func:`_finalize_reconstruction`.
+
+    :param batch:
+        A native record batch (dict of the six ``_PARTIAL_COLUMNS``
+        arrays).
+    :param path:
+        Destination path for the checkpoint file.
+    :param str spec_digest:
+        The job's ``_ReconstructionSpec.digest``, stored as an HDF5
+        attribute so resume can detect a stale checkpoint by comparing
+        digests (design doc Sec11) without a separate manifest registry.
+    :param dict metadata:
+        Optional extra JSON-serializable scalar attributes to store (e.g.
+        checkpoint index, grid name, frame range).
+    :param int chunk_rows:
+        HDF5 chunk size in rows for every column dataset.
+    :returns:
+        The XXH3-128 hex digest written to the file.
+    :rtype: str
+    """
+    rows = int(np.asarray(batch["chunk_id"]).size)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    digest = _checkpoint_batch_digest(batch)
+    dataset_kwargs = (
+        {
+            "chunks": (min(int(chunk_rows), rows),),
+            **_compression_kwargs("bitshuffle-lz4"),
+        }
+        if rows > 0
+        else {}
+    )
+    with h5py.File(temporary, "w") as h5file:
+        h5file.attrs["spec_sha256"] = spec_digest
+        h5file.attrs["xxh3_128"] = digest
+        h5file.attrs["rows"] = rows
+        for key, value in (metadata or {}).items():
+            h5file.attrs[key] = value
+        for name in _PARTIAL_COLUMNS:
+            h5file.create_dataset(
+                name, data=np.ascontiguousarray(batch[name]), **dataset_kwargs
+            )
+        h5file.flush()
+    temporary.replace(path)
+    return digest
+
+
+def _read_checkpoint(path) -> dict[str, np.ndarray]:
+    """Read a checkpoint file's record batch back into the standard shape.
+
+    :returns:
+        Dict of the six ``_PARTIAL_COLUMNS`` arrays.
+    :rtype: dict[str, np.ndarray]
+    """
+    with h5py.File(path, "r") as h5file:
+        return {name: h5file[name][()] for name in _PARTIAL_COLUMNS}
+
+
+def _verify_checkpoint(path, *, spec_digest, full=False) -> bool:
+    """Check a checkpoint file's identity, optionally its data integrity.
+
+    Cheap path (default): the file exists and its ``spec_sha256`` attribute
+    matches ``spec_digest`` -- this is the entire resume mechanism (design
+    doc Sec11), with no separate manifest registry, since atomic
+    write-then-replace already guarantees a file present at its final name
+    is complete.
+
+    :param bool full:
+        If true, also re-read every column and re-verify the stored
+        XXH3-128 digest against freshly hashed data -- cheap at XXH3 speed
+        even for real job sizes, so safe to do routinely, unlike the
+        SHA-256-by-reread pattern this replaces (design doc Sec8).
+    :returns:
+        ``True`` if the checkpoint is present and matches.
+    :rtype: bool
+    """
+    path = Path(path)
+    if not path.exists():
+        return False
+    with h5py.File(path, "r") as h5file:
+        if h5file.attrs.get("spec_sha256") != spec_digest:
+            return False
+        if full:
+            batch = {name: h5file[name][()] for name in _PARTIAL_COLUMNS}
+            if _checkpoint_batch_digest(batch) != h5file.attrs.get("xxh3_128"):
+                return False
+    return True
 
 
 def _require_pyarrow():
