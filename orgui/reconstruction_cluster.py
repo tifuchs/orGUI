@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import math
+from pathlib import Path
 import re
 import shlex
 
@@ -28,6 +29,7 @@ class ClusterSettings:
     environment_setup: str = ""
     queue: str = ""
     account: str = ""
+    array_task_count: int = 4
     array_cpus: int = 4
     array_memory_gib: float = 16.0
     array_walltime: str = "24:00:00"
@@ -52,7 +54,7 @@ class ClusterSettings:
             )
         if not self.python_executable.strip():
             raise ValueError("Python executable cannot be empty")
-        for name in ("array_cpus", "reduce_cpus"):
+        for name in ("array_task_count", "array_cpus", "reduce_cpus"):
             if int(getattr(self, name)) < 1:
                 raise ValueError(f"{name} must be at least one")
         for name in ("array_memory_gib", "reduce_memory_gib"):
@@ -201,6 +203,15 @@ def _slurm_directives(settings, *, array_tasks=None):
 def generate_cluster_scripts(job_path, job, output_directory=None):
     """Generate map-array, finalizer, and dependency-submission scripts.
 
+    The array size (``settings.array_task_count``) is the only source of
+    "how many nodes" -- it is never read from a scheduler environment
+    variable at run time (design doc Sec13): most schedulers besides
+    Slurm never expose a reliable total-array-size variable to a running
+    task, so it is instead baked into the generated commands as an
+    explicit ``--total-tasks`` argument, the same way ``--cpus``/
+    ``--memory-gib`` already are. Only each array element's own index
+    comes from the scheduler.
+
     :param job_path:
         Prepared reconstruction job JSON.
     :param ReconstructionJob job:
@@ -211,8 +222,110 @@ def generate_cluster_scripts(job_path, job, output_directory=None):
         Paths keyed by ``map``, ``finalize``, and ``submit``.
     :rtype: dict
     """
-    raise NotImplementedError(
-        "Cluster script generation is being reworked for the checkpoint "
-        "architecture (design doc Sec13) and is not yet available in this "
-        "build. Run the job with 'run'/'resume' on a single node instead."
+    settings = ClusterSettings.from_dict(job.cluster_settings)
+    array_tasks = settings.array_task_count
+    job_path = Path(job_path).absolute()
+    directory = Path(
+        output_directory
+        or settings.script_directory
+        or job_path.parent / f"{job_path.stem}-cluster"
+    ).absolute()
+    directory.mkdir(parents=True, exist_ok=True)
+    working_directory = Path(
+        settings.working_directory or job_path.parent
+    ).absolute()
+    suffix = "sge" if settings.scheduler == "sge" else "slurm"
+    map_path = directory / f"{settings.job_name}-map.{suffix}"
+    finalize_path = directory / f"{settings.job_name}-finalize.{suffix}"
+    submit_path = directory / f"{settings.job_name}-submit.sh"
+    preamble = _script_preamble(settings, working_directory)
+
+    if settings.scheduler == "sge":
+        map_index = '"$((SGE_TASK_ID - 1))"'
+        map_directives = _sge_directives(settings, array_tasks=array_tasks)
+        finalize_directives = _sge_directives(settings)
+    else:
+        map_index = '"${SLURM_ARRAY_TASK_ID}"'
+        map_directives = _slurm_directives(settings, array_tasks=array_tasks)
+        finalize_directives = _slurm_directives(settings)
+
+    map_command = _python_command(
+        settings,
+        (
+            "cluster-map",
+            job_path,
+            "--task-index",
+            "__ARRAY_INDEX__",
+            "--total-tasks",
+            array_tasks,
+            "--cpus",
+            settings.array_cpus,
+            "--memory-gib",
+            settings.array_memory_gib,
+        ),
+    ).replace(_quote("__ARRAY_INDEX__"), map_index)
+    finalize_command = _python_command(
+        settings,
+        (
+            "cluster-finalize",
+            job_path,
+            "--total-tasks",
+            array_tasks,
+            "--cpus",
+            settings.reduce_cpus,
+            "--memory-gib",
+            settings.reduce_memory_gib,
+        ),
     )
+    map_text = "\n".join(
+        ["#!/usr/bin/env bash", *map_directives, "", *preamble, map_command, ""]
+    )
+    finalize_text = "\n".join(
+        [
+            "#!/usr/bin/env bash",
+            *finalize_directives,
+            "",
+            *preamble,
+            finalize_command,
+            "",
+        ]
+    )
+    if settings.scheduler == "sge":
+        submit_lines = [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            f"map_job_id=$(qsub -terse {_quote(map_path)})",
+            'map_job_id="${map_job_id%%.*}"',
+            (
+                f'qsub -hold_jid "$map_job_id" '
+                f"{_quote(finalize_path)}"
+            ),
+            'echo "Submitted SGE map array ${map_job_id} and finalizer"',
+            "",
+        ]
+    else:
+        submit_lines = [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            f"map_job_id=$(sbatch --parsable {_quote(map_path)})",
+            'map_job_id="${map_job_id%%;*}"',
+            (
+                f'sbatch --dependency="afterok:${{map_job_id}}" '
+                f"{_quote(finalize_path)}"
+            ),
+            'echo "Submitted Slurm map array ${map_job_id} and finalizer"',
+            "",
+        ]
+    for path, text in (
+        (map_path, map_text),
+        (finalize_path, finalize_text),
+        (submit_path, "\n".join(submit_lines)),
+    ):
+        path.write_text(text, encoding="utf-8", newline="\n")
+    return {
+        "scheduler": settings.scheduler,
+        "map": str(map_path),
+        "finalize": str(finalize_path),
+        "submit": str(submit_path),
+        "array_tasks": array_tasks,
+    }

@@ -13,9 +13,12 @@ from orgui.app.config_data import ConfigData
 from orgui.app.database import config_data_to_json
 from orgui.backend.scans import ScanReference, SimulationScan
 from orgui.datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
+import orgui.reconstruction_job as reconstruction_job_module
 from orgui.reconstruction_job import (
     ReconstructionGrid,
     ReconstructionJob,
+    _node_checkpoint_plan,
+    _node_excluded_frames,
     job_status,
     reconstruction_execution_settings,
     run_cluster_finalize,
@@ -227,22 +230,274 @@ def test_job_resumes_partial_checkpoints_without_remapping_completed_ones(
     assert len(loaded_frames) == 1
 
 
-def test_cluster_execution_is_not_yet_available(tmp_path):
-    """Cluster execution is temporarily stubbed pending the checkpoint-era
-    task model (design doc Sec13): running or finalizing must fail clearly,
-    not partially execute or mutate the shared job JSON."""
-    _scan, job = _two_frame_job(tmp_path, "cluster-result.h5")
-    job_path = tmp_path / "cluster-job.json"
+def _multi_frame_job(
+    tmp_path, output_name, frame_count, *, cluster=False, array_task_count=None
+):
+    scan = SimulationScan((2, 2), 0.0, 1.0, frame_count)
+    assets = tmp_path / "scratch" / "job-assets.nxs"
+    assets.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(assets, "w") as h5file:
+        h5file.attrs["orgui_job_assets"] = 1
+    grid = ReconstructionGrid(
+        minimum=(-20.0, -20.0, -20.0),
+        maximum=(20.0, 20.0, 20.0),
+        step=(20.0, 20.0, 20.0),
+        frame="lab",
+        chunk_shape=(2, 2, 2),
+    )
+    scan_reference = ScanReference.from_scan(scan).to_dict()
+    job = ReconstructionJob(
+        config=config_data_to_json(_config()),
+        scan_reference=scan_reference,
+        grids=[grid.__dict__],
+        scratch_path=str(assets.parent),
+        output_path=str(tmp_path / output_name),
+        compression="Raw",
+        assets_path=str(assets),
+        assets_sha256=sha256(assets.read_bytes()).hexdigest(),
+        source_fingerprint_sha256=sha256(
+            json.dumps(
+                scan_reference, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
+        threads_per_image=1,
+        accumulation_budget_bytes=None,
+        checkpoint_count=frame_count,
+        # Cluster jobs never populate checkpoint_plan (design doc Sec13:
+        # per-node plans live in scratch-local sidecars, not the job
+        # JSON); single-node jobs get one checkpoint per frame, mirroring
+        # _two_frame_job's convention.
+        checkpoint_plan=(
+            {}
+            if cluster
+            else {"q_lab": [[i, i + 1] for i in range(frame_count)]}
+        ),
+        runtime_threads=2,
+        runtime_memory_bytes=64 * 1024 * 1024,
+        tile_shape=(1, 1),
+        frame_batch=1,
+        cluster_settings=(
+            {"array_task_count": array_task_count} if array_task_count else {}
+        ),
+    )
+    return scan, job
+
+
+@pytest.mark.parametrize(
+    "scan_length,excluded,total_tasks",
+    [
+        (10, set(), 3),
+        (10, {3, 4, 5}, 3),
+        (7, {0, 6}, 4),
+        (1, set(), 5),
+        (20, {2, 5, 17}, 6),
+    ],
+)
+def test_node_excluded_frames_partitions_included_frames_exactly(
+    scan_length, excluded, total_tasks
+):
+    """Every included frame must be owned by exactly one task_index; no
+    frame is owned by zero or more than one (design doc Sec13: disjoint,
+    position-based node slicing)."""
+    included = {index for index in range(scan_length) if index not in excluded}
+    owners = {}
+    for task_index in range(total_tasks):
+        node_excluded = _node_excluded_frames(
+            scan_length, excluded, total_tasks, task_index
+        )
+        owned = set(range(scan_length)) - node_excluded
+        assert owned <= included
+        for frame in owned:
+            assert frame not in owners, f"frame {frame} owned by multiple nodes"
+            owners[frame] = task_index
+    assert set(owners) == included
+
+
+def test_node_checkpoint_plan_computes_once_and_caches(tmp_path, monkeypatch):
+    """A node's checkpoint plan is computed once and persisted (design doc
+    Sec11, extended to per-node scope); a second call for the same
+    task_index must read the sidecar rather than re-running the
+    calibration probe."""
+    scan, job = _multi_frame_job(
+        tmp_path, "sidecar.h5", 4, cluster=True, array_task_count=2
+    )
+    config = job.config_data
+    calls = 0
+    original = reconstruction_job_module.estimate_checkpoint_plan
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reconstruction_job_module, "estimate_checkpoint_plan", counting
+    )
+
+    first = _node_checkpoint_plan(
+        job, scan, config, None, total_tasks=2, task_index=0
+    )
+    assert calls == 1
+    second = _node_checkpoint_plan(
+        job, scan, config, None, total_tasks=2, task_index=0
+    )
+    assert calls == 1
+    assert first == second
+
+
+@pytest.mark.parametrize("total_tasks", [1, 2, 3])
+def test_cluster_run_matches_single_node_run(tmp_path, total_tasks):
+    """Splitting the same scan across a cluster array must produce the
+    same output as running it on a single node -- the central scientific
+    claim of the checkpoint architecture's cluster extension (design doc
+    Sec13): frame-range splitting must not change results."""
+    frame_count = 6
+
+    single_root = tmp_path / "single"
+    single_root.mkdir()
+    _single_scan, single_job = _multi_frame_job(
+        single_root, "single-result.h5", frame_count
+    )
+    single_path = single_root / "job.json"
+    write_job(single_job, single_path)
+    single_result = run_job(single_path)
+    assert single_result["status"] == "complete"
+
+    cluster_root = tmp_path / f"cluster-{total_tasks}"
+    cluster_root.mkdir()
+    _cluster_scan, cluster_job = _multi_frame_job(
+        cluster_root,
+        "cluster-result.h5",
+        frame_count,
+        cluster=True,
+        array_task_count=total_tasks,
+    )
+    cluster_path = cluster_root / "job.json"
+    write_job(cluster_job, cluster_path)
+    for task_index in range(total_tasks):
+        run_cluster_map_task(
+            cluster_path,
+            task_index,
+            total_tasks=total_tasks,
+            cpus=1,
+            memory_bytes=64 * 1024 * 1024,
+        )
+    cluster_result = run_cluster_finalize(
+        cluster_path,
+        total_tasks=total_tasks,
+        cpus=1,
+        memory_bytes=64 * 1024 * 1024,
+    )
+    assert cluster_result["status"] == "complete"
+
+    with h5py.File(single_result["output_path"], "r") as single_h5:
+        with h5py.File(cluster_result["output_path"], "r") as cluster_h5:
+            single_group = single_h5["entry/reconstruction/results/q_lab"]
+            cluster_group = cluster_h5["entry/reconstruction/results/q_lab"]
+            for dataset in ("intensity", "variance", "weight", "contributors"):
+                np.testing.assert_array_equal(
+                    np.nan_to_num(single_group[dataset][()]),
+                    np.nan_to_num(cluster_group[dataset][()]),
+                    err_msg=dataset,
+                )
+
+
+def test_cluster_node_resumes_without_remapping_completed_frames(
+    tmp_path, monkeypatch
+):
+    """Interrupting one node mid-map, then re-running just that node, must
+    not reload frames whose checkpoint already fully covers them -- the
+    same invariant as single-node resume, scoped to one node's slice."""
+    scan, job = _multi_frame_job(
+        tmp_path, "cluster-resume.h5", 4, cluster=True, array_task_count=2
+    )
+    job_path = tmp_path / "job.json"
+    write_job(job, job_path)
+
+    loaded_frames = []
+    decision_lock = threading.Lock()
+    first_claimed = threading.Event()
+    original_get_raw_img = SimulationScan.get_raw_img
+
+    def failing_after_first(self, index):
+        with decision_lock:
+            loaded_frames.append(index)
+            allowed = not first_claimed.is_set()
+            if allowed:
+                first_claimed.set()
+        if not allowed:
+            raise RuntimeError("simulated crash mid-node")
+        return original_get_raw_img(self, index)
+
+    monkeypatch.setattr(SimulationScan, "get_raw_img", failing_after_first)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        run_cluster_map_task(
+            job_path,
+            0,
+            total_tasks=2,
+            cpus=1,
+            memory_bytes=64 * 1024 * 1024,
+        )
+
+    # Node 0 owns 2 of the 4 frames; both were attempted (racing for
+    # "first"), exactly one completed before the other's crash aborted
+    # this node's run.
+    assert len(loaded_frames) == 2
+    loaded_frames.clear()
+
+    def counting_get_raw_img(self, index):
+        loaded_frames.append(index)
+        return original_get_raw_img(self, index)
+
+    monkeypatch.setattr(SimulationScan, "get_raw_img", counting_get_raw_img)
+
+    result = run_cluster_map_task(
+        job_path, 0, total_tasks=2, cpus=1, memory_bytes=64 * 1024 * 1024
+    )
+
+    assert result["status"] == "complete"
+    # Only the one frame whose checkpoint was not yet resumable was
+    # reloaded -- not both of node 0's frames from scratch.
+    assert len(loaded_frames) == 1
+
+
+def test_cluster_finalize_raises_when_a_node_is_incomplete(tmp_path):
+    """Finalize must refuse to produce output while any node's planned
+    checkpoints are missing, and must not mutate job.status."""
+    scan, job = _multi_frame_job(
+        tmp_path, "incomplete.h5", 4, cluster=True, array_task_count=2
+    )
+    job_path = tmp_path / "job.json"
+    write_job(job, job_path)
+
+    # Only node 0 ever runs; node 1 never does.
+    run_cluster_map_task(
+        job_path, 0, total_tasks=2, cpus=1, memory_bytes=64 * 1024 * 1024
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete"):
+        run_cluster_finalize(
+            job_path, total_tasks=2, cpus=1, memory_bytes=64 * 1024 * 1024
+        )
+
+    assert job_status(job_path)["status"] != "complete"
+
+
+def test_cluster_array_task_count_never_mutates_shared_job_json(tmp_path):
+    """Array elements must not mutate the shared job JSON, so they may
+    run fully concurrently without coordination."""
+    _scan, job = _multi_frame_job(
+        tmp_path, "no-mutate.h5", 2, cluster=True, array_task_count=2
+    )
+    job_path = tmp_path / "job.json"
     write_job(job, job_path)
     frozen_job = job_path.read_bytes()
 
-    with pytest.raises(NotImplementedError, match="checkpoint"):
-        run_cluster_map_task(
-            job_path, 0, cpus=1, memory_bytes=64 * 1024 * 1024
-        )
-    with pytest.raises(NotImplementedError, match="checkpoint"):
-        run_cluster_finalize(
-            job_path, cpus=2, memory_bytes=128 * 1024 * 1024
-        )
+    run_cluster_map_task(
+        job_path, 0, total_tasks=2, cpus=1, memory_bytes=64 * 1024 * 1024
+    )
+    run_cluster_map_task(
+        job_path, 1, total_tasks=2, cpus=1, memory_bytes=64 * 1024 * 1024
+    )
 
     assert job_path.read_bytes() == frozen_job

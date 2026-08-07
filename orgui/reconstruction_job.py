@@ -557,6 +557,7 @@ def estimate_checkpoint_plan(
     mask=None,
     budget_seconds=0.1,
     memory_budget_bytes=None,
+    extra_excluded_frames=(),
 ):
     """Estimate per-grid job data volume and checkpoint file counts.
 
@@ -601,6 +602,12 @@ def estimate_checkpoint_plan(
     :param memory_budget_bytes:
         Optional override for the native kernel's own memory-budget
         precheck; defaults to ``ram_budget_bytes``.
+    :param extra_excluded_frames:
+        Additional frame indices to treat as excluded, unioned with
+        ``config.corrections.excluded_frames``. Used to scope the estimate
+        to one cluster node's own slice of the scan (design doc Sec13)
+        without touching the job-level exclusion set; empty for the
+        single-node case.
     :returns:
         Dict with ``per_grid`` (mapping ``grid_name`` ->
         ``{"job_data_bytes_estimate", "files_per_job"}``) and
@@ -626,7 +633,7 @@ def estimate_checkpoint_plan(
         if mask.shape != (rows, columns):
             raise ValueError("mask shape must match the detector shape")
 
-    excluded = set(config.corrections.excluded_frames)
+    excluded = set(config.corrections.excluded_frames) | set(extra_excluded_frames)
     included = [index for index in range(len(scan)) if index not in excluded]
     if not included:
         raise ValueError("No included frames are available for estimation")
@@ -725,6 +732,37 @@ def _checkpoint_frame_ranges(count, excluded, files_per_job):
         return []
     batch_size = max(1, math.ceil(included_count / max(1, int(files_per_job))))
     return _included_ranges(count, excluded, batch_size)
+
+
+def _node_excluded_frames(scan_length, excluded, total_tasks, task_index) -> set[int]:
+    """Frames outside this cluster node's disjoint share of the included
+    frames, unioned with the job's own excluded frames (design doc Sec13).
+
+    Splits the *included* frame list into ``total_tasks`` contiguous
+    shares by position (``included[i*n//total_tasks : (i+1)*n//total_tasks]``),
+    not by re-running :func:`_included_ranges`'s gap-driven batching --
+    that split is sized to bound checkpoint/task granularity and can
+    produce more pieces than ``total_tasks`` when excluded frames create
+    extra gaps, which would leave a piece owned by no node. Position-based
+    splitting always yields exactly ``total_tasks`` shares (some possibly
+    empty), covering every included frame exactly once. A share can still
+    be internally non-contiguous (excluded frames inside it); that is
+    fine -- :func:`_included_ranges` already decomposes a sparse included
+    set into multiple ``(start, stop)`` ranges everywhere else it is used.
+
+    :returns:
+        The set of frame indices this node does *not* own -- pass to
+        ``extra_excluded_frames`` on :func:`_execution_layout` and
+        :func:`estimate_checkpoint_plan`, or union directly into an
+        ``excluded`` argument to :func:`_checkpoint_frame_ranges`.
+    """
+    included = [index for index in range(scan_length) if index not in excluded]
+    total_tasks = max(1, int(total_tasks))
+    task_index = int(task_index)
+    share_start = (task_index * len(included)) // total_tasks
+    share_stop = ((task_index + 1) * len(included)) // total_tasks
+    owned = set(included[share_start:share_stop])
+    return (set(range(scan_length)) - owned) | set(excluded)
 
 
 def prepare_job(
@@ -1100,7 +1138,16 @@ def _correction_pipeline(config, scan, assets, provenance):
     return correct
 
 
-def _execution_layout(job, scan, config):
+def _execution_layout(job, scan, config, *, extra_excluded_frames=()):
+    """Compute the automatic scheduling ranges and detector tiles.
+
+    :param extra_excluded_frames:
+        Additional frame indices to exclude, unioned with
+        ``config.corrections.excluded_frames``. Used to scope scheduling
+        to one cluster node's own slice of the scan (design doc Sec13);
+        empty for the single-node case.
+    """
+    excluded = set(config.corrections.excluded_frames) | set(extra_excluded_frames)
     rows, columns = config.detector.detector.shape
     effective_memory = (
         job.memory_override_bytes or job.runtime_memory_bytes
@@ -1131,13 +1178,7 @@ def _execution_layout(job, scan, config):
     included_count = max(
         1,
         len(scan)
-        - len(
-            {
-                frame
-                for frame in config.corrections.excluded_frames
-                if 0 <= frame < len(scan)
-            }
-        ),
+        - len({frame for frame in excluded if 0 <= frame < len(scan)}),
     )
     if job.frame_batch is None:
         spec = job.internal_spec()
@@ -1152,9 +1193,7 @@ def _execution_layout(job, scan, config):
         )
     else:
         frame_batch = job.frame_batch
-    ranges = _included_ranges(
-        len(scan), set(config.corrections.excluded_frames), frame_batch
-    )
+    ranges = _included_ranges(len(scan), excluded, frame_batch)
     tiles = [
         (
             row,
@@ -1409,20 +1448,63 @@ def _job_checkpoint_boundaries(job):
     }
 
 
+def _cluster_status_counts(job, *, total_tasks):
+    """Best-effort checkpoint completion counts for a cluster job.
+
+    Only reads whatever node sidecars already exist on disk -- a node
+    that has not run yet simply contributes 0 planned/0 completed rather
+    than triggering a calibration probe just to answer a status query.
+    Authoritative completeness is still :func:`run_cluster_finalize`'s
+    own check.
+    """
+    total_checkpoints = 0
+    completed_checkpoints = 0
+    for task_index in range(int(total_tasks)):
+        sidecar = _read_node_checkpoint_sidecar(
+            job, task_index, total_tasks=total_tasks
+        )
+        if sidecar is None:
+            continue
+        boundaries = {
+            grid_name: [tuple(item) for item in items]
+            for grid_name, items in sidecar["boundaries"].items()
+        }
+        total_checkpoints += sum(len(items) for items in boundaries.values())
+        node_dir = _node_checkpoint_dir(job, task_index)
+        resumed, _files = _discover_checkpoint_state(
+            node_dir, boundaries, job.digest
+        )
+        completed_checkpoints += len(resumed)
+    return total_checkpoints, completed_checkpoints
+
+
 def job_status(path):
     """Return verified completion state for a job JSON."""
     job = read_job(path)
-    boundaries = _job_checkpoint_boundaries(job)
-    total_checkpoints = sum(len(items) for items in boundaries.values())
+    array_task_count = job.cluster_settings.get("array_task_count")
     if job.status != "complete":
         verify_job(job)
-        checkpoint_dir = Path(job.scratch_path) / "checkpoints"
-        resumed, _files = _discover_checkpoint_state(
-            checkpoint_dir, boundaries, job.digest
+    if array_task_count and job.status != "complete":
+        # Node sidecars are deleted on successful finalize (matching the
+        # single-node cleanup), so a completed cluster job has nothing
+        # left on disk to count -- `status`/`output_sha256` already tell
+        # the real story at that point.
+        total_checkpoints, completed_checkpoints = _cluster_status_counts(
+            job, total_tasks=array_task_count
         )
-        completed_checkpoints = len(resumed)
+    elif array_task_count:
+        total_checkpoints = completed_checkpoints = 0
     else:
-        completed_checkpoints = total_checkpoints
+        boundaries = _job_checkpoint_boundaries(job)
+        total_checkpoints = sum(len(items) for items in boundaries.values())
+        if job.status != "complete":
+            checkpoint_dir = Path(job.scratch_path) / "checkpoints"
+            resumed, _files = _discover_checkpoint_state(
+                checkpoint_dir, boundaries, job.digest
+            )
+            completed_checkpoints = len(resumed)
+        else:
+            completed_checkpoints = total_checkpoints
     result = {
         "status": job.status,
         "job_sha256": job.digest,
@@ -1458,120 +1540,196 @@ def _base_provenance(job, config):
     }
 
 
-def run_cluster_map_task(
-    path,
-    task_index,
-    *,
-    cpus=1,
-    memory_bytes=1024**3,
-    progress=None,
-):
-    """Execute one cluster map-array task.
+def _merge_provenance(target, source):
+    """Deep-merge one node's correction provenance into another's.
 
-    Not yet implemented: cluster execution is being reworked for the
-    checkpoint architecture (design doc Sec13), where each array task is a
-    full independent node running the whole single-node pipeline against
-    its own disjoint frame-range slice -- a structurally different split
-    from the retired Parquet-era wiring this replaces (one frame-range
-    mapping task feeding a shared job-wide reduce). Run the job with
-    ``run``/``resume`` on a single node until cluster support lands.
+    Every cluster node runs :func:`_correction_pipeline` in its own
+    process, mutating its own provenance dict independently -- unlike the
+    single-node path, where one dict is shared across every frame within
+    one process, cluster provenance genuinely needs merging back together
+    at finalize time (design doc Sec13).
     """
-    raise NotImplementedError(
-        "Cluster execution is being reworked for the checkpoint "
-        "architecture (design doc Sec13) and is not yet available in this "
-        "build. Use 'run'/'resume' on a single node instead."
-    )
+    for key, value in source.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _merge_provenance(target[key], value)
+        else:
+            target[key] = value
 
 
-def run_cluster_finalize(
-    path,
-    *,
-    cpus=1,
-    memory_bytes=1024**3,
-    progress=None,
-):
-    """Verify all cluster map tasks, then finalize their job.
+def _execution_spec(job, *, threads=None, memory_bytes=None):
+    """Build the job's spec, optionally overriding threads/memory for one
+    execution.
 
-    Not yet implemented -- see :func:`run_cluster_map_task`.
+    A cluster array task's own scheduler allocation (``cpus``,
+    ``memory_bytes``) can differ from the job's captured
+    ``runtime_threads``/``runtime_memory_bytes`` (design doc Sec13); this
+    lets :func:`run_cluster_map_task` build a spec reflecting what that
+    task actually has available, without mutating the job's own recorded
+    configuration. Returns ``job.internal_spec()`` unchanged when both
+    overrides are ``None`` (the single-node case).
     """
-    raise NotImplementedError(
-        "Cluster execution is being reworked for the checkpoint "
-        "architecture (design doc Sec13) and is not yet available in this "
-        "build. Use 'run'/'resume' on a single node instead."
-    )
-
-
-def run_job(
-    path,
-    *,
-    progress=None,
-    execution_memory_bytes=None,
-):
-    """Run or resume one prepared reconstruction job."""
-    path = Path(path).absolute()
-    job = read_job(path)
-    if job.status == "complete":
-        return job_status(path)
-    verify_job(job)
-    scan = job.scan
-    config = job.config_data
-    assets = _load_assets(job)
     spec = job.internal_spec()
-    bounds = scan.exposure_angle_bounds(
-        config, fallback=job.angle_fallback
-    )
-    ranges, tiles = _execution_layout(job, scan, config)
-    checkpoint_dir = Path(job.scratch_path) / "checkpoints"
-    boundaries = _job_checkpoint_boundaries(job)
+    if threads is None and memory_bytes is None:
+        return spec
+    overrides = {}
+    if threads is not None:
+        overrides["threads"] = max(1, int(threads))
+    if memory_bytes is not None:
+        overrides["memory_budget_bytes"] = max(1024**2, int(memory_bytes))
+    return _ReconstructionSpec.from_dict({**spec.to_dict(), **overrides})
 
-    effective_memory = (
-        max(1024**2, int(execution_memory_bytes))
-        if execution_memory_bytes is not None
-        else job.memory_override_bytes or job.runtime_memory_bytes
-    )
-    number_of_grids = max(1, len(spec.grids))
-    active_budget_bytes = max(
-        1024**2,
-        effective_memory
-        // (MAX_CONCURRENT_ACTIVE_CHECKPOINTS * number_of_grids),
-    )
 
-    resumed, _existing_files = _discover_checkpoint_state(
-        checkpoint_dir, boundaries, job.digest, cleanup_stale=True
-    )
-    router = _CheckpointRouter(
-        boundaries,
-        spec_digest=job.digest,
-        checkpoint_dir=checkpoint_dir,
-        active_budget_bytes=active_budget_bytes,
-        resumed=resumed,
-    )
-    provenance = _base_provenance(job, config)
-    correct = _correction_pipeline(config, scan, assets, provenance)
+def _node_checkpoint_dir(job, task_index):
+    """Scratch subdirectory owning one cluster node's checkpoint files
+    (design doc Sec13) -- disjoint from every other node's, and from the
+    single-node case's flat ``checkpoints/{grid_name}/...`` layout."""
+    return Path(job.scratch_path) / "checkpoints" / f"node{int(task_index):04d}"
 
-    def range_is_resumed(frame_range):
-        start, stop = frame_range
-        for grid_name in boundaries:
-            for frame_index in range(start, stop):
-                index = router.checkpoint_index_for_frame(grid_name, frame_index)
-                if (grid_name, index) not in resumed:
-                    return False
-        return True
 
-    pending_ranges = [
-        frame_range for frame_range in ranges if not range_is_resumed(frame_range)
-    ]
-    total_images = sum(stop - start for start, stop in ranges)
-    completed_images = total_images - sum(
-        stop - start for start, stop in pending_ranges
+def _read_node_checkpoint_sidecar(job, task_index, *, total_tasks):
+    """Read one node's persisted checkpoint-plan sidecar, if present and
+    valid for the current job/total_tasks/task_index -- no scan/config
+    access, no computation. Used by :func:`_node_checkpoint_plan` (which
+    falls back to computing it) and by :func:`job_status` (which reports
+    "not started yet" rather than paying for a calibration probe just to
+    answer a status query).
+
+    :returns:
+        ``{"excluded": [...], "boundaries": {...}}`` or ``None``.
+    :rtype: dict | None
+    """
+    sidecar_path = _node_checkpoint_dir(job, task_index) / "plan.json"
+    if not sidecar_path.exists():
+        return None
+    try:
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        if (
+            sidecar.get("job_sha256") == job.digest
+            and sidecar.get("total_tasks") == int(total_tasks)
+            and sidecar.get("task_index") == int(task_index)
+        ):
+            return {
+                "excluded": sidecar["excluded"],
+                "boundaries": sidecar["boundaries"],
+            }
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
+def _node_checkpoint_plan(job, scan, config, mask, *, total_tasks, task_index):
+    """Load or compute-and-persist one cluster node's checkpoint plan.
+
+    Mirrors :func:`prepare_job`'s single-node checkpoint-plan computation,
+    scoped to this node's own disjoint frame share
+    (:func:`_node_excluded_frames`) and persisted as a small JSON sidecar
+    under this node's own scratch subdirectory instead of the job JSON
+    (design doc Sec11: computed once, never recomputed on resume --
+    extended to per-node scope so a scheduler retry of the same array
+    task reuses the same boundaries rather than risking different ones
+    from calibration-probe sampling variance).
+
+    :returns:
+        ``None`` if this node owns no frames (``task_index`` beyond the
+        real share count for ``total_tasks``). Otherwise a dict with
+        ``excluded`` (sorted list of frame indices this node does not
+        own) and ``boundaries`` (``{grid_name: [[start, stop], ...]}``,
+        this node's own planned checkpoint frame ranges).
+    :rtype: dict | None
+    """
+    node_excluded = _node_excluded_frames(
+        len(scan), set(config.corrections.excluded_frames), total_tasks, task_index
     )
-    if progress is not None:
-        progress(
-            completed_images,
-            total_images + 1,
-            f"Mapping images {completed_images}/{total_images}",
-        )
+    if len(node_excluded) >= len(scan):
+        return None
 
+    cached = _read_node_checkpoint_sidecar(
+        job, task_index, total_tasks=total_tasks
+    )
+    if cached is not None:
+        return cached
+
+    depth = (
+        job.advanced_depth
+        if job.advanced_depth is not None
+        else ACCURACY_DEPTHS[job.accuracy]
+    )
+    threads = job.thread_override or job.runtime_threads
+    memory = job.memory_override_bytes or job.runtime_memory_bytes
+    plan = estimate_checkpoint_plan(
+        config,
+        scan,
+        job.grids,
+        max_depth=depth,
+        threads=threads,
+        ram_budget_bytes=memory,
+        checkpoint_count=job.checkpoint_count,
+        angle_fallback=job.angle_fallback,
+        mask=mask,
+        extra_excluded_frames=node_excluded,
+    )
+    boundaries = {
+        grid_name: [
+            list(item)
+            for item in _checkpoint_frame_ranges(
+                len(scan), node_excluded, estimate["files_per_job"]
+            )
+        ]
+        for grid_name, estimate in plan["per_grid"].items()
+    }
+    result = {"excluded": sorted(node_excluded), "boundaries": boundaries}
+    sidecar_path = _node_checkpoint_dir(job, task_index) / "plan.json"
+    _atomic_json(
+        sidecar_path,
+        {
+            "job_sha256": job.digest,
+            "total_tasks": int(total_tasks),
+            "task_index": int(task_index),
+            **result,
+        },
+    )
+    return result
+
+
+def _range_is_resumed(router, boundaries, resumed, frame_range):
+    """Whether every frame in ``frame_range`` is, for every grid, already
+    covered by an already-resumed checkpoint. Shared by :func:`run_job`
+    and :func:`run_cluster_map_task`."""
+    start, stop = frame_range
+    for grid_name in boundaries:
+        for frame_index in range(start, stop):
+            index = router.checkpoint_index_for_frame(grid_name, frame_index)
+            if (grid_name, index) not in resumed:
+                return False
+    return True
+
+
+def _map_pending_ranges(
+    spec,
+    scan,
+    config,
+    bounds,
+    tiles,
+    pending_ranges,
+    router,
+    *,
+    correction_pipeline,
+    effective_memory,
+    threads_per_image,
+    accumulation_budget_bytes,
+    total_images,
+    completed_images,
+    progress,
+):
+    """Map every range in ``pending_ranges`` against ``router``.
+
+    Extracted from :func:`run_job`'s mapping loop so
+    :func:`run_cluster_map_task` can reuse it unchanged, scoped to one
+    node's own ``pending_ranges`` instead of the whole job's. Mutates
+    ``router`` (and the checkpoint files it writes) in place; returns
+    nothing. Not resume-aware itself -- callers decide ``pending_ranges``
+    (see :func:`_range_is_resumed`).
+    """
     ray_cache_bytes = sum(
         (tile[1] - tile[0] + 1)
         * (tile[3] - tile[2] + 1)
@@ -1603,8 +1761,8 @@ def run_job(
                 scheduler_memory,
                 stationary=stationary,
                 frames_per_task=frame_range[1] - frame_range[0],
-                threads_per_image=job.threads_per_image,
-                accumulation_budget_bytes=job.accumulation_budget_bytes,
+                threads_per_image=threads_per_image,
+                accumulation_budget_bytes=accumulation_budget_bytes,
             )
         )
         worker_limits.append(image_limit)
@@ -1656,7 +1814,7 @@ def run_job(
             tiles,
             task_bounds,
             router,
-            correction_pipeline=correct,
+            correction_pipeline=correction_pipeline,
             corner_rays=ray_cache if cache_detector_rays else None,
             kernel_threads=kernel_threads,
             kernel_memory_budget_bytes=kernel_memory_budget,
@@ -1699,6 +1857,368 @@ def run_job(
     finally:
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
+
+
+def run_cluster_map_task(
+    path,
+    task_index,
+    *,
+    total_tasks,
+    cpus=1,
+    memory_bytes=1024**3,
+    progress=None,
+):
+    """Execute one cluster map-array task.
+
+    Runs the full single-node mapping pipeline (design doc Sec13) against
+    this node's own disjoint frame slice, computed from
+    ``task_index``/``total_tasks`` alone -- never read from a scheduler
+    environment variable, since most schedulers besides Slurm never
+    expose a reliable total-array-size variable to a running task (see
+    ``doc/design/reciprocal_space_scratch_architecture.md`` Sec13). Never
+    writes the shared job JSON: array elements must not mutate shared
+    state, so they may run fully concurrently.
+
+    :param int task_index:
+        This node's 0-based position in the array (already normalized
+        from the scheduler's own per-task index -- SGE's 1-based
+        ``SGE_TASK_ID``, Slurm's 0-based ``SLURM_ARRAY_TASK_ID`` -- by the
+        generated script).
+    :param int total_tasks:
+        Total array size, supplied explicitly (baked into the generated
+        script by
+        :func:`orgui.reconstruction_cluster.generate_cluster_scripts`),
+        never inferred from scheduler environment variables.
+    :param int cpus, memory_bytes:
+        This array task's own scheduler resource allocation -- can differ
+        from the job's captured
+        ``runtime_threads``/``runtime_memory_bytes``.
+    :returns:
+        Status dict: ``task_index``, ``total_tasks``, ``frames`` (owned
+        by this node), ``mapped`` (newly loaded this run), ``reused``
+        (already-resumed frames skipped).
+    :rtype: dict
+    """
+    path = Path(path).absolute()
+    job = read_job(path)
+    verify_job(job)
+    scan = job.scan
+    config = job.config_data
+    assets = _load_assets(job)
+    mask = assets.get("mask")
+
+    plan = _node_checkpoint_plan(
+        job, scan, config, mask, total_tasks=total_tasks, task_index=task_index
+    )
+    if plan is None:
+        return {
+            "status": "complete",
+            "task_index": int(task_index),
+            "total_tasks": int(total_tasks),
+            "frames": 0,
+            "mapped": 0,
+            "reused": 0,
+        }
+
+    node_excluded = set(plan["excluded"])
+    node_dir = _node_checkpoint_dir(job, task_index)
+    boundaries = {
+        grid_name: [tuple(item) for item in items]
+        for grid_name, items in plan["boundaries"].items()
+    }
+    execution_spec = _execution_spec(job, threads=cpus, memory_bytes=memory_bytes)
+    effective_memory = execution_spec.memory_budget_bytes
+    number_of_grids = max(1, len(execution_spec.grids))
+    active_budget_bytes = max(
+        1024**2,
+        effective_memory
+        // (MAX_CONCURRENT_ACTIVE_CHECKPOINTS * number_of_grids),
+    )
+    resumed, _existing_files = _discover_checkpoint_state(
+        node_dir, boundaries, job.digest, cleanup_stale=True
+    )
+    router = _CheckpointRouter(
+        boundaries,
+        spec_digest=job.digest,
+        checkpoint_dir=node_dir,
+        active_budget_bytes=active_budget_bytes,
+        resumed=resumed,
+    )
+
+    provenance = _base_provenance(job, config)
+    correct = _correction_pipeline(config, scan, assets, provenance)
+
+    ranges, tiles = _execution_layout(
+        job, scan, config, extra_excluded_frames=node_excluded
+    )
+    bounds = scan.exposure_angle_bounds(config, fallback=job.angle_fallback)
+    pending_ranges = [
+        frame_range
+        for frame_range in ranges
+        if not _range_is_resumed(router, boundaries, resumed, frame_range)
+    ]
+    total_frames = sum(stop - start for start, stop in ranges)
+    reused_frames = total_frames - sum(
+        stop - start for start, stop in pending_ranges
+    )
+
+    _map_pending_ranges(
+        execution_spec,
+        scan,
+        config,
+        bounds,
+        tiles,
+        pending_ranges,
+        router,
+        correction_pipeline=correct,
+        effective_memory=effective_memory,
+        threads_per_image=job.threads_per_image,
+        accumulation_budget_bytes=job.accumulation_budget_bytes,
+        total_images=total_frames,
+        completed_images=reused_frames,
+        progress=progress,
+    )
+
+    resumed_after, _files = _discover_checkpoint_state(
+        node_dir, boundaries, job.digest, cleanup_stale=False
+    )
+    expected = {
+        (grid_name, index)
+        for grid_name, ranges_for_grid in boundaries.items()
+        for index in range(len(ranges_for_grid))
+    }
+    missing = expected - resumed_after
+    if missing:
+        raise RuntimeError(
+            f"Node {task_index} mapping did not produce {len(missing)} "
+            f"expected checkpoint(s): {sorted(missing)[:10]}"
+        )
+
+    _atomic_json(node_dir / "provenance.json", provenance)
+
+    return {
+        "status": "complete",
+        "task_index": int(task_index),
+        "total_tasks": int(total_tasks),
+        "frames": total_frames,
+        "mapped": total_frames - reused_frames,
+        "reused": reused_frames,
+    }
+
+
+def run_cluster_finalize(
+    path,
+    *,
+    total_tasks,
+    cpus=1,
+    memory_bytes=1024**3,
+    progress=None,
+):
+    """Verify every cluster node's checkpoints, then finalize their job.
+
+    Reads every node's persisted checkpoint-plan sidecar
+    (:func:`_node_checkpoint_plan`) and provenance, verifies each node's
+    planned checkpoints are all present and digest-matching
+    (:func:`_discover_checkpoint_state`, the same mechanism as the
+    single-node path -- design doc Sec11), then merges every node's
+    checkpoint files into one :func:`_finalize_reconstruction` call: the
+    "more readers, same tree-merge" extension from design doc Sec13 --
+    no change needed inside ``reconstruction.py`` for cluster support.
+
+    :param int total_tasks:
+        Must match the array size the map tasks actually ran with.
+    :param int cpus:
+        Accepted for CLI/script-generation symmetry with the map tasks;
+        not currently used algorithmically -- finalize has no internal
+        worker pool to size, matching the single-node finalize path's own
+        single-threaded per-grid chunk loop.
+    :param int memory_bytes:
+        Accepted for CLI/script-generation symmetry; finalize already
+        bounds memory per checkpoint file via
+        ``_CheckpointRangeReader`` regardless of this value, matching the
+        single-node path, so it is currently informational only.
+    """
+    path = Path(path).absolute()
+    job = read_job(path)
+    if job.status == "complete":
+        return job_status(path)
+    verify_job(job)
+    if int(cpus) < 1:
+        raise ValueError("cpus must be at least one")
+    if int(memory_bytes) < 1:
+        raise ValueError("memory_bytes must be positive")
+    scan = job.scan
+    config = job.config_data
+    assets = _load_assets(job)
+    mask = assets.get("mask")
+
+    checkpoint_files: dict[str, list] = {}
+    provenance = _base_provenance(job, config)
+    incomplete = []
+    for task_index in range(int(total_tasks)):
+        plan = _node_checkpoint_plan(
+            job,
+            scan,
+            config,
+            mask,
+            total_tasks=total_tasks,
+            task_index=task_index,
+        )
+        if plan is None:
+            continue
+        node_dir = _node_checkpoint_dir(job, task_index)
+        boundaries = {
+            grid_name: [tuple(item) for item in items]
+            for grid_name, items in plan["boundaries"].items()
+        }
+        resumed, files = _discover_checkpoint_state(
+            node_dir, boundaries, job.digest
+        )
+        expected = {
+            (grid_name, index)
+            for grid_name, ranges_for_grid in boundaries.items()
+            for index in range(len(ranges_for_grid))
+        }
+        if expected - resumed:
+            incomplete.append(task_index)
+            continue
+        for grid_name, paths in files.items():
+            checkpoint_files.setdefault(grid_name, []).extend(paths)
+        provenance_path = node_dir / "provenance.json"
+        if provenance_path.exists():
+            _merge_provenance(
+                provenance,
+                json.loads(provenance_path.read_text(encoding="utf-8")),
+            )
+
+    if incomplete:
+        raise RuntimeError(
+            f"Cannot finalize: {len(incomplete)} of {total_tasks} cluster "
+            f"map tasks are incomplete or missing: {incomplete[:20]}"
+        )
+
+    job.correction_provenance = provenance
+    spec = job.internal_spec()
+    result = _finalize_reconstruction(
+        spec,
+        checkpoint_files,
+        job.output_path,
+        provenance={
+            **provenance,
+            "scan_reference": job.scan_reference,
+        },
+        config=config,
+        chunk_progress=(
+            None
+            if progress is None
+            else lambda written, count: progress(
+                written, count, f"Finalizing HDF5 chunk {written}/{count}"
+            )
+        ),
+    )
+    job.output_sha256 = result["sha256"]
+    job.status = "complete"
+    for task_index in range(int(total_tasks)):
+        target = _node_checkpoint_dir(job, task_index)
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+        except OSError as error:
+            job.cleanup_errors.append(f"{target}: {error}")
+    checkpoints_root = Path(job.scratch_path) / "checkpoints"
+    try:
+        if checkpoints_root.is_dir() and not any(checkpoints_root.iterdir()):
+            checkpoints_root.rmdir()
+    except OSError as error:
+        job.cleanup_errors.append(f"{checkpoints_root}: {error}")
+    try:
+        Path(job.assets_path).unlink()
+    except OSError as error:
+        job.cleanup_errors.append(f"{job.assets_path}: {error}")
+    write_job(job, path)
+    return job_status(path)
+
+
+def run_job(
+    path,
+    *,
+    progress=None,
+    execution_memory_bytes=None,
+):
+    """Run or resume one prepared reconstruction job."""
+    path = Path(path).absolute()
+    job = read_job(path)
+    if job.status == "complete":
+        return job_status(path)
+    verify_job(job)
+    scan = job.scan
+    config = job.config_data
+    assets = _load_assets(job)
+    spec = job.internal_spec()
+    bounds = scan.exposure_angle_bounds(
+        config, fallback=job.angle_fallback
+    )
+    ranges, tiles = _execution_layout(job, scan, config)
+    checkpoint_dir = Path(job.scratch_path) / "checkpoints"
+    boundaries = _job_checkpoint_boundaries(job)
+
+    effective_memory = (
+        max(1024**2, int(execution_memory_bytes))
+        if execution_memory_bytes is not None
+        else job.memory_override_bytes or job.runtime_memory_bytes
+    )
+    number_of_grids = max(1, len(spec.grids))
+    active_budget_bytes = max(
+        1024**2,
+        effective_memory
+        // (MAX_CONCURRENT_ACTIVE_CHECKPOINTS * number_of_grids),
+    )
+
+    resumed, _existing_files = _discover_checkpoint_state(
+        checkpoint_dir, boundaries, job.digest, cleanup_stale=True
+    )
+    router = _CheckpointRouter(
+        boundaries,
+        spec_digest=job.digest,
+        checkpoint_dir=checkpoint_dir,
+        active_budget_bytes=active_budget_bytes,
+        resumed=resumed,
+    )
+    provenance = _base_provenance(job, config)
+    correct = _correction_pipeline(config, scan, assets, provenance)
+
+    pending_ranges = [
+        frame_range
+        for frame_range in ranges
+        if not _range_is_resumed(router, boundaries, resumed, frame_range)
+    ]
+    total_images = sum(stop - start for start, stop in ranges)
+    completed_images = total_images - sum(
+        stop - start for start, stop in pending_ranges
+    )
+    if progress is not None:
+        progress(
+            completed_images,
+            total_images + 1,
+            f"Mapping images {completed_images}/{total_images}",
+        )
+
+    _map_pending_ranges(
+        spec,
+        scan,
+        config,
+        bounds,
+        tiles,
+        pending_ranges,
+        router,
+        correction_pipeline=correct,
+        effective_memory=effective_memory,
+        threads_per_image=job.threads_per_image,
+        accumulation_budget_bytes=job.accumulation_budget_bytes,
+        total_images=total_images,
+        completed_images=completed_images,
+        progress=progress,
+    )
 
     if progress is not None:
         progress(total_images, total_images + 1, "Verifying checkpoints")

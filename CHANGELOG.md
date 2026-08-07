@@ -215,9 +215,16 @@ Reciprocal-space reconstruction:
   that the old chunk-driven file count could trigger on a large production
   job, and removes the ``pyarrow`` dependency (``orGUI[reconstruction]`` now
   only needs ``hdf5plugin``). Reduction is now folded into mapping instead of
-  running as a separate pass. Multi-node cluster batch execution (SGE/Slurm
-  job arrays) is temporarily unavailable while it is reworked for the new
-  scratch format; single-node ``run``/``resume`` is unaffected.
+  running as a separate pass.
+- Restored multi-node cluster batch execution (SGE/Slurm job arrays) for the
+  checkpointed scratch format: each array element now maps a full,
+  independent, disjoint share of the scan's frames, and a single dependent
+  finalizer job merges every node's checkpoint files directly. The array
+  size is a new **Number of nodes** cluster setting, baked into the
+  generated ``cluster-map``/``cluster-finalize`` commands as an explicit
+  ``--total-tasks`` argument rather than inferred from the scheduler at run
+  time -- most schedulers besides Slurm never expose a running task's total
+  array size to it.
 
 
 ## [1.5.0] (2026-06-07)

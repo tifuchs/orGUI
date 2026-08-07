@@ -473,14 +473,147 @@ The direct alias is equivalent:
 Cluster Batch Execution
 -----------------------
 
-.. note::
+The **Cluster** tab generates an SGE or Slurm batch bundle from the same
+prepared job JSON used for local execution. It does not introduce another
+experiment configuration. Each array element runs the full single-node
+mapping pipeline against its own disjoint, equal share of the scan's
+frames, computed purely from its position in the array (``task_index``)
+and the array's total size (``total_tasks``) -- not from the scan's frame
+count or any grid structure. No node communicates with any other node
+while mapping; a single dependent finalizer job merges every node's
+checkpoint files once all of them are complete. The bundle contains:
 
-   Multi-node cluster execution is being reworked for the checkpoint scratch
-   architecture and is temporarily unavailable: ``cluster-map``,
-   ``cluster-finalize``, and ``cluster-scripts`` (and the **Cluster** tab's
-   script-generation button) raise a clear "not yet available" error rather
-   than run. Run jobs with ``run``/``resume`` on a single node until cluster
-   support returns. This section will be rewritten once it does.
+``*-map.sge`` or ``*-map.slurm``
+   A job array with one element per requested node. Each element reads the
+   immutable job and asset bundle, computes its own frame slice, and
+   writes only its own checkpoint files under a node-specific scratch
+   subdirectory. Array elements never update the shared job JSON, so they
+   may execute concurrently.
+
+``*-finalize.sge`` or ``*-finalize.slurm``
+   A single dependent job. It verifies that every node's planned
+   checkpoints are present and checksummed, merges their checkpoint files
+   directly into the final HDF5 file, and records completion in the job
+   JSON.
+
+``*-submit.sh``
+   A convenience submission wrapper. For SGE it captures ``qsub -terse``
+   and submits the finalizer with ``-hold_jid``. For Slurm it captures
+   ``sbatch --parsable`` and uses ``afterok`` on the complete array. The
+   finalizer always verifies every node, including on SGE installations
+   where a job hold records completion rather than successful exit.
+
+The scripts require the job JSON, scratch directory, immutable assets, scan
+source, and final output directory to be reachable at the same absolute paths
+from every compute node. Scratch should normally reside on a high-throughput
+shared filesystem or node-local storage explicitly staged by site-specific
+setup commands.
+
+**Array size is never read from the scheduler at run time.** Most
+schedulers besides Slurm do not reliably expose a running task's total
+array size as an environment variable (SGE, PBS Pro, and LSF expose only
+each task's own index). To stay portable across schedulers, orGUI never
+relies on one: the array size chosen in the **Number of nodes** field is
+baked directly into the generated ``cluster-map``/``cluster-finalize``
+commands as an explicit ``--total-tasks`` argument, the same way
+``--cpus``/``--memory-gib`` already are. Only each array element's own
+index comes from the scheduler (``SGE_TASK_ID``, ``SLURM_ARRAY_TASK_ID``),
+normalized to a 0-based ``task_index`` by the generated script.
+
+The generated worker commands are also available for inspection and manual
+scheduler integration:
+
+.. code-block:: bash
+
+   orGUI rsmap cluster-map JOB.json --task-index 0 --total-tasks 8 --cpus 4 --memory-gib 16
+   orGUI rsmap cluster-finalize JOB.json --total-tasks 8 --cpus 24 --memory-gib 64
+   orGUI rsmap cluster-scripts JOB.json --output-directory batch
+
+Scheduler Parameters
+~~~~~~~~~~~~~~~~~~~~
+
+``Scheduler``
+   ``SGE`` (default) or ``Slurm``. SGE arrays are one-based and converted to
+   orGUI's zero-based task index. Slurm arrays are generated zero-based.
+
+``Job name``
+   Scheduler-safe base name for the map array and finalizer. Letters, numbers,
+   periods, underscores, and hyphens are accepted.
+
+``Queue / partition``
+   Optional SGE ``-q`` queue or Slurm ``--partition``.
+
+``Project / account``
+   Optional SGE ``-P`` project or Slurm ``--account``.
+
+``Script directory``
+   Destination for the three generated scripts. It defaults beneath the
+   current writable working directory.
+
+``Working directory``
+   Shared directory selected with ``cd`` before environment setup and Python
+   execution.
+
+``Python executable``
+   Python command used to invoke ``orgui.reconstruction_cli`` after environment
+   setup. ``python`` is the portable default; an absolute cluster-environment
+   path can be supplied.
+
+``Setup commands``
+   Verbatim shell lines placed after ``set -euo pipefail`` and ``cd``. Use
+   these for module loading and conda or virtual-environment activation.
+
+``Number of nodes``
+   How many array elements (nodes) to request. Each node maps an equal,
+   disjoint share of the scan's frames. See the array-size note above --
+   this value is never inferred from the scheduler.
+
+``CPUs / slots per mapping task``
+   Native C++ threads used by each array element. This allocation is
+   independent of the number of simultaneously running array elements.
+
+``Memory per mapping task``
+   Total RAM budget passed to one mapping process. Slurm receives it through
+   ``--mem``. SGE memory complexes are normally per-slot, so orGUI divides the
+   total by the slot count and rounds upward.
+
+``Mapping wall time``
+   Per-element SGE ``h_rt`` or Slurm ``--time`` limit.
+
+``Maximum concurrent tasks``
+   Optional array throttle: SGE ``-tc`` or the Slurm ``%N`` array suffix.
+   Zero leaves concurrency to site policy.
+
+``Reduction CPUs / slots``
+   Accepted for symmetry with the mapping allocation; the finalizer's own
+   chunk-merge loop is currently single-threaded, matching the single-node
+   finalize path, so this is presently informational rather than sized
+   against an internal worker pool.
+
+``Reduction memory``
+   Informational RAM budget for the finalizer process. Finalize already
+   bounds memory per checkpoint file via its own streaming range reader
+   regardless of this value, matching the single-node path.
+
+``Reduction wall time``
+   SGE ``h_rt`` or Slurm ``--time`` for the dependent job.
+
+``SGE parallel environment``
+   Name requested through ``-pe``; ``smp`` is the default. It must match the
+   target site's configured shared-memory parallel environment.
+
+``SGE memory resource``
+   Per-slot consumable complex used in ``-l`` requests. ``h_vmem`` is the
+   default, but sites may require ``mem_free`` or another name.
+
+``Extra map/finalizer directives``
+   Optional scheduler-specific header lines. Each non-empty line must start
+   with ``#$`` for SGE or ``#SBATCH`` for Slurm.
+
+See the `Grid Engine qsub reference
+<https://gridengine.eu/mangridengine/htmlman1/qsub.html>`_ and the `Slurm job
+array reference <https://slurm.schedmd.com/job_array.html>`_ for scheduler
+semantics.
 
 Job Descriptor Reference
 ------------------------

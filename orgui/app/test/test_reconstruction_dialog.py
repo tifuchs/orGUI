@@ -245,6 +245,7 @@ def test_settings_are_grouped_and_have_tooltips(tmp_path):
         dialog.cluster_working_directory,
         dialog.cluster_python,
         dialog.cluster_environment,
+        dialog.cluster_array_task_count,
         dialog.cluster_array_cpus,
         dialog.cluster_array_memory,
         dialog.cluster_array_walltime,

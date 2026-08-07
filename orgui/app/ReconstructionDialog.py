@@ -796,6 +796,18 @@ class ReconstructionDialog(qt.QDialog):
 
         map_group = qt.QGroupBox("Mapping array")
         map_form = qt.QFormLayout(map_group)
+        self.cluster_array_task_count = qt.QSpinBox()
+        self.cluster_array_task_count.setRange(1, 100000)
+        self.cluster_array_task_count.setValue(4)
+        self._add_form_row(
+            map_form,
+            "Number of nodes:",
+            self.cluster_array_task_count,
+            "How many array elements (nodes) to request. Each node maps an "
+            "equal, disjoint share of the scan's frames -- the array size "
+            "is never inferred from the scheduler at run time, since most "
+            "schedulers besides Slurm do not expose it to a running task.",
+        )
         self.cluster_array_cpus = qt.QSpinBox()
         self.cluster_array_cpus.setRange(1, 4096)
         self.cluster_array_cpus.setValue(4)
@@ -927,6 +939,7 @@ class ReconstructionDialog(qt.QDialog):
             environment_setup=self.cluster_environment.toPlainText(),
             queue=self.cluster_queue.text().strip(),
             account=self.cluster_account.text().strip(),
+            array_task_count=self.cluster_array_task_count.value(),
             array_cpus=self.cluster_array_cpus.value(),
             array_memory_gib=self.cluster_array_memory.value(),
             array_walltime=self.cluster_array_walltime.text().strip(),
@@ -956,6 +969,7 @@ class ReconstructionDialog(qt.QDialog):
         self.cluster_environment.setPlainText(settings.environment_setup)
         self.cluster_queue.setText(settings.queue)
         self.cluster_account.setText(settings.account)
+        self.cluster_array_task_count.setValue(settings.array_task_count)
         self.cluster_array_cpus.setValue(settings.array_cpus)
         self.cluster_array_memory.setValue(settings.array_memory_gib)
         self.cluster_array_walltime.setText(settings.array_walltime)
@@ -1417,7 +1431,7 @@ class ReconstructionDialog(qt.QDialog):
         self.cluster_summary.setPlainText(
             json.dumps(
                 {
-                    "array_tasks": settings["map_tasks"],
+                    "array_tasks": self.cluster_array_task_count.value(),
                     "cpus_per_task": self.cluster_array_cpus.value(),
                     "maximum_concurrent_tasks": (
                         self.cluster_array_concurrency.value() or "scheduler"

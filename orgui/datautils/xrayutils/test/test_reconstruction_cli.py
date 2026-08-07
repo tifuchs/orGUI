@@ -76,10 +76,11 @@ def test_cluster_map_cli_passes_array_resources(capsys):
     """Array task IDs and scheduler resources reach the cluster map helper."""
     captured = {}
 
-    def fake_map(path, task_index, *, cpus, memory_bytes, progress):
+    def fake_map(path, task_index, *, total_tasks, cpus, memory_bytes, progress):
         captured.update(
             path=path,
             task_index=task_index,
+            total_tasks=total_tasks,
             cpus=cpus,
             memory_bytes=memory_bytes,
         )
@@ -95,6 +96,8 @@ def test_cluster_map_cli_passes_array_resources(capsys):
                 "job.json",
                 "--task-index",
                 "7",
+                "--total-tasks",
+                "32",
                 "--cpus",
                 "4",
                 "--memory-gib",
@@ -105,6 +108,7 @@ def test_cluster_map_cli_passes_array_resources(capsys):
     assert captured == {
         "path": "job.json",
         "task_index": 7,
+        "total_tasks": 32,
         "cpus": 4,
         "memory_bytes": 16 * 1024**3,
     }

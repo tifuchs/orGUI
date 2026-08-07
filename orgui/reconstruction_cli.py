@@ -49,6 +49,7 @@ def _cluster_map(arguments):
         run_cluster_map_task,
         arguments.job,
         arguments.task_index,
+        total_tasks=arguments.total_tasks,
         cpus=arguments.cpus,
         memory_bytes=int(arguments.memory_gib * 1024**3),
     )
@@ -58,6 +59,7 @@ def _cluster_finalize(arguments):
     _progress_operation(
         run_cluster_finalize,
         arguments.job,
+        total_tasks=arguments.total_tasks,
         cpus=arguments.cpus,
         memory_bytes=int(arguments.memory_gib * 1024**3),
     )
@@ -100,6 +102,7 @@ def build_parser(prog=None):
     )
     cluster_map.add_argument("job")
     cluster_map.add_argument("--task-index", type=int, required=True)
+    cluster_map.add_argument("--total-tasks", type=int, required=True)
     cluster_map.add_argument("--cpus", type=int, required=True)
     cluster_map.add_argument("--memory-gib", type=float, required=True)
     cluster_map.set_defaults(handler=_cluster_map)
@@ -108,6 +111,7 @@ def build_parser(prog=None):
         help="Reduce and finalize completed cluster map tasks",
     )
     cluster_finalize.add_argument("job")
+    cluster_finalize.add_argument("--total-tasks", type=int, required=True)
     cluster_finalize.add_argument("--cpus", type=int, required=True)
     cluster_finalize.add_argument("--memory-gib", type=float, required=True)
     cluster_finalize.set_defaults(handler=_cluster_finalize)
