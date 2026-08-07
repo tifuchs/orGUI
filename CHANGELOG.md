@@ -225,6 +225,14 @@ Reciprocal-space reconstruction:
   ``--total-tasks`` argument rather than inferred from the scheduler at run
   time -- most schedulers besides Slurm never expose a running task's total
   array size to it.
+- Reciprocal-space mapping now overlaps image loading with image
+  processing instead of loading each frame fully before starting the
+  next: a small prefetch-reader pool feeds a bounded queue that a pool of
+  compute workers drains, and the reader pool grows and shrinks live
+  based on how often compute sits waiting for an image. Progress messages
+  now also report the current prefetch reader count. Native thread
+  allocation per image (``Native threads per image``) is unchanged for
+  now; only the image-loading overlap is new.
 
 
 ## [1.5.0] (2026-06-07)

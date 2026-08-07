@@ -930,50 +930,24 @@ def _discover_checkpoint_state(
     return resumed, files
 
 
-def _map_frame_range(
-    spec: _ReconstructionSpec,
-    scan,
-    detector,
-    ub_calculator,
-    frame_range,
-    detector_tiles,
-    angle_bounds_rad,
-    router: _CheckpointRouter,
-    *,
-    correction_pipeline: Callable,
-    image_payloads: Mapping[int, object] | None = None,
-    corner_rays: Mapping[tuple[int, int, int, int], np.ndarray] | None = None,
-    kernel_threads: int | None = None,
-    kernel_memory_budget_bytes: int | None = None,
-    image_progress: Callable[[int], None] | None = None,
-) -> None:
-    """Map a streaming frame range, routing each frame's per-grid reduced
-    batch to ``router`` instead of writing scratch partitions.
+def _validate_mapping_setup(
+    scan, detector, detector_tiles, angle_bounds_rad, correction_pipeline
+) -> tuple[tuple[tuple[int, int, int, int], ...], np.ndarray]:
+    """Validate a mapping run's fixed inputs once, up front.
 
-    ``angle_bounds_rad`` must have shape ``(frames, 2, 4)`` in the order
-    ``alpha, omega, chi, phi``. The correction object may provide a
-    ``correct_frame`` method, called once per image before detector
-    tiling, to preserve full-detector pixel-repair neighborhoods and avoid
-    repeating static corrections per tile; the tile callback remains
-    available for correction objects without that method.
+    Design doc Sec7: the pipeline processes frames continuously through a
+    shared prefetch/compute pool rather than in per-range calls, so this
+    validation (previously repeated once per ``_map_frame_range`` call)
+    now runs exactly once for the whole run instead of once per
+    scheduling range.
 
-    Every image is loaded once; all detector tiles and all of ``spec``'s
-    output grids are processed from that one load before moving to the
-    next frame. ``router`` is shared across every concurrently running
-    frame range in the job and is internally thread-safe -- this function
-    keeps no scratch-file or memory-accumulation state of its own.
-
-    :param _CheckpointRouter router:
-        The job's shared checkpoint router.
-    :param image_payloads, corner_rays, kernel_threads,
-        kernel_memory_budget_bytes:
-        Local execution controls; they do not alter scientific values.
-    :param image_progress:
-        Called with each frame index once it has been fully routed.
+    :param angle_bounds_rad:
+        Shape ``(len(scan), 2, 4)`` in the order ``alpha, omega, chi,
+        phi``, covering every frame in the scan (not just pending ones).
+    :returns:
+        ``(detector_tiles, bounds)`` -- ``detector_tiles`` normalized to a
+        tuple of int tuples, ``bounds`` as a validated float array.
     """
-    start, stop = map(int, frame_range)
-    if start < 0 or stop <= start or stop > len(scan):
-        raise ValueError("Invalid frame range")
     detector_tiles = tuple(
         tuple(map(int, detector_tile)) for detector_tile in detector_tiles
     )
@@ -991,12 +965,23 @@ def _map_frame_range(
         ):
             raise ValueError("Invalid detector tile")
     bounds = np.asarray(angle_bounds_rad, dtype=np.float64)
-    if bounds.shape != (stop - start, 2, 4):
-        raise ValueError("angle_bounds_rad must have shape (frame_count, 2, 4)")
+    if bounds.shape != (len(scan), 2, 4):
+        raise ValueError("angle_bounds_rad must have shape (len(scan), 2, 4)")
     if not np.all(np.isfinite(bounds)):
         raise ValueError("angle_bounds_rad contains non-finite values")
     if not callable(correction_pipeline):
         raise TypeError("correction_pipeline must be the central job correction")
+    return detector_tiles, bounds
+
+
+def _tile_ray_arrays(detector, detector_tiles, corner_rays=None):
+    """Build (or reuse cached) corner rays for every detector tile, once.
+
+    :param corner_rays:
+        Optional ``{detector_tile: array}`` cache (design doc Sec7: shared
+        read-only across every compute worker, built once per mapping run
+        rather than once per frame or per worker).
+    """
     ray_arrays = {}
     for detector_tile in detector_tiles:
         row_start, row_stop, column_start, column_stop = detector_tile
@@ -1013,69 +998,106 @@ def _map_frame_range(
         if rays.shape != expected_ray_shape:
             raise ValueError(f"corner_rays must have shape {expected_ray_shape}")
         ray_arrays[detector_tile] = rays
-    kernels = {
+    return ray_arrays
+
+
+def _build_kernels(spec, ub_calculator, *, threads=None, memory_budget_bytes=None):
+    """One kernel per grid, for one compute worker's exclusive use.
+
+    Each compute worker in the Sec7 pipeline builds and owns its own
+    kernel set (kernels are not safe to call concurrently from multiple
+    Python threads -- each call spawns its own native worker threads
+    already, per ``kernel_threads``); this is the shared construction
+    logic every worker calls once at start-up.
+    """
+    return {
         grid.grid_name: _kernel_for_grid(
             spec,
             grid,
             ub_calculator,
-            threads=kernel_threads,
-            memory_budget_bytes=kernel_memory_budget_bytes,
+            threads=threads,
+            memory_budget_bytes=memory_budget_bytes,
         )
         for grid in spec.grids
     }
-    for offset, frame_index in enumerate(range(start, stop)):
-        image_payload = (
-            scan.get_raw_img(frame_index)
-            if image_payloads is None
-            else image_payloads[frame_index]
-        )
-        image = np.asarray(image_payload.img)
-        frame_correction = getattr(correction_pipeline, "correct_frame", None)
-        corrected_frame = (
-            frame_correction(image_payload, image, frame_index)
-            if callable(frame_correction)
-            else None
-        )
-        # Collect every tile's contribution per grid, then route exactly
-        # once per (frame, grid) -- the router's remaining-frame countdown
-        # (Sec9/Sec10) counts frames, not tile-level route() calls, so a
-        # multi-tile frame must be merged down to one routed batch per grid
-        # before reaching it.
-        tile_batches: dict[str, list[Mapping[str, np.ndarray]]] = {
-            grid.grid_name: [] for grid in spec.grids
-        }
-        for detector_tile in detector_tiles:
-            row_start, row_stop, column_start, column_stop = detector_tile
-            selection = np.s_[row_start:row_stop, column_start:column_stop]
-            if corrected_frame is None:
-                intensity, variance, mask = correction_pipeline(
-                    image_payload,
-                    image[selection],
-                    frame_index,
-                    detector_tile,
-                )
-            else:
-                intensity, variance, mask = (
-                    values[selection] for values in corrected_frame
-                )
-            intensity = np.ascontiguousarray(intensity, dtype=np.float64)
-            variance = np.ascontiguousarray(variance, dtype=np.float64)
-            mask = np.ascontiguousarray(mask, dtype=bool)
-            for grid in spec.grids:
-                batch = kernels[grid.grid_name].accumulate(
-                    intensity,
-                    variance,
-                    mask,
-                    ray_arrays[detector_tile],
-                    np.ascontiguousarray(bounds[offset, 0]),
-                    np.ascontiguousarray(bounds[offset, 1]),
-                )
-                tile_batches[grid.grid_name].append(batch)
+
+
+def _map_one_frame(
+    spec: _ReconstructionSpec,
+    kernels: Mapping[str, object],
+    ray_arrays: Mapping[tuple[int, int, int, int], np.ndarray],
+    detector_tiles: Iterable[tuple[int, int, int, int]],
+    correction_pipeline: Callable,
+    image_payload: object,
+    frame_index: int,
+    angles_start: np.ndarray,
+    angles_end: np.ndarray,
+    router: _CheckpointRouter,
+) -> None:
+    """Process one already-loaded frame: correction, per-tile-per-grid
+    kernel accumulate, merge, and route.
+
+    This is the compute-side half of what ``_map_frame_range``'s loop
+    body used to do in one serial per-frame step (design doc Sec7):
+    image loading (I/O) happens separately, in the prefetch pipeline, so
+    ``image_payload`` here is already loaded -- this function does no
+    I/O of its own and is safe to call concurrently for different frames
+    from multiple compute workers, provided each worker uses its own
+    ``kernels`` (see :func:`_build_kernels`) and every worker shares the
+    same read-only ``ray_arrays``.
+
+    The correction pipeline's whole-frame ``correct_frame`` step (pixel
+    repair, static factors) runs here, in the compute worker, not in the
+    prefetch reader -- it is CPU-bound work that belongs inside the
+    ``image_workers``/``kernel_threads`` thread budget, not hidden inside
+    I/O-rate bookkeeping the reader pool's blocked-fraction signal
+    depends on staying clean.
+    """
+    image = np.asarray(image_payload.img)
+    frame_correction = getattr(correction_pipeline, "correct_frame", None)
+    corrected_frame = (
+        frame_correction(image_payload, image, frame_index)
+        if callable(frame_correction)
+        else None
+    )
+    # Collect every tile's contribution per grid, then route exactly once
+    # per (frame, grid) -- the router's remaining-frame countdown
+    # (Sec9/Sec10) counts frames, not tile-level route() calls, so a
+    # multi-tile frame must be merged down to one routed batch per grid
+    # before reaching it.
+    tile_batches: dict[str, list[Mapping[str, np.ndarray]]] = {
+        grid.grid_name: [] for grid in spec.grids
+    }
+    for detector_tile in detector_tiles:
+        row_start, row_stop, column_start, column_stop = detector_tile
+        selection = np.s_[row_start:row_stop, column_start:column_stop]
+        if corrected_frame is None:
+            intensity, variance, mask = correction_pipeline(
+                image_payload,
+                image[selection],
+                frame_index,
+                detector_tile,
+            )
+        else:
+            intensity, variance, mask = (
+                values[selection] for values in corrected_frame
+            )
+        intensity = np.ascontiguousarray(intensity, dtype=np.float64)
+        variance = np.ascontiguousarray(variance, dtype=np.float64)
+        mask = np.ascontiguousarray(mask, dtype=bool)
         for grid in spec.grids:
-            merged = _reduce_batches(tile_batches[grid.grid_name])
-            router.route(grid.grid_name, frame_index, merged)
-        if image_progress is not None:
-            image_progress(frame_index)
+            batch = kernels[grid.grid_name].accumulate(
+                intensity,
+                variance,
+                mask,
+                ray_arrays[detector_tile],
+                angles_start,
+                angles_end,
+            )
+            tile_batches[grid.grid_name].append(batch)
+    for grid in spec.grids:
+        merged = _reduce_batches(tile_batches[grid.grid_name])
+        router.route(grid.grid_name, frame_index, merged)
 
 
 def _compression_kwargs(name):

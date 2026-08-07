@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 import json
@@ -10,7 +9,8 @@ import math
 from pathlib import Path
 from queue import Empty, SimpleQueue
 import shutil
-from threading import Event
+import threading
+import time
 from typing import Any
 
 import h5py
@@ -25,12 +25,15 @@ from .datautils.xrayutils.reconstruction import (
     _CheckpointRouter,
     _GridSpec,
     _ReconstructionSpec,
+    _build_kernels,
     _calibration_probe_all_grids,
     _detector_corner_rays,
     _discover_checkpoint_state,
     _files_per_job,
     _finalize_reconstruction,
-    _map_frame_range,
+    _map_one_frame,
+    _tile_ray_arrays,
+    _validate_mapping_setup,
 )
 
 
@@ -1704,6 +1707,142 @@ def _range_is_resumed(router, boundaries, resumed, frame_range):
     return True
 
 
+class _AdjustablePool:
+    """A resizable pool of raw worker threads.
+
+    ``concurrent.futures.ThreadPoolExecutor`` cannot be resized once
+    created; both the prefetch pool (grown/shrunk continuously by
+    blocked-fraction, design doc Sec7) and, in a later phase, the compute
+    pool (resized rarely, on a joint ``kernel_threads``/``image_workers``
+    rebalance) need to change worker count live, so both use this
+    instead.
+
+    ``worker_fn(retire, cancellation)`` runs one worker's entire loop; it
+    must poll both events at every blocking boundary (never a bare
+    blocking call) and only exit *between* work items, never mid-item, so
+    a shrink or a cancellation never abandons in-flight work.
+    """
+
+    def __init__(self, worker_fn, *, initial_size, name):
+        self._worker_fn = worker_fn
+        self._name = name
+        self._cancellation = threading.Event()
+        self._lock = threading.Lock()
+        self._active: list[tuple[threading.Thread, threading.Event]] = []
+        self._retiring: list[threading.Thread] = []
+        self._next_id = 0
+        self.retarget(initial_size)
+
+    @property
+    def size(self) -> int:
+        """Current target worker count (excludes stragglers still
+        finishing their last item after a shrink)."""
+        with self._lock:
+            return len(self._active)
+
+    def _spawn(self):
+        retire = threading.Event()
+        thread = threading.Thread(
+            target=self._worker_fn,
+            args=(retire, self._cancellation),
+            name=f"{self._name}-{self._next_id}",
+            daemon=True,
+        )
+        self._next_id += 1
+        thread.start()
+        return thread, retire
+
+    def retarget(self, size) -> None:
+        """Grow to ``size`` workers, or mark the excess for retirement."""
+        size = max(0, int(size))
+        with self._lock:
+            if self._cancellation.is_set():
+                return
+            current = len(self._active)
+            if size > current:
+                self._active.extend(self._spawn() for _ in range(size - current))
+            elif size < current:
+                retiring = self._active[size:]
+                self._active = self._active[:size]
+                for thread, retire in retiring:
+                    retire.set()
+                    self._retiring.append(thread)
+
+    def reap(self) -> None:
+        """Drop worker threads that have finished retiring. Call this
+        periodically from the coordinator loop; retired threads are not
+        joined eagerly, so the caller never stalls waiting for one to
+        finish its in-flight item."""
+        with self._lock:
+            self._retiring = [thread for thread in self._retiring if thread.is_alive()]
+
+    def shutdown(self, *, wait=True) -> None:
+        with self._lock:
+            self._cancellation.set()
+            threads = [thread for thread, _retire in self._active] + self._retiring
+            self._active = []
+            self._retiring = []
+        if wait:
+            for thread in threads:
+                thread.join()
+
+
+class _BoundedGate:
+    """A semaphore-like backpressure gate whose capacity can be retargeted
+    live, decoupling a bounded in-flight count from the pool objects on
+    either side of it (design doc Sec7: prefetch queue depth
+    ``N ~= image_workers + small_constant``) -- retargeting it never
+    requires tearing down the reader or compute pools.
+    """
+
+    def __init__(self, capacity):
+        self._condition = threading.Condition()
+        self._capacity = max(1, int(capacity))
+        self._in_flight = 0
+
+    def acquire(self, *, poll_timeout, should_stop) -> bool:
+        """Block (polling ``should_stop``) until under capacity, then
+        reserve a slot. Returns ``False`` without reserving if
+        ``should_stop`` fires first."""
+        with self._condition:
+            while self._in_flight >= self._capacity:
+                if should_stop():
+                    return False
+                self._condition.wait(timeout=poll_timeout)
+            if should_stop():
+                return False
+            self._in_flight += 1
+            return True
+
+    def release(self) -> None:
+        with self._condition:
+            self._in_flight = max(0, self._in_flight - 1)
+            self._condition.notify()
+
+    def retarget(self, capacity) -> None:
+        with self._condition:
+            self._capacity = max(1, int(capacity))
+            self._condition.notify_all()
+
+
+_PREFETCH_QUEUE_SLACK = 3
+"""Design doc Sec7: prefetch queue depth N ~= image_workers + small
+constant (+2 to +4). A structural default, not a measured value -- same
+category as MAX_CONCURRENT_ACTIVE_CHECKPOINTS."""
+_PREFETCH_POOL_INITIAL = 4
+"""Sec7 point 1: a small fixed-default prefetch pool, chosen because
+diminishing returns past a handful of concurrent reads is a common
+pattern across storage backends -- not a claim that 4 is optimal for any
+particular job's storage."""
+_PREFETCH_POOL_MAX = 16
+_BLOCKED_FRACTION_GROW = 0.20
+_BLOCKED_FRACTION_SHRINK = 0.02
+"""Sec7's own already-resolved open item: illustrative 20%/2% bands, not
+tuned against real production load."""
+_COORDINATOR_TICK_SECONDS = 0.3
+_POLL_TIMEOUT_SECONDS = 0.2
+
+
 def _map_pending_ranges(
     spec,
     scan,
@@ -1723,6 +1862,18 @@ def _map_pending_ranges(
 ):
     """Map every range in ``pending_ranges`` against ``router``.
 
+    A producer/consumer pipeline (design doc Sec7): a prefetch pool of
+    reader threads loads images and feeds a bounded-backpressure queue; a
+    fixed-size pool of compute workers drains it, correcting and
+    accumulating each frame via :func:`_map_one_frame`. The reader pool
+    adapts continuously via a blocked-fraction signal (grow eagerly when
+    compute is starved for images, shrink cautiously when it isn't).
+    ``image_workers``/``kernel_threads`` are still the static,
+    ``_frame_parallelism``-derived pair for now -- Sec7's live joint
+    rebalancing against a measured I/O rate is a follow-up phase; this
+    phase only replaces the "zero overlap between image load and image
+    compute" gap in the previous fully-serial-per-task loop.
+
     Extracted from :func:`run_job`'s mapping loop so
     :func:`run_cluster_map_task` can reuse it unchanged, scoped to one
     node's own ``pending_ranges`` instead of the whole job's. Mutates
@@ -1730,6 +1881,13 @@ def _map_pending_ranges(
     nothing. Not resume-aware itself -- callers decide ``pending_ranges``
     (see :func:`_range_is_resumed`).
     """
+    if not pending_ranges:
+        return
+
+    detector_tiles, bounds = _validate_mapping_setup(
+        scan, config.detector, tiles, bounds, correction_pipeline
+    )
+
     ray_cache_bytes = sum(
         (tile[1] - tile[0] + 1)
         * (tile[3] - tile[2] + 1)
@@ -1742,6 +1900,9 @@ def _map_pending_ranges(
     if cache_detector_rays:
         for tile in tiles:
             ray_cache[tuple(tile)] = _detector_corner_rays(config.detector, tile)
+    ray_arrays = _tile_ray_arrays(
+        config.detector, detector_tiles, ray_cache if cache_detector_rays else None
+    )
 
     worker_limits = []
     kernel_thread_limits = []
@@ -1775,88 +1936,210 @@ def _map_pending_ranges(
     # bounds the aggregate worker working set above.
     kernel_memory_budget = effective_memory
 
+    frame_indices = [
+        frame_index
+        for start, stop in pending_ranges
+        for frame_index in range(start, stop)
+    ]
+
+    max_readers = (
+        _PREFETCH_POOL_MAX
+        if getattr(scan, "supports_concurrent_read", True)
+        else 1
+    )
+    reader_pool_size = min(_PREFETCH_POOL_INITIAL, max_readers)
+
     progress_events = SimpleQueue()
-    cancellation = Event()
+    ready_queue = SimpleQueue()
+    gate = _BoundedGate(image_workers + _PREFETCH_QUEUE_SLACK)
     mapped_images = completed_images
 
-    def publish_image_progress(frame_index):
-        if cancellation.is_set():
-            raise RuntimeError("Reconstruction mapping cancelled")
-        progress_events.put(frame_index)
+    work_lock = threading.Lock()
+    work_iterator = iter(frame_indices)
+    remaining = [len(frame_indices)]
+    remaining_lock = threading.Lock()
+    readers_done = threading.Event()
 
-    def drain_progress_events():
-        nonlocal mapped_images
-        while True:
+    exception_lock = threading.Lock()
+    first_exception: list[BaseException] = []
+
+    def record_exception(exc):
+        with exception_lock:
+            if not first_exception:
+                first_exception.append(exc)
+
+    def should_stop():
+        return bool(first_exception)
+
+    def mark_frame_delivered():
+        with remaining_lock:
+            remaining[0] -= 1
+            if remaining[0] <= 0:
+                readers_done.set()
+
+    def reader_loop(retire, pool_cancellation):
+        def local_should_stop():
+            return retire.is_set() or pool_cancellation.is_set() or should_stop()
+
+        # The outer try/except is a safety net independent of the
+        # get_raw_img-specific one below: a bug anywhere in this loop's
+        # own logic (not just in get_raw_img) must still reach the
+        # coordinator via record_exception, not die silently -- Python's
+        # default behavior for an uncaught exception in a plain
+        # threading.Thread is to print a traceback and let the thread
+        # exit with no other observable effect, which would otherwise
+        # hang the coordinator waiting for completion signals that will
+        # never come.
+        try:
+            while not local_should_stop():
+                with work_lock:
+                    frame_index = next(work_iterator, None)
+                if frame_index is None:
+                    return
+                if not gate.acquire(
+                    poll_timeout=_POLL_TIMEOUT_SECONDS, should_stop=local_should_stop
+                ):
+                    return
+                try:
+                    image_payload = scan.get_raw_img(frame_index)
+                except BaseException as exc:  # noqa: BLE001
+                    gate.release()
+                    record_exception(exc)
+                    mark_frame_delivered()
+                    return
+                ready_queue.put((frame_index, image_payload))
+                mark_frame_delivered()
+        except BaseException as exc:  # noqa: BLE001 -- must reach the coordinator
+            record_exception(exc)
+
+    blocked_counts: dict[int, list[int]] = {}
+    blocked_counts_lock = threading.Lock()
+
+    def compute_loop(retire, pool_cancellation):
+        """A personal ``retire`` (this specific worker being asked to step
+        down, e.g. a future live pool shrink) or ``pool_cancellation``
+        exits immediately -- other workers remain to drain the queue. A
+        job-wide ``should_stop()`` (an exception anywhere) does *not*
+        exit immediately: it stops accepting the possibility of new work
+        arriving from readers (who do stop immediately), but drains
+        whatever is already sitting in the ready queue first, so an
+        already-loaded frame's real, already-paid-for I/O is never
+        silently discarded -- resumability is about not repeating
+        finished work, not just about not corrupting it.
+        """
+        counts = [0, 0]  # [blocked, total], only this thread ever writes
+        with blocked_counts_lock:
+            blocked_counts[id(counts)] = counts
+        try:
+            # Same catch-all rationale as reader_loop: any bug in this
+            # loop (including kernel construction) must reach the
+            # coordinator via record_exception, never die silently.
             try:
-                progress_events.get_nowait()
-            except Empty:
-                return
-            mapped_images += 1
-            if progress is not None:
-                progress(
-                    mapped_images,
-                    total_images + 1,
-                    (
-                        f"Mapping images {mapped_images}/{total_images} "
-                        f"({image_workers} image workers, "
-                        f"{kernel_threads} native threads/image)"
-                    ),
+                kernels = _build_kernels(
+                    spec,
+                    config.ub_calculator,
+                    threads=kernel_threads,
+                    memory_budget_bytes=kernel_memory_budget,
                 )
+                while True:
+                    if retire.is_set() or pool_cancellation.is_set():
+                        return
+                    try:
+                        frame_index, image_payload = ready_queue.get(
+                            timeout=_POLL_TIMEOUT_SECONDS
+                        )
+                    except Empty:
+                        counts[0] += 1
+                        counts[1] += 1
+                        if (
+                            readers_done.is_set() or should_stop()
+                        ) and ready_queue.empty():
+                            return
+                        continue
+                    counts[1] += 1
+                    gate.release()
+                    try:
+                        _map_one_frame(
+                            spec,
+                            kernels,
+                            ray_arrays,
+                            detector_tiles,
+                            correction_pipeline,
+                            image_payload,
+                            frame_index,
+                            np.ascontiguousarray(bounds[frame_index, 0]),
+                            np.ascontiguousarray(bounds[frame_index, 1]),
+                            router,
+                        )
+                    except BaseException as exc:  # noqa: BLE001
+                        record_exception(exc)
+                        return
+                    progress_events.put(frame_index)
+            except BaseException as exc:  # noqa: BLE001
+                record_exception(exc)
+        finally:
+            with blocked_counts_lock:
+                blocked_counts.pop(id(counts), None)
 
-    def map_frame(frame_range):
-        task_bounds = bounds[frame_range[0] : frame_range[1]]
-        _map_frame_range(
-            spec,
-            scan,
-            config.detector,
-            config.ub_calculator,
-            frame_range,
-            tiles,
-            task_bounds,
-            router,
-            correction_pipeline=correction_pipeline,
-            corner_rays=ray_cache if cache_detector_rays else None,
-            kernel_threads=kernel_threads,
-            kernel_memory_budget_bytes=kernel_memory_budget,
-            image_progress=publish_image_progress,
-        )
-        return frame_range
-
-    executor = (
-        None
-        if image_workers == 1
-        else ThreadPoolExecutor(
-            max_workers=image_workers,
-            thread_name_prefix="orgui-rsmap-image",
-        )
+    reader_pool = _AdjustablePool(
+        reader_loop, initial_size=reader_pool_size, name="orgui-rsmap-reader"
     )
+    compute_pool = _AdjustablePool(
+        compute_loop, initial_size=image_workers, name="orgui-rsmap-compute"
+    )
+    previous_blocked = 0
+    previous_total = 0
     try:
-        for wave_start in range(0, len(pending_ranges), image_workers):
-            wave = pending_ranges[wave_start : wave_start + image_workers]
-            if executor is None:
-                for frame_task in wave:
-                    map_frame(frame_task)
-                    drain_progress_events()
-            else:
-                future_set = {
-                    executor.submit(map_frame, frame_task) for frame_task in wave
-                }
-                while future_set:
-                    done, future_set = wait(
-                        future_set,
-                        timeout=0.1,
-                        return_when=FIRST_COMPLETED,
+        while True:
+            deadline = time.monotonic() + _COORDINATOR_TICK_SECONDS
+            while time.monotonic() < deadline:
+                try:
+                    progress_events.get(
+                        timeout=max(0.0, deadline - time.monotonic())
                     )
-                    drain_progress_events()
-                    for future in done:
-                        future.result()
-                drain_progress_events()
-    except BaseException:
-        cancellation.set()
-        raise
+                except Empty:
+                    break
+                mapped_images += 1
+                if progress is not None:
+                    progress(
+                        mapped_images,
+                        total_images + 1,
+                        (
+                            f"Mapping images {mapped_images}/{total_images} "
+                            f"({image_workers} image workers, "
+                            f"{kernel_threads} native threads/image, "
+                            f"{reader_pool.size} prefetch readers)"
+                        ),
+                    )
+            with blocked_counts_lock:
+                blocked = sum(counts[0] for counts in blocked_counts.values())
+                total = sum(counts[1] for counts in blocked_counts.values())
+            window_blocked = max(0, blocked - previous_blocked)
+            window_total = max(0, total - previous_total)
+            previous_blocked, previous_total = blocked, total
+            if window_total > 0 and not readers_done.is_set() and not first_exception:
+                blocked_fraction = window_blocked / window_total
+                if blocked_fraction > _BLOCKED_FRACTION_GROW:
+                    reader_pool.retarget(min(max_readers, reader_pool.size + 2))
+                elif (
+                    blocked_fraction < _BLOCKED_FRACTION_SHRINK
+                    and reader_pool.size > 1
+                ):
+                    reader_pool.retarget(reader_pool.size - 1)
+            reader_pool.reap()
+            compute_pool.reap()
+            # Completion: every frame delivered or errored, and every
+            # compute worker has drained the queue and exited on its own.
+            if readers_done.is_set():
+                with blocked_counts_lock:
+                    still_computing = bool(blocked_counts)
+                if not still_computing:
+                    break
+        if first_exception:
+            raise first_exception[0]
     finally:
-        if executor is not None:
-            executor.shutdown(wait=True, cancel_futures=True)
+        reader_pool.shutdown(wait=True)
+        compute_pool.shutdown(wait=True)
 
 
 def run_cluster_map_task(

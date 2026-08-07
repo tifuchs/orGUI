@@ -14,11 +14,13 @@ from orgui.datautils.xrayutils.reconstruction import (
     _CheckpointRouter,
     _GridSpec,
     _ReconstructionSpec,
+    _build_kernels,
     _calibration_probe,
     _files_per_job,
-    _map_frame_range,
+    _map_one_frame,
     _merge_sorted_batches,
     _reduce_batches,
+    _tile_ray_arrays,
 )
 
 
@@ -595,7 +597,7 @@ def _router(
     )
 
 
-def test_map_frame_range_routes_batches_and_skips_resumed_checkpoints(tmp_path):
+def test_map_one_frame_routes_batches_and_skips_resumed_checkpoints(tmp_path):
     grid = _GridSpec(
         minimum=(-1.0, -1.0, -1.0),
         maximum=(1.0, 1.0, 1.0),
@@ -618,23 +620,33 @@ def test_map_frame_range_routes_batches_and_skips_resumed_checkpoints(tmp_path):
         tmp_path=tmp_path,
         resumed={(grid.grid_name, 1)},
     )
-
-    _map_frame_range(
-        spec,
-        scan,
+    detector_tiles = ((0, 1, 0, 1),)
+    ray_arrays = _tile_ray_arrays(
         _FakeDetector(),
-        _FakeUB(),
-        (0, 2),
-        ((0, 1, 0, 1),),
-        np.zeros((2, 2, 4), dtype=np.float64),
-        router,
-        correction_pipeline=correction,
-        corner_rays={(0, 1, 0, 1): _constant_rays(1, 1)},
+        detector_tiles,
+        {(0, 1, 0, 1): _constant_rays(1, 1)},
     )
+    kernels = _build_kernels(spec, _FakeUB())
+    bounds = np.zeros((2, 2, 4), dtype=np.float64)
+
+    for frame_index in range(2):
+        payload = scan.get_raw_img(frame_index)
+        _map_one_frame(
+            spec,
+            kernels,
+            ray_arrays,
+            detector_tiles,
+            correction,
+            payload,
+            frame_index,
+            bounds[frame_index, 0],
+            bounds[frame_index, 1],
+            router,
+        )
 
     # Both frames were loaded (mapping is not resume-aware per frame; the
-    # caller decides which scheduling ranges are worth submitting), but
-    # only checkpoint 0's file was written -- checkpoint 1 was pre-resumed.
+    # caller decides which frames are worth submitting), but only
+    # checkpoint 0's file was written -- checkpoint 1 was pre-resumed.
     assert scan.image_loads == 2
     written_indices = {
         int(path.name.split("_")[0][len("ckpt"):]) for path in router.written
@@ -642,19 +654,12 @@ def test_map_frame_range_routes_batches_and_skips_resumed_checkpoints(tmp_path):
     assert written_indices == {0}
 
 
-def test_map_frame_range_corrects_once_before_tiling(tmp_path):
+def test_map_one_frame_corrects_once_before_tiling(tmp_path):
     class Detector:
         detector = type("PyfaiDetector", (), {"shape": (1, 2)})()
 
         def primBeamPoints(self, rows, columns):
             return np.zeros_like(rows), np.zeros_like(columns)
-
-    class Scan:
-        def __len__(self):
-            return 1
-
-        def get_raw_img(self, index):
-            return h5_Image(np.array([[10.0, 20.0]]))
 
     calls = {"frame": 0, "tile": 0}
 
@@ -681,21 +686,25 @@ def test_map_frame_range_corrects_once_before_tiling(tmp_path):
     spec = _ReconstructionSpec(grids=(grid,), max_depth=0)
     tiles = ((0, 1, 0, 1), (0, 1, 1, 2))
     router = _router({grid.grid_name: [(0, 1)]}, tmp_path=tmp_path)
-
-    _map_frame_range(
-        spec,
-        Scan(),
+    ray_arrays = _tile_ray_arrays(
         Detector(),
-        _FakeUB(),
-        (0, 1),
         tiles,
-        np.zeros((1, 2, 4), dtype=np.float64),
+        {tiles[0]: _constant_rays(1, 1), tiles[1]: _constant_rays(1, 1)},
+    )
+    kernels = _build_kernels(spec, _FakeUB())
+    payload = h5_Image(np.array([[10.0, 20.0]]))
+
+    _map_one_frame(
+        spec,
+        kernels,
+        ray_arrays,
+        tiles,
+        correction,
+        payload,
+        0,
+        np.zeros(4, dtype=np.float64),
+        np.zeros(4, dtype=np.float64),
         router,
-        correction_pipeline=correction,
-        corner_rays={
-            tiles[0]: _constant_rays(1, 1),
-            tiles[1]: _constant_rays(1, 1),
-        },
     )
 
     assert calls == {"frame": 1, "tile": 0}

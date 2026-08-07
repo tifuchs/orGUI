@@ -44,6 +44,23 @@ class Scan(ABC):
     All methods in this class must be populated for a working backend.
     """
 
+    supports_concurrent_read: bool = True
+    """Whether :meth:`get_raw_img` is safe to call concurrently from
+    multiple threads for different frame indices of the *same* scan
+    instance. Reciprocal-space reconstruction's mapping pipeline (design
+    doc ``doc/design/reciprocal_space_scratch_architecture.md`` Sec7)
+    prefetches several frames' worth of images ahead of compute via a
+    small pool of reader threads, all calling ``get_raw_img`` on the same
+    scan object at once. Every backend shipped with orGUI already
+    satisfies this (each call opens its own file handle, or reads through
+    h5py's own internal locking on a shared handle); it was simply never
+    exercised before, since mapping was previously fully serial. Override
+    to ``False`` on a backend that cannot meet it (e.g. one caching
+    mutable per-call state on ``self`` without its own locking) to fall
+    the prefetch pool back to a single reader for that backend, rather
+    than silently racing.
+    """
+
     @abstractmethod
     def __init__(self, hdffilepath_orNode=None, scanno=None):
         """Constructor of the class.
@@ -148,6 +165,11 @@ class Scan(ABC):
         """This should return a populated image class such as h5_Image (see below)
 
         Only the image data is required as numpy array, accessible as h5_image.img
+
+        Must be safe to call concurrently from multiple threads for
+        different values of ``i`` on the same scan instance, unless the
+        backend overrides :attr:`supports_concurrent_read` to ``False``
+        (see that attribute's docstring).
         """
         raise NotImplementedError()
 
