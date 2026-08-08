@@ -11,6 +11,7 @@ import pytest
 
 from orgui.datautils.xrayutils.reconstruction import (
     _CheckpointAccumulator,
+    _merge_sorted_batches,
     _read_checkpoint,
     _reduce_batches,
     _tree_finalize,
@@ -91,6 +92,46 @@ def test_tree_insert_and_finalize_match_reduce_batches_directly():
 
     for name in expected:
         np.testing.assert_array_equal(actual[name], expected[name], err_msg=name)
+
+
+# ---------------------------------------------------------------------------
+# _merge_sorted_batches (native, single-pass): output must be exactly
+# trimmed to its true size, not left with unused worst-case-sized capacity.
+# ---------------------------------------------------------------------------
+
+
+def test_merge_sorted_batches_output_exact_size_duplicate_free():
+    left = _batch(0, [1, 3, 5], [1.0, 2.0, 3.0])
+    right = _batch(0, [2, 4, 6], [10.0, 20.0, 30.0])
+    result = _merge_sorted_batches(left, right)
+    for name in result:
+        assert result[name].shape == (6,), name
+    np.testing.assert_array_equal(result["local_voxel_id"], [1, 2, 3, 4, 5, 6])
+
+
+def test_merge_sorted_batches_output_exact_size_all_duplicates():
+    left = _batch(0, [1, 2, 3], [1.0, 2.0, 3.0], contributors=[1, 1, 1])
+    right = _batch(0, [1, 2, 3], [10.0, 20.0, 30.0], contributors=[2, 2, 2])
+    result = _merge_sorted_batches(left, right)
+    for name in result:
+        assert result[name].shape == (3,), name
+    np.testing.assert_array_equal(result["local_voxel_id"], [1, 2, 3])
+    np.testing.assert_array_equal(
+        result["weighted_intensity"], [11.0, 22.0, 33.0]
+    )
+    np.testing.assert_array_equal(result["contributors"], [3, 3, 3])
+
+
+def test_merge_sorted_batches_output_exact_size_partial_overlap():
+    left = _batch(0, [1, 2, 4], [1.0, 2.0, 4.0])
+    right = _batch(0, [2, 3, 4], [20.0, 3.0, 40.0])
+    result = _merge_sorted_batches(left, right)
+    for name in result:
+        assert result[name].shape == (4,), name
+    np.testing.assert_array_equal(result["local_voxel_id"], [1, 2, 3, 4])
+    np.testing.assert_array_equal(
+        result["weighted_intensity"], [1.0, 22.0, 3.0, 44.0]
+    )
 
 
 # ---------------------------------------------------------------------------

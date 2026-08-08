@@ -151,38 +151,18 @@ py::dict merge_sorted_batches(
         return chunk_a < chunk_b
             || (chunk_a == chunk_b && local_a < local_b);
     };
-    py::ssize_t output_size = 0;
-    {
-        py::gil_scoped_release release;
-        py::ssize_t left = 0;
-        py::ssize_t right = 0;
-        while (left < left_size && right < right_size) {
-            if (
-                lc_data[left] == rc_data[right]
-                && ll_data[left] == rl_data[right]
-            ) {
-                ++left;
-                ++right;
-            } else if (less(
-                lc_data[left],
-                ll_data[left],
-                rc_data[right],
-                rl_data[right]
-            )) {
-                ++left;
-            } else {
-                ++right;
-            }
-            ++output_size;
-        }
-        output_size += left_size - left + right_size - right;
-    }
-    ContiguousUInt32Array output_chunk(output_size);
-    ContiguousUInt32Array output_local(output_size);
-    FloatArray output_intensity(output_size);
-    FloatArray output_variance(output_size);
-    FloatArray output_weight(output_size);
-    ContiguousUInt32Array output_contributors(output_size);
+    // Single pass: allocate at the worst case (no duplicates -- output can
+    // only be smaller than left_size + right_size when equal keys merge),
+    // merge directly into it, then shrink to the true count. Replaces a
+    // prior two-pass count-then-fill structure that walked the same
+    // comparison logic twice per call.
+    const py::ssize_t worst_case_size = left_size + right_size;
+    ContiguousUInt32Array output_chunk(worst_case_size);
+    ContiguousUInt32Array output_local(worst_case_size);
+    FloatArray output_intensity(worst_case_size);
+    FloatArray output_variance(worst_case_size);
+    FloatArray output_weight(worst_case_size);
+    ContiguousUInt32Array output_contributors(worst_case_size);
     auto *oc_data = static_cast<std::uint32_t *>(output_chunk.request().ptr);
     auto *ol_data = static_cast<std::uint32_t *>(output_local.request().ptr);
     auto *oi_data = static_cast<double *>(output_intensity.request().ptr);
@@ -191,6 +171,7 @@ py::dict merge_sorted_batches(
     auto *on_data = static_cast<std::uint32_t *>(
         output_contributors.request().ptr
     );
+    py::ssize_t output_size = 0;
     {
         py::gil_scoped_release release;
         py::ssize_t left = 0;
@@ -238,6 +219,19 @@ py::dict merge_sorted_batches(
             }
             ++output;
         }
+        output_size = output;
+    }
+    if (output_size != worst_case_size) {
+        // Freshly allocated above, not yet exposed to Python -- refcheck
+        // would only ever see this one reference, but pass false directly
+        // since that's the actual invariant being relied on.
+        const std::vector<py::ssize_t> trimmed_shape{output_size};
+        output_chunk.resize(trimmed_shape, false);
+        output_local.resize(trimmed_shape, false);
+        output_intensity.resize(trimmed_shape, false);
+        output_variance.resize(trimmed_shape, false);
+        output_weight.resize(trimmed_shape, false);
+        output_contributors.resize(trimmed_shape, false);
     }
     py::dict result;
     result["chunk_id"] = std::move(output_chunk);

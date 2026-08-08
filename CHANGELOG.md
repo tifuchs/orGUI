@@ -287,6 +287,10 @@ Reciprocal-space reconstruction:
   list and re-sorting it from scratch. Each block's own records were
   already sorted and deduplicated; the merge exploits that instead of
   discarding it, with no change to the mapped result.
+- The native two-way sorted-batch merge used when combining each frame's
+  records into a checkpoint now runs in a single pass instead of
+  scanning the input twice (once to size the output, once to fill it),
+  halving its comparison work with no change to the merged result.
 
 
 ## [1.5.0] (2026-06-07)
