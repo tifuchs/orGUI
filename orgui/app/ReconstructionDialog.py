@@ -514,15 +514,22 @@ class ReconstructionDialog(qt.QDialog):
             self.thread_override[0],
             thread_tooltip,
         )
-        self.threads_per_image = qt.QSpinBox()
-        self.threads_per_image.setRange(1, 4096)
-        self.threads_per_image.setValue(4)
+        threads_per_image_tooltip = (
+            "Native C++ threads assigned to one image; concurrent image "
+            "workers use the remaining total thread and memory budgets. "
+            "Unchecked (default): chosen automatically and rebalanced "
+            "live during mapping against the real measured image "
+            "delivery rate. Checked: pinned to a fixed value for the "
+            "whole run."
+        )
+        self.threads_per_image = self._optional_spin(
+            1, 4096, threads_per_image_tooltip
+        )
         self._add_form_row(
             execution_form,
             "Native threads per image:",
-            self.threads_per_image,
-            "Native C++ threads assigned to one image; concurrent image workers "
-            "use the remaining total thread and memory budgets.",
+            self.threads_per_image[0],
+            threads_per_image_tooltip,
         )
         memory_tooltip = (
             "Maximum total RAM available to this reconstruction job."
@@ -1420,11 +1427,9 @@ class ReconstructionDialog(qt.QDialog):
             (self.tile_rows, tile_rows),
             (self.tile_columns, tile_columns),
             (self.work_block, settings["native_work_block_pixels"]),
+            (self.threads_per_image, settings["native_threads_per_image"]),
         ):
             self._set_detected_value(control, value)
-        self.threads_per_image.setValue(
-            settings["native_threads_per_image"]
-        )
         self.performance_summary.setPlainText(
             json.dumps(settings, indent=2, sort_keys=True)
         )
@@ -1484,7 +1489,7 @@ class ReconstructionDialog(qt.QDialog):
             ),
             work_block_pixels=self._optional_value(self.work_block),
             checkpoint_count=self.checkpoint_count.value(),
-            threads_per_image=self.threads_per_image.value(),
+            threads_per_image=self._optional_value(self.threads_per_image),
             accumulation_budget_bytes=(
                 None
                 if self._optional_value(self.accumulation_memory) is None
@@ -1549,7 +1554,9 @@ class ReconstructionDialog(qt.QDialog):
                 "frames": included_frames,
                 "threads": self._optional_value(self.thread_override)
                 or self.orgui.numberthreads,
-                "native_threads_per_image": self.threads_per_image.value(),
+                "native_threads_per_image": (
+                    self._optional_value(self.threads_per_image) or "automatic"
+                ),
                 "memory_MiB": self._optional_value(self.memory_override)
                 or self.orgui.maxMemory,
                 "accumulation_MiB_per_worker": self._optional_value(

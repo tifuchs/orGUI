@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pytest
 
@@ -17,6 +19,7 @@ from orgui.datautils.xrayutils.reconstruction import (
     _build_kernels,
     _calibration_probe,
     _files_per_job,
+    _kernel_threads_sweep,
     _map_one_frame,
     _merge_sorted_batches,
     _reduce_batches,
@@ -500,6 +503,69 @@ def test_calibration_probe_scales_sample_size_with_budget():
     )
 
     assert large_budget["sampled_pixels"] >= small_budget["sampled_pixels"]
+
+
+def test_kernel_threads_sweep_stops_early_on_plateau(monkeypatch):
+    """Real native-kernel timing on a tiny test grid is noise-level (design
+    doc Sec7), so this drives the sweep's own control flow (candidate
+    loop, plateau early-stop, inherited values) with a fake, deterministic
+    per-candidate kernel/timing instead of relying on real thread-scaling
+    behavior."""
+    import orgui.datautils.xrayutils.reconstruction as reconstruction_module
+
+    call_log = []
+    durations = {1: 0.15, 2: 0.03, 4: 0.05, 8: 0.001}
+
+    class _FakeSweepKernel:
+        def __init__(self, threads):
+            self._threads = threads
+
+        def accumulate(self, *args, **kwargs):
+            call_log.append(self._threads)
+            time.sleep(durations[self._threads])
+            return {}
+
+    def fake_kernel_for_grid(
+        spec, grid, ub_calculator, *, threads=None, memory_budget_bytes=None
+    ):
+        return _FakeSweepKernel(threads)
+
+    monkeypatch.setattr(
+        reconstruction_module, "_kernel_for_grid", fake_kernel_for_grid
+    )
+
+    grid = _GridSpec(
+        minimum=(-1.0, -1.0, -1.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(1.0, 1.0, 1.0),
+        frame="lab",
+        chunk_shape=(2, 2, 2),
+    )
+    spec = _ReconstructionSpec(grids=(grid,), max_depth=0)
+    mask = np.zeros((4, 4), dtype=bool)
+    rays = _constant_rays(4, 4)
+
+    results = _kernel_threads_sweep(
+        spec,
+        grid,
+        _FakeUB(),
+        mask,
+        rays,
+        np.zeros(4),
+        np.zeros(4),
+        candidates=[1, 2, 4, 8],
+        tile_pixels=16,
+        plateau_ratio=0.9,
+    )
+
+    assert set(results) == {1, 2, 4, 8}
+    assert all(value > 0 for value in results.values())
+    # A real 5x speedup 1 -> 2, then diminishing returns at 4 (slower than
+    # 2) trips the plateau -- candidate 8 must not be measured at all, and
+    # inherits candidate 4's measured time exactly.
+    assert call_log == [1, 2, 4]
+    assert results[1] > results[2]
+    assert results[8] == results[4]
 
 
 def test_footprint_split_conserves_weight_and_pixel_variance():

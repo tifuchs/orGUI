@@ -230,9 +230,15 @@ Reciprocal-space reconstruction:
   next: a small prefetch-reader pool feeds a bounded queue that a pool of
   compute workers drains, and the reader pool grows and shrinks live
   based on how often compute sits waiting for an image. Progress messages
-  now also report the current prefetch reader count. Native thread
-  allocation per image (``Native threads per image``) is unchanged for
-  now; only the image-loading overlap is new.
+  now also report the current prefetch reader count.
+- ``Native threads per image`` is now automatic by default: mapping
+  starts image-parallel and periodically rebalances native threads per
+  image against concurrent images live, using the real, currently
+  measured image delivery rate, instead of a single fixed value used for
+  the whole job. The dialog's field is now an optional override
+  (unchecked = automatic, checked = pin a fixed value as before).
+  **Breaking:** a prepared-but-not-yet-run job JSON from an older orGUI
+  version is no longer accepted (schema version bump) -- re-prepare it.
 
 
 ## [1.5.0] (2026-06-07)

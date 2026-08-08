@@ -474,6 +474,106 @@ def _calibration_probe_all_grids(
     return results
 
 
+def _kernel_threads_sweep(
+    spec,
+    grid,
+    ub_calculator,
+    mask,
+    corner_rays,
+    angles_start,
+    angles_end,
+    *,
+    candidates,
+    tile_pixels=1_048_576,
+    memory_budget_bytes=None,
+    plateau_ratio=0.9,
+):
+    """Measure real wall-clock ``per_call_time(kernel_threads)`` (design doc
+    Sec7's live joint-balancing rule), one real kernel and one real
+    ``accumulate()`` call per candidate against a single tile near
+    ``tile_pixels``.
+
+    Deliberately not :func:`_calibration_probe`'s
+    ``block_mapping_cpu_seconds``: that figure is aggregate CPU-time summed
+    across ``kernel_threads`` native worker threads, which hides the
+    parallel-efficiency plateau by construction (it grows with thread count
+    even when wall-clock time has flattened). Also deliberately one large
+    tile rather than many small scattered ones -- the plateau is a property
+    of one call's native block count (design doc Sec7/Sec17's confirmed
+    sweep), not something many small calls would reveal.
+
+    :param _ReconstructionSpec spec:
+        Frozen reconstruction compute settings (``max_depth``,
+        ``work_block_pixels`` are read from here; ``threads`` is not --
+        each candidate supplies its own thread count).
+    :param _GridSpec grid:
+        The grid to build sweep kernels for.
+    :param ub_calculator:
+        Live UB calculator (same object passed to :func:`_build_kernels`).
+    :param np.ndarray mask:
+        Boolean mask for the full detector, shape ``(rows, columns)``.
+    :param np.ndarray corner_rays:
+        Full-detector corner rays, shape ``(rows + 1, columns + 1, 3)``.
+    :param np.ndarray angles_start, angles_end:
+        Shape ``(4,)`` diffractometer angles in radians.
+    :param iterable candidates:
+        Candidate ``kernel_threads`` values, sorted ascending.
+    :param int tile_pixels:
+        Target sample-tile pixel count; clamped to the detector's actual
+        size.
+    :param memory_budget_bytes:
+        Forwarded to each candidate's kernel construction.
+    :param float plateau_ratio:
+        Stop measuring further candidates once a candidate's time is at
+        least this fraction of the previous candidate's time (diminishing
+        returns). Later, unmeasured candidates are not claimed to be
+        faster: they simply inherit the last measured time.
+    :returns:
+        Dict keyed by ``kernel_threads`` (every requested candidate,
+        including unmeasured ones past the plateau), values are measured
+        (or inherited) wall-clock seconds for one call at ``tile_pixels``.
+    :rtype: dict[int, float]
+    """
+    rows, columns = mask.shape
+    tile_side = max(1, min(int(math.sqrt(tile_pixels)), rows, columns))
+    tile_mask = np.ascontiguousarray(mask[:tile_side, :tile_side])
+    tile_rays = np.ascontiguousarray(
+        corner_rays[: tile_side + 1, : tile_side + 1]
+    )
+    intensity = np.zeros((tile_side, tile_side), dtype=np.float64)
+    variance = np.zeros((tile_side, tile_side), dtype=np.float64)
+
+    results: dict[int, float] = {}
+    last_measured_time = None
+    plateaued = False
+    for kernel_threads in candidates:
+        if plateaued:
+            results[kernel_threads] = last_measured_time
+            continue
+        kernel = _kernel_for_grid(
+            spec,
+            grid,
+            ub_calculator,
+            threads=kernel_threads,
+            memory_budget_bytes=memory_budget_bytes,
+        )
+        started = time.perf_counter()
+        kernel.accumulate(
+            intensity, variance, tile_mask, tile_rays,
+            angles_start, angles_end, True,
+        )
+        elapsed = time.perf_counter() - started
+        results[kernel_threads] = elapsed
+        if (
+            last_measured_time is not None
+            and last_measured_time > 0
+            and elapsed >= plateau_ratio * last_measured_time
+        ):
+            plateaued = True
+        last_measured_time = elapsed
+    return results
+
+
 def _empty_batch() -> dict[str, np.ndarray]:
     return {
         "chunk_id": np.empty(0, dtype=np.uint64),

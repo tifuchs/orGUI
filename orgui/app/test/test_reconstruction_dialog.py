@@ -160,12 +160,13 @@ def test_detected_performance_values_are_visible_without_becoming_overrides(
     dialog._show_execution_settings(object())
 
     assert dialog.thread_override[2].value() == 16
-    assert dialog.threads_per_image.value() == 4
+    assert dialog.threads_per_image[2].value() == 4
     assert dialog.memory_override[2].value() == 2048
     assert dialog.accumulation_memory[2].value() == 256
     assert dialog.tile_rows[2].value() == 1024
     assert dialog.tile_columns[2].value() == 768
     assert not dialog.thread_override[1].isChecked()
+    assert not dialog.threads_per_image[1].isChecked()
     assert not dialog.tile_rows[1].isChecked()
     assert '"concurrent_image_workers": 8' in (
         dialog.performance_summary.toPlainText()
@@ -230,7 +231,7 @@ def test_settings_are_grouped_and_have_tooltips(tmp_path):
         dialog.grid_table,
         dialog.accuracy,
         dialog.thread_override[0],
-        dialog.threads_per_image,
+        dialog.threads_per_image[0],
         dialog.memory_override[0],
         dialog.accumulation_memory[0],
         dialog.frame_batch[0],

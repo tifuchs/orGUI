@@ -291,9 +291,21 @@ job.
    between concurrent image workers and native threads within each image.
 
 ``Native threads per image``
-   C++ threads assigned to one image. The default is 4. Remaining threads can
-   run other images concurrently. The actual value is bounded by the total
-   thread and memory budgets.
+   C++ threads assigned to one image. Remaining threads can run other images
+   concurrently. By default (``Override`` unchecked) this is chosen
+   automatically: mapping starts image-parallel (one native thread per image)
+   and periodically rebalances native threads per image against concurrent
+   images while running, using the real, currently measured image delivery
+   rate for this job's storage -- not a value that can be predicted or
+   configured ahead of time. Check ``Override`` to pin a fixed value for the
+   whole job instead (the previous, always-static behavior). Either way the
+   actual value is bounded by the total thread and memory budgets.
+
+Mapping overlaps image loading with image processing: a small prefetch-reader
+pool loads images ahead of the compute workers that process them, growing and
+shrinking live based on how often compute sits waiting for an image. Progress
+messages report the current prefetch reader count alongside concurrent image
+workers and native threads per image.
 
 ``Total memory budget``
    Optional per-job replacement for ``orGUI.maxMemory``, in MiB. It bounds
@@ -658,7 +670,9 @@ inspection, scheduling, and provenance:
    Optional per-job replacements for the captured defaults.
 
 ``threads_per_image``
-   Requested native threads per concurrent image.
+   Requested native threads per concurrent image, or ``null`` for automatic
+   (the default): chosen at run time and periodically rebalanced live against
+   the measured image delivery rate, instead of a single fixed value.
 
 ``accumulation_budget_bytes``
    Optional retained-record bytes per image worker.

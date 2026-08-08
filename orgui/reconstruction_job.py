@@ -31,13 +31,14 @@ from .datautils.xrayutils.reconstruction import (
     _discover_checkpoint_state,
     _files_per_job,
     _finalize_reconstruction,
+    _kernel_threads_sweep,
     _map_one_frame,
     _tile_ray_arrays,
     _validate_mapping_setup,
 )
 
 
-JOB_SCHEMA_VERSION = 4
+JOB_SCHEMA_VERSION = 5
 ACCURACY_DEPTHS = {
     "center": 0,
     "low": 1,
@@ -128,7 +129,7 @@ class ReconstructionJob:
     assets_path: str
     assets_sha256: str
     source_fingerprint_sha256: str
-    threads_per_image: int
+    threads_per_image: int | None
     accumulation_budget_bytes: int | None
     checkpoint_count: int = 10
     checkpoint_plan: dict[str, list[list[int]]] = field(default_factory=dict)
@@ -785,7 +786,7 @@ def prepare_job(
     frame_batch=None,
     tile_shape=None,
     work_block_pixels=None,
-    threads_per_image=4,
+    threads_per_image=None,
     accumulation_budget_bytes=None,
     checkpoint_count=10,
     cluster_settings=None,
@@ -803,7 +804,7 @@ def prepare_job(
         raise ValueError(
             f"Unknown HDF5 compression override: {compression_override}"
         )
-    if int(threads_per_image) < 1:
+    if threads_per_image is not None and int(threads_per_image) < 1:
         raise ValueError("Threads per image must be at least one")
     if int(checkpoint_count) < 1:
         raise ValueError("checkpoint_count must be at least one")
@@ -858,7 +859,9 @@ def prepare_job(
         assets_path=str(assets),
         assets_sha256=assets_sha256,
         source_fingerprint_sha256=fingerprint,
-        threads_per_image=int(threads_per_image),
+        threads_per_image=(
+            None if threads_per_image is None else int(threads_per_image)
+        ),
         accumulation_budget_bytes=(
             None
             if accumulation_budget_bytes is None
@@ -1185,8 +1188,11 @@ def _execution_layout(job, scan, config, *, extra_excluded_frames=()):
     )
     if job.frame_batch is None:
         spec = job.internal_spec()
+        seed_threads_per_image = (
+            1 if job.threads_per_image is None else job.threads_per_image
+        )
         native_threads = max(
-            1, min(job.threads_per_image, spec.threads)
+            1, min(seed_threads_per_image, spec.threads)
         )
         image_workers = max(1, spec.threads // native_threads)
         target_tasks = max(1, image_workers * 4)
@@ -1347,6 +1353,14 @@ def reconstruction_execution_settings(job, scan=None, config=None):
     scan = job.scan if scan is None else scan
     config = job.config_data if config is None else config
     spec = job.internal_spec()
+    # Automatic mode (job.threads_per_image is None, Sec7 Phase 4b) has no
+    # live-measured I/O rate available before a job runs, so this preview
+    # reports the same I/O-optimistic seed _map_pending_ranges itself
+    # starts a live-balanced run from, not a claim about the pair that
+    # will actually be chosen once real timing data exists.
+    effective_threads_per_image = (
+        1 if job.threads_per_image is None else job.threads_per_image
+    )
     ranges, tiles = _execution_layout(job, scan, config)
     bounds = scan.exposure_angle_bounds(
         config, fallback=job.angle_fallback
@@ -1384,7 +1398,7 @@ def reconstruction_execution_settings(job, scan=None, config=None):
                 scheduler_memory,
                 stationary=stationary,
                 frames_per_task=stop - start,
-                threads_per_image=job.threads_per_image,
+                threads_per_image=effective_threads_per_image,
                 accumulation_budget_bytes=job.accumulation_budget_bytes,
             )
         )
@@ -1418,7 +1432,10 @@ def reconstruction_execution_settings(job, scan=None, config=None):
     return {
         "thread_budget": spec.threads,
         "native_threads_per_image": max(
-            1, min(job.threads_per_image, spec.threads)
+            1, min(effective_threads_per_image, spec.threads)
+        ),
+        "threads_per_image_mode": (
+            "automatic" if job.threads_per_image is None else "pinned"
         ),
         "memory_budget_MiB": spec.memory_budget_bytes / 1024**2,
         "accumulation_budget_MiB_per_worker": min(
@@ -1841,6 +1858,52 @@ _BLOCKED_FRACTION_SHRINK = 0.02
 tuned against real production load."""
 _COORDINATOR_TICK_SECONDS = 0.3
 _POLL_TIMEOUT_SECONDS = 0.2
+_REBALANCE_INTERVAL_SECONDS = 600
+"""Sec7 Phase 4b: periodic, not continuous, re-evaluation cadence for the
+joint kernel_threads/image_workers rebalance. Illustrative, like the
+blocked-fraction bands above -- not tuned against real production load."""
+_REBALANCE_RATE_HYSTERESIS = 0.25
+"""Only commit a kernel_threads rebuild if the measured delivery rate has
+moved by more than this fraction since the pair currently in effect was
+chosen (design doc Sec17's resolved item) -- avoids rebuilding on noise
+even when a rebalance check happens to land on a slightly different
+candidate."""
+_KERNEL_SWEEP_TILE_PIXELS = 1_048_576
+_KERNEL_SWEEP_PLATEAU_RATIO = 0.9
+
+
+def _kernel_threads_candidates(total_threads, include=()):
+    """Candidate ``kernel_threads`` values for the Sec7 sweep.
+
+    Powers of two up to ``total_threads``, plus ``total_threads`` itself
+    if not already a power of two, plus every value in ``include`` (e.g.
+    the currently-active ``kernel_threads``, which the caller must always
+    inject -- see :func:`_map_pending_ranges`). Generated from the job's
+    own thread budget, never a hardcoded absolute list: the design doc's
+    own ``{1,2,4,8}`` vs. ``{1,4,8,16,24+}`` examples are per-depth
+    illustrations of this same construction at ``total_threads=24``, not
+    values to hardcode.
+
+    :param int total_threads:
+        The job/node's own thread budget.
+    :param iterable include:
+        Additional values to force into the candidate set.
+    :returns:
+        Sorted, deduplicated list of positive ``kernel_threads`` values,
+        each at most ``total_threads``.
+    :rtype: list[int]
+    """
+    total_threads = max(1, int(total_threads))
+    candidates = {1}
+    value = 1
+    while value < total_threads:
+        value *= 2
+        candidates.add(min(value, total_threads))
+    for extra in include:
+        extra = int(extra)
+        if 1 <= extra <= total_threads:
+            candidates.add(extra)
+    return sorted(candidates)
 
 
 def _map_pending_ranges(
@@ -1864,15 +1927,20 @@ def _map_pending_ranges(
 
     A producer/consumer pipeline (design doc Sec7): a prefetch pool of
     reader threads loads images and feeds a bounded-backpressure queue; a
-    fixed-size pool of compute workers drains it, correcting and
-    accumulating each frame via :func:`_map_one_frame`. The reader pool
-    adapts continuously via a blocked-fraction signal (grow eagerly when
-    compute is starved for images, shrink cautiously when it isn't).
-    ``image_workers``/``kernel_threads`` are still the static,
-    ``_frame_parallelism``-derived pair for now -- Sec7's live joint
-    rebalancing against a measured I/O rate is a follow-up phase; this
-    phase only replaces the "zero overlap between image load and image
-    compute" gap in the previous fully-serial-per-task loop.
+    pool of compute workers drains it, correcting and accumulating each
+    frame via :func:`_map_one_frame`. The reader pool adapts continuously
+    via a blocked-fraction signal (grow eagerly when compute is starved
+    for images, shrink cautiously when it isn't).
+
+    ``threads_per_image=None`` (Sec7 Phase 4b, "automatic") starts from an
+    I/O-optimistic seed (``kernel_threads=1``, all budget as
+    ``image_workers``) and periodically rebalances ``kernel_threads``/
+    ``image_workers`` live against a measured frame-delivery rate (every
+    ``_REBALANCE_INTERVAL_SECONDS``), via a wall-clock
+    ``_kernel_threads_sweep`` and the design doc's joint-balancing rule.
+    A concrete ``threads_per_image`` int keeps the static,
+    ``_frame_parallelism``-derived pair fixed for the whole run (today's
+    Phase 4a behavior, unchanged) -- the explicit override escape hatch.
 
     Extracted from :func:`run_job`'s mapping loop so
     :func:`run_cluster_map_task` can reuse it unchanged, scoped to one
@@ -1883,6 +1951,9 @@ def _map_pending_ranges(
     """
     if not pending_ranges:
         return
+
+    automatic = threads_per_image is None
+    seed_threads_per_image = 1 if automatic else threads_per_image
 
     detector_tiles, bounds = _validate_mapping_setup(
         scan, config.detector, tiles, bounds, correction_pipeline
@@ -1922,7 +1993,7 @@ def _map_pending_ranges(
                 scheduler_memory,
                 stationary=stationary,
                 frames_per_task=frame_range[1] - frame_range[0],
-                threads_per_image=threads_per_image,
+                threads_per_image=seed_threads_per_image,
                 accumulation_budget_bytes=accumulation_budget_bytes,
             )
         )
@@ -1931,7 +2002,13 @@ def _map_pending_ranges(
     image_workers = (
         min(len(pending_ranges), min(worker_limits)) if worker_limits else 1
     )
-    kernel_threads = min(kernel_thread_limits) if kernel_thread_limits else 1
+    # A mutable box: read by compute_loop at each worker's kernel-build
+    # time (not closed over as a plain value), so an automatic-mode
+    # kernel_threads change only affects newly-spawned compute workers --
+    # see the rebalance block in the coordinator loop below.
+    current_kernel_threads = [
+        min(kernel_thread_limits) if kernel_thread_limits else 1
+    ]
     # The native budget is a per-call guard. The scheduler independently
     # bounds the aggregate worker working set above.
     kernel_memory_budget = effective_memory
@@ -1941,6 +2018,28 @@ def _map_pending_ranges(
         for start, stop in pending_ranges
         for frame_index in range(start, stop)
     ]
+
+    if automatic:
+        # A single representative tile/frame is enough for the sweep: it
+        # measures kernel_threads scaling behavior (thread-count
+        # plateau shape), not a scientifically exact per-job estimate --
+        # unlike the checkpoint accumulation itself, this only informs a
+        # scheduling decision. A trivial all-included mask is used
+        # (real per-frame masks only exist after correction, which is
+        # not needed here).
+        sweep_tile = detector_tiles[0]
+        sweep_mask = np.zeros(
+            (sweep_tile[1] - sweep_tile[0], sweep_tile[3] - sweep_tile[2]),
+            dtype=bool,
+        )
+        sweep_rays = ray_arrays[sweep_tile]
+        sweep_angles_start = np.ascontiguousarray(bounds[frame_indices[0], 0])
+        sweep_angles_end = np.ascontiguousarray(bounds[frame_indices[0], 1])
+        sweep_stationary = bool(
+            np.array_equal(
+                bounds[frame_indices[0], 0], bounds[frame_indices[0], 1]
+            )
+        )
 
     max_readers = (
         _PREFETCH_POOL_MAX
@@ -1959,6 +2058,12 @@ def _map_pending_ranges(
     remaining = [len(frame_indices)]
     remaining_lock = threading.Lock()
     readers_done = threading.Event()
+    # Successfully-read frames since the last rebalance check -- the
+    # reader pool's own delivery rate, not end-to-end throughput (which
+    # would be capped by compute when compute is the bottleneck, making
+    # the rebalance rule unable to ever discover more image_workers would
+    # help; see design doc Sec7 Phase 4b notes).
+    delivered_in_window = [0]
 
     exception_lock = threading.Lock()
     first_exception: list[BaseException] = []
@@ -1971,9 +2076,11 @@ def _map_pending_ranges(
     def should_stop():
         return bool(first_exception)
 
-    def mark_frame_delivered():
+    def mark_frame_delivered(*, succeeded=True):
         with remaining_lock:
             remaining[0] -= 1
+            if succeeded:
+                delivered_in_window[0] += 1
             if remaining[0] <= 0:
                 readers_done.set()
 
@@ -2005,7 +2112,7 @@ def _map_pending_ranges(
                 except BaseException as exc:  # noqa: BLE001
                     gate.release()
                     record_exception(exc)
-                    mark_frame_delivered()
+                    mark_frame_delivered(succeeded=False)
                     return
                 ready_queue.put((frame_index, image_payload))
                 mark_frame_delivered()
@@ -2038,7 +2145,7 @@ def _map_pending_ranges(
                 kernels = _build_kernels(
                     spec,
                     config.ub_calculator,
-                    threads=kernel_threads,
+                    threads=current_kernel_threads[0],
                     memory_budget_bytes=kernel_memory_budget,
                 )
                 while True:
@@ -2089,6 +2196,8 @@ def _map_pending_ranges(
     )
     previous_blocked = 0
     previous_total = 0
+    last_rebalance_monotonic = time.monotonic()
+    rate_at_last_rebalance = 0.0
     try:
         while True:
             deadline = time.monotonic() + _COORDINATOR_TICK_SECONDS
@@ -2106,8 +2215,8 @@ def _map_pending_ranges(
                         total_images + 1,
                         (
                             f"Mapping images {mapped_images}/{total_images} "
-                            f"({image_workers} image workers, "
-                            f"{kernel_threads} native threads/image, "
+                            f"({compute_pool.size} image workers, "
+                            f"{current_kernel_threads[0]} native threads/image, "
                             f"{reader_pool.size} prefetch readers)"
                         ),
                     )
@@ -2126,6 +2235,93 @@ def _map_pending_ranges(
                     and reader_pool.size > 1
                 ):
                     reader_pool.retarget(reader_pool.size - 1)
+            if automatic and not readers_done.is_set() and not first_exception:
+                now = time.monotonic()
+                elapsed = now - last_rebalance_monotonic
+                if elapsed >= _REBALANCE_INTERVAL_SECONDS:
+                    with remaining_lock:
+                        delivered = delivered_in_window[0]
+                        delivered_in_window[0] = 0
+                    last_rebalance_monotonic = now
+                    rate = delivered / elapsed if elapsed > 0 else 0.0
+                    candidates = _kernel_threads_candidates(
+                        spec.threads, include=(current_kernel_threads[0],)
+                    )
+                    sweep = _kernel_threads_sweep(
+                        spec,
+                        spec.grids[0],
+                        config.ub_calculator,
+                        sweep_mask,
+                        sweep_rays,
+                        sweep_angles_start,
+                        sweep_angles_end,
+                        candidates=candidates,
+                        tile_pixels=_KERNEL_SWEEP_TILE_PIXELS,
+                        memory_budget_bytes=kernel_memory_budget,
+                        plateau_ratio=_KERNEL_SWEEP_PLATEAU_RATIO,
+                    )
+                    feasible = []
+                    for candidate_threads, per_call_time in sweep.items():
+                        needed = (
+                            max(1, math.ceil(rate * per_call_time))
+                            if rate > 0
+                            else 1
+                        )
+                        ceiling, _nt, _pm, _acc = _frame_parallelism(
+                            spec,
+                            tiles,
+                            scheduler_memory,
+                            stationary=sweep_stationary,
+                            threads_per_image=candidate_threads,
+                            accumulation_budget_bytes=accumulation_budget_bytes,
+                        )
+                        if needed <= ceiling:
+                            feasible.append(
+                                (candidate_threads, min(needed, ceiling))
+                            )
+                    if feasible:
+                        new_kernel_threads, new_image_workers = max(
+                            feasible, key=lambda pair: pair[0]
+                        )
+                        rate_ref = max(rate_at_last_rebalance, 1e-9)
+                        rate_moved = (
+                            abs(rate - rate_at_last_rebalance) / rate_ref
+                            > _REBALANCE_RATE_HYSTERESIS
+                        )
+                        if (
+                            new_kernel_threads != current_kernel_threads[0]
+                            and rate_moved
+                        ):
+                            # kernel_threads change: each compute worker's
+                            # kernel is built once at worker-start, so this
+                            # needs a full generation swap, not a resize.
+                            # ready_queue/gate are untouched -- readers and
+                            # already-queued frames are unaffected, only
+                            # which pool drains the queue changes.
+                            current_kernel_threads[0] = new_kernel_threads
+                            gate.retarget(
+                                new_image_workers + _PREFETCH_QUEUE_SLACK
+                            )
+                            old_compute_pool = compute_pool
+                            compute_pool = _AdjustablePool(
+                                compute_loop,
+                                initial_size=new_image_workers,
+                                name="orgui-rsmap-compute",
+                            )
+                            # Blocks until every straggler on the retired
+                            # generation finishes its in-flight
+                            # _map_one_frame call -- a deliberate, rare
+                            # stall (this whole block runs at most once per
+                            # _REBALANCE_INTERVAL_SECONDS), never abandons
+                            # in-flight work.
+                            old_compute_pool.shutdown(wait=True)
+                            rate_at_last_rebalance = rate
+                        elif new_image_workers != compute_pool.size:
+                            gate.retarget(
+                                new_image_workers + _PREFETCH_QUEUE_SLACK
+                            )
+                            compute_pool.retarget(new_image_workers)
+                            rate_at_last_rebalance = rate
             reader_pool.reap()
             compute_pool.reap()
             # Completion: every frame delivered or errored, and every

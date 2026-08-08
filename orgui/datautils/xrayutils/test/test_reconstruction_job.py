@@ -179,6 +179,36 @@ def test_central_job_runs_resumes_and_cleans_verified_scratch(
     }
 
 
+def test_threads_per_image_none_round_trips_and_reports_automatic_mode(
+    tmp_path,
+):
+    """Sec7 Phase 4b: threads_per_image=None ('automatic') must survive a
+    JSON round-trip under the bumped schema version and be reported
+    distinctly from a pinned int, without requiring a live run."""
+    scan, job = _two_frame_job(tmp_path, "result.h5")
+    job.threads_per_image = None
+
+    assert job.schema_version == reconstruction_job_module.JOB_SCHEMA_VERSION
+    restored = ReconstructionJob.from_dict(job.to_dict())
+    assert restored.threads_per_image is None
+
+    settings = reconstruction_execution_settings(
+        job, scan=scan, config=job.config_data
+    )
+    assert settings["threads_per_image_mode"] == "automatic"
+    # The automatic-mode seed matches _map_pending_ranges' own I/O-optimistic
+    # starting point (kernel_threads=1) -- not a claim about the pair that
+    # will actually be chosen once a run has real timing data.
+    assert settings["native_threads_per_image"] == 1
+
+    job.threads_per_image = 2
+    pinned_settings = reconstruction_execution_settings(
+        job, scan=scan, config=job.config_data
+    )
+    assert pinned_settings["threads_per_image_mode"] == "pinned"
+    assert pinned_settings["native_threads_per_image"] == 2
+
+
 def test_job_resumes_partial_checkpoints_without_remapping_completed_ones(
     tmp_path, monkeypatch
 ):
