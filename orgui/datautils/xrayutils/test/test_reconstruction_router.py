@@ -6,11 +6,16 @@ finalize (design doc Sec9/Sec10/Sec11): :class:`_CheckpointRouter`,
 
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import h5py
 import numpy as np
 import pytest
 
 from orgui.datautils.xrayutils.reconstruction import (
+    _CheckpointAccumulator,
     _CheckpointRangeReader,
     _CheckpointRouter,
     _GridSpec,
@@ -146,6 +151,112 @@ def test_router_safety_valve_splits_into_multiple_parts_summing_frames(tmp_path)
     resumed, files = _discover_checkpoint_state(tmp_path, boundaries, "d")
     assert resumed == {("hkl", 0)}
     assert sorted(files["hkl"]) == sorted(router.written)
+
+
+# ---------------------------------------------------------------------------
+# _CheckpointRouter: concurrent route() calls (the lock-scoping fix that
+# moves accumulator.insert() outside the router's lock)
+# ---------------------------------------------------------------------------
+
+
+def test_router_concurrent_routes_to_same_key_lose_no_frames(tmp_path, monkeypatch):
+    """route() no longer holds the router lock across insert(), so several
+    frames destined for the same checkpoint can have their insert() calls
+    genuinely overlap. Delay the *first* frame's insert() so it is still
+    in flight when the *last* frame's route() call decrements _remaining
+    to zero -- the exact window the in-flight counter exists to guard --
+    and confirm the flush still waits for it, losing nothing."""
+    rng = np.random.default_rng(2)
+    n_frames = 8
+    batches = [
+        _batch(0, rng.integers(0, 50, size=10), rng.uniform(0, 10, size=10))
+        for _ in range(n_frames)
+    ]
+    expected = _reduce_batches(batches)
+
+    real_insert = _CheckpointAccumulator.insert
+    delay_next = threading.Event()
+    delay_next.set()  # delay exactly the first call that reaches insert()
+    lock = threading.Lock()
+
+    def delayed_insert(self, batch):
+        should_delay = False
+        with lock:
+            if delay_next.is_set():
+                delay_next.clear()
+                should_delay = True
+        real_insert(self, batch)
+        if should_delay:
+            # Released the accumulator's own lock already (real_insert
+            # returned); hold up *returning to route()* so this frame's
+            # in-flight count stays nonzero while other frames' route()
+            # calls race ahead and reach their own flush check first.
+            time.sleep(0.3)
+
+    monkeypatch.setattr(_CheckpointAccumulator, "insert", delayed_insert)
+
+    router = _CheckpointRouter(
+        {"hkl": [(0, n_frames)]},
+        spec_digest="d",
+        checkpoint_dir=tmp_path,
+        active_budget_bytes=10**9,
+    )
+    with ThreadPoolExecutor(max_workers=n_frames) as pool:
+        list(
+            pool.map(
+                lambda item: router.route("hkl", item[0], item[1]),
+                enumerate(batches),
+            )
+        )
+
+    assert len(router.written) == 1
+    actual = _read_checkpoint(router.written[0])
+    for name in expected:
+        np.testing.assert_array_equal(actual[name], expected[name], err_msg=name)
+    with h5py.File(router.written[0], "r") as h5file:
+        assert h5file.attrs["frames_covered"] == n_frames
+
+
+def test_router_concurrent_routes_to_different_keys_do_not_block(tmp_path, monkeypatch):
+    """A slow insert() cascade for one checkpoint must not stall route()
+    calls for a different, unrelated checkpoint -- the reason the merge
+    moved outside the router's single job-wide lock in the first place."""
+    slow_key_seen = threading.Event()
+
+    real_insert = _CheckpointAccumulator.insert
+
+    def slow_insert(self, batch):
+        real_insert(self, batch)
+        if not slow_key_seen.is_set():
+            slow_key_seen.set()
+            time.sleep(0.5)
+
+    monkeypatch.setattr(_CheckpointAccumulator, "insert", slow_insert)
+
+    router = _CheckpointRouter(
+        {"hkl": [(0, 1), (1, 2)]},
+        spec_digest="d",
+        checkpoint_dir=tmp_path,
+        active_budget_bytes=10**9,
+    )
+
+    def route_slow():
+        router.route("hkl", 0, _batch(0, [1], [1.0]))
+
+    def route_fast():
+        slow_key_seen.wait(timeout=5)  # ensure the slow route() has started first
+        started = time.perf_counter()
+        router.route("hkl", 1, _batch(1, [2], [2.0]))
+        return time.perf_counter() - started
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        slow_future = pool.submit(route_slow)
+        fast_future = pool.submit(route_fast)
+        fast_elapsed = fast_future.result(timeout=5)
+        slow_future.result(timeout=5)
+
+    assert fast_elapsed < 0.4  # well under the slow route's 0.5s hold
+    assert len(router.written) == 2
 
 
 # ---------------------------------------------------------------------------

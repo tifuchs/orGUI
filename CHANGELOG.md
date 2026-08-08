@@ -291,6 +291,15 @@ Reciprocal-space reconstruction:
   records into a checkpoint now runs in a single pass instead of
   scanning the input twice (once to size the output, once to fill it),
   halving its comparison work with no change to the merged result.
+- Routing a frame's records into its checkpoint no longer holds one
+  job-wide lock for the entire merge. That merge can itself take longer
+  than a single frame's own mapping time under fine (low-redundancy)
+  output grids, and the lock previously serialized every concurrently
+  running frame worker behind it, even for frames destined for a
+  different checkpoint or grid entirely. The merge now runs outside the
+  lock; an in-flight-call counter keeps the checkpoint-flush decision
+  correct so a later frame's routing can never flush a checkpoint while
+  an earlier frame's merge into it is still running.
 
 
 ## [1.5.0] (2026-06-07)

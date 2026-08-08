@@ -909,6 +909,12 @@ class _CheckpointRouter:
         self._parts: dict[tuple[str, int], int] = {}
         self._frames_in_part: dict[tuple[str, int], int] = {}
         self._remaining: dict[tuple[str, int], int] = {}
+        # Count of insert() calls currently in flight per key -- lets route()
+        # release the router lock before calling the (potentially slow)
+        # accumulator merge, while still knowing exactly when it's safe to
+        # flush: not merely when every frame has been routed, but when every
+        # one of their insert() calls has actually finished.
+        self._inflight: dict[tuple[str, int], int] = {}
         for grid_name, ranges in self._boundaries.items():
             for index, (start, stop) in enumerate(ranges):
                 key = (grid_name, index)
@@ -939,10 +945,25 @@ class _CheckpointRouter:
         previous run. May flush the checkpoint (or a part of it, under the
         Sec10 safety valve) to disk; the write itself happens without
         holding the router's lock.
+
+        The merge itself (:meth:`_CheckpointAccumulator.insert`) runs
+        outside the router's lock, relying on the accumulator's own lock
+        for correctness -- only the short bookkeeping around it is
+        serialized job-wide. This matters because ``insert()`` is not
+        cheap: its binary-counter merge tree periodically cascades
+        pairwise merges over progressively larger accumulated batches, and
+        holding a single job-wide lock for that whole cascade would block
+        every other concurrently running frame worker's own ``route()``
+        call, even for frames belonging to a different checkpoint or grid
+        entirely. Flushing is gated on an in-flight counter, not just the
+        remaining-frame count, so that the *last* frame's ``route()`` call
+        reaching ``_remaining[key] == 0`` can never flush the accumulator
+        while an *earlier* frame's ``insert()`` for the same key is still
+        running -- which would otherwise silently lose that frame's
+        contribution to a ``finalize()``-reset accumulator.
         """
         index = self.checkpoint_index_for_frame(grid_name, frame_index)
         key = (grid_name, index)
-        to_flush = None
         with self._lock:
             if key in self._resumed:
                 return
@@ -950,13 +971,25 @@ class _CheckpointRouter:
             if accumulator is None:
                 accumulator = _CheckpointAccumulator()
                 self._accumulators[key] = accumulator
-            accumulator.insert(batch)
-            self._frames_in_part[key] = self._frames_in_part.get(key, 0) + 1
+            self._inflight[key] = self._inflight.get(key, 0) + 1
             self._remaining[key] -= 1
-            done = self._remaining[key] <= 0
-            over_budget = accumulator.should_flush(self._active_budget_bytes)
+        accumulator.insert(batch)
+        to_flush = None
+        with self._lock:
+            self._inflight[key] -= 1
+            self._frames_in_part[key] = self._frames_in_part.get(key, 0) + 1
+            # Gate both flush triggers on no-other-insert-in-flight-for-this-
+            # key, not just "done": an over-budget flush racing a still-
+            # running sibling insert() for the same key would tear down
+            # _accumulators[key]/_inflight[key] out from under it.
+            no_inflight = self._inflight[key] <= 0
+            done = no_inflight and self._remaining[key] <= 0
+            over_budget = no_inflight and accumulator.should_flush(
+                self._active_budget_bytes
+            )
             if done or over_budget:
                 del self._accumulators[key]
+                del self._inflight[key]
                 part = self._parts.get(key, 0)
                 self._parts[key] = part + 1
                 frames_covered = self._frames_in_part.pop(key, 0)
