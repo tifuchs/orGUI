@@ -13,10 +13,12 @@ from orgui.app.config_data import ConfigData
 from orgui.app.database import config_data_to_json
 from orgui.backend.scans import ScanReference, SimulationScan
 from orgui.datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
+from orgui.datautils.xrayutils.reconstruction import _GridSpec, _ReconstructionSpec
 import orgui.reconstruction_job as reconstruction_job_module
 from orgui.reconstruction_job import (
     ReconstructionGrid,
     ReconstructionJob,
+    _frame_parallelism,
     _node_checkpoint_plan,
     _node_excluded_frames,
     job_status,
@@ -177,6 +179,51 @@ def test_central_job_runs_resumes_and_cleans_verified_scratch(
         "pending": 0,
         "total": 2,
     }
+
+
+def test_frame_parallelism_scopes_memory_to_largest_tile_not_detector_sum():
+    """A worker processes its detector tiles sequentially (_map_one_frame),
+    one native accumulate() call at a time -- its peak native working set
+    is bounded by its single largest tile, never the sum of every tile
+    across the whole detector. Summing silently starved image_workers on
+    any job with more than one detector tile (a multi-tile Pilatus-6M-scale
+    job saw concurrent_image_workers capped at 6 instead of the full
+    24-thread budget purely from this overcounting)."""
+    grid = _GridSpec(
+        minimum=(-1.0, -1.0, -1.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(1.0, 1.0, 1.0),
+        frame="lab",
+        chunk_shape=(2, 2, 2),
+    )
+    spec = _ReconstructionSpec(grids=(grid,), max_depth=0, threads=24)
+    memory_bytes = 10_000 * 1024**2
+    one_tile = [(0, 1024, 0, 1024)]
+    nine_identically_sized_tiles = [
+        (row, row + 1024, column, column + 1024)
+        for row in range(0, 3 * 1024, 1024)
+        for column in range(0, 3 * 1024, 1024)
+    ]
+    assert len(nine_identically_sized_tiles) == 9
+
+    single_tile_result = _frame_parallelism(
+        spec, one_tile, memory_bytes, stationary=False, threads_per_image=1
+    )
+    nine_tile_result = _frame_parallelism(
+        spec,
+        nine_identically_sized_tiles,
+        memory_bytes,
+        stationary=False,
+        threads_per_image=1,
+    )
+
+    # One worker touching 9 identically-sized tiles has the same peak
+    # per-tile memory need as one touching a single such tile -- both
+    # must produce the same (image_workers, kernel_threads,
+    # per_worker_memory_bytes, accumulation_budget_bytes).
+    assert nine_tile_result == single_tile_result
+    # Thread-bound, not memory-starved by the (wrong) detector-wide sum.
+    assert nine_tile_result[0] == spec.threads == 24
 
 
 def test_threads_per_image_none_round_trips_and_reports_automatic_mode(

@@ -245,6 +245,14 @@ Reciprocal-space reconstruction:
   (unchecked = automatic, checked = pin a fixed value as before).
   **Breaking:** a prepared-but-not-yet-run job JSON from an older orGUI
   version is no longer accepted (schema version bump) -- re-prepare it.
+- Fixed the concurrent-image-worker memory estimate summing every
+  detector tile's worst-case native working set instead of using only
+  the single largest tile (a worker processes its tiles one at a time,
+  never simultaneously). On any job with more than one detector tile,
+  this had silently capped concurrent image workers to roughly
+  ``thread_budget / tile_count`` regardless of the actual memory budget
+  -- on a real multi-tile production job this meant only 6 of 24
+  requested threads were ever used.
 - The "Output grids" tab now shows a live estimate of checkpoint
   scratch-file and cluster-job counts (single-node total, per-grid
   breakdown when more than one grid is defined, and a separate estimate

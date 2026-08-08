@@ -1164,7 +1164,9 @@ def _execution_layout(job, scan, config, *, extra_excluded_frames=()):
         else ACCURACY_DEPTHS[job.accuracy]
     )
     worst_leaves = 8**depth
-    estimated_native_bytes_per_pixel = 128 + 2 * worst_leaves * 40
+    estimated_native_bytes_per_pixel = (
+        128 + 2 * worst_leaves * _CHECKPOINT_BYTES_PER_ROW
+    )
     tile_pixels = max(
         1,
         min(
@@ -1228,13 +1230,18 @@ def _frame_parallelism(
 ):
     """Derive bounded parallelism across images and within each image.
 
-    Each frame worker processes that frame's detector tiles sequentially. The
+    Each frame worker processes that frame's detector tiles sequentially,
+    one native ``accumulate()`` call at a time -- never more than one tile's
+    worth of native working memory is live at once for a given worker. The
     configured CPU budget is divided between concurrent image workers and
     native threads used by each image. The worker count is also bounded by a
-    depth-aware working-set estimate. Native blocks are reduced before task
-    records are retained, so the unattainable bound in which every footprint
-    leaf survives for the complete detector must not be multiplied by the
-    number of image workers.
+    depth-aware working-set estimate scoped to that single largest tile
+    (mirroring the native kernel's own per-call memory precheck exactly,
+    ``ReconstructionKernel::accumulate`` in
+    ``reciprocal_reconstruction_cpp.cpp``) -- summing every tile across the
+    whole detector would overstate one worker's actual peak memory need by
+    roughly the tile count, silently starving ``image_workers`` on jobs with
+    more than one detector tile.
 
     ``accumulation_budget_bytes``/the returned ``accumulation`` value model a
     per-worker retained-record buffer from the retired Parquet-era mapping
@@ -1275,12 +1282,19 @@ def _frame_parallelism(
         (row_stop - row_start) * (column_stop - column_start)
         for row_start, row_stop, column_start, column_stop in tiles
     ]
-    detector_pixels = sum(tile_pixels)
+    # One worker's peak native working set is bounded by its single
+    # largest tile (see docstring) -- not the sum of every tile across
+    # the whole detector.
+    largest_tile_pixels = max(tile_pixels)
     children = 4 if stationary else 8
-    depth_scale = 1 << max(0, spec.max_depth - 2)
-    sweep_scale = 2 if children == 8 else 1
-    bytes_per_pixel = 128 * depth_scale * sweep_scale
-    image_memory = detector_pixels * bytes_per_pixel
+    worst_leaves = children**spec.max_depth
+    # Mirrors ReconstructionKernel::accumulate's own memory precheck
+    # exactly (a fixed per-pixel baseline plus twice the worst-case leaf
+    # count times one native Record's on-the-wire size), so this
+    # Python-side estimate cannot drift from what the kernel itself
+    # actually enforces.
+    bytes_per_pixel = 128 + 2 * worst_leaves * _CHECKPOINT_BYTES_PER_ROW
+    image_memory = largest_tile_pixels * bytes_per_pixel
     worker_memory = max(
         1024**2,
         image_memory,
