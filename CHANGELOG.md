@@ -245,6 +245,11 @@ Reciprocal-space reconstruction:
   (unchecked = automatic, checked = pin a fixed value as before).
   **Breaking:** a prepared-but-not-yet-run job JSON from an older orGUI
   version is no longer accepted (schema version bump) -- re-prepare it.
+- The "Output grids" tab now shows a live estimate of checkpoint
+  scratch-file and cluster-job counts (single-node total, per-grid
+  breakdown when more than one grid is defined, and a separate estimate
+  for the Cluster tab's node count when it's more than one), updating
+  automatically as grids or related settings change.
 
 
 ## [1.5.0] (2026-06-07)

@@ -171,6 +171,18 @@ Each row describes one independent output coordinate system.
    contributors. Sparse HDF5 chunk allocation and compression usually reduce
    payload size; axes, metadata, and HDF5 structures add a smaller overhead.
 
+Below the grid table, an estimated checkpoint scratch-file and cluster-job
+count is shown, from a short live calibration probe against the active scan
+and detector geometry. It reports the single-node file count (with a
+per-grid breakdown when more than one grid is defined) and, if the Cluster
+tab's node count is greater than one, a second estimate for that many
+cluster nodes -- the same prepared job can still be run either locally or
+as a cluster job. This updates automatically as grids, accuracy, angle
+fallback, thread/memory budgets, ``Checkpoint count``, or the cluster node
+count change; it requires an active scan and at least one output grid, and
+is an estimate, not a guarantee -- the checkpoint-count floor and available
+memory may still produce more files than shown.
+
 Adding and Removing Grids
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 

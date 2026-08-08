@@ -12,6 +12,7 @@ from orgui.app.ReconstructionDialog import ReconstructionDialog
 from orgui.app.config_data import CorrectionState
 from orgui.app.database import FILTERS
 from orgui.app.HDF5SettingsDialog import HDF5SettingsDialog
+from orgui.reconstruction_job import ReconstructionGrid
 
 
 def _dialog(tmp_path):
@@ -171,6 +172,107 @@ def test_detected_performance_values_are_visible_without_becoming_overrides(
     assert '"concurrent_image_workers": 8' in (
         dialog.performance_summary.toPlainText()
     )
+
+    dialog.close()
+    dialog._test_parent.close()
+
+
+def test_file_count_summary_prompts_for_scan_and_grid(tmp_path):
+    """Sec14: the estimate must guide the user rather than fail silently
+    or raise before a scan/grid exists to estimate from."""
+    dialog = _dialog(tmp_path)
+
+    assert "Load a scan" in dialog.file_count_summary.text()
+
+    class _LenScan:
+        def __len__(self):
+            return 4
+
+    dialog.orgui.fscan = _LenScan()
+    dialog._refresh_file_count_summary()
+    assert "Add an output grid" in dialog.file_count_summary.text()
+
+    dialog.close()
+    dialog._test_parent.close()
+
+
+def test_file_count_summary_reports_single_node_multi_grid_and_cluster(
+    tmp_path, monkeypatch
+):
+    """Sec14: number_of_files, per-grid breakdown (only when there is more
+    than one grid), and the cluster-node multiplication must all be
+    reflected live, using the dialog's own current settings."""
+    dialog = _dialog(tmp_path)
+
+    class _LenScan:
+        def __len__(self):
+            return 4
+
+    dialog.orgui.fscan = _LenScan()
+    fake_config = SimpleNamespace(
+        corrections=SimpleNamespace(excluded_frames=())
+    )
+    monkeypatch.setattr(
+        reconstruction_dialog_module.ConfigData,
+        "from_gui",
+        classmethod(lambda cls, gui: fake_config),
+    )
+    monkeypatch.setattr(
+        reconstruction_dialog_module,
+        "_node_excluded_frames",
+        lambda *args, **kwargs: set(),
+    )
+
+    calls = []
+
+    def fake_estimate(config, scan, grids, **kwargs):
+        calls.append(kwargs)
+        per_grid = {
+            "q_lab": {
+                "job_data_bytes_estimate": 1024.0,
+                "files_per_job": 3,
+            }
+        }
+        if len(grids) > 1:
+            per_grid["q_hkl"] = {
+                "job_data_bytes_estimate": 2048.0,
+                "files_per_job": 5,
+            }
+        return {
+            "per_grid": per_grid,
+            "files_total": sum(
+                result["files_per_job"] for result in per_grid.values()
+            ),
+        }
+
+    monkeypatch.setattr(
+        reconstruction_dialog_module, "estimate_checkpoint_plan", fake_estimate
+    )
+
+    def grid(name, frame):
+        return ReconstructionGrid(
+            minimum=(-1.0, -1.0, -1.0),
+            maximum=(1.0, 1.0, 1.0),
+            step=(0.1, 0.1, 0.1),
+            frame=frame,
+            name=name,
+        )
+
+    dialog.cluster_array_task_count.setValue(1)
+    dialog._append_grid(grid("q_lab", "lab"))
+
+    assert "3" in dialog.file_count_summary.text()
+    assert "cluster" not in dialog.file_count_summary.text().lower()
+    assert "Per grid" not in dialog.file_count_summary.text()
+
+    dialog.cluster_array_task_count.setValue(3)
+    assert f"{3 * 3}" in dialog.file_count_summary.text()
+    assert "3-node" in dialog.file_count_summary.text()
+
+    dialog._append_grid(grid("q_hkl", "hkl"))
+    assert "Per grid" in dialog.file_count_summary.text()
+    assert "q_lab" in dialog.file_count_summary.text()
+    assert "q_hkl" in dialog.file_count_summary.text()
 
     dialog.close()
     dialog._test_parent.close()

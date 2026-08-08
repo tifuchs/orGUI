@@ -17,7 +17,9 @@ from ..reconstruction_cluster import (
 from ..reconstruction_job import (
     ACCURACY_DEPTHS,
     ReconstructionGrid,
+    _node_excluded_frames,
     derive_grid,
+    estimate_checkpoint_plan,
     estimate_geometry_steps,
     job_status,
     prepare_job,
@@ -158,6 +160,18 @@ class ReconstructionDialog(qt.QDialog):
         )
         output_layout.addWidget(self.preview_output)
         self.tabs.addTab(self.output_tab, "Preview and status")
+        for signal in (
+            self.checkpoint_count.valueChanged,
+            self.thread_override[1].toggled,
+            self.thread_override[2].valueChanged,
+            self.memory_override[1].toggled,
+            self.memory_override[2].valueChanged,
+            self.cluster_array_task_count.valueChanged,
+            self.accuracy.currentIndexChanged,
+            self.angle_fallback.currentIndexChanged,
+        ):
+            signal.connect(self._refresh_file_count_summary)
+        self._refresh_file_count_summary()
         layout.addWidget(self.tabs, stretch=1)
         buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Close)
         for label, slot in (
@@ -391,6 +405,16 @@ class ReconstructionDialog(qt.QDialog):
         )
         grid_layout.addWidget(self.hdf5_summary)
         self._refresh_hdf5_summary()
+        self.file_count_summary = qt.QLabel()
+        self.file_count_summary.setWordWrap(True)
+        self.file_count_summary.setToolTip(
+            "Estimated checkpoint scratch-file and cluster-job counts, from "
+            "a short live calibration probe against the active scan and "
+            "detector geometry (design doc Sec6/Sec14). An estimate, not a "
+            "guarantee -- the checkpoint-count floor and available memory "
+            "may still produce more files than shown here."
+        )
+        grid_layout.addWidget(self.file_count_summary)
         layout.addWidget(grid_group)
         return widget
 
@@ -431,6 +455,96 @@ class ReconstructionDialog(qt.QDialog):
             self._refresh_hdf5_summary()
         except Exception as error:
             self._report_failure("Cannot update HDF5 settings", error)
+
+    def _refresh_file_count_summary(self):
+        """Live-update the checkpoint file/job count estimate (design doc
+        Sec14). Never raises -- called reactively from several widgets
+        across tabs, not from a button slot, so failures are reported
+        in-place instead of via :meth:`_report_failure`.
+        """
+        try:
+            if self.orgui.fscan is None:
+                self.file_count_summary.setText(
+                    "Load a scan to estimate checkpoint file and job counts."
+                )
+                return
+            if self.grid_table.rowCount() == 0:
+                self.file_count_summary.setText(
+                    "Add an output grid to estimate checkpoint file and job "
+                    "counts."
+                )
+                return
+            grids = self._grids()
+            config = ConfigData.from_gui(self.orgui)
+            scan = self.orgui.fscan
+            depth = ACCURACY_DEPTHS[self.accuracy.currentData()]
+            threads = (
+                self._optional_value(self.thread_override)
+                or self.orgui.numberthreads
+            )
+            ram_budget_bytes = (
+                self._optional_value(self.memory_override)
+                or self.orgui.maxMemory
+            ) * 1024 * 1024
+            checkpoint_count = self.checkpoint_count.value()
+            angle_fallback = self.angle_fallback.currentData()
+
+            single = estimate_checkpoint_plan(
+                config,
+                scan,
+                grids,
+                max_depth=depth,
+                threads=threads,
+                ram_budget_bytes=ram_budget_bytes,
+                checkpoint_count=checkpoint_count,
+                angle_fallback=angle_fallback,
+                budget_seconds=0.05,
+            )
+            lines = [
+                f"Estimated checkpoint files (single node): "
+                f"{single['files_total']}."
+            ]
+            if len(single["per_grid"]) > 1:
+                lines.append(
+                    "  Per grid: "
+                    + ", ".join(
+                        f"{name}: {result['files_per_job']} files "
+                        f"(~{_format_size(result['job_data_bytes_estimate'])})"
+                        for name, result in single["per_grid"].items()
+                    )
+                )
+
+            array_task_count = self.cluster_array_task_count.value()
+            if array_task_count > 1:
+                node_excluded = _node_excluded_frames(
+                    len(scan),
+                    config.corrections.excluded_frames,
+                    total_tasks=array_task_count,
+                    task_index=0,
+                )
+                cluster = estimate_checkpoint_plan(
+                    config,
+                    scan,
+                    grids,
+                    max_depth=depth,
+                    threads=threads,
+                    ram_budget_bytes=ram_budget_bytes,
+                    checkpoint_count=checkpoint_count,
+                    angle_fallback=angle_fallback,
+                    extra_excluded_frames=node_excluded,
+                    budget_seconds=0.05,
+                )
+                lines.append(
+                    f"If run as a {array_task_count}-node cluster job: "
+                    f"~{cluster['files_total'] * array_task_count} checkpoint "
+                    f"files total across {array_task_count} map jobs "
+                    f"(~{cluster['files_total']} per node)."
+                )
+            self.file_count_summary.setText("\n".join(lines))
+        except Exception as error:
+            self.file_count_summary.setText(
+                f"Cannot estimate checkpoint file counts: {error}"
+            )
 
     def _estimate_geometry_steps(self):
         try:
@@ -1267,6 +1381,7 @@ class ReconstructionDialog(qt.QDialog):
                 )
                 self.grid_table.setItem(row, column, item)
             self._update_grid_row(row)
+        self._refresh_file_count_summary()
 
     def _on_grid_cell_changed(self, row, column):
         try:
@@ -1276,6 +1391,7 @@ class ReconstructionDialog(qt.QDialog):
             if size_item is not None:
                 with qt.QSignalBlocker(self.grid_table):
                     size_item.setText("invalid")
+        self._refresh_file_count_summary()
 
     def _update_grid_row(self, row, changed_column=None):
         with qt.QSignalBlocker(self.grid_table):
@@ -1342,6 +1458,7 @@ class ReconstructionDialog(qt.QDialog):
             )
             for row in rows:
                 self.grid_table.removeRow(row)
+            self._refresh_file_count_summary()
         except Exception as error:
             self._report_failure("Cannot remove output grid", error)
 
