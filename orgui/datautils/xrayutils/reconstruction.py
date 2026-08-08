@@ -38,11 +38,11 @@ _PARTIAL_COLUMNS = (
 )
 _Q_FRAMES = {"lab", "alpha", "omega", "chi", "phi", "crystal"}
 _ALL_FRAMES = _Q_FRAMES | {"hkl"}
-_CHECKPOINT_BYTES_PER_ROW = 48
+_CHECKPOINT_BYTES_PER_ROW = 40
 """Fixed on-the-wire row size for the six ``_PARTIAL_COLUMNS`` fields
-(two uint64 key columns, three float64 value columns, one uint64 count
-column -- 6 * 8 bytes). Used to convert calibration-probe record counts
-into byte estimates for the checkpoint file-count formula."""
+(two uint32 key columns, three float64 value columns, one uint32 count
+column -- 2 * 4 + 3 * 8 + 4 = 40 bytes). Used to convert calibration-probe
+record counts into byte estimates for the checkpoint file-count formula."""
 
 _CHECKPOINT_PART_PATTERN = re.compile(r"^ckpt(?P<index>\d+)_p(?P<part>\d+)\.h5$")
 
@@ -99,6 +99,31 @@ class _GridSpec:
             raise ValueError("Each grid maximum must exceed its minimum")
         if any(value <= 0 for value in self.chunk_shape):
             raise ValueError("Chunk dimensions must be positive")
+        # The native kernel packs each record's within-chunk voxel index
+        # and chunk index into uint32 fields (RecordKey.local/.chunk):
+        # local's range is bounded by one chunk's own voxel count, chunk's
+        # by the grid's total chunk count -- both computed from this same
+        # (unclamped) chunk_shape. A config that could overflow either
+        # bound must be rejected here, not silently corrupt indices deep
+        # inside the native kernel.
+        uint32_max = 2**32 - 1
+        local_bound = math.prod(self.chunk_shape)
+        if local_bound > uint32_max:
+            raise ValueError(
+                f"chunk_shape {self.chunk_shape} packs {local_bound:,} voxels per "
+                f"chunk, which exceeds the native kernel's uint32 within-chunk "
+                f"voxel index (max {uint32_max:,}); use a smaller chunk_shape"
+            )
+        chunk_bound = math.prod(
+            math.ceil(size / chunk) for size, chunk in zip(self.shape, self.chunk_shape)
+        )
+        if chunk_bound > uint32_max:
+            raise ValueError(
+                f"grid shape {self.shape} with chunk_shape {self.chunk_shape} "
+                f"produces {chunk_bound:,} chunks, which exceeds the native "
+                f"kernel's uint32 chunk index (max {uint32_max:,}); use a "
+                "larger chunk_shape or a smaller grid"
+            )
         effective_chunk = tuple(
             min(size, chunk)
             for size, chunk in zip(self.shape, self.chunk_shape)
@@ -576,12 +601,12 @@ def _kernel_threads_sweep(
 
 def _empty_batch() -> dict[str, np.ndarray]:
     return {
-        "chunk_id": np.empty(0, dtype=np.uint64),
-        "local_voxel_id": np.empty(0, dtype=np.uint64),
+        "chunk_id": np.empty(0, dtype=np.uint32),
+        "local_voxel_id": np.empty(0, dtype=np.uint32),
         "weighted_intensity": np.empty(0, dtype=np.float64),
         "weighted_variance": np.empty(0, dtype=np.float64),
         "weight": np.empty(0, dtype=np.float64),
-        "contributors": np.empty(0, dtype=np.uint64),
+        "contributors": np.empty(0, dtype=np.uint32),
     }
 
 
@@ -1297,7 +1322,7 @@ class _CheckpointRangeReader:
                 self.batch = None
                 continue
             position += int(
-                np.searchsorted(chunks[position:], np.uint64(chunk_id), side="left")
+                np.searchsorted(chunks[position:], np.uint32(chunk_id), side="left")
             )
             if position >= chunks.size:
                 self.batch = None
@@ -1307,17 +1332,17 @@ class _CheckpointRangeReader:
                 self.position = position
                 break
             chunk_stop = int(
-                np.searchsorted(chunks, np.uint64(chunk_id), side="right")
+                np.searchsorted(chunks, np.uint32(chunk_id), side="right")
             )
             local = self.batch["local_voxel_id"]
             start = position + int(
                 np.searchsorted(
-                    local[position:chunk_stop], np.uint64(local_start), side="left"
+                    local[position:chunk_stop], np.uint32(local_start), side="left"
                 )
             )
             stop = position + int(
                 np.searchsorted(
-                    local[position:chunk_stop], np.uint64(local_stop), side="left"
+                    local[position:chunk_stop], np.uint32(local_stop), side="left"
                 )
             )
             if stop > start:
@@ -1374,13 +1399,13 @@ def _write_chunk_from_checkpoints(group, grid, readers, chunk_id):
     reduced = _tree_finalize(levels)
     if not reduced["chunk_id"].size:
         return
-    if np.any(reduced["chunk_id"] != np.uint64(chunk_id)):
+    if np.any(reduced["chunk_id"] != np.uint32(chunk_id)):
         raise ValueError(f"Checkpoint data for chunk {chunk_id} is inconsistent")
-    local = reduced["local_voxel_id"].astype(np.uint64, copy=False)
+    local = reduced["local_voxel_id"].astype(np.uint32, copy=False)
     local_x, remainder = np.divmod(
-        local, np.uint64(grid.chunk_shape[1] * grid.chunk_shape[2])
+        local, np.uint32(grid.chunk_shape[1] * grid.chunk_shape[2])
     )
-    local_y, local_z = np.divmod(remainder, np.uint64(grid.chunk_shape[2]))
+    local_y, local_z = np.divmod(remainder, np.uint32(grid.chunk_shape[2]))
     valid = (
         (local_x < local_shape[0])
         & (local_y < local_shape[1])
@@ -1396,7 +1421,7 @@ def _write_chunk_from_checkpoints(group, grid, readers, chunk_id):
     weighted_intensity = np.zeros(local_shape, dtype=np.float64)
     weighted_variance = np.zeros(local_shape, dtype=np.float64)
     weight = np.zeros(local_shape, dtype=np.float64)
-    contributors = np.zeros(local_shape, dtype=np.uint64)
+    contributors = np.zeros(local_shape, dtype=np.uint32)
     weighted_intensity[index] = reduced["weighted_intensity"]
     weighted_variance[index] = reduced["weighted_variance"]
     weight[index] = reduced["weight"]
@@ -1561,7 +1586,7 @@ def _finalize_reconstruction(
             group.create_dataset(
                 "contributors",
                 shape=grid.shape,
-                dtype=np.uint64,
+                dtype=np.uint32,
                 chunks=hdf5_chunks,
                 fillvalue=0,
                 **compression,

@@ -81,6 +81,92 @@ def test_grid_validates_effective_hdf5_chunk_bytes():
         )
 
 
+def test_grid_rejects_chunk_shape_that_overflows_uint32_local_index():
+    """RecordKey.local is uint32 in the native kernel -- chunk_shape's own
+    voxel product must stay under 2**32-1, or per-record indices would
+    silently wrap. 1626**3 = 4,298,942,376 exceeds the bound; 1625**3 =
+    4,291,015,625 does not.
+    """
+    with pytest.raises(ValueError, match="within-chunk voxel index"):
+        _GridSpec(
+            minimum=(0.0, 0.0, 0.0),
+            maximum=(5000.0, 5000.0, 5000.0),
+            step=(1.0, 1.0, 1.0),
+            frame="hkl",
+            chunk_shape=(1626, 1626, 1626),
+        )
+
+
+def test_grid_rejects_config_that_overflows_uint32_chunk_index():
+    """RecordKey.chunk is uint32 too -- an unrealistically fine chunk_shape
+    relative to a large grid can overflow the total chunk count even
+    though each individual chunk is tiny (so the unrelated 4 GiB
+    per-chunk check does not catch it). ceil(5000/3)**3 = 4,632,407,963
+    exceeds the bound.
+    """
+    with pytest.raises(ValueError, match="uint32 chunk index"):
+        _GridSpec(
+            minimum=(0.0, 0.0, 0.0),
+            maximum=(5000.0, 5000.0, 5000.0),
+            step=(1.0, 1.0, 1.0),
+            frame="hkl",
+            chunk_shape=(3, 3, 3),
+        )
+
+
+def test_grid_accepts_default_chunk_shape_at_a_large_grid():
+    """The default chunk_shape has wide uint32 headroom even at a
+    5000**3-voxel grid (493,039 chunks, 262,144 voxels/chunk -- both far
+    under 2**32-1)."""
+    grid = _GridSpec(
+        minimum=(0.0, 0.0, 0.0),
+        maximum=(5000.0, 5000.0, 5000.0),
+        step=(1.0, 1.0, 1.0),
+        frame="hkl",
+    )
+    assert grid.shape == (5000, 5000, 5000)
+    assert grid.chunk_shape == (64, 64, 64)
+
+
+def test_native_accumulate_produces_uint32_chunk_and_local_ids_across_multiple_chunks():
+    """A grid split into several chunks along one axis exercises the real
+    record_key() chunk/local decomposition (not just the trivial
+    single-chunk case), confirming uint32 output end to end."""
+    kernel = native.ReconstructionKernel(
+        np.array([-20.0, -20.0, -20.0]),
+        np.array([0.01, 0.01, 0.01]),
+        np.array([4000, 4000, 4000], dtype=np.int64),
+        np.array([16, 4000, 4000], dtype=np.int64),
+        "lab",
+        1.0,
+        np.linalg.inv(np.eye(3)),
+        np.eye(3),
+        0,
+        1,
+        16,
+        1024 * 1024,
+    )
+    rays = np.zeros((4, 4, 3), dtype=np.float64)
+    rays[..., 0] = np.linspace(-1.5, 1.5, 4)[:, None]
+    rays[..., 1] = 1.0
+    result = kernel.accumulate(
+        np.ones((3, 3)),
+        np.ones((3, 3)),
+        np.zeros((3, 3), dtype=bool),
+        rays,
+        np.zeros(4),
+        np.zeros(4),
+    )
+    assert result["chunk_id"].dtype == np.uint32
+    assert result["local_voxel_id"].dtype == np.uint32
+    assert result["contributors"].dtype == np.uint32
+    assert result["chunk_id"].size > 0
+    # This tile spans multiple 16-voxel-wide chunks along axis 0 -- confirm
+    # record_key() actually exercised more than one chunk, not just the
+    # trivial chunk=0 case every other test in this file uses.
+    assert np.unique(result["chunk_id"]).size > 1
+
+
 def test_files_per_job_formula_floors_at_checkpoint_count():
     """The checkpoint-count floor wins when data comfortably fits budget."""
     assert _files_per_job(0, 24e9, checkpoint_count=10) == 10

@@ -26,9 +26,9 @@ namespace py = pybind11;
 using FloatArray = py::array_t<double, py::array::c_style | py::array::forcecast>;
 using BoolArray = py::array_t<bool, py::array::c_style | py::array::forcecast>;
 using Int64Array = py::array_t<std::int64_t>;
-using UInt64Array = py::array_t<std::uint64_t>;
-using ContiguousUInt64Array = py::array_t<
-    std::uint64_t,
+using UInt32Array = py::array_t<std::uint32_t>;
+using ContiguousUInt32Array = py::array_t<
+    std::uint32_t,
     py::array::c_style | py::array::forcecast
 >;
 
@@ -71,18 +71,18 @@ std::string xxh3_128_buffer(const py::buffer &buffer) {
 }
 
 py::dict merge_sorted_batches(
-    const ContiguousUInt64Array &left_chunk,
-    const ContiguousUInt64Array &left_local,
+    const ContiguousUInt32Array &left_chunk,
+    const ContiguousUInt32Array &left_local,
     const FloatArray &left_intensity,
     const FloatArray &left_variance,
     const FloatArray &left_weight,
-    const ContiguousUInt64Array &left_contributors,
-    const ContiguousUInt64Array &right_chunk,
-    const ContiguousUInt64Array &right_local,
+    const ContiguousUInt32Array &left_contributors,
+    const ContiguousUInt32Array &right_chunk,
+    const ContiguousUInt32Array &right_local,
     const FloatArray &right_intensity,
     const FloatArray &right_variance,
     const FloatArray &right_weight,
-    const ContiguousUInt64Array &right_contributors
+    const ContiguousUInt32Array &right_contributors
 ) {
     const auto lc = left_chunk.request();
     const auto ll = left_local.request();
@@ -127,23 +127,23 @@ py::dict merge_sorted_batches(
     ) {
         throw py::value_error("Right batch columns must have equal lengths");
     }
-    const auto *lc_data = static_cast<const std::uint64_t *>(lc.ptr);
-    const auto *ll_data = static_cast<const std::uint64_t *>(ll.ptr);
+    const auto *lc_data = static_cast<const std::uint32_t *>(lc.ptr);
+    const auto *ll_data = static_cast<const std::uint32_t *>(ll.ptr);
     const auto *li_data = static_cast<const double *>(li.ptr);
     const auto *lv_data = static_cast<const double *>(lv.ptr);
     const auto *lw_data = static_cast<const double *>(lw.ptr);
-    const auto *ln_data = static_cast<const std::uint64_t *>(ln.ptr);
-    const auto *rc_data = static_cast<const std::uint64_t *>(rc.ptr);
-    const auto *rl_data = static_cast<const std::uint64_t *>(rl.ptr);
+    const auto *ln_data = static_cast<const std::uint32_t *>(ln.ptr);
+    const auto *rc_data = static_cast<const std::uint32_t *>(rc.ptr);
+    const auto *rl_data = static_cast<const std::uint32_t *>(rl.ptr);
     const auto *ri_data = static_cast<const double *>(ri.ptr);
     const auto *rv_data = static_cast<const double *>(rv.ptr);
     const auto *rw_data = static_cast<const double *>(rw.ptr);
-    const auto *rn_data = static_cast<const std::uint64_t *>(rn.ptr);
+    const auto *rn_data = static_cast<const std::uint32_t *>(rn.ptr);
     const auto less = [](
-        const std::uint64_t chunk_a,
-        const std::uint64_t local_a,
-        const std::uint64_t chunk_b,
-        const std::uint64_t local_b
+        const std::uint32_t chunk_a,
+        const std::uint32_t local_a,
+        const std::uint32_t chunk_b,
+        const std::uint32_t local_b
     ) {
         return chunk_a < chunk_b
             || (chunk_a == chunk_b && local_a < local_b);
@@ -174,18 +174,18 @@ py::dict merge_sorted_batches(
         }
         output_size += left_size - left + right_size - right;
     }
-    ContiguousUInt64Array output_chunk(output_size);
-    ContiguousUInt64Array output_local(output_size);
+    ContiguousUInt32Array output_chunk(output_size);
+    ContiguousUInt32Array output_local(output_size);
     FloatArray output_intensity(output_size);
     FloatArray output_variance(output_size);
     FloatArray output_weight(output_size);
-    ContiguousUInt64Array output_contributors(output_size);
-    auto *oc_data = static_cast<std::uint64_t *>(output_chunk.request().ptr);
-    auto *ol_data = static_cast<std::uint64_t *>(output_local.request().ptr);
+    ContiguousUInt32Array output_contributors(output_size);
+    auto *oc_data = static_cast<std::uint32_t *>(output_chunk.request().ptr);
+    auto *ol_data = static_cast<std::uint32_t *>(output_local.request().ptr);
     auto *oi_data = static_cast<double *>(output_intensity.request().ptr);
     auto *ov_data = static_cast<double *>(output_variance.request().ptr);
     auto *ow_data = static_cast<double *>(output_weight.request().ptr);
-    auto *on_data = static_cast<std::uint64_t *>(
+    auto *on_data = static_cast<std::uint32_t *>(
         output_contributors.request().ptr
     );
     {
@@ -450,8 +450,13 @@ struct Grid {
 };
 
 struct RecordKey {
-    std::uint64_t chunk;
-    std::uint64_t local;
+    // Narrower than the flat voxel index they're decomposed from (see
+    // record_key()): chunk is bounded by the grid's total chunk count and
+    // local by one chunk's own voxel count, both far under 2^32 for any
+    // chunk_shape a _GridSpec construction-time check (uint32-overflow
+    // validation) allows through.
+    std::uint32_t chunk;
+    std::uint32_t local;
 };
 
 bool operator<(const RecordKey &left, const RecordKey &right) {
@@ -468,7 +473,10 @@ struct Record {
     double weighted_intensity;
     double weighted_variance;
     double weight;
-    std::uint64_t contributors;
+    // Bounded by one tile's pixel count x max subdivision factor, far
+    // under 2^32 in any realistic configuration -- see RecordKey's
+    // comment for the analogous chunk/local bound.
+    std::uint32_t contributors;
 };
 
 struct VoxelWeight {
@@ -1170,9 +1178,13 @@ private:
             index_z / static_cast<std::uint64_t>(grid_.chunk_shape[2])
         );
         RecordKey key{};
-        key.chunk = (
+        // Arithmetic stays uint64 throughout (chunk_grid/chunk_shape are
+        // uint64 already); only the final, per-axis-bounded result
+        // narrows to uint32, safe once the construction-time
+        // uint32-overflow validation on chunk_shape/grid.shape holds.
+        key.chunk = static_cast<std::uint32_t>((
             chunk_x * grid_.chunk_grid[1] + chunk_y
-        ) * grid_.chunk_grid[2] + chunk_z;
+        ) * grid_.chunk_grid[2] + chunk_z);
         const std::uint64_t local_x = static_cast<std::uint64_t>(
             index_x % static_cast<std::uint64_t>(grid_.chunk_shape[0])
         );
@@ -1182,9 +1194,9 @@ private:
         const std::uint64_t local_z = static_cast<std::uint64_t>(
             index_z % static_cast<std::uint64_t>(grid_.chunk_shape[2])
         );
-        key.local = (
+        key.local = static_cast<std::uint32_t>((
             local_x * static_cast<std::uint64_t>(grid_.chunk_shape[1]) + local_y
-        ) * static_cast<std::uint64_t>(grid_.chunk_shape[2]) + local_z;
+        ) * static_cast<std::uint64_t>(grid_.chunk_shape[2]) + local_z);
         return key;
     }
 
@@ -1678,18 +1690,18 @@ private:
 
     static py::dict records_to_python(const std::vector<Record> &records) {
         const py::ssize_t size = static_cast<py::ssize_t>(records.size());
-        UInt64Array chunk_id(size);
-        UInt64Array local_voxel_id(size);
+        UInt32Array chunk_id(size);
+        UInt32Array local_voxel_id(size);
         FloatArray weighted_intensity(size);
         FloatArray weighted_variance(size);
         FloatArray weight(size);
-        UInt64Array contributors(size);
-        auto *chunk_data = static_cast<std::uint64_t *>(chunk_id.request().ptr);
-        auto *local_data = static_cast<std::uint64_t *>(local_voxel_id.request().ptr);
+        UInt32Array contributors(size);
+        auto *chunk_data = static_cast<std::uint32_t *>(chunk_id.request().ptr);
+        auto *local_data = static_cast<std::uint32_t *>(local_voxel_id.request().ptr);
         auto *intensity_data = static_cast<double *>(weighted_intensity.request().ptr);
         auto *variance_data = static_cast<double *>(weighted_variance.request().ptr);
         auto *weight_data = static_cast<double *>(weight.request().ptr);
-        auto *contributors_data = static_cast<std::uint64_t *>(
+        auto *contributors_data = static_cast<std::uint32_t *>(
             contributors.request().ptr
         );
         {

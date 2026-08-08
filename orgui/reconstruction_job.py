@@ -38,7 +38,7 @@ from .datautils.xrayutils.reconstruction import (
 )
 
 
-JOB_SCHEMA_VERSION = 5
+JOB_SCHEMA_VERSION = 6
 ACCURACY_DEPTHS = {
     "center": 0,
     "low": 1,

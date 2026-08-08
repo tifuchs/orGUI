@@ -258,6 +258,23 @@ Reciprocal-space reconstruction:
   breakdown when more than one grid is defined, and a separate estimate
   for the Cluster tab's node count when it's more than one), updating
   automatically as grids or related settings change.
+- Narrowed the native per-record chunk index, local-voxel index, and
+  contributor count from 64-bit to 32-bit, reducing the native reduction
+  step's per-record footprint from 48 to 40 bytes -- measured 12-24%
+  faster mapping under realistic multi-threaded load, since that step is
+  memory-bandwidth-bound rather than compute-bound. A new
+  construction-time check rejects any output grid whose ``chunk_shape``
+  or grid size could overflow the narrower 32-bit index, with a clear
+  error naming which bound was exceeded, instead of silently producing
+  corrupted indices deep inside the native kernel.
+  **Breaking:** this changes both the checkpoint scratch format (schema
+  version bump; an already-running job's in-progress checkpoints cannot
+  resume under the new 40-byte row format and must be re-run from
+  scratch, in addition to the usual re-prepare-a-not-yet-run-job
+  consequence) and the final output file schema -- every grid's
+  ``contributors`` output dataset is now ``uint32`` instead of
+  ``uint64``. Any downstream script that reads ``contributors`` assuming
+  ``uint64`` needs updating.
 
 
 ## [1.5.0] (2026-06-07)

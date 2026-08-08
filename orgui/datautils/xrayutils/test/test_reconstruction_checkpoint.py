@@ -28,15 +28,15 @@ native = pytest.importorskip(
 def _batch(chunk_id, local, intensity, contributors=None):
     size = len(local)
     return {
-        "chunk_id": np.full(size, chunk_id, dtype=np.uint64),
-        "local_voxel_id": np.asarray(local, dtype=np.uint64),
+        "chunk_id": np.full(size, chunk_id, dtype=np.uint32),
+        "local_voxel_id": np.asarray(local, dtype=np.uint32),
         "weighted_intensity": np.asarray(intensity, dtype=np.float64),
         "weighted_variance": np.asarray(intensity, dtype=np.float64),
         "weight": np.ones(size, dtype=np.float64),
         "contributors": (
-            np.ones(size, dtype=np.uint64)
+            np.ones(size, dtype=np.uint32)
             if contributors is None
-            else np.asarray(contributors, dtype=np.uint64)
+            else np.asarray(contributors, dtype=np.uint32)
         ),
     }
 
@@ -177,6 +177,14 @@ def test_checkpoint_write_read_roundtrip_columnar_chunked(tmp_path):
     roundtrip = _read_checkpoint(path)
     for name in batch:
         np.testing.assert_array_equal(roundtrip[name], batch[name], err_msg=name)
+        assert roundtrip[name].dtype == batch[name].dtype, name
+    # The narrow key/count columns must round-trip as uint32 (40-byte row
+    # format), not the pre-narrowing uint64 -- a silent widening here would
+    # double the on-disk/in-memory footprint _CHECKPOINT_BYTES_PER_ROW
+    # assumes.
+    assert roundtrip["chunk_id"].dtype == np.uint32
+    assert roundtrip["local_voxel_id"].dtype == np.uint32
+    assert roundtrip["contributors"].dtype == np.uint32
 
 
 def test_checkpoint_write_chunks_are_capped_at_65536_rows(tmp_path):
