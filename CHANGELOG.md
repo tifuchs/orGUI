@@ -282,6 +282,11 @@ Reciprocal-space reconstruction:
   lock contention (tens of times slower at high thread counts in
   isolated testing); reuse removes that contention with no change to
   the mapped result.
+- Combining every detector block's mapped records within one frame now
+  merges them directly instead of concatenating everything into one
+  list and re-sorting it from scratch. Each block's own records were
+  already sorted and deduplicated; the merge exploits that instead of
+  discarding it, with no change to the mapped result.
 
 
 ## [1.5.0] (2026-06-07)

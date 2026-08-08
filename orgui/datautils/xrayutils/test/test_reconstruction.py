@@ -229,6 +229,54 @@ def test_native_accumulate_reused_arena_reduce_is_thread_count_and_depth_indepen
                 assert summary[2] == reference[2], (max_depth, threads)
 
 
+def test_native_loser_tree_merges_duplicate_voxels_across_many_blocks():
+    """A hand-constructed scenario where every valid pixel maps to the
+    SAME single voxel, forced across many separate blocks (small
+    work_block_pixels relative to the tile) -- exercises exactly the
+    cross-block duplicate-key case the loser-tree merge must combine
+    correctly (accumulate_block's own per-block reduce cannot produce
+    this duplication on its own; only the Level-2 merge across blocks
+    can). The expected combined result is exactly predictable: one
+    output record, contributors equal to the valid pixel count,
+    weighted_intensity equal to the sum of every valid pixel's own
+    intensity (weight is 1.0 per pixel at max_depth=0)."""
+    rows, columns = 20, 20
+    intensity = np.arange(1, rows * columns + 1, dtype=np.float64).reshape(
+        rows, columns
+    )
+    variance = np.ones((rows, columns), dtype=np.float64)
+    mask = np.zeros((rows, columns), dtype=bool)
+    mask[0, 0] = True  # one excluded pixel, to also confirm it is excluded
+    rays = _constant_rays(rows, columns)  # every corner ray identical -> one voxel
+
+    kernel = native.ReconstructionKernel(
+        np.array([-20.0, -20.0, -20.0]),
+        np.array([0.01, 0.01, 0.01]),
+        np.array([4000, 4000, 4000], dtype=np.int64),
+        np.array([64, 64, 64], dtype=np.int64),  # same default as elsewhere here
+        "lab",
+        1.0,
+        np.linalg.inv(np.eye(3)),
+        np.eye(3),
+        0,  # max_depth
+        4,  # threads
+        8,  # work_block_pixels -- forces (400 valid pixels)/8 = 50 blocks
+        512 * 1024 * 1024,
+    )
+    result = kernel.accumulate(
+        intensity, variance, mask, rays, np.zeros(4), np.zeros(4)
+    )
+
+    valid_pixels = intensity.size - int(np.sum(mask))
+    expected_intensity = float(np.sum(intensity)) - float(intensity[0, 0])
+
+    assert result["chunk_id"].size == 1
+    assert int(result["contributors"][0]) == valid_pixels
+    assert result["weighted_intensity"][0] == pytest.approx(expected_intensity)
+    # weight is 1.0 per contributing pixel at max_depth=0.
+    assert result["weight"][0] == pytest.approx(float(valid_pixels))
+
+
 def test_files_per_job_formula_floors_at_checkpoint_count():
     """The checkpoint-count floor wins when data comfortably fits budget."""
     assert _files_per_job(0, 24e9, checkpoint_count=10) == 10

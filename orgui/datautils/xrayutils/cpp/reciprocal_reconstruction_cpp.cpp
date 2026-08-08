@@ -739,31 +739,23 @@ public:
         }
         const auto blocks_finished = std::chrono::steady_clock::now();
 
-        std::vector<Record> records;
         std::size_t record_count = 0;
-        const auto concatenate_started = std::chrono::steady_clock::now();
+        for (const auto &block : block_results) {
+            record_count += block.size();
+        }
+        std::vector<Record> records;
+        const auto merge_started = std::chrono::steady_clock::now();
         {
             py::gil_scoped_release release;
-            for (const auto &block : block_results) {
-                record_count += block.size();
-            }
-            records.reserve(record_count);
-            for (auto &block : block_results) {
-                records.insert(
-                    records.end(),
-                    std::make_move_iterator(block.begin()),
-                    std::make_move_iterator(block.end())
-                );
-            }
+            // Each block's output is already sorted and deduped
+            // (accumulate_block's pmr::map reduce) -- merge them directly
+            // with the loser tree instead of concatenating into one
+            // vector and blindly re-sorting it from scratch, which
+            // ignores that pre-sortedness entirely.
+            records = merge_sorted_blocks(block_results);
         }
-        const auto concatenate_finished = std::chrono::steady_clock::now();
-        const auto final_reduce_started = concatenate_finished;
-        {
-            py::gil_scoped_release release;
-            reduce_records(records);
-        }
-        const auto final_reduce_finished = std::chrono::steady_clock::now();
-        const auto conversion_started = final_reduce_finished;
+        const auto merge_finished = std::chrono::steady_clock::now();
+        const auto conversion_started = merge_finished;
         py::dict result = records_to_python(records);
         const auto conversion_finished = std::chrono::steady_clock::now();
         if (profile) {
@@ -796,7 +788,7 @@ public:
             details["unreduced_block_records"] =
                 combined.unreduced_records;
             details["reduced_block_records"] = combined.reduced_records;
-            details["concatenated_records"] = record_count;
+            details["pre_merge_records"] = record_count;
             details["final_records"] = records.size();
             details["block_mapping_cpu_seconds"] =
                 static_cast<double>(combined.mapping_nanoseconds) * 1.0e-9;
@@ -804,10 +796,8 @@ public:
                 static_cast<double>(combined.reduction_nanoseconds) * 1.0e-9;
             details["block_wall_seconds"] =
                 seconds(blocks_started, blocks_finished);
-            details["concatenate_seconds"] =
-                seconds(concatenate_started, concatenate_finished);
-            details["final_reduce_seconds"] =
-                seconds(final_reduce_started, final_reduce_finished);
+            details["merge_seconds"] =
+                seconds(merge_started, merge_finished);
             details["python_conversion_seconds"] =
                 seconds(conversion_started, conversion_finished);
             details["total_seconds"] =
@@ -1720,28 +1710,141 @@ private:
         return records;
     }
 
-    static void reduce_records(std::vector<Record> &records) {
-        std::stable_sort(
-            records.begin(),
-            records.end(),
-            [](const Record &left, const Record &right) {
-                return left.key < right.key;
+    // Loser tree (tournament tree) k-way merge of block_results -- each
+    // block's output is already sorted and deduped (accumulate_block's
+    // pmr::map reduce), so this replaces reduce_records' blind
+    // concatenate-then-resort with a single O(N log k) pass that
+    // exploits that pre-sortedness instead of ignoring it. One
+    // comparison per tree level on replay, versus a priority-queue
+    // heap's sift-down (~two comparisons per level).
+    struct SortedRun {
+        const Record *begin;
+        const Record *end;
+    };
+
+    class LoserTree {
+    public:
+        explicit LoserTree(const std::vector<SortedRun> &runs) : runs_(runs) {
+            std::size_t real_runs = runs.size();
+            leaf_count_ = 1;
+            while (leaf_count_ < real_runs) {
+                leaf_count_ <<= 1;
             }
-        );
-        std::size_t write = 0;
-        std::size_t read = 0;
-        while (read < records.size()) {
-            Record combined = records[read++];
-            while (read < records.size() && records[read].key == combined.key) {
-                combined.weighted_intensity += records[read].weighted_intensity;
-                combined.weighted_variance += records[read].weighted_variance;
-                combined.weight += records[read].weight;
-                combined.contributors += records[read].contributors;
-                ++read;
+            if (leaf_count_ < 2) {
+                leaf_count_ = 2;
             }
-            records[write++] = combined;
+            run_index_.assign(leaf_count_, 0);
+            current_key_.assign(leaf_count_, sentinel_key());
+            for (std::size_t i = 0; i < real_runs; ++i) {
+                if (runs[i].begin != runs[i].end) {
+                    current_key_[i] = runs[i].begin[0].key;
+                }
+            }
+            loser_.assign(leaf_count_, 0);
+            build();
         }
-        records.resize(write);
+
+        static RecordKey sentinel_key() {
+            return RecordKey{
+                std::numeric_limits<std::uint32_t>::max(),
+                std::numeric_limits<std::uint32_t>::max(),
+            };
+        }
+
+        bool exhausted() const {
+            return current_key_[loser_[0]] == sentinel_key();
+        }
+
+        const Record &winner_record() const {
+            return runs_[loser_[0]].begin[run_index_[loser_[0]]];
+        }
+
+        void advance_winner() {
+            const std::uint32_t slot = loser_[0];
+            ++run_index_[slot];
+            const SortedRun &run = runs_[slot];
+            current_key_[slot] = (run.begin + run_index_[slot] < run.end)
+                ? run.begin[run_index_[slot]].key
+                : sentinel_key();
+            replay(slot);
+        }
+
+    private:
+        void build() {
+            std::vector<std::uint32_t> winner(2 * leaf_count_);
+            for (std::uint32_t i = 0; i < leaf_count_; ++i) {
+                winner[leaf_count_ + i] = i;
+            }
+            for (std::uint32_t node = leaf_count_ - 1; node >= 1; --node) {
+                const std::uint32_t left = winner[2 * node];
+                const std::uint32_t right = winner[2 * node + 1];
+                if (
+                    current_key_[left] < current_key_[right]
+                    || current_key_[left] == current_key_[right]
+                ) {
+                    winner[node] = left;
+                    loser_[node] = right;
+                } else {
+                    winner[node] = right;
+                    loser_[node] = left;
+                }
+                if (node == 1) {
+                    break;
+                }
+            }
+            loser_[0] = winner[1];
+        }
+
+        void replay(const std::uint32_t slot) {
+            std::uint32_t candidate = slot;
+            std::uint32_t node = (leaf_count_ + slot) / 2;
+            while (node >= 1) {
+                if (!(current_key_[candidate] < current_key_[loser_[node]])) {
+                    std::swap(candidate, loser_[node]);
+                }
+                if (node == 1) {
+                    break;
+                }
+                node /= 2;
+            }
+            loser_[0] = candidate;
+        }
+
+        const std::vector<SortedRun> &runs_;
+        std::uint32_t leaf_count_;
+        std::vector<std::uint32_t> run_index_;
+        std::vector<RecordKey> current_key_;
+        std::vector<std::uint32_t> loser_;
+    };
+
+    static std::vector<Record> merge_sorted_blocks(
+        const std::vector<std::vector<Record>> &block_results
+    ) {
+        std::vector<SortedRun> runs;
+        runs.reserve(block_results.size());
+        std::size_t total = 0;
+        for (const auto &block : block_results) {
+            runs.push_back({block.data(), block.data() + block.size()});
+            total += block.size();
+        }
+        std::vector<Record> merged;
+        merged.reserve(total);
+        LoserTree tree(runs);
+        while (!tree.exhausted()) {
+            Record combined = tree.winner_record();
+            const RecordKey winner_key = combined.key;
+            tree.advance_winner();
+            while (!tree.exhausted() && tree.winner_record().key == winner_key) {
+                const Record &duplicate = tree.winner_record();
+                combined.weighted_intensity += duplicate.weighted_intensity;
+                combined.weighted_variance += duplicate.weighted_variance;
+                combined.weight += duplicate.weight;
+                combined.contributors += duplicate.contributors;
+                tree.advance_winner();
+            }
+            merged.push_back(combined);
+        }
+        return merged;
     }
 
     static py::dict records_to_python(const std::vector<Record> &records) {
