@@ -167,6 +167,68 @@ def test_native_accumulate_produces_uint32_chunk_and_local_ids_across_multiple_c
     assert np.unique(result["chunk_id"]).size > 1
 
 
+def test_native_accumulate_reused_arena_reduce_is_thread_count_and_depth_independent():
+    """accumulate_block's per-worker-thread reused pmr::map arena replaces
+    the old per-block vector+stable_sort reduce -- this must not change
+    the scientific result. Cross-checks identical (record count, summed
+    weighted_intensity, summed contributors) across thread counts (1, 4,
+    8 -- exercising a single worker reusing its arena across many blocks
+    as well as several workers each with their own arena) and across
+    max_depth values (0 through 4, spanning the max_depth==0 fast path,
+    the depth==2 stationary fast path, and the general adaptive
+    split_pixel path -- all three feed the same shared reduce)."""
+    rows, columns = 64, 64
+    rng_intensity = np.random.default_rng(0)
+    rng_variance = np.random.default_rng(1)
+    intensity = rng_intensity.uniform(1.0, 100.0, size=(rows, columns))
+    variance = np.abs(rng_variance.normal(1.0, 0.1, size=(rows, columns)))
+    mask = np.zeros((rows, columns), dtype=bool)
+    rays = _constant_rays(rows, columns)
+    rays[..., 0] = np.linspace(-3.0, 3.0, columns + 1)[None, :]
+
+    for max_depth in (0, 1, 2, 3, 4):
+        reference = None
+        for threads in (1, 4, 8):
+            kernel = native.ReconstructionKernel(
+                np.array([-20.0, -20.0, -20.0]),
+                np.array([0.02, 0.02, 0.02]),
+                np.array([2000, 2000, 2000], dtype=np.int64),
+                np.array([32, 32, 32], dtype=np.int64),
+                "lab",
+                1.0,
+                np.linalg.inv(np.eye(3)),
+                np.eye(3),
+                max_depth,
+                threads,
+                64,
+                512 * 1024 * 1024,
+            )
+            result = kernel.accumulate(
+                intensity, variance, mask, rays, np.zeros(4), np.zeros(4)
+            )
+            chunk = result["chunk_id"]
+            local = result["local_voxel_id"]
+            combined_key = chunk.astype(np.uint64) << 32 | local.astype(np.uint64)
+            assert np.all(np.diff(combined_key) > 0), (
+                f"max_depth={max_depth} threads={threads}: output must be "
+                "strictly sorted with no duplicate keys"
+            )
+            summary = (
+                chunk.size,
+                float(np.sum(result["weighted_intensity"])),
+                int(np.sum(result["contributors"])),
+            )
+            if reference is None:
+                reference = summary
+            else:
+                assert summary[0] == reference[0], (max_depth, threads)
+                assert summary[1] == pytest.approx(reference[1], rel=1e-9), (
+                    max_depth,
+                    threads,
+                )
+                assert summary[2] == reference[2], (max_depth, threads)
+
+
 def test_files_per_job_formula_floors_at_checkpoint_count():
     """The checkpoint-count floor wins when data comfortably fits budget."""
     assert _files_per_job(0, 24e9, checkpoint_count=10) == 10

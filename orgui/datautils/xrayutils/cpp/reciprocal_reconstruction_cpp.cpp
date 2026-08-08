@@ -9,6 +9,9 @@
 #include <cstdint>
 #include <limits>
 #include <iterator>
+#include <map>
+#include <memory>
+#include <memory_resource>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -479,6 +482,13 @@ struct Record {
     std::uint32_t contributors;
 };
 
+struct RecordAccum {
+    double weighted_intensity = 0.0;
+    double weighted_variance = 0.0;
+    double weight = 0.0;
+    std::uint32_t contributors = 0;
+};
+
 struct VoxelWeight {
     std::uint64_t voxel;
     double weight;
@@ -671,6 +681,17 @@ public:
             profile ? blocks : 0
         );
         std::atomic<std::size_t> next_block{0};
+        // One arena per worker thread, sized for one block's worst case
+        // (every leaf a distinct voxel) and reused -- via
+        // monotonic_buffer_resource::release(), not a fresh allocation --
+        // across every block that thread processes. Falls back to the
+        // default heap resource transparently if a pathological block
+        // ever needs more than this, so undersizing here is a
+        // performance risk, never a correctness one.
+        const std::size_t bytes_per_node =
+            sizeof(std::pair<const RecordKey, RecordAccum>) + 32;
+        const std::size_t arena_bytes =
+            block_size * worst_leaves * bytes_per_node + 4096;
 
         const auto blocks_started = std::chrono::steady_clock::now();
         {
@@ -682,6 +703,12 @@ public:
             workers.reserve(static_cast<std::size_t>(worker_count));
             for (int worker = 0; worker < worker_count; ++worker) {
                 workers.emplace_back([&, this]() {
+                    std::unique_ptr<std::byte[]> arena_buffer(
+                        new std::byte[arena_bytes]
+                    );
+                    std::pmr::monotonic_buffer_resource arena(
+                        arena_buffer.get(), arena_bytes
+                    );
                     while (true) {
                         const std::size_t block = next_block.fetch_add(1);
                         if (block >= blocks) {
@@ -700,7 +727,8 @@ public:
                             ray_data,
                             transforms,
                             stationary,
-                            profile ? &block_profiles[block] : nullptr
+                            profile ? &block_profiles[block] : nullptr,
+                            arena
                         );
                     }
                 });
@@ -1540,18 +1568,32 @@ private:
         const double *rays,
         const std::vector<CoordinateTransform> &transforms,
         const bool stationary,
-        BlockProfile *profile
+        BlockProfile *profile,
+        std::pmr::monotonic_buffer_resource &arena
     ) const {
         (void)rows;
-        std::vector<Record> records;
+        // Reset the caller-owned arena to the start of its (already
+        // allocated once, reused across every block this worker thread
+        // processes) buffer -- no allocation or deallocation here, just a
+        // cursor reset. This is what avoids the per-block malloc/free
+        // churn a fresh arena-per-call would cause under heavy thread
+        // contention.
+        arena.release();
+        std::pmr::map<RecordKey, RecordAccum> tree(&arena);
         std::vector<VoxelWeight> weights;
         PixelCoordinateCache coordinate_cache;
         std::vector<Cell> stack;
         const std::size_t reserve_leaves = static_cast<std::size_t>(1)
             << std::min((stationary ? 2 : 3) * max_depth_, 9);
-        records.reserve(2 * (end - begin));
         weights.reserve(reserve_leaves);
         stack.reserve(reserve_leaves);
+        // Counts per-pixel-merged (voxel, weight) accumulation events --
+        // the same quantity the old push_back-one-Record-per-event code
+        // counted via records.size() before its later block-end reduce.
+        // tree.size() alone cannot recover this: it's already the
+        // post-dedup unique-key count by the time any pixel has been
+        // processed, since accumulation happens directly into the map.
+        std::uint64_t unreduced_count = 0;
         const auto mapping_started = std::chrono::steady_clock::now();
         for (std::size_t flat = begin; flat < end; ++flat) {
             if (profile != nullptr) {
@@ -1633,18 +1675,22 @@ private:
                     && weights[offset].voxel == voxel
                 );
                 const RecordKey key = record_key(voxel);
-                records.push_back({
-                    key,
-                    weight * intensity[flat],
-                    weight * weight * variance[flat],
-                    weight,
-                    1,
-                });
+                // Accumulate directly into the tree instead of
+                // push_back-ing a raw Record for a later sort+merge pass
+                // -- the map already groups by key (and, iterated, is
+                // already in sorted key order) as pixels are processed,
+                // so no separate block-end reduce step is needed at all.
+                RecordAccum &accumulator = tree[key];
+                accumulator.weighted_intensity += weight * intensity[flat];
+                accumulator.weighted_variance += weight * weight * variance[flat];
+                accumulator.weight += weight;
+                accumulator.contributors += 1;
+                ++unreduced_count;
             }
         }
         const auto mapping_finished = std::chrono::steady_clock::now();
         if (profile != nullptr) {
-            profile->unreduced_records = records.size();
+            profile->unreduced_records = unreduced_count;
             profile->mapping_nanoseconds = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     mapping_finished - mapping_started
@@ -1652,7 +1698,17 @@ private:
             );
         }
         const auto reduction_started = mapping_finished;
-        reduce_records(records);
+        std::vector<Record> records;
+        records.reserve(tree.size());
+        for (const auto &entry : tree) {
+            records.push_back({
+                entry.first,
+                entry.second.weighted_intensity,
+                entry.second.weighted_variance,
+                entry.second.weight,
+                entry.second.contributors,
+            });
+        }
         if (profile != nullptr) {
             profile->reduced_records = records.size();
             profile->reduction_nanoseconds = static_cast<std::uint64_t>(

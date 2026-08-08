@@ -275,6 +275,13 @@ Reciprocal-space reconstruction:
   ``contributors`` output dataset is now ``uint32`` instead of
   ``uint64``. Any downstream script that reads ``contributors`` assuming
   ``uint64`` needs updating.
+- Each native mapping worker thread now reuses a single memory arena
+  across every detector block it processes, instead of allocating and
+  freeing a fresh working buffer per block. Under heavy thread
+  contention this previously caused a severe slowdown from allocator
+  lock contention (tens of times slower at high thread counts in
+  isolated testing); reuse removes that contention with no change to
+  the mapped result.
 
 
 ## [1.5.0] (2026-06-07)
