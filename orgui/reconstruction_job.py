@@ -53,6 +53,22 @@ AUTO_MAX_ACCUMULATION_BYTES = 2 * 1024**3
 MAX_CONCURRENT_ACTIVE_CHECKPOINTS = 2
 """Design doc Sec10: how many checkpoints (per grid) may have live,
 non-empty accumulator state at once -- small and fixed, not user-facing."""
+_RAW_IMAGE_BYTES_PER_PIXEL = 8
+"""Conservative per-pixel size for one decoded detector frame held in
+memory -- whether still sitting in the prefetch queue or already handed
+to a compute worker. Assumes float64 (the widest dtype involved) as a
+safe upper bound regardless of a scan backend's actual raw dtype."""
+_CORRECTED_ARRAY_BYTES_PER_PIXEL = 8 + 8 + 1
+"""_correction_pipeline.correct_frame's per-pixel output: float64
+intensity, float64 variance, bool mask."""
+_PYTHON_CORRECTION_BYTES_PER_PIXEL = (
+    _RAW_IMAGE_BYTES_PER_PIXEL + _CORRECTED_ARRAY_BYTES_PER_PIXEL
+)
+"""Sec7's Python-side frame footprint: correct_frame runs once per
+frame (not per detector tile) and holds the raw image plus every
+corrected array, all full-detector-sized, simultaneously. This is real
+per-in-flight-frame resident memory the native kernel's own per-tile
+working-set estimate (_frame_parallelism) does not see at all."""
 
 
 def _build_metadata():
@@ -1243,15 +1259,25 @@ def _frame_parallelism(
     roughly the tile count, silently starving ``image_workers`` on jobs with
     more than one detector tile.
 
+    The native-kernel estimate alone still misses two real, non-native
+    memory costs (design doc Sec7): the Python-side correction step
+    (``_correction_pipeline.correct_frame``), which runs once per frame
+    rather than once per tile and holds the raw image plus every
+    corrected array at full-detector size for as long as that frame is
+    in flight; and the prefetch pipeline's own read-ahead queue, which
+    can hold up to ``_PREFETCH_QUEUE_SLACK`` additional decoded (but not
+    yet claimed) frames beyond ``image_workers``. Both are folded into
+    this function's own worker/reservation accounting so ``image_workers``
+    reflects the job's actual peak resident memory, not just the native
+    kernel's.
+
     ``accumulation_budget_bytes``/the returned ``accumulation`` value model a
     per-worker retained-record buffer from the retired Parquet-era mapping
     path; the checkpoint-routing path (design doc Sec9) has no equivalent
     per-worker buffer of its own; ``run_job`` computes the checkpoint
     accumulators' own memory budget separately (Sec10) and does not forward
-    this value onward. Kept unchanged here (this function belongs to the
-    still-unimplemented Sec7 thread-allocation phase) so a caller-supplied
-    ``accumulation_budget_bytes`` still conservatively bounds
-    ``image_workers``.
+    this value onward. Kept only as a conservative extra bound on
+    ``image_workers`` when a caller supplies it explicitly.
 
     :param _ReconstructionSpec spec:
         Frozen reconstruction compute settings.
@@ -1286,6 +1312,11 @@ def _frame_parallelism(
     # largest tile (see docstring) -- not the sum of every tile across
     # the whole detector.
     largest_tile_pixels = max(tile_pixels)
+    # The whole detector's pixel count: correct_frame (unlike the native
+    # kernel) runs once per frame, not once per tile, and its buffers are
+    # always full-detector-sized regardless of how many native tiles the
+    # frame is split into.
+    detector_pixels = sum(tile_pixels)
     children = 4 if stationary else 8
     worst_leaves = children**spec.max_depth
     # Mirrors ReconstructionKernel::accumulate's own memory precheck
@@ -1293,8 +1324,13 @@ def _frame_parallelism(
     # count times one native Record's on-the-wire size), so this
     # Python-side estimate cannot drift from what the kernel itself
     # actually enforces.
-    bytes_per_pixel = 128 + 2 * worst_leaves * _CHECKPOINT_BYTES_PER_ROW
-    image_memory = largest_tile_pixels * bytes_per_pixel
+    native_bytes_per_pixel = 128 + 2 * worst_leaves * _CHECKPOINT_BYTES_PER_ROW
+    native_memory = largest_tile_pixels * native_bytes_per_pixel
+    # The native estimate alone misses real, per-in-flight-frame Python
+    # memory: the raw decoded image plus every corrected array
+    # (_PYTHON_CORRECTION_BYTES_PER_PIXEL), full-detector-sized.
+    python_memory = detector_pixels * _PYTHON_CORRECTION_BYTES_PER_PIXEL
+    image_memory = native_memory + python_memory
     worker_memory = max(
         1024**2,
         image_memory,
@@ -1304,8 +1340,21 @@ def _frame_parallelism(
     )
     cpu_workers = max(1, int(spec.threads) // kernel_threads)
     minimum_accumulation = 1024**2
+    # Design doc Sec7's prefetch-queue memory constraint: up to
+    # _PREFETCH_QUEUE_SLACK frames beyond image_workers can sit in the
+    # ready queue, already decoded but not yet claimed by a compute
+    # worker -- raw image bytes only, no correction buffers yet. Reserved
+    # off the top before dividing the remaining budget among workers, the
+    # same way the ray-corner cache is reserved by callers before this
+    # function ever sees the budget.
+    prefetch_reserve_bytes = (
+        _PREFETCH_QUEUE_SLACK * detector_pixels * _RAW_IMAGE_BYTES_PER_PIXEL
+    )
+    usable_memory_bytes = max(
+        minimum_accumulation, memory_bytes - prefetch_reserve_bytes
+    )
     if accumulation_budget_bytes is None:
-        memory_workers = max(1, memory_bytes // worker_memory)
+        memory_workers = max(1, usable_memory_bytes // worker_memory)
     else:
         requested = max(
             minimum_accumulation, int(accumulation_budget_bytes)
@@ -1314,7 +1363,7 @@ def _frame_parallelism(
             worker_memory
             + ACCUMULATION_TRANSIENT_FACTOR * requested
         )
-        memory_workers = max(1, memory_bytes // required)
+        memory_workers = max(1, usable_memory_bytes // required)
     image_workers = max(
         1,
         min(cpu_workers, memory_workers),
@@ -1322,7 +1371,7 @@ def _frame_parallelism(
     safe_accumulation = max(
         minimum_accumulation,
         (
-            memory_bytes // image_workers - worker_memory
+            usable_memory_bytes // image_workers - worker_memory
         )
         // ACCUMULATION_TRANSIENT_FACTOR,
     )

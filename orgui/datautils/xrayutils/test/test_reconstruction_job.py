@@ -181,14 +181,24 @@ def test_central_job_runs_resumes_and_cleans_verified_scratch(
     }
 
 
-def test_frame_parallelism_scopes_memory_to_largest_tile_not_detector_sum():
+def _uniform_tiles(total_side, tile_side):
+    return [
+        (row, row + tile_side, column, column + tile_side)
+        for row in range(0, total_side, tile_side)
+        for column in range(0, total_side, tile_side)
+    ]
+
+
+def test_frame_parallelism_scopes_native_memory_to_largest_tile_not_detector_sum():
     """A worker processes its detector tiles sequentially (_map_one_frame),
-    one native accumulate() call at a time -- its peak native working set
-    is bounded by its single largest tile, never the sum of every tile
-    across the whole detector. Summing silently starved image_workers on
-    any job with more than one detector tile (a multi-tile Pilatus-6M-scale
-    job saw concurrent_image_workers capped at 6 instead of the full
-    24-thread budget purely from this overcounting)."""
+    one native accumulate() call at a time -- the native-kernel share of
+    its peak memory is bounded by its single largest tile, never the sum
+    of every tile across the whole detector. Splitting the same total
+    detector area into more, smaller tiles must not increase (and here,
+    since each tile shrinks, must decrease) the native contribution --
+    summing silently starved image_workers on any multi-tile job (a real
+    Pilatus-6M-scale job saw concurrent_image_workers capped at 6 instead
+    of the full 24-thread budget purely from this overcounting)."""
     grid = _GridSpec(
         minimum=(-1.0, -1.0, -1.0),
         maximum=(1.0, 1.0, 1.0),
@@ -196,34 +206,73 @@ def test_frame_parallelism_scopes_memory_to_largest_tile_not_detector_sum():
         frame="lab",
         chunk_shape=(2, 2, 2),
     )
-    spec = _ReconstructionSpec(grids=(grid,), max_depth=0, threads=24)
+    # depth > 0 so the native (leaf-count-driven) share is large enough
+    # to dominate the fixed per-pixel Python-side buffer cost, making the
+    # native-only effect being tested clearly visible.
+    spec = _ReconstructionSpec(grids=(grid,), max_depth=3, threads=24)
     memory_bytes = 10_000 * 1024**2
-    one_tile = [(0, 1024, 0, 1024)]
-    nine_identically_sized_tiles = [
-        (row, row + 1024, column, column + 1024)
-        for row in range(0, 3 * 1024, 1024)
-        for column in range(0, 3 * 1024, 1024)
-    ]
-    assert len(nine_identically_sized_tiles) == 9
+    one_big_tile = _uniform_tiles(2048, 2048)
+    four_small_tiles = _uniform_tiles(2048, 1024)
+    assert len(one_big_tile) == 1
+    assert len(four_small_tiles) == 4
+    # Same total detector area either way -- same Python-side correction
+    # buffer cost -- only the native per-call tile size differs.
+    assert sum(
+        (r1 - r0) * (c1 - c0) for r0, r1, c0, c1 in one_big_tile
+    ) == sum((r1 - r0) * (c1 - c0) for r0, r1, c0, c1 in four_small_tiles)
 
-    single_tile_result = _frame_parallelism(
-        spec, one_tile, memory_bytes, stationary=False, threads_per_image=1
+    single_result = _frame_parallelism(
+        spec, one_big_tile, memory_bytes, stationary=False, threads_per_image=1
     )
-    nine_tile_result = _frame_parallelism(
-        spec,
-        nine_identically_sized_tiles,
-        memory_bytes,
-        stationary=False,
-        threads_per_image=1,
+    split_result = _frame_parallelism(
+        spec, four_small_tiles, memory_bytes, stationary=False, threads_per_image=1
     )
 
-    # One worker touching 9 identically-sized tiles has the same peak
-    # per-tile memory need as one touching a single such tile -- both
-    # must produce the same (image_workers, kernel_threads,
-    # per_worker_memory_bytes, accumulation_budget_bytes).
-    assert nine_tile_result == single_tile_result
-    # Thread-bound, not memory-starved by the (wrong) detector-wide sum.
-    assert nine_tile_result[0] == spec.threads == 24
+    # The split (4x smaller largest tile) version's per-worker memory
+    # must be strictly smaller -- proving the estimate tracks the single
+    # largest tile, not a detector-wide total that would be identical
+    # (and therefore give an identical result) in both cases.
+    assert split_result[2] < single_result[2]
+    assert split_result[0] >= single_result[0]
+
+
+def test_frame_parallelism_accounts_for_python_correction_buffers_and_prefetch():
+    """The native-kernel-only estimate misses two real, non-native memory
+    costs (design doc Sec7): _correction_pipeline.correct_frame's
+    full-detector-sized Python buffers (held once per frame, not per
+    tile) and the prefetch pipeline's own read-ahead queue. A large,
+    single-tile, depth-0 job (negligible native share) must still be
+    bounded well below "infinite" image_workers by these alone."""
+    grid = _GridSpec(
+        minimum=(-1.0, -1.0, -1.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(1.0, 1.0, 1.0),
+        frame="lab",
+        chunk_shape=(2, 2, 2),
+    )
+    spec = _ReconstructionSpec(grids=(grid,), max_depth=0, threads=1000)
+    # A Pilatus-6M-scale detector split into many small tiles: at depth=0
+    # the native share (bounded by one small tile) is negligible, so only
+    # the Python-side/prefetch accounting can be limiting concurrency
+    # here.
+    detector_side = 2500
+    tiles = _uniform_tiles(detector_side, 250)
+    memory_bytes = 10_000 * 1024**2
+
+    image_workers, _kernel_threads, per_worker_memory, _accumulation = (
+        _frame_parallelism(
+            spec, tiles, memory_bytes, stationary=True, threads_per_image=1
+        )
+    )
+
+    # With a 1000-thread budget and negligible native memory, an
+    # accounting that only sees the native kernel would let this run
+    # essentially unbounded (unrealistic -- it would try to hold far more
+    # than 10 GiB of raw/corrected frames in flight at once). The
+    # Python-side buffer + prefetch-queue reservation must keep it well
+    # below the thread budget instead.
+    assert image_workers < 1000
+    assert per_worker_memory > detector_side * detector_side * 8
 
 
 def test_threads_per_image_none_round_trips_and_reports_automatic_mode(
