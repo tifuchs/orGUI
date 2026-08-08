@@ -415,7 +415,13 @@ def test_map_pending_ranges_automatic_mode_rebalances_and_stays_stable(
     # synthetic run's completion. Shrink it (modestly -- an extreme value
     # makes every tick dominated by thread create/join overhead instead of
     # real work) so several rebalance checks land while frames are still
-    # in flight.
+    # in flight. This deliberately keeps the reader pool's own Phase 4a
+    # blocked-fraction growth/shrink live and fast alongside the
+    # kernel_threads rebalance: a reader-pool shrink racing a reader's
+    # gate wait is exactly the scenario that used to lose a claimed frame
+    # permanently and hang the coordinator forever (fixed in
+    # reader_loop -- see its docstring); this timing deliberately keeps
+    # that race hot rather than avoiding it.
     monkeypatch.setattr(
         reconstruction_job_module, "_COORDINATOR_TICK_SECONDS", 0.05
     )

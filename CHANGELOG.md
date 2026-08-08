@@ -231,6 +231,12 @@ Reciprocal-space reconstruction:
   compute workers drains, and the reader pool grows and shrinks live
   based on how often compute sits waiting for an image. Progress messages
   now also report the current prefetch reader count.
+- Fixed a race in that prefetch pool where a frame already claimed by a
+  reader thread could be silently dropped -- never mapped, and never
+  counted as done -- if the reader pool happened to shrink (or the job
+  failed) while that reader was still waiting for a compute slot. The
+  dropped frame's count was never decremented, so the affected job would
+  hang indefinitely instead of finishing or reporting the failure.
 - ``Native threads per image`` is now automatic by default: mapping
   starts image-parallel and periodically rebalances native threads per
   image against concurrent images live, using the real, currently

@@ -2085,6 +2085,16 @@ def _map_pending_ranges(
                 readers_done.set()
 
     def reader_loop(retire, pool_cancellation):
+        """A personal ``retire`` (reader-pool shrink) only stops this
+        worker from claiming its *next* frame from ``work_iterator`` --
+        once a frame index is claimed, it must be delivered (successfully
+        or as a recorded failure) before this worker exits, matching
+        ``compute_loop``'s own in-flight-completes-first contract.
+        ``work_iterator`` is a one-shot generator: a claimed-then-abandoned
+        frame index can never be reclaimed by another reader, which would
+        permanently stall ``remaining`` above zero and hang the
+        coordinator waiting for a ``readers_done`` that can never fire.
+        """
         def local_should_stop():
             return retire.is_set() or pool_cancellation.is_set() or should_stop()
 
@@ -2097,6 +2107,20 @@ def _map_pending_ranges(
         # exit with no other observable effect, which would otherwise
         # hang the coordinator waiting for completion signals that will
         # never come.
+        def abandon_should_stop():
+            # Deliberately excludes this reader's own `retire` -- once a
+            # frame has been claimed from work_iterator below, abandoning
+            # the gate wait just because *this* reader is being retired
+            # (e.g. a live reader-pool shrink) would drop that frame on
+            # the floor forever: nothing else can reclaim it from a
+            # one-shot iterator, so remaining[0] would never reach zero
+            # and readers_done would never fire, hanging the coordinator.
+            # A hard pool_cancellation (final teardown) or a job-wide
+            # should_stop() (some other failure) still abort it -- both
+            # are handled below by explicitly marking it delivered
+            # (failed), keeping the bookkeeping consistent either way.
+            return pool_cancellation.is_set() or should_stop()
+
         try:
             while not local_should_stop():
                 with work_lock:
@@ -2104,8 +2128,10 @@ def _map_pending_ranges(
                 if frame_index is None:
                     return
                 if not gate.acquire(
-                    poll_timeout=_POLL_TIMEOUT_SECONDS, should_stop=local_should_stop
+                    poll_timeout=_POLL_TIMEOUT_SECONDS,
+                    should_stop=abandon_should_stop,
                 ):
+                    mark_frame_delivered(succeeded=False)
                     return
                 try:
                     image_payload = scan.get_raw_img(frame_index)
