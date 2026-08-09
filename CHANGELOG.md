@@ -327,6 +327,10 @@ Reciprocal-space reconstruction:
   bit-identical output verified record for record. The gains stack with
   the change above: from before both, mapping is 1.57x faster single
   threaded at a 1000-voxel-per-axis grid.
+- Mapping walks each detector block's row and column forward instead of
+  recovering them from the pixel's flat index, removing an integer
+  division and remainder per pixel for about 2% less mapping time, with
+  identical output.
 
 
 ## [1.5.0] (2026-06-07)

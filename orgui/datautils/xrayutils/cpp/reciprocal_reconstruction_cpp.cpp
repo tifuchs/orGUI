@@ -1649,6 +1649,11 @@ private:
         // post-dedup unique-key count by the time any pixel has been
         // processed, since accumulation happens directly into the map.
         std::uint64_t unreduced_count = 0;
+        // Walked forward instead of recovered per pixel: the flat index
+        // divided and taken modulo the row length was an integer division
+        // and remainder on every pixel, and a block is a contiguous run.
+        std::size_t row_cursor = begin / columns;
+        std::size_t column_cursor = begin % columns;
         // Neighbouring pixels overwhelmingly land in the same voxel (only
         // about a third of adjacent pairs cross a voxel boundary on real
         // data), so remembering the last key's accumulator turns most
@@ -1670,6 +1675,14 @@ private:
         };
         const auto mapping_started = std::chrono::steady_clock::now();
         for (std::size_t flat = begin; flat < end; ++flat) {
+            const std::size_t row = row_cursor;
+            const std::size_t column = column_cursor;
+            // Advanced here rather than at the bottom, so the skip paths
+            // below cannot step over it.
+            if (++column_cursor == columns) {
+                column_cursor = 0;
+                ++row_cursor;
+            }
             if (profile != nullptr) {
                 ++profile->pixels_seen;
             }
@@ -1684,8 +1697,6 @@ private:
             if (profile != nullptr) {
                 ++profile->valid_pixels;
             }
-            const std::size_t row = flat / columns;
-            const std::size_t column = flat % columns;
             const PixelRays prepared_rays = pixel_rays(
                 row,
                 column,
