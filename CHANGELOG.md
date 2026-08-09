@@ -355,6 +355,21 @@ Reciprocal-space reconstruction:
   of double-precision rounding and far below counting statistics; set
   ``work_block_pixels`` explicitly in a job to reproduce an older run
   bit for bit.
+- Detector tiles are now full-width row bands of equal height instead of
+  a square grid. The grid left tiles of very unequal size (a 2527x2463
+  detector became nine tiles spanning 198,785 to 1,048,576 pixels, a
+  factor of 5.3), and because every tile was cut in both directions, no
+  tile was a contiguous slice of the corrected frame -- so the copy each
+  tile makes before the native call was a strided gather rather than a
+  no-op. Equal full-width bands make that copy free, give every tile the
+  same number of native work blocks, and cut the number of native calls
+  per frame. Measured on a real dataset: the per-tile copy drops from
+  16.8 ms to 3.2 ms per frame, and mapping is about 1.05x faster end to
+  end. An explicit ``tile_shape`` on the job still produces the previous
+  grid, unchanged. Like the work-block size, tile boundaries determine
+  how voxel contributions are grouped before being merged, so results
+  can differ in the last bits from earlier runs -- see the note on
+  summation order above.
 
 
 ## [1.5.0] (2026-06-07)

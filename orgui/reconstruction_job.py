@@ -1213,10 +1213,15 @@ def _execution_layout(job, scan, config, *, extra_excluded_frames=()):
             ),
         ),
     )
-    tile_side = max(1, int(math.sqrt(tile_pixels)))
     tile_rows, tile_columns = job.tile_shape or (
-        min(tile_side, rows),
-        min(tile_side, columns),
+        # Full detector width, so a tile is a contiguous slice of the
+        # corrected frame: the per-tile copy the mapping loop makes is
+        # then a no-op instead of a strided gather, and every tile holds
+        # the same number of pixels (and so the same number of native
+        # work blocks) rather than the ragged remainders a square grid
+        # leaves along two edges.
+        max(1, min(rows, tile_pixels // max(1, columns))),
+        columns,
     )
     included_count = max(
         1,
@@ -1240,16 +1245,29 @@ def _execution_layout(job, scan, config, *, extra_excluded_frames=()):
     else:
         frame_batch = job.frame_batch
     ranges = _included_ranges(len(scan), excluded, frame_batch)
-    tiles = [
-        (
-            row,
-            min(row + tile_rows, rows),
-            column,
-            min(column + tile_columns, columns),
-        )
-        for row in range(0, rows, tile_rows)
-        for column in range(0, columns, tile_columns)
-    ]
+    if job.tile_shape is None:
+        # Spread the rows evenly over the bands the budget allows, rather
+        # than filling each to tile_rows and leaving a short remainder:
+        # every band then carries the same work to within one row.
+        band_count = max(1, math.ceil(rows / tile_rows))
+        edges = [
+            round(rows * index / band_count) for index in range(band_count + 1)
+        ]
+        tiles = [
+            (edges[index], edges[index + 1], 0, columns)
+            for index in range(band_count)
+        ]
+    else:
+        tiles = [
+            (
+                row,
+                min(row + tile_rows, rows),
+                column,
+                min(column + tile_columns, columns),
+            )
+            for row in range(0, rows, tile_rows)
+            for column in range(0, columns, tile_columns)
+        ]
     return ranges, tiles
 
 
