@@ -243,6 +243,97 @@ def test_native_chunk_local_ids_match_independently_computed_voxel_indices(
     ) == expected
 
 
+def test_native_center_accumulation_survives_revisiting_voxels_out_of_order():
+    """The mapping loop remembers the previous pixel's accumulator, which is
+    only correct if a key revisited after an intervening different key still
+    lands on its own accumulator. This tile alternates between voxels so
+    that cache hit and miss alternate too, and checks every record's summed
+    values against the same sums accumulated independently here.
+    """
+    minimum = np.array([-0.4, -0.4, -0.4])
+    step = np.array([0.05, 0.05, 0.05])
+    shape = np.array([16, 16, 16], dtype=np.int64)
+    kernel = native.ReconstructionKernel(
+        minimum,
+        step,
+        shape,
+        np.array([8, 8, 8], dtype=np.int64),
+        "lab",
+        1.0,
+        np.eye(3),
+        np.eye(3),
+        0,
+        1,
+        4096,
+        1024 * 1024,
+    )
+    rows = 4
+    columns = 12
+    rays = np.zeros((rows + 1, columns + 1, 3), dtype=np.float64)
+    # Alternating corner offsets, so consecutive pixel centres keep moving
+    # back and forth between a small set of voxels.
+    offsets = np.array([0.0, 0.0, 0.22, 0.22] * ((columns + 4) // 4))
+    rays[..., 0] = offsets[: columns + 1][None, :]
+    rays[..., 2] = np.linspace(-0.05, 0.05, rows + 1)[:, None]
+    rays[..., 1] = 1.0
+    rays /= np.linalg.norm(rays, axis=2, keepdims=True)
+    rng = np.random.default_rng(7)
+    intensity = rng.random((rows, columns))
+    variance = rng.random((rows, columns)) + 0.5
+    mask = np.zeros((rows, columns), dtype=bool)
+    angles = np.zeros(4)
+
+    expected: dict[tuple[int, int], list[float]] = {}
+    chunk_shape = np.array([8, 8, 8])
+    chunk_grid = np.ceil(shape / chunk_shape).astype(np.int64)
+    for row in range(rows):
+        for column in range(columns):
+            coordinate = np.asarray(
+                kernel.coordinate(rays, angles, angles, row, column)
+            )
+            index = np.floor((coordinate - minimum) / step).astype(np.int64)
+            if np.any(index < 0) or np.any(index >= shape):
+                continue
+            chunk_index, local_index = np.divmod(index, chunk_shape)
+            key = (
+                int(
+                    (chunk_index[0] * chunk_grid[1] + chunk_index[1])
+                    * chunk_grid[2]
+                    + chunk_index[2]
+                ),
+                int(
+                    (local_index[0] * chunk_shape[1] + local_index[1])
+                    * chunk_shape[2]
+                    + local_index[2]
+                ),
+            )
+            totals = expected.setdefault(key, [0.0, 0.0, 0.0, 0])
+            totals[0] += intensity[row, column]
+            totals[1] += variance[row, column]
+            totals[2] += 1.0
+            totals[3] += 1
+
+    result = kernel.accumulate(
+        intensity, variance, mask, rays, angles, angles
+    )
+
+    # More voxels than one, revisited more often than they are distinct --
+    # otherwise the cache would never be exercised in both directions.
+    assert len(expected) > 2
+    assert result["chunk_id"].size == len(expected)
+    assert sum(totals[3] for totals in expected.values()) > 2 * len(expected)
+    for position in range(result["chunk_id"].size):
+        key = (
+            int(result["chunk_id"][position]),
+            int(result["local_voxel_id"][position]),
+        )
+        totals = expected[key]
+        assert result["weighted_intensity"][position] == totals[0]
+        assert result["weighted_variance"][position] == totals[1]
+        assert result["weight"][position] == totals[2]
+        assert int(result["contributors"][position]) == totals[3]
+
+
 def test_native_accumulate_produces_uint32_chunk_and_local_ids_across_multiple_chunks():
     """A grid split into several chunks along one axis exercises the real
     record_key() chunk/local decomposition (not just the trivial
@@ -761,6 +852,11 @@ def test_center_only_profiles_one_coordinate_per_valid_pixel():
     assert profile["valid_pixels"] == 5
     assert profile["coordinate_evaluations"] == 5
     assert profile["maximum_weights_per_pixel"] == 1
+    # Depth zero skips the per-pixel weight vector entirely, so these two
+    # counters are maintained by hand on that path and cannot be derived
+    # from a weights.size() the fast path never computes.
+    assert profile["voxel_weights"] == 5
+    assert profile["unreduced_block_records"] == 5
 
 
 def test_calibration_probe_returns_positive_byte_estimate():

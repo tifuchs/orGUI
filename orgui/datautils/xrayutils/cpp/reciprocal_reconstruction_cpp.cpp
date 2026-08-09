@@ -1649,6 +1649,25 @@ private:
         // post-dedup unique-key count by the time any pixel has been
         // processed, since accumulation happens directly into the map.
         std::uint64_t unreduced_count = 0;
+        // Neighbouring pixels overwhelmingly land in the same voxel (only
+        // about a third of adjacent pairs cross a voxel boundary on real
+        // data), so remembering the last key's accumulator turns most
+        // accumulations into two uint32 compares instead of a tree
+        // descent. Map nodes never move, so the pointer stays valid for
+        // the whole block.
+        RecordKey cached_key{};
+        RecordAccum *cached_accumulator = nullptr;
+        const auto accumulator_for = [&tree, &cached_key, &cached_accumulator](
+            const RecordKey key
+        ) -> RecordAccum & {
+            if (cached_accumulator != nullptr && key == cached_key) {
+                return *cached_accumulator;
+            }
+            RecordAccum &accumulator = tree[key];
+            cached_key = key;
+            cached_accumulator = &accumulator;
+            return accumulator;
+        };
         const auto mapping_started = std::chrono::steady_clock::now();
         for (std::size_t flat = begin; flat < end; ++flat) {
             if (profile != nullptr) {
@@ -1673,8 +1692,11 @@ private:
                 columns,
                 rays
             );
-            weights.clear();
             if (max_depth_ == 0) {
+                // One pixel centre, so exactly one (voxel, weight=1) pair:
+                // the scratch vector, its sort, and the duplicate-merging
+                // walk below all have nothing to do at this depth, and
+                // multiplying by a weight of exactly one is exact.
                 if (profile != nullptr) {
                     ++profile->coordinate_evaluations;
                 }
@@ -1690,9 +1712,24 @@ private:
                         voxel
                     )
                 ) {
-                    weights.push_back({voxel, 1.0});
+                    if (profile != nullptr) {
+                        ++profile->voxel_weights;
+                        profile->maximum_weights_per_pixel = std::max(
+                            profile->maximum_weights_per_pixel,
+                            static_cast<std::uint64_t>(1)
+                        );
+                    }
+                    RecordAccum &accumulator = accumulator_for(record_key(voxel));
+                    accumulator.weighted_intensity += intensity[flat];
+                    accumulator.weighted_variance += variance[flat];
+                    accumulator.weight += 1.0;
+                    accumulator.contributors += 1;
+                    ++unreduced_count;
                 }
-            } else if (stationary && max_depth_ == 2) {
+                continue;
+            }
+            weights.clear();
+            if (stationary && max_depth_ == 2) {
                 split_pixel_stationary_depth2(
                     prepared_rays,
                     transforms[transforms.size() / 2],
@@ -1729,13 +1766,12 @@ private:
                     offset < weights.size()
                     && weights[offset].voxel == voxel
                 );
-                const RecordKey key = record_key(voxel);
                 // Accumulate directly into the tree instead of
                 // push_back-ing a raw Record for a later sort+merge pass
                 // -- the map already groups by key (and, iterated, is
                 // already in sorted key order) as pixels are processed,
                 // so no separate block-end reduce step is needed at all.
-                RecordAccum &accumulator = tree[key];
+                RecordAccum &accumulator = accumulator_for(record_key(voxel));
                 accumulator.weighted_intensity += weight * intensity[flat];
                 accumulator.weighted_variance += weight * weight * variance[flat];
                 accumulator.weight += weight;

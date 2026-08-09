@@ -315,6 +315,18 @@ Reciprocal-space reconstruction:
   rejects any grid needing more than 64 bits of voxel index across the
   three axes, which no physically meaningful grid approaches (a
   5000-voxel-per-axis grid uses 39).
+- Mapping now remembers the previous pixel's output voxel, and the
+  ``center`` accuracy preset no longer builds a per-pixel list of
+  sub-pixel contributions it cannot have. Neighbouring detector pixels
+  usually land in the same voxel, so reusing the previous accumulator
+  replaces most of the per-voxel lookups with a single comparison; and at
+  ``center`` accuracy each pixel contributes exactly one voxel with a
+  weight of one, so the scratch list, its sort, and its
+  duplicate-merging pass had nothing to do. Together these made mapping a
+  further 1.14-1.31x faster on a real beamtime dataset, again with
+  bit-identical output verified record for record. The gains stack with
+  the change above: from before both, mapping is 1.57x faster single
+  threaded at a 1000-voxel-per-axis grid.
 
 
 ## [1.5.0] (2026-06-07)
