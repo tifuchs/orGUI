@@ -456,7 +456,12 @@ def _sobol_tile_origins(rows, columns, count, rng=None):
     from scipy.stats import qmc
 
     exponent = max(1, math.ceil(math.log2(max(2, int(count)))))
-    seed = None if rng is None else int(rng.integers(0, 2**32))
+    # A fixed default seed rather than an arbitrary one: the scramble is
+    # there to stratify, not to randomise, and pinning it means two
+    # preparations of the same job on the same machine sample the same
+    # positions. Callers wanting independent draws pass their own
+    # generator.
+    seed = 0 if rng is None else int(rng.integers(0, 2**32))
     sampler = qmc.Sobol(d=2, scramble=True, seed=seed)
     points = sampler.random_base2(exponent)
     return [(float(point[0]), float(point[1])) for point in points]
@@ -556,8 +561,6 @@ def _calibration_probe(
         density relative to itself.
     :rtype: dict
     """
-    if rng is None:
-        rng = np.random.default_rng()
     rows, columns = mask.shape
     started = time.perf_counter()
 

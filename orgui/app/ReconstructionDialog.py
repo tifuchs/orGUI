@@ -16,6 +16,7 @@ from ..reconstruction_cluster import (
 )
 from ..reconstruction_job import (
     ACCURACY_DEPTHS,
+    WORK_BLOCK_PRESETS,
     ReconstructionGrid,
     _node_excluded_frames,
     derive_grid,
@@ -701,10 +702,24 @@ class ReconstructionDialog(qt.QDialog):
             tile_tooltip,
         )
         block_tooltip = (
-            "Fixed number of detector pixels scheduled as one native work block."
+            "Size of one native work block. A block's working set is the "
+            "pixel data it reads plus the accumulator it builds, and "
+            "throughput is best when that fits the CPU cache, so these "
+            "names select a cache scale rather than a raw count: 'Minimum' "
+            "is about an L1 data cache, 'Medium' about a 1 MiB L2. Left "
+            "alone, the block is chosen automatically -- 'Medium', halved "
+            "for each adaptive depth so the working set stays put, and "
+            "capped so the native arenas fit the memory budget."
         )
-        self.work_block = self._optional_spin(
-            1, 100000000, block_tooltip
+        self.work_block = self._optional_combo(
+            [
+                (f"{name.capitalize()} ({pixels:,} px at center accuracy)", name)
+                for name, pixels in sorted(
+                    WORK_BLOCK_PRESETS.items(), key=lambda item: item[1]
+                )
+            ],
+            block_tooltip,
+            current="medium",
         )
         self._add_form_row(
             advanced_form,
@@ -1138,6 +1153,33 @@ class ReconstructionDialog(qt.QDialog):
         self._set_control_tooltip(control, tooltip)
         return control
 
+    def _optional_combo(self, items, tooltip, current=None):
+        """An override checkbox in front of a named-choice combo.
+
+        Same ``(container, checkbox, editor)`` shape as
+        :meth:`_optional_spin`, so the same value and detected-value
+        helpers handle both.
+        """
+        container = qt.QWidget()
+        layout = qt.QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        enabled = qt.QCheckBox("Override")
+        editor = qt.QComboBox()
+        for label, value in items:
+            editor.addItem(label, value)
+        if current is not None:
+            index = editor.findData(current)
+            if index >= 0:
+                editor.setCurrentIndex(index)
+        editor.setEnabled(False)
+        enabled.toggled.connect(editor.setEnabled)
+        layout.addWidget(enabled)
+        layout.addWidget(editor)
+        layout.addStretch(1)
+        control = (container, enabled, editor)
+        self._set_control_tooltip(control, tooltip)
+        return control
+
     def _path_row(self, editor, kind, save=False, tooltip=""):
         widget = qt.QWidget()
         layout = qt.QHBoxLayout(widget)
@@ -1517,12 +1559,20 @@ class ReconstructionDialog(qt.QDialog):
     @staticmethod
     def _optional_value(control):
         _, enabled, editor = control
-        return editor.value() if enabled.isChecked() else None
+        if not enabled.isChecked():
+            return None
+        if isinstance(editor, qt.QComboBox):
+            return editor.currentData()
+        return editor.value()
 
     @staticmethod
     def _set_detected_value(control, value):
         _, enabled, editor = control
         if enabled.isChecked() or value is None:
+            return
+        if isinstance(editor, qt.QComboBox):
+            # A combo offers named scales; the resolved pixel count this
+            # would report belongs in the performance summary instead.
             return
         editor.setValue(
             max(editor.minimum(), min(editor.maximum(), int(round(value))))

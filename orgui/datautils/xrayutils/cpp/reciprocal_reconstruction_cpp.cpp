@@ -744,8 +744,25 @@ public:
         // performance risk, never a correctness one.
         const std::size_t bytes_per_node =
             sizeof(std::pair<const RecordKey, RecordAccum>) + 32;
+        // Reserving one node per leaf assumes every leaf of every pixel
+        // reaches a voxel no other leaf did. Real data does not behave
+        // that way at any depth: measured post-dedup density stays
+        // between 0.46 and 0.87 records per pixel from depth 0 through 8,
+        // because deeper subdivision's extra samples overwhelmingly land
+        // in voxels a neighbouring sample already reached. Reserving by
+        // leaf count therefore over-reserves by up to four orders of
+        // magnitude at high depth -- gigabytes per worker thread -- while
+        // buying nothing. A small multiple of the measured density leaves
+        // ample headroom, and the resource falls back to the heap if a
+        // block ever does exceed it, so this bounds performance, never
+        // correctness. Depth 0 is exact: one leaf can only yield one
+        // record.
+        constexpr std::size_t reserved_records_per_pixel = 4;
         const std::size_t arena_bytes =
-            block_size * worst_leaves * bytes_per_node + 4096;
+            block_size
+                * std::min<std::size_t>(worst_leaves, reserved_records_per_pixel)
+                * bytes_per_node
+            + 4096;
 
         const auto blocks_started = std::chrono::steady_clock::now();
         {

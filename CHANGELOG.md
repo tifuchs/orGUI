@@ -419,6 +419,32 @@ Reciprocal-space reconstruction:
 - **Dependency:** scipy's minimum is now 1.9 (was 1.0), for
   ``scipy.stats.qmc``. scipy is already a hard dependency; 1.7, the first
   release providing this module, reached end of life in 2021.
+- The native work block is now chosen by name rather than as a raw pixel
+  count. A block's working set is the pixel data it reads plus the
+  accumulator it builds, so a name selects a cache scale: ``minimum`` is
+  about 50-75 KiB and fits a typical per-core L1 data cache, ``medium``
+  about 0.8-1.2 MiB and fits a typical 1 MiB L2, with ``tiny``, ``small``,
+  ``low``, ``high`` and ``maximum`` in between and beyond. ``medium``
+  measured fastest and is the default, so the setting can simply be left
+  alone; the reconstruction dialog now offers the names instead of a
+  free-form number. An explicit pixel count is still accepted and is
+  taken literally.
+- Every work-block setting, including a pinned pixel count, is now capped
+  so the native arenas fit the job's memory budget. Previously nothing
+  connected the two, and the arena was reserved for the worst case that
+  every leaf of every subdivided pixel reaches a distinct voxel -- so a
+  large block at a deep accuracy setting could ask for tens of gigabytes
+  per worker thread.
+- The native accumulator's arena is now sized from measured record
+  density rather than that worst case. Post-deduplication density stays
+  between 0.46 and 0.87 records per pixel from the shallowest adaptive
+  depth to the deepest, because deeper subdivision's extra samples
+  overwhelmingly land in voxels a neighbouring sample already reached, so
+  reserving one record per leaf over-reserved by up to four orders of
+  magnitude at high depth while buying nothing. The arena keeps several
+  times the headroom actually needed and still falls back to the heap if
+  a block ever exceeds it, so this bounds memory, never correctness;
+  mapped output is unchanged, verified record for record.
 
 
 ## [1.5.0] (2026-06-07)

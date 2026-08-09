@@ -16,6 +16,7 @@ from orgui.datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
 from orgui.datautils.xrayutils.reconstruction import _GridSpec, _ReconstructionSpec
 import orgui.reconstruction_job as reconstruction_job_module
 from orgui.reconstruction_job import (
+    WORK_BLOCK_PRESETS,
     ReconstructionGrid,
     ReconstructionJob,
     _frame_parallelism,
@@ -23,6 +24,8 @@ from orgui.reconstruction_job import (
     _node_excluded_frames,
     job_status,
     reconstruction_execution_settings,
+    resolve_work_block_pixels,
+    work_block_memory_cap,
     run_cluster_finalize,
     run_cluster_map_task,
     run_job,
@@ -187,6 +190,56 @@ def _uniform_tiles(total_side, tile_side):
         for row in range(0, total_side, tile_side)
         for column in range(0, total_side, tile_side)
     ]
+
+
+def test_work_block_preset_halves_with_adaptive_depth():
+    """A preset names a target working set, not a raw pixel count: deeper
+    subdivision adds per-pixel state competing for the same cache, so the
+    pixel count halves per depth to hold that working set roughly fixed.
+    """
+    memory, threads = 64 * 1024**3, 8
+
+    assert (
+        resolve_work_block_pixels("medium", 0, memory, threads)
+        == WORK_BLOCK_PRESETS["medium"]
+    )
+    assert (
+        resolve_work_block_pixels("medium", 2, memory, threads)
+        == WORK_BLOCK_PRESETS["medium"] // 4
+    )
+    # No setting at all behaves as the default preset does.
+    assert resolve_work_block_pixels(None, 2, memory, threads) == (
+        resolve_work_block_pixels("medium", 2, memory, threads)
+    )
+
+
+def test_work_block_explicit_count_is_taken_literally():
+    """A pinned number means that number -- it is not a scale to rescale."""
+    memory, threads = 64 * 1024**3, 8
+
+    assert resolve_work_block_pixels(4096, 0, memory, threads) == 4096
+    assert resolve_work_block_pixels(4096, 3, memory, threads) == 4096
+
+
+def test_work_block_is_capped_by_the_memory_budget():
+    """The kernel reserves an arena per worker thread proportional to the
+    block, so no setting -- including a pinned one -- may push that past
+    the job's budget."""
+    threads = 16
+    tight = 64 * 1024**2
+
+    cap = work_block_memory_cap(0, tight, threads)
+    assert resolve_work_block_pixels(1_000_000_000, 0, tight, threads) == cap
+    assert resolve_work_block_pixels("maximum", 0, tight, threads) <= cap
+    # A generous budget must not cap a sensible request.
+    assert resolve_work_block_pixels("medium", 0, 64 * 1024**3, threads) == (
+        WORK_BLOCK_PRESETS["medium"]
+    )
+
+
+def test_work_block_rejects_an_unknown_preset():
+    with pytest.raises(ValueError, match="Unknown native work block preset"):
+        resolve_work_block_pixels("enormous", 0, 64 * 1024**3, 8)
 
 
 def test_frame_parallelism_scopes_native_memory_to_largest_tile_not_detector_sum():

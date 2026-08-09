@@ -47,6 +47,46 @@ ACCURACY_DEPTHS = {
     "very_high": 4,
     "maximum": 5,
 }
+WORK_BLOCK_PRESETS = {
+    "minimum": 1024,
+    "tiny": 2048,
+    "small": 4096,
+    "low": 8192,
+    "medium": 16384,
+    "high": 32768,
+    "maximum": 65536,
+}
+"""Named native work-block sizes, in detector pixels at ``center`` accuracy.
+
+A block's working set is the pixel stream it reads -- about 41 bytes per
+pixel of intensity, variance, mask and detector corner rays -- plus the
+accumulator it builds, roughly 72 bytes per distinct voxel reached. So a
+name selects a *cache scale* rather than a raw count: ``minimum`` is about
+50-75 KiB and lands in a typical per-core L1 data cache, ``medium`` is
+about 0.8-1.2 MiB and lands in a typical 1 MiB L2. ``medium`` measured
+fastest across grid resolutions and thread counts and is the default.
+
+The pixel count halves with each adaptive depth, because deeper
+subdivision adds per-pixel state (the dyadic coordinate cache alone grows
+as ``(2**(depth+1)+1)**3``) that competes for the same cache, so holding
+the name fixed holds the working set roughly fixed.
+"""
+
+DEFAULT_WORK_BLOCK = "medium"
+
+_MAP_NODE_BYTES = 72
+"""Bytes the native accumulator spends per distinct voxel: an 8-byte key,
+a 32-byte accumulator, and 32 bytes of tree links."""
+
+_ARENA_BUDGET_SHARE = 4
+"""The per-worker arena may claim at most this fraction's reciprocal of one
+thread's share of the memory budget."""
+
+_RESERVED_RECORDS_PER_PIXEL = 4
+"""Records the native arena reserves per block pixel, mirroring the kernel.
+Measured density stays between 0.46 and 0.87 records per pixel at every
+adaptive depth, so this leaves several times the headroom actually needed."""
+
 AUTO_MAX_FRAMES_PER_TASK = 64
 ACCUMULATION_TRANSIENT_FACTOR = 3
 AUTO_MAX_ACCUMULATION_BYTES = 2 * 1024**3
@@ -159,7 +199,9 @@ class ReconstructionJob:
     memory_override_bytes: int | None = None
     frame_batch: int | None = None
     tile_shape: tuple[int, int] | None = None
-    work_block_pixels: int | None = None
+    #: ``None`` for the default preset, a :data:`WORK_BLOCK_PRESETS` name,
+    #: or an explicit pixel count. See :func:`resolve_work_block_pixels`.
+    work_block_pixels: int | str | None = None
     user_note: str = ""
     status: str = "prepared"
     output_sha256: str | None = None
@@ -226,19 +268,8 @@ class ReconstructionJob:
         )
         memory = self.memory_override_bytes or self.runtime_memory_bytes
         threads = self.thread_override or self.runtime_threads
-        # The cap, not the memory term, is what normally binds. A block's
-        # working set is the pixel stream it reads (about 41 B/px of
-        # intensity, variance, mask and detector corner rays) plus the
-        # accumulator it builds, and throughput is best when that stays
-        # inside a typical 1 MiB per-core L2 -- which also leaves a
-        # detector tile with enough blocks to occupy every worker thread.
-        # Each adaptive depth adds per-pixel state (the dyadic coordinate
-        # cache grows as (2^(depth+1)+1)^3) that competes for the same
-        # cache, so the block that fits shrinks with depth. Halving per
-        # depth level matches the measured optimum at depths 0, 1 and 2
-        # (16384, 8192, 4096 pixels) at both 12 and 24 threads.
-        work_block = self.work_block_pixels or max(
-            1024, min(16384 >> min(depth, 8), memory // max(threads * 256, 1))
+        work_block = resolve_work_block_pixels(
+            self.work_block_pixels, depth, memory, threads
         )
         return _ReconstructionSpec(
             grids=tuple(_GridSpec(**grid) for grid in self.grids),
@@ -1177,6 +1208,71 @@ def _correction_pipeline(config, scan, assets, provenance):
     correct.correct_frame = correct_frame
     correct.repair_plan = repair_plan
     return correct
+
+
+def work_block_memory_cap(depth, memory_bytes, threads):
+    """Largest work block whose native arenas stay inside the memory budget.
+
+    The kernel reserves one arena per worker thread, sized for the worst
+    case that every leaf of every pixel in a block reaches a distinct
+    voxel: ``block * children**depth * 72`` bytes. That grows by the
+    subdivision factor with depth, so a block size that is unremarkable at
+    ``center`` accuracy reserves tens of gigabytes per thread at the
+    deepest settings. Eight children are assumed because a spec cannot
+    know whether an individual frame range's exposure rotates; a
+    stationary one subdivides four ways and so has headroom to spare.
+
+    :param int depth:
+        Adaptive subdivision depth.
+    :param int memory_bytes:
+        The job's memory budget.
+    :param int threads:
+        Thread budget; arenas are live one per worker thread at once.
+    :returns:
+        Pixel count, at least 1.
+    :rtype: int
+    """
+    leaves = min(8 ** max(0, int(depth)), _RESERVED_RECORDS_PER_PIXEL)
+    bytes_per_block_pixel = leaves * _MAP_NODE_BYTES
+    per_thread = max(1, int(memory_bytes)) // max(1, int(threads))
+    return max(1, per_thread // _ARENA_BUDGET_SHARE // bytes_per_block_pixel)
+
+
+def resolve_work_block_pixels(setting, depth, memory_bytes, threads):
+    """Resolve a work-block setting to a pixel count.
+
+    ``None`` selects the default preset, a string names one of
+    :data:`WORK_BLOCK_PRESETS`, and an integer is taken literally. Preset
+    (and default) sizes halve with each adaptive depth so that the name
+    keeps selecting a working-set scale rather than a raw count; an
+    explicit integer is what the caller asked for and is not rescaled.
+
+    Every route is capped by :func:`work_block_memory_cap`, so no setting
+    -- including a pinned integer -- can make the kernel reserve more
+    memory than the job's budget allows.
+
+    :raises ValueError:
+        If ``setting`` names an unknown preset or is not positive.
+    :rtype: int
+    """
+    if setting is None:
+        scaled = WORK_BLOCK_PRESETS[DEFAULT_WORK_BLOCK] >> min(int(depth), 16)
+    elif isinstance(setting, str):
+        if setting not in WORK_BLOCK_PRESETS:
+            raise ValueError(
+                f"Unknown native work block preset: {setting!r}; choose one of "
+                + ", ".join(
+                    sorted(WORK_BLOCK_PRESETS, key=WORK_BLOCK_PRESETS.get)
+                )
+            )
+        scaled = WORK_BLOCK_PRESETS[setting] >> min(int(depth), 16)
+    else:
+        scaled = int(setting)
+        if scaled < 1:
+            raise ValueError("Native work block pixels must be positive")
+    return max(
+        1, min(max(1, scaled), work_block_memory_cap(depth, memory_bytes, threads))
+    )
 
 
 def _execution_layout(job, scan, config, *, extra_excluded_frames=()):
