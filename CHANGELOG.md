@@ -331,6 +331,30 @@ Reciprocal-space reconstruction:
   recovering them from the pixel's flat index, removing an integer
   division and remainder per pixel for about 2% less mapping time, with
   identical output.
+- The native work block is now sized from the accuracy preset instead of
+  being a fixed 65536 detector pixels: 16384 pixels at ``center``,
+  halving for each further adaptive depth (8192 at ``low``, 4096 at
+  ``balanced``, and so on). A block's working set is the pixel stream it
+  reads (roughly 41 bytes per pixel of intensity, variance, mask and
+  detector corner rays) plus the accumulator it builds, and throughput
+  is best when that stays inside a typical 1 MiB per-core L2 cache;
+  65536 pixels overran it at every depth, and also left a detector tile
+  with only 16 blocks, too few to occupy every worker thread. Deeper
+  subdivision adds per-pixel state that competes for the same cache, so
+  the block that fits shrinks with depth. Measured across every size
+  from 2048 to 131072 pixels, at depths 0 to 2, at 12 and 24 threads and
+  at two grid resolutions: mapping a frame is 1.3x to 1.4x faster.
+  **Results can differ in the last bits from runs made with the previous
+  block size.** Voxel contributions are summed per block and the blocks
+  are then merged, so the block size determines the order in which
+  floating-point values are added, and that order determines the final
+  rounding. This is inherent to accumulating in parallel over a
+  partition -- any block size, thread count or partitioning that changes
+  the grouping changes the last bits -- so it cannot be designed away
+  and is reported here rather than hidden. Differences are at the level
+  of double-precision rounding and far below counting statistics; set
+  ``work_block_pixels`` explicitly in a job to reproduce an older run
+  bit for bit.
 
 
 ## [1.5.0] (2026-06-07)

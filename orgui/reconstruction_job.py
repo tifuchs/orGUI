@@ -226,8 +226,19 @@ class ReconstructionJob:
         )
         memory = self.memory_override_bytes or self.runtime_memory_bytes
         threads = self.thread_override or self.runtime_threads
+        # The cap, not the memory term, is what normally binds. A block's
+        # working set is the pixel stream it reads (about 41 B/px of
+        # intensity, variance, mask and detector corner rays) plus the
+        # accumulator it builds, and throughput is best when that stays
+        # inside a typical 1 MiB per-core L2 -- which also leaves a
+        # detector tile with enough blocks to occupy every worker thread.
+        # Each adaptive depth adds per-pixel state (the dyadic coordinate
+        # cache grows as (2^(depth+1)+1)^3) that competes for the same
+        # cache, so the block that fits shrinks with depth. Halving per
+        # depth level matches the measured optimum at depths 0, 1 and 2
+        # (16384, 8192, 4096 pixels) at both 12 and 24 threads.
         work_block = self.work_block_pixels or max(
-            1024, min(65536, memory // max(threads * 256, 1))
+            1024, min(16384 >> min(depth, 8), memory // max(threads * 256, 1))
         )
         return _ReconstructionSpec(
             grids=tuple(_GridSpec(**grid) for grid in self.grids),

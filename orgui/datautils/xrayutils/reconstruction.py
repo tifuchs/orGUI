@@ -182,6 +182,9 @@ class _ReconstructionSpec:
     grids: tuple[_GridSpec, ...]
     max_depth: int = 2
     threads: int = 1
+    #: Pixels per native work block. The best value depends on ``max_depth``
+    #: (see ReconstructionJob.internal_spec, which derives it); 4096 is the
+    #: measured optimum for this class's own default depth of 2.
     work_block_pixels: int = 4096
     memory_budget_bytes: int = 512 * 1024 * 1024
     checkpoint_count: int = 10
