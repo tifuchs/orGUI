@@ -444,7 +444,38 @@ struct Grid {
     std::array<std::int64_t, 3> shape;
     std::array<std::int64_t, 3> chunk_shape;
     std::array<std::uint64_t, 3> chunk_grid;
+    // shape as doubles, so voxel_id()'s per-axis range test compares in
+    // floating point (before any integer conversion) rather than casting a
+    // possibly out-of-range floor() result to int64 first.
+    std::array<double, 3> shape_as_double;
+    // Bit field layout of the internal flat voxel id (see voxel_id()): one
+    // field per axis, wide enough for that axis' voxel count, packed
+    // x:y:z from the most significant end. Bit-packing keeps the id
+    // lexicographically ordered by (x, y, z) exactly as the row-major
+    // encoding it replaces, so every ordering built on it is unchanged --
+    // but record_key() can unpack it with shifts instead of divisions.
+    std::array<int, 3> voxel_shift;
+    std::array<std::uint64_t, 3> voxel_mask;
+    // Per-axis chunk split. chunk_power_of_two selects shifts/masks over
+    // divisions; every default chunk_shape (64, 64, 64) takes that path.
+    std::array<int, 3> chunk_shift;
+    std::array<std::uint64_t, 3> chunk_mask;
+    bool chunk_power_of_two = false;
 };
+
+// Smallest `bits` with 2^bits >= size: the width of an index into `size`
+// values, and, for a power-of-two `size`, exactly log2(size).
+int ceil_log2(const std::int64_t size) {
+    int bits = 0;
+    while (
+        bits < 63
+        && (static_cast<std::uint64_t>(1) << bits)
+            < static_cast<std::uint64_t>(size)
+    ) {
+        ++bits;
+    }
+    return bits;
+}
 
 struct RecordKey {
     // Narrower than the flat voxel index they're decomposed from (see
@@ -582,10 +613,39 @@ public:
         grid_.step = triple_from_array(step, "step", true);
         grid_.shape = shape_from_array(shape, "shape");
         grid_.chunk_shape = shape_from_array(chunk_shape, "chunk_shape");
+        std::array<int, 3> voxel_bits{};
+        int total_voxel_bits = 0;
+        grid_.chunk_power_of_two = true;
         for (int axis = 0; axis < 3; ++axis) {
             grid_.chunk_grid[axis] = static_cast<std::uint64_t>(
                 (grid_.shape[axis] + grid_.chunk_shape[axis] - 1)
                 / grid_.chunk_shape[axis]
+            );
+            grid_.shape_as_double[axis] =
+                static_cast<double>(grid_.shape[axis]);
+            voxel_bits[axis] = std::max(1, ceil_log2(grid_.shape[axis]));
+            total_voxel_bits += voxel_bits[axis];
+            grid_.voxel_mask[axis] =
+                (static_cast<std::uint64_t>(1) << voxel_bits[axis]) - 1;
+            const std::int64_t chunk_size = grid_.chunk_shape[axis];
+            if ((chunk_size & (chunk_size - 1)) != 0) {
+                grid_.chunk_power_of_two = false;
+            } else {
+                grid_.chunk_shift[axis] = ceil_log2(chunk_size);
+                grid_.chunk_mask[axis] =
+                    static_cast<std::uint64_t>(chunk_size) - 1;
+            }
+        }
+        grid_.voxel_shift[2] = 0;
+        grid_.voxel_shift[1] = voxel_bits[2];
+        grid_.voxel_shift[0] = voxel_bits[2] + voxel_bits[1];
+        if (total_voxel_bits > 64) {
+            // Only reachable for grids within a factor of eight of
+            // overflowing a 64-bit voxel count outright, which no
+            // physically meaningful reconstruction approaches.
+            throw py::value_error(
+                "grid shape needs more than 64 bits of voxel index; use a "
+                "coarser step or a smaller grid"
             );
         }
         if (!std::isfinite(wavevector_) || wavevector_ <= 0.0) {
@@ -1144,51 +1204,71 @@ private:
     }
 
     bool voxel_id(const Vec3 &coordinate, std::uint64_t &voxel) const {
-        std::array<std::int64_t, 3> index{};
+        // All three axes are evaluated unconditionally and combined at the
+        // end: the early-exit form this replaces put a data-dependent
+        // branch between every axis, and the per-axis std::isfinite() call
+        // it needed is subsumed by the range test, since a NaN compares
+        // false against both bounds. Out-of-range and non-finite input is
+        // rejected exactly as before.
         const std::array<double, 3> values{
             coordinate.x,
             coordinate.y,
             coordinate.z,
         };
+        std::array<std::uint64_t, 3> index{};
+        int inside = 1;
         for (int axis = 0; axis < 3; ++axis) {
-            if (!std::isfinite(values[axis])) {
-                return false;
-            }
-            index[axis] = static_cast<std::int64_t>(
-                std::floor((values[axis] - grid_.minimum[axis]) / grid_.step[axis])
+            const double scaled =
+                (values[axis] - grid_.minimum[axis]) / grid_.step[axis];
+            const double floored = std::floor(scaled);
+            const bool axis_inside =
+                floored >= 0.0 && floored < grid_.shape_as_double[axis];
+            inside &= static_cast<int>(axis_inside);
+            // Comparing before converting also keeps the conversion itself
+            // in range, which the old cast-then-test order did not.
+            index[axis] = static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(axis_inside ? floored : 0.0)
             );
-            if (index[axis] < 0 || index[axis] >= grid_.shape[axis]) {
-                return false;
-            }
         }
-        voxel = (
-            static_cast<std::uint64_t>(index[0])
-                * static_cast<std::uint64_t>(grid_.shape[1])
-            + static_cast<std::uint64_t>(index[1])
-        ) * static_cast<std::uint64_t>(grid_.shape[2])
-            + static_cast<std::uint64_t>(index[2]);
-        return true;
+        voxel = (index[0] << grid_.voxel_shift[0])
+            | (index[1] << grid_.voxel_shift[1])
+            | index[2];
+        return inside != 0;
     }
 
     RecordKey record_key(const std::uint64_t voxel) const {
-        std::uint64_t remaining = voxel;
-        const std::uint64_t shape_z =
-            static_cast<std::uint64_t>(grid_.shape[2]);
-        const std::uint64_t shape_y =
-            static_cast<std::uint64_t>(grid_.shape[1]);
-        const std::uint64_t index_z = remaining % shape_z;
-        remaining /= shape_z;
-        const std::uint64_t index_y = remaining % shape_y;
-        const std::uint64_t index_x = remaining / shape_y;
-        const std::uint64_t chunk_x = static_cast<std::uint64_t>(
-            index_x / static_cast<std::uint64_t>(grid_.chunk_shape[0])
-        );
-        const std::uint64_t chunk_y = static_cast<std::uint64_t>(
-            index_y / static_cast<std::uint64_t>(grid_.chunk_shape[1])
-        );
-        const std::uint64_t chunk_z = static_cast<std::uint64_t>(
-            index_z / static_cast<std::uint64_t>(grid_.chunk_shape[2])
-        );
+        // Both halves of this decomposition used to be 64-bit integer
+        // divisions -- four to recover the axis indices from a row-major
+        // flat id, six more to split each index into chunk and local
+        // parts. voxel_id()'s bit-packed id makes the first four shifts
+        // and masks, and a power-of-two chunk_shape (every default one)
+        // makes the rest shifts and masks too.
+        const std::uint64_t index_x =
+            (voxel >> grid_.voxel_shift[0]) & grid_.voxel_mask[0];
+        const std::uint64_t index_y =
+            (voxel >> grid_.voxel_shift[1]) & grid_.voxel_mask[1];
+        const std::uint64_t index_z = voxel & grid_.voxel_mask[2];
+        std::uint64_t chunk_x;
+        std::uint64_t chunk_y;
+        std::uint64_t chunk_z;
+        std::uint64_t local_x;
+        std::uint64_t local_y;
+        std::uint64_t local_z;
+        if (grid_.chunk_power_of_two) {
+            chunk_x = index_x >> grid_.chunk_shift[0];
+            chunk_y = index_y >> grid_.chunk_shift[1];
+            chunk_z = index_z >> grid_.chunk_shift[2];
+            local_x = index_x & grid_.chunk_mask[0];
+            local_y = index_y & grid_.chunk_mask[1];
+            local_z = index_z & grid_.chunk_mask[2];
+        } else {
+            chunk_x = index_x / static_cast<std::uint64_t>(grid_.chunk_shape[0]);
+            chunk_y = index_y / static_cast<std::uint64_t>(grid_.chunk_shape[1]);
+            chunk_z = index_z / static_cast<std::uint64_t>(grid_.chunk_shape[2]);
+            local_x = index_x % static_cast<std::uint64_t>(grid_.chunk_shape[0]);
+            local_y = index_y % static_cast<std::uint64_t>(grid_.chunk_shape[1]);
+            local_z = index_z % static_cast<std::uint64_t>(grid_.chunk_shape[2]);
+        }
         RecordKey key{};
         // Arithmetic stays uint64 throughout (chunk_grid/chunk_shape are
         // uint64 already); only the final, per-axis-bounded result
@@ -1197,15 +1277,6 @@ private:
         key.chunk = static_cast<std::uint32_t>((
             chunk_x * grid_.chunk_grid[1] + chunk_y
         ) * grid_.chunk_grid[2] + chunk_z);
-        const std::uint64_t local_x = static_cast<std::uint64_t>(
-            index_x % static_cast<std::uint64_t>(grid_.chunk_shape[0])
-        );
-        const std::uint64_t local_y = static_cast<std::uint64_t>(
-            index_y % static_cast<std::uint64_t>(grid_.chunk_shape[1])
-        );
-        const std::uint64_t local_z = static_cast<std::uint64_t>(
-            index_z % static_cast<std::uint64_t>(grid_.chunk_shape[2])
-        );
         key.local = static_cast<std::uint32_t>((
             local_x * static_cast<std::uint64_t>(grid_.chunk_shape[1]) + local_y
         ) * static_cast<std::uint64_t>(grid_.chunk_shape[2]) + local_z);

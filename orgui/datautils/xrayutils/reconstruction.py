@@ -124,6 +124,20 @@ class _GridSpec:
                 f"kernel's uint32 chunk index (max {uint32_max:,}); use a "
                 "larger chunk_shape or a smaller grid"
             )
+        # The native kernel identifies a voxel internally by packing the
+        # three axis indices into one uint64, one bit field per axis (see
+        # voxel_id()/record_key()), so that the chunk/local split needs
+        # shifts rather than divisions. Rounding each axis up to a whole
+        # number of bits costs at most three bits in total, so this only
+        # rejects grids already within a factor of eight of overflowing a
+        # 64-bit voxel count.
+        voxel_bits = sum(max(1, int(size - 1).bit_length()) for size in self.shape)
+        if voxel_bits > 64:
+            raise ValueError(
+                f"grid shape {self.shape} needs {voxel_bits} bits of voxel "
+                "index, which exceeds the native kernel's 64-bit packed voxel "
+                "identifier; use a coarser step or a smaller grid"
+            )
         effective_chunk = tuple(
             min(size, chunk)
             for size, chunk in zip(self.shape, self.chunk_shape)

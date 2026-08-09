@@ -332,7 +332,11 @@ def derive_grid(config, scan, *, frame="hkl", name=None):
     kernel = _native_module().ReconstructionKernel(
         np.full(3, -1e12),
         np.ones(3),
-        np.full(3, 2_000_000_000, dtype=np.int64),
+        # Only kernel.coordinate() is called here, which never looks at the
+        # grid shape; it just has to be large enough to stand in for
+        # "unbounded" and small enough for the kernel's packed voxel
+        # identifier (64 bits across the three axes).
+        np.full(3, 2_000_000, dtype=np.int64),
         np.ones(3, dtype=np.int64),
         frame,
         float(ub.getK()),
@@ -466,7 +470,11 @@ def estimate_geometry_steps(
     kernel = _native_module().ReconstructionKernel(
         np.full(3, -1e12),
         np.ones(3),
-        np.full(3, 2_000_000_000, dtype=np.int64),
+        # Only kernel.coordinate() is called here, which never looks at the
+        # grid shape; it just has to be large enough to stand in for
+        # "unbounded" and small enough for the kernel's packed voxel
+        # identifier (64 bits across the three axes).
+        np.full(3, 2_000_000, dtype=np.int64),
         np.ones(3, dtype=np.int64),
         frame,
         float(ub.getK()),

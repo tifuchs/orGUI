@@ -128,6 +128,121 @@ def test_grid_accepts_default_chunk_shape_at_a_large_grid():
     assert grid.chunk_shape == (64, 64, 64)
 
 
+def test_grid_rejects_shape_needing_more_than_64_bits_of_voxel_index():
+    """The native kernel packs the three axis indices into one uint64 voxel
+    identifier, one bit field per axis. 2,640,625 voxels per axis needs 22
+    bits each, 66 in total -- while staying inside both uint32 RecordKey
+    bounds, so only this check can catch it.
+    """
+    with pytest.raises(ValueError, match="64-bit packed voxel identifier"):
+        _GridSpec(
+            minimum=(0.0, 0.0, 0.0),
+            maximum=(2640625.0, 2640625.0, 2640625.0),
+            step=(1.0, 1.0, 1.0),
+            frame="hkl",
+            chunk_shape=(1625, 1625, 1625),
+        )
+
+
+def test_grid_accepts_a_realistic_grids_voxel_index_width():
+    """A 5000**3 grid needs 13 bits per axis, 39 of the 64 available."""
+    grid = _GridSpec(
+        minimum=(0.0, 0.0, 0.0),
+        maximum=(5000.0, 5000.0, 5000.0),
+        step=(1.0, 1.0, 1.0),
+        frame="hkl",
+    )
+    assert sum(int(size - 1).bit_length() for size in grid.shape) == 39
+
+
+@pytest.mark.parametrize(
+    "chunk_shape",
+    [
+        pytest.param((8, 4, 16), id="power-of-two-chunks"),
+        pytest.param((5, 7, 9), id="arbitrary-chunks"),
+    ],
+)
+def test_native_chunk_local_ids_match_independently_computed_voxel_indices(
+    chunk_shape,
+):
+    """End-to-end check of voxel_id()'s packed identifier and record_key()'s
+    decomposition of it: every emitted (chunk_id, local_voxel_id) pair must
+    decode back to the voxel the pixel's own coordinate falls in, computed
+    here from ``coordinate()`` alone. Deliberately uses axes of differing
+    extent (so the packed bit fields differ in width) and covers both the
+    shift/mask chunk split and the division fallback for a chunk_shape that
+    is not a power of two.
+    """
+    minimum = np.array([-0.6, -0.35, -0.45])
+    step = np.array([0.02, 0.015, 0.025])
+    shape = np.array([37, 61, 23], dtype=np.int64)
+    kernel = native.ReconstructionKernel(
+        minimum,
+        step,
+        shape,
+        np.array(chunk_shape, dtype=np.int64),
+        "lab",
+        1.0,
+        np.eye(3),
+        np.eye(3),
+        0,
+        1,
+        16,
+        1024 * 1024,
+    )
+    rows = columns = 12
+    rays = np.zeros((rows + 1, columns + 1, 3), dtype=np.float64)
+    rays[..., 0] = np.linspace(-0.35, 0.35, columns + 1)[None, :]
+    rays[..., 2] = np.linspace(-0.3, 0.3, rows + 1)[:, None]
+    rays[..., 1] = 1.0
+    rays /= np.linalg.norm(rays, axis=2, keepdims=True)
+    angles = np.zeros(4)
+
+    expected = set()
+    chunk_grid = np.ceil(shape / np.array(chunk_shape)).astype(np.int64)
+    for row in range(rows):
+        for column in range(columns):
+            coordinate = np.asarray(
+                kernel.coordinate(rays, angles, angles, row, column)
+            )
+            index = np.floor((coordinate - minimum) / step).astype(np.int64)
+            if np.any(index < 0) or np.any(index >= shape):
+                continue
+            chunk_index, local_index = np.divmod(index, np.array(chunk_shape))
+            expected.add(
+                (
+                    int(
+                        (chunk_index[0] * chunk_grid[1] + chunk_index[1])
+                        * chunk_grid[2]
+                        + chunk_index[2]
+                    ),
+                    int(
+                        (local_index[0] * chunk_shape[1] + local_index[1])
+                        * chunk_shape[2]
+                        + local_index[2]
+                    ),
+                )
+            )
+
+    result = kernel.accumulate(
+        np.ones((rows, columns)),
+        np.ones((rows, columns)),
+        np.zeros((rows, columns), dtype=bool),
+        rays,
+        angles,
+        angles,
+    )
+
+    assert expected
+    assert len(expected) > 1
+    assert set(
+        zip(
+            result["chunk_id"].tolist(),
+            result["local_voxel_id"].tolist(),
+        )
+    ) == expected
+
+
 def test_native_accumulate_produces_uint32_chunk_and_local_ids_across_multiple_chunks():
     """A grid split into several chunks along one axis exercises the real
     record_key() chunk/local decomposition (not just the trivial
