@@ -370,6 +370,27 @@ Reciprocal-space reconstruction:
   how voxel contributions are grouped before being merged, so results
   can differ in the last bits from earlier runs -- see the note on
   summation order above.
+- Fixed the calibration probe raising ``Detector tile exceeds the native
+  memory budget`` instead of returning an estimate. The probe sizes its
+  own sample tiles from a fixed two-million-pixel ceiling, while the
+  native kernel refuses any tile whose worst-case record footprint
+  exceeds its memory budget -- a limit that shrinks by the subdivision
+  factor at every adaptive depth (about 50 million pixels per call at
+  ``center`` against 128 thousand at ``maximum``). Once that limit fell
+  below what the probe could ask for, the probe failed, which for the
+  highest accuracy presets meant an error raised from GUI code on an
+  ordinary settings change. Sample tiles are now bounded by the same
+  limit the kernel enforces.
+- The calibration probe's bootstrap tile is no longer taken from the
+  detector corner. The bootstrap fixes the per-pixel rate that the rest
+  of the sample size is derived from, and a corner is systematically
+  unrepresentative -- it maps partly outside the output grid and is
+  often masked, measuring half the records per pixel of the detector
+  centre on a real dataset. Underestimating there inflated every later
+  sample, so the probe overran its wall-clock budget by up to 2.2x.
+  The bootstrap now starts at the centre and moves outwards to avoid
+  masked regions, keeping the probe within 1.1x of its budget at every
+  accuracy preset.
 
 
 ## [1.5.0] (2026-06-07)

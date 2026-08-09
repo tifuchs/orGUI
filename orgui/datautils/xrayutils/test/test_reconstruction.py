@@ -17,7 +17,9 @@ from orgui.datautils.xrayutils.reconstruction import (
     _GridSpec,
     _ReconstructionSpec,
     _build_kernels,
+    _admissible_sample_pixels,
     _calibration_probe,
+    _representative_tile_origin,
     _files_per_job,
     _kernel_threads_sweep,
     _map_one_frame,
@@ -880,6 +882,49 @@ def test_calibration_probe_returns_positive_byte_estimate():
     assert result["sampled_pixels"] > 0
     assert result["seconds_per_pixel"] >= 0.0
     assert result["records_per_pixel"] >= 0.0
+
+
+def test_calibration_probe_respects_the_kernels_own_tile_limit():
+    """The kernel refuses a tile whose worst-case footprint exceeds its
+    memory budget, and that limit shrinks by the subdivision factor at
+    every adaptive depth. The probe sizes its own samples, so it has to
+    honour the same bound -- otherwise a deep-subdivision job raises
+    inside what is a live, GUI-driven estimate rather than returning one.
+    """
+    rows, columns = 64, 64
+    mask = np.zeros((rows, columns), dtype=bool)
+    # This helper's 1 MiB budget makes the admissible tile far smaller
+    # than the sample the probe would otherwise ask for, the same way a
+    # high max_depth does against a real job's budget.
+    kernel = _kernel(max_depth=2, threads=1)
+    admissible = _admissible_sample_pixels(kernel, np.zeros(4), np.zeros(4))
+    assert admissible < rows * columns
+
+    result = _calibration_probe(
+        kernel,
+        mask,
+        _constant_rays(rows, columns),
+        np.zeros(4),
+        np.zeros(4),
+        budget_seconds=0.05,
+        rng=np.random.default_rng(0),
+    )
+
+    assert result["sampled_pixels"] > 0
+
+
+def test_calibration_probe_bootstrap_avoids_masked_regions():
+    """The bootstrap tile sets the rate the whole sized pass is derived
+    from, so it must not land somewhere unrepresentative. A masked centre
+    has to push it elsewhere rather than measuring excluded pixels.
+    """
+    rows, columns = 64, 64
+    mask = np.zeros((rows, columns), dtype=bool)
+    mask[16:48, 16:48] = True
+
+    row, column = _representative_tile_origin(mask, 8)
+
+    assert not mask[row : row + 8, column : column + 8].any()
 
 
 def test_calibration_probe_scales_sample_size_with_budget():

@@ -348,6 +348,70 @@ def _files_per_job(job_data_bytes, ram_budget_bytes, checkpoint_count) -> int:
     return max(checkpoint_count, files_for_memory)
 
 
+def _admissible_sample_pixels(kernel, angles_start, angles_end):
+    """Largest pixel count one ``accumulate()`` call will accept.
+
+    Mirrors the kernel's own per-call precheck, which refuses a tile whose
+    worst-case record footprint would exceed its memory budget. That limit
+    shrinks by the subdivision factor at every adaptive depth -- a 10 GB
+    budget admits about 50 million pixels at depth 0 but only 128 thousand
+    at depth 5, and a rotating exposure subdivides eight ways rather than
+    four -- so a sampler using a fixed pixel ceiling eventually asks for
+    more than the kernel will take and gets an exception instead of an
+    estimate.
+
+    :returns:
+        Pixel count that is safe to pass to ``accumulate()``.
+    :rtype: int
+    """
+    configuration = kernel.configuration
+    children = 4 if np.array_equal(angles_start, angles_end) else 8
+    worst_leaves = children ** int(configuration["max_depth"])
+    bytes_per_pixel = 128 + 2 * worst_leaves * _CHECKPOINT_BYTES_PER_ROW
+    return max(
+        1, int(configuration["memory_budget_bytes"]) // bytes_per_pixel
+    )
+
+
+def _representative_tile_origin(mask, side):
+    """Pick a bootstrap-tile origin that reflects the whole detector.
+
+    Anchoring the bootstrap at the detector corner measures a per-pixel
+    cost well below average: a corner maps partly outside the output grid
+    and is frequently masked, and on a real detector it produced half the
+    records per pixel of the centre. Since the sized pass divides the
+    remaining time budget by that rate, an unrepresentatively cheap
+    bootstrap inflates every later sample. Candidates are tried from the
+    centre outwards and the least-masked one wins, so a masked beam stop
+    at the centre does not simply move the problem.
+
+    :returns:
+        ``(row_start, column_start)`` for a ``side``-by-``side`` tile.
+    :rtype: tuple[int, int]
+    """
+    rows, columns = mask.shape
+    best = None
+    # Centre first, then progressively further out, so an unmasked
+    # detector keeps the most representative position and a masked one
+    # (a beam stop, a dead module) still finds clean pixels nearby.
+    fractions = (0.5, 0.3, 0.7, 0.15, 0.85)
+    for row_fraction in fractions:
+        for column_fraction in fractions:
+            row = min(
+                max(0, int(rows * row_fraction) - side // 2), max(0, rows - side)
+            )
+            column = min(
+                max(0, int(columns * column_fraction) - side // 2),
+                max(0, columns - side),
+            )
+            masked = float(mask[row : row + side, column : column + side].mean())
+            if masked == 0.0:
+                return row, column
+            if best is None or masked < best[0]:
+                best = (masked, row, column)
+    return best[1], best[2]
+
+
 def _calibration_probe(
     kernel,
     mask,
@@ -438,9 +502,21 @@ def _calibration_probe(
             int(profile["reduced_block_records"]),
         )
 
-    bootstrap_side = max(1, min(int(bootstrap_tile), rows, columns))
+    admissible_pixels = _admissible_sample_pixels(
+        kernel, angles_start, angles_end
+    )
+    admissible_side = max(1, int(math.isqrt(admissible_pixels)))
+    bootstrap_side = max(
+        1, min(int(bootstrap_tile), rows, columns, admissible_side)
+    )
+    bootstrap_row, bootstrap_column = _representative_tile_origin(
+        mask, bootstrap_side
+    )
     total_pixels, total_seconds, total_records = sample_tile(
-        0, bootstrap_side, 0, bootstrap_side
+        bootstrap_row,
+        bootstrap_row + bootstrap_side,
+        bootstrap_column,
+        bootstrap_column + bootstrap_side,
     )
     elapsed = time.perf_counter() - started
     rate = total_seconds / max(1, total_pixels)
@@ -451,7 +527,11 @@ def _calibration_probe(
             min(max(remaining_budget / rate, min_sample_pixels), max_sample_pixels)
         )
         tile_side = max(1, int(math.sqrt(target_pixels / max(1, sample_tiles))))
-        tile_side = min(tile_side, rows, columns)
+        # Never ask for a tile the kernel would refuse: without this the
+        # sampler's fixed pixel ceiling outgrows the admissible size at
+        # high adaptive depth and accumulate() raises inside what is a
+        # live, GUI-driven estimate.
+        tile_side = min(tile_side, rows, columns, admissible_side)
         for _ in range(int(sample_tiles)):
             if time.perf_counter() - started >= budget_seconds:
                 break
