@@ -19,7 +19,9 @@ from orgui.datautils.xrayutils.reconstruction import (
     _build_kernels,
     _admissible_sample_pixels,
     _calibration_probe,
+    _relative_standard_error,
     _representative_tile_origin,
+    _sobol_tile_origins,
     _files_per_job,
     _kernel_threads_sweep,
     _map_one_frame,
@@ -911,6 +913,65 @@ def test_calibration_probe_respects_the_kernels_own_tile_limit():
     )
 
     assert result["sampled_pixels"] > 0
+
+
+def test_sobol_tile_origins_cover_every_quadrant():
+    """The whole point of sampling low-discrepancy positions rather than
+    independent uniform ones is that a handful of tiles still reaches the
+    whole detector. Eight origins must touch all four quadrants; eight
+    independent draws frequently do not.
+    """
+    origins = _sobol_tile_origins(
+        1000, 1000, 8, rng=np.random.default_rng(0)
+    )
+
+    assert len(origins) == 8
+    assert all(0.0 <= row <= 1.0 and 0.0 <= column <= 1.0 for row, column in origins)
+    quadrants = {(row >= 0.5, column >= 0.5) for row, column in origins}
+    assert len(quadrants) == 4
+
+
+def test_sobol_tile_origins_are_reproducible_from_a_seed():
+    """A pinned generator has to pin the sequence, so a job's plan can be
+    reproduced."""
+    first = _sobol_tile_origins(500, 500, 4, rng=np.random.default_rng(7))
+    second = _sobol_tile_origins(500, 500, 4, rng=np.random.default_rng(7))
+
+    assert first == second
+
+
+def test_relative_standard_error_reports_convergence():
+    """Undefined below two samples, zero when every sample agrees, and
+    shrinking as agreeing samples accumulate."""
+    assert _relative_standard_error([1.0]) == float("inf")
+    assert _relative_standard_error([2.0, 2.0, 2.0]) == 0.0
+    assert _relative_standard_error([1.0, 2.0, 3.0]) > _relative_standard_error(
+        [1.9, 2.0, 2.1]
+    )
+
+
+def test_calibration_probe_reports_its_own_uncertainty():
+    """The probe returns how well converged its density estimate is, so a
+    caller can size a safety margin on measured scatter instead of a
+    fixed guess."""
+    rows, columns = 48, 48
+    mask = np.zeros((rows, columns), dtype=bool)
+
+    result = _calibration_probe(
+        _kernel(max_depth=0, threads=1),
+        mask,
+        _constant_rays(rows, columns),
+        np.zeros(4),
+        np.zeros(4),
+        budget_seconds=0.05,
+        max_sample_pixels=4000,
+        rng=np.random.default_rng(0),
+    )
+
+    assert result["sampled_tiles"] >= 2
+    # Constant rays put every pixel in one voxel, so every tile agrees and
+    # the estimate is exactly converged.
+    assert result["records_per_pixel_relative_error"] < 1.0
 
 
 def test_calibration_probe_bootstrap_avoids_masked_regions():

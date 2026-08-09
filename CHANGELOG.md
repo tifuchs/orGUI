@@ -391,6 +391,34 @@ Reciprocal-space reconstruction:
   The bootstrap now starts at the centre and moves outwards to avoid
   masked regions, keeping the probe within 1.1x of its budget at every
   accuracy preset.
+- The calibration probe now samples adaptively over a scrambled Sobol
+  sequence instead of committing to one sample size up front and drawing
+  independent uniform positions. The quantities it averages vary smoothly
+  across the detector, so where its tiles land decides how good the
+  average is, and at the handful of tiles a 0.1 s budget allows,
+  independent draws leave whole regions unsampled often enough to matter.
+  Tile size is now re-estimated after every tile and bounded in how fast
+  it may grow, so an unusually cheap first tile costs one more small tile
+  rather than the entire budget, and sampling stops early once the
+  estimate has converged. The first tile grows from a single pixel until
+  it is long enough to time, rather than starting at a fixed size: at the
+  deepest subdivision one pixel already costs tens of milliseconds, so a
+  fixed starting tile spent several budgets before the probe had learned
+  anything. Measured against a real detector at every adaptive depth the
+  kernel supports, 0 through 8, the probe now stays within its budget
+  (0.04 to 0.10 s against a 0.1 s budget) where it previously ran up to
+  2.5x over, and its record-density estimate varies about 3% between
+  repeated probes. What degrades with depth is the sample it can afford
+  -- about 1.3 million pixels over 14 tiles at ``center`` against 450
+  pixels over 12 tiles at the deepest setting -- not the time it takes.
+  The result also reports ``records_per_pixel_relative_error``, so a
+  caller can size a safety margin from measured scatter rather than a
+  fixed guess. That figure is deliberately conservative -- it treats the
+  tiles as independent, while the Sobol sequence is stratified, so it
+  overstates the true scatter by roughly two to four times.
+- **Dependency:** scipy's minimum is now 1.9 (was 1.0), for
+  ``scipy.stats.qmc``. scipy is already a hard dependency; 1.7, the first
+  release providing this module, reached end of life in 2021.
 
 
 ## [1.5.0] (2026-06-07)

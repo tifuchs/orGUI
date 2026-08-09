@@ -412,6 +412,75 @@ def _representative_tile_origin(mask, side):
     return best[1], best[2]
 
 
+_MINIMUM_TILE_PIXELS = 1
+"""Smallest sample tile the probe will ask for. Only ever reached when the
+per-pixel cost is so high that a single pixel already fills a useful share
+of the budget, which is the case at the deepest subdivision levels."""
+
+_BOOTSTRAP_TIME_SHARE = 0.02
+"""Fraction of the budget the first tile should take before the probe stops
+enlarging it. Growing into this rather than fixing a size in advance is
+what keeps the first measurement from costing more than the whole budget
+when the per-pixel cost is extreme."""
+
+_MINIMUM_CONVERGENCE_TILES = 6
+"""Tiles required before the probe may stop early on its own error
+estimate: a standard error computed from two or three samples is itself
+too noisy to act on."""
+
+
+def _sobol_tile_origins(rows, columns, count, rng=None):
+    """Low-discrepancy tile origins, as fractions of the placeable range.
+
+    The probe averages quantities that vary smoothly across the detector,
+    so where its handful of tiles land decides how good the average is.
+    Independent uniform draws clump: at eight tiles it is entirely
+    ordinary for a quadrant to go unsampled. A scrambled Sobol sequence
+    stratifies by construction while staying randomised, so repeated
+    probes of the same job do not all inherit one unlucky layout.
+
+    Requested counts are rounded up to a power of two, which is where a
+    Sobol sequence's balance properties hold.
+
+    :param int count:
+        Lower bound on how many origins to generate.
+    :param rng:
+        Optional generator, used only to seed the scramble so tests can
+        pin the sequence.
+    :returns:
+        List of ``(row_fraction, column_fraction)`` in ``[0, 1]``.
+    :rtype: list[tuple[float, float]]
+    """
+    # Imported here rather than at module scope: scipy.stats is expensive
+    # to import and this module is pulled in by the GUI at start-up.
+    from scipy.stats import qmc
+
+    exponent = max(1, math.ceil(math.log2(max(2, int(count)))))
+    seed = None if rng is None else int(rng.integers(0, 2**32))
+    sampler = qmc.Sobol(d=2, scramble=True, seed=seed)
+    points = sampler.random_base2(exponent)
+    return [(float(point[0]), float(point[1])) for point in points]
+
+
+def _relative_standard_error(values):
+    """Standard error of the mean of ``values``, relative to that mean.
+
+    Reported alongside the probe's estimate so a caller can tell a
+    well-converged number from one drawn on a detector whose record
+    density varies strongly with position, and size its safety margin on
+    that rather than on a fixed guess.
+
+    :rtype: float
+    """
+    if len(values) < 2:
+        return float("inf")
+    mean = sum(values) / len(values)
+    if mean <= 0.0:
+        return 0.0 if all(value == 0.0 for value in values) else float("inf")
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return math.sqrt(variance / len(values)) / mean
+
+
 def _calibration_probe(
     kernel,
     mask,
@@ -422,6 +491,7 @@ def _calibration_probe(
     budget_seconds=0.1,
     kernel_threads=1,
     bootstrap_tile=16,
+    target_relative_error=0.05,
     sample_tiles=9,
     min_sample_pixels=256,
     max_sample_pixels=2_000_000,
@@ -460,9 +530,18 @@ def _calibration_probe(
         Recorded in the result as bookkeeping only; does not affect
         ``kernel``'s own configured thread count.
     :param int bootstrap_tile:
-        Side length in pixels of the bootstrap tile.
+        Side length in pixels of the first tile. Deliberately small: the
+        adaptive loop grows subsequent tiles from the rate this one
+        measures, so starting large only risks spending the whole budget
+        before anything has been learned.
+    :param float target_relative_error:
+        Stop early once the sampled record density's relative standard
+        error falls below this, rather than spending the whole budget on
+        a detector that is already well characterised.
     :param int sample_tiles:
-        Number of scattered tiles sampled in the sized pass.
+        Target number of tiles to spread the budget over. Rounded up to a
+        power of two for the Sobol sequence; sampling stops on budget or
+        convergence, so it is an upper bound rather than a fixed count.
     :param int min_sample_pixels, max_sample_pixels:
         Clamp on the sized pass's total target sample size.
     :param rng:
@@ -470,9 +549,11 @@ def _calibration_probe(
         defaults to a fresh, unseeded generator.
     :returns:
         Dict with ``kernel_threads``, ``sampled_pixels``,
-        ``sampled_seconds``, ``seconds_per_pixel`` (kernel CPU-seconds per
-        sampled pixel), and ``records_per_pixel`` (post-dedup records per
-        sampled pixel).
+        ``sampled_seconds``, ``sampled_tiles``, ``seconds_per_pixel``
+        (kernel CPU-seconds per sampled pixel), ``records_per_pixel``
+        (post-dedup records per sampled pixel), and
+        ``records_per_pixel_relative_error``, the standard error of that
+        density relative to itself.
     :rtype: dict
     """
     if rng is None:
@@ -506,51 +587,116 @@ def _calibration_probe(
         kernel, angles_start, angles_end
     )
     admissible_side = max(1, int(math.isqrt(admissible_pixels)))
-    bootstrap_side = max(
+    # Grow the first tile until it is long enough to time, instead of
+    # fixing its size up front. At the deepest subdivision a single pixel
+    # already costs tens of milliseconds, so any fixed starting size
+    # spends several budgets before the probe has learned anything.
+    bootstrap_cap = max(
         1, min(int(bootstrap_tile), rows, columns, admissible_side)
     )
-    bootstrap_row, bootstrap_column = _representative_tile_origin(
-        mask, bootstrap_side
-    )
-    total_pixels, total_seconds, total_records = sample_tile(
-        bootstrap_row,
-        bootstrap_row + bootstrap_side,
-        bootstrap_column,
-        bootstrap_column + bootstrap_side,
-    )
-    elapsed = time.perf_counter() - started
-    rate = total_seconds / max(1, total_pixels)
-
-    remaining_budget = budget_seconds - elapsed
-    if remaining_budget > 0 and rate > 0:
-        target_pixels = int(
-            min(max(remaining_budget / rate, min_sample_pixels), max_sample_pixels)
+    total_pixels = 0
+    total_seconds = 0.0
+    total_records = 0
+    # Per-tile record densities, kept so the estimate can report how well
+    # it has converged rather than only what it averaged to.
+    densities = []
+    bootstrap_side = 1
+    while True:
+        bootstrap_row, bootstrap_column = _representative_tile_origin(
+            mask, bootstrap_side
         )
-        tile_side = max(1, int(math.sqrt(target_pixels / max(1, sample_tiles))))
-        # Never ask for a tile the kernel would refuse: without this the
-        # sampler's fixed pixel ceiling outgrows the admissible size at
-        # high adaptive depth and accumulate() raises inside what is a
-        # live, GUI-driven estimate.
+        tile_started = time.perf_counter()
+        pixels, seconds, records = sample_tile(
+            bootstrap_row,
+            bootstrap_row + bootstrap_side,
+            bootstrap_column,
+            bootstrap_column + bootstrap_side,
+        )
+        total_pixels += pixels
+        total_seconds += seconds
+        total_records += records
+        densities.append(records / max(1, pixels))
+        if (
+            time.perf_counter() - tile_started
+            >= budget_seconds * _BOOTSTRAP_TIME_SHARE
+            or bootstrap_side >= bootstrap_cap
+            or time.perf_counter() - started >= budget_seconds
+        ):
+            break
+        bootstrap_side = min(bootstrap_side * 2, bootstrap_cap)
+    # The ramp's earlier tiles exist to time the kernel, not to measure
+    # density: a one-pixel tile yields a density of exactly zero or one and
+    # would dominate the scatter the error estimate is built from. Their
+    # pixels still count towards the totals, only their spread is dropped.
+    densities = densities[-1:]
+    # Low-discrepancy positions rather than independent uniform draws: the
+    # quantities being averaged vary smoothly across the detector (solid
+    # angle, incidence angle, which part of the output grid a pixel
+    # reaches), so this is a quadrature problem, and at the handful of
+    # tiles a 0.1 s budget allows, independent draws leave whole regions
+    # unsampled often enough to matter.
+    origins = _sobol_tile_origins(rows, columns, int(sample_tiles), rng)
+
+    previous_pixels = total_pixels
+    for fraction_row, fraction_column in origins:
+        elapsed = time.perf_counter() - started
+        remaining_budget = budget_seconds - elapsed
+        if remaining_budget <= 0 or total_pixels >= max_sample_pixels:
+            break
+        if (
+            len(densities) >= _MINIMUM_CONVERGENCE_TILES
+            and total_pixels >= min_sample_pixels
+            and _relative_standard_error(densities) <= target_relative_error
+        ):
+            break
+        rate = total_seconds / max(1, total_pixels)
+        if rate <= 0:
+            next_pixels = max_sample_pixels
+        else:
+            # Spend the remaining budget over the tiles still planned,
+            # re-estimated after every tile: a first tile that happened to
+            # be unusually cheap costs one more small tile rather than the
+            # whole budget, which is what the old size-once design did.
+            share = remaining_budget / max(1, int(sample_tiles) - len(densities) + 1)
+            next_pixels = share / rate
+        next_pixels = min(
+            next_pixels,
+            max_sample_pixels - total_pixels,
+            admissible_pixels,
+            # Bound how fast the tile may grow, so one underestimated rate
+            # cannot produce a single tile that overruns the budget.
+            8 * previous_pixels,
+        )
+        # The floor is per tile and deliberately tiny: min_sample_pixels is
+        # a target for the sample as a whole, and forcing it on every tile
+        # would make a single tile cost more than the entire budget once
+        # the per-pixel cost is high enough (a 256-pixel tile takes a
+        # quarter of a second at the deepest subdivision).
+        next_pixels = max(next_pixels, _MINIMUM_TILE_PIXELS)
+        tile_side = max(1, int(math.isqrt(int(next_pixels))))
         tile_side = min(tile_side, rows, columns, admissible_side)
-        for _ in range(int(sample_tiles)):
-            if time.perf_counter() - started >= budget_seconds:
-                break
-            row_start = int(rng.integers(0, max(1, rows - tile_side + 1)))
-            column_start = int(rng.integers(0, max(1, columns - tile_side + 1)))
-            pixels, seconds, records = sample_tile(
-                row_start, row_start + tile_side,
-                column_start, column_start + tile_side,
-            )
-            total_pixels += pixels
-            total_seconds += seconds
-            total_records += records
+        row_start = int(round(fraction_row * max(0, rows - tile_side)))
+        column_start = int(round(fraction_column * max(0, columns - tile_side)))
+        pixels, seconds, records = sample_tile(
+            row_start,
+            row_start + tile_side,
+            column_start,
+            column_start + tile_side,
+        )
+        total_pixels += pixels
+        total_seconds += seconds
+        total_records += records
+        densities.append(records / max(1, pixels))
+        previous_pixels = pixels
 
     return {
         "kernel_threads": int(kernel_threads),
         "sampled_pixels": total_pixels,
         "sampled_seconds": total_seconds,
+        "sampled_tiles": len(densities),
         "seconds_per_pixel": total_seconds / max(1, total_pixels),
         "records_per_pixel": total_records / max(1, total_pixels),
+        "records_per_pixel_relative_error": _relative_standard_error(densities),
     }
 
 
