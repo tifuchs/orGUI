@@ -586,10 +586,44 @@ Not required by either finding; do not fold it in.
 
 ### Phase 3 — Frame-group bricks at depth 0 (finding A)
 
-1. *Kernel.* `accumulate_group()` taking `(frames, rows, columns)` arrays and
-   `(frames, 2, 4)` angle bounds, returning the same six columnar arrays merged
-   across the group. The block queue becomes a 3D brick index; `block_results`,
-   the per-worker arena and the loser-tree merge are unchanged.
+1. *Kernel.* **Done.** `accumulate_group()` takes `(frames, rows, columns)`
+   arrays and `(frames, 4)` angle bounds and returns the same six columnar
+   arrays merged across the group. The block queue is a brick index;
+   `block_results`, the per-worker arena and the loser-tree merge are
+   unchanged. The caller sets the group size purely by how many frames it
+   passes, and one brick holds the same sample count a single-image block did,
+   so the frame extent is spent out of the detector-plane extent rather than
+   added to it.
+
+   Measured on the real job, 512 x 2463 tile, depth 0, against the same frames
+   mapped one at a time:
+
+   | group | brick | records | time |
+   |---|---|---|---|
+   | 1 | 128x128x1 | x0.966 | x0.903 |
+   | 2 | 91x90x2 | x0.752 | x0.752 |
+   | 4 | 64x64x4 | x0.645 | x0.715 |
+   | 8 | 45x45x8 | x0.595 | x0.606 |
+   | 16 | 32x32x16 | **x0.575** | **x0.621** |
+
+   Record ratios at one thread, time ratios at twelve. The record figure
+   matches the exhaustive geometric prediction of 0.5749 made before any of it
+   was implemented, which retires the main open question of finding A.
+
+   It also settles the one the plan flagged as unpredictable: **the kernel
+   itself is 1.6x faster**, not merely the stages downstream. About 42% fewer
+   distinct keys are inserted into the block map, and the pixel centre ray --
+   pure detector geometry, unchanged by the rotation -- is computed once per
+   brick instead of once per (pixel, frame). A single-frame group is already
+   1.1x faster from the block shape alone.
+
+   One correction to the plan: **`F = 1` is not bit-for-bit with today.** A
+   brick partitions the detector into rectangles where a block partitions it
+   into runs of the flattened image, so pixels group into accumulators
+   differently and their sums associate differently. Same voxels, same
+   contributor counts, totals equal to rounding. The fallback is
+   scientifically identical rather than byte-identical — and slightly better,
+   at 3.4% fewer records.
 2. *Brick loop, depth 0.* Precompute the brick's unit centre rays once into a
    24 KiB stack buffer, iterate frames-outer / pixels-inner. Note separately
    that at depth 0 the centre ray is frame-invariant for the whole job — pure
