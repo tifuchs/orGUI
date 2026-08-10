@@ -1423,7 +1423,6 @@ def _frame_parallelism(
     tiles,
     memory_bytes,
     *,
-    stationary,
     frames_per_task=1,
     threads_per_image=1,
     accumulation_budget_bytes=None,
@@ -1470,8 +1469,6 @@ def _frame_parallelism(
         column_stop)`` tuples.
     :param int memory_bytes:
         Total memory budget in bytes.
-    :param bool stationary:
-        Whether exposure start and end angles are identical.
     :param int frames_per_task:
         Number of images streamed by one resumable task. Images are not
         retained together.
@@ -1501,14 +1498,25 @@ def _frame_parallelism(
     # always full-detector-sized regardless of how many native tiles the
     # frame is split into.
     detector_pixels = sum(tile_pixels)
-    children = 4 if stationary else 8
-    worst_leaves = children**spec.max_depth
     # Mirrors ReconstructionKernel::accumulate's own memory precheck
-    # exactly (a fixed per-pixel baseline plus twice the worst-case leaf
-    # count times one native Record's on-the-wire size), so this
-    # Python-side estimate cannot drift from what the kernel itself
+    # exactly (a fixed per-pixel baseline plus twice the records a pixel is
+    # assumed to leave behind, times one native Record's on-the-wire size),
+    # so this Python-side estimate cannot drift from what the kernel itself
     # actually enforces.
-    native_bytes_per_pixel = 128 + 2 * worst_leaves * _CHECKPOINT_BYTES_PER_ROW
+    #
+    # That estimate used to be the worst-case *leaf* count, 4**depth or
+    # 8**depth, which is where the two could drift: a spec cannot know
+    # whether an individual frame range's exposure rotates, so this side had
+    # to assume the rotating case and reserve twice what the kernel would.
+    # Bounding both by the same record ceiling removes the asymmetry
+    # outright -- above depth 0 the bound saturates, so the estimate no
+    # longer depends on the exposure model at all, and the two sides now
+    # agree by construction rather than by careful mirroring.
+    native_bytes_per_pixel = (
+        128 + 2 * _RESERVED_RECORDS_PER_PIXEL * _CHECKPOINT_BYTES_PER_ROW
+        if spec.max_depth > 0
+        else 128 + 2 * _CHECKPOINT_BYTES_PER_ROW
+    )
     native_memory = largest_tile_pixels * native_bytes_per_pixel
     # The native estimate alone misses real, per-in-flight-frame Python
     # memory: the raw decoded image plus every corrected array
@@ -1645,7 +1653,6 @@ def reconstruction_execution_settings(job, scan=None, config=None):
                 spec,
                 tiles,
                 scheduler_memory,
-                stationary=stationary,
                 frames_per_task=stop - start,
                 threads_per_image=effective_threads_per_image,
                 accumulation_budget_bytes=job.accumulation_budget_bytes,
@@ -2251,16 +2258,11 @@ def _map_pending_ranges(
         workers = []
         natives = []
         for frame_range in pending_ranges:
-            task_bounds = bounds[frame_range[0] : frame_range[1]]
-            stationary = bool(
-                np.array_equal(task_bounds[:, 0], task_bounds[:, 1])
-            )
             image_limit, native_threads, _worker_memory, _accumulation_limit = (
                 _frame_parallelism(
                     spec,
                     tiles,
                     scheduler_memory,
-                    stationary=stationary,
                     frames_per_task=frame_range[1] - frame_range[0],
                     threads_per_image=threads_per_image_seed,
                     accumulation_budget_bytes=accumulation_budget_bytes,
@@ -2317,11 +2319,6 @@ def _map_pending_ranges(
         sweep_rays = ray_arrays[sweep_tile]
         sweep_angles_start = np.ascontiguousarray(bounds[frame_indices[0], 0])
         sweep_angles_end = np.ascontiguousarray(bounds[frame_indices[0], 1])
-        sweep_stationary = bool(
-            np.array_equal(
-                bounds[frame_indices[0], 0], bounds[frame_indices[0], 1]
-            )
-        )
         # Every tile of a frame is mapped, so a frame's kernel work is the
         # whole detector's pixels -- what the sweep's single sample tile
         # has to be scaled up to.
@@ -2597,7 +2594,6 @@ def _map_pending_ranges(
                             spec,
                             tiles,
                             scheduler_memory,
-                            stationary=sweep_stationary,
                             threads_per_image=candidate_threads,
                             accumulation_budget_bytes=accumulation_budget_bytes,
                         )

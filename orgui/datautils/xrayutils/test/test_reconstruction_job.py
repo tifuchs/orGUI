@@ -20,6 +20,7 @@ from orgui.reconstruction_job import (
     WORK_BLOCK_PRESETS,
     _FRAME_RECORD_BYTES_PER_PIXEL,
     _PYTHON_CORRECTION_BYTES_PER_PIXEL,
+    _RESERVED_RECORDS_PER_PIXEL,
     ReconstructionGrid,
     ReconstructionJob,
     _frame_parallelism,
@@ -229,7 +230,7 @@ def test_frame_parallelism_accounts_for_a_frames_own_records():
     tiles = [(0, 1024, 0, 1024)]
 
     _workers, _threads, per_worker, _accumulation = _frame_parallelism(
-        spec, tiles, 8 * 1024**3, stationary=True, threads_per_image=1
+        spec, tiles, 8 * 1024**3, threads_per_image=1
     )
 
     detector_pixels = 1024 * 1024
@@ -321,10 +322,10 @@ def test_frame_parallelism_scopes_native_memory_to_largest_tile_not_detector_sum
     ) == sum((r1 - r0) * (c1 - c0) for r0, r1, c0, c1 in four_small_tiles)
 
     single_result = _frame_parallelism(
-        spec, one_big_tile, memory_bytes, stationary=False, threads_per_image=1
+        spec, one_big_tile, memory_bytes, threads_per_image=1
     )
     split_result = _frame_parallelism(
-        spec, four_small_tiles, memory_bytes, stationary=False, threads_per_image=1
+        spec, four_small_tiles, memory_bytes, threads_per_image=1
     )
 
     # The split (4x smaller largest tile) version's per-worker memory
@@ -333,6 +334,99 @@ def test_frame_parallelism_scopes_native_memory_to_largest_tile_not_detector_sum
     # (and therefore give an identical result) in both cases.
     assert split_result[2] < single_result[2]
     assert split_result[0] >= single_result[0]
+
+
+def test_frame_parallelism_native_estimate_does_not_grow_with_depth():
+    """The per-pixel native estimate is bounded by records, not leaves.
+
+    Sized by the worst-case leaf count it grows as ``4**depth`` (or
+    ``8**depth`` when the exposure rotates), which claimed 5248 bytes at
+    depth 3 for a pixel that really costs about 106 and so forced any
+    realistic detector onto tiny tiles. Because one worker's estimate
+    divides into the budget, that also capped how many frames could be in
+    flight. Leaves are transient; records are what stays resident.
+    """
+    grid = _GridSpec(
+        minimum=(-1.0, -1.0, -1.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(1.0, 1.0, 1.0),
+        frame="lab",
+        chunk_shape=(2, 2, 2),
+    )
+    tiles = _uniform_tiles(2048, 2048)
+    memory_bytes = 10_000 * 1024**2
+    results = {
+        depth: _frame_parallelism(
+            _ReconstructionSpec(grids=(grid,), max_depth=depth, threads=24),
+            tiles,
+            memory_bytes,
+            threads_per_image=1,
+        )
+        for depth in (0, 1, 2, 3, 5, 8)
+    }
+    # Depth 0 is exact -- one leaf can only reach one voxel -- so it stays
+    # below the saturated bound; every deeper setting shares one value.
+    assert results[0][2] < results[1][2]
+    deep = {depth: value[2] for depth, value in results.items() if depth}
+    assert len(set(deep.values())) == 1, deep
+    # And the concurrency that estimate funds must not collapse with depth.
+    assert results[8][0] == results[1][0]
+    assert results[8][0] > 1
+
+
+def test_frame_parallelism_native_estimate_mirrors_the_kernel_precheck():
+    """The Python estimate and the kernel's own guard must agree.
+
+    They are two statements of one bound, and the kernel throws where this
+    side merely sizes a pool, so a tile this side considers affordable must
+    not be one the kernel rejects.
+    """
+    native = pytest.importorskip(
+        "orgui.datautils.xrayutils._reciprocal_reconstruction_cpp"
+    )
+    rows = columns = 512
+    pixels = rows * columns
+    rays = np.zeros((rows + 1, columns + 1, 3), dtype=np.float64)
+    rays[..., 1] = 1.0
+    arguments = (
+        np.ones((rows, columns)),
+        np.ones((rows, columns)),
+        np.zeros((rows, columns), dtype=bool),
+        rays,
+        np.zeros(4),
+        np.zeros(4),
+    )
+
+    def kernel_for(max_depth, memory_budget_bytes):
+        return native.ReconstructionKernel(
+            np.array([-1.0, -1.0, -1.0]),
+            np.array([0.01, 0.01, 0.01]),
+            np.array([256, 256, 256], dtype=np.int64),
+            np.array([16, 16, 16], dtype=np.int64),
+            "lab",
+            1.0,
+            np.eye(3),
+            np.eye(3),
+            max_depth,
+            1,
+            64,
+            memory_budget_bytes,
+        )
+
+    for max_depth in (0, 1, 3, 5, 8):
+        expected = (
+            128 + 2 * _RESERVED_RECORDS_PER_PIXEL * 40
+            if max_depth
+            else 128 + 2 * 40
+        )
+        # Exactly what the Python estimate asks for must be accepted. This
+        # is the direction that pins the two together: a leaf-sized bound
+        # demands 4**depth times more and rejects this outright from depth
+        # 2 up.
+        kernel_for(max_depth, pixels * expected).accumulate(*arguments)
+        # One byte per pixel short of it must not be.
+        with pytest.raises(ValueError, match="native memory budget"):
+            kernel_for(max_depth, pixels * (expected - 1)).accumulate(*arguments)
 
 
 def test_frame_parallelism_accounts_for_python_correction_buffers_and_prefetch():
@@ -360,7 +454,7 @@ def test_frame_parallelism_accounts_for_python_correction_buffers_and_prefetch()
 
     image_workers, _kernel_threads, per_worker_memory, _accumulation = (
         _frame_parallelism(
-            spec, tiles, memory_bytes, stationary=True, threads_per_image=1
+            spec, tiles, memory_bytes, threads_per_image=1
         )
     )
 

@@ -514,6 +514,23 @@ struct RecordAccum {
     std::uint32_t contributors = 0;
 };
 
+// Records one pixel is assumed to leave behind, for every purpose that has
+// to size memory before the data is seen: the per-worker arena, and the
+// per-call budget precheck.
+//
+// Sizing by leaf count instead assumes every leaf of every pixel reaches a
+// voxel no other leaf did. Real data does not behave that way at any depth:
+// measured post-dedup density stays between 0.46 and 0.89 records per pixel
+// from depth 0 through 8, and across both exposure models, because deeper
+// subdivision's extra samples overwhelmingly land in voxels a neighbouring
+// sample already reached. Leaves are transient -- they are sorted, merged
+// and discarded per pixel -- while records are what stays resident.
+//
+// Four is therefore several times the density ever observed, and both users
+// below take it as a ceiling on the leaf count rather than a replacement,
+// so depth 0 stays exact: one leaf can only yield one record.
+constexpr std::size_t reserved_records_per_pixel = 4;
+
 struct VoxelWeight {
     std::uint64_t voxel;
     double weight;
@@ -670,8 +687,20 @@ public:
         for (int depth = 0; depth < max_depth_; ++depth) {
             worst_leaves *= subdivision_children;
         }
+        // Bounded by reserved_records_per_pixel for the reason given there.
+        // Unbounded, this term is 4^depth (or 8^depth when the exposure
+        // rotates) and rejects any useful detector tile from depth 3 up: at
+        // depth 3 it claims 5248 bytes for a pixel that really costs about
+        // 106, so a full Pilatus-6M frame "needs" 32.7 GB and the layout is
+        // forced onto tiny tiles -- which then caps how many frames can be
+        // in flight, since one worker's estimate divides into the budget.
+        // Two resident copies of a pixel's records are still allowed for,
+        // covering the per-block vectors and the merged output together.
         const std::size_t estimated_bytes_per_pixel =
-            128 + 2 * worst_leaves * sizeof(Record);
+            128
+            + 2
+                * std::min<std::size_t>(worst_leaves, reserved_records_per_pixel)
+                * sizeof(Record);
         if (
             pixels > 0
             && estimated_bytes_per_pixel
@@ -699,20 +728,10 @@ public:
         // performance risk, never a correctness one.
         const std::size_t bytes_per_node =
             sizeof(std::pair<const RecordKey, RecordAccum>) + 32;
-        // Reserving one node per leaf assumes every leaf of every pixel
-        // reaches a voxel no other leaf did. Real data does not behave
-        // that way at any depth: measured post-dedup density stays
-        // between 0.46 and 0.87 records per pixel from depth 0 through 8,
-        // because deeper subdivision's extra samples overwhelmingly land
-        // in voxels a neighbouring sample already reached. Reserving by
-        // leaf count therefore over-reserves by up to four orders of
-        // magnitude at high depth -- gigabytes per worker thread -- while
-        // buying nothing. A small multiple of the measured density leaves
-        // ample headroom, and the resource falls back to the heap if a
-        // block ever does exceed it, so this bounds performance, never
-        // correctness. Depth 0 is exact: one leaf can only yield one
-        // record.
-        constexpr std::size_t reserved_records_per_pixel = 4;
+        // Sized by reserved_records_per_pixel, as the precheck above is.
+        // Undersizing here is a performance risk and never a correctness
+        // one: the resource falls back to the heap transparently if a
+        // block ever does exceed it.
         const std::size_t arena_bytes =
             block_size
                 * std::min<std::size_t>(worst_leaves, reserved_records_per_pixel)
