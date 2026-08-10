@@ -101,6 +101,16 @@ safe upper bound regardless of a scan backend's actual raw dtype."""
 _CORRECTED_ARRAY_BYTES_PER_PIXEL = 8 + 8 + 1
 """_correction_pipeline.correct_frame's per-pixel output: float64
 intensity, float64 variance, bool mask."""
+_FRAME_RECORD_BYTES_PER_PIXEL = 2 * _CHECKPOINT_BYTES_PER_ROW
+"""A frame's own mapped records, held Python-side while it is in flight:
+every detector tile's output batch, plus the transient copy
+_reduce_batches makes while merging those batches into one. Sized at one
+record per detector pixel, which bounds every density measured across
+adaptive depths (0.46 to 0.87 records per pixel), and doubled for the
+merge. Without this term the worker pool was sized as though a frame cost
+only its image and correction buffers, and measured peaks ran about a
+third above what the pool believed it had claimed."""
+
 _PYTHON_CORRECTION_BYTES_PER_PIXEL = (
     _RAW_IMAGE_BYTES_PER_PIXEL + _CORRECTED_ARRAY_BYTES_PER_PIXEL
 )
@@ -1210,6 +1220,47 @@ def _correction_pipeline(config, scan, assets, provenance):
     return correct
 
 
+CHECKPOINT_MEMORY_SHARE = 0.25
+"""Fraction of the memory budget reserved for in-memory checkpoint
+accumulators; the rest funds the frame pipeline.
+
+The two used to be sized against the whole budget independently -- the
+worker pool took as many concurrent frames as the budget allowed, while
+``MAX_CONCURRENT_ACTIVE_CHECKPOINTS`` accumulators were each allowed the
+budget divided by that same count -- so nothing stopped their sum
+reaching twice what the user asked for, and measured peaks did reach
+1.4x. Splitting the budget once, here, is what makes the two shares add
+up to it instead.
+
+Accumulating longer before flushing mostly saves scratch writes, and
+measurably little: quartering the share grew a checkpoint set by 6%.
+"""
+
+
+def split_memory_budget(memory_bytes, grid_count):
+    """Divide a memory budget between checkpoint accumulators and pipeline.
+
+    :param int memory_bytes:
+        The job's whole memory budget.
+    :param int grid_count:
+        Number of output grids; each has its own active checkpoints.
+    :returns:
+        ``(accumulator_bytes_per_checkpoint, pipeline_bytes)`` -- the
+        first bounds one active checkpoint's in-memory records, the
+        second is what the frame pipeline (in-flight frames, prefetch
+        queue, native buffers) may use.
+    :rtype: tuple[int, int]
+    """
+    memory_bytes = max(2 * 1024**2, int(memory_bytes))
+    accumulator_total = int(memory_bytes * CHECKPOINT_MEMORY_SHARE)
+    per_checkpoint = max(
+        1024**2,
+        accumulator_total
+        // (MAX_CONCURRENT_ACTIVE_CHECKPOINTS * max(1, int(grid_count))),
+    )
+    return per_checkpoint, max(1024**2, memory_bytes - accumulator_total)
+
+
 def work_block_memory_cap(depth, memory_bytes, threads):
     """Largest work block whose native arenas stay inside the memory budget.
 
@@ -1462,7 +1513,9 @@ def _frame_parallelism(
     # The native estimate alone misses real, per-in-flight-frame Python
     # memory: the raw decoded image plus every corrected array
     # (_PYTHON_CORRECTION_BYTES_PER_PIXEL), full-detector-sized.
-    python_memory = detector_pixels * _PYTHON_CORRECTION_BYTES_PER_PIXEL
+    python_memory = detector_pixels * (
+        _PYTHON_CORRECTION_BYTES_PER_PIXEL + _FRAME_RECORD_BYTES_PER_PIXEL
+    )
     image_memory = native_memory + python_memory
     worker_memory = max(
         1024**2,
@@ -2630,10 +2683,8 @@ def run_cluster_map_task(
     execution_spec = _execution_spec(job, threads=cpus, memory_bytes=memory_bytes)
     effective_memory = execution_spec.memory_budget_bytes
     number_of_grids = max(1, len(execution_spec.grids))
-    active_budget_bytes = max(
-        1024**2,
-        effective_memory
-        // (MAX_CONCURRENT_ACTIVE_CHECKPOINTS * number_of_grids),
+    active_budget_bytes, effective_memory = split_memory_budget(
+        effective_memory, number_of_grids
     )
     resumed, _existing_files = _discover_checkpoint_state(
         node_dir, boundaries, job.digest, cleanup_stale=True
@@ -2869,10 +2920,10 @@ def run_job(
         else job.memory_override_bytes or job.runtime_memory_bytes
     )
     number_of_grids = max(1, len(spec.grids))
-    active_budget_bytes = max(
-        1024**2,
-        effective_memory
-        // (MAX_CONCURRENT_ACTIVE_CHECKPOINTS * number_of_grids),
+    # One split of the budget: what the accumulators may hold and what the
+    # frame pipeline may use, so the two cannot each claim most of it.
+    active_budget_bytes, effective_memory = split_memory_budget(
+        effective_memory, number_of_grids
     )
 
     resumed, _existing_files = _discover_checkpoint_state(

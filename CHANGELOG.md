@@ -435,6 +435,22 @@ Reciprocal-space reconstruction:
   every leaf of every subdivided pixel reaches a distinct voxel -- so a
   large block at a deep accuracy setting could ask for tens of gigabytes
   per worker thread.
+- Fixed reciprocal-space mapping exceeding the memory budget it was
+  given. Two things claimed most of the budget independently: the frame
+  pipeline sized its worker pool so that concurrent frames alone could
+  fill it, while the in-memory checkpoint accumulators were each allowed
+  the budget divided by the number that may be active at once -- so their
+  sum could approach twice what was asked for. Measured on a real dataset
+  at 24 threads against a 10 GiB budget, peak resident memory reached
+  12.4 to 14.5 GiB depending on settings. The budget is now split once
+  between the two, and the per-frame estimate also counts a frame's own
+  mapped records -- every detector tile's output batch plus the transient
+  copy made while merging them -- which it previously ignored, leaving
+  the pool about a third larger than it believed. Peak is now 5.7 GiB
+  (57% of budget) at ``center`` accuracy and 3.8 GiB (37%) at
+  ``balanced``, and mapping is *faster* for it -- 3.14 to 4.94 frames per
+  second -- because fewer concurrent frames contend for cache and memory
+  bandwidth.
 - The native accumulator's arena is now sized from measured record
   density rather than that worst case. Post-deduplication density stays
   between 0.46 and 0.87 records per pixel from the shallowest adaptive

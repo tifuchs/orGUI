@@ -16,7 +16,10 @@ from orgui.datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
 from orgui.datautils.xrayutils.reconstruction import _GridSpec, _ReconstructionSpec
 import orgui.reconstruction_job as reconstruction_job_module
 from orgui.reconstruction_job import (
+    MAX_CONCURRENT_ACTIVE_CHECKPOINTS,
     WORK_BLOCK_PRESETS,
+    _FRAME_RECORD_BYTES_PER_PIXEL,
+    _PYTHON_CORRECTION_BYTES_PER_PIXEL,
     ReconstructionGrid,
     ReconstructionJob,
     _frame_parallelism,
@@ -25,6 +28,7 @@ from orgui.reconstruction_job import (
     job_status,
     reconstruction_execution_settings,
     resolve_work_block_pixels,
+    split_memory_budget,
     work_block_memory_cap,
     run_cluster_finalize,
     run_cluster_map_task,
@@ -190,6 +194,48 @@ def _uniform_tiles(total_side, tile_side):
         for row in range(0, total_side, tile_side)
         for column in range(0, total_side, tile_side)
     ]
+
+
+def test_memory_budget_is_split_between_accumulators_and_pipeline():
+    """The checkpoint accumulators and the frame pipeline used to be sized
+    against the whole budget independently, so their sum could reach twice
+    what the user asked for. One split has to divide it between them.
+    """
+    budget = 10 * 1024**3
+
+    per_checkpoint, pipeline = split_memory_budget(budget, 1)
+
+    assert per_checkpoint * MAX_CONCURRENT_ACTIVE_CHECKPOINTS + pipeline <= budget
+    # Every grid gets its own concurrent checkpoints, so more grids must
+    # not multiply the accumulators' total share.
+    two_grids, pipeline_two = split_memory_budget(budget, 2)
+    assert two_grids * MAX_CONCURRENT_ACTIVE_CHECKPOINTS * 2 + pipeline_two <= budget
+
+
+def test_frame_parallelism_accounts_for_a_frames_own_records():
+    """A worker holds its frame's mapped records -- every tile's output
+    batch and the transient copy merging them makes -- not just the image
+    and correction buffers. Sizing the pool without that term let measured
+    peaks run about a third above what the pool believed it had claimed.
+    """
+    grid = _GridSpec(
+        minimum=(-1.0, -1.0, -1.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(1.0, 1.0, 1.0),
+        frame="lab",
+        chunk_shape=(2, 2, 2),
+    )
+    spec = _ReconstructionSpec(grids=(grid,), max_depth=0, threads=8)
+    tiles = [(0, 1024, 0, 1024)]
+
+    _workers, _threads, per_worker, _accumulation = _frame_parallelism(
+        spec, tiles, 8 * 1024**3, stationary=True, threads_per_image=1
+    )
+
+    detector_pixels = 1024 * 1024
+    assert per_worker >= detector_pixels * (
+        _PYTHON_CORRECTION_BYTES_PER_PIXEL + _FRAME_RECORD_BYTES_PER_PIXEL
+    )
 
 
 def test_work_block_preset_halves_with_adaptive_depth():
