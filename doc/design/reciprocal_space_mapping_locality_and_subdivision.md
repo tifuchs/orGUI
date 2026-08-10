@@ -543,7 +543,39 @@ would change FP association. Recursing children in index order reproduces it.
    sampled in 3D — which is what the adaptive rule should cost and, before
    this, only did below depth 4.
 
-### Phase 2 — The `worst_leaves` bound (memory, standalone)
+### Phase 2 — The `worst_leaves` bound (memory, standalone). Done.
+
+Both prechecks are now bounded by `reserved_records_per_pixel`, the constant
+the arena already used, hoisted to file scope in the kernel so the two users
+share one definition. Measured on the real detector against the job's own
+10 GiB budget:
+
+| depth | tiles | before | after |
+|---|---|---|---|
+| 0 | 1 | 5 workers, 1.93 GiB | unchanged |
+| 2 | 1 | 1 worker, 9.63 GiB | 3 workers, 3.21 GiB |
+| 3 | 1 | 1 worker, 31.03 GiB | 3 workers, 3.21 GiB |
+| 5 | 1 | 1 worker, 476.2 GiB | 3 workers, 3.21 GiB |
+| 3 | 4 bands | 1 worker, 9.63 GiB | 7 workers, 1.38 GiB |
+| 5 | 4 bands | 1 worker, 119.6 GiB | 7 workers, 1.38 GiB |
+
+It also closed the drift risk findings open item 2 raised, but not the way
+that item anticipated. The concern was that a spec cannot know whether a
+frame range's exposure rotates, so the Python side had to assume `8**depth`
+where the kernel knew it was `4**depth` — and the conclusion drawn was that
+the authoritative cap therefore belonged in the kernel. With the bound
+saturating above depth 0, neither side depends on the exposure model at all,
+so the asymmetry disappears rather than being relocated. `_frame_parallelism`
+no longer takes `stationary`, and the two call sites that computed it only to
+pass it no longer do.
+
+What was *not* done: a per-thread term for the leaf buffer. It is the one
+genuinely exposure- and depth-dependent allocation left, and it is the reason
+the original bound looked plausible — but it is bounded by thread count
+rather than tile size, and at 24 threads it reaches ~14 MB at moving depth 6
+and ~230 MB at depth 8. Too small to model against a multi-gigabyte budget.
+
+### Phase 2 — original reasoning, retained
 
 Replace `children**depth` in both mirrored sites with a bound derived from
 boundary growth (~2^depth) plus headroom, keeping the two in step. Findings open
