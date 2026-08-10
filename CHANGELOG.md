@@ -79,6 +79,14 @@ Scientific correctness and performance fixes:
   detector samples reach each of them, are unchanged. Existing checkpoint
   files remain resumable, but a job resumed across this change will contain
   parts from both association orders.
+- Mapping several images per call uses a scheduler of its own, which runs a
+  few concurrent native calls with the thread budget split between them and
+  hoists whole-frame correction into the prefetch pool, so one call's
+  GIL-held Python work overlaps the next call's native work instead of
+  queueing behind it. Measured 0.87x the mapping wall time of the
+  per-image pipeline at four images per call on a 3651-frame rotation scan.
+  Group size is not yet chosen automatically, so this path is only taken
+  when a group size is set explicitly.
 
 A ***critical bug*** was fixed that affects bulk CTR calculations:
 
