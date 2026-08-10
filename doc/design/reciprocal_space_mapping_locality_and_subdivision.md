@@ -1,11 +1,10 @@
 # Reciprocal-space mapping: locality, subdivision cost, and the scheduling that would carry them
 
-> **Status: partly implemented.** Phases 1 and 2 have landed, and so has
-> phase 3 except for choosing the group size per job (step 6); phase 4 has
-> not. Each step below says which it is and what it measured. Everything
-> here was measured against real beamtime data, and where a prediction was
-> made before implementing, the step records whether it held — including
-> where it did not.
+> **Status: phases 1-3 implemented, phase 4 not.** Frame grouping is on by
+> default and chooses its own group size per job. Each step below says which
+> it is and what it measured. Everything here was measured against real
+> beamtime data, and where a prediction was made before implementing, the
+> step records whether it held — including where it did not.
 
 Third companion to `reciprocal_space_scratch_architecture.md` (what the pipeline
 *is*) and `reciprocal_space_performance_findings.md` (what has been measured
@@ -16,10 +15,10 @@ to do to carry them.
 - **A — cross-frame locality.** The native work block deduplicates voxels within
   one image, mostly by accident. Extending it across adjacent images cuts
   emitted records by ~42% and *shrinks* the cache working set. **The kernel and
-  the pipeline wiring and the scheduler are implemented.** Records through the
-  router fall to 0.598x at F = 8, matching the geometric prediction, and
-  end-to-end mapping is **0.866x at F = 4** on the real job. F is not yet
-  chosen per job, so grouping stays opt-in. See phase 3.
+  the pipeline wiring, the scheduler and the per-job group size are all
+  implemented.** Records through the router fall to 0.657x at the group size
+  chosen for the reference job, and end-to-end mapping to **0.88x**. See
+  phase 3.
 - **B — subdivision cost.** Above depth 3 the shared-corner cache switched off
   and the kernel did several times more ray work than it needed to. A
   corner-passing recursion removes that, bit-for-bit. **Phase 1 is implemented**
@@ -727,13 +726,52 @@ Not required by either finding; do not fold it in.
    other for the same memory**, which is a knob this document had not
    identified, and picking the pair rather than picking F alone is what
    step 6 should actually do.
-6. *Choosing F per job.* **Not done.** The probe should now choose a
-   (band height, F) pair rather than F alone, and it should optimise
-   throughput rather than record density: records keep falling past the
-   point where throughput turns around, so density is the wrong objective
-   on its own. `F = 4` is a reasonable default for a 0.1 deg/frame scan at
-   depth 0 on a 24-thread machine, and nothing weaker than a measurement
-   should be trusted to generalise that.
+6. *Choosing F per job.* **Done.** `spec.frames_per_group` now defaults to
+   `None`, meaning "measure this job and choose"; an explicit integer still
+   overrides. Two gates, and the second is the one that is easy to get
+   wrong.
+
+   **The regime gate.** `_frame_advance_voxels` asks the kernel where a
+   sample of pixels lands on one frame and on the next, and takes the
+   difference in units of the grid step. Geometry only — no image data and
+   no I/O — so it costs a few hundred `coordinate()` calls at job start.
+   Past `_GROUP_ADVANCE_VOXEL_LIMIT` (one voxel) consecutive frames tile
+   rather than overlap and the answer is `F = 1`. Sampled at three places
+   in the scan, not one, so a non-uniform angular step is caught. The
+   monotonicity check for interlaced scans gates both this and any
+   explicit request.
+
+   **The concurrency gate, which is what density alone would get wrong.**
+   Records fall monotonically with F, so choosing on density picks the
+   largest group that fits memory — which on this job is the configuration
+   that maps *slowest*. The rule is instead the largest F that still leaves
+   `_GROUP_MINIMUM_CONCURRENT_CALLS` (3) native calls affordable.
+
+   On the reference job this picks **F = 4 with 3 concurrent calls of 8
+   threads**, on every run, which is the configuration the sweep in step 5
+   found by hand. Interleaved against an explicit `F = 1`, three pairs:
+
+   | pair | automatic | F = 1 | ratio |
+   |---|---|---|---|
+   | 1 | 262.3 | 311.2 | 0.843 |
+   | 2 | 223.4 | 255.6 | 0.874 |
+   | 3 | 250.3 | 268.5 | 0.932 |
+
+   **0.88x**, with records at 0.657x. Note both arms are slower in absolute
+   terms than the step 5 table taken a day earlier (278 ms/frame for `F = 1`
+   against 233); the machine drifts between sessions, and only the paired
+   ratio is stable. That is the whole reason the arms are interleaved.
+
+   One case worth knowing about, pinned by a test: a **lab-frame grid**
+   measures zero travel, because Q in the lab frame does not depend on the
+   sample angles at all. Every frame reaches the same voxels, so grouping
+   helps most there and the gate correctly does not stand in the way.
+
+   What is *not* done: choosing the band height. Step 5 showed band height
+   and group size trade against each other for the same memory, and the
+   choice here takes the tiling as given. Re-tiling to afford a larger
+   group is the obvious next thing to try, and it is what would let `F = 8`
+   compete.
 
 ### Measurement noise on this machine
 

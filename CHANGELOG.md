@@ -85,8 +85,14 @@ Scientific correctness and performance fixes:
   GIL-held Python work overlaps the next call's native work instead of
   queueing behind it. Measured 0.87x the mapping wall time of the
   per-image pipeline at four images per call on a 3651-frame rotation scan.
-  Group size is not yet chosen automatically, so this path is only taken
-  when a group size is set explicitly.
+- The number of images per call is now measured per job rather than
+  configured. Grouping only helps while consecutive images land within about
+  one voxel of each other, so the job's own geometry is probed at three
+  points in the scan to decide whether it does, and the group size is then
+  the largest the memory budget can afford without giving up concurrency.
+  Scans whose angles do not advance monotonically, such as interlaced ones,
+  map one image per call as before. On a 0.1 deg/frame rotation scan this
+  chooses four images per call and maps at 0.88x the previous wall time.
 
 A ***critical bug*** was fixed that affects bulk CTR calculations:
 
