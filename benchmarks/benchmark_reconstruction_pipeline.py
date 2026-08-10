@@ -46,11 +46,13 @@ from orgui.datautils.xrayutils.reconstruction import (
     _native_module,
     _PARTIAL_COLUMNS,
 )
+import orgui.reconstruction_job as reconstruction_job
 from orgui.reconstruction_job import (
     _base_provenance,
     _correction_pipeline,
     _execution_layout,
     _frame_parallelism,
+    _group_pipeline_layout,
     _load_assets,
     _map_pending_ranges,
     read_job,
@@ -96,6 +98,21 @@ def _arguments():
             "worker's native working set, so they buy image_workers back "
             "at the same total budget rather than by raising it."
         ),
+    )
+    parser.add_argument(
+        "--compute-workers",
+        type=int,
+        default=None,
+        help=(
+            "Override the grouped scheduler's concurrent group calls. "
+            "Native threads are split evenly between them."
+        ),
+    )
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=None,
+        help="Override spec.max_depth (the job's accuracy setting).",
     )
     parser.add_argument("--scratch", type=Path)
     parser.add_argument("--output", type=Path)
@@ -211,6 +228,8 @@ def main():
     config = job.config_data
     scan = job.scan
     spec = job.internal_spec()
+    if arguments.depth is not None:
+        spec = replace(spec, max_depth=arguments.depth)
     if arguments.group != 1:
         if not hasattr(spec, "frames_per_group"):
             raise SystemExit(
@@ -305,15 +324,45 @@ def main():
         "angle_fallback": job.angle_fallback,
         "effective_memory_bytes": int(effective_memory),
         "active_budget_bytes": int(active_budget_bytes),
-        # What the memory budget affords at the I/O-optimistic seed, which
-        # is where automatic mode starts and what a larger group shrinks.
+        # What the memory budget affords. Above one frame per group the
+        # scheduler uses _group_pipeline_layout instead, which the final
+        # progress line reports; these are the per-frame pipeline's.
         "seed_image_workers": int(seed_workers),
         "seed_kernel_threads": int(seed_threads),
         "worker_memory_mb": round(worker_bytes / 1e6, 1),
+        "group_layout": (
+            list(_group_pipeline_layout(spec, tiles, effective_memory, 4))
+            if getattr(spec, "frames_per_group", 1) > 1
+            else None
+        ),
         "native": _native_module().__file__,
         "scratch": str(scratch),
     }
     print(json.dumps(header, sort_keys=True), flush=True)
+
+    if arguments.compute_workers:
+        # A benchmark-only hook. The layout is a memory decision inside
+        # the scheduler, and the point of sweeping it is to find out what
+        # that decision should be aiming at.
+        original_layout = reconstruction_job._group_pipeline_layout
+
+        def fixed_layout(spec, tiles, memory_bytes, prepare_workers):
+            _workers, _threads, depth = original_layout(
+                spec, tiles, memory_bytes, prepare_workers
+            )
+            workers = max(1, arguments.compute_workers)
+            return (
+                workers,
+                max(1, spec.threads // workers),
+                workers + max(1, depth - _workers),
+            )
+
+        reconstruction_job._group_pipeline_layout = fixed_layout
+
+    messages = []
+
+    def capture(value, maximum, message):
+        messages.append(message)
 
     started = perf_counter()
     _map_pending_ranges(
@@ -334,7 +383,7 @@ def main():
         accumulation_budget_bytes=job.accumulation_budget_bytes,
         total_images=total_images,
         completed_images=0,
-        progress=None,
+        progress=capture,
     )
     elapsed = perf_counter() - started
 
@@ -345,6 +394,7 @@ def main():
         "routed_records": routed["records"],
         "routed_records_per_frame": routed["records"] / total_images,
         "route_calls": routed["calls"],
+        "final_layout": messages[-1] if messages else None,
         "checkpoints_written": len(router.written),
         "grids": _summarize_checkpoints(checkpoint_dir, grid_names),
     }
@@ -354,9 +404,11 @@ def main():
     print(f"{total_images} frames in {elapsed:.1f} s "
           f"({total_images / elapsed:.3f} frames/s, "
           f"{elapsed / total_images * 1000:.1f} ms/frame)")
+    if messages:
+        print(f"  {messages[-1]}")
     print(f"  routed {routed['records']:,} records in {routed['calls']} calls "
           f"({routed['records'] / total_images:,.0f} per frame); "
-          f"seed layout {seed_workers} workers x {seed_threads} threads")
+          f"per-frame layout {seed_workers} workers x {seed_threads} threads")
     for grid_name, values in result["grids"].items():
         print(
             f"  {grid_name}: {values['rows']:,} rows, "
