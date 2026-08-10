@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from hashlib import sha256
 import json
 import math
@@ -32,7 +32,7 @@ from .datautils.xrayutils.reconstruction import (
     _files_per_job,
     _finalize_reconstruction,
     _kernel_threads_sweep,
-    _map_one_frame,
+    _map_frame_group,
     _tile_ray_arrays,
     _validate_mapping_setup,
 )
@@ -1517,12 +1517,30 @@ def _frame_parallelism(
         if spec.max_depth > 0
         else 128 + 2 * _CHECKPOINT_BYTES_PER_ROW
     )
-    native_memory = largest_tile_pixels * native_bytes_per_pixel
+    # A frame group is one native call over (frames, tile rows, tile
+    # columns) samples, and the kernel's own precheck is written against
+    # that sample count -- so a worker's native working set scales with
+    # the group size exactly as the tile size, and this side must scale
+    # with it too or the two would disagree in the one direction that
+    # matters (this side permissive, the kernel throwing).
+    frames_per_group = max(1, int(getattr(spec, "frames_per_group", 1)))
+    native_memory = (
+        largest_tile_pixels * frames_per_group * native_bytes_per_pixel
+    )
     # The native estimate alone misses real, per-in-flight-frame Python
     # memory: the raw decoded image plus every corrected array
     # (_PYTHON_CORRECTION_BYTES_PER_PIXEL), full-detector-sized.
+    #
+    # Only the correction half multiplies by the group size. A group
+    # holds all F corrected frames at once -- each tile is a row band, so
+    # every frame is revisited once per band and none can be released
+    # early -- but it produces one merged record batch for the whole
+    # group, not F of them, and that batch is measured at 0.575x the sum
+    # of the F it replaces. Charging the record term per frame would
+    # reserve nearly twice what a group actually holds.
     python_memory = detector_pixels * (
-        _PYTHON_CORRECTION_BYTES_PER_PIXEL + _FRAME_RECORD_BYTES_PER_PIXEL
+        frames_per_group * _PYTHON_CORRECTION_BYTES_PER_PIXEL
+        + _FRAME_RECORD_BYTES_PER_PIXEL
     )
     image_memory = native_memory + python_memory
     worker_memory = max(
@@ -1541,8 +1559,13 @@ def _frame_parallelism(
     # off the top before dividing the remaining budget among workers, the
     # same way the ray-corner cache is reserved by callers before this
     # function ever sees the budget.
+    # The queue holds groups, not frames, so a slack slot now costs a
+    # whole group's raw images.
     prefetch_reserve_bytes = (
-        _PREFETCH_QUEUE_SLACK * detector_pixels * _RAW_IMAGE_BYTES_PER_PIXEL
+        _PREFETCH_QUEUE_SLACK
+        * frames_per_group
+        * detector_pixels
+        * _RAW_IMAGE_BYTES_PER_PIXEL
     )
     usable_memory_bytes = max(
         minimum_accumulation, memory_bytes - prefetch_reserve_bytes
@@ -2179,6 +2202,80 @@ def _kernel_threads_candidates(total_threads, include=()):
     return sorted(candidates)
 
 
+def _angles_advance_monotonically(bounds, frame_indices):
+    """Whether frames adjacent in index are also adjacent in angle.
+
+    Frame grouping merges several images inside one native call on the
+    premise that consecutive frames sit next to each other in reciprocal
+    space. An interlaced scan (``orgui/backend/interlacedScanLoader.py``)
+    breaks that premise: frames adjacent in file order can be half a
+    rotation apart, and grouping them would collapse nothing while still
+    costing the group buffer. Rather than assume the scan is sequential,
+    check the angles the job actually resolved.
+
+    Every axis that moves at all across the sampled frames must move in
+    one direction only. An axis that never moves is ignored, so a scan
+    that rotates a single motor is judged on that motor alone.
+
+    :param bounds:
+        ``(len(scan), 2, 4)`` exposure angle bounds in radians.
+    :param frame_indices:
+        Frame indices in the order they would be grouped.
+    :returns:
+        ``True`` when grouping is sound for these frames.
+    :rtype: bool
+    """
+    if len(frame_indices) < 3:
+        return True
+    starts = np.asarray(bounds, dtype=np.float64)[list(frame_indices), 0]
+    steps = np.diff(starts, axis=0)
+    for axis in range(starts.shape[1]):
+        column = steps[:, axis]
+        span = float(np.ptp(starts[:, axis]))
+        if span <= 1e-9:
+            continue
+        if not (np.all(column >= -1e-12) or np.all(column <= 1e-12)):
+            return False
+    return True
+
+
+def _frame_groups(frame_range, router, grid_names, frames_per_group):
+    """Split one scheduling range into the groups mapped in one call each.
+
+    A group must be contiguous in frame index and must lie inside one
+    planned checkpoint range for *every* grid: its frames merge inside the
+    kernel and can no longer be told apart, so they have to share a
+    checkpoint. Scheduling ranges are already contiguous and free of
+    excluded frames (:func:`_included_ranges` splits on both), so the only
+    cut this has to make beyond the group size is at a checkpoint
+    boundary -- which need not align with the scheduling ranges, since the
+    two are sized independently.
+
+    :returns:
+        List of frame-index lists, each at most ``frames_per_group`` long,
+        together covering the range in order.
+    :rtype: list[list[int]]
+    """
+    start, stop = frame_range
+    size = max(1, int(frames_per_group))
+    groups = []
+    current: list[int] = []
+    previous_keys = None
+    for frame in range(start, stop):
+        keys = tuple(
+            router.checkpoint_index_for_frame(grid_name, frame)
+            for grid_name in grid_names
+        )
+        if current and (keys != previous_keys or len(current) >= size):
+            groups.append(current)
+            current = []
+        previous_keys = keys
+        current.append(frame)
+    if current:
+        groups.append(current)
+    return groups
+
+
 def _map_pending_ranges(
     spec,
     scan,
@@ -2201,9 +2298,17 @@ def _map_pending_ranges(
     A producer/consumer pipeline (design doc Sec7): a prefetch pool of
     reader threads loads images and feeds a bounded-backpressure queue; a
     pool of compute workers drains it, correcting and accumulating each
-    frame via :func:`_map_one_frame`. The reader pool adapts continuously
-    via a blocked-fraction signal (grow eagerly when compute is starved
-    for images, shrink cautiously when it isn't).
+    group of frames via :func:`_map_frame_group`. The reader pool adapts
+    continuously via a blocked-fraction signal (grow eagerly when compute
+    is starved for images, shrink cautiously when it isn't).
+
+    The unit of work is ``spec.frames_per_group`` consecutive frames
+    mapped in one native call -- one frame per group by default, which is
+    the degenerate case of the same machinery rather than a separate
+    path. Groups are cut at scheduling-range and checkpoint boundaries
+    (:func:`_frame_groups`), and dropped to one frame per group entirely
+    when the scan's angles do not advance monotonically
+    (:func:`_angles_advance_monotonically`).
 
     ``threads_per_image=None`` (Sec7 Phase 4b, "automatic") starts from an
     I/O-optimistic seed (``kernel_threads=1``, all budget as
@@ -2232,6 +2337,21 @@ def _map_pending_ranges(
     detector_tiles, bounds = _validate_mapping_setup(
         scan, config.detector, tiles, bounds, correction_pipeline
     )
+
+    frame_indices = [
+        frame_index
+        for start, stop in pending_ranges
+        for frame_index in range(start, stop)
+    ]
+    # Grouping rests on frames adjacent in index being adjacent in angle.
+    # Where they are not -- an interlaced scan -- the honest answer is one
+    # frame per call, decided here rather than assumed anywhere below.
+    frames_per_group = max(1, int(getattr(spec, "frames_per_group", 1)))
+    if frames_per_group > 1 and not _angles_advance_monotonically(
+        bounds, frame_indices
+    ):
+        frames_per_group = 1
+    spec = replace(spec, frames_per_group=frames_per_group)
 
     ray_cache_bytes = sum(
         (tile[1] - tile[0] + 1)
@@ -2297,10 +2417,13 @@ def _map_pending_ranges(
     # bounds the aggregate worker working set above.
     kernel_memory_budget = effective_memory
 
-    frame_indices = [
-        frame_index
-        for start, stop in pending_ranges
-        for frame_index in range(start, stop)
+    grid_names = [grid.grid_name for grid in spec.grids]
+    frame_groups = [
+        group
+        for frame_range in pending_ranges
+        for group in _frame_groups(
+            frame_range, router, grid_names, frames_per_group
+        )
     ]
 
     if automatic:
@@ -2340,8 +2463,14 @@ def _map_pending_ranges(
     mapped_images = completed_images
 
     work_lock = threading.Lock()
-    work_iterator = iter(frame_indices)
-    remaining = [len(frame_indices)]
+    # The unit of work is a group of frames mapped in one native call --
+    # one frame per group when frames_per_group is 1. The gate therefore
+    # bounds in-flight *groups* rather than frames: a reader loads a whole
+    # group before queueing it, so a per-frame gate would let several
+    # readers each hold a partial group and none of them make progress.
+    # _frame_parallelism reserves the queue slack in whole groups to match.
+    work_iterator = iter(frame_groups)
+    remaining = [len(frame_groups)]
     remaining_lock = threading.Lock()
     readers_done = threading.Event()
     # Successfully-read frames since the last rebalance check -- the
@@ -2362,11 +2491,19 @@ def _map_pending_ranges(
     def should_stop():
         return bool(first_exception)
 
-    def mark_frame_delivered(*, succeeded=True):
+    def mark_group_delivered(group_frames, *, succeeded=True):
+        """One group off the reader pool's plate.
+
+        ``remaining`` counts groups (the work unit), but
+        ``delivered_in_window`` stays in frames: it feeds the rebalance's
+        Little's-law rule against a sweep that reports a per-frame time,
+        and mixing the two units there would silently misprice every
+        candidate thread count.
+        """
         with remaining_lock:
             remaining[0] -= 1
             if succeeded:
-                delivered_in_window[0] += 1
+                delivered_in_window[0] += group_frames
             if remaining[0] <= 0:
                 readers_done.set()
 
@@ -2410,24 +2547,26 @@ def _map_pending_ranges(
         try:
             while not local_should_stop():
                 with work_lock:
-                    frame_index = next(work_iterator, None)
-                if frame_index is None:
+                    group = next(work_iterator, None)
+                if group is None:
                     return
                 if not gate.acquire(
                     poll_timeout=_POLL_TIMEOUT_SECONDS,
                     should_stop=abandon_should_stop,
                 ):
-                    mark_frame_delivered(succeeded=False)
+                    mark_group_delivered(len(group), succeeded=False)
                     return
                 try:
-                    image_payload = scan.get_raw_img(frame_index)
+                    image_payloads = [
+                        scan.get_raw_img(frame_index) for frame_index in group
+                    ]
                 except BaseException as exc:  # noqa: BLE001
                     gate.release()
                     record_exception(exc)
-                    mark_frame_delivered(succeeded=False)
+                    mark_group_delivered(len(group), succeeded=False)
                     return
-                ready_queue.put((frame_index, image_payload))
-                mark_frame_delivered()
+                ready_queue.put((group, image_payloads))
+                mark_group_delivered(len(group))
         except BaseException as exc:  # noqa: BLE001 -- must reach the coordinator
             record_exception(exc)
 
@@ -2464,7 +2603,7 @@ def _map_pending_ranges(
                     if retire.is_set() or pool_cancellation.is_set():
                         return
                     try:
-                        frame_index, image_payload = ready_queue.get(
+                        group, image_payloads = ready_queue.get(
                             timeout=_POLL_TIMEOUT_SECONDS
                         )
                     except Empty:
@@ -2478,22 +2617,22 @@ def _map_pending_ranges(
                     counts[1] += 1
                     gate.release()
                     try:
-                        _map_one_frame(
+                        _map_frame_group(
                             spec,
                             kernels,
                             ray_arrays,
                             detector_tiles,
                             correction_pipeline,
-                            image_payload,
-                            frame_index,
-                            np.ascontiguousarray(bounds[frame_index, 0]),
-                            np.ascontiguousarray(bounds[frame_index, 1]),
+                            image_payloads,
+                            group,
+                            np.ascontiguousarray(bounds[group, 0]),
+                            np.ascontiguousarray(bounds[group, 1]),
                             router,
                         )
                     except BaseException as exc:  # noqa: BLE001
                         record_exception(exc)
                         return
-                    progress_events.put(frame_index)
+                    progress_events.put(len(group))
             except BaseException as exc:  # noqa: BLE001
                 record_exception(exc)
         finally:
@@ -2516,19 +2655,24 @@ def _map_pending_ranges(
             deadline = time.monotonic() + _COORDINATOR_TICK_SECONDS
             while time.monotonic() < deadline:
                 try:
-                    progress_events.get(
+                    mapped_in_group = progress_events.get(
                         timeout=max(0.0, deadline - time.monotonic())
                     )
                 except Empty:
                     break
-                mapped_images += 1
+                mapped_images += mapped_in_group
                 if progress is not None:
+                    grouping = (
+                        f" x {frames_per_group} frames"
+                        if frames_per_group > 1
+                        else ""
+                    )
                     progress(
                         mapped_images,
                         total_images + 1,
                         (
                             f"Mapping images {mapped_images}/{total_images} "
-                            f"({compute_pool.size} image workers, "
+                            f"({compute_pool.size} image workers{grouping}, "
                             f"{current_kernel_threads[0]} native threads/image, "
                             f"{reader_pool.size} prefetch readers)"
                         ),
@@ -2632,7 +2776,7 @@ def _map_pending_ranges(
                             )
                             # Blocks until every straggler on the retired
                             # generation finishes its in-flight
-                            # _map_one_frame call -- a deliberate, rare
+                            # _map_frame_group call -- a deliberate, rare
                             # stall (this whole block runs at most once per
                             # rebalance interval), never abandons
                             # in-flight work.

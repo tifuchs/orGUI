@@ -13,7 +13,11 @@ from orgui.app.config_data import ConfigData
 from orgui.app.database import config_data_to_json
 from orgui.backend.scans import ScanReference, SimulationScan
 from orgui.datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
-from orgui.datautils.xrayutils.reconstruction import _GridSpec, _ReconstructionSpec
+from orgui.datautils.xrayutils.reconstruction import (
+    _CheckpointRouter,
+    _GridSpec,
+    _ReconstructionSpec,
+)
 import orgui.reconstruction_job as reconstruction_job_module
 from orgui.reconstruction_job import (
     MAX_CONCURRENT_ACTIVE_CHECKPOINTS,
@@ -23,6 +27,8 @@ from orgui.reconstruction_job import (
     _RESERVED_RECORDS_PER_PIXEL,
     ReconstructionGrid,
     ReconstructionJob,
+    _angles_advance_monotonically,
+    _frame_groups,
     _frame_parallelism,
     _node_checkpoint_plan,
     _node_excluded_frames,
@@ -820,3 +826,161 @@ def test_cluster_array_task_count_never_mutates_shared_job_json(tmp_path):
     )
 
     assert job_path.read_bytes() == frozen_job
+
+
+def test_frame_groups_cut_at_the_group_size_and_at_checkpoint_boundaries():
+    """A group is bounded by two things at once.
+
+    Its own size, and the planned checkpoint it belongs to: the frames of
+    a group merge inside the kernel and cannot be separated afterwards, so
+    a group spanning two checkpoints could not be routed to either.
+    """
+    router = _CheckpointRouter(
+        {"hkl": [(0, 5), (5, 12)]},
+        spec_digest="test",
+        checkpoint_dir="unused",
+        active_budget_bytes=1024**2,
+    )
+    groups = _frame_groups((0, 12), router, ["hkl"], 4)
+
+    assert groups == [[0, 1, 2, 3], [4], [5, 6, 7, 8], [9, 10, 11]]
+    assert [frame for group in groups for frame in group] == list(range(12))
+    assert all(len(group) <= 4 for group in groups)
+
+
+def test_frame_groups_respect_every_grid_not_only_the_first():
+    """Grids may be checkpointed on different boundaries, and a group has
+    to be routable to all of them."""
+    router = _CheckpointRouter(
+        {"hkl": [(0, 8)], "q_lab": [(0, 3), (3, 8)]},
+        spec_digest="test",
+        checkpoint_dir="unused",
+        active_budget_bytes=1024**2,
+    )
+    groups = _frame_groups((0, 8), router, ["hkl", "q_lab"], 8)
+
+    assert groups == [[0, 1, 2], [3, 4, 5, 6, 7]]
+
+
+def test_frame_groups_of_one_reproduce_the_per_frame_schedule():
+    router = _CheckpointRouter(
+        {"hkl": [(0, 4)]},
+        spec_digest="test",
+        checkpoint_dir="unused",
+        active_budget_bytes=1024**2,
+    )
+
+    assert _frame_groups((0, 4), router, ["hkl"], 1) == [[0], [1], [2], [3]]
+
+
+def test_angles_advance_monotonically_rejects_an_interlaced_order():
+    """Grouping assumes frames adjacent in index are adjacent in angle.
+
+    An interlaced scan (orgui/backend/interlacedScanLoader.py) breaks
+    that: every other frame first, then the ones between them.
+    """
+    bounds = np.zeros((8, 2, 4), dtype=np.float64)
+    sequential = np.deg2rad(0.1) * np.arange(8)
+    bounds[:, 0, 1] = sequential
+    bounds[:, 1, 1] = sequential
+
+    assert _angles_advance_monotonically(bounds, list(range(8)))
+
+    interlaced = np.concatenate([sequential[::2], sequential[1::2]])
+    bounds[:, 0, 1] = interlaced
+    bounds[:, 1, 1] = interlaced
+
+    assert not _angles_advance_monotonically(bounds, list(range(8)))
+
+
+def test_angles_advance_monotonically_ignores_axes_that_never_move():
+    """A scan rotating one motor is judged on that motor alone; the three
+    stationary angles carry floating-point noise, not direction."""
+    bounds = np.zeros((6, 2, 4), dtype=np.float64)
+    bounds[:, 0, 1] = np.deg2rad(0.1) * np.arange(6)
+    bounds[:, 1, 1] = bounds[:, 0, 1]
+    bounds[:, :, 3] = 1e-17 * np.array([1.0, -1.0, 1.0, -1.0, 1.0, -1.0])[:, None]
+
+    assert _angles_advance_monotonically(bounds, list(range(6)))
+
+
+def test_router_counts_a_group_as_all_of_its_frames(tmp_path):
+    """The checkpoint countdown and ``frames_covered`` count frames, not
+    route() calls -- a group that declared one frame would leave its
+    checkpoint permanently short and unresumable."""
+    router = _CheckpointRouter(
+        {"hkl": [(0, 6)]},
+        spec_digest="test",
+        checkpoint_dir=tmp_path / "checkpoints",
+        active_budget_bytes=1024**3,
+    )
+    batch = {
+        "chunk_id": np.array([0], dtype=np.uint32),
+        "local_voxel_id": np.array([0], dtype=np.uint32),
+        "weighted_intensity": np.array([1.0]),
+        "weighted_variance": np.array([1.0]),
+        "weight": np.array([1.0]),
+        "contributors": np.array([1], dtype=np.uint32),
+    }
+
+    router.route("hkl", 0, dict(batch), frames=3)
+    assert not router.written, "half the checkpoint's frames are still missing"
+
+    router.route("hkl", 3, dict(batch), frames=3)
+    assert len(router.written) == 1
+
+    with h5py.File(router.written[0], "r") as handle:
+        assert int(handle.attrs["frames_covered"]) == 6
+
+
+def test_router_rejects_a_group_straddling_a_checkpoint_boundary(tmp_path):
+    router = _CheckpointRouter(
+        {"hkl": [(0, 4), (4, 8)]},
+        spec_digest="test",
+        checkpoint_dir=tmp_path / "checkpoints",
+        active_budget_bytes=1024**3,
+    )
+    batch = {name: np.zeros(0) for name in ("weighted_intensity",)}
+    batch["chunk_id"] = np.zeros(0, dtype=np.uint32)
+
+    with pytest.raises(ValueError, match="straddles"):
+        router.route("hkl", 2, batch, frames=4)
+
+
+def test_frame_parallelism_charges_a_group_for_its_resident_frames():
+    """A group holds every one of its corrected frames at once, and its
+    native call covers frames x tile samples -- but it emits one merged
+    record batch, not one per frame, so only the correction term
+    multiplies."""
+    grid = _GridSpec(
+        minimum=(0.0, 0.0, 0.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(0.1, 0.1, 0.1),
+        frame="lab",
+        chunk_shape=(8, 8, 8),
+    )
+    tiles = [(0, 512, 0, 512)]
+    budget = 32 * 1024**3
+
+    def worker_bytes(frames_per_group):
+        spec = _ReconstructionSpec(
+            grids=(grid,),
+            max_depth=0,
+            threads=8,
+            frames_per_group=frames_per_group,
+        )
+        _workers, _threads, per_worker, _accumulation = _frame_parallelism(
+            spec, tiles, budget, threads_per_image=1
+        )
+        return per_worker
+
+    pixels = 512 * 512
+    native_per_pixel = 128 + 2 * 40
+    record_term = pixels * _FRAME_RECORD_BYTES_PER_PIXEL
+    for frames_per_group in (1, 2, 8):
+        expected = (
+            pixels * frames_per_group * native_per_pixel
+            + pixels * frames_per_group * _PYTHON_CORRECTION_BYTES_PER_PIXEL
+            + record_term
+        )
+        assert worker_bytes(frames_per_group) >= expected

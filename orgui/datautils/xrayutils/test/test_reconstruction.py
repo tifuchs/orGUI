@@ -24,7 +24,7 @@ from orgui.datautils.xrayutils.reconstruction import (
     _sobol_tile_origins,
     _files_per_job,
     _kernel_threads_sweep,
-    _map_one_frame,
+    _map_frame_group,
     _merge_sorted_batches,
     _reduce_batches,
     _tile_ray_arrays,
@@ -1229,7 +1229,7 @@ def _router(
     )
 
 
-def test_map_one_frame_routes_batches_and_skips_resumed_checkpoints(tmp_path):
+def test_map_frame_group_routes_batches_and_skips_resumed_checkpoints(tmp_path):
     grid = _GridSpec(
         minimum=(-1.0, -1.0, -1.0),
         maximum=(1.0, 1.0, 1.0),
@@ -1263,16 +1263,16 @@ def test_map_one_frame_routes_batches_and_skips_resumed_checkpoints(tmp_path):
 
     for frame_index in range(2):
         payload = scan.get_raw_img(frame_index)
-        _map_one_frame(
+        _map_frame_group(
             spec,
             kernels,
             ray_arrays,
             detector_tiles,
             correction,
-            payload,
-            frame_index,
-            bounds[frame_index, 0],
-            bounds[frame_index, 1],
+            [payload],
+            [frame_index],
+            bounds[frame_index : frame_index + 1, 0],
+            bounds[frame_index : frame_index + 1, 1],
             router,
         )
 
@@ -1286,7 +1286,7 @@ def test_map_one_frame_routes_batches_and_skips_resumed_checkpoints(tmp_path):
     assert written_indices == {0}
 
 
-def test_map_one_frame_corrects_once_before_tiling(tmp_path):
+def test_map_frame_group_corrects_once_before_tiling(tmp_path):
     class Detector:
         detector = type("PyfaiDetector", (), {"shape": (1, 2)})()
 
@@ -1326,18 +1326,131 @@ def test_map_one_frame_corrects_once_before_tiling(tmp_path):
     kernels = _build_kernels(spec, _FakeUB())
     payload = h5_Image(np.array([[10.0, 20.0]]))
 
-    _map_one_frame(
+    _map_frame_group(
         spec,
         kernels,
         ray_arrays,
         tiles,
         correction,
-        payload,
-        0,
-        np.zeros(4, dtype=np.float64),
-        np.zeros(4, dtype=np.float64),
+        [payload],
+        [0],
+        np.zeros((1, 4), dtype=np.float64),
+        np.zeros((1, 4), dtype=np.float64),
         router,
     )
 
     assert calls == {"frame": 1, "tile": 0}
     assert len(router.written) == 1
+
+
+class _RecordingRouter:
+    """Collects routed batches instead of writing checkpoints."""
+
+    def __init__(self):
+        self.batches = []
+        self.frames = []
+
+    def route(self, grid_name, frame_index, batch, *, frames=1):
+        self.batches.append(
+            {name: np.asarray(values) for name, values in batch.items()}
+        )
+        self.frames.append((grid_name, int(frame_index), int(frames)))
+
+
+def _totals(batches):
+    """Per-voxel contributor counts and weight, summed over batches.
+
+    Independent of how the frames were split into calls, which is exactly
+    the property a frame group must not disturb.
+    """
+    contributors: dict[tuple[int, int], int] = {}
+    weight: dict[tuple[int, int], float] = {}
+    for batch in batches:
+        for chunk, voxel, count, mass in zip(
+            batch["chunk_id"],
+            batch["local_voxel_id"],
+            batch["contributors"],
+            batch["weight"],
+        ):
+            key = (int(chunk), int(voxel))
+            contributors[key] = contributors.get(key, 0) + int(count)
+            weight[key] = weight.get(key, 0.0) + float(mass)
+    return contributors, weight
+
+
+def test_map_frame_group_reaches_the_same_voxels_as_single_frame_calls():
+    """Grouping frames must not change the answer.
+
+    It is deliberately not bit-for-bit -- several frames merge in the
+    block map rather than in the tree accumulator, so sums associate
+    differently -- so what is pinned here is what must not move: which
+    voxels were reached, and how many samples reached each of them.
+    """
+    grid = _GridSpec(
+        minimum=(-4.0, -4.0, -4.0),
+        maximum=(4.0, 4.0, 4.0),
+        step=(0.25, 0.25, 0.25),
+        frame="lab",
+        chunk_shape=(4, 4, 4),
+    )
+    frames = 4
+    scan = _FakeScan([10.0, 20.0, 30.0, 40.0])
+    detector_tiles = ((0, 1, 0, 1),)
+    ray_arrays = _tile_ray_arrays(
+        _FakeDetector(), detector_tiles, {(0, 1, 0, 1): _constant_rays(1, 1)}
+    )
+    # A rotation, so the frames land at different places in the volume and
+    # a group has something to merge rather than nothing.
+    bounds = np.zeros((frames, 2, 4), dtype=np.float64)
+    bounds[:, :, 1] = np.deg2rad(0.1) * np.arange(frames)[:, None]
+
+    def correction(payload, raw, frame, tile):
+        return (
+            raw.astype(np.float64),
+            np.maximum(raw, 0.0).astype(np.float64),
+            np.zeros(raw.shape, dtype=bool),
+        )
+
+    results = {}
+    for frames_per_group in (1, 2, 4):
+        spec = _ReconstructionSpec(
+            grids=(grid,), max_depth=0, frames_per_group=frames_per_group
+        )
+        kernels = _build_kernels(spec, _FakeUB())
+        router = _RecordingRouter()
+        for origin in range(0, frames, frames_per_group):
+            group = list(range(origin, origin + frames_per_group))
+            _map_frame_group(
+                spec,
+                kernels,
+                ray_arrays,
+                detector_tiles,
+                correction,
+                [scan.get_raw_img(index) for index in group],
+                group,
+                np.ascontiguousarray(bounds[group, 0]),
+                np.ascontiguousarray(bounds[group, 1]),
+                router,
+            )
+        # One route() call per group, each declaring its own frame count,
+        # so the checkpoint countdown still sees every frame exactly once.
+        assert sum(entry[2] for entry in router.frames) == frames
+        assert len(router.frames) == frames // frames_per_group
+        results[frames_per_group] = (
+            _totals(router.batches),
+            sum(int(batch["chunk_id"].size) for batch in router.batches),
+        )
+
+    (reference_contributors, reference_weight), reference_rows = results[1]
+    assert reference_contributors, "the fixture must reach at least one voxel"
+    for frames_per_group in (2, 4):
+        (contributors, weight), rows = results[frames_per_group]
+        assert contributors == reference_contributors
+        assert set(weight) == set(reference_weight)
+        for key, value in weight.items():
+            assert value == pytest.approx(reference_weight[key], rel=1e-12)
+        # The point of grouping: the same samples leave the kernel as
+        # fewer records, because frames sharing a voxel now merge inside
+        # one call. Without this the test would still pass if grouping
+        # silently degraded to mapping each frame on its own.
+        assert rows < reference_rows
