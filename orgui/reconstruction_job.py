@@ -2202,6 +2202,129 @@ def _kernel_threads_candidates(total_threads, include=()):
     return sorted(candidates)
 
 
+_GROUP_PIPELINE_MINIMUM_READAHEAD = 1
+"""Groups prepared *beyond* the ones being mapped.
+
+At least one, or there is no double-buffering at all: every concurrent
+call would stop dead at its group boundary while the next group is loaded
+and corrected, which is the synchronisation point that makes grouping
+lose."""
+_GROUP_PIPELINE_MAXIMUM_READAHEAD = 3
+"""More than a few groups of read-ahead buys nothing and costs the largest
+resident term in the pipeline, one full group buffer each."""
+
+
+class _GroupAssembly:
+    """One frame group being loaded and corrected, frame by frame.
+
+    Prepare workers cooperate on a single group rather than each taking a
+    whole group of their own. A group buffer is ``F`` full-detector
+    corrected frames -- the largest resident term in the pipeline -- so
+    per-worker groups would multiply it by the pool size. Frame
+    granularity keeps the number of live buffers down to the pipeline
+    depth while still spreading a group's ``F`` loads and corrections
+    across every worker in the pool.
+    """
+
+    __slots__ = ("frames", "payloads", "corrected", "_remaining", "_lock", "failed")
+
+    def __init__(self, frames):
+        self.frames = list(frames)
+        self.payloads = [None] * len(self.frames)
+        self.corrected = [None] * len(self.frames)
+        self._remaining = len(self.frames)
+        self._lock = threading.Lock()
+        self.failed = False
+
+    def complete_one(self, *, failed=False) -> bool:
+        """Record one frame finished. ``True`` when the group is whole."""
+        with self._lock:
+            if failed:
+                self.failed = True
+            self._remaining -= 1
+            return self._remaining <= 0
+
+
+def _group_pipeline_layout(spec, tiles, memory_bytes, prepare_workers):
+    """Concurrent group calls, native threads each, and read-ahead depth.
+
+    The grouped scheduler spends its memory differently from the
+    per-frame one. There, every concurrent frame carried its own native
+    working set *and* its own record batch, so the budget bought
+    ``image_workers`` directly. Here the budget is split three ways:
+    concurrent group calls, the read-ahead buffer in front of them, and
+    the prepare pool's own transients.
+
+    One concurrent call with every thread was the design's first guess
+    and it measured badly -- three calls of eight threads beat one call
+    of twenty-four by 1.38x on real data at four frames per group. A
+    group call has thousands of bricks, so the thread budget is not
+    limited by work available to hand out; it is limited by what the call
+    does around the parallel region. Concurrency therefore still has to
+    be bought, exactly as it did before grouping, and this decides how
+    much of it the budget affords.
+
+    :param int prepare_workers:
+        Prepare pool size. Each worker holds one raw image and one
+        corrected frame while it works, independently of the group
+        buffers those frames land in.
+    :returns:
+        ``(compute_workers, kernel_threads, pipeline_depth)``.
+    :rtype: tuple[int, int, int]
+    """
+    tiles = list(tiles)
+    tile_pixels = [
+        (row_stop - row_start) * (column_stop - column_start)
+        for row_start, row_stop, column_start, column_stop in tiles
+    ]
+    if not tile_pixels:
+        return (
+            1,
+            max(1, int(spec.threads)),
+            1 + _GROUP_PIPELINE_MINIMUM_READAHEAD,
+        )
+    detector_pixels = sum(tile_pixels)
+    frames_per_group = max(1, int(getattr(spec, "frames_per_group", 1)))
+    native_bytes_per_pixel = (
+        128 + 2 * _RESERVED_RECORDS_PER_PIXEL * _CHECKPOINT_BYTES_PER_ROW
+        if spec.max_depth > 0
+        else 128 + 2 * _CHECKPOINT_BYTES_PER_ROW
+    )
+    # Per concurrent group call: its native working set over the largest
+    # tile times the group size, plus the merged record batch it builds.
+    call_bytes = (
+        max(tile_pixels) * frames_per_group * native_bytes_per_pixel
+        + detector_pixels * _FRAME_RECORD_BYTES_PER_PIXEL
+    )
+    group_buffer_bytes = max(
+        1, frames_per_group * detector_pixels * _PYTHON_CORRECTION_BYTES_PER_PIXEL
+    )
+    prepare_bytes = max(1, int(prepare_workers)) * detector_pixels * (
+        _RAW_IMAGE_BYTES_PER_PIXEL + _PYTHON_CORRECTION_BYTES_PER_PIXEL
+    )
+    spare = max(0, int(memory_bytes) - prepare_bytes)
+    # Every concurrent call needs a group buffer to read from, and the
+    # read-ahead sits on top of that -- so a worker costs both terms.
+    per_worker_bytes = call_bytes + group_buffer_bytes
+    compute_workers = max(
+        1,
+        min(
+            max(1, int(spec.threads)),
+            spare // max(1, per_worker_bytes),
+        ),
+    )
+    kernel_threads = max(1, int(spec.threads) // compute_workers)
+    remaining = spare - compute_workers * per_worker_bytes
+    pipeline_depth = compute_workers + max(
+        _GROUP_PIPELINE_MINIMUM_READAHEAD,
+        min(
+            _GROUP_PIPELINE_MAXIMUM_READAHEAD,
+            remaining // group_buffer_bytes,
+        ),
+    )
+    return compute_workers, kernel_threads, pipeline_depth
+
+
 def _angles_advance_monotonically(bounds, frame_indices):
     """Whether frames adjacent in index are also adjacent in angle.
 
@@ -2276,6 +2399,315 @@ def _frame_groups(frame_range, router, grid_names, frames_per_group):
     return groups
 
 
+def _map_frame_groups_streamed(
+    spec,
+    scan,
+    config,
+    bounds,
+    detector_tiles,
+    ray_arrays,
+    frame_groups,
+    router,
+    *,
+    correction_pipeline,
+    kernel_memory_budget,
+    compute_workers,
+    kernel_threads,
+    pipeline_depth,
+    prepare_workers,
+    maximum_prepare_workers,
+    total_images,
+    completed_images,
+    progress,
+):
+    """Map frame groups with one all-threads native call at a time.
+
+    The scheduler the per-frame pipeline uses answers a question frame
+    grouping dissolves. There, one frame's kernel call could not
+    profitably use every thread, so the budget was split jointly between
+    ``image_workers`` and ``kernel_threads`` and rebalanced live. A group
+    call has thousands of bricks and saturates the thread budget on its
+    own, so there is nothing left to split: ``kernel_threads`` is pinned
+    at the budget and exactly one group is mapped at a time.
+
+    What replaces the joint balance is a simpler question -- how many
+    workers it takes to keep that one call fed. Loading and correcting a
+    frame is GIL-held Python; mapping is not. So correction moves out of
+    the compute worker and into the prepare pool, where group N+1's
+    Python work overlaps group N's native call instead of queueing behind
+    it. Without that move a group is a hard synchronisation point and the
+    pipeline stalls once per group, which is what made grouping lose
+    end-to-end even while it cut records by 40%.
+
+    The pool is sized the same way the reader pool always was, by the
+    blocked fraction the compute worker measures: grow eagerly when it is
+    starved, shrink cautiously when it is not. That signal now steers
+    load *and* correction together, which is the whole per-frame Python
+    cost rather than only its I/O half.
+
+    Mutates ``router`` in place; returns nothing.
+
+    :param int compute_workers:
+        Concurrent group calls.
+    :param int kernel_threads:
+        Native threads per call.
+    :param int pipeline_depth:
+        Groups that may be resident at once
+        (:func:`_group_pipeline_layout`).
+    :param int prepare_workers:
+        Initial prepare pool size.
+    :param int maximum_prepare_workers:
+        Ceiling for the pool, one when the scan cannot be read
+        concurrently.
+    """
+    frame_correction = getattr(correction_pipeline, "correct_frame", None)
+    corrects_whole_frame = callable(frame_correction)
+
+    progress_events = SimpleQueue()
+    frame_queue = SimpleQueue()
+    ready_queue = SimpleQueue()
+    gate = _BoundedGate(pipeline_depth)
+    dispatch_done = threading.Event()
+    mapped_images = completed_images
+
+    counter_lock = threading.Lock()
+    dispatched = [0]
+    completed = [0]
+
+    exception_lock = threading.Lock()
+    first_exception: list[BaseException] = []
+
+    def record_exception(exc):
+        with exception_lock:
+            if not first_exception:
+                first_exception.append(exc)
+
+    def should_stop():
+        return bool(first_exception)
+
+    def all_groups_retired():
+        with counter_lock:
+            return dispatch_done.is_set() and completed[0] >= dispatched[0]
+
+    def dispatch_loop(cancellation):
+        """Hand out one group's frames at a time, under the gate.
+
+        Issuing every group's frames up front would let the pool spread
+        itself over all of them and hold a group buffer for each. The
+        gate is acquired per group and released when that group has been
+        mapped, so the number of live buffers is the pipeline depth and
+        nothing else.
+        """
+        def stop_waiting():
+            return cancellation.is_set() or should_stop()
+
+        try:
+            for group in frame_groups:
+                if stop_waiting():
+                    break
+                if not gate.acquire(
+                    poll_timeout=_POLL_TIMEOUT_SECONDS,
+                    should_stop=stop_waiting,
+                ):
+                    break
+                assembly = _GroupAssembly(group)
+                with counter_lock:
+                    dispatched[0] += 1
+                for slot in range(len(group)):
+                    frame_queue.put((assembly, slot))
+        except BaseException as exc:  # noqa: BLE001 -- must reach the coordinator
+            record_exception(exc)
+        finally:
+            dispatch_done.set()
+
+    def prepare_loop(retire, cancellation):
+        """Load and correct one frame per item, into its group's slot.
+
+        Exits only between items, never mid-frame: a claimed slot must be
+        completed one way or the other, since its group can never become
+        whole otherwise and the coordinator would wait forever for a
+        group that no one is still working on.
+        """
+        try:
+            while True:
+                if retire.is_set() or cancellation.is_set():
+                    return
+                try:
+                    assembly, slot = frame_queue.get(
+                        timeout=_POLL_TIMEOUT_SECONDS
+                    )
+                except Empty:
+                    if dispatch_done.is_set() and frame_queue.empty():
+                        return
+                    continue
+                failed = False
+                if should_stop():
+                    # Drain without doing the work: the group still has to
+                    # complete so the compute side can retire it and
+                    # release its gate slot.
+                    failed = True
+                else:
+                    frame_index = assembly.frames[slot]
+                    try:
+                        payload = scan.get_raw_img(frame_index)
+                        if corrects_whole_frame:
+                            assembly.corrected[slot] = frame_correction(
+                                payload, np.asarray(payload.img), frame_index
+                            )
+                        else:
+                            assembly.payloads[slot] = payload
+                    except BaseException as exc:  # noqa: BLE001
+                        record_exception(exc)
+                        failed = True
+                if assembly.complete_one(failed=failed):
+                    ready_queue.put(assembly)
+        except BaseException as exc:  # noqa: BLE001
+            record_exception(exc)
+
+    blocked_counts: dict[int, list[int]] = {}
+    blocked_counts_lock = threading.Lock()
+
+    def compute_loop(retire, cancellation):
+        counts = [0, 0]  # [blocked, total], only this thread ever writes
+        with blocked_counts_lock:
+            blocked_counts[id(counts)] = counts
+        try:
+            try:
+                kernels = _build_kernels(
+                    spec,
+                    config.ub_calculator,
+                    threads=kernel_threads,
+                    memory_budget_bytes=kernel_memory_budget,
+                )
+                while True:
+                    if retire.is_set() or cancellation.is_set():
+                        return
+                    try:
+                        assembly = ready_queue.get(
+                            timeout=_POLL_TIMEOUT_SECONDS
+                        )
+                    except Empty:
+                        counts[0] += 1
+                        counts[1] += 1
+                        if all_groups_retired() and ready_queue.empty():
+                            return
+                        continue
+                    counts[1] += 1
+                    try:
+                        if not assembly.failed:
+                            group = assembly.frames
+                            _map_frame_group(
+                                spec,
+                                kernels,
+                                ray_arrays,
+                                detector_tiles,
+                                correction_pipeline,
+                                None if corrects_whole_frame else assembly.payloads,
+                                group,
+                                np.ascontiguousarray(bounds[group, 0]),
+                                np.ascontiguousarray(bounds[group, 1]),
+                                router,
+                                corrected_frames=(
+                                    assembly.corrected
+                                    if corrects_whole_frame
+                                    else None
+                                ),
+                            )
+                    except BaseException as exc:  # noqa: BLE001
+                        record_exception(exc)
+                    finally:
+                        # Drop the group buffer before releasing its slot,
+                        # so the gate bounds what is actually resident
+                        # rather than what has merely been claimed.
+                        assembly.corrected = []
+                        assembly.payloads = []
+                        with counter_lock:
+                            completed[0] += 1
+                        gate.release()
+                    if not assembly.failed:
+                        progress_events.put(len(assembly.frames))
+            except BaseException as exc:  # noqa: BLE001
+                record_exception(exc)
+        finally:
+            with blocked_counts_lock:
+                blocked_counts.pop(id(counts), None)
+
+    dispatch_cancellation = threading.Event()
+    dispatcher = threading.Thread(
+        target=dispatch_loop,
+        args=(dispatch_cancellation,),
+        name="orgui-rsmap-dispatch",
+        daemon=True,
+    )
+    dispatcher.start()
+    prepare_pool = _AdjustablePool(
+        prepare_loop, initial_size=prepare_workers, name="orgui-rsmap-prepare"
+    )
+    compute_pool = _AdjustablePool(
+        compute_loop, initial_size=compute_workers, name="orgui-rsmap-compute"
+    )
+    previous_blocked = 0
+    previous_total = 0
+    try:
+        while True:
+            deadline = time.monotonic() + _COORDINATOR_TICK_SECONDS
+            while time.monotonic() < deadline:
+                try:
+                    mapped_in_group = progress_events.get(
+                        timeout=max(0.0, deadline - time.monotonic())
+                    )
+                except Empty:
+                    break
+                mapped_images += mapped_in_group
+                if progress is not None:
+                    progress(
+                        mapped_images,
+                        total_images + 1,
+                        (
+                            f"Mapping images {mapped_images}/{total_images} "
+                            f"({spec.frames_per_group} frames/call, "
+                            f"{compute_pool.size} concurrent calls x "
+                            f"{kernel_threads} native threads, "
+                            f"{prepare_pool.size} prepare workers)"
+                        ),
+                    )
+            with blocked_counts_lock:
+                blocked = sum(counts[0] for counts in blocked_counts.values())
+                total = sum(counts[1] for counts in blocked_counts.values())
+            window_blocked = max(0, blocked - previous_blocked)
+            window_total = max(0, total - previous_total)
+            previous_blocked, previous_total = blocked, total
+            if window_total > 0 and not all_groups_retired() and not first_exception:
+                blocked_fraction = window_blocked / window_total
+                if blocked_fraction > _BLOCKED_FRACTION_GROW:
+                    prepare_pool.retarget(
+                        min(maximum_prepare_workers, prepare_pool.size + 2)
+                    )
+                elif (
+                    blocked_fraction < _BLOCKED_FRACTION_SHRINK
+                    and prepare_pool.size > 1
+                ):
+                    prepare_pool.retarget(prepare_pool.size - 1)
+            prepare_pool.reap()
+            compute_pool.reap()
+            with blocked_counts_lock:
+                still_computing = bool(blocked_counts)
+            if not still_computing and (all_groups_retired() or first_exception):
+                # The second condition is not redundant. A compute worker
+                # that dies -- building its kernels, or on a mapping
+                # failure -- leaves dispatched groups that nothing will
+                # ever complete, so waiting for the counters to agree
+                # would hang here forever instead of raising.
+                break
+        if first_exception:
+            raise first_exception[0]
+    finally:
+        dispatch_cancellation.set()
+        dispatcher.join(timeout=_POLL_TIMEOUT_SECONDS * 10)
+        prepare_pool.shutdown(wait=True)
+        compute_pool.shutdown(wait=True)
+
+
 def _map_pending_ranges(
     spec,
     scan,
@@ -2310,14 +2742,21 @@ def _map_pending_ranges(
     when the scan's angles do not advance monotonically
     (:func:`_angles_advance_monotonically`).
 
-    ``threads_per_image=None`` (Sec7 Phase 4b, "automatic") starts from an
-    I/O-optimistic seed (``kernel_threads=1``, all budget as
-    ``image_workers``) and periodically rebalances ``kernel_threads``/
-    ``image_workers`` live against a measured frame-delivery rate (every
-    ``_REBALANCE_INITIAL_SECONDS``, backing off while nothing
-    changes), via a wall-clock
-    ``_kernel_threads_sweep`` and the design doc's joint-balancing rule.
-    A concrete ``threads_per_image`` int keeps the static,
+    Above one frame per group the whole scheduling question changes, and
+    :func:`_map_frame_groups_streamed` answers the new one instead: a
+    group call saturates the thread budget by itself, so there is no pair
+    left to balance, and what matters is keeping that one call fed. See
+    its docstring.
+
+    At one frame per group the joint balance still applies, and is
+    unchanged. ``threads_per_image=None`` (Sec7 Phase 4b, "automatic")
+    starts from an I/O-optimistic seed (``kernel_threads=1``, all budget
+    as ``image_workers``) and periodically rebalances
+    ``kernel_threads``/``image_workers`` live against a measured
+    frame-delivery rate (every ``_REBALANCE_INITIAL_SECONDS``, backing off
+    while nothing changes), via a wall-clock ``_kernel_threads_sweep`` and
+    the design doc's joint-balancing rule. A concrete
+    ``threads_per_image`` int keeps the static,
     ``_frame_parallelism``-derived pair fixed for the whole run (today's
     Phase 4a behavior, unchanged) -- the explicit override escape hatch.
 
@@ -2426,6 +2865,38 @@ def _map_pending_ranges(
         )
     ]
 
+    max_readers = (
+        _PREFETCH_POOL_MAX
+        if getattr(scan, "supports_concurrent_read", True)
+        else 1
+    )
+    if frames_per_group > 1:
+        seed_prepare_workers = min(_PREFETCH_POOL_INITIAL, max_readers)
+        group_workers, group_threads, group_depth = _group_pipeline_layout(
+            spec, tiles, scheduler_memory, seed_prepare_workers
+        )
+        _map_frame_groups_streamed(
+            spec,
+            scan,
+            config,
+            bounds,
+            detector_tiles,
+            ray_arrays,
+            frame_groups,
+            router,
+            correction_pipeline=correction_pipeline,
+            kernel_memory_budget=effective_memory,
+            compute_workers=group_workers,
+            kernel_threads=group_threads,
+            pipeline_depth=group_depth,
+            prepare_workers=seed_prepare_workers,
+            maximum_prepare_workers=max_readers,
+            total_images=total_images,
+            completed_images=completed_images,
+            progress=progress,
+        )
+        return
+
     if automatic:
         # A single representative tile/frame is enough for the sweep: it
         # measures kernel_threads scaling behavior (thread-count
@@ -2450,11 +2921,6 @@ def _map_pending_ranges(
             for row_start, row_stop, column_start, column_stop in detector_tiles
         )
 
-    max_readers = (
-        _PREFETCH_POOL_MAX
-        if getattr(scan, "supports_concurrent_read", True)
-        else 1
-    )
     reader_pool_size = min(_PREFETCH_POOL_INITIAL, max_readers)
 
     progress_events = SimpleQueue()

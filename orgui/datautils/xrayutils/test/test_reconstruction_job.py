@@ -1,5 +1,6 @@
 """End-to-end tests for the centralized reconstruction job."""
 
+import dataclasses
 from hashlib import sha256
 import json
 import threading
@@ -30,6 +31,7 @@ from orgui.reconstruction_job import (
     _angles_advance_monotonically,
     _frame_groups,
     _frame_parallelism,
+    _group_pipeline_layout,
     _node_checkpoint_plan,
     _node_excluded_frames,
     job_status,
@@ -984,3 +986,134 @@ def test_frame_parallelism_charges_a_group_for_its_resident_frames():
             + record_term
         )
         assert worker_bytes(frames_per_group) >= expected
+
+
+def _map_with_group_size(tmp_path, frames_per_group, frame_count=8):
+    """Map one range end to end at a given group size; return its output.
+
+    Goes through _map_pending_ranges, so above one frame per group this
+    exercises the streamed scheduler in full -- dispatcher, prepare pool,
+    compute pool and gate -- rather than _map_frame_group alone.
+    """
+    root = tmp_path / f"group{frames_per_group}"
+    root.mkdir()
+    scan, job = _multi_frame_job(root, "result.h5", frame_count)
+    # One checkpoint over every frame, so groups are cut by their own size
+    # rather than by a boundary between every pair of frames.
+    job.checkpoint_plan = {"q_lab": [[0, frame_count]]}
+    config = job.config_data
+    spec = dataclasses.replace(
+        job.internal_spec(), frames_per_group=frames_per_group
+    )
+    boundaries = {"q_lab": [(0, frame_count)]}
+    checkpoint_dir = root / "checkpoints"
+    router = _CheckpointRouter(
+        boundaries,
+        spec_digest=job.digest,
+        checkpoint_dir=checkpoint_dir,
+        active_budget_bytes=64 * 1024**2,
+    )
+    reconstruction_job_module._map_pending_ranges(
+        spec,
+        scan,
+        config,
+        scan.exposure_angle_bounds(config, fallback=job.angle_fallback),
+        [(0, 2, 0, 2)],
+        [(0, frame_count)],
+        router,
+        correction_pipeline=reconstruction_job_module._correction_pipeline(
+            config, scan, reconstruction_job_module._load_assets(job), {}
+        ),
+        effective_memory=64 * 1024**2,
+        threads_per_image=1,
+        accumulation_budget_bytes=None,
+        total_images=frame_count,
+        completed_images=0,
+        progress=None,
+    )
+    contributors: dict[tuple[int, int], int] = {}
+    frames_covered = 0
+    for path in sorted(checkpoint_dir.glob("q_lab/ckpt*.h5")):
+        with h5py.File(path, "r") as handle:
+            frames_covered += int(handle.attrs["frames_covered"])
+            for chunk, voxel, count in zip(
+                handle["chunk_id"][:],
+                handle["local_voxel_id"][:],
+                handle["contributors"][:],
+            ):
+                key = (int(chunk), int(voxel))
+                contributors[key] = contributors.get(key, 0) + int(count)
+    return frames_covered, contributors
+
+
+def test_streamed_group_scheduler_matches_the_per_frame_pipeline(tmp_path):
+    """The grouped scheduler is a different pipeline -- one all-threads
+    call at a time, correction hoisted into the prepare pool -- so it has
+    to be shown to produce the per-frame pipeline's answer, not just to
+    run."""
+    frames_covered, reference = _map_with_group_size(tmp_path, 1)
+    assert frames_covered == 8
+    assert reference, "the fixture must reach at least one voxel"
+
+    for frames_per_group in (2, 4):
+        covered, contributors = _map_with_group_size(
+            tmp_path, frames_per_group
+        )
+        # Every frame is still counted exactly once, which is what makes
+        # the checkpoint resumable.
+        assert covered == 8
+        assert contributors == reference
+
+
+def test_group_pipeline_layout_trades_concurrency_for_group_size():
+    """A group buffer and a group's native working set both scale with the
+    group size, so a larger group buys read-ahead out of concurrency. The
+    thread budget is then split between whatever concurrency survives."""
+    grid = _GridSpec(
+        minimum=(0.0, 0.0, 0.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(0.1, 0.1, 0.1),
+        frame="lab",
+        chunk_shape=(8, 8, 8),
+    )
+    tiles = [(0, 256, 0, 1024), (256, 512, 0, 1024)]
+    budget = 8 * 1024**3
+    previous_workers = None
+    for frames_per_group in (1, 2, 4, 8, 16):
+        spec = _ReconstructionSpec(
+            grids=(grid,),
+            max_depth=0,
+            threads=24,
+            frames_per_group=frames_per_group,
+        )
+        workers, threads, depth = _group_pipeline_layout(spec, tiles, budget, 4)
+        assert workers >= 1
+        assert threads >= 1
+        assert workers * threads <= 24
+        # Always at least one group of read-ahead beyond the calls in
+        # flight, or there is no double-buffering and every call stalls at
+        # its group boundary.
+        assert depth > workers
+        if previous_workers is not None:
+            assert workers <= previous_workers
+        previous_workers = workers
+
+
+def test_group_pipeline_layout_never_returns_zero_workers_on_a_tiny_budget():
+    grid = _GridSpec(
+        minimum=(0.0, 0.0, 0.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(0.1, 0.1, 0.1),
+        frame="lab",
+        chunk_shape=(8, 8, 8),
+    )
+    spec = _ReconstructionSpec(
+        grids=(grid,), max_depth=0, threads=8, frames_per_group=16
+    )
+
+    workers, threads, depth = _group_pipeline_layout(
+        spec, [(0, 2048, 0, 2048)], 1024**2, 4
+    )
+
+    assert (workers, threads) == (1, 8)
+    assert depth > workers

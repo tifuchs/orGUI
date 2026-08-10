@@ -1494,6 +1494,8 @@ def _map_frame_group(
     angles_start: np.ndarray,
     angles_end: np.ndarray,
     router: _CheckpointRouter,
+    *,
+    corrected_frames: Sequence[tuple] | None = None,
 ) -> None:
     """Process one already-loaded group of frames: correction, per-tile-
     per-grid kernel accumulate, merge, and route.
@@ -1522,17 +1524,24 @@ def _map_frame_group(
     rounding, and about 3.4% fewer records from the better block shape.
 
     The correction pipeline's whole-frame ``correct_frame`` step (pixel
-    repair, static factors) runs here, in the compute worker, not in the
-    prefetch reader -- it is CPU-bound work that belongs inside the
-    ``image_workers``/``kernel_threads`` thread budget, not hidden inside
-    I/O-rate bookkeeping the reader pool's blocked-fraction signal
-    depends on staying clean.
+    repair, static factors) runs here by default, in the compute worker.
+    Pass ``corrected_frames`` to have it run somewhere else instead: the
+    grouped scheduler corrects in its prepare pool, so that the GIL-held
+    Python work of group N+1 overlaps group N's native call rather than
+    queueing behind it. A pipeline with no ``correct_frame`` corrects per
+    tile here either way, since there is nothing whole-frame to hoist.
 
     :param image_payloads:
-        Loaded payloads, one per frame in the group, in frame order.
+        Loaded payloads, one per frame in the group, in frame order. May
+        be ``None`` when ``corrected_frames`` supplies the arrays and the
+        pipeline has a ``correct_frame`` step, since the raw images are
+        then no longer needed and are better released.
     :param frame_indices:
         The group's frame indices: contiguous, ascending, all inside one
         checkpoint range per grid.
+    :param corrected_frames:
+        Optional pre-corrected ``(intensity, variance, mask)`` triples,
+        one per frame, each full-detector sized.
     :param angles_start:
         ``(frames, 4)`` exposure-start diffractometer angles, radians.
     :param angles_end:
@@ -1541,22 +1550,23 @@ def _map_frame_group(
         per frame, so a group may mix the two.
     """
     frame_indices = [int(index) for index in frame_indices]
-    images = [np.asarray(payload.img) for payload in image_payloads]
+    images = (
+        [np.asarray(payload.img) for payload in image_payloads]
+        if image_payloads is not None
+        else [None] * len(frame_indices)
+    )
     frame_correction = getattr(correction_pipeline, "correct_frame", None)
     # The whole group's corrected frames stay resident until every tile
     # has been mapped: a tile is a row band of the detector, so each
     # frame is revisited once per band. This is the group buffer, and it
     # is what _frame_parallelism sizes a compute worker against.
-    corrected_frames = (
-        [
+    if corrected_frames is None and callable(frame_correction):
+        corrected_frames = [
             frame_correction(payload, image, frame_index)
             for payload, image, frame_index in zip(
                 image_payloads, images, frame_indices
             )
         ]
-        if callable(frame_correction)
-        else None
-    )
     # Collect every tile's contribution per grid, then route exactly once
     # per (group, grid) -- the router's remaining-frame countdown
     # (Sec9/Sec10) counts frames, so a multi-tile group must be merged
