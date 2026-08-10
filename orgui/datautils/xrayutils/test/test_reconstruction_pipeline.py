@@ -476,9 +476,12 @@ def test_map_pending_ranges_automatic_mode_rebalances_and_stays_stable(
     written = _read_checkpoint(router.written[0])
     assert int(written["contributors"].sum()) == frame_count
 
-    # Exactly one swap: the automatic-mode seed pool, then one
-    # kernel_threads=4-sized replacement -- despite many rebalance ticks
-    # (a 60-frame, 5ms-per-read run against a 0.02s interval spans well
-    # over a dozen), the second and later checks must not swap again once
-    # converged.
-    assert len(compute_pool_sizes) == 2
+    # Stability, not churn: despite many rebalance ticks (this run spans
+    # well over a dozen), automatic mode must settle and stay settled. It
+    # may take at most one swap to get there -- and takes none when the
+    # seed already sizes kernel_threads from how many frames memory
+    # affords, which for this single-range, single-pixel-tile setup is
+    # the whole thread budget on one worker, exactly what the rebalance
+    # would otherwise converge to.
+    assert len(compute_pool_sizes) <= 2
+    assert len(set(compute_pool_sizes)) == len(compute_pool_sizes)

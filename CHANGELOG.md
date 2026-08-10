@@ -435,6 +435,17 @@ Reciprocal-space reconstruction:
   every leaf of every subdivided pixel reaches a distinct voxel -- so a
   large block at a deep accuracy setting could ask for tens of gigabytes
   per worker thread.
+- Automatic ``Native threads per image`` now starts from how many frames
+  the memory budget can actually hold in flight, instead of always
+  starting at one thread per image. The two are linked: the budget caps
+  concurrent frames, so one native thread each can leave most of the
+  thread budget idle -- five threads of twenty-four at ``balanced``
+  accuracy on a real job. Mapping ran 1.85x slower than it needed to, and
+  the live rebalance only corrects this after its first interval, which
+  outlasts many jobs. Measured at ``balanced`` accuracy, automatic mode
+  goes from 0.77 to 1.30 frames per second, within 2% of the best fixed
+  setting; ``center`` accuracy is unchanged, where it was already the
+  fastest choice available.
 - Fixed reciprocal-space mapping exceeding the memory budget it was
   given. Two things claimed most of the budget independently: the frame
   pipeline sized its worker pool so that concurrent frames alone could

@@ -2224,40 +2224,55 @@ def _map_pending_ranges(
         config.detector, detector_tiles, ray_cache if cache_detector_rays else None
     )
 
-    worker_limits = []
-    kernel_thread_limits = []
     scheduler_memory = max(
         1024**2,
         effective_memory - (ray_cache_bytes if cache_detector_rays else 0),
     )
-    for frame_range in pending_ranges:
-        task_bounds = bounds[frame_range[0] : frame_range[1]]
-        stationary = bool(
-            np.array_equal(task_bounds[:, 0], task_bounds[:, 1])
-        )
-        image_limit, native_threads, _worker_memory, _accumulation_limit = (
-            _frame_parallelism(
-                spec,
-                tiles,
-                scheduler_memory,
-                stationary=stationary,
-                frames_per_task=frame_range[1] - frame_range[0],
-                threads_per_image=seed_threads_per_image,
-                accumulation_budget_bytes=accumulation_budget_bytes,
+    def layout_for(threads_per_image_seed):
+        """Worker count and native threads this seed would run with."""
+        workers = []
+        natives = []
+        for frame_range in pending_ranges:
+            task_bounds = bounds[frame_range[0] : frame_range[1]]
+            stationary = bool(
+                np.array_equal(task_bounds[:, 0], task_bounds[:, 1])
             )
+            image_limit, native_threads, _worker_memory, _accumulation_limit = (
+                _frame_parallelism(
+                    spec,
+                    tiles,
+                    scheduler_memory,
+                    stationary=stationary,
+                    frames_per_task=frame_range[1] - frame_range[0],
+                    threads_per_image=threads_per_image_seed,
+                    accumulation_budget_bytes=accumulation_budget_bytes,
+                )
+            )
+            workers.append(image_limit)
+            natives.append(native_threads)
+        return (
+            min(len(pending_ranges), min(workers)) if workers else 1,
+            min(natives) if natives else 1,
         )
-        worker_limits.append(image_limit)
-        kernel_thread_limits.append(native_threads)
-    image_workers = (
-        min(len(pending_ranges), min(worker_limits)) if worker_limits else 1
-    )
+
+    if automatic:
+        # Seed from how many frames can actually be in flight, not from
+        # one native thread each. The memory budget caps concurrent
+        # frames, and giving each a single thread then leaves most of the
+        # thread budget idle -- five of twenty-four at balanced accuracy
+        # on a real job, measured 1.85x slower than using them all. The
+        # live rebalance would eventually find this, but not before its
+        # first interval, which outlasts many jobs.
+        affordable_workers, _seed_threads = layout_for(1)
+        seed_threads_per_image = max(
+            1, math.ceil(spec.threads / max(1, affordable_workers))
+        )
+    image_workers, seed_kernel_threads = layout_for(seed_threads_per_image)
     # A mutable box: read by compute_loop at each worker's kernel-build
     # time (not closed over as a plain value), so an automatic-mode
     # kernel_threads change only affects newly-spawned compute workers --
     # see the rebalance block in the coordinator loop below.
-    current_kernel_threads = [
-        min(kernel_thread_limits) if kernel_thread_limits else 1
-    ]
+    current_kernel_threads = [seed_kernel_threads]
     # The native budget is a per-call guard. The scheduler independently
     # bounds the aggregate worker working set above.
     kernel_memory_budget = effective_memory
