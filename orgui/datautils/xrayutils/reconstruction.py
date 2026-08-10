@@ -756,6 +756,7 @@ def _kernel_threads_sweep(
     *,
     candidates,
     tile_pixels=1_048_576,
+    frame_pixels=None,
     memory_budget_bytes=None,
     plateau_ratio=0.9,
 ):
@@ -799,14 +800,31 @@ def _kernel_threads_sweep(
         least this fraction of the previous candidate's time (diminishing
         returns). Later, unmeasured candidates are not claimed to be
         faster: they simply inherit the last measured time.
+    :param frame_pixels:
+        Total pixels one frame maps, across every detector tile. The
+        sample tile is a fraction of a frame -- and is clamped to the
+        detector besides -- so a caller reasoning about how many frames
+        can be in flight needs the time to map a whole one, not one
+        sample tile. Given this, results are scaled to a whole frame;
+        omitted, they stay per sample tile.
     :returns:
         Dict keyed by ``kernel_threads`` (every requested candidate,
-        including unmeasured ones past the plateau), values are measured
-        (or inherited) wall-clock seconds for one call at ``tile_pixels``.
+        including unmeasured ones past the plateau), values are wall-clock
+        seconds to map one frame when ``frame_pixels`` is given, or one
+        ``tile_pixels`` call otherwise.
     :rtype: dict[int, float]
     """
     rows, columns = mask.shape
     tile_side = max(1, min(int(math.sqrt(tile_pixels)), rows, columns))
+    # Scale from what was actually measured, not from the requested tile
+    # size: the sample tile is clamped to the detector, so on a small
+    # detector the two differ.
+    sampled_pixels = tile_side * tile_side
+    frame_scale = (
+        1.0
+        if frame_pixels is None
+        else max(1.0, float(frame_pixels) / max(1, sampled_pixels))
+    )
     tile_mask = np.ascontiguousarray(mask[:tile_side, :tile_side])
     tile_rays = np.ascontiguousarray(
         corner_rays[: tile_side + 1, : tile_side + 1]
@@ -819,7 +837,7 @@ def _kernel_threads_sweep(
     plateaued = False
     for kernel_threads in candidates:
         if plateaued:
-            results[kernel_threads] = last_measured_time
+            results[kernel_threads] = last_measured_time * frame_scale
             continue
         kernel = _kernel_for_grid(
             spec,
@@ -834,7 +852,7 @@ def _kernel_threads_sweep(
             angles_start, angles_end, True,
         )
         elapsed = time.perf_counter() - started
-        results[kernel_threads] = elapsed
+        results[kernel_threads] = elapsed * frame_scale
         if (
             last_measured_time is not None
             and last_measured_time > 0

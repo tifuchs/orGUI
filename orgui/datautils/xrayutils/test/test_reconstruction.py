@@ -1018,6 +1018,59 @@ def test_calibration_probe_scales_sample_size_with_budget():
     assert large_budget["sampled_pixels"] >= small_budget["sampled_pixels"]
 
 
+def test_kernel_threads_sweep_scales_its_sample_to_a_whole_frame():
+    """The sweep measures one sample tile, but the scheduler uses the
+    result to decide how many frames can be in flight -- which needs the
+    time to map a whole frame. Measured against the sample alone it came
+    out low by the ratio of a frame to that tile, six times over on a
+    real detector, which made every thread count look affordable.
+    """
+    import orgui.datautils.xrayutils.reconstruction as reconstruction_module
+
+    class _FakeSweepKernel:
+        def accumulate(self, *args, **kwargs):
+            time.sleep(0.02)
+            return {}
+
+    grid = _GridSpec(
+        minimum=(-1.0, -1.0, -1.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(1.0, 1.0, 1.0),
+        frame="lab",
+        chunk_shape=(2, 2, 2),
+    )
+    spec = _ReconstructionSpec(grids=(grid,), max_depth=0, threads=1)
+    rows = columns = 8
+    mask = np.zeros((rows, columns), dtype=bool)
+    rays = _constant_rays(rows, columns)
+    sampled_pixels = rows * columns
+
+    def sweep(frame_pixels):
+        return _kernel_threads_sweep(
+            spec,
+            grid,
+            None,
+            mask,
+            rays,
+            np.zeros(4),
+            np.zeros(4),
+            candidates=[1],
+            frame_pixels=frame_pixels,
+        )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            reconstruction_module,
+            "_kernel_for_grid",
+            lambda *args, **kwargs: _FakeSweepKernel(),
+        )
+        unscaled = sweep(None)
+        per_frame = sweep(sampled_pixels * 100)
+
+    # A frame a hundred times the sample must report a hundredfold time.
+    assert per_frame[1] == pytest.approx(100 * unscaled[1], rel=0.25)
+
+
 def test_kernel_threads_sweep_stops_early_on_plateau(monkeypatch):
     """Real native-kernel timing on a tiny test grid is noise-level (design
     doc Sec7), so this drives the sweep's own control flow (candidate

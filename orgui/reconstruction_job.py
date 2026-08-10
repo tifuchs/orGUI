@@ -2107,7 +2107,24 @@ _BLOCKED_FRACTION_SHRINK = 0.02
 tuned against real production load."""
 _COORDINATOR_TICK_SECONDS = 0.3
 _POLL_TIMEOUT_SECONDS = 0.2
-_REBALANCE_INTERVAL_SECONDS = 600
+_REBALANCE_INITIAL_SECONDS = 30
+"""How soon automatic mode first re-evaluates its thread/worker pair.
+
+A single fixed cadence cannot serve both ends of the range. At ten
+minutes -- what this used to be -- a job shorter than that never
+re-evaluated at all, and every job spent its first ten minutes on
+whatever the seed guessed. Checking early and then backing off costs one
+sweep against a sample tile, and the sweep stops itself at the first
+plateau."""
+
+_REBALANCE_MAXIMUM_SECONDS = 600
+"""Ceiling the interval backs off to once the pair stops changing."""
+
+_REBALANCE_BACKOFF = 2.0
+"""Interval growth per check that leaves the pair unchanged. A check that
+does change it resets to :data:`_REBALANCE_INITIAL_SECONDS`, so the
+scheduler stays attentive while conditions are still moving and goes
+quiet once they settle."""
 """Sec7 Phase 4b: periodic, not continuous, re-evaluation cadence for the
 joint kernel_threads/image_workers rebalance. Illustrative, like the
 blocked-fraction bands above -- not tuned against real production load."""
@@ -2185,7 +2202,8 @@ def _map_pending_ranges(
     I/O-optimistic seed (``kernel_threads=1``, all budget as
     ``image_workers``) and periodically rebalances ``kernel_threads``/
     ``image_workers`` live against a measured frame-delivery rate (every
-    ``_REBALANCE_INTERVAL_SECONDS``), via a wall-clock
+    ``_REBALANCE_INITIAL_SECONDS``, backing off while nothing
+    changes), via a wall-clock
     ``_kernel_threads_sweep`` and the design doc's joint-balancing rule.
     A concrete ``threads_per_image`` int keeps the static,
     ``_frame_parallelism``-derived pair fixed for the whole run (today's
@@ -2303,6 +2321,13 @@ def _map_pending_ranges(
             np.array_equal(
                 bounds[frame_indices[0], 0], bounds[frame_indices[0], 1]
             )
+        )
+        # Every tile of a frame is mapped, so a frame's kernel work is the
+        # whole detector's pixels -- what the sweep's single sample tile
+        # has to be scaled up to.
+        frame_pixels = sum(
+            (row_stop - row_start) * (column_stop - column_start)
+            for row_start, row_stop, column_start, column_stop in detector_tiles
         )
 
     max_readers = (
@@ -2488,6 +2513,7 @@ def _map_pending_ranges(
     previous_total = 0
     last_rebalance_monotonic = time.monotonic()
     rate_at_last_rebalance = 0.0
+    rebalance_interval = _REBALANCE_INITIAL_SECONDS
     try:
         while True:
             deadline = time.monotonic() + _COORDINATOR_TICK_SECONDS
@@ -2528,7 +2554,7 @@ def _map_pending_ranges(
             if automatic and not readers_done.is_set() and not first_exception:
                 now = time.monotonic()
                 elapsed = now - last_rebalance_monotonic
-                if elapsed >= _REBALANCE_INTERVAL_SECONDS:
+                if elapsed >= rebalance_interval:
                     with remaining_lock:
                         delivered = delivered_in_window[0]
                         delivered_in_window[0] = 0
@@ -2547,13 +2573,23 @@ def _map_pending_ranges(
                         sweep_angles_end,
                         candidates=candidates,
                         tile_pixels=_KERNEL_SWEEP_TILE_PIXELS,
+                        frame_pixels=frame_pixels,
                         memory_budget_bytes=kernel_memory_budget,
                         plateau_ratio=_KERNEL_SWEEP_PLATEAU_RATIO,
                     )
                     feasible = []
-                    for candidate_threads, per_call_time in sweep.items():
+                    for candidate_threads, per_frame_time in sweep.items():
+                        # Little's law: to consume frames arriving at
+                        # `rate` while each takes `per_frame_time` to map,
+                        # that many must be in flight at once. The sweep
+                        # reports a whole frame's time, so this is a
+                        # worker count rather than a fraction of one --
+                        # measured against a sample tile alone it came out
+                        # low by the ratio of a frame to that tile, six
+                        # times on a 6.2-megapixel detector, which made
+                        # every candidate look affordable.
                         needed = (
-                            max(1, math.ceil(rate * per_call_time))
+                            max(1, math.ceil(rate * per_frame_time))
                             if rate > 0
                             else 1
                         )
@@ -2602,16 +2638,26 @@ def _map_pending_ranges(
                             # generation finishes its in-flight
                             # _map_one_frame call -- a deliberate, rare
                             # stall (this whole block runs at most once per
-                            # _REBALANCE_INTERVAL_SECONDS), never abandons
+                            # rebalance interval), never abandons
                             # in-flight work.
                             old_compute_pool.shutdown(wait=True)
                             rate_at_last_rebalance = rate
+                            rebalance_interval = _REBALANCE_INITIAL_SECONDS
                         elif new_image_workers != compute_pool.size:
                             gate.retarget(
                                 new_image_workers + _PREFETCH_QUEUE_SLACK
                             )
                             compute_pool.retarget(new_image_workers)
                             rate_at_last_rebalance = rate
+                            rebalance_interval = _REBALANCE_INITIAL_SECONDS
+                        else:
+                            # Nothing moved, so look again later rather
+                            # than paying for a sweep at the same cadence
+                            # for the rest of a long job.
+                            rebalance_interval = min(
+                                _REBALANCE_MAXIMUM_SECONDS,
+                                rebalance_interval * _REBALANCE_BACKOFF,
+                            )
             reader_pool.reap()
             compute_pool.reap()
             # Completion: every frame delivered or errored, and every

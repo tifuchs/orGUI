@@ -406,7 +406,7 @@ def test_map_pending_ranges_automatic_mode_rebalances_and_stays_stable(
 
     monkeypatch.setattr(reconstruction_job_module, "_AdjustablePool", _SpyPool)
     monkeypatch.setattr(
-        reconstruction_job_module, "_REBALANCE_INTERVAL_SECONDS", 0.05
+        reconstruction_job_module, "_REBALANCE_INITIAL_SECONDS", 0.05
     )
     # The coordinator's outer tick only falls through to the
     # blocked-fraction/rebalance checks after its own per-tick progress

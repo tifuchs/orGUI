@@ -435,6 +435,24 @@ Reciprocal-space reconstruction:
   every leaf of every subdivided pixel reaches a distinct voxel -- so a
   large block at a deep accuracy setting could ask for tens of gigabytes
   per worker thread.
+- Automatic ``Native threads per image`` now re-evaluates itself early
+  and then backs off, instead of waiting a fixed ten minutes between
+  checks. A single fixed cadence served neither end of the range: a job
+  shorter than ten minutes never re-evaluated at all, and every longer
+  job spent its first ten minutes on whatever the starting guess was. The
+  first check is now after 30 seconds, doubling up to the same ten-minute
+  ceiling for as long as nothing changes, and resetting whenever it does
+  -- attentive while conditions are still moving, quiet once they settle.
+- Fixed the same rebalance comparing a whole scan's frame-delivery rate
+  against the time to map a *fraction* of one frame. It measures a
+  sample tile, roughly a megapixel, and used that directly as though it
+  were a frame's mapping time when deciding how many frames must be in
+  flight to keep up. On a 6.2-megapixel detector the requirement came out
+  six times too low, so every thread count looked affordable and the
+  choice fell through to a tie-break rather than the measurement. The
+  sample is now scaled to a whole frame, from the pixel count actually
+  sampled rather than the requested one, since the sample tile is clamped
+  to the detector.
 - Automatic ``Native threads per image`` now starts from how many frames
   the memory budget can actually hold in flight, instead of always
   starting at one thread per image. The two are linked: the budget caps
