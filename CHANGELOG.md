@@ -64,6 +64,21 @@ Scientific correctness and performance fixes:
   corrected atomic-coordinate stacking when splitting unit cells into layers.
 - Added a C++ electron-density backend and bounded caches for atomic form
   factors, anomalous scattering factors, and accelerated form-factor lookup.
+- Reciprocal-space mapping now maps detector images through a work block
+  shaped as a brick in (row, column, frame) rather than a run of one
+  flattened image, and can map several consecutive images in a single native
+  call. On a rotation scan two adjacent images land as close together in
+  reciprocal space as two adjacent pixels do, so a brick merges
+  contributions the per-image block could not see: on a 3651-frame Pilatus
+  6M scan, mapping eight images together emits 0.60x the records for the
+  same samples. **This changes reconstructed values in the last bits, for
+  every job, including jobs that map one image at a time.** Contributions
+  now merge inside the kernel rather than in the checkpoint accumulator, so
+  the same sums associate differently — with fewer intermediate roundings,
+  so slightly better conditioned. Which voxels are reached, and how many
+  detector samples reach each of them, are unchanged. Existing checkpoint
+  files remain resumable, but a job resumed across this change will contain
+  parts from both association orders.
 
 A ***critical bug*** was fixed that affects bulk CTR calculations:
 

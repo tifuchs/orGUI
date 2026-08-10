@@ -1,9 +1,10 @@
 # Reciprocal-space mapping: locality, subdivision cost, and the scheduling that would carry them
 
-> **Status: idea for later. Nothing here is implemented, and no decision has
-> been taken.** The measurements are real and were taken against real beamtime
-> data; the designs sketched from them are proposals. Treat this as a record of
-> an investigation, not a plan of record.
+> **Status: partly implemented.** Phases 1 and 2 have landed, and so have
+> phase 3's kernel and pipeline wiring; phase 3's scheduler and phase 4 have
+> not. Each step below says which it is and what it measured. Everything
+> here was measured against real beamtime data, and where a prediction was
+> made before implementing, the step records whether it held.
 
 Third companion to `reciprocal_space_scratch_architecture.md` (what the pipeline
 *is*) and `reciprocal_space_performance_findings.md` (what has been measured
@@ -13,7 +14,11 @@ to do to carry them.
 
 - **A — cross-frame locality.** The native work block deduplicates voxels within
   one image, mostly by accident. Extending it across adjacent images cuts
-  emitted records by ~42% and *shrinks* the cache working set. **Not started.**
+  emitted records by ~42% and *shrinks* the cache working set. **The kernel and
+  the pipeline wiring are implemented; the scheduler is not.** Records through
+  the router fall to 0.598x at F = 8 on the real job, matching the geometric
+  prediction — but end-to-end throughput *regresses* until the scheduler stops
+  paying for group size out of the worker count. See phase 3.
 - **B — subdivision cost.** Above depth 3 the shared-corner cache switched off
   and the kernel did several times more ray work than it needed to. A
   corner-passing recursion removes that, bit-for-bit. **Phase 1 is implemented**
@@ -630,16 +635,120 @@ Not required by either finding; do not fold it in.
    detector geometry, currently recomputed 3651 times per pixel. A
    whole-detector centre-ray cache (149 MB, alongside the existing 143 MiB
    corner cache) removes it entirely, with or without grouping.
-3. *Banding.* Bricks iterate row band by row band so level-3 records stay near
-   today's ~110 MB, as above.
-4. *Choosing F per job.* Extend the calibration probe: run `accumulate_group` on
-   one sample brick at F in {1, 2, 4, 8, 16}, take the smallest F past which the
-   marginal density gain falls below a few per cent, capped by memory. Five small
-   native calls, and it measures the quantity that actually matters rather than
-   deriving it from the angular step. `F = 1` must reproduce today exactly.
-5. *Scheduler.* As above: pin `kernel_threads`, size the correct pool from the
-   measured Python-to-native ratio, retarget `_BoundedGate`, repoint the live
+3. *Banding.* **Done, and it needed no new code.** The detector tiling that
+   already exists is the banding: `_execution_layout` gives this job six
+   full-width bands of ~421 x 2463 (1.04 Mpx), and `_map_frame_group` maps
+   one band across all F frames before moving to the next. At F = 8 a band
+   is 8.3 M samples, which the kernel's own precheck passes comfortably
+   (208 B/sample against 10 GiB / 8.3 M = 1290 B available), and its record
+   footprint lands near 93 MB — the same place as the ~110 MB figure above.
+   Tiling has acquired the real purpose this document predicted it would.
+4. *Wiring it into the mapping path.* **Done.** `_map_one_frame` is gone;
+   `_map_frame_group` replaces it and is the only path, with F = 1 the
+   degenerate case rather than a separate branch. `_ReconstructionSpec`
+   carries `frames_per_group`. The pieces that had to move with it:
+
+   - `_CheckpointRouter.route()` takes `frames=`, because the checkpoint
+     countdown and the `frames_covered` attribute that makes a part
+     resumable both count frames, not `route()` calls. A group declaring
+     one frame would leave its checkpoint permanently short and
+     unresumable. It also rejects a group straddling a checkpoint
+     boundary, which is otherwise a silent corruption of that bookkeeping.
+   - `_frame_groups` cuts groups at the group size and at every grid's
+     checkpoint boundaries. Scheduling ranges are already contiguous and
+     exclusion-free, so `excluded_frames` needs no separate handling —
+     which is a weaker statement than this document's risk item assumed,
+     and worth having checked rather than assumed.
+   - `_angles_advance_monotonically` drops the job to F = 1 when the
+     angles do not advance monotonically, which is the interlaced-scan
+     answer this document called for.
+   - The `_BoundedGate` bounds in-flight *groups*, not frames. A reader
+     loads a whole group before queueing it, so a per-frame gate would let
+     several readers each hold a partial group with none able to finish.
+   - `_frame_parallelism` charges a worker F x the native tile working set
+     (mirroring the kernel's own precheck, which is written against
+     `frames * tile_pixels`) and F x the corrected-frame buffer, but only
+     1 x the record term — a group emits one merged batch, not F of them.
+
+   **`F = 1` is not bit-for-bit with the old per-image path**, as step 1
+   already established. Same voxels, same contributor counts, totals equal
+   to rounding. That is a `phys`-scope change to every job, not only to
+   jobs that opt into grouping.
+5. *Scheduler.* **Not done, and now the blocker** — see below. Pin
+   `kernel_threads`, size the correct pool from the measured
+   Python-to-native ratio, retarget `_BoundedGate`, repoint the live
    rebalance at `F`.
+6. *Choosing F per job.* **Not done, and deliberately moved behind step 5.**
+   Extend the calibration probe: run `accumulate_group` on one sample brick
+   at F in {1, 2, 4, 8, 16}, take the smallest F past which the marginal
+   density gain falls below a few per cent, capped by memory. Five small
+   native calls, and it measures the quantity that actually matters rather
+   than deriving it from the angular step. There is no point choosing F
+   against a scheduler that punishes every value above 1.
+
+### What the wired pipeline measured
+
+`benchmarks/benchmark_reconstruction_pipeline.py` runs the real
+`_map_pending_ranges` — reader pool, correction, kernel, router, checkpoint
+writes — over a bounded window and reports both throughput and the records
+*entering* the checkpoint layer. 234 frames of the `39_1-rsmap` job (six
+scheduling ranges, three checkpoints, depth 0, stationary bounds, 24
+threads, the job's own 10 GB budget), against a baseline captured from the
+same checkout immediately before the change:
+
+| F | records/frame | vs F=1 | ms/frame | vs baseline | workers |
+|---|---|---|---|---|---|
+| baseline (`accumulate`) | 2,584,531 | 1.000 | 236.8 | 1.00 | 8 |
+| 1 | 2,584,531 | 1.000 | 263.1 | 1.11 | 8 |
+| 2 | 2,005,606 | 0.776 | 245.8 | 1.04 | 6 |
+| 4 | 1,699,144 | 0.657 | 248.1 | 1.05 | 3 |
+| 8 | 1,545,463 | **0.598** | 347.4 | **1.47** | **1** |
+
+**The record prediction held.** 0.598 at F = 8 against the 0.575 the kernel
+benchmark measured on a single tile and the 0.5749 the exhaustive geometric
+model predicted before any of it existed. Finding A survives contact with
+the whole pipeline.
+
+**The throughput prediction did not.** The band stated before implementing
+was 0.7-1.0x; F = 8 landed at 1.47x, outside it and on the wrong side. The
+cause is visible in the last column: `_frame_parallelism` charges a worker
+for F resident frames, so `image_workers` collapses from 8 to 1, and at one
+worker a group's GIL-held correction has nothing to overlap with. This is
+the synchronisation point this document flagged as the main scheduling
+risk, arriving exactly where it was predicted to.
+
+It is a scheduling problem and not a kernel one, which the same instrument
+can show directly. Cutting the detector bands from ~421 rows to 160 lowers
+a worker's native working set, so the same budget affords more workers —
+no extra memory, just less per worker:
+
+| F | bands | workers | ms/frame | records/frame |
+|---|---|---|---|---|
+| 1 | 160-row | 10 | 274.4 | 2,584,531 |
+| 8 | 160-row | 2 | **233.3** | 1,545,463 |
+
+One extra worker takes F = 8 from 347.4 to 233.3 ms/frame — **0.85x against
+like-for-like F = 1**, with byte-identical record volume. So the kernel's
+gain does reach the pipeline; what stands between them is `image_workers`
+being the wrong lever for a work unit that is no longer one frame.
+
+**This retires the question of what order the remaining steps go in.**
+Step 5 must precede step 6: `kernel_threads` pinned at the budget, one
+group at a time, and a prefetch/correct pool sized from the measured
+Python-to-native ratio, so that F stops competing with worker count for
+the same memory. Until then `frames_per_group` defaults to 1 and grouping
+is opt-in.
+
+Two smaller things the measurement settled. Records *written* to checkpoint
+parts barely move with F (0.97x at F = 8) because the checkpoint
+accumulator already merges across frames — it collapses the same
+redundancy later and more expensively, so the saving never appears there.
+Records entering the router is the quantity that matters, and it is what
+the table above reports. And F = 1 through `accumulate_group` routes
+*exactly* the same record count as `accumulate` (604,780,339, to the
+record): the 3.4% block-shape gain is real in block records before the
+cross-block merge, but one call's merged output is the set of voxels that
+frame reached, which does not depend on how the frame was partitioned.
 
 ### Phase 4 — Frame-group bricks above depth 0
 
@@ -679,7 +788,10 @@ exposures and cross-frame overlap above depth 0 — each frame then covers a
 0.71-voxel slab rather than a plane, and adjacent slabs tile rather than overlap.
 
 **`excluded_frames`** must be skipped when forming groups, not merely masked
-inside them.
+inside them. *Resolved, and more cheaply than expected:* `_included_ranges`
+already splits scheduling ranges at every excluded frame, so a range is
+contiguous and exclusion-free by construction and `_frame_groups` only has
+to cut at checkpoint boundaries.
 
 **Records converge at depth 3.** 0.632 -> 0.642 -> 0.647 -> 0.650 across depths
 3-6, while cost rises 3x / 6x / 13x. Everything above depth 3 buys finer
@@ -691,4 +803,18 @@ worth.
 ## Also
 
 `benchmarks/benchmark_reconstruction_mapping.py` no longer imports: it wants
-`_map_frame_range`, which was replaced by `_map_one_frame`.
+`_map_frame_range` and the Parquet-era writers, both of which predate the
+checkpoint router. `benchmarks/benchmark_reconstruction_pipeline.py` is the
+replacement and measures the pipeline that actually exists.
+
+Read back the checkpoint parts in row chunks, never all at once. A 234-frame
+window is ~350 M rows, and concatenating them costs more than the mapping
+run whose peak is already sized to the job's whole memory budget — the
+first version of the pipeline benchmark swapped the machine doing exactly
+that. The comparable quantity is `sum over rows of h(key) * contributors`
+accumulated in wrapping `uint64`: it is a sum, so it is independent of row
+order and of how the accumulator happened to split its parts, and it pins
+both the voxel set and the contributor apportionment. Two baseline runs
+with visibly different flush partitions (352.3 M against 350.1 M rows)
+agreed on it exactly, which is what makes it usable as an acceptance
+criterion where a digest is not.
