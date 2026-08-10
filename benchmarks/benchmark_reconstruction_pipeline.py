@@ -74,8 +74,11 @@ def _arguments():
     parser.add_argument(
         "--group",
         type=int,
-        default=1,
-        help="Frames per kernel call (spec.frames_per_group).",
+        default=None,
+        help=(
+            "Frames per kernel call. Omitted leaves spec.frames_per_group "
+            "unset, so the scheduler measures the job and chooses."
+        ),
     )
     parser.add_argument(
         "--threads-per-image",
@@ -230,7 +233,7 @@ def main():
     spec = job.internal_spec()
     if arguments.depth is not None:
         spec = replace(spec, max_depth=arguments.depth)
-    if arguments.group != 1:
+    if arguments.group is not None:
         if not hasattr(spec, "frames_per_group"):
             raise SystemExit(
                 "This checkout has no spec.frames_per_group; --group only "
@@ -317,7 +320,7 @@ def main():
             (row_stop - row_start) * (column_stop - column_start)
             for row_start, row_stop, column_start, column_stop in tiles
         ),
-        "frames_per_group": getattr(spec, "frames_per_group", 1),
+        "frames_per_group": getattr(spec, "frames_per_group", None),
         "max_depth": spec.max_depth,
         "work_block_pixels": spec.work_block_pixels,
         "threads": spec.threads,
@@ -332,7 +335,7 @@ def main():
         "worker_memory_mb": round(worker_bytes / 1e6, 1),
         "group_layout": (
             list(_group_pipeline_layout(spec, tiles, effective_memory, 4))
-            if getattr(spec, "frames_per_group", 1) > 1
+            if (getattr(spec, "frames_per_group", None) or 1) > 1
             else None
         ),
         "native": _native_module().__file__,
