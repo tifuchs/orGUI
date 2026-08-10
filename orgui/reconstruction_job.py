@@ -31,6 +31,7 @@ from .datautils.xrayutils.reconstruction import (
     _discover_checkpoint_state,
     _files_per_job,
     _finalize_reconstruction,
+    _kernel_for_grid,
     _kernel_threads_sweep,
     _map_frame_group,
     _tile_ray_arrays,
@@ -1523,7 +1524,7 @@ def _frame_parallelism(
     # the group size exactly as the tile size, and this side must scale
     # with it too or the two would disagree in the one direction that
     # matters (this side permissive, the kernel throwing).
-    frames_per_group = max(1, int(getattr(spec, "frames_per_group", 1)))
+    frames_per_group = _frames_per_group(spec)
     native_memory = (
         largest_tile_pixels * frames_per_group * native_bytes_per_pixel
     )
@@ -2202,6 +2203,36 @@ def _kernel_threads_candidates(total_threads, include=()):
     return sorted(candidates)
 
 
+_GROUP_SIZE_CANDIDATES = (1, 2, 4, 8, 16)
+"""Group sizes the automatic choice considers."""
+_GROUP_ADVANCE_VOXEL_LIMIT = 1.0
+"""Per-frame reciprocal-space travel, in voxels, past which grouping stops
+paying.
+
+Frame grouping merges frames that reach the same voxels. Measured over a
+striding sweep of the reference scan, the gain is already gone by the time
+a frame advances a whole voxel -- past that, consecutive frames tile
+rather than overlap, and a group buffer buys nothing while still costing
+concurrency. This is a statement about grid step against angular step: a
+finer grid moves a job into the regime, a coarser scan moves it out."""
+_GROUP_MINIMUM_CONCURRENT_CALLS = 3
+"""Concurrent native calls a group size has to leave affordable.
+
+Purely empirical, and the reason the automatic choice is not simply "the
+largest group that fits". On the reference job, four frames per group with
+three concurrent calls mapped at 0.866x the per-frame pipeline; eight with
+two was 1.014x, and eight with one was 1.24x. Records keep falling as the
+group grows, so density alone would pick the losing configuration -- what
+turns over is the concurrency the group buffer and its native working set
+crowd out."""
+
+
+def _frames_per_group(spec):
+    """Resolved group size for ``spec``: ``None`` means one frame."""
+    value = getattr(spec, "frames_per_group", None)
+    return 1 if value is None else max(1, int(value))
+
+
 _GROUP_PIPELINE_MINIMUM_READAHEAD = 1
 """Groups prepared *beyond* the ones being mapped.
 
@@ -2284,7 +2315,7 @@ def _group_pipeline_layout(spec, tiles, memory_bytes, prepare_workers):
             1 + _GROUP_PIPELINE_MINIMUM_READAHEAD,
         )
     detector_pixels = sum(tile_pixels)
-    frames_per_group = max(1, int(getattr(spec, "frames_per_group", 1)))
+    frames_per_group = _frames_per_group(spec)
     native_bytes_per_pixel = (
         128 + 2 * _RESERVED_RECORDS_PER_PIXEL * _CHECKPOINT_BYTES_PER_ROW
         if spec.max_depth > 0
@@ -2360,6 +2391,118 @@ def _angles_advance_monotonically(bounds, frame_indices):
         if not (np.all(column >= -1e-12) or np.all(column <= 1e-12)):
             return False
     return True
+
+
+def _frame_advance_voxels(
+    kernel, grid, corner_rays, bounds, frame_pairs, *, samples_per_axis=8
+):
+    """Median distance a pixel travels between adjacent frames, in voxels.
+
+    The quantity finding A rests on, measured on the job rather than
+    inferred from its angular step: two frames merge usefully only while
+    they land within about a voxel of each other. Geometry and the grid
+    decide it, so this needs no image data and does no I/O -- it asks the
+    kernel where a pixel lands on one frame and on the next, and takes the
+    difference in units of the grid step.
+
+    A median rather than a mean: the distribution across a detector is
+    wide (measured p10 0.22, p90 1.48 voxels on the reference job), and
+    the tails are the corners rather than the bulk of the frame.
+
+    :param kernel:
+        Constructed ``ReconstructionKernel`` for ``grid``.
+    :param corner_rays:
+        Corner rays for one detector tile, ``(rows + 1, columns + 1, 3)``.
+        Pixels are sampled inside that tile.
+    :param bounds:
+        ``(len(scan), 2, 4)`` exposure angle bounds in radians.
+    :param frame_pairs:
+        ``(first, second)`` adjacent frame indices to sample across.
+    :returns:
+        Median displacement in voxels; ``0.0`` when nothing was sampled.
+    :rtype: float
+    """
+    rows = int(corner_rays.shape[0]) - 1
+    columns = int(corner_rays.shape[1]) - 1
+    if rows < 1 or columns < 1:
+        return 0.0
+    step = np.asarray(grid.step, dtype=np.float64)
+    row_samples = np.unique(
+        np.linspace(0, rows - 1, min(samples_per_axis, rows)).astype(int)
+    )
+    column_samples = np.unique(
+        np.linspace(0, columns - 1, min(samples_per_axis, columns)).astype(int)
+    )
+    distances = []
+    for first, second in frame_pairs:
+        angles = [
+            (
+                np.ascontiguousarray(bounds[index, 0]),
+                np.ascontiguousarray(bounds[index, 1]),
+            )
+            for index in (first, second)
+        ]
+        for row in row_samples:
+            for column in column_samples:
+                positions = [
+                    np.asarray(
+                        kernel.coordinate(
+                            corner_rays, start, end, int(row), int(column)
+                        )
+                    )
+                    for start, end in angles
+                ]
+                distances.append(
+                    float(
+                        np.linalg.norm((positions[1] - positions[0]) / step)
+                    )
+                )
+    return float(np.median(distances)) if distances else 0.0
+
+
+def _choose_frames_per_group(
+    spec,
+    tiles,
+    memory_bytes,
+    advance_voxels,
+    prepare_workers,
+    candidates=_GROUP_SIZE_CANDIDATES,
+):
+    """Largest group size that is both in the regime and affordable.
+
+    Two independent gates, and the second is the one that is easy to get
+    wrong. Records emitted fall monotonically as the group grows, so
+    choosing on record density alone picks the largest group that fits
+    memory -- which on the reference job is the configuration that maps
+    *slowest*, because the group buffer and the call's native working set
+    crowd out the concurrency that was paying for itself. So the rule is
+    the largest group that still leaves
+    ``_GROUP_MINIMUM_CONCURRENT_CALLS`` native calls affordable, not the
+    largest group that fits.
+
+    :param float advance_voxels:
+        Per-frame reciprocal-space travel from
+        :func:`_frame_advance_voxels`.
+    :returns:
+        Frames per group, at least 1.
+    :rtype: int
+    """
+    if advance_voxels >= _GROUP_ADVANCE_VOXEL_LIMIT:
+        return 1
+    chosen = 1
+    for candidate in sorted(int(value) for value in candidates):
+        if candidate <= 1:
+            continue
+        workers, _threads, _depth = _group_pipeline_layout(
+            replace(spec, frames_per_group=candidate),
+            tiles,
+            memory_bytes,
+            prepare_workers,
+        )
+        if workers < _GROUP_MINIMUM_CONCURRENT_CALLS:
+            break
+        chosen = candidate
+    return chosen
 
 
 def _frame_groups(frame_range, router, grid_names, frames_per_group):
@@ -2784,13 +2927,11 @@ def _map_pending_ranges(
     ]
     # Grouping rests on frames adjacent in index being adjacent in angle.
     # Where they are not -- an interlaced scan -- the honest answer is one
-    # frame per call, decided here rather than assumed anywhere below.
-    frames_per_group = max(1, int(getattr(spec, "frames_per_group", 1)))
-    if frames_per_group > 1 and not _angles_advance_monotonically(
-        bounds, frame_indices
-    ):
-        frames_per_group = 1
-    spec = replace(spec, frames_per_group=frames_per_group)
+    # frame per call, whatever else the job asked for. Cheap, and it gates
+    # both the requested and the measured group size, so it is settled
+    # here; the rest of the choice needs the ray arrays and the memory
+    # split and waits for them.
+    grouping_is_sound = _angles_advance_monotonically(bounds, frame_indices)
 
     ray_cache_bytes = sum(
         (tile[1] - tile[0] + 1)
@@ -2812,6 +2953,56 @@ def _map_pending_ranges(
         1024**2,
         effective_memory - (ray_cache_bytes if cache_detector_rays else 0),
     )
+
+    max_readers = (
+        _PREFETCH_POOL_MAX
+        if getattr(scan, "supports_concurrent_read", True)
+        else 1
+    )
+    seed_prepare_workers = min(_PREFETCH_POOL_INITIAL, max_readers)
+    requested_frames_per_group = getattr(spec, "frames_per_group", None)
+    if not grouping_is_sound:
+        frames_per_group = 1
+    elif requested_frames_per_group is not None:
+        frames_per_group = max(1, int(requested_frames_per_group))
+    elif len(frame_indices) < 2:
+        frames_per_group = 1
+    else:
+        # Sample the travel per frame at a few places in the scan, not
+        # one: a scan with a non-uniform angular step is the mild version
+        # of the interlaced problem, and one pair at the start would miss
+        # it entirely.
+        last_pair = len(frame_indices) - 2
+        probe_pairs = [
+            (frame_indices[position], frame_indices[position + 1])
+            for position in sorted(
+                {0, min(last_pair, len(frame_indices) // 2), last_pair}
+            )
+            # Skip a pair that straddles an excluded frame: its travel is
+            # two frames' worth and would read as out of the regime.
+            if frame_indices[position] + 1 == frame_indices[position + 1]
+        ]
+        frames_per_group = (
+            _choose_frames_per_group(
+                spec,
+                tiles,
+                scheduler_memory,
+                _frame_advance_voxels(
+                    _kernel_for_grid(
+                        spec, spec.grids[0], config.ub_calculator, threads=1
+                    ),
+                    spec.grids[0],
+                    ray_arrays[detector_tiles[0]],
+                    bounds,
+                    probe_pairs,
+                ),
+                seed_prepare_workers,
+            )
+            if probe_pairs
+            else 1
+        )
+    spec = replace(spec, frames_per_group=frames_per_group)
+
     def layout_for(threads_per_image_seed):
         """Worker count and native threads this seed would run with."""
         workers = []
@@ -2865,13 +3056,7 @@ def _map_pending_ranges(
         )
     ]
 
-    max_readers = (
-        _PREFETCH_POOL_MAX
-        if getattr(scan, "supports_concurrent_read", True)
-        else 1
-    )
     if frames_per_group > 1:
-        seed_prepare_workers = min(_PREFETCH_POOL_INITIAL, max_readers)
         group_workers, group_threads, group_depth = _group_pipeline_layout(
             spec, tiles, scheduler_memory, seed_prepare_workers
         )

@@ -25,11 +25,13 @@ from orgui.reconstruction_job import (
     WORK_BLOCK_PRESETS,
     _FRAME_RECORD_BYTES_PER_PIXEL,
     _PYTHON_CORRECTION_BYTES_PER_PIXEL,
+    _GROUP_SIZE_CANDIDATES,
     _RESERVED_RECORDS_PER_PIXEL,
     ReconstructionGrid,
     ReconstructionJob,
     _angles_advance_monotonically,
     _frame_groups,
+    _choose_frames_per_group,
     _frame_parallelism,
     _group_pipeline_layout,
     _node_checkpoint_plan,
@@ -1117,3 +1119,136 @@ def test_group_pipeline_layout_never_returns_zero_workers_on_a_tiny_budget():
 
     assert (workers, threads) == (1, 8)
     assert depth > workers
+
+
+def _layout_spec(frames_per_group=None, threads=24):
+    grid = _GridSpec(
+        minimum=(0.0, 0.0, 0.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(0.1, 0.1, 0.1),
+        frame="lab",
+        chunk_shape=(8, 8, 8),
+    )
+    return _ReconstructionSpec(
+        grids=(grid,),
+        max_depth=0,
+        threads=threads,
+        frames_per_group=frames_per_group,
+    )
+
+
+def test_choose_frames_per_group_stops_where_frames_stop_overlapping():
+    """Grouping merges frames that reach the same voxels. Once a frame
+    advances a whole voxel they tile instead, and the group buffer costs
+    concurrency for nothing."""
+    tiles = [(0, 256, 0, 1024), (256, 512, 0, 1024)]
+    budget = 8 * 1024**3
+
+    assert (
+        _choose_frames_per_group(_layout_spec(), tiles, budget, 0.7, 4) > 1
+    )
+    assert _choose_frames_per_group(_layout_spec(), tiles, budget, 1.0, 4) == 1
+    assert _choose_frames_per_group(_layout_spec(), tiles, budget, 3.2, 4) == 1
+
+
+def test_choose_frames_per_group_keeps_concurrency_rather_than_density():
+    """Records fall monotonically with the group size, so density alone
+    would pick the largest group memory allows -- which measured *slowest*
+    on the reference job, because the group crowds out concurrent calls.
+    The choice must stop where concurrency does.
+
+    Sized so the floor actually binds inside the candidate list, the way
+    it does on a real detector: a tile small enough for every candidate to
+    fit would test nothing.
+    """
+    tiles = [(0, 1024, 0, 2048)]
+    spec = _layout_spec()
+    budget = 8 * 1024**3
+
+    chosen = _choose_frames_per_group(spec, tiles, budget, 0.7, 4)
+
+    assert 1 < chosen < max(_GROUP_SIZE_CANDIDATES)
+    workers, _threads, _depth = _group_pipeline_layout(
+        dataclasses.replace(spec, frames_per_group=chosen), tiles, budget, 4
+    )
+    assert workers >= 3
+    # The next size up must be the one that broke the floor, or the choice
+    # stopped early and left throughput on the table.
+    larger = _group_pipeline_layout(
+        dataclasses.replace(spec, frames_per_group=chosen * 2), tiles, budget, 4
+    )[0]
+    assert larger < 3
+
+
+def test_choose_frames_per_group_falls_back_to_one_on_a_tight_budget():
+    """A budget that cannot afford concurrent group calls must not group:
+    one call with every thread is the configuration that measured worst."""
+    tiles = [(0, 2048, 0, 2048)]
+
+    assert (
+        _choose_frames_per_group(_layout_spec(), tiles, 512 * 1024**2, 0.5, 4)
+        == 1
+    )
+
+
+def test_frame_advance_voxels_is_zero_when_the_grid_does_not_rotate():
+    """A lab-frame grid is the degenerate case worth pinning: Q in the lab
+    frame does not depend on the sample angles, so every frame reaches the
+    same voxels however far the sample turns. Zero travel is the correct
+    answer, and it is the case grouping helps most."""
+    grid = ReconstructionGrid(
+        minimum=(-20.0, -20.0, -20.0),
+        maximum=(20.0, 20.0, 20.0),
+        step=(0.05, 0.05, 0.05),
+        frame="lab",
+        chunk_shape=(8, 8, 8),
+    )
+    config = _config()
+    spec = _ReconstructionSpec(grids=(_GridSpec(**grid.__dict__),), max_depth=0)
+    kernel = reconstruction_job_module._kernel_for_grid(
+        spec, spec.grids[0], config.ub_calculator, threads=1
+    )
+    rays = reconstruction_job_module._detector_corner_rays(
+        config.detector, (0, 2, 0, 2)
+    )
+    bounds = np.zeros((3, 2, 4), dtype=np.float64)
+    bounds[:, 0, 1] = np.deg2rad(5.0) * np.arange(3)
+    bounds[:, 1, 1] = bounds[:, 0, 1]
+
+    assert reconstruction_job_module._frame_advance_voxels(
+        kernel, spec.grids[0], rays, bounds, [(0, 1)]
+    ) == 0.0
+
+
+def test_frame_advance_voxels_scales_with_the_angular_step():
+    """The probe has to measure the job, so a scan that turns twice as far
+    per frame must read as twice the travel."""
+    grid = ReconstructionGrid(
+        minimum=(-1.0, -1.0, -1.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(0.002, 0.002, 0.002),
+        frame="hkl",
+        chunk_shape=(8, 8, 8),
+    )
+    config = _config()
+    spec = _ReconstructionSpec(grids=(_GridSpec(**grid.__dict__),), max_depth=0)
+    kernel = reconstruction_job_module._kernel_for_grid(
+        spec, spec.grids[0], config.ub_calculator, threads=1
+    )
+    rays = reconstruction_job_module._detector_corner_rays(
+        config.detector, (0, 2, 0, 2)
+    )
+
+    def advance(step_degrees):
+        bounds = np.zeros((3, 2, 4), dtype=np.float64)
+        angles = np.deg2rad(step_degrees) * np.arange(3)
+        bounds[:, 0, 1] = angles
+        bounds[:, 1, 1] = angles
+        return reconstruction_job_module._frame_advance_voxels(
+            kernel, spec.grids[0], rays, bounds, [(0, 1)]
+        )
+
+    small = advance(0.1)
+    large = advance(0.2)
+    assert small > 0.0
+    assert large == pytest.approx(2.0 * small, rel=0.05)

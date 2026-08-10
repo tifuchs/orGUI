@@ -193,8 +193,10 @@ class _ReconstructionSpec:
     #: frame) collapses redundancy a per-image block cannot see. One frame
     #: per call is the degenerate case of the same machinery, not a
     #: separate path. Past roughly one voxel of travel per frame the gain
-    #: is gone, so this is a per-job quantity rather than a constant.
-    frames_per_group: int = 1
+    #: is gone, so this is a per-job quantity rather than a constant --
+    #: ``None`` measures the job and chooses (the normal case), an
+    #: explicit integer overrides that measurement.
+    frames_per_group: int | None = None
     memory_budget_bytes: int = 512 * 1024 * 1024
     checkpoint_count: int = 10
     compression: str = "bitshuffle-lz4"
@@ -218,8 +220,8 @@ class _ReconstructionSpec:
             raise ValueError("threads must be positive")
         if self.work_block_pixels < 1:
             raise ValueError("work_block_pixels must be positive")
-        if self.frames_per_group < 1:
-            raise ValueError("frames_per_group must be positive")
+        if self.frames_per_group is not None and self.frames_per_group < 1:
+            raise ValueError("frames_per_group must be positive when set")
         if self.memory_budget_bytes < 1024 * 1024:
             raise ValueError("memory_budget_bytes must be at least 1 MiB")
         if self.checkpoint_count < 1:
