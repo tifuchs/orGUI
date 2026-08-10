@@ -519,59 +519,14 @@ struct VoxelWeight {
     double weight;
 };
 
-struct CachedVoxel {
-    std::uint64_t voxel = 0;
-    std::uint64_t generation = 0;
-    bool valid = false;
-};
-
 struct LatticeVoxel {
     std::uint64_t voxel = 0;
     bool valid = false;
 };
 
-struct PixelCoordinateCache {
-    std::size_t side = 0;
-    std::uint64_t generation = 0;
-    std::vector<CachedVoxel> values;
-
-    void begin_pixel(const int max_depth) {
-        // A dense dyadic cache is small through depth 3 (17^3 entries).
-        // Higher depths retain the uncached path to keep memory bounded.
-        if (max_depth > 3) {
-            side = 0;
-            return;
-        }
-        const std::size_t required_side =
-            (static_cast<std::size_t>(1) << (max_depth + 1)) + 1;
-        if (side != required_side) {
-            side = required_side;
-            values.assign(side * side * side, CachedVoxel{});
-        }
-        ++generation;
-        if (generation == 0) {
-            for (auto &value : values) {
-                value.generation = 0;
-            }
-            generation = 1;
-        }
-    }
-};
-
 bool operator<(const VoxelWeight &left, const VoxelWeight &right) {
     return left.voxel < right.voxel;
 }
-
-struct Cell {
-    double u0;
-    double u1;
-    double v0;
-    double v1;
-    double t0;
-    double t1;
-    double weight;
-    int depth;
-};
 
 struct BlockProfile {
     std::uint64_t pixels_seen = 0;
@@ -1300,60 +1255,6 @@ private:
         return key;
     }
 
-    bool cached_voxel_key(
-        const PixelRays &rays,
-        const double u,
-        const double v,
-        const double t,
-        const std::vector<CoordinateTransform> &transforms,
-        PixelCoordinateCache &cache,
-        std::uint64_t &voxel,
-        BlockProfile *profile
-    ) const {
-        const double rotation_scale =
-            static_cast<double>(transforms.size() - 1);
-        const std::size_t it = static_cast<std::size_t>(
-            std::llround(t * rotation_scale)
-        );
-        if (cache.side == 0) {
-            if (profile != nullptr) {
-                ++profile->coordinate_evaluations;
-            }
-            return voxel_id(
-                coordinate_at(
-                    rays,
-                    u,
-                    v,
-                    transforms[it]
-                ),
-                voxel
-            );
-        }
-        const double scale = static_cast<double>(cache.side - 1);
-        const std::size_t iu = static_cast<std::size_t>(std::llround(u * scale));
-        const std::size_t iv = static_cast<std::size_t>(std::llround(v * scale));
-        CachedVoxel &cached = cache.values[
-            (iu * cache.side + iv) * cache.side + it
-        ];
-        if (cached.generation != cache.generation) {
-            if (profile != nullptr) {
-                ++profile->coordinate_evaluations;
-            }
-            cached.valid = voxel_id(
-                coordinate_at(
-                    rays,
-                    u,
-                    v,
-                    transforms[it]
-                ),
-                cached.voxel
-            );
-            cached.generation = cache.generation;
-        }
-        voxel = cached.voxel;
-        return cached.valid;
-    }
-
     LatticeVoxel stationary_lattice_voxel(
         const PixelRays &rays,
         const std::size_t u_index,
@@ -1528,105 +1429,324 @@ private:
         }
     }
 
-    void split_pixel(
+    // One node of the 3x3x3 dyadic lattice a moving cell's subdivision
+    // spans: (iu, iv, it) each in {0, 1, 2}, low corner to high corner.
+    static std::size_t lattice_index(
+        const std::size_t iu,
+        const std::size_t iv,
+        const std::size_t it
+    ) {
+        return (iu * 3 + iv) * 3 + it;
+    }
+
+    LatticeVoxel evaluate_lattice_voxel(
         const PixelRays &rays,
+        const double u,
+        const double v,
+        const double t,
         const std::vector<CoordinateTransform> &transforms,
-        const bool stationary,
-        std::vector<VoxelWeight> &weights,
-        PixelCoordinateCache &cache,
-        std::vector<Cell> &stack,
         BlockProfile *profile
     ) const {
-        cache.begin_pixel(max_depth_);
-        stack.clear();
-        stack.push_back({
-            0.0,
-            1.0,
-            0.0,
-            1.0,
-            stationary ? 0.5 : 0.0,
-            stationary ? 0.5 : 1.0,
-            1.0,
-            0,
-        });
-        while (!stack.empty()) {
-            const Cell cell = stack.back();
-            stack.pop_back();
-            std::uint64_t first_voxel = 0;
-            bool first_valid = false;
-            bool all_same = true;
-            const int corner_count = stationary ? 4 : 8;
-            for (int corner = 0; corner < corner_count; ++corner) {
-                const double u = (corner & 1) != 0 ? cell.u1 : cell.u0;
-                const double v = (corner & 2) != 0 ? cell.v1 : cell.v0;
-                const double t = stationary
-                    ? 0.5
-                    : ((corner & 4) != 0 ? cell.t1 : cell.t0);
-                std::uint64_t voxel = 0;
-                const bool valid = cached_voxel_key(
-                    rays,
-                    u,
-                    v,
-                    t,
-                    transforms,
-                    cache,
-                    voxel,
-                    profile
-                );
-                if (corner == 0) {
-                    first_valid = valid;
-                    first_voxel = voxel;
-                } else if (
-                    valid != first_valid
-                    || (valid && voxel != first_voxel)
-                ) {
-                    all_same = false;
-                }
-            }
-            if (all_same && first_valid) {
-                weights.push_back({first_voxel, cell.weight});
-                continue;
-            }
-            if (cell.depth >= max_depth_) {
-                std::uint64_t voxel = 0;
-                const bool valid = cached_voxel_key(
-                    rays,
-                    0.5 * (cell.u0 + cell.u1),
-                    0.5 * (cell.v0 + cell.v1),
-                    0.5 * (cell.t0 + cell.t1),
-                    transforms,
-                    cache,
-                    voxel,
-                    profile
-                );
-                if (valid) {
-                    weights.push_back({voxel, cell.weight});
-                }
-                continue;
-            }
-            const double um = 0.5 * (cell.u0 + cell.u1);
-            const double vm = 0.5 * (cell.v0 + cell.v1);
-            const double tm = 0.5 * (cell.t0 + cell.t1);
-            const int child_count = stationary ? 4 : 8;
-            const double child_weight =
-                cell.weight / static_cast<double>(child_count);
-            for (int child = child_count - 1; child >= 0; --child) {
-                stack.push_back({
-                    (child & 1) != 0 ? um : cell.u0,
-                    (child & 1) != 0 ? cell.u1 : um,
-                    (child & 2) != 0 ? vm : cell.v0,
-                    (child & 2) != 0 ? cell.v1 : vm,
-                    stationary
-                        ? 0.5
-                        : ((child & 4) != 0 ? tm : cell.t0),
-                    stationary
-                        ? 0.5
-                        : ((child & 4) != 0 ? cell.t1 : tm),
-                    child_weight,
-                    cell.depth + 1,
-                });
+        // t selects one of the rotations frame_rotations() precomputed over
+        // the dyadic lattice, by the same rounding the removed shared-corner
+        // cache used, so coordinates here are bit-for-bit what it produced.
+        LatticeVoxel result;
+        if (profile != nullptr) {
+            ++profile->coordinate_evaluations;
+        }
+        const double rotation_scale =
+            static_cast<double>(transforms.size() - 1);
+        const std::size_t it = static_cast<std::size_t>(
+            std::llround(t * rotation_scale)
+        );
+        result.valid = voxel_id(
+            coordinate_at(rays, u, v, transforms[it]),
+            result.voxel
+        );
+        return result;
+    }
+
+    void subdivide_moving(
+        const PixelRays &rays,
+        const std::vector<CoordinateTransform> &transforms,
+        const double u0,
+        const double u1,
+        const double v0,
+        const double v1,
+        const double t0,
+        const double t1,
+        const double weight,
+        const int depth,
+        const LatticeVoxel (&corners)[8],
+        std::vector<VoxelWeight> &weights,
+        BlockProfile *profile
+    ) const {
+        // Corner c sits at (u1 if c&1 else u0, v1 if c&2 else v0,
+        // t1 if c&4 else t0) -- the same numbering the explicit-stack form
+        // used, and the same order children are visited in, so leaves are
+        // emitted in an unchanged sequence and their later summation
+        // associates identically.
+        bool all_same = true;
+        for (int corner = 1; corner < 8; ++corner) {
+            if (
+                corners[corner].valid != corners[0].valid
+                || (corners[0].valid && corners[corner].voxel != corners[0].voxel)
+            ) {
+                all_same = false;
+                break;
             }
         }
+        if (all_same && corners[0].valid) {
+            weights.push_back({corners[0].voxel, weight});
+            return;
+        }
+        const double um = 0.5 * (u0 + u1);
+        const double vm = 0.5 * (v0 + v1);
+        const double tm = 0.5 * (t0 + t1);
+        if (depth >= max_depth_) {
+            // A cell whose corners disagree at the deepest level assigns its
+            // whole weight at its centre. Note an entirely out-of-grid cell
+            // reaches here too (all_same holds, but no corner is valid),
+            // exactly as before.
+            const LatticeVoxel centre = evaluate_lattice_voxel(
+                rays, um, vm, tm, transforms, profile
+            );
+            if (centre.valid) {
+                weights.push_back({centre.voxel, weight});
+            }
+            return;
+        }
+        // Eight children share one 27-node lattice, of which the eight
+        // corners are already in hand: only the nineteen nodes with a
+        // midpoint index are new. That is what replaces the dense
+        // per-pixel cache -- the sharing lives in the recursion instead of
+        // in a side array that has to be indexed, generation-stamped, and
+        // sized for a depth it mostly does not use.
+        LatticeVoxel lattice[27];
+        const double us[3] = {u0, um, u1};
+        const double vs[3] = {v0, vm, v1};
+        const double ts[3] = {t0, tm, t1};
+        for (std::size_t iu = 0; iu < 3; ++iu) {
+            for (std::size_t iv = 0; iv < 3; ++iv) {
+                for (std::size_t it = 0; it < 3; ++it) {
+                    LatticeVoxel &node = lattice[lattice_index(iu, iv, it)];
+                    if (iu != 1 && iv != 1 && it != 1) {
+                        const int corner = (iu == 2 ? 1 : 0)
+                            | (iv == 2 ? 2 : 0)
+                            | (it == 2 ? 4 : 0);
+                        node = corners[corner];
+                    } else {
+                        node = evaluate_lattice_voxel(
+                            rays, us[iu], vs[iv], ts[it], transforms, profile
+                        );
+                    }
+                }
+            }
+        }
+        const double child_weight = weight / 8.0;
+        for (int child = 0; child < 8; ++child) {
+            const std::size_t base_u = (child & 1) != 0 ? 1 : 0;
+            const std::size_t base_v = (child & 2) != 0 ? 1 : 0;
+            const std::size_t base_t = (child & 4) != 0 ? 1 : 0;
+            LatticeVoxel child_corners[8];
+            for (int corner = 0; corner < 8; ++corner) {
+                child_corners[corner] = lattice[
+                    lattice_index(
+                        base_u + ((corner & 1) != 0 ? 1 : 0),
+                        base_v + ((corner & 2) != 0 ? 1 : 0),
+                        base_t + ((corner & 4) != 0 ? 1 : 0)
+                    )
+                ];
+            }
+            subdivide_moving(
+                rays,
+                transforms,
+                (child & 1) != 0 ? um : u0,
+                (child & 1) != 0 ? u1 : um,
+                (child & 2) != 0 ? vm : v0,
+                (child & 2) != 0 ? v1 : vm,
+                (child & 4) != 0 ? tm : t0,
+                (child & 4) != 0 ? t1 : tm,
+                child_weight,
+                depth + 1,
+                child_corners,
+                weights,
+                profile
+            );
+        }
+    }
+
+    LatticeVoxel evaluate_stationary_voxel(
+        const PixelRays &rays,
+        const double u,
+        const double v,
+        const CoordinateTransform &transform,
+        BlockProfile *profile
+    ) const {
+        // The stationary counterpart of evaluate_lattice_voxel: t is pinned,
+        // so the rotation is chosen once by the caller instead of being
+        // recovered from t on every node. transforms[size / 2] and
+        // llround(0.5 * (size - 1)) are the same index for every depth --
+        // both are 2^max_depth -- so this is bit-for-bit what the cached
+        // path evaluated.
+        LatticeVoxel result;
+        if (profile != nullptr) {
+            ++profile->coordinate_evaluations;
+        }
+        result.valid = voxel_id(
+            coordinate_at(rays, u, v, transform),
+            result.voxel
+        );
+        return result;
+    }
+
+    void subdivide_stationary(
+        const PixelRays &rays,
+        const CoordinateTransform &transform,
+        const double u0,
+        const double u1,
+        const double v0,
+        const double v1,
+        const double weight,
+        const int depth,
+        const LatticeVoxel (&corners)[4],
+        std::vector<VoxelWeight> &weights,
+        BlockProfile *profile
+    ) const {
+        bool all_same = true;
+        for (int corner = 1; corner < 4; ++corner) {
+            if (
+                corners[corner].valid != corners[0].valid
+                || (corners[0].valid && corners[corner].voxel != corners[0].voxel)
+            ) {
+                all_same = false;
+                break;
+            }
+        }
+        if (all_same && corners[0].valid) {
+            weights.push_back({corners[0].voxel, weight});
+            return;
+        }
+        const double um = 0.5 * (u0 + u1);
+        const double vm = 0.5 * (v0 + v1);
+        if (depth >= max_depth_) {
+            const LatticeVoxel centre = evaluate_stationary_voxel(
+                rays, um, vm, transform, profile
+            );
+            if (centre.valid) {
+                weights.push_back({centre.voxel, weight});
+            }
+            return;
+        }
+        // Four children share one 3x3 lattice whose corners are already in
+        // hand: five new nodes per split, exactly what
+        // split_pixel_stationary_depth2 materializes by hand at depth two.
+        LatticeVoxel lattice[9];
+        const double us[3] = {u0, um, u1};
+        const double vs[3] = {v0, vm, v1};
+        for (std::size_t iu = 0; iu < 3; ++iu) {
+            for (std::size_t iv = 0; iv < 3; ++iv) {
+                LatticeVoxel &node = lattice[iu * 3 + iv];
+                if (iu != 1 && iv != 1) {
+                    const int corner = (iu == 2 ? 1 : 0) | (iv == 2 ? 2 : 0);
+                    node = corners[corner];
+                } else {
+                    node = evaluate_stationary_voxel(
+                        rays, us[iu], vs[iv], transform, profile
+                    );
+                }
+            }
+        }
+        const double child_weight = weight / 4.0;
+        for (int child = 0; child < 4; ++child) {
+            const std::size_t base_u = (child & 1) != 0 ? 1 : 0;
+            const std::size_t base_v = (child & 2) != 0 ? 1 : 0;
+            LatticeVoxel child_corners[4];
+            for (int corner = 0; corner < 4; ++corner) {
+                child_corners[corner] = lattice[
+                    (base_u + ((corner & 1) != 0 ? 1 : 0)) * 3
+                    + base_v + ((corner & 2) != 0 ? 1 : 0)
+                ];
+            }
+            subdivide_stationary(
+                rays,
+                transform,
+                (child & 1) != 0 ? um : u0,
+                (child & 1) != 0 ? u1 : um,
+                (child & 2) != 0 ? vm : v0,
+                (child & 2) != 0 ? v1 : vm,
+                child_weight,
+                depth + 1,
+                child_corners,
+                weights,
+                profile
+            );
+        }
+    }
+
+    void split_pixel_stationary(
+        const PixelRays &rays,
+        const CoordinateTransform &transform,
+        std::vector<VoxelWeight> &weights,
+        BlockProfile *profile
+    ) const {
+        LatticeVoxel corners[4];
+        for (int corner = 0; corner < 4; ++corner) {
+            corners[corner] = evaluate_stationary_voxel(
+                rays,
+                (corner & 1) != 0 ? 1.0 : 0.0,
+                (corner & 2) != 0 ? 1.0 : 0.0,
+                transform,
+                profile
+            );
+        }
+        subdivide_stationary(
+            rays,
+            transform,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            1.0,
+            0,
+            corners,
+            weights,
+            profile
+        );
+    }
+
+    void split_pixel_moving(
+        const PixelRays &rays,
+        const std::vector<CoordinateTransform> &transforms,
+        std::vector<VoxelWeight> &weights,
+        BlockProfile *profile
+    ) const {
+        LatticeVoxel corners[8];
+        for (int corner = 0; corner < 8; ++corner) {
+            corners[corner] = evaluate_lattice_voxel(
+                rays,
+                (corner & 1) != 0 ? 1.0 : 0.0,
+                (corner & 2) != 0 ? 1.0 : 0.0,
+                (corner & 4) != 0 ? 1.0 : 0.0,
+                transforms,
+                profile
+            );
+        }
+        subdivide_moving(
+            rays,
+            transforms,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            1.0,
+            0,
+            corners,
+            weights,
+            profile
+        );
     }
 
     std::vector<Record> accumulate_block(
@@ -1653,12 +1773,14 @@ private:
         arena.release();
         std::pmr::map<RecordKey, RecordAccum> tree(&arena);
         std::vector<VoxelWeight> weights;
-        PixelCoordinateCache coordinate_cache;
-        std::vector<Cell> stack;
-        const std::size_t reserve_leaves = static_cast<std::size_t>(1)
-            << std::min((stationary ? 2 : 3) * max_depth_, 9);
-        weights.reserve(reserve_leaves);
-        stack.reserve(reserve_leaves);
+        // Subdivision now carries its cell state on the recursion stack --
+        // nine LatticeVoxel per level stationary, twenty-seven moving, so
+        // at most about four kilobytes at the deepest setting -- so the
+        // only scratch a block still needs is the leaf list.
+        weights.reserve(
+            static_cast<std::size_t>(1)
+            << std::min((stationary ? 2 : 3) * max_depth_, 9)
+        );
         // Counts per-pixel-merged (voxel, weight) accumulation events --
         // the same quantity the old push_back-one-Record-per-event code
         // counted via records.size() before its later block-end reduce.
@@ -1758,20 +1880,31 @@ private:
             }
             weights.clear();
             if (stationary && max_depth_ == 2) {
+                // Kept in preference to the general recursion, which measured
+                // 10% slower here: one flat 5x5 lattice per pixel shares
+                // nodes between sibling subtrees, which corner-passing gives
+                // up (22.02 against 20.82 evaluations per pixel). That
+                // sharing is only affordable because a stationary depth-two
+                // lattice is 25 nodes; see the design note on generalizing
+                // it.
                 split_pixel_stationary_depth2(
                     prepared_rays,
                     transforms[transforms.size() / 2],
                     weights,
                     profile
                 );
+            } else if (stationary) {
+                split_pixel_stationary(
+                    prepared_rays,
+                    transforms[transforms.size() / 2],
+                    weights,
+                    profile
+                );
             } else {
-                split_pixel(
+                split_pixel_moving(
                     prepared_rays,
                     transforms,
-                    stationary,
                     weights,
-                    coordinate_cache,
-                    stack,
                     profile
                 );
             }
