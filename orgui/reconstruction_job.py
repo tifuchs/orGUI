@@ -1346,9 +1346,24 @@ def _execution_layout(job, scan, config, *, extra_excluded_frames=()):
         if job.advanced_depth is not None
         else ACCURACY_DEPTHS[job.accuracy]
     )
-    worst_leaves = 8**depth
+    # Bounded by the record ceiling the arena and both memory prechecks
+    # already use, not by the worst-case leaf count. 8**depth is what this
+    # site was left with when the prechecks were corrected, and it is far
+    # more conservative than anything a pixel actually leaves behind: at
+    # depth 2 it claims 5248 bytes per pixel against a real ~106, which
+    # bands this detector into 13 strips of 194 rows, and by depth 5 it
+    # asks for 2.6 MB per pixel and collapses a band to a single row.
+    #
+    # Thin bands are not free. Measured at depth 0 on the reference job,
+    # banding finer than the budget requires costs 10-15% -- more kernel
+    # calls per frame group, each with less work to spread over its
+    # threads, and a brick that is shorter in the row direction than the
+    # locality it is trying to exploit.
     estimated_native_bytes_per_pixel = (
-        128 + 2 * worst_leaves * _CHECKPOINT_BYTES_PER_ROW
+        128
+        + 2
+        * min(8**depth, _RESERVED_RECORDS_PER_PIXEL)
+        * _CHECKPOINT_BYTES_PER_ROW
     )
     tile_pixels = max(
         1,

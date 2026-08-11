@@ -1252,3 +1252,68 @@ def test_frame_advance_voxels_scales_with_the_angular_step():
     large = advance(0.2)
     assert small > 0.0
     assert large == pytest.approx(2.0 * small, rel=0.05)
+
+
+def _large_detector_job(tmp_path, depth):
+    scan = SimulationScan((2, 2), 0.0, 1.0, 8)
+    assets = tmp_path / f"scratch{depth}" / "job-assets.nxs"
+    assets.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(assets, "w") as h5file:
+        h5file.attrs["orgui_job_assets"] = 1
+    config = _config()
+    config.detector.detector.shape = (2527, 2463)
+    config.detector.detector.max_shape = (2527, 2463)
+    grid = ReconstructionGrid(
+        minimum=(-20.0, -20.0, -20.0),
+        maximum=(20.0, 20.0, 20.0),
+        step=(20.0, 20.0, 20.0),
+        frame="lab",
+        chunk_shape=(2, 2, 2),
+    )
+    scan_reference = ScanReference.from_scan(scan).to_dict()
+    job = ReconstructionJob(
+        config=config_data_to_json(config),
+        scan_reference=scan_reference,
+        grids=[grid.__dict__],
+        scratch_path=str(assets.parent),
+        output_path=str(tmp_path / f"result{depth}.h5"),
+        compression="Raw",
+        assets_path=str(assets),
+        assets_sha256=sha256(assets.read_bytes()).hexdigest(),
+        source_fingerprint_sha256="0" * 64,
+        threads_per_image=None,
+        accumulation_budget_bytes=None,
+        advanced_depth=depth,
+        runtime_threads=24,
+        runtime_memory_bytes=10 * 1000**3,
+        frame_batch=4,
+    )
+    return scan, job, config
+
+
+def test_detector_bands_do_not_collapse_at_high_adaptive_depth(tmp_path):
+    """Band height is bounded by the record ceiling, not by the worst-case
+    leaf count.
+
+    ``8**depth`` bytes per pixel is what this site was left with when the
+    two memory prechecks were corrected to the record ceiling. It is
+    enormously conservative: at depth 5 it asks for 2.6 MB per pixel,
+    which bands a Pilatus 6M into one row per band -- 2527 native calls
+    per frame instead of six. Thin bands are not free, and one row is not
+    a band at all.
+    """
+    band_counts = {}
+    for depth in (0, 2, 5):
+        scan, job, config = _large_detector_job(tmp_path, depth)
+        _ranges, tiles = reconstruction_job_module._execution_layout(
+            job, scan, config
+        )
+        band_counts[depth] = len(tiles)
+        # Full detector width, so a tile is a contiguous slice of the frame.
+        assert all(
+            (column_start, column_stop) == (0, 2463)
+            for _rs, _re, column_start, column_stop in tiles
+        )
+
+    assert band_counts[0] == band_counts[2] == band_counts[5]
+    assert band_counts[5] < 20
