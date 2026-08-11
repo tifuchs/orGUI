@@ -56,6 +56,7 @@ from orgui.reconstruction_job import (
     _load_assets,
     _map_pending_ranges,
     read_job,
+    resolve_work_block_pixels,
     split_memory_budget,
 )
 
@@ -232,7 +233,22 @@ def main():
     scan = job.scan
     spec = job.internal_spec()
     if arguments.depth is not None:
-        spec = replace(spec, max_depth=arguments.depth)
+        # Re-derive the work block, exactly as ``internal_spec`` does.
+        # Overriding ``max_depth`` alone leaves the block at the job's own
+        # depth -- a documented way to measure something no real job runs:
+        # the preset halves with depth to hold the working set fixed, so a
+        # depth-0 arm carrying a depth-3 block is eight times too small,
+        # and frame-group brick dimensions are cut from that same count.
+        spec = replace(
+            spec,
+            max_depth=arguments.depth,
+            work_block_pixels=resolve_work_block_pixels(
+                job.work_block_pixels,
+                arguments.depth,
+                spec.memory_budget_bytes,
+                spec.threads,
+            ),
+        )
     if arguments.group is not None:
         if not hasattr(spec, "frames_per_group"):
             raise SystemExit(
