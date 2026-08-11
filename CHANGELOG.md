@@ -93,6 +93,15 @@ Scientific correctness and performance fixes:
   Scans whose angles do not advance monotonically, such as interlaced ones,
   map one image per call as before. On a 0.1 deg/frame rotation scan this
   chooses four images per call and maps at 0.88x the previous wall time.
+- Corrected the detector band height used for reciprocal-space mapping,
+  which was still derived from the worst-case adaptive leaf count rather
+  than from the record ceiling the memory prechecks use. At the
+  ``very_high`` and ``maximum`` accuracy settings this over-estimated a
+  pixel's cost by four orders of magnitude and split the detector into
+  extremely thin bands — one row per band on a Pilatus 6M at ``maximum``,
+  giving 2527 native calls per image instead of six. Band height no longer
+  depends on the accuracy setting. Measured throughput at ``balanced``
+  accuracy is unchanged; the fix matters at the two highest settings.
 
 A ***critical bug*** was fixed that affects bulk CTR calculations:
 

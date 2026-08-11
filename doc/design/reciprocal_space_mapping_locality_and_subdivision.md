@@ -767,11 +767,53 @@ Not required by either finding; do not fold it in.
    sample angles at all. Every frame reaches the same voxels, so grouping
    helps most there and the gate correctly does not stand in the way.
 
-   What is *not* done: choosing the band height. Step 5 showed band height
-   and group size trade against each other for the same memory, and the
-   choice here takes the tiling as given. Re-tiling to afford a larger
-   group is the obvious next thing to try, and it is what would let `F = 8`
-   compete.
+7. *Choosing the band height too.* **Measured, and there is nothing to
+   choose.** Step 5 showed band height and group size trade against each
+   other for the same memory, so re-tiling to afford a larger group looked
+   like the obvious next lever. It is not: swept at `F = 4` on the
+   reference job, band height is flat across the region that matters and
+   the existing default sits in the middle of it.
+
+   | bands | tiles | layout | median ms/frame |
+   |---|---|---|---|
+   | 240 | 11 | 4 x 6 | 236.7 |
+   | **421 (the default)** | 7 | **3 x 8** | **205.4** |
+   | 506 | 5 | 3 x 8 | 207.1 |
+   | 600 | 4 | 2 x 12 | 237.1 |
+
+   Both directions lose, and for different reasons. Finer bands buy a
+   fourth concurrent call but take two threads off each, and 4 x 6 is
+   worse than 3 x 8 — more calls, each with less work to spread. Coarser
+   bands cost a call outright. **`F = 8` cannot be rescued this way at
+   all**: its group buffer does not shrink with the band height, so it
+   holds at two concurrent calls from 200 rows to 2527 and never reaches
+   the floor of three.
+
+   So the pair does not need choosing jointly; the band height that
+   maximises concurrency at the chosen `F` is already what the memory
+   budget produces.
+
+   **One real defect surfaced while sweeping it, and is fixed.** Tile
+   planning still sized bands by `8**depth` bytes per pixel — the
+   worst-case leaf count phase 2 replaced in both memory prechecks and
+   left behind at this third site. It is wildly conservative: at depth 2
+   it claims 5248 bytes for a pixel that costs about 106, banding this
+   detector into 13 strips of 194 rows, and at depth 5 it asks for 2.6 MB
+   per pixel and collapses a band to **one row — 2527 native calls per
+   frame instead of six**. Bounding it by the same record ceiling the
+   arena and both prechecks use makes the band height depth-independent.
+
+   Measured at depth 2, interleaved, the fix is a **wash** (619 against
+   629 ms/frame, 0.98x) — the 5-20% predicted from the depth-0 sweep did
+   not appear. The reason is visible in the run: wider bands make the
+   group-size gate drop `F` from 4 to 2, and the two effects cancel almost
+   exactly. That is worth stating as a result in its own right — **band
+   height and group size substitute for each other**, which is why neither
+   is worth optimising hard, and why the joint search this step set out to
+   build would have found a flat surface.
+
+   The fix is kept for the depth-5 pathology and for consistency with
+   phase 2, not for throughput. A test pins the band count against depth.
 
 ### Measurement noise on this machine
 
