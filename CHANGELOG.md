@@ -102,6 +102,15 @@ Scientific correctness and performance fixes:
   giving 2527 native calls per image instead of six. Band height no longer
   depends on the accuracy setting. Measured throughput at ``balanced``
   accuracy is unchanged; the fix matters at the two highest settings.
+- The reciprocal-space reconstruction documentation now says which footprint
+  accuracy setting to choose, and why. Each setting's effect on a
+  reconstructed intensity was measured against that voxel's own counting
+  error: ``Balanced`` is sufficient for a full rotation scan, while
+  ``High``, ``Very high`` and ``Maximum`` shift intensities by 0.02 sigma or
+  less and are not distinguishable from ``Balanced`` by the data, at roughly
+  4x, 15x and 100x the runtime. ``Center only`` is genuinely lossy and also
+  misses about 4% of the voxels the other settings reach. No behaviour or
+  default has changed.
 
 A ***critical bug*** was fixed that affects bulk CTR calculations:
 

@@ -291,6 +291,57 @@ Stationary cells split into four spatial children per level. Swept cells split
 in detector row, detector column, and exposure position and can create eight
 children per level. Consequently, worst-case work grows rapidly with depth.
 
+Choosing a depth
+~~~~~~~~~~~~~~~~
+
+Depth changes an intensity by less than counting statistics well before it
+stops costing runtime, so the highest settings are rarely worth their price.
+Measured on real rotation-scan data by comparing each voxel's reconstructed
+intensity against the same voxel at depth 5, in units of that voxel's own
+propagated error bar:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Setting
+     - Typical shift from the deepest result
+     - Contributors per voxel needed to see it
+   * - ``Center only (depth 0)``
+     - 0.4-0.5 sigma
+     - 70-260
+   * - ``Low (depth 1)``
+     - 0.13 sigma
+     - 1,100-2,500
+   * - ``Balanced (depth 2)``
+     - 0.05 sigma
+     - 7,700-13,800
+   * - ``High (depth 3)``
+     - 0.01-0.02 sigma
+     - 76,000-112,000
+   * - ``Very high (depth 4)``
+     - 0.003 sigma
+     - ~2,000,000
+
+A full rotation scan of several thousand frames delivers of order 1,000 to
+2,500 contributors to a well-covered voxel. Reading the table against that:
+
+* ``Center only`` is genuinely lossy. It also fails to reach about 4% of the
+  voxels that deeper settings populate, because a pixel contributes at one
+  point rather than over its footprint.
+* ``Low`` sits at the edge of what a long scan can resolve.
+* ``Balanced`` is sufficient for production work on such a scan, which is why
+  it is the default.
+* ``High``, ``Very high`` and ``Maximum`` are not distinguishable from
+  ``Balanced`` by the data itself, while costing roughly 4x, 15x and 100x its
+  runtime respectively. Use them to check convergence on a small region, not
+  for whole production jobs.
+
+These figures come from one dataset on one machine and depend on the ratio of
+voxel size to detector pixel footprint: a grid much finer than the pixel
+footprint moves every threshold upward. Treat the ordering as general and the
+constants as indicative. ``benchmarks/benchmark_reconstruction_depth_convergence.py``
+reproduces the table for a prepared job of your own.
+
 Performance Parameters
 ----------------------
 
