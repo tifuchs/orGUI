@@ -325,8 +325,36 @@ pipeline runs in 2026-08 routed zero records, wrote a checkpoint with 0
 rows and `frames_covered` set to the full count, and exited 0 — at 50.5
 ms/frame against ~250, i.e. a 5x "speed-up". Always compare a run's
 checkpoint fingerprint against its partner's and discard mismatches; a
-timing-only harness will silently take these as wins. The underlying
-defect is a correctness issue and is not yet diagnosed.
+timing-only harness will silently take these as wins.
+
+`_map_pending_ranges` now warns, on both schedulers and through the
+progress channel as well as `warnings`, when a whole run routes nothing.
+That makes the next occurrence visible; it does not explain it. What the
+investigation ruled out, each by direct measurement rather than
+inspection:
+
+- **Not the static correction factor.** `1 / solidAngleArray` and the
+  polarization array are bit-identical across 12 fresh job loads, with no
+  zeros and no non-finite entries. A bad one would poison a whole run,
+  which fits the symptom, but it does not vary.
+- **Not the angle bounds or the grid.** Bit-identical across 20 fresh
+  loads. This was the best remaining candidate — garbage bounds would put
+  every sample outside the grid, which is silent, fast and record-free.
+- **Not a swallowed exception.** Both schedulers re-raise the first
+  recorded exception, and the failing runs exited 0 with no traceback, so
+  correction did not raise.
+- **Not the native memory precheck.** It throws; it has no path that
+  returns empty.
+- **Not reproducible on demand.** 30 consecutive runs of a 39-frame
+  window returned the identical record count every time.
+
+What remains is that the raw frames themselves, or the mask derived from
+them, occasionally come back degenerate for an entire run — consistent
+with the `RuntimeWarning` seen at `intensity *= static_factor` on one
+occurrence, which implies a non-finite *raw* image rather than a bad
+factor. Both observed failures came late in long, memory-heavy sequences.
+Unproven. A separate one-off hang of the same pipeline under `pytest`,
+not reproduced, may or may not be related.
 
 ## Calibration constants and what they rest on
 
