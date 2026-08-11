@@ -1182,6 +1182,9 @@ class _CheckpointRouter:
             for grid_name, ranges in self._boundaries.items()
         }
         self._resumed = set(resumed)
+        #: Records handed to :meth:`route` over this router's lifetime,
+        #: summed across grids. Diagnostic only -- nothing schedules on it.
+        self.routed_records = 0
         self._accumulators: dict[tuple[str, int], _CheckpointAccumulator] = {}
         self._parts: dict[tuple[str, int], int] = {}
         self._frames_in_part: dict[tuple[str, int], int] = {}
@@ -1268,6 +1271,12 @@ class _CheckpointRouter:
                 )
         key = (grid_name, index)
         with self._lock:
+            # Counted before the resumed-checkpoint early return, and
+            # across every grid: this exists so a caller can tell "mapped
+            # and produced nothing" from "mapped and produced records",
+            # which is otherwise invisible until a reconstruction comes
+            # out empty. See _warn_if_nothing_was_routed.
+            self.routed_records += int(np.asarray(batch["chunk_id"]).size)
             if key in self._resumed:
                 return
             accumulator = self._accumulators.get(key)

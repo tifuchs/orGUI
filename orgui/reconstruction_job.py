@@ -12,6 +12,7 @@ import shutil
 import threading
 import time
 from typing import Any
+import warnings
 
 import h5py
 import numpy as np
@@ -2371,6 +2372,38 @@ def _group_pipeline_layout(spec, tiles, memory_bytes, prepare_workers):
     return compute_workers, kernel_threads, pipeline_depth
 
 
+def _warn_if_nothing_was_routed(router, routed_before, total_images, progress):
+    """Say so when a whole mapping run produced no records at all.
+
+    Mapping every frame of a range and emitting nothing is possible
+    legitimately -- a grid can cover a region this slice of the scan never
+    reaches -- so this warns rather than raising. But it is also what an
+    intermittent failure observed in 2026-08 looks like from the outside:
+    roughly one run in twenty mapped nothing, wrote a checkpoint claiming
+    its full frame count with zero rows, and exited successfully, in about
+    a fifth of the usual time. Nothing downstream could tell that from a
+    fast, empty-but-correct run, and on resume the empty part counts as
+    done.
+
+    Reported through ``progress`` as well as :mod:`warnings`, because a
+    warning alone is invisible in the GUI, which is where an empty
+    reconstruction is most expensive to discover late.
+    """
+    routed = getattr(router, "routed_records", None)
+    if routed is None or total_images <= 0 or routed > routed_before:
+        return
+    message = (
+        f"Mapped {total_images} frames and produced no records at all. "
+        "This is expected only if the grids genuinely cover no part of "
+        "the reciprocal space these frames reach; otherwise the frames "
+        "were masked away or their geometry placed every sample outside "
+        "every grid, and the resulting checkpoints will be empty."
+    )
+    warnings.warn(message, RuntimeWarning, stacklevel=2)
+    if progress is not None:
+        progress(total_images, total_images, message)
+
+
 def _angles_advance_monotonically(bounds, frame_indices):
     """Whether frames adjacent in index are also adjacent in angle.
 
@@ -3071,6 +3104,8 @@ def _map_pending_ranges(
         )
     ]
 
+    routed_before = getattr(router, "routed_records", 0)
+
     if frames_per_group > 1:
         group_workers, group_threads, group_depth = _group_pipeline_layout(
             spec, tiles, scheduler_memory, seed_prepare_workers
@@ -3094,6 +3129,9 @@ def _map_pending_ranges(
             total_images=total_images,
             completed_images=completed_images,
             progress=progress,
+        )
+        _warn_if_nothing_was_routed(
+            router, routed_before, total_images, progress
         )
         return
 
@@ -3478,6 +3516,7 @@ def _map_pending_ranges(
     finally:
         reader_pool.shutdown(wait=True)
         compute_pool.shutdown(wait=True)
+    _warn_if_nothing_was_routed(router, routed_before, total_images, progress)
 
 
 def run_cluster_map_task(
