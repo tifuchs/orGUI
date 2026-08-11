@@ -134,6 +134,24 @@ to paying for it. Between 421 and 506 rows, where concurrency is equal, the
 two are indistinguishable, which is the form the original finding should
 have taken.
 
+**Frame grouping pays only where the kernel dominates and records
+dominate the kernel.** Measured in 2026-08 across two grids and three
+depths: the record saving transfers everywhere and even improves with a
+coarser grid (0.450x at 1000^3 depth 0), but the *time* saving appears
+only at depth 0 on the fine 2000^3 grid (0.872x, every pair). Depth 1 and
+2 are nulls because each (pixel, frame) still walks its own subdivision
+tree — ~31 evaluations per pixel at continuous depth 1, ~149 at depth 2,
+against ~1 at depth 0 — so record density stops controlling kernel time.
+Coarse-grid depth 0 is a null for the opposite reason: it is not
+kernel-bound at all. Detail, and what it retires, in the locality
+document's phase 4.
+
+**Nothing above `balanced` changes a reconstructed intensity.** Depth 3
+differs from depth 5 by 0.013-0.024 of a voxel's own error bar, needing
+~10^5 contributors per voxel to reach 1 sigma against the ~1,000-2,500 a
+full job delivers. Depth 0 -> 1 is the only clearly real step. See the
+locality document, "The prior question, answered".
+
 Band height and group size also substitute for each other almost exactly —
 at depth 2, widening the bands makes the group-size gate halve the group
 and the two cancel — which is why neither repays hard optimisation. Detail
@@ -275,6 +293,40 @@ measuring (a `pytest` run in another shell is enough), and a clean
 separation between arms is worth more than a difference of means. Two rounds
 of conclusions in the locality document were withdrawn for this. Its
 "Measuring any of this" section is the full version.
+
+**The reference job's own configuration drifts.** `39_1-rsmap.json` on
+disk is no longer the job the table at the top of this document
+describes: it now carries `high` accuracy and a 1000^3 grid, every step
+2x the documented one. That is a different regime — at depth 0 it maps at
+~110 ms/frame using 7 of 24 cores, bound by loading and correcting rather
+than by the kernel, so phase 3's whole result is invisible on it. A 2026-08
+sweep was run and had to be reinterpreted. Print the grid before trusting
+any comparison against numbers written here.
+
+**At depth 0 the page cache is the noise.** A 234-frame window is 11.7 GB
+against 31 GB of RAM and the run itself holds several more, so how much
+of the window survives between repeats varies. One fine-grid depth-0 arm
+spread 176.5 to 340.6 ms/frame — a factor of 1.9 — where depth >= 1 arms
+hold ±7%. Six pairs, not three, at depth 0.
+
+**"Nothing else may run" is worth verifying, and worth measuring
+correctly.** This machine carries ~1.8-2.9 cores of persistent background
+load. Sampling it per run turns that from an invisible confounder into a
+number you can gate on — but define it as *the sum of other user
+processes*, not as machine-busy minus the benchmark's own. Kernel,
+interrupt and storage-driver time is attributed to System rather than to
+the process that caused it, and mapping is I/O-heavy, so the
+total-minus-child definition charges the benchmark's own I/O to
+"foreign": it reported 7.2 cores of interference where per-process
+accounting showed 2.9.
+
+**A run that maps nothing looks like a fast run.** Roughly 2 of ~40
+pipeline runs in 2026-08 routed zero records, wrote a checkpoint with 0
+rows and `frames_covered` set to the full count, and exited 0 — at 50.5
+ms/frame against ~250, i.e. a 5x "speed-up". Always compare a run's
+checkpoint fingerprint against its partner's and discard mismatches; a
+timing-only harness will silently take these as wins. The underlying
+defect is a correctness issue and is not yet diagnosed.
 
 ## Calibration constants and what they rest on
 
