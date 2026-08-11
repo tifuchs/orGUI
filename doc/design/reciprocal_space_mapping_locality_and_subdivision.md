@@ -18,7 +18,10 @@ to do to carry them.
   the pipeline wiring, the scheduler and the per-job group size are all
   implemented.** Records through the router fall to 0.657x at the group size
   chosen for the reference job, and end-to-end mapping to **0.88x**. See
-  phase 3.
+  phase 3. *Its reach is now bounded: the record saving survives at every
+  depth and grid measured, but it converts into time only where the kernel
+  dominates and record density dominates the kernel — depth 0 on a fine
+  grid. See phase 4.*
 - **B — subdivision cost.** Above depth 3 the shared-corner cache switched off
   and the kernel did several times more ray work than it needed to. A
   corner-passing recursion removes that, bit-for-bit. **Phase 1 is implemented**
@@ -39,8 +42,8 @@ Everything is on branch `perf/subdivision-corner-passing`, unpushed.
 |---|---|
 | 1 — corner-passing subdivision | done, bit-for-bit, 1.65–2.98x |
 | 2 — the `worst_leaves` memory bound | done |
-| 3 — frame-group bricks at depth 0 | done, steps 1–7; **0.88x end-to-end** |
-| 4 — frame-group bricks above depth 0 | **not started** |
+| 3 — frame-group bricks at depth 0 | done, steps 1–7; **0.88x end-to-end**, re-confirmed at 0.872x |
+| 4 — frame-group bricks above depth 0 | **measured, and closed without building it** |
 
 What a reader should know before touching it:
 
@@ -55,10 +58,17 @@ What a reader should know before touching it:
   every job, not only grouped ones.
 - **Read "Measuring any of this" before running a benchmark.** Two rounds
   of conclusions in this document had to be withdrawn for measurement
-  error, not for reasoning error.
-- **The next real question is phase 4's first measurement**, not phase 4's
-  design: `F = 1` against automatic `F` at depth 1 and 2, interleaved. The
-  incidental depth-2 numbers suggest grouping does less there.
+  error, not for reasoning error, and a third round in 2026-08 was
+  reinterpreted after the reference job turned out to have changed
+  underneath it.
+- **Phase 4 is closed, unbuilt.** Grouping's record saving transfers above
+  depth 0 and even improves (0.61–0.71x), but it stops converting into
+  time: depth 1 and depth 2 are nulls on both grids. Above depth 0 the
+  kernel's cost is the per-(pixel, frame) subdivision walk, which no brick
+  shape can share. See phase 4.
+- **Depth above 2 buys nothing observable**, which is a separate result
+  from the same round and bears on how much phases 1–2 are worth. See
+  "The prior question, answered".
 
 ## How this was measured
 
@@ -66,6 +76,19 @@ All numbers are from the `39_1-rsmap` job used throughout the findings document
 (La3Ni2O7, CHESS QM2, Pilatus 6M, 2527 x 2463, 3651 frames, omega rotation
 0.1 deg/frame over 365 deg, `center` accuracy = depth 0, 2000^3 hkl grid with
 steps [0.00457, 0.00208, 0.00265]).
+
+> **The job file on disk is no longer that job, and this cost a measurement
+> round in 2026-08.** `39_1-rsmap.json` now carries `high` accuracy and a
+> **1000^3** grid — every step exactly 2x the above. That is a different
+> regime, not a rescaling: voxels are 8x larger, a frame reaches ~3.5x
+> fewer of them, per-frame travel falls from 0.71 to ~0.35 voxels, and at
+> depth 0 the pipeline stops being kernel-bound altogether (~110 ms/frame,
+> using 7 of 24 cores, against a load-and-correct floor). Phase 3's whole
+> result is invisible on it. **Check the grid before comparing anything
+> here against a fresh run**, and if you need the documented
+> configuration, copy the job and halve every `step` — the grid's
+> `minimum`/`maximum` are unchanged, so the shape doubles on its own. Every
+> phase 4 number below was taken that way.
 
 Which voxel a pixel reaches depends only on geometry and the mask, never on the
 recorded intensity, so the depth-0 pixel-to-voxel map was reproduced in NumPy
@@ -268,6 +291,14 @@ inside a brick at all. **At depth 0, cache centre rays for the brick (24 KiB for
 32x32) and iterate frames-outer. Above depth 0, iterate pixels-outer and do not
 build a cross-frame ray cache.**
 
+> **Superseded above depth 0 by phase 4's measurement.** The second mode
+> this section calls for was never built, and should not be: grouping's
+> record saving does transfer above depth 0, but it no longer converts
+> into time, so there is nothing for a better brick loop to recover. The
+> reasoning here is sound and is kept as the analysis that made phase 4
+> worth measuring — it is the premise that the saving would still be
+> *worth* something above depth 0 that turned out to be false.
+
 ## Memory
 
 ### What finding B costs and frees
@@ -410,12 +441,48 @@ because of it.
 | `benchmark_reconstruction_subdivision.py` | kernel cost and evaluations per pixel by depth and exposure, with XXH3 fingerprints and a `--compare` mode | seconds |
 | `benchmark_reconstruction_group.py` | one `accumulate_group` call against per-image `accumulate`, by group size | seconds |
 | `benchmark_reconstruction_pipeline.py` | the whole mapping phase — reader pool, correction, kernel, router, checkpoint writes | ~1 min per 234-frame arm at depth 0 |
+| `benchmark_reconstruction_depth_convergence.py` | reconstructed intensities across depths, in units of each voxel's own error bar | ~7 min for depths 0–5 on one tile |
 
 `benchmark_reconstruction_mapping.py` is dead: it imports `_map_frame_range`
 and the Parquet writers, both retired. Do not resurrect it; the pipeline
 benchmark replaces it against the pipeline that exists.
 
-### Two traps that silently invalidate a run
+### Traps that silently invalidate a run
+
+**The reference job's own configuration drifts.** See the box under "How
+this was measured": the grid on disk is now 2x coarser than the one every
+phase 1-3 number was taken against, which moves the pipeline out of the
+kernel-bound regime entirely. A whole phase 4 sweep was run and had to be
+reinterpreted before this was noticed. Print the grid shape and step at
+the start of a session and compare them against the document you are
+reading.
+
+**Overriding `--depth` must re-derive `work_block_pixels`.** The findings
+document lists this as a trap and the pipeline benchmark had it anyway,
+until 2026-08: `--depth` replaced `max_depth` alone, leaving the block at
+whatever the job's *own* accuracy implied. The preset halves with depth
+(`16384 >> depth`, memory-capped) precisely to hold the working set fixed,
+so a depth-0 arm was running a 2048-pixel block — eight times too small —
+and frame-group brick dimensions are cut from that same count, so it
+biased the one comparison the benchmark exists to make. Fixed; `--depth`
+now calls `resolve_work_block_pixels` exactly as `internal_spec` does.
+
+**At depth 0 the arm is I/O-bound, and the page cache is the noise.** A
+234-frame window is 11.7 GB against 31 GB of RAM, and the mapping run
+itself holds several more, so how much of the window survives in the page
+cache between runs varies from one repeat to the next. Measured spread on
+a single fine-grid depth-0 arm: **176.5 to 340.6 ms/frame, a factor of
+1.9**, with the process using only 7 of 24 cores. Depth >= 1 is
+compute-bound and far better behaved (±7%). Three pairs is not enough at
+depth 0; use six, and expect the tails.
+
+**"Nothing else may run" needs checking, not assuming.** This machine
+carries a persistent ~1.8 cores of background load — a stray long-running
+process and the agent runtime itself — and a foreign test run landed in
+the middle of a sweep in 2026-08. Sampling total machine CPU against the
+benchmark child's own CPU during each run turns that from an invisible
+confounder into a per-run number you can gate on; a run showing a spike
+should be discarded and repeated, never corrected.
 
 **`PYTHONPATH` must point at the checkout.** `python benchmarks/<script>.py`
 puts `benchmarks/` on `sys.path`, *not* the repository root, so a
@@ -987,53 +1054,168 @@ record): the 3.4% block-shape gain is real in block records before the
 cross-block merge, but one call's merged output is the set of voxels that
 frame reached, which does not depend on how the frame was partitioned.
 
-### Phase 4 — Frame-group bricks above depth 0. Not started.
+### Phase 4 — Frame-group bricks above depth 0. Measured, and not worth doing.
 
-Everything in phase 3 was designed and measured at depth 0. Grouping is not
-*disabled* above it — the gates run at any depth and the streamed scheduler
-works — but nothing about it has been tuned there, and the little evidence
-that exists is not encouraging.
+The measurement this section used to ask for has been taken. **Finding A
+transfers above depth 0 in full — and stops paying for itself entirely.**
+The design work below it is therefore not worth starting.
 
-**What is already known, from the depth-2 runs taken while fixing band
-height.** At depth 2 on the reference job the group-size gate picks
-`F = 2`, not the `F = 4` it picks at depth 0, and mapping runs at
-~620 ms/frame against ~205 at depth 0. The reason `F` falls is structural:
-a group call's native working set is `F x tile pixels x bytes-per-pixel`,
-and the per-pixel term roughly quadruples from depth 0 to depth 2, so the
-same memory affords half the group at the same concurrency. Grouping and
-adaptive depth compete for the same budget.
+**The record saving is real and gets better with depth.** Routed records,
+automatic `F` against `F = 1`, both grids:
 
-That was measured incidentally, on two arms that differed in band height as
-well, so treat it as an observation rather than a result. **The first real
-phase 4 measurement is the obvious one nobody has taken: `F = 1` against
-automatic `F` at depth 1 and depth 2, interleaved, three repeats.** Until
-that exists there is no evidence that grouping helps or hurts above depth 0,
-and the honest reading of the numbers above is that it does less.
+| grid | depth | `F` | routed records vs `F = 1` |
+|---|---|---|---|
+| 2000^3 | 0 | 4 | 0.665 |
+| 2000^3 | 1 | 2 | 0.714 |
+| 1000^3 | 0 | 4 | **0.450** |
+| 1000^3 | 1 | 2 | 0.620 |
+| 1000^3 | 2 | 2 | 0.613 |
 
-Only after that is the design work worth doing:
+Note the coarse grid does *better*, which finding A predicts: per-frame
+travel is halved there, so consecutive frames overlap more. Records are
+deterministic, so these are exact, and they are unaffected by block size
+(the same depth-1 figure came out of a 2048- and an 8192-pixel block, as
+it must — one call's merged output is the set of voxels the frames
+reached, not a function of how the detector was partitioned).
 
-- **Pixel-outer / frame-inner iteration.** Above depth 0 the per-pixel
-  subdivision state cannot be shared across frames (see "Where the two
-  meet"), so the brick loop needs its second mode. Corner-passing is what
-  makes this affordable at all — 1.2–3.5 KiB of stack instead of a
-  6.9–101 KiB dense array per pixel.
-- **No cross-frame ray cache.** The payoff is capped near 28% and the
-  cache is per pixel, so it can only live for one pixel at a time.
-- **Brick dimensions re-derived** against the phase 2 record bound rather
-  than the leaf count.
-- **Whether the record saving even survives.** At higher depth a pixel
-  resolves into a footprint rather than a point, so cross-frame overlap
-  should be at least as good — but "should" is doing all the work in that
-  sentence, and the records-converge-at-depth-3 observation below suggests
-  the marginal voxel is increasingly a partial-volume weight rather than a
-  new voxel. Measure the routed-record ratio at depth 1–3 before assuming
-  finding A transfers.
+**The time saving does not survive depth 0.** Interleaved pairs, 234
+frames, six scheduling ranges so the per-frame arm reaches all six image
+workers the budget affords, every run's checkpoint fingerprint checked
+against its partner:
+
+| grid | depth | pair ratios | median | every pair favours grouping? |
+|---|---|---|---|---|
+| 2000^3 | **0** | 0.928, 0.671, 0.788, 0.966, 0.872 | **0.872** | **yes** |
+| 2000^3 | 1 | 0.993, 1.179, 1.047 | 1.047 | no — none do |
+| 1000^3 | 0 | 1.025, 0.878, 0.968 | 0.968 | no |
+| 1000^3 | 1 | 0.968, 0.971, 1.001 | 0.971 | no |
+| 1000^3 | 2 | 1.053, 0.909, 0.978 | 0.978 | no |
+
+The depth-0 row on the fine grid is the control, and it reproduces phase
+3's result cleanly: 0.872 against the 0.866-0.88 recorded there, at the
+same `F = 4` / 3 calls x 8 threads layout, with all five valid pairs
+below 1.0. Everything else is a null.
+
+**Why, and it is not the reason this section originally guessed.** The
+old text argued `F` falls at depth because a group call's working set
+grows — true (the gate picks 2 rather than 4 above depth 0) but not the
+cause. The cause is that **grouping removes emitted records, and above
+depth 0 emitted records are no longer where the time goes.** Each
+(pixel, frame) still walks its own subdivision tree; that walk is
+per-frame by construction and no brick shape can share it. It costs ~31
+coordinate evaluations per pixel at continuous depth 1 and ~149 at depth
+2, against ~1 at depth 0. So the fraction of kernel time that record
+density controls collapses exactly as the record saving improves, and
+the two cancel. A better brick cannot fix this; only making the
+subdivision itself cheaper can, which is what phase 1 already did.
+
+**A second null, independent of depth, is worth recording with it.** On
+the coarse 1000^3 grid, grouping buys nothing *even at depth 0* (0.968)
+despite the largest record saving measured anywhere (0.450). That job
+maps at ~110 ms/frame using 7 of 24 cores — it is bound by loading and
+correcting frames, not by the kernel at all. So grouping pays only where
+the kernel dominates *and* the kernel's cost is dominated by records:
+depth 0 on a grid fine enough to matter. That is a narrow window, and it
+is the one phase 3 already occupies.
+
+What this retires, and what it does not:
+
+- **Do not build pixel-outer / frame-inner iteration.** It exists to
+  share per-pixel subdivision state across frames above depth 0. There is
+  no time there to recover.
+- **Do not re-derive brick dimensions** against the phase 2 record bound.
+  Same reason.
+- **The cross-frame ray cache was already ruled out** on its own
+  ~28% ceiling; nothing here changes that.
+- **Grouping should stay on and stay automatic.** It is not a regression
+  above depth 0 — the nulls are nulls, not losses, and it remains a clear
+  win in the regime it was tuned for. The gate already declines to group
+  outside the geometric regime; it does not, and need not, decline on the
+  basis of depth.
+- **The concurrency floor of 3 is doing real work** and should not be
+  relaxed to let `F` grow above depth 0: `F` would rise, records would
+  fall further, and by the above that buys nothing while costing
+  concurrency.
 
 There is also a prior question worth settling first, because it may make
 the whole of phase 4 moot: **records converge at depth 3** (0.632 → 0.650
 across depths 3–6 while cost rises 3x / 6x / 13x). If `very_high` and
 `maximum` do not change a reconstructed intensity measurably, the right
 answer is to discourage them rather than to optimise them.
+
+**Settled — see the next section. They do not.**
+
+## The prior question, answered: depth stops changing intensities at 2
+
+Record counts converging is suggestive but not the question. What a user
+reads is `weighted_intensity / weight`, and what decides whether a change
+to it is real is that voxel's own propagated error bar,
+`sqrt(weighted_variance) / weight`. So the statistic is the **pull**,
+
+    (I_depth - I_reference) / sigma_reference
+
+which is dimensionless and already scaled by what the measurement can
+resolve. Because sigma falls as `1/sqrt(contributors)` while a systematic
+from the subdivision does not fall at all, a pull measured at one exposure
+also says at what exposure the difference *would* become visible:
+`contributors_for_unit_pull = contributors / pull^2`. That number is the
+answer, independent of how long the probe could afford to run.
+
+Measured on real frames through the kernel itself, two independent tiles
+at different scan positions, every frame accumulated separately and summed
+in Python so that grouping's summation order is not a second variable:
+
+| depth | median pull | p90 | contributors for 1 sigma | voxels it never reaches |
+|---|---|---|---|---|
+| 0 | 0.525 / 0.412 | 1.43 / 1.15 | **72 / 261** | 4.3% |
+| 1 | 0.135 / 0.132 | 0.38 / 0.37 | 1,090 / 2,542 | 2.0% |
+| 2 | 0.051 / 0.057 | 0.13 / 0.15 | 7,688 / 13,816 | 0.9% |
+| 3 | 0.013 / 0.024 | 0.04 / 0.06 | **111,919 / 76,287** | 0.38% |
+| 4 | 0.003 | 0.009 | 2,084,863 | 0.13% |
+
+Two values per cell are the two tiles (192x192 over 64 frames, 19.7 and
+44.3 contributors per voxel); the reference is depth 5 for the first and
+depth 4 for the second. The last column agreed to within 0.1 points
+between the tiles, so it is given once. Total weight and total weighted
+intensity are conserved to 1.0 at every depth, which is what says this
+measures redistribution rather than a bug.
+
+The pull is taken over the voxels both depths reach, weighted by voxel
+weight so that well-measured voxels dominate. Voxels a shallower depth
+misses entirely are *not* in it — they are the last column, and they are a
+second, independent way in which depth 0 differs.
+
+**Calibrate it against a real job.** These probes used 64 frames; the job
+has 3651, so a well-covered voxel in a finished reconstruction gets
+roughly 1,000-2,500 contributors. Against that:
+
+- **`center` (0) → `low` (1) is a real difference.** It shows at 72-261
+  contributors, i.e. almost immediately, and depth 0 additionally fails to
+  reach 4.3% of the voxels deeper settings do.
+- **`low` (1) → `balanced` (2) sits exactly at the boundary**, 1,090-2,542.
+  Visible on a full-length job, marginal on a short one.
+- **`balanced` (2) → `high` (3) needs 7,700-13,800** — three to ten times
+  what a full job delivers.
+- **`high` (3) → `very_high` (4) → `maximum` (5) needs 76,000 to 2,000,000.**
+  Unreachable by any measurement the instrument can make, at 4.6x and 24x
+  the cost (3.2 s / 12-14 s / 37-64 s / 327 s for the same tile).
+
+So the honest recommendation is that **`balanced` is enough for a full job
+and the three settings above it are not distinguishable from it by the
+data itself.** That bears directly on how much phases 1 and 2 are worth:
+they made depths 4-5 affordable, and depths 4-5 turn out to buy nothing
+observable. Phase 1 keeps its value at depths 1-3, which is where jobs
+should actually run; it is the *justification* for optimising the top of
+the range that has gone.
+
+This does not argue for removing the settings — a user checking
+convergence for themselves is a legitimate thing to do, and the deeper
+runs are what make the table above possible. It argues for saying plainly
+in the user-facing documentation what they cost and what they buy.
+
+Instrument: `benchmarks/benchmark_reconstruction_depth_convergence.py`.
+Unlike everything else in this document it is immune to machine noise —
+it compares numbers, not times.
 
 ## Risks and open questions
 
@@ -1071,9 +1253,11 @@ sound in spirit — the prepare pool grows to its ceiling at F = 4 — but
 **MSVC inlining** of the recursion is an assumption; check the measurement, not
 the intent. The 19-point octree bookkeeping is the fiddly part.
 
-**Depth > 0 for finding A** is unmeasured, as is the interaction between swept
-exposures and cross-frame overlap above depth 0 — each frame then covers a
-0.71-voxel slab rather than a plane, and adjacent slabs tile rather than overlap.
+**Depth > 0 for finding A** is measured, and closed — see phase 4. The
+record saving transfers (0.61-0.71x) and buys no time. The interaction
+between swept exposures and cross-frame overlap was measured with it: all
+of these runs used `midpoint` bounds, so the slab-versus-plane concern is
+inside the measured numbers rather than beside them.
 
 **`excluded_frames`** must be skipped when forming groups, not merely masked
 inside them. *Resolved, and more cheaply than expected:* `_included_ranges`
@@ -1083,10 +1267,10 @@ to cut at checkpoint boundaries.
 
 **Records converge at depth 3.** 0.632 -> 0.642 -> 0.647 -> 0.650 across depths
 3-6, while cost rises 3x / 6x / 13x. Everything above depth 3 buys finer
-partial-volume weights, not new voxels. Whether `very_high` and `maximum` change
-a reconstructed intensity measurably is a separate question, but it is worth
-asking before optimising them — it bears directly on how much phases 1 and 2 are
-worth.
+partial-volume weights, not new voxels. *Resolved, and more sharply than
+this item expected: the convergence is in intensities too, and it starts
+lower. Depth 2 onward is indistinguishable from depth 5 by any measurement
+a full job can make. See "The prior question, answered".*
 
 ## Also
 
