@@ -17,6 +17,12 @@ keeps it in sync with releases:
 - `source/conf.py`: Sphinx configuration (`furo` theme, `nbsphinx`, autodoc).
 - `generate_release_notes.py`: extracts hand-written release notes from
   `../CHANGELOG.md` into `source/release_notes.rst`.
+- `design/*.md`: engineering design records, **not** part of the Sphinx
+  toctree and not user-facing. They record why a subsystem is built the way
+  it is, what was measured, and what remains open — including decisions that
+  were tried and reversed. Written for whoever picks the work up next, not
+  for users; a user-facing consequence belongs in `source/*.rst` and
+  `../CHANGELOG.md` as well.
 - `build/`, `_build/`: build output, not source.
 
 Use the repository root `AGENTS.md` together with this file.
@@ -31,8 +37,13 @@ Use the repository root `AGENTS.md` together with this file.
    record of user-facing changes, curated at release time per
    `source/release_procedure.rst`.
 
+3. **Design records** (`design/*.md`): why a subsystem is the way it is, what
+   was measured, what is still open. Not published, not in the toctree.
+
 A given code change may need updates on either track, both, or neither.
-Internal refactors typically need neither.
+Internal refactors typically need neither — but a refactor that invalidates a
+measurement or a decision recorded under `design/` should say so there, and a
+prediction that turned out wrong is worth recording rather than deleting.
 
 ## Updating Topic Pages
 

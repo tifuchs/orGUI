@@ -1,0 +1,299 @@
+# Reciprocal-space mapping: performance findings and open items
+
+Companion to `reciprocal_space_scratch_architecture.md`, which describes what
+the pipeline *is*. This one records what was measured, what those measurements
+settled, and what is still open.
+
+> **Read `reciprocal_space_mapping_locality_and_subdivision.md` alongside
+> this.** Since these numbers were taken, the subdivision was rewritten
+> (corner-passing, 1.65-2.98x at depth >= 1), the memory prechecks were
+> re-bounded, and mapping now maps several adjacent frames in one native
+> call by default. The timings below are the **per-frame** pipeline and
+> still describe it; where a grouped run differs, it is noted inline. That
+> document also carries the measurement discipline this one's "Measurement
+> traps" section started, and it is the more complete of the two on that
+> subject.
+
+## How to read the numbers here
+
+Everything below was measured on one machine against one dataset:
+
+| | |
+|---|---|
+| CPU | AMD Ryzen AI 9 HX 370, 12 cores / 24 threads |
+| Cache | L1d 48 KiB per core, L2 1 MiB per core, L3 24 MiB total |
+| RAM | 31 GiB |
+| Storage | NVMe, 967 MB/s cold on this dataset (19.4 frames/s) |
+| Dataset | `39_1-rsmap`, La3Ni2O7, CHESS QM2, 2527 x 2463 = 6,224,001 px/frame, 49.8 MB/frame |
+| Job | `center` accuracy (depth 0), 2000^3 hkl grid, 64^3 chunks, 24 threads, 10 GiB budget |
+
+The *reasoning* generalises. The *constants* are calibrated to this machine —
+notably the 16384-pixel work block (an L2-sized working set), the 25%
+accumulator share, and one record per pixel as the per-frame record estimate.
+On a machine with a different L2, or a detector with very different record
+density, they should be re-measured rather than trusted.
+
+## Where the time goes
+
+Per frame, one kernel thread, before this round of work (native grid):
+
+| Stage | ms/frame | Share |
+|---|---|---|
+| load | 48.3 | 4.4% |
+| correct_frame | 42.3 | 3.9% |
+| slice/copy per tile | 24.0 | 2.2% |
+| **kernel** | **853.4** | **78.3%** |
+| reduce (merge tile batches) | 121.2 | 11.1% |
+| **total** | **1089.3** | 0.92 frames/s |
+
+The kernel dominates a single frame, but it releases the GIL; the other ~114 ms
+(10.5%) does not. That is the ceiling on image-level parallelism — see open
+item 1.
+
+**This table is the per-frame path.** A grouped run redistributes it rather
+than shrinking it: `load` and `correct_frame` move out of the compute worker
+into a prepare pool, where they overlap the next group's kernel instead of
+queueing behind it, and `reduce` shrinks because one merged batch replaces
+`F` per-frame batches. The kernel's own per-sample work is unchanged — which
+is why the 34% record saving converts to only ~12% wall time.
+
+## Subdivision hierarchy, with footprints
+
+One image passes through seven levels. Sizes are for the job above.
+
+| # | Scope | Structure | Footprint |
+|---|---|---|---|
+| 1 | per pixel | `std::vector<VoxelWeight>` + recursion stack | tiny; **absent at depth 0** (fast path); 1.2-3.5 KiB of stack at the deepest setting since corner-passing replaced the dense cache |
+| 2 | per block | `std::pmr::map<RecordKey, RecordAccum>` (arena-backed) | ~0.5 MiB |
+| 3 | per block | `std::vector<Record>`, sorted snapshot of (2) — **all blocks live at once** | records x 40 B |
+| 4 | per call | loser-tree merge of block runs -> six NumPy arrays | ~17 MiB per tile |
+| 5 | per frame | `tile_batches` + `_reduce_batches` | ~100 MB |
+| 6 | **per checkpoint** | `_CheckpointAccumulator._levels`, binary-counter tree, spans ~85 frames | **the dominant term** |
+| 7 | finalization | `_CheckpointRangeReader` + one output chunk at a time | ~1 GiB |
+
+Note there is **no thread-level structure**: a worker thread processes blocks in
+sequence, reusing one arena. The loser tree merges *per-block* runs at the
+*call* level.
+
+With frame grouping the *scope* of levels 2-5 changes but their structure
+does not. A "block" becomes a brick in (row, column, frame) holding the same
+sample count, so level 2's working set is unchanged and level 3 falls with
+the record density. Level 5 becomes per *group* — one merged batch for `F`
+frames, measured 0.575x the sum of the `F` it replaces — and level 6 gains
+a new resident term of its own: the group buffer, `F` full-detector
+corrected frames, which is the largest single allocation in the pipeline
+and what bounds how many group calls can run at once.
+
+Other fixed costs: detector ray cache 143 MiB for the job; per worker thread a
+1.13 MiB arena; grid chunks 32,768 of 7 MiB dense each.
+
+## Settled — please do not re-litigate without new evidence
+
+**The accumulator container stays `std::pmr::map`.** Measured alternatives at
+realistic redundancy (block 4096, ~7:1 in-block):
+
+| Container | ns/pixel | Bytes/key |
+|---|---|---|
+| `pmr::map` + last-key cache (current) | **30.1** | 72 |
+| open-addressing hash + sort | 27.6 | ~80 effective |
+| tlx B+ tree, key -> index + side array | 32.8 | 55 |
+| tlx B+ tree holding values | 41.4 | 80 |
+| sorted array, dedup on insert | 126.5 | 40 |
+| vector + sort | 40.4 | 40 |
+
+The B+ tree's memory win (~1.3x) costs speed and needs a side array, because a
+B-tree relocates values on split and the last-key cache holds a pointer. The
+sorted-run idea fails because the key stream is *not* monotone at any block
+size: `backscans/pixel` stays at 0.97-0.996 from 1024 to 65536-pixel blocks. A
+`(chunk, local)` key blocks reciprocal space in three dimensions, so one voxel
+of movement in x jumps the key by a whole chunk row.
+
+**Tiling does not reduce memory pressure.** 1 / 6 / 12 tiles measured 9.61 /
+10.12 / 9.81 GiB peak — flat. Tiling subdivides *one frame's* native call; the
+memory that matters accumulates *across* frames in the router, which no tiling
+arrangement touches. Fewer tiles is better for throughput — *within a
+limit*, see the next entry, which was measured later and bounds this one.
+
+**Band height is flat, and "fewer tiles is better" has a limit.** Swept in
+2026-08 at four frames per group over 240 / 421 / 506 / 600 rows,
+throughput is flat across the region that matters and the height the memory
+budget already produces sits in the middle of it:
+
+| bands | tiles | concurrent calls x threads | median ms/frame |
+|---|---|---|---|
+| 240 | 11 | 4 x 6 | 236.7 |
+| **421 (the default)** | 7 | **3 x 8** | **205.4** |
+| 506 | 5 | 3 x 8 | 207.1 |
+| 600 | 4 | 2 x 12 | 237.1 |
+
+Note the last row against the claim above it: **four tiles is worse than
+seven**. Fewer tiles is better only while the tile stays small enough for
+the memory budget to afford the same concurrency — past that, a larger tile
+costs a whole concurrent call and the tile-count saving does not come close
+to paying for it. Between 421 and 506 rows, where concurrency is equal, the
+two are indistinguishable, which is the form the original finding should
+have taken.
+
+Band height and group size also substitute for each other almost exactly —
+at depth 2, widening the bands makes the group-size gate halve the group
+and the two cancel — which is why neither repays hard optimisation. Detail
+in the locality document's phase 3 step 7.
+
+**The transition-rate correlation is container cost, not branch
+misprediction.** `voxel_id`'s cost is flat across transition rates (17.3 ->
+17.4 ns/px from 0% to 100%); what scales is the `pmr::map` insert (0.5 -> 90
+ns/px). An earlier session's 0.9959 correlation was measuring unique-key
+working set.
+
+**Reciprocal arithmetic was implemented, measured, and rejected.** Replacing the
+ray-normalisation and grid-step divisions with reciprocal multiplies is worth
+~35% in a cache-resident microbenchmark but only ~3% on real data, where those
+divisions hide under memory stalls. It shifts a coordinate by at most 1.28e-12
+voxel widths — zero assignment changes across 9.2M real records and 600M
+uniform samples, but 4.7% for coordinates sitting exactly on a voxel edge,
+which lattice-aligned synthetic data produces routinely.
+
+## Open items
+
+### 1. GIL-serialised per-frame Python work
+
+The largest remaining structural limit. Load + correct + per-tile copy is
+~114 ms of a 1089 ms frame and holds the GIL. Amdahl on a 10.5% serial fraction
+predicts a 6.1x ceiling at 16 workers; measured 4.2x (26% efficiency; 14% at 24
+workers on the coarser grid). Roughly two thirds of the loss is explained by
+that serial fraction, the rest most likely memory bandwidth.
+
+Candidate directions: move the per-tile slice/copy into the native call, or
+release the GIL across correction. Note the memory work reduced worker counts,
+so re-measure the balance before assuming the old figures still hold.
+
+**Partly addressed, structurally rather than by tuning.** The grouped
+scheduler hoists `load` and `correct_frame` into a prepare pool, so one
+group's GIL-held Python overlaps the previous group's native call instead of
+competing with it. That is the direction this item asked for, and it is what
+turned frame grouping from a 1.4x regression into a 0.88x win. It applies
+only above one frame per group; the per-frame path still has the serial
+fraction described above, and the per-tile slice/copy is still in Python on
+both paths.
+
+### 2. `bounded_block_size` still clamps memory with a depth-blind constant
+
+The Python side now caps the work block against the arena the kernel will
+reserve (`work_block_memory_cap`). The kernel's own `bounded_block_size()`
+still divides its budget by a magic `512` that ignores `worst_leaves`, so the
+two disagree about what a block costs.
+
+**The conclusion this item drew has been superseded.** It argued the
+authoritative cap belongs in the kernel, because the kernel knows whether an
+exposure is stationary while the Python side must assume the worst. Both
+memory prechecks are now bounded by the record ceiling instead of the leaf
+count, and that bound saturates above depth 0 — so neither side depends on
+the exposure model any more and the asymmetry disappeared rather than being
+relocated. See the locality document's phase 2.
+
+Still open, and narrower than it was: `bounded_block_size`'s magic `512` is
+untouched, and a third site — the detector band height in tile planning —
+was found in 2026-08 still using `8**depth` and has been corrected. Any
+remaining depth-blind constant in this area is worth checking against the
+same record ceiling.
+
+### 3. Depth 3+ block sizes are extrapolated
+
+The `16384 >> depth` rule was measured at depths 0, 1 and 2 (optima 16384, 8192,
+4096, consistent at 12 and 24 threads). Depths 3-8 follow by extrapolation only.
+
+### 4. `image_workers = min(len(pending_ranges), ...)`
+
+Concurrency is capped by the *scheduling* granularity. Production sizes
+`frame_batch` for roughly 4x as many ranges as workers, so it is fine mid-job,
+but the tail of every job runs with fewer workers by construction. It is also
+the single most effective way to invalidate a benchmark — see below.
+
+**Gone above one frame per group.** The grouped scheduler does not use
+`image_workers` at all: work is a queue of frame groups drained by a fixed
+number of concurrent native calls, so scheduling granularity no longer bounds
+concurrency. The per-frame path is unchanged, and the benchmark trap still
+applies to it.
+
+### 5. Finalization scaling at full job length
+
+Shrinking the accumulator share raises the checkpoint *part* count, and
+finalization k-way merges across all parts per output chunk. Measured flat over
+2 checkpoints (finalize 38.7-40.6 s across a 4x accumulator range), but a real
+job has 43 checkpoints, where the run count would grow roughly 86 -> 300, i.e.
+log2 6.4 -> 8.2. Still on a non-dominant term against HDF5 compression, but
+unverified at scale.
+
+### 6. The probe's reported error is conservative by construction
+
+`records_per_pixel_relative_error` treats the Sobol tiles as independent while
+the sequence is stratified, so it overstates true scatter by 2-4x (reported
+5.5-7.5% against observed 1.6-3.4%). Safe for a margin, not calibrated. A
+calibrated figure needs randomised QMC — several independent scrambles, variance
+across their means — which is too noisy at the 10-15 tiles a 0.1 s budget buys.
+
+### 7. Two fixes are unexercised on this hardware
+
+The rebalance unit fix (sample tile -> whole frame) and the adaptive re-check
+cadence only change a decision when the delivery rate is high enough that a
+candidate's requirement exceeds its worker ceiling. Here mapping is
+compute-bound — ~5 frames/s against 19 available — so the requirement stays at
+its floor either way. They need a machine where I/O outpaces compute.
+
+## Measurement traps
+
+Every one of these produced a confident, wrong conclusion during this work.
+
+**`image_workers = min(len(pending_ranges), ...)`.** Passing one pending range
+pins the compute pool to a single worker regardless of thread settings. This
+invalidated two separate rounds of conclusions, including a recommended
+accumulator constant that had to be retracted: with one worker, shrinking the
+accumulator looked like it *halved* peak memory; with a real pool it *raised*
+it, because faster mapping puts more frames in flight.
+
+**Harness costs inside the timed region.** An early tiling comparison timed its
+own `np.ascontiguousarray` copies and reported 2.4x where the real figure was
+1.13x.
+
+**Unequal work between arms.** Synthetic per-tile geometry that gave each
+"tile" the full angular range produced 8x the records in the split arm.
+
+**Overriding depth without overriding block size.** `max_depth` alone leaves
+`work_block_pixels` at its depth-0 value, inflating the kernel's arena from
+4.8 GB to 77 GB and making depth 8 look broken. Always derive both.
+
+**This machine is bimodal.** Identical binaries measure 42 or 71 ns/pixel
+depending on thermal/clock state. Single samples at high thread counts are
+worthless; alternate arms and take best-of-N.
+
+**End-to-end pipeline timings are worse than bimodal.** Single runs vary by
+up to 30% — the same configuration measured 183, 202 and 342 ms/frame on
+different occasions — and absolute values drift between *sessions*, so a
+number written down yesterday cannot be compared with one taken today. Only
+paired, interleaved ratios carry, nothing else may run on the machine while
+measuring (a `pytest` run in another shell is enough), and a clean
+separation between arms is worth more than a difference of means. Two rounds
+of conclusions in the locality document were withdrawn for this. Its
+"Measuring any of this" section is the full version.
+
+## Calibration constants and what they rest on
+
+| Constant | Value | Basis |
+|---|---|---|
+| `WORK_BLOCK_PRESETS["medium"]` | 16384 px | L2-sized working set; measured optimum at depths 0-2, both thread counts |
+| block scaling | `>> depth` | measured optima 16384 / 8192 / 4096 at depths 0 / 1 / 2 |
+| `CHECKPOINT_MEMORY_SHARE` | 0.25 | peak tracks 2x the accumulator budget; 4x shrink cost +6% scratch |
+| `_FRAME_RECORD_BYTES_PER_PIXEL` | 2 x 40 B | bounds measured density 0.46-0.87 rec/px, doubled for the merge |
+| `_RESERVED_RECORDS_PER_PIXEL` | 4 | 6-8x headroom over measured density; heap fallback covers the rest |
+| `_REBALANCE_INITIAL_SECONDS` | 30 | first check well inside a short job; backs off x2 to the old 600 |
+| probe `budget_seconds` | 0.1 | holds 0.04-0.10 s at every depth 0-8; GUI limit is 0.5 s |
+| `_GROUP_ADVANCE_VOXEL_LIMIT` | 1.0 voxel | striding sweep: the grouping gain is already gone by one voxel of travel per frame |
+| `_GROUP_MINIMUM_CONCURRENT_CALLS` | 3 | **purely empirical**: 4 frames/3 calls measured 0.87x, 8/2 was 1.01x, 8/1 was 1.24x |
+| `_GROUP_SIZE_CANDIDATES` | 1, 2, 4, 8, 16 | powers of two spanning the useful range; 4 is what the reference job picks |
+| `_GROUP_PIPELINE_*_READAHEAD` | 1 to 3 groups | one is the minimum for double-buffering; more costs a full group buffer each and buys nothing measured |
+
+The group constants are the least well-founded in this table. The voxel limit
+comes from a striding sweep on one scan; the concurrency floor of 3 is fitted
+to a single job's throughput curve and reproduces its optimum but has not
+been tested anywhere else. Treat both as calibrated to this machine and this
+scan in the same way the work-block size is.

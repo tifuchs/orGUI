@@ -31,6 +31,35 @@ identical, and it is what makes A viable at depth > 0 at all — see "Where the
 two meet". The measurements in "Finding B" below are the *pre-change* state,
 kept as the record of why the work was done.
 
+### Where this stands
+
+Everything is on branch `perf/subdivision-corner-passing`, unpushed.
+
+| phase | state |
+|---|---|
+| 1 — corner-passing subdivision | done, bit-for-bit, 1.65–2.98x |
+| 2 — the `worst_leaves` memory bound | done |
+| 3 — frame-group bricks at depth 0 | done, steps 1–7; **0.88x end-to-end** |
+| 4 — frame-group bricks above depth 0 | **not started** |
+
+What a reader should know before touching it:
+
+- **Grouping is on by default** and sizes itself per job. On the reference
+  scan it picks four frames per call and maps at 0.88x. Jobs outside the
+  regime (coarse scans, interlaced order, tight memory) get one frame per
+  call and are unaffected.
+- **Output moved.** Contributions merge inside the kernel rather than in
+  the checkpoint accumulator, so sums associate differently — in the last
+  bits, and better conditioned. Voxels reached and contributor counts are
+  unchanged, and tests pin that. This is a `phys` change and it applies to
+  every job, not only grouped ones.
+- **Read "Measuring any of this" before running a benchmark.** Two rounds
+  of conclusions in this document had to be withdrawn for measurement
+  error, not for reasoning error.
+- **The next real question is phase 4's first measurement**, not phase 4's
+  design: `F = 1` against automatic `F` at depth 1 and 2, interleaved. The
+  incidental depth-2 numbers suggest grouping does less there.
+
 ## How this was measured
 
 All numbers are from the `39_1-rsmap` job used throughout the findings document
@@ -367,6 +396,93 @@ Consequences worth stating plainly:
   if the correct pool keeps up; if it does not, the pipeline stalls once per
   group rather than degrading smoothly. This is the main scheduling risk, and it
   argues for the smaller F (8) until measured.
+
+## Measuring any of this
+
+Read this before running a benchmark. Most of it was learned by getting a
+measurement wrong first, and two rounds of conclusions had to be withdrawn
+because of it.
+
+### The instruments
+
+| script | measures | typical cost |
+|---|---|---|
+| `benchmark_reconstruction_subdivision.py` | kernel cost and evaluations per pixel by depth and exposure, with XXH3 fingerprints and a `--compare` mode | seconds |
+| `benchmark_reconstruction_group.py` | one `accumulate_group` call against per-image `accumulate`, by group size | seconds |
+| `benchmark_reconstruction_pipeline.py` | the whole mapping phase — reader pool, correction, kernel, router, checkpoint writes | ~1 min per 234-frame arm at depth 0 |
+
+`benchmark_reconstruction_mapping.py` is dead: it imports `_map_frame_range`
+and the Parquet writers, both retired. Do not resurrect it; the pipeline
+benchmark replaces it against the pipeline that exists.
+
+### Two traps that silently invalidate a run
+
+**`PYTHONPATH` must point at the checkout.** `python benchmarks/<script>.py`
+puts `benchmarks/` on `sys.path`, *not* the repository root, so a
+pip-installed `orgui` shadows the working tree and the run measures a
+binary you did not build. Both reconstruction benchmarks print the resolved
+extension path — check it. This has cost a whole measurement round.
+
+**The reference job is `schema_version: 5` and `JOB_SCHEMA_VERSION` has
+moved on**, so `read_job` rejects it. Copy the JSON and bump the field;
+nothing else in the dict changed.
+
+### Run-to-run noise is the hard part
+
+Single runs of the pipeline benchmark vary by up to **30%**. The same
+`F = 4` configuration measured 183.4, 202.0 and 342.4 ms/frame on different
+occasions. Consequences, all of them learned the hard way:
+
+- **Interleave the arms** (A, B, A, B, ...) with two or three repeats.
+  Never one run of each in sequence — ordering effects and drift are
+  confounded with the arm.
+- **Nothing else may run on the machine.** A `pytest` run in another shell
+  is enough to poison a sweep.
+- **Only paired ratios are stable.** Absolute values drift between
+  sessions: `F = 1` measured 233 ms/frame one day and 278 the next, in both
+  arms alike, while the ratio held at 0.87. Never compare a number taken
+  today against one written down yesterday.
+- **Prefer a clean separation over a mean.** The `F = 4` result was
+  trustworthy because every `F = 4` run beat every `F = 1` run, not
+  because the means differed.
+
+Two conclusions drawn from single sequential runs — a "1.47x regression"
+at `F = 8` and a "0.85x win" from finer bands — both dissolved when
+measured properly. Anything in this document from before that was
+understood is flagged where it appears.
+
+Baselines must come from the same checkout, captured immediately before
+the change: `git stash push -- <changed files>`, run, `git stash pop`.
+Never compare across builds.
+
+### Measure the right quantity
+
+**Records entering the router, not rows written to checkpoints.** The
+checkpoint accumulator already merges across frames, so it collapses the
+same redundancy later and more expensively and the saving never appears on
+disk — rows moved 0.97x at `F = 8` where routed records moved 0.598x.
+
+**Do not concatenate checkpoint parts to summarise them.** A 234-frame
+window is ~350 M rows; reading it all at once swapped the machine on top
+of the mapping run's own on-budget ~9.4 GB peak. Stream in row chunks.
+
+**Where bit-for-bit is impossible, pin the contributor-weighted key sum.**
+Frame grouping changes floating-point association by design, so a digest
+moves for legitimate reasons. `sum over rows of h(key) * contributors`,
+accumulated in wrapping `uint64`, is a sum and therefore independent of row
+order and of how the accumulator split its parts. It equals the same sum
+over distinct voxels with their total contributor counts, so it pins both
+the voxel set and the contributor apportionment. Two baseline runs with
+visibly different flush partitions (352.3 M against 350.1 M rows) agreed on
+it exactly, which is what makes it usable as an acceptance criterion.
+
+### Sizing a run
+
+234 frames is six scheduling ranges of the reference job and about a minute
+per arm at depth 0 — enough for three checkpoints to complete and flush.
+Depth 2 is roughly seven times the kernel cost, so use 78 frames there
+(~2 min per arm). A three-repeat, two-arm interleaved comparison is
+therefore 6–15 minutes; budget for it rather than trying to shortcut it.
 
 ## Plan
 
@@ -817,14 +933,9 @@ Not required by either finding; do not fold it in.
 
 ### Measurement noise on this machine
 
-Worth recording, because it invalidated a first round of conclusions.
-Single runs of the pipeline benchmark vary by up to **30%** — the same F = 4
-configuration measured 183.4, 202.0 and 342.4 ms/frame on different
-occasions. Comparisons must be **interleaved** (A, B, A, B, ...) and
-repeated, never one run of each in sequence, and nothing else may run on
-the machine at the time. Two conclusions drawn from single sequential runs
-before this was noticed — a "1.47x regression" at F = 8 and a "0.85x win"
-from finer bands — both dissolved when measured properly.
+See "Measuring any of this" above: single runs vary by up to 30%, arms must
+be interleaved, and only paired ratios mean anything. The step 5 table was
+taken that way. Two earlier conclusions were not, and were withdrawn.
 
 ### What the wired pipeline measured
 
@@ -876,13 +987,53 @@ record): the 3.4% block-shape gain is real in block records before the
 cross-block merge, but one call's merged output is the set of voxels that
 frame reached, which does not depend on how the frame was partitioned.
 
-### Phase 4 — Frame-group bricks above depth 0
+### Phase 4 — Frame-group bricks above depth 0. Not started.
 
-Only after phases 1 and 3. Pixel-outer / frame-inner, no cross-frame ray cache,
-brick dimensions re-derived against the corrected leaf bound from phase 2. All
-of finding A is measured at depth 0 only; at higher depth a pixel resolves into
-a footprint rather than a point, so overlap should be at least as good, but that
-is an expectation, not a result.
+Everything in phase 3 was designed and measured at depth 0. Grouping is not
+*disabled* above it — the gates run at any depth and the streamed scheduler
+works — but nothing about it has been tuned there, and the little evidence
+that exists is not encouraging.
+
+**What is already known, from the depth-2 runs taken while fixing band
+height.** At depth 2 on the reference job the group-size gate picks
+`F = 2`, not the `F = 4` it picks at depth 0, and mapping runs at
+~620 ms/frame against ~205 at depth 0. The reason `F` falls is structural:
+a group call's native working set is `F x tile pixels x bytes-per-pixel`,
+and the per-pixel term roughly quadruples from depth 0 to depth 2, so the
+same memory affords half the group at the same concurrency. Grouping and
+adaptive depth compete for the same budget.
+
+That was measured incidentally, on two arms that differed in band height as
+well, so treat it as an observation rather than a result. **The first real
+phase 4 measurement is the obvious one nobody has taken: `F = 1` against
+automatic `F` at depth 1 and depth 2, interleaved, three repeats.** Until
+that exists there is no evidence that grouping helps or hurts above depth 0,
+and the honest reading of the numbers above is that it does less.
+
+Only after that is the design work worth doing:
+
+- **Pixel-outer / frame-inner iteration.** Above depth 0 the per-pixel
+  subdivision state cannot be shared across frames (see "Where the two
+  meet"), so the brick loop needs its second mode. Corner-passing is what
+  makes this affordable at all — 1.2–3.5 KiB of stack instead of a
+  6.9–101 KiB dense array per pixel.
+- **No cross-frame ray cache.** The payoff is capped near 28% and the
+  cache is per pixel, so it can only live for one pixel at a time.
+- **Brick dimensions re-derived** against the phase 2 record bound rather
+  than the leaf count.
+- **Whether the record saving even survives.** At higher depth a pixel
+  resolves into a footprint rather than a point, so cross-frame overlap
+  should be at least as good — but "should" is doing all the work in that
+  sentence, and the records-converge-at-depth-3 observation below suggests
+  the marginal voxel is increasingly a partial-volume weight rather than a
+  new voxel. Measure the routed-record ratio at depth 1–3 before assuming
+  finding A transfers.
+
+There is also a prior question worth settling first, because it may make
+the whole of phase 4 moot: **records converge at depth 3** (0.632 → 0.650
+across depths 3–6 while cost rises 3x / 6x / 13x). If `very_high` and
+`maximum` do not change a reconstructed intensity measurably, the right
+answer is to discourage them rather than to optimise them.
 
 ## Risks and open questions
 
@@ -939,19 +1090,8 @@ worth.
 
 ## Also
 
-`benchmarks/benchmark_reconstruction_mapping.py` no longer imports: it wants
-`_map_frame_range` and the Parquet-era writers, both of which predate the
-checkpoint router. `benchmarks/benchmark_reconstruction_pipeline.py` is the
-replacement and measures the pipeline that actually exists.
-
-Read back the checkpoint parts in row chunks, never all at once. A 234-frame
-window is ~350 M rows, and concatenating them costs more than the mapping
-run whose peak is already sized to the job's whole memory budget — the
-first version of the pipeline benchmark swapped the machine doing exactly
-that. The comparable quantity is `sum over rows of h(key) * contributors`
-accumulated in wrapping `uint64`: it is a sum, so it is independent of row
-order and of how the accumulator happened to split its parts, and it pins
-both the voxel set and the contributor apportionment. Two baseline runs
-with visibly different flush partitions (352.3 M against 350.1 M rows)
-agreed on it exactly, which is what makes it usable as an acceptance
-criterion where a digest is not.
+The benchmark mechanics that used to live here — which script to run, the
+`PYTHONPATH` and schema-version traps, the noise discipline, why routed
+records rather than rows on disk, and the contributor-weighted key sum used
+where bit-for-bit is impossible — are now collected under "Measuring any of
+this" above, before the plan rather than after it.
