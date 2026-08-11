@@ -1236,6 +1236,19 @@ intermediate roundings, so slightly better conditioned, but any test pinning an
 XXH3 digest of record values will move. That is a `phys`-scope change and needs
 saying so.
 
+*Decided, 2026-08: accepted.* Reciprocal-space reconstruction has never
+been released — no tag contains the feature commit — so there is no
+published behaviour for the association change to break, and no stored
+result a user could have produced with the old order. The commits keep
+their `!` and `BREAKING CHANGE:` footers, which are accurate about the
+code and cost nothing; the release notes should not describe this as a
+change to previously produced numbers, because for anyone reading them
+the whole feature is new. The one group this does affect is people
+running the development branch against existing scratch directories: a
+job resumed across the change contains checkpoint parts from both
+association orders. That is still worth saying, and is the only part of
+the warning that survives.
+
 **The group synchronisation point**, as described under Scheduling. *Real, and
 resolved by moving correction into the prepare pool (phase 3 step 5).* The
 preference for F = 8 was wrong on this job: F = 4 measured better, because

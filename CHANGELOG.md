@@ -71,14 +71,14 @@ Scientific correctness and performance fixes:
   reciprocal space as two adjacent pixels do, so a brick merges
   contributions the per-image block could not see: on a 3651-frame Pilatus
   6M scan, mapping eight images together emits 0.60x the records for the
-  same samples. **This changes reconstructed values in the last bits, for
-  every job, including jobs that map one image at a time.** Contributions
-  now merge inside the kernel rather than in the checkpoint accumulator, so
-  the same sums associate differently — with fewer intermediate roundings,
-  so slightly better conditioned. Which voxels are reached, and how many
-  detector samples reach each of them, are unchanged. Existing checkpoint
-  files remain resumable, but a job resumed across this change will contain
-  parts from both association orders.
+  same samples. Contributions merge inside the kernel rather than in the
+  checkpoint accumulator, which associates the same sums differently — with
+  fewer intermediate roundings, so slightly better conditioned. Which voxels
+  are reached, and how many detector samples reach each of them, are
+  unchanged. Reciprocal-space reconstruction has not appeared in a release
+  before this one, so no previously published result is affected; but a job
+  resumed against a scratch directory written by an earlier development
+  build will contain checkpoint parts from both association orders.
 - Mapping several images per call uses a scheduler of its own, which runs a
   few concurrent native calls with the thread budget split between them and
   hoists whole-frame correction into the prefetch pool, so one call's
