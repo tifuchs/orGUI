@@ -73,6 +73,111 @@ std::string xxh3_128_buffer(const py::buffer &buffer) {
     return xxh128_hex(hash);
 }
 
+void apply_correction_factors(
+    py::array_t<double, py::array::c_style> intensity,
+    py::array_t<double, py::array::c_style> variance,
+    py::array_t<bool, py::array::c_style> mask,
+    const py::object &static_factor,
+    const py::object &static_factor_squared,
+    const std::vector<double> &factors,
+    const std::vector<double> &factors_squared,
+    const std::vector<double> &factor_variances
+) {
+    // The scaling half of ``_correction_pipeline.correct_frame``, in one
+    // pass: the per-pixel static factor, then each scalar factor in turn,
+    // then the finiteness check folded into the mask.
+    //
+    // NumPy does this in eight or nine full-detector passes over ~50 MB
+    // each, which on a detector this size is around 800 MB of memory
+    // traffic per frame, and it takes and drops the GIL between them.
+    // The arithmetic here is unchanged: the same operations, on the same
+    // values, in the same order, one pixel at a time. Correction is
+    // entirely element-wise -- no reduction, nothing that could
+    // reassociate -- so this is bit-for-bit with the NumPy form, and a
+    // test pins that rather than assuming it.
+    //
+    // ``factors_squared`` and ``factor_variances`` are computed by the
+    // caller rather than here, deliberately: ``factor ** 2`` in Python is
+    // ``pow``, and pow's last bit is not guaranteed to equal a
+    // multiplication's on every platform. The caller already has the
+    // value it used before, so it passes that.
+    const py::buffer_info intensity_info = intensity.request();
+    const py::buffer_info variance_info = variance.request();
+    const py::buffer_info mask_info = mask.request();
+    if (
+        variance_info.size != intensity_info.size
+        || mask_info.size != intensity_info.size
+    ) {
+        throw py::value_error(
+            "intensity, variance and mask must have the same size"
+        );
+    }
+    if (
+        factors_squared.size() != factors.size()
+        || factor_variances.size() != factors.size()
+    ) {
+        throw py::value_error(
+            "factors, factors_squared and factor_variances must match"
+        );
+    }
+    const bool has_static = !static_factor.is_none();
+    py::array_t<double, py::array::c_style> static_array;
+    py::array_t<double, py::array::c_style> static_squared_array;
+    const double *static_data = nullptr;
+    const double *static_squared_data = nullptr;
+    if (has_static) {
+        static_array = static_factor.cast<py::array_t<double, py::array::c_style>>();
+        static_squared_array =
+            static_factor_squared.cast<py::array_t<double, py::array::c_style>>();
+        const py::buffer_info static_info = static_array.request();
+        const py::buffer_info static_squared_info = static_squared_array.request();
+        if (
+            static_info.size != intensity_info.size
+            || static_squared_info.size != intensity_info.size
+        ) {
+            throw py::value_error(
+                "static_factor must have the same size as intensity"
+            );
+        }
+        static_data = static_cast<const double *>(static_info.ptr);
+        static_squared_data =
+            static_cast<const double *>(static_squared_info.ptr);
+    }
+    auto *intensity_data = static_cast<double *>(intensity_info.ptr);
+    auto *variance_data = static_cast<double *>(variance_info.ptr);
+    auto *mask_data = static_cast<bool *>(mask_info.ptr);
+    const std::size_t pixels = static_cast<std::size_t>(intensity_info.size);
+    const std::size_t factor_count = factors.size();
+    {
+        py::gil_scoped_release release;
+        for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+            double value = intensity_data[pixel];
+            double spread = variance_data[pixel];
+            if (static_data != nullptr) {
+                value *= static_data[pixel];
+                spread *= static_squared_data[pixel];
+            }
+            for (std::size_t index = 0; index < factor_count; ++index) {
+                const double factor_variance = factor_variances[index];
+                if (std::isnan(factor_variance)) {
+                    value *= factors[index];
+                    spread *= factors_squared[index];
+                } else {
+                    // Order matters: the propagated term uses the
+                    // intensity from *before* this factor is applied.
+                    spread *= factors_squared[index];
+                    spread += value * value * factor_variance;
+                    value *= factors[index];
+                }
+            }
+            intensity_data[pixel] = value;
+            variance_data[pixel] = spread;
+            mask_data[pixel] =
+                mask_data[pixel] || !std::isfinite(value) || !std::isfinite(spread);
+        }
+    }
+}
+
 py::dict merge_sorted_batches(
     const ContiguousUInt32Array &left_chunk,
     const ContiguousUInt32Array &left_local,
@@ -514,15 +619,26 @@ struct RecordAccum {
     std::uint32_t contributors = 0;
 };
 
+// Records one pixel is assumed to leave behind, for every purpose that has
+// to size memory before the data is seen: the per-worker arena, and the
+// per-call budget precheck.
+//
+// Sizing by leaf count instead assumes every leaf of every pixel reaches a
+// voxel no other leaf did. Real data does not behave that way at any depth:
+// measured post-dedup density stays between 0.46 and 0.89 records per pixel
+// from depth 0 through 8, and across both exposure models, because deeper
+// subdivision's extra samples overwhelmingly land in voxels a neighbouring
+// sample already reached. Leaves are transient -- they are sorted, merged
+// and discarded per pixel -- while records are what stays resident.
+//
+// Four is therefore several times the density ever observed, and both users
+// below take it as a ceiling on the leaf count rather than a replacement,
+// so depth 0 stays exact: one leaf can only yield one record.
+constexpr std::size_t reserved_records_per_pixel = 4;
+
 struct VoxelWeight {
     std::uint64_t voxel;
     double weight;
-};
-
-struct CachedVoxel {
-    std::uint64_t voxel = 0;
-    std::uint64_t generation = 0;
-    bool valid = false;
 };
 
 struct LatticeVoxel {
@@ -530,47 +646,34 @@ struct LatticeVoxel {
     bool valid = false;
 };
 
-struct PixelCoordinateCache {
-    std::size_t side = 0;
-    std::uint64_t generation = 0;
-    std::vector<CachedVoxel> values;
-
-    void begin_pixel(const int max_depth) {
-        // A dense dyadic cache is small through depth 3 (17^3 entries).
-        // Higher depths retain the uncached path to keep memory bounded.
-        if (max_depth > 3) {
-            side = 0;
-            return;
-        }
-        const std::size_t required_side =
-            (static_cast<std::size_t>(1) << (max_depth + 1)) + 1;
-        if (side != required_side) {
-            side = required_side;
-            values.assign(side * side * side, CachedVoxel{});
-        }
-        ++generation;
-        if (generation == 0) {
-            for (auto &value : values) {
-                value.generation = 0;
-            }
-            generation = 1;
-        }
-    }
-};
-
 bool operator<(const VoxelWeight &left, const VoxelWeight &right) {
     return left.voxel < right.voxel;
 }
 
-struct Cell {
-    double u0;
-    double u1;
-    double v0;
-    double v1;
-    double t0;
-    double t1;
-    double weight;
-    int depth;
+// One work block of a frame group: a rectangle of the detector, taken
+// across every frame of the group.
+struct BrickExtent {
+    std::size_t row_begin;
+    std::size_t row_end;
+    std::size_t column_begin;
+    std::size_t column_end;
+};
+
+// A frame group's pixel data as the caller already holds it: one pointer
+// per frame at the tile's first pixel, plus the distance between two
+// rows of the caller's own array.
+//
+// The stride is what makes the tile a view rather than a copy. A tile cut
+// out of whole corrected frames strides by the frame's row length and is
+// read in place; a tile that has been gathered into its own
+// ``(frames, rows, columns)`` buffer strides by the tile's own row
+// length. The brick loop cannot tell the two apart, and reads the same
+// values in the same order either way.
+struct GroupPixels {
+    std::vector<const double *> intensity;
+    std::vector<const double *> variance;
+    std::vector<const bool *> mask;
+    std::size_t row_stride = 0;
 };
 
 struct BlockProfile {
@@ -715,8 +818,20 @@ public:
         for (int depth = 0; depth < max_depth_; ++depth) {
             worst_leaves *= subdivision_children;
         }
+        // Bounded by reserved_records_per_pixel for the reason given there.
+        // Unbounded, this term is 4^depth (or 8^depth when the exposure
+        // rotates) and rejects any useful detector tile from depth 3 up: at
+        // depth 3 it claims 5248 bytes for a pixel that really costs about
+        // 106, so a full Pilatus-6M frame "needs" 32.7 GB and the layout is
+        // forced onto tiny tiles -- which then caps how many frames can be
+        // in flight, since one worker's estimate divides into the budget.
+        // Two resident copies of a pixel's records are still allowed for,
+        // covering the per-block vectors and the merged output together.
         const std::size_t estimated_bytes_per_pixel =
-            128 + 2 * worst_leaves * sizeof(Record);
+            128
+            + 2
+                * std::min<std::size_t>(worst_leaves, reserved_records_per_pixel)
+                * sizeof(Record);
         if (
             pixels > 0
             && estimated_bytes_per_pixel
@@ -744,20 +859,10 @@ public:
         // performance risk, never a correctness one.
         const std::size_t bytes_per_node =
             sizeof(std::pair<const RecordKey, RecordAccum>) + 32;
-        // Reserving one node per leaf assumes every leaf of every pixel
-        // reaches a voxel no other leaf did. Real data does not behave
-        // that way at any depth: measured post-dedup density stays
-        // between 0.46 and 0.87 records per pixel from depth 0 through 8,
-        // because deeper subdivision's extra samples overwhelmingly land
-        // in voxels a neighbouring sample already reached. Reserving by
-        // leaf count therefore over-reserves by up to four orders of
-        // magnitude at high depth -- gigabytes per worker thread -- while
-        // buying nothing. A small multiple of the measured density leaves
-        // ample headroom, and the resource falls back to the heap if a
-        // block ever does exceed it, so this bounds performance, never
-        // correctness. Depth 0 is exact: one leaf can only yield one
-        // record.
-        constexpr std::size_t reserved_records_per_pixel = 4;
+        // Sized by reserved_records_per_pixel, as the precheck above is.
+        // Undersizing here is a performance risk and never a correctness
+        // one: the resource falls back to the heap transparently if a
+        // block ever does exceed it.
         const std::size_t arena_bytes =
             block_size
                 * std::min<std::size_t>(worst_leaves, reserved_records_per_pixel)
@@ -826,53 +931,382 @@ public:
             records = merge_sorted_blocks(block_results);
         }
         const auto merge_finished = std::chrono::steady_clock::now();
-        const auto conversion_started = merge_finished;
         py::dict result = records_to_python(records);
         const auto conversion_finished = std::chrono::steady_clock::now();
         if (profile) {
-            BlockProfile combined;
-            for (const BlockProfile &block : block_profiles) {
-                combined.pixels_seen += block.pixels_seen;
-                combined.valid_pixels += block.valid_pixels;
-                combined.coordinate_evaluations += block.coordinate_evaluations;
-                combined.voxel_weights += block.voxel_weights;
-                combined.maximum_weights_per_pixel = std::max(
-                    combined.maximum_weights_per_pixel,
-                    block.maximum_weights_per_pixel
+            result["_profile"] = summarize_profile(
+                block_profiles,
+                record_count,
+                records.size(),
+                total_started,
+                blocks_started,
+                blocks_finished,
+                merge_started,
+                merge_finished,
+                conversion_finished
+            );
+        }
+        return result;
+    }
+
+    py::dict accumulate_group(
+        const FloatArray &intensity,
+        const FloatArray &variance,
+        const BoolArray &mask,
+        const FloatArray &corner_rays,
+        const FloatArray &angles_start,
+        const FloatArray &angles_end,
+        const bool profile = false
+    ) const {
+        // Several consecutive images mapped in one call, with the work
+        // block a brick in (row, column, frame) rather than a run of one
+        // image. On a rotation scan two adjacent frames are as close in
+        // reciprocal space as two adjacent pixels are -- measured 0.71
+        // voxels per frame against 0.49 and 0.80 for the next column and
+        // row -- so a brick collapses redundancy the per-image block
+        // cannot see, and it does so in the same cache-resident map.
+        //
+        // The caller chooses the group size by how many frames it passes;
+        // one frame reproduces accumulate() exactly.
+        //
+        // This form takes one contiguous ``(frames, rows, columns)``
+        // buffer per array. :meth:`accumulate_group_tile` takes the same
+        // data as whole frames plus a rectangle, and is what the mapping
+        // pipeline uses; both run the identical brick loop over the
+        // identical values.
+        const auto total_started = std::chrono::steady_clock::now();
+        const py::buffer_info intensity_info = intensity.request();
+        const py::buffer_info variance_info = variance.request();
+        const py::buffer_info mask_info = mask.request();
+        const py::buffer_info ray_info = corner_rays.request();
+        const py::buffer_info start_info = angles_start.request();
+        const py::buffer_info end_info = angles_end.request();
+        validate_group_inputs(
+            intensity_info,
+            variance_info,
+            mask_info,
+            ray_info,
+            start_info,
+            end_info
+        );
+
+        const auto *intensity_data =
+            static_cast<const double *>(intensity_info.ptr);
+        const auto *variance_data =
+            static_cast<const double *>(variance_info.ptr);
+        const auto *mask_data = static_cast<const bool *>(mask_info.ptr);
+
+        const std::size_t frames =
+            static_cast<std::size_t>(intensity_info.shape[0]);
+        const std::size_t rows =
+            static_cast<std::size_t>(intensity_info.shape[1]);
+        const std::size_t cols =
+            static_cast<std::size_t>(intensity_info.shape[2]);
+
+        GroupPixels pixels;
+        pixels.row_stride = cols;
+        pixels.intensity.reserve(frames);
+        pixels.variance.reserve(frames);
+        pixels.mask.reserve(frames);
+        for (std::size_t frame = 0; frame < frames; ++frame) {
+            const std::size_t offset = frame * rows * cols;
+            pixels.intensity.push_back(intensity_data + offset);
+            pixels.variance.push_back(variance_data + offset);
+            pixels.mask.push_back(mask_data + offset);
+        }
+        return accumulate_group_impl(
+            pixels,
+            frames,
+            rows,
+            cols,
+            static_cast<const double *>(ray_info.ptr),
+            static_cast<const double *>(start_info.ptr),
+            static_cast<const double *>(end_info.ptr),
+            profile,
+            total_started
+        );
+    }
+
+    py::dict accumulate_group_tile(
+        const py::sequence &intensity,
+        const py::sequence &variance,
+        const py::sequence &mask,
+        const FloatArray &corner_rays,
+        const FloatArray &angles_start,
+        const FloatArray &angles_end,
+        const std::size_t row_start,
+        const std::size_t row_stop,
+        const std::size_t column_start,
+        const std::size_t column_stop,
+        const bool profile = false
+    ) const {
+        // The same call as :meth:`accumulate_group`, taking whole frames
+        // and the rectangle to map instead of a buffer already cut down
+        // to it.
+        //
+        // Detector tiles partition the detector, so gathering each tile
+        // into its own contiguous buffer copies every corrected frame
+        // exactly once per group -- around 105 MB a frame, in Python,
+        // holding the GIL, purely to give this call a shape it does not
+        // need. The brick loop walks rows within a tile in either form,
+        // so reading through the frame's own row stride costs it nothing.
+        const auto total_started = std::chrono::steady_clock::now();
+        const py::buffer_info ray_info = corner_rays.request();
+        const py::buffer_info start_info = angles_start.request();
+        const py::buffer_info end_info = angles_end.request();
+
+        const std::size_t frames = static_cast<std::size_t>(py::len(intensity));
+        if (frames < 1) {
+            throw py::value_error("A frame group needs at least one frame");
+        }
+        if (
+            static_cast<std::size_t>(py::len(variance)) != frames
+            || static_cast<std::size_t>(py::len(mask)) != frames
+        ) {
+            throw py::value_error(
+                "variance and mask must hold one frame each, as intensity does"
+            );
+        }
+        if (row_stop <= row_start || column_stop <= column_start) {
+            throw py::value_error("The tile rectangle must be non-empty");
+        }
+        const std::size_t rows = row_stop - row_start;
+        const std::size_t cols = column_stop - column_start;
+
+        // The casts hold references for as long as this call runs, which
+        // is what keeps the frames alive while the GIL is released.
+        std::vector<FloatArray> intensity_frames;
+        std::vector<FloatArray> variance_frames;
+        std::vector<BoolArray> mask_frames;
+        intensity_frames.reserve(frames);
+        variance_frames.reserve(frames);
+        mask_frames.reserve(frames);
+        GroupPixels pixels;
+        pixels.intensity.reserve(frames);
+        pixels.variance.reserve(frames);
+        pixels.mask.reserve(frames);
+        std::size_t frame_columns = 0;
+        for (std::size_t frame = 0; frame < frames; ++frame) {
+            intensity_frames.push_back(intensity[frame].cast<FloatArray>());
+            variance_frames.push_back(variance[frame].cast<FloatArray>());
+            mask_frames.push_back(mask[frame].cast<BoolArray>());
+            const py::buffer_info intensity_info =
+                intensity_frames.back().request();
+            const py::buffer_info variance_info =
+                variance_frames.back().request();
+            const py::buffer_info mask_info = mask_frames.back().request();
+            validate_tile_frame(
+                intensity_info, variance_info, mask_info, row_stop, column_stop
+            );
+            const std::size_t columns_here =
+                static_cast<std::size_t>(intensity_info.shape[1]);
+            if (frame == 0) {
+                frame_columns = columns_here;
+            } else if (columns_here != frame_columns) {
+                throw py::value_error(
+                    "every frame in a group must have the same shape"
                 );
-                combined.unreduced_records += block.unreduced_records;
-                combined.reduced_records += block.reduced_records;
-                combined.mapping_nanoseconds += block.mapping_nanoseconds;
-                combined.reduction_nanoseconds += block.reduction_nanoseconds;
             }
-            const auto seconds = [](const auto start, const auto stop) {
-                return std::chrono::duration<double>(stop - start).count();
-            };
-            py::dict details;
-            details["pixels_seen"] = combined.pixels_seen;
-            details["valid_pixels"] = combined.valid_pixels;
-            details["coordinate_evaluations"] =
-                combined.coordinate_evaluations;
-            details["voxel_weights"] = combined.voxel_weights;
-            details["maximum_weights_per_pixel"] =
-                combined.maximum_weights_per_pixel;
-            details["unreduced_block_records"] =
-                combined.unreduced_records;
-            details["reduced_block_records"] = combined.reduced_records;
-            details["pre_merge_records"] = record_count;
-            details["final_records"] = records.size();
-            details["block_mapping_cpu_seconds"] =
-                static_cast<double>(combined.mapping_nanoseconds) * 1.0e-9;
-            details["block_reduction_cpu_seconds"] =
-                static_cast<double>(combined.reduction_nanoseconds) * 1.0e-9;
-            details["block_wall_seconds"] =
-                seconds(blocks_started, blocks_finished);
-            details["merge_seconds"] =
-                seconds(merge_started, merge_finished);
-            details["python_conversion_seconds"] =
-                seconds(conversion_started, conversion_finished);
-            details["total_seconds"] =
-                seconds(total_started, conversion_finished);
+            const std::size_t offset = row_start * frame_columns + column_start;
+            pixels.intensity.push_back(
+                static_cast<const double *>(intensity_info.ptr) + offset
+            );
+            pixels.variance.push_back(
+                static_cast<const double *>(variance_info.ptr) + offset
+            );
+            pixels.mask.push_back(
+                static_cast<const bool *>(mask_info.ptr) + offset
+            );
+        }
+        pixels.row_stride = frame_columns;
+        validate_group_geometry(ray_info, start_info, end_info, frames, rows, cols);
+        return accumulate_group_impl(
+            pixels,
+            frames,
+            rows,
+            cols,
+            static_cast<const double *>(ray_info.ptr),
+            static_cast<const double *>(start_info.ptr),
+            static_cast<const double *>(end_info.ptr),
+            profile,
+            total_started
+        );
+    }
+
+    py::dict accumulate_group_impl(
+        const GroupPixels &pixels,
+        const std::size_t frames,
+        const std::size_t rows,
+        const std::size_t cols,
+        const double *ray_data,
+        const double *start_data,
+        const double *end_data,
+        const bool profile,
+        const std::chrono::steady_clock::time_point total_started
+    ) const {
+        const std::size_t frame_pixels = rows * cols;
+        const std::size_t samples = frames * frame_pixels;
+
+        // Exposure geometry is per frame: a group may mix stationary and
+        // swept frames, and each needs its own rotation lattice.
+        std::vector<std::vector<CoordinateTransform>> transforms(frames);
+        std::vector<char> stationary(frames, 1);
+        for (std::size_t frame = 0; frame < frames; ++frame) {
+            const double *frame_start = start_data + frame * 4;
+            const double *frame_end = end_data + frame * 4;
+            bool still = true;
+            for (int index = 0; index < 4; ++index) {
+                still = still && frame_start[index] == frame_end[index];
+            }
+            stationary[frame] = still ? 1 : 0;
+            for (const FrameRotation &rotation :
+                 frame_rotations(frame_start, frame_end)) {
+                transforms[frame].push_back(coordinate_transform(rotation));
+            }
+        }
+
+        std::size_t worst_leaves = 1;
+        for (int depth = 0; depth < max_depth_; ++depth) {
+            worst_leaves *= 8;
+        }
+        const std::size_t estimated_bytes_per_pixel =
+            128
+            + 2
+                * std::min<std::size_t>(worst_leaves, reserved_records_per_pixel)
+                * sizeof(Record);
+        if (
+            samples > 0
+            && estimated_bytes_per_pixel > memory_budget_bytes_ / samples
+        ) {
+            throw py::value_error(
+                "Frame group exceeds the native memory budget at the "
+                "configured adaptive depth; use fewer frames per group, a "
+                "smaller detector tile, or increase memory_budget_bytes"
+            );
+        }
+
+        // One brick holds the same sample count a single-image block would,
+        // so the map's working set is unchanged; the frame extent is spent
+        // out of the detector-plane extent rather than added to it.
+        const std::size_t samples_per_brick = bounded_block_size();
+        const std::size_t plane_pixels = std::max<std::size_t>(
+            1, samples_per_brick / std::max<std::size_t>(frames, 1)
+        );
+        std::size_t brick_columns = std::max<std::size_t>(
+            1,
+            static_cast<std::size_t>(
+                std::sqrt(static_cast<double>(plane_pixels))
+            )
+        );
+        brick_columns = std::min(brick_columns, cols);
+        std::size_t brick_rows =
+            std::max<std::size_t>(1, plane_pixels / brick_columns);
+        brick_rows = std::min(brick_rows, rows);
+
+        std::vector<BrickExtent> bricks;
+        for (std::size_t row = 0; row < rows; row += brick_rows) {
+            for (std::size_t column = 0; column < cols; column += brick_columns) {
+                bricks.push_back({
+                    row,
+                    std::min(row + brick_rows, rows),
+                    column,
+                    std::min(column + brick_columns, cols),
+                });
+            }
+        }
+        const std::size_t brick_count = bricks.size();
+        std::vector<std::vector<Record>> block_results(brick_count);
+        std::vector<BlockProfile> block_profiles(profile ? brick_count : 0);
+        std::atomic<std::size_t> next_brick{0};
+
+        const std::size_t bytes_per_node =
+            sizeof(std::pair<const RecordKey, RecordAccum>) + 32;
+        const std::size_t arena_bytes =
+            brick_rows * brick_columns * frames
+                * std::min<std::size_t>(worst_leaves, reserved_records_per_pixel)
+                * bytes_per_node
+            + 4096;
+
+        const auto blocks_started = std::chrono::steady_clock::now();
+        {
+            py::gil_scoped_release release;
+            const int worker_count = static_cast<int>(
+                std::min<std::size_t>(
+                    static_cast<std::size_t>(threads_), std::max<std::size_t>(brick_count, 1)
+                )
+            );
+            std::vector<std::thread> workers;
+            workers.reserve(static_cast<std::size_t>(worker_count));
+            for (int worker = 0; worker < worker_count; ++worker) {
+                workers.emplace_back([&, this]() {
+                    std::unique_ptr<std::byte[]> arena_buffer(
+                        new std::byte[arena_bytes]
+                    );
+                    std::pmr::monotonic_buffer_resource arena(
+                        arena_buffer.get(), arena_bytes
+                    );
+                    std::vector<Vec3> centre_rays;
+                    std::vector<VoxelWeight> weights;
+                    weights.reserve(
+                        static_cast<std::size_t>(1)
+                        << std::min(3 * max_depth_, 9)
+                    );
+                    while (true) {
+                        const std::size_t index = next_brick.fetch_add(1);
+                        if (index >= brick_count) {
+                            break;
+                        }
+                        block_results[index] = accumulate_brick(
+                            bricks[index],
+                            frames,
+                            cols,
+                            pixels,
+                            ray_data,
+                            transforms,
+                            stationary,
+                            centre_rays,
+                            weights,
+                            profile ? &block_profiles[index] : nullptr,
+                            arena
+                        );
+                    }
+                });
+            }
+            for (auto &worker : workers) {
+                worker.join();
+            }
+        }
+        const auto blocks_finished = std::chrono::steady_clock::now();
+
+        std::size_t record_count = 0;
+        for (const auto &block : block_results) {
+            record_count += block.size();
+        }
+        std::vector<Record> records;
+        const auto merge_started = std::chrono::steady_clock::now();
+        {
+            py::gil_scoped_release release;
+            records = merge_sorted_blocks(block_results);
+        }
+        const auto merge_finished = std::chrono::steady_clock::now();
+        py::dict result = records_to_python(records);
+        const auto conversion_finished = std::chrono::steady_clock::now();
+        if (profile) {
+            py::dict details = summarize_profile(
+                block_profiles,
+                record_count,
+                records.size(),
+                total_started,
+                blocks_started,
+                blocks_finished,
+                merge_started,
+                merge_finished,
+                conversion_finished
+            );
+            details["frames"] = frames;
+            details["bricks"] = brick_count;
+            details["brick_rows"] = brick_rows;
+            details["brick_columns"] = brick_columns;
             result["_profile"] = std::move(details);
         }
         return result;
@@ -968,6 +1402,179 @@ private:
             1,
             std::min(work_block_pixels_, per_worker / estimated_bytes_per_pixel)
         );
+    }
+
+    static py::dict summarize_profile(
+        const std::vector<BlockProfile> &block_profiles,
+        const std::size_t pre_merge_records,
+        const std::size_t final_records,
+        const std::chrono::steady_clock::time_point total_started,
+        const std::chrono::steady_clock::time_point blocks_started,
+        const std::chrono::steady_clock::time_point blocks_finished,
+        const std::chrono::steady_clock::time_point merge_started,
+        const std::chrono::steady_clock::time_point merge_finished,
+        const std::chrono::steady_clock::time_point conversion_finished
+    ) {
+        BlockProfile combined;
+        for (const BlockProfile &block : block_profiles) {
+            combined.pixels_seen += block.pixels_seen;
+            combined.valid_pixels += block.valid_pixels;
+            combined.coordinate_evaluations += block.coordinate_evaluations;
+            combined.voxel_weights += block.voxel_weights;
+            combined.maximum_weights_per_pixel = std::max(
+                combined.maximum_weights_per_pixel,
+                block.maximum_weights_per_pixel
+            );
+            combined.unreduced_records += block.unreduced_records;
+            combined.reduced_records += block.reduced_records;
+            combined.mapping_nanoseconds += block.mapping_nanoseconds;
+            combined.reduction_nanoseconds += block.reduction_nanoseconds;
+        }
+        const auto seconds = [](const auto start, const auto stop) {
+            return std::chrono::duration<double>(stop - start).count();
+        };
+        py::dict details;
+        details["pixels_seen"] = combined.pixels_seen;
+        details["valid_pixels"] = combined.valid_pixels;
+        details["coordinate_evaluations"] = combined.coordinate_evaluations;
+        details["voxel_weights"] = combined.voxel_weights;
+        details["maximum_weights_per_pixel"] =
+            combined.maximum_weights_per_pixel;
+        details["unreduced_block_records"] = combined.unreduced_records;
+        details["reduced_block_records"] = combined.reduced_records;
+        details["pre_merge_records"] = pre_merge_records;
+        details["final_records"] = final_records;
+        details["block_mapping_cpu_seconds"] =
+            static_cast<double>(combined.mapping_nanoseconds) * 1.0e-9;
+        details["block_reduction_cpu_seconds"] =
+            static_cast<double>(combined.reduction_nanoseconds) * 1.0e-9;
+        details["block_wall_seconds"] = seconds(blocks_started, blocks_finished);
+        details["merge_seconds"] = seconds(merge_started, merge_finished);
+        details["python_conversion_seconds"] =
+            seconds(merge_finished, conversion_finished);
+        details["total_seconds"] = seconds(total_started, conversion_finished);
+        return details;
+    }
+
+    static void validate_tile_frame(
+        const py::buffer_info &intensity,
+        const py::buffer_info &variance,
+        const py::buffer_info &mask,
+        const std::size_t row_stop,
+        const std::size_t column_stop
+    ) {
+        // The frames are read in place, so their layout is part of the
+        // contract rather than something a cast quietly repairs: one row
+        // stride has to serve every frame and every array.
+        if (intensity.ndim != 2) {
+            throw py::value_error(
+                "each frame's intensity must be a two-dimensional "
+                "(rows, columns) array"
+            );
+        }
+        for (const py::buffer_info *other : {&variance, &mask}) {
+            if (
+                other->ndim != 2
+                || other->shape[0] != intensity.shape[0]
+                || other->shape[1] != intensity.shape[1]
+            ) {
+                throw py::value_error(
+                    "each frame's variance and mask must match its intensity "
+                    "shape"
+                );
+            }
+        }
+        if (
+            static_cast<std::size_t>(intensity.shape[0]) < row_stop
+            || static_cast<std::size_t>(intensity.shape[1]) < column_stop
+        ) {
+            throw py::value_error(
+                "the tile rectangle reaches outside the frame"
+            );
+        }
+    }
+
+    static void validate_group_geometry(
+        const py::buffer_info &rays,
+        const py::buffer_info &start,
+        const py::buffer_info &end,
+        const std::size_t frames,
+        const std::size_t rows,
+        const std::size_t cols
+    ) {
+        if (
+            rays.ndim != 3
+            || static_cast<std::size_t>(rays.shape[0]) != rows + 1
+            || static_cast<std::size_t>(rays.shape[1]) != cols + 1
+            || rays.shape[2] != 3
+        ) {
+            throw py::value_error(
+                "corner_rays must have shape (rows + 1, columns + 1, 3)"
+            );
+        }
+        for (const py::buffer_info *angles : {&start, &end}) {
+            if (
+                angles->ndim != 2
+                || static_cast<std::size_t>(angles->shape[0]) != frames
+                || angles->shape[1] != 4
+            ) {
+                throw py::value_error(
+                    "angles_start and angles_end must have shape (frames, 4)"
+                );
+            }
+        }
+    }
+
+    static void validate_group_inputs(
+        const py::buffer_info &intensity,
+        const py::buffer_info &variance,
+        const py::buffer_info &mask,
+        const py::buffer_info &rays,
+        const py::buffer_info &start,
+        const py::buffer_info &end
+    ) {
+        if (intensity.ndim != 3) {
+            throw py::value_error(
+                "intensity must be a three-dimensional (frames, rows, columns) "
+                "array"
+            );
+        }
+        for (const py::buffer_info *other : {&variance, &mask}) {
+            if (
+                other->ndim != 3
+                || other->shape[0] != intensity.shape[0]
+                || other->shape[1] != intensity.shape[1]
+                || other->shape[2] != intensity.shape[2]
+            ) {
+                throw py::value_error(
+                    "variance and mask must match the intensity shape"
+                );
+            }
+        }
+        if (intensity.shape[0] < 1) {
+            throw py::value_error("A frame group needs at least one frame");
+        }
+        if (
+            rays.ndim != 3
+            || rays.shape[0] != intensity.shape[1] + 1
+            || rays.shape[1] != intensity.shape[2] + 1
+            || rays.shape[2] != 3
+        ) {
+            throw py::value_error(
+                "corner_rays must have shape (rows + 1, columns + 1, 3)"
+            );
+        }
+        for (const py::buffer_info *angles : {&start, &end}) {
+            if (
+                angles->ndim != 2
+                || angles->shape[0] != intensity.shape[0]
+                || angles->shape[1] != 4
+            ) {
+                throw py::value_error(
+                    "angles_start and angles_end must have shape (frames, 4)"
+                );
+            }
+        }
     }
 
     static void validate_inputs(
@@ -1300,60 +1907,6 @@ private:
         return key;
     }
 
-    bool cached_voxel_key(
-        const PixelRays &rays,
-        const double u,
-        const double v,
-        const double t,
-        const std::vector<CoordinateTransform> &transforms,
-        PixelCoordinateCache &cache,
-        std::uint64_t &voxel,
-        BlockProfile *profile
-    ) const {
-        const double rotation_scale =
-            static_cast<double>(transforms.size() - 1);
-        const std::size_t it = static_cast<std::size_t>(
-            std::llround(t * rotation_scale)
-        );
-        if (cache.side == 0) {
-            if (profile != nullptr) {
-                ++profile->coordinate_evaluations;
-            }
-            return voxel_id(
-                coordinate_at(
-                    rays,
-                    u,
-                    v,
-                    transforms[it]
-                ),
-                voxel
-            );
-        }
-        const double scale = static_cast<double>(cache.side - 1);
-        const std::size_t iu = static_cast<std::size_t>(std::llround(u * scale));
-        const std::size_t iv = static_cast<std::size_t>(std::llround(v * scale));
-        CachedVoxel &cached = cache.values[
-            (iu * cache.side + iv) * cache.side + it
-        ];
-        if (cached.generation != cache.generation) {
-            if (profile != nullptr) {
-                ++profile->coordinate_evaluations;
-            }
-            cached.valid = voxel_id(
-                coordinate_at(
-                    rays,
-                    u,
-                    v,
-                    transforms[it]
-                ),
-                cached.voxel
-            );
-            cached.generation = cache.generation;
-        }
-        voxel = cached.voxel;
-        return cached.valid;
-    }
-
     LatticeVoxel stationary_lattice_voxel(
         const PixelRays &rays,
         const std::size_t u_index,
@@ -1528,105 +2081,522 @@ private:
         }
     }
 
-    void split_pixel(
+    // One node of the 3x3x3 dyadic lattice a moving cell's subdivision
+    // spans: (iu, iv, it) each in {0, 1, 2}, low corner to high corner.
+    static std::size_t lattice_index(
+        const std::size_t iu,
+        const std::size_t iv,
+        const std::size_t it
+    ) {
+        return (iu * 3 + iv) * 3 + it;
+    }
+
+    LatticeVoxel evaluate_lattice_voxel(
         const PixelRays &rays,
+        const double u,
+        const double v,
+        const double t,
         const std::vector<CoordinateTransform> &transforms,
-        const bool stationary,
-        std::vector<VoxelWeight> &weights,
-        PixelCoordinateCache &cache,
-        std::vector<Cell> &stack,
         BlockProfile *profile
     ) const {
-        cache.begin_pixel(max_depth_);
-        stack.clear();
-        stack.push_back({
-            0.0,
-            1.0,
-            0.0,
-            1.0,
-            stationary ? 0.5 : 0.0,
-            stationary ? 0.5 : 1.0,
-            1.0,
-            0,
-        });
-        while (!stack.empty()) {
-            const Cell cell = stack.back();
-            stack.pop_back();
-            std::uint64_t first_voxel = 0;
-            bool first_valid = false;
-            bool all_same = true;
-            const int corner_count = stationary ? 4 : 8;
-            for (int corner = 0; corner < corner_count; ++corner) {
-                const double u = (corner & 1) != 0 ? cell.u1 : cell.u0;
-                const double v = (corner & 2) != 0 ? cell.v1 : cell.v0;
-                const double t = stationary
-                    ? 0.5
-                    : ((corner & 4) != 0 ? cell.t1 : cell.t0);
-                std::uint64_t voxel = 0;
-                const bool valid = cached_voxel_key(
-                    rays,
-                    u,
-                    v,
-                    t,
-                    transforms,
-                    cache,
-                    voxel,
-                    profile
-                );
-                if (corner == 0) {
-                    first_valid = valid;
-                    first_voxel = voxel;
-                } else if (
-                    valid != first_valid
-                    || (valid && voxel != first_voxel)
-                ) {
-                    all_same = false;
-                }
-            }
-            if (all_same && first_valid) {
-                weights.push_back({first_voxel, cell.weight});
-                continue;
-            }
-            if (cell.depth >= max_depth_) {
-                std::uint64_t voxel = 0;
-                const bool valid = cached_voxel_key(
-                    rays,
-                    0.5 * (cell.u0 + cell.u1),
-                    0.5 * (cell.v0 + cell.v1),
-                    0.5 * (cell.t0 + cell.t1),
-                    transforms,
-                    cache,
-                    voxel,
-                    profile
-                );
-                if (valid) {
-                    weights.push_back({voxel, cell.weight});
-                }
-                continue;
-            }
-            const double um = 0.5 * (cell.u0 + cell.u1);
-            const double vm = 0.5 * (cell.v0 + cell.v1);
-            const double tm = 0.5 * (cell.t0 + cell.t1);
-            const int child_count = stationary ? 4 : 8;
-            const double child_weight =
-                cell.weight / static_cast<double>(child_count);
-            for (int child = child_count - 1; child >= 0; --child) {
-                stack.push_back({
-                    (child & 1) != 0 ? um : cell.u0,
-                    (child & 1) != 0 ? cell.u1 : um,
-                    (child & 2) != 0 ? vm : cell.v0,
-                    (child & 2) != 0 ? cell.v1 : vm,
-                    stationary
-                        ? 0.5
-                        : ((child & 4) != 0 ? tm : cell.t0),
-                    stationary
-                        ? 0.5
-                        : ((child & 4) != 0 ? cell.t1 : tm),
-                    child_weight,
-                    cell.depth + 1,
-                });
+        // t selects one of the rotations frame_rotations() precomputed over
+        // the dyadic lattice, by the same rounding the removed shared-corner
+        // cache used, so coordinates here are bit-for-bit what it produced.
+        LatticeVoxel result;
+        if (profile != nullptr) {
+            ++profile->coordinate_evaluations;
+        }
+        const double rotation_scale =
+            static_cast<double>(transforms.size() - 1);
+        const std::size_t it = static_cast<std::size_t>(
+            std::llround(t * rotation_scale)
+        );
+        result.valid = voxel_id(
+            coordinate_at(rays, u, v, transforms[it]),
+            result.voxel
+        );
+        return result;
+    }
+
+    void subdivide_moving(
+        const PixelRays &rays,
+        const std::vector<CoordinateTransform> &transforms,
+        const double u0,
+        const double u1,
+        const double v0,
+        const double v1,
+        const double t0,
+        const double t1,
+        const double weight,
+        const int depth,
+        const LatticeVoxel (&corners)[8],
+        std::vector<VoxelWeight> &weights,
+        BlockProfile *profile
+    ) const {
+        // Corner c sits at (u1 if c&1 else u0, v1 if c&2 else v0,
+        // t1 if c&4 else t0) -- the same numbering the explicit-stack form
+        // used, and the same order children are visited in, so leaves are
+        // emitted in an unchanged sequence and their later summation
+        // associates identically.
+        bool all_same = true;
+        for (int corner = 1; corner < 8; ++corner) {
+            if (
+                corners[corner].valid != corners[0].valid
+                || (corners[0].valid && corners[corner].voxel != corners[0].voxel)
+            ) {
+                all_same = false;
+                break;
             }
         }
+        if (all_same && corners[0].valid) {
+            weights.push_back({corners[0].voxel, weight});
+            return;
+        }
+        const double um = 0.5 * (u0 + u1);
+        const double vm = 0.5 * (v0 + v1);
+        const double tm = 0.5 * (t0 + t1);
+        if (depth >= max_depth_) {
+            // A cell whose corners disagree at the deepest level assigns its
+            // whole weight at its centre. Note an entirely out-of-grid cell
+            // reaches here too (all_same holds, but no corner is valid),
+            // exactly as before.
+            const LatticeVoxel centre = evaluate_lattice_voxel(
+                rays, um, vm, tm, transforms, profile
+            );
+            if (centre.valid) {
+                weights.push_back({centre.voxel, weight});
+            }
+            return;
+        }
+        // Eight children share one 27-node lattice, of which the eight
+        // corners are already in hand: only the nineteen nodes with a
+        // midpoint index are new. That is what replaces the dense
+        // per-pixel cache -- the sharing lives in the recursion instead of
+        // in a side array that has to be indexed, generation-stamped, and
+        // sized for a depth it mostly does not use.
+        LatticeVoxel lattice[27];
+        const double us[3] = {u0, um, u1};
+        const double vs[3] = {v0, vm, v1};
+        const double ts[3] = {t0, tm, t1};
+        for (std::size_t iu = 0; iu < 3; ++iu) {
+            for (std::size_t iv = 0; iv < 3; ++iv) {
+                for (std::size_t it = 0; it < 3; ++it) {
+                    LatticeVoxel &node = lattice[lattice_index(iu, iv, it)];
+                    if (iu != 1 && iv != 1 && it != 1) {
+                        const int corner = (iu == 2 ? 1 : 0)
+                            | (iv == 2 ? 2 : 0)
+                            | (it == 2 ? 4 : 0);
+                        node = corners[corner];
+                    } else {
+                        node = evaluate_lattice_voxel(
+                            rays, us[iu], vs[iv], ts[it], transforms, profile
+                        );
+                    }
+                }
+            }
+        }
+        const double child_weight = weight / 8.0;
+        for (int child = 0; child < 8; ++child) {
+            const std::size_t base_u = (child & 1) != 0 ? 1 : 0;
+            const std::size_t base_v = (child & 2) != 0 ? 1 : 0;
+            const std::size_t base_t = (child & 4) != 0 ? 1 : 0;
+            LatticeVoxel child_corners[8];
+            for (int corner = 0; corner < 8; ++corner) {
+                child_corners[corner] = lattice[
+                    lattice_index(
+                        base_u + ((corner & 1) != 0 ? 1 : 0),
+                        base_v + ((corner & 2) != 0 ? 1 : 0),
+                        base_t + ((corner & 4) != 0 ? 1 : 0)
+                    )
+                ];
+            }
+            subdivide_moving(
+                rays,
+                transforms,
+                (child & 1) != 0 ? um : u0,
+                (child & 1) != 0 ? u1 : um,
+                (child & 2) != 0 ? vm : v0,
+                (child & 2) != 0 ? v1 : vm,
+                (child & 4) != 0 ? tm : t0,
+                (child & 4) != 0 ? t1 : tm,
+                child_weight,
+                depth + 1,
+                child_corners,
+                weights,
+                profile
+            );
+        }
+    }
+
+    LatticeVoxel evaluate_stationary_voxel(
+        const PixelRays &rays,
+        const double u,
+        const double v,
+        const CoordinateTransform &transform,
+        BlockProfile *profile
+    ) const {
+        // The stationary counterpart of evaluate_lattice_voxel: t is pinned,
+        // so the rotation is chosen once by the caller instead of being
+        // recovered from t on every node. transforms[size / 2] and
+        // llround(0.5 * (size - 1)) are the same index for every depth --
+        // both are 2^max_depth -- so this is bit-for-bit what the cached
+        // path evaluated.
+        LatticeVoxel result;
+        if (profile != nullptr) {
+            ++profile->coordinate_evaluations;
+        }
+        result.valid = voxel_id(
+            coordinate_at(rays, u, v, transform),
+            result.voxel
+        );
+        return result;
+    }
+
+    void subdivide_stationary(
+        const PixelRays &rays,
+        const CoordinateTransform &transform,
+        const double u0,
+        const double u1,
+        const double v0,
+        const double v1,
+        const double weight,
+        const int depth,
+        const LatticeVoxel (&corners)[4],
+        std::vector<VoxelWeight> &weights,
+        BlockProfile *profile
+    ) const {
+        bool all_same = true;
+        for (int corner = 1; corner < 4; ++corner) {
+            if (
+                corners[corner].valid != corners[0].valid
+                || (corners[0].valid && corners[corner].voxel != corners[0].voxel)
+            ) {
+                all_same = false;
+                break;
+            }
+        }
+        if (all_same && corners[0].valid) {
+            weights.push_back({corners[0].voxel, weight});
+            return;
+        }
+        const double um = 0.5 * (u0 + u1);
+        const double vm = 0.5 * (v0 + v1);
+        if (depth >= max_depth_) {
+            const LatticeVoxel centre = evaluate_stationary_voxel(
+                rays, um, vm, transform, profile
+            );
+            if (centre.valid) {
+                weights.push_back({centre.voxel, weight});
+            }
+            return;
+        }
+        // Four children share one 3x3 lattice whose corners are already in
+        // hand: five new nodes per split, exactly what
+        // split_pixel_stationary_depth2 materializes by hand at depth two.
+        LatticeVoxel lattice[9];
+        const double us[3] = {u0, um, u1};
+        const double vs[3] = {v0, vm, v1};
+        for (std::size_t iu = 0; iu < 3; ++iu) {
+            for (std::size_t iv = 0; iv < 3; ++iv) {
+                LatticeVoxel &node = lattice[iu * 3 + iv];
+                if (iu != 1 && iv != 1) {
+                    const int corner = (iu == 2 ? 1 : 0) | (iv == 2 ? 2 : 0);
+                    node = corners[corner];
+                } else {
+                    node = evaluate_stationary_voxel(
+                        rays, us[iu], vs[iv], transform, profile
+                    );
+                }
+            }
+        }
+        const double child_weight = weight / 4.0;
+        for (int child = 0; child < 4; ++child) {
+            const std::size_t base_u = (child & 1) != 0 ? 1 : 0;
+            const std::size_t base_v = (child & 2) != 0 ? 1 : 0;
+            LatticeVoxel child_corners[4];
+            for (int corner = 0; corner < 4; ++corner) {
+                child_corners[corner] = lattice[
+                    (base_u + ((corner & 1) != 0 ? 1 : 0)) * 3
+                    + base_v + ((corner & 2) != 0 ? 1 : 0)
+                ];
+            }
+            subdivide_stationary(
+                rays,
+                transform,
+                (child & 1) != 0 ? um : u0,
+                (child & 1) != 0 ? u1 : um,
+                (child & 2) != 0 ? vm : v0,
+                (child & 2) != 0 ? v1 : vm,
+                child_weight,
+                depth + 1,
+                child_corners,
+                weights,
+                profile
+            );
+        }
+    }
+
+    void split_pixel_stationary(
+        const PixelRays &rays,
+        const CoordinateTransform &transform,
+        std::vector<VoxelWeight> &weights,
+        BlockProfile *profile
+    ) const {
+        LatticeVoxel corners[4];
+        for (int corner = 0; corner < 4; ++corner) {
+            corners[corner] = evaluate_stationary_voxel(
+                rays,
+                (corner & 1) != 0 ? 1.0 : 0.0,
+                (corner & 2) != 0 ? 1.0 : 0.0,
+                transform,
+                profile
+            );
+        }
+        subdivide_stationary(
+            rays,
+            transform,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            1.0,
+            0,
+            corners,
+            weights,
+            profile
+        );
+    }
+
+    void split_pixel_moving(
+        const PixelRays &rays,
+        const std::vector<CoordinateTransform> &transforms,
+        std::vector<VoxelWeight> &weights,
+        BlockProfile *profile
+    ) const {
+        LatticeVoxel corners[8];
+        for (int corner = 0; corner < 8; ++corner) {
+            corners[corner] = evaluate_lattice_voxel(
+                rays,
+                (corner & 1) != 0 ? 1.0 : 0.0,
+                (corner & 2) != 0 ? 1.0 : 0.0,
+                (corner & 4) != 0 ? 1.0 : 0.0,
+                transforms,
+                profile
+            );
+        }
+        subdivide_moving(
+            rays,
+            transforms,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            1.0,
+            0,
+            corners,
+            weights,
+            profile
+        );
+    }
+
+    std::vector<Record> accumulate_brick(
+        const BrickExtent &brick,
+        const std::size_t frames,
+        const std::size_t columns,
+        const GroupPixels &pixels,
+        const double *rays,
+        const std::vector<std::vector<CoordinateTransform>> &transforms,
+        const std::vector<char> &stationary,
+        std::vector<Vec3> &centre_rays,
+        std::vector<VoxelWeight> &weights,
+        BlockProfile *profile,
+        std::pmr::monotonic_buffer_resource &arena
+    ) const {
+        arena.release();
+        std::pmr::map<RecordKey, RecordAccum> tree(&arena);
+        std::uint64_t unreduced_count = 0;
+        RecordKey cached_key{};
+        RecordAccum *cached_accumulator = nullptr;
+        const auto accumulator_for = [&tree, &cached_key, &cached_accumulator](
+            const RecordKey key
+        ) -> RecordAccum & {
+            if (cached_accumulator != nullptr && key == cached_key) {
+                return *cached_accumulator;
+            }
+            RecordAccum &accumulator = tree[key];
+            cached_key = key;
+            cached_accumulator = &accumulator;
+            return accumulator;
+        };
+        const std::size_t brick_rows = brick.row_end - brick.row_begin;
+        const std::size_t brick_columns = brick.column_end - brick.column_begin;
+        const std::size_t row_stride = pixels.row_stride;
+
+        if (max_depth_ == 0) {
+            // A pixel's centre ray is pure detector geometry -- the frame's
+            // rotation enters only through the transform applied after it --
+            // so it is the same for every frame in the group and is computed
+            // once per brick instead of once per (pixel, frame). At 32x32
+            // that buffer is 24 KiB.
+            centre_rays.resize(brick_rows * brick_columns);
+            for (std::size_t row = brick.row_begin; row < brick.row_end; ++row) {
+                for (
+                    std::size_t column = brick.column_begin;
+                    column < brick.column_end;
+                    ++column
+                ) {
+                    centre_rays[
+                        (row - brick.row_begin) * brick_columns
+                        + (column - brick.column_begin)
+                    ] = ray_at(pixel_rays(row, column, columns, rays), 0.5, 0.5);
+                }
+            }
+        }
+
+        const auto mapping_started = std::chrono::steady_clock::now();
+        for (std::size_t frame = 0; frame < frames; ++frame) {
+            const std::vector<CoordinateTransform> &frame_transforms =
+                transforms[frame];
+            const CoordinateTransform &centre_transform =
+                frame_transforms[frame_transforms.size() / 2];
+            const double *const intensity = pixels.intensity[frame];
+            const double *const variance = pixels.variance[frame];
+            const bool *const mask = pixels.mask[frame];
+            for (std::size_t row = brick.row_begin; row < brick.row_end; ++row) {
+                const std::size_t row_offset = row * row_stride;
+                for (
+                    std::size_t column = brick.column_begin;
+                    column < brick.column_end;
+                    ++column
+                ) {
+                    const std::size_t flat = row_offset + column;
+                    if (profile != nullptr) {
+                        ++profile->pixels_seen;
+                    }
+                    if (
+                        mask[flat]
+                        || !std::isfinite(intensity[flat])
+                        || !std::isfinite(variance[flat])
+                        || variance[flat] < 0.0
+                    ) {
+                        continue;
+                    }
+                    if (profile != nullptr) {
+                        ++profile->valid_pixels;
+                    }
+                    if (max_depth_ == 0) {
+                        if (profile != nullptr) {
+                            ++profile->coordinate_evaluations;
+                        }
+                        std::uint64_t voxel = 0;
+                        if (
+                            voxel_id(
+                                coordinate_from_unit_ray(
+                                    centre_rays[
+                                        (row - brick.row_begin) * brick_columns
+                                        + (column - brick.column_begin)
+                                    ],
+                                    centre_transform
+                                ),
+                                voxel
+                            )
+                        ) {
+                            if (profile != nullptr) {
+                                ++profile->voxel_weights;
+                                profile->maximum_weights_per_pixel = std::max(
+                                    profile->maximum_weights_per_pixel,
+                                    static_cast<std::uint64_t>(1)
+                                );
+                            }
+                            RecordAccum &accumulator =
+                                accumulator_for(record_key(voxel));
+                            accumulator.weighted_intensity += intensity[flat];
+                            accumulator.weighted_variance += variance[flat];
+                            accumulator.weight += 1.0;
+                            accumulator.contributors += 1;
+                            ++unreduced_count;
+                        }
+                        continue;
+                    }
+                    const PixelRays prepared_rays =
+                        pixel_rays(row, column, columns, rays);
+                    weights.clear();
+                    if (stationary[frame] != 0 && max_depth_ == 2) {
+                        split_pixel_stationary_depth2(
+                            prepared_rays, centre_transform, weights, profile
+                        );
+                    } else if (stationary[frame] != 0) {
+                        split_pixel_stationary(
+                            prepared_rays, centre_transform, weights, profile
+                        );
+                    } else {
+                        split_pixel_moving(
+                            prepared_rays, frame_transforms, weights, profile
+                        );
+                    }
+                    if (profile != nullptr) {
+                        profile->voxel_weights += weights.size();
+                        profile->maximum_weights_per_pixel = std::max(
+                            profile->maximum_weights_per_pixel,
+                            static_cast<std::uint64_t>(weights.size())
+                        );
+                    }
+                    std::sort(weights.begin(), weights.end());
+                    std::size_t offset = 0;
+                    while (offset < weights.size()) {
+                        const std::uint64_t voxel = weights[offset].voxel;
+                        double weight = 0.0;
+                        do {
+                            weight += weights[offset].weight;
+                            ++offset;
+                        } while (
+                            offset < weights.size()
+                            && weights[offset].voxel == voxel
+                        );
+                        RecordAccum &accumulator =
+                            accumulator_for(record_key(voxel));
+                        accumulator.weighted_intensity +=
+                            weight * intensity[flat];
+                        accumulator.weighted_variance +=
+                            weight * weight * variance[flat];
+                        accumulator.weight += weight;
+                        accumulator.contributors += 1;
+                        ++unreduced_count;
+                    }
+                }
+            }
+        }
+        const auto mapping_finished = std::chrono::steady_clock::now();
+        if (profile != nullptr) {
+            profile->unreduced_records = unreduced_count;
+            profile->mapping_nanoseconds = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    mapping_finished - mapping_started
+                ).count()
+            );
+        }
+        std::vector<Record> records;
+        records.reserve(tree.size());
+        for (const auto &entry : tree) {
+            records.push_back({
+                entry.first,
+                entry.second.weighted_intensity,
+                entry.second.weighted_variance,
+                entry.second.weight,
+                entry.second.contributors,
+            });
+        }
+        if (profile != nullptr) {
+            profile->reduced_records = records.size();
+            profile->reduction_nanoseconds = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - mapping_finished
+                ).count()
+            );
+        }
+        return records;
     }
 
     std::vector<Record> accumulate_block(
@@ -1653,12 +2623,14 @@ private:
         arena.release();
         std::pmr::map<RecordKey, RecordAccum> tree(&arena);
         std::vector<VoxelWeight> weights;
-        PixelCoordinateCache coordinate_cache;
-        std::vector<Cell> stack;
-        const std::size_t reserve_leaves = static_cast<std::size_t>(1)
-            << std::min((stationary ? 2 : 3) * max_depth_, 9);
-        weights.reserve(reserve_leaves);
-        stack.reserve(reserve_leaves);
+        // Subdivision now carries its cell state on the recursion stack --
+        // nine LatticeVoxel per level stationary, twenty-seven moving, so
+        // at most about four kilobytes at the deepest setting -- so the
+        // only scratch a block still needs is the leaf list.
+        weights.reserve(
+            static_cast<std::size_t>(1)
+            << std::min((stationary ? 2 : 3) * max_depth_, 9)
+        );
         // Counts per-pixel-merged (voxel, weight) accumulation events --
         // the same quantity the old push_back-one-Record-per-event code
         // counted via records.size() before its later block-end reduce.
@@ -1758,20 +2730,31 @@ private:
             }
             weights.clear();
             if (stationary && max_depth_ == 2) {
+                // Kept in preference to the general recursion, which measured
+                // 10% slower here: one flat 5x5 lattice per pixel shares
+                // nodes between sibling subtrees, which corner-passing gives
+                // up (22.02 against 20.82 evaluations per pixel). That
+                // sharing is only affordable because a stationary depth-two
+                // lattice is 25 nodes; see the design note on generalizing
+                // it.
                 split_pixel_stationary_depth2(
                     prepared_rays,
                     transforms[transforms.size() / 2],
                     weights,
                     profile
                 );
+            } else if (stationary) {
+                split_pixel_stationary(
+                    prepared_rays,
+                    transforms[transforms.size() / 2],
+                    weights,
+                    profile
+                );
             } else {
-                split_pixel(
+                split_pixel_moving(
                     prepared_rays,
                     transforms,
-                    stationary,
                     weights,
-                    coordinate_cache,
-                    stack,
                     profile
                 );
             }
@@ -2025,6 +3008,20 @@ PYBIND11_MODULE(_reciprocal_reconstruction_cpp, module) {
         "Return the canonical XXH3-128 digest of a C-contiguous buffer."
     );
     module.def(
+        "apply_correction_factors",
+        &apply_correction_factors,
+        py::arg("intensity"),
+        py::arg("variance"),
+        py::arg("mask"),
+        py::arg("static_factor"),
+        py::arg("static_factor_squared"),
+        py::arg("factors"),
+        py::arg("factors_squared"),
+        py::arg("factor_variances"),
+        "Apply the per-pixel and scalar correction factors in one pass, "
+        "in place, and fold the finiteness check into the mask."
+    );
+    module.def(
         "merge_sorted_batches",
         &merge_sorted_batches,
         py::arg("left_chunk_id"),
@@ -2079,6 +3076,32 @@ PYBIND11_MODULE(_reciprocal_reconstruction_cpp, module) {
             py::arg("corner_rays"),
             py::arg("angles_start"),
             py::arg("angles_end"),
+            py::arg("profile") = false
+        )
+        .def(
+            "accumulate_group",
+            &ReconstructionKernel::accumulate_group,
+            py::arg("intensity"),
+            py::arg("variance"),
+            py::arg("mask"),
+            py::arg("corner_rays"),
+            py::arg("angles_start"),
+            py::arg("angles_end"),
+            py::arg("profile") = false
+        )
+        .def(
+            "accumulate_group_tile",
+            &ReconstructionKernel::accumulate_group_tile,
+            py::arg("intensity"),
+            py::arg("variance"),
+            py::arg("mask"),
+            py::arg("corner_rays"),
+            py::arg("angles_start"),
+            py::arg("angles_end"),
+            py::arg("row_start"),
+            py::arg("row_stop"),
+            py::arg("column_start"),
+            py::arg("column_stop"),
             py::arg("profile") = false
         )
         .def(

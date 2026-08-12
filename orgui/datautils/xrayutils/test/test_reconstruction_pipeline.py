@@ -5,8 +5,10 @@ orchestration: :class:`_AdjustablePool`, :class:`_BoundedGate`, and
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
+import warnings
 
 import numpy as np
 import pytest
@@ -264,6 +266,125 @@ def test_map_pending_ranges_matches_reduce_on_synthetic_frames(tmp_path):
     # equal the number of frames that landed in populated voxels, and in
     # particular must not be zero or obviously truncated.
     assert int(written["contributors"].sum()) == frame_count
+
+
+def _mask_everything(payload, raw, frame, tile):
+    """A correction that masks every pixel, as a fully-masked frame does."""
+    return (
+        raw.astype(np.float64),
+        np.maximum(raw, 0).astype(np.float64),
+        np.ones(raw.shape, dtype=bool),
+    )
+
+
+def test_map_pending_ranges_warns_when_nothing_is_routed(tmp_path):
+    """Mapping frames and producing nothing must not be silent.
+
+    Observed in the field: a run mapped every frame, routed no records,
+    wrote a checkpoint claiming its full frame count with zero rows, and
+    exited successfully in a fifth of the usual time. Nothing downstream
+    could distinguish that from a fast, legitimately empty run, and on
+    resume the empty part counts as complete.
+    """
+    frame_count = 4
+    scan = _SlowScan(frame_count, delay=0.0)
+    config = _FakeConfig()
+    spec = _spec()
+    bounds = np.zeros((frame_count, 2, 4), dtype=np.float64)
+    grid_name = spec.grids[0].grid_name
+    router = _router({grid_name: [(0, frame_count)]}, tmp_path=tmp_path)
+    reported = []
+
+    with pytest.warns(RuntimeWarning, match="produced no records"):
+        _map_pending_ranges(
+            spec,
+            scan,
+            config,
+            bounds,
+            [(0, 1, 0, 1)],
+            [(0, frame_count)],
+            router,
+            correction_pipeline=_mask_everything,
+            effective_memory=256 * 1024**2,
+            threads_per_image=1,
+            accumulation_budget_bytes=None,
+            total_images=frame_count,
+            completed_images=0,
+            progress=lambda done, total, message: reported.append(message),
+        )
+
+    assert router.routed_records == 0
+    # The GUI never sees a warnings.warn, so the same statement has to
+    # reach the progress channel it does watch.
+    assert any("produced no records" in message for message in reported)
+
+
+def test_map_frame_groups_streamed_warns_when_nothing_is_routed(tmp_path):
+    """The grouped scheduler returns early, so it needs its own check.
+
+    Its ``return`` sits before the per-frame path's end, and a guard
+    placed only at the end of the function would miss every grouped job
+    -- which is the default whenever a scan's geometry qualifies.
+    """
+    frame_count = 8
+    scan = _SlowScan(frame_count, delay=0.0)
+    config = _FakeConfig()
+    spec = dataclasses.replace(_spec(), frames_per_group=2)
+    bounds = np.zeros((frame_count, 2, 4), dtype=np.float64)
+    grid_name = spec.grids[0].grid_name
+    router = _router({grid_name: [(0, frame_count)]}, tmp_path=tmp_path)
+
+    with pytest.warns(RuntimeWarning, match="produced no records"):
+        _map_pending_ranges(
+            spec,
+            scan,
+            config,
+            bounds,
+            [(0, 1, 0, 1)],
+            [(0, frame_count)],
+            router,
+            correction_pipeline=_mask_everything,
+            effective_memory=256 * 1024**2,
+            threads_per_image=1,
+            accumulation_budget_bytes=None,
+            total_images=frame_count,
+            completed_images=0,
+            progress=None,
+        )
+
+    assert router.routed_records == 0
+
+
+def test_map_pending_ranges_is_quiet_when_records_are_routed(tmp_path):
+    """The counterpart: a normal run must not warn."""
+    frame_count = 4
+    scan = _SlowScan(frame_count, delay=0.0)
+    config = _FakeConfig()
+    spec = _spec()
+    bounds = np.zeros((frame_count, 2, 4), dtype=np.float64)
+    grid_name = spec.grids[0].grid_name
+    router = _router({grid_name: [(0, frame_count)]}, tmp_path=tmp_path)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        _map_pending_ranges(
+            spec,
+            scan,
+            config,
+            bounds,
+            [(0, 1, 0, 1)],
+            [(0, frame_count)],
+            router,
+            correction_pipeline=_correction,
+            effective_memory=256 * 1024**2,
+            threads_per_image=1,
+            accumulation_budget_bytes=None,
+            total_images=frame_count,
+            completed_images=0,
+            progress=None,
+        )
+
+    assert router.routed_records > 0
 
 
 def test_map_pending_ranges_grows_reader_pool_under_sustained_blocking(tmp_path):

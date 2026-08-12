@@ -15,6 +15,9 @@ subprojects/.wraplock
 orgui.egg-info/
 orgui/_version.py
 benchmarks/roi_sum_results.json
+# Fingerprint/timing baselines are captured per build and per machine, and
+# are only meaningful compared against themselves.
+benchmarks/baselines/
 **/.ipynb_checkpoints/
 
 # Packages #

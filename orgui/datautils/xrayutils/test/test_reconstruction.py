@@ -24,7 +24,7 @@ from orgui.datautils.xrayutils.reconstruction import (
     _sobol_tile_origins,
     _files_per_job,
     _kernel_threads_sweep,
-    _map_one_frame,
+    _map_frame_group,
     _merge_sorted_batches,
     _reduce_batches,
     _tile_ray_arrays,
@@ -666,6 +666,111 @@ def test_shared_correction_pipeline_propagates_factor_uncertainty():
     assert provenance["factor_uncertainty"]["exposure"] == "propagated"
 
 
+class _CorrectionScan:
+    """A scan carrying an exposure time and one monitor, with variances."""
+
+    def __init__(self, image):
+        self.image = image
+        self.exposure_time = np.array([0.37])
+        self.exposure_time_variance = np.array([0.011])
+        self.ic2 = np.array([1.7e5])
+        self.ic2_variance = np.array([913.0])
+
+    def __len__(self):
+        return 1
+
+    def get_raw_img(self, index):
+        return h5_Image(self.image)
+
+
+class _SolidAngleDetector:
+    """Just enough detector for the static per-pixel correction factor."""
+
+    _polFactor = 0.93
+    _polAxis = 0.11
+
+    def __init__(self, shape):
+        self.shape = shape
+
+    def solidAngleArray(self):
+        rows, columns = self.shape
+        grid = np.arange(rows * columns, dtype=np.float64).reshape(rows, columns)
+        return 1.0 + grid / (rows * columns)
+
+    def polarization(self, factor, axis_offset):
+        rows, columns = self.shape
+        grid = np.arange(rows * columns, dtype=np.float64).reshape(rows, columns)
+        return 0.5 + factor * 0.25 + axis_offset + grid / (2 * rows * columns)
+
+
+@pytest.mark.parametrize("propagate", [False, True])
+def test_native_correction_is_bit_for_bit_with_the_numpy_form(
+    monkeypatch, propagate
+):
+    """The fused native pass must not move a single bit.
+
+    Correction applies a per-pixel factor and then each scalar factor in
+    turn, and NumPy does it in eight or nine full-detector passes. Doing
+    the same arithmetic one pixel at a time in the extension is a pure
+    memory-traffic change: every operation is element-wise, so there is
+    no reduction to reassociate and no reason for a result to move.
+
+    Both variance branches are exercised, because they differ in *order*
+    -- a propagated factor scales the variance, then uses the intensity
+    from before the factor was applied, then scales the intensity -- and
+    an implementation that got that order wrong would still look
+    plausible on the deterministic branch.
+    """
+    import orgui.reconstruction_job as job_module
+
+    rows, columns = 9, 11
+    rng = np.random.default_rng(20260811)
+    image = rng.uniform(0.0, 5000.0, size=(rows, columns))
+    # A pixel that must come back masked whatever else happens.
+    image[4, 5] = np.inf
+    scan = _CorrectionScan(image)
+    if not propagate:
+        del scan.exposure_time_variance
+        del scan.ic2_variance
+    config = type(
+        "Config",
+        (),
+        {
+            "corrections": CorrectionState(
+                use_mask=True,
+                use_solid_angle=True,
+                use_polarization=True,
+                normalize_exposure=True,
+                monitor_corrections=("ic2",),
+            ),
+            "detector": _SolidAngleDetector((rows, columns)),
+        },
+    )()
+    static_mask = np.zeros((rows, columns), dtype=bool)
+    static_mask[0, 0] = True
+    assets = {"mask": static_mask}
+
+    def corrected():
+        pipeline = _correction_pipeline(config, scan, assets, {})
+        return pipeline.correct_frame(h5_Image(image), image, 0)
+
+    native_intensity, native_variance, native_mask = corrected()
+    monkeypatch.setattr(job_module, "_correction_extension", lambda: None)
+    numpy_intensity, numpy_variance, numpy_mask = corrected()
+
+    assert job_module._correction_extension() is None
+    np.testing.assert_array_equal(native_intensity, numpy_intensity)
+    np.testing.assert_array_equal(native_variance, numpy_variance)
+    np.testing.assert_array_equal(native_mask, numpy_mask)
+    # ... and the comparison has to be worth something: the factors must
+    # actually have changed the values, and the non-finite pixel must be
+    # masked while its neighbours are not.
+    assert not np.array_equal(native_intensity, image)
+    assert native_mask[4, 5]
+    assert native_mask[0, 0]
+    assert native_mask.sum() == 2
+
+
 def test_shared_correction_repairs_across_detector_tile_boundaries():
     scan = _FakeScan([0.0])
     config = type(
@@ -1229,7 +1334,7 @@ def _router(
     )
 
 
-def test_map_one_frame_routes_batches_and_skips_resumed_checkpoints(tmp_path):
+def test_map_frame_group_routes_batches_and_skips_resumed_checkpoints(tmp_path):
     grid = _GridSpec(
         minimum=(-1.0, -1.0, -1.0),
         maximum=(1.0, 1.0, 1.0),
@@ -1263,16 +1368,16 @@ def test_map_one_frame_routes_batches_and_skips_resumed_checkpoints(tmp_path):
 
     for frame_index in range(2):
         payload = scan.get_raw_img(frame_index)
-        _map_one_frame(
+        _map_frame_group(
             spec,
             kernels,
             ray_arrays,
             detector_tiles,
             correction,
-            payload,
-            frame_index,
-            bounds[frame_index, 0],
-            bounds[frame_index, 1],
+            [payload],
+            [frame_index],
+            bounds[frame_index : frame_index + 1, 0],
+            bounds[frame_index : frame_index + 1, 1],
             router,
         )
 
@@ -1286,7 +1391,7 @@ def test_map_one_frame_routes_batches_and_skips_resumed_checkpoints(tmp_path):
     assert written_indices == {0}
 
 
-def test_map_one_frame_corrects_once_before_tiling(tmp_path):
+def test_map_frame_group_corrects_once_before_tiling(tmp_path):
     class Detector:
         detector = type("PyfaiDetector", (), {"shape": (1, 2)})()
 
@@ -1326,18 +1431,131 @@ def test_map_one_frame_corrects_once_before_tiling(tmp_path):
     kernels = _build_kernels(spec, _FakeUB())
     payload = h5_Image(np.array([[10.0, 20.0]]))
 
-    _map_one_frame(
+    _map_frame_group(
         spec,
         kernels,
         ray_arrays,
         tiles,
         correction,
-        payload,
-        0,
-        np.zeros(4, dtype=np.float64),
-        np.zeros(4, dtype=np.float64),
+        [payload],
+        [0],
+        np.zeros((1, 4), dtype=np.float64),
+        np.zeros((1, 4), dtype=np.float64),
         router,
     )
 
     assert calls == {"frame": 1, "tile": 0}
     assert len(router.written) == 1
+
+
+class _RecordingRouter:
+    """Collects routed batches instead of writing checkpoints."""
+
+    def __init__(self):
+        self.batches = []
+        self.frames = []
+
+    def route(self, grid_name, frame_index, batch, *, frames=1):
+        self.batches.append(
+            {name: np.asarray(values) for name, values in batch.items()}
+        )
+        self.frames.append((grid_name, int(frame_index), int(frames)))
+
+
+def _totals(batches):
+    """Per-voxel contributor counts and weight, summed over batches.
+
+    Independent of how the frames were split into calls, which is exactly
+    the property a frame group must not disturb.
+    """
+    contributors: dict[tuple[int, int], int] = {}
+    weight: dict[tuple[int, int], float] = {}
+    for batch in batches:
+        for chunk, voxel, count, mass in zip(
+            batch["chunk_id"],
+            batch["local_voxel_id"],
+            batch["contributors"],
+            batch["weight"],
+        ):
+            key = (int(chunk), int(voxel))
+            contributors[key] = contributors.get(key, 0) + int(count)
+            weight[key] = weight.get(key, 0.0) + float(mass)
+    return contributors, weight
+
+
+def test_map_frame_group_reaches_the_same_voxels_as_single_frame_calls():
+    """Grouping frames must not change the answer.
+
+    It is deliberately not bit-for-bit -- several frames merge in the
+    block map rather than in the tree accumulator, so sums associate
+    differently -- so what is pinned here is what must not move: which
+    voxels were reached, and how many samples reached each of them.
+    """
+    grid = _GridSpec(
+        minimum=(-4.0, -4.0, -4.0),
+        maximum=(4.0, 4.0, 4.0),
+        step=(0.25, 0.25, 0.25),
+        frame="lab",
+        chunk_shape=(4, 4, 4),
+    )
+    frames = 4
+    scan = _FakeScan([10.0, 20.0, 30.0, 40.0])
+    detector_tiles = ((0, 1, 0, 1),)
+    ray_arrays = _tile_ray_arrays(
+        _FakeDetector(), detector_tiles, {(0, 1, 0, 1): _constant_rays(1, 1)}
+    )
+    # A rotation, so the frames land at different places in the volume and
+    # a group has something to merge rather than nothing.
+    bounds = np.zeros((frames, 2, 4), dtype=np.float64)
+    bounds[:, :, 1] = np.deg2rad(0.1) * np.arange(frames)[:, None]
+
+    def correction(payload, raw, frame, tile):
+        return (
+            raw.astype(np.float64),
+            np.maximum(raw, 0.0).astype(np.float64),
+            np.zeros(raw.shape, dtype=bool),
+        )
+
+    results = {}
+    for frames_per_group in (1, 2, 4):
+        spec = _ReconstructionSpec(
+            grids=(grid,), max_depth=0, frames_per_group=frames_per_group
+        )
+        kernels = _build_kernels(spec, _FakeUB())
+        router = _RecordingRouter()
+        for origin in range(0, frames, frames_per_group):
+            group = list(range(origin, origin + frames_per_group))
+            _map_frame_group(
+                spec,
+                kernels,
+                ray_arrays,
+                detector_tiles,
+                correction,
+                [scan.get_raw_img(index) for index in group],
+                group,
+                np.ascontiguousarray(bounds[group, 0]),
+                np.ascontiguousarray(bounds[group, 1]),
+                router,
+            )
+        # One route() call per group, each declaring its own frame count,
+        # so the checkpoint countdown still sees every frame exactly once.
+        assert sum(entry[2] for entry in router.frames) == frames
+        assert len(router.frames) == frames // frames_per_group
+        results[frames_per_group] = (
+            _totals(router.batches),
+            sum(int(batch["chunk_id"].size) for batch in router.batches),
+        )
+
+    (reference_contributors, reference_weight), reference_rows = results[1]
+    assert reference_contributors, "the fixture must reach at least one voxel"
+    for frames_per_group in (2, 4):
+        (contributors, weight), rows = results[frames_per_group]
+        assert contributors == reference_contributors
+        assert set(weight) == set(reference_weight)
+        for key, value in weight.items():
+            assert value == pytest.approx(reference_weight[key], rel=1e-12)
+        # The point of grouping: the same samples leave the kernel as
+        # fewer records, because frames sharing a voxel now merge inside
+        # one call. Without this the test would still pass if grouping
+        # silently degraded to mapping each frame on its own.
+        assert rows < reference_rows

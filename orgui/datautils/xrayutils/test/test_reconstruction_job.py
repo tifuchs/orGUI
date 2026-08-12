@@ -1,5 +1,6 @@
 """End-to-end tests for the centralized reconstruction job."""
 
+import dataclasses
 from hashlib import sha256
 import json
 import threading
@@ -13,16 +14,26 @@ from orgui.app.config_data import ConfigData
 from orgui.app.database import config_data_to_json
 from orgui.backend.scans import ScanReference, SimulationScan
 from orgui.datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
-from orgui.datautils.xrayutils.reconstruction import _GridSpec, _ReconstructionSpec
+from orgui.datautils.xrayutils.reconstruction import (
+    _CheckpointRouter,
+    _GridSpec,
+    _ReconstructionSpec,
+)
 import orgui.reconstruction_job as reconstruction_job_module
 from orgui.reconstruction_job import (
     MAX_CONCURRENT_ACTIVE_CHECKPOINTS,
     WORK_BLOCK_PRESETS,
     _FRAME_RECORD_BYTES_PER_PIXEL,
     _PYTHON_CORRECTION_BYTES_PER_PIXEL,
+    _GROUP_SIZE_CANDIDATES,
+    _RESERVED_RECORDS_PER_PIXEL,
     ReconstructionGrid,
     ReconstructionJob,
+    _angles_advance_monotonically,
+    _frame_groups,
+    _choose_frames_per_group,
     _frame_parallelism,
+    _group_pipeline_layout,
     _node_checkpoint_plan,
     _node_excluded_frames,
     job_status,
@@ -229,7 +240,7 @@ def test_frame_parallelism_accounts_for_a_frames_own_records():
     tiles = [(0, 1024, 0, 1024)]
 
     _workers, _threads, per_worker, _accumulation = _frame_parallelism(
-        spec, tiles, 8 * 1024**3, stationary=True, threads_per_image=1
+        spec, tiles, 8 * 1024**3, threads_per_image=1
     )
 
     detector_pixels = 1024 * 1024
@@ -321,10 +332,10 @@ def test_frame_parallelism_scopes_native_memory_to_largest_tile_not_detector_sum
     ) == sum((r1 - r0) * (c1 - c0) for r0, r1, c0, c1 in four_small_tiles)
 
     single_result = _frame_parallelism(
-        spec, one_big_tile, memory_bytes, stationary=False, threads_per_image=1
+        spec, one_big_tile, memory_bytes, threads_per_image=1
     )
     split_result = _frame_parallelism(
-        spec, four_small_tiles, memory_bytes, stationary=False, threads_per_image=1
+        spec, four_small_tiles, memory_bytes, threads_per_image=1
     )
 
     # The split (4x smaller largest tile) version's per-worker memory
@@ -333,6 +344,99 @@ def test_frame_parallelism_scopes_native_memory_to_largest_tile_not_detector_sum
     # (and therefore give an identical result) in both cases.
     assert split_result[2] < single_result[2]
     assert split_result[0] >= single_result[0]
+
+
+def test_frame_parallelism_native_estimate_does_not_grow_with_depth():
+    """The per-pixel native estimate is bounded by records, not leaves.
+
+    Sized by the worst-case leaf count it grows as ``4**depth`` (or
+    ``8**depth`` when the exposure rotates), which claimed 5248 bytes at
+    depth 3 for a pixel that really costs about 106 and so forced any
+    realistic detector onto tiny tiles. Because one worker's estimate
+    divides into the budget, that also capped how many frames could be in
+    flight. Leaves are transient; records are what stays resident.
+    """
+    grid = _GridSpec(
+        minimum=(-1.0, -1.0, -1.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(1.0, 1.0, 1.0),
+        frame="lab",
+        chunk_shape=(2, 2, 2),
+    )
+    tiles = _uniform_tiles(2048, 2048)
+    memory_bytes = 10_000 * 1024**2
+    results = {
+        depth: _frame_parallelism(
+            _ReconstructionSpec(grids=(grid,), max_depth=depth, threads=24),
+            tiles,
+            memory_bytes,
+            threads_per_image=1,
+        )
+        for depth in (0, 1, 2, 3, 5, 8)
+    }
+    # Depth 0 is exact -- one leaf can only reach one voxel -- so it stays
+    # below the saturated bound; every deeper setting shares one value.
+    assert results[0][2] < results[1][2]
+    deep = {depth: value[2] for depth, value in results.items() if depth}
+    assert len(set(deep.values())) == 1, deep
+    # And the concurrency that estimate funds must not collapse with depth.
+    assert results[8][0] == results[1][0]
+    assert results[8][0] > 1
+
+
+def test_frame_parallelism_native_estimate_mirrors_the_kernel_precheck():
+    """The Python estimate and the kernel's own guard must agree.
+
+    They are two statements of one bound, and the kernel throws where this
+    side merely sizes a pool, so a tile this side considers affordable must
+    not be one the kernel rejects.
+    """
+    native = pytest.importorskip(
+        "orgui.datautils.xrayutils._reciprocal_reconstruction_cpp"
+    )
+    rows = columns = 512
+    pixels = rows * columns
+    rays = np.zeros((rows + 1, columns + 1, 3), dtype=np.float64)
+    rays[..., 1] = 1.0
+    arguments = (
+        np.ones((rows, columns)),
+        np.ones((rows, columns)),
+        np.zeros((rows, columns), dtype=bool),
+        rays,
+        np.zeros(4),
+        np.zeros(4),
+    )
+
+    def kernel_for(max_depth, memory_budget_bytes):
+        return native.ReconstructionKernel(
+            np.array([-1.0, -1.0, -1.0]),
+            np.array([0.01, 0.01, 0.01]),
+            np.array([256, 256, 256], dtype=np.int64),
+            np.array([16, 16, 16], dtype=np.int64),
+            "lab",
+            1.0,
+            np.eye(3),
+            np.eye(3),
+            max_depth,
+            1,
+            64,
+            memory_budget_bytes,
+        )
+
+    for max_depth in (0, 1, 3, 5, 8):
+        expected = (
+            128 + 2 * _RESERVED_RECORDS_PER_PIXEL * 40
+            if max_depth
+            else 128 + 2 * 40
+        )
+        # Exactly what the Python estimate asks for must be accepted. This
+        # is the direction that pins the two together: a leaf-sized bound
+        # demands 4**depth times more and rejects this outright from depth
+        # 2 up.
+        kernel_for(max_depth, pixels * expected).accumulate(*arguments)
+        # One byte per pixel short of it must not be.
+        with pytest.raises(ValueError, match="native memory budget"):
+            kernel_for(max_depth, pixels * (expected - 1)).accumulate(*arguments)
 
 
 def test_frame_parallelism_accounts_for_python_correction_buffers_and_prefetch():
@@ -360,7 +464,7 @@ def test_frame_parallelism_accounts_for_python_correction_buffers_and_prefetch()
 
     image_workers, _kernel_threads, per_worker_memory, _accumulation = (
         _frame_parallelism(
-            spec, tiles, memory_bytes, stationary=True, threads_per_image=1
+            spec, tiles, memory_bytes, threads_per_image=1
         )
     )
 
@@ -726,3 +830,490 @@ def test_cluster_array_task_count_never_mutates_shared_job_json(tmp_path):
     )
 
     assert job_path.read_bytes() == frozen_job
+
+
+def test_frame_groups_cut_at_the_group_size_and_at_checkpoint_boundaries():
+    """A group is bounded by two things at once.
+
+    Its own size, and the planned checkpoint it belongs to: the frames of
+    a group merge inside the kernel and cannot be separated afterwards, so
+    a group spanning two checkpoints could not be routed to either.
+    """
+    router = _CheckpointRouter(
+        {"hkl": [(0, 5), (5, 12)]},
+        spec_digest="test",
+        checkpoint_dir="unused",
+        active_budget_bytes=1024**2,
+    )
+    groups = _frame_groups((0, 12), router, ["hkl"], 4)
+
+    assert groups == [[0, 1, 2, 3], [4], [5, 6, 7, 8], [9, 10, 11]]
+    assert [frame for group in groups for frame in group] == list(range(12))
+    assert all(len(group) <= 4 for group in groups)
+
+
+def test_frame_groups_respect_every_grid_not_only_the_first():
+    """Grids may be checkpointed on different boundaries, and a group has
+    to be routable to all of them."""
+    router = _CheckpointRouter(
+        {"hkl": [(0, 8)], "q_lab": [(0, 3), (3, 8)]},
+        spec_digest="test",
+        checkpoint_dir="unused",
+        active_budget_bytes=1024**2,
+    )
+    groups = _frame_groups((0, 8), router, ["hkl", "q_lab"], 8)
+
+    assert groups == [[0, 1, 2], [3, 4, 5, 6, 7]]
+
+
+def test_frame_groups_of_one_reproduce_the_per_frame_schedule():
+    router = _CheckpointRouter(
+        {"hkl": [(0, 4)]},
+        spec_digest="test",
+        checkpoint_dir="unused",
+        active_budget_bytes=1024**2,
+    )
+
+    assert _frame_groups((0, 4), router, ["hkl"], 1) == [[0], [1], [2], [3]]
+
+
+def test_angles_advance_monotonically_rejects_an_interlaced_order():
+    """Grouping assumes frames adjacent in index are adjacent in angle.
+
+    An interlaced scan (orgui/backend/interlacedScanLoader.py) breaks
+    that: every other frame first, then the ones between them.
+    """
+    bounds = np.zeros((8, 2, 4), dtype=np.float64)
+    sequential = np.deg2rad(0.1) * np.arange(8)
+    bounds[:, 0, 1] = sequential
+    bounds[:, 1, 1] = sequential
+
+    assert _angles_advance_monotonically(bounds, list(range(8)))
+
+    interlaced = np.concatenate([sequential[::2], sequential[1::2]])
+    bounds[:, 0, 1] = interlaced
+    bounds[:, 1, 1] = interlaced
+
+    assert not _angles_advance_monotonically(bounds, list(range(8)))
+
+
+def test_angles_advance_monotonically_ignores_axes_that_never_move():
+    """A scan rotating one motor is judged on that motor alone; the three
+    stationary angles carry floating-point noise, not direction."""
+    bounds = np.zeros((6, 2, 4), dtype=np.float64)
+    bounds[:, 0, 1] = np.deg2rad(0.1) * np.arange(6)
+    bounds[:, 1, 1] = bounds[:, 0, 1]
+    bounds[:, :, 3] = 1e-17 * np.array([1.0, -1.0, 1.0, -1.0, 1.0, -1.0])[:, None]
+
+    assert _angles_advance_monotonically(bounds, list(range(6)))
+
+
+def test_router_counts_a_group_as_all_of_its_frames(tmp_path):
+    """The checkpoint countdown and ``frames_covered`` count frames, not
+    route() calls -- a group that declared one frame would leave its
+    checkpoint permanently short and unresumable."""
+    router = _CheckpointRouter(
+        {"hkl": [(0, 6)]},
+        spec_digest="test",
+        checkpoint_dir=tmp_path / "checkpoints",
+        active_budget_bytes=1024**3,
+    )
+    batch = {
+        "chunk_id": np.array([0], dtype=np.uint32),
+        "local_voxel_id": np.array([0], dtype=np.uint32),
+        "weighted_intensity": np.array([1.0]),
+        "weighted_variance": np.array([1.0]),
+        "weight": np.array([1.0]),
+        "contributors": np.array([1], dtype=np.uint32),
+    }
+
+    router.route("hkl", 0, dict(batch), frames=3)
+    assert not router.written, "half the checkpoint's frames are still missing"
+
+    router.route("hkl", 3, dict(batch), frames=3)
+    assert len(router.written) == 1
+
+    with h5py.File(router.written[0], "r") as handle:
+        assert int(handle.attrs["frames_covered"]) == 6
+
+
+def test_router_rejects_a_group_straddling_a_checkpoint_boundary(tmp_path):
+    router = _CheckpointRouter(
+        {"hkl": [(0, 4), (4, 8)]},
+        spec_digest="test",
+        checkpoint_dir=tmp_path / "checkpoints",
+        active_budget_bytes=1024**3,
+    )
+    batch = {name: np.zeros(0) for name in ("weighted_intensity",)}
+    batch["chunk_id"] = np.zeros(0, dtype=np.uint32)
+
+    with pytest.raises(ValueError, match="straddles"):
+        router.route("hkl", 2, batch, frames=4)
+
+
+def test_frame_parallelism_charges_a_group_for_its_resident_frames():
+    """A group holds every one of its corrected frames at once, and its
+    native call covers frames x tile samples -- but it emits one merged
+    record batch, not one per frame, so only the correction term
+    multiplies."""
+    grid = _GridSpec(
+        minimum=(0.0, 0.0, 0.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(0.1, 0.1, 0.1),
+        frame="lab",
+        chunk_shape=(8, 8, 8),
+    )
+    tiles = [(0, 512, 0, 512)]
+    budget = 32 * 1024**3
+
+    def worker_bytes(frames_per_group):
+        spec = _ReconstructionSpec(
+            grids=(grid,),
+            max_depth=0,
+            threads=8,
+            frames_per_group=frames_per_group,
+        )
+        _workers, _threads, per_worker, _accumulation = _frame_parallelism(
+            spec, tiles, budget, threads_per_image=1
+        )
+        return per_worker
+
+    pixels = 512 * 512
+    native_per_pixel = 128 + 2 * 40
+    record_term = pixels * _FRAME_RECORD_BYTES_PER_PIXEL
+    for frames_per_group in (1, 2, 8):
+        expected = (
+            pixels * frames_per_group * native_per_pixel
+            + pixels * frames_per_group * _PYTHON_CORRECTION_BYTES_PER_PIXEL
+            + record_term
+        )
+        assert worker_bytes(frames_per_group) >= expected
+
+
+def _map_with_group_size(tmp_path, frames_per_group, frame_count=8):
+    """Map one range end to end at a given group size; return its output.
+
+    Goes through _map_pending_ranges, so above one frame per group this
+    exercises the streamed scheduler in full -- dispatcher, prepare pool,
+    compute pool and gate -- rather than _map_frame_group alone.
+    """
+    root = tmp_path / f"group{frames_per_group}"
+    root.mkdir()
+    scan, job = _multi_frame_job(root, "result.h5", frame_count)
+    # One checkpoint over every frame, so groups are cut by their own size
+    # rather than by a boundary between every pair of frames.
+    job.checkpoint_plan = {"q_lab": [[0, frame_count]]}
+    config = job.config_data
+    spec = dataclasses.replace(
+        job.internal_spec(), frames_per_group=frames_per_group
+    )
+    boundaries = {"q_lab": [(0, frame_count)]}
+    checkpoint_dir = root / "checkpoints"
+    router = _CheckpointRouter(
+        boundaries,
+        spec_digest=job.digest,
+        checkpoint_dir=checkpoint_dir,
+        active_budget_bytes=64 * 1024**2,
+    )
+    reconstruction_job_module._map_pending_ranges(
+        spec,
+        scan,
+        config,
+        scan.exposure_angle_bounds(config, fallback=job.angle_fallback),
+        [(0, 2, 0, 2)],
+        [(0, frame_count)],
+        router,
+        correction_pipeline=reconstruction_job_module._correction_pipeline(
+            config, scan, reconstruction_job_module._load_assets(job), {}
+        ),
+        effective_memory=64 * 1024**2,
+        threads_per_image=1,
+        accumulation_budget_bytes=None,
+        total_images=frame_count,
+        completed_images=0,
+        progress=None,
+    )
+    contributors: dict[tuple[int, int], int] = {}
+    frames_covered = 0
+    for path in sorted(checkpoint_dir.glob("q_lab/ckpt*.h5")):
+        with h5py.File(path, "r") as handle:
+            frames_covered += int(handle.attrs["frames_covered"])
+            for chunk, voxel, count in zip(
+                handle["chunk_id"][:],
+                handle["local_voxel_id"][:],
+                handle["contributors"][:],
+            ):
+                key = (int(chunk), int(voxel))
+                contributors[key] = contributors.get(key, 0) + int(count)
+    return frames_covered, contributors
+
+
+def test_streamed_group_scheduler_matches_the_per_frame_pipeline(tmp_path):
+    """The grouped scheduler is a different pipeline -- one all-threads
+    call at a time, correction hoisted into the prepare pool -- so it has
+    to be shown to produce the per-frame pipeline's answer, not just to
+    run."""
+    frames_covered, reference = _map_with_group_size(tmp_path, 1)
+    assert frames_covered == 8
+    assert reference, "the fixture must reach at least one voxel"
+
+    for frames_per_group in (2, 4):
+        covered, contributors = _map_with_group_size(
+            tmp_path, frames_per_group
+        )
+        # Every frame is still counted exactly once, which is what makes
+        # the checkpoint resumable.
+        assert covered == 8
+        assert contributors == reference
+
+
+def test_group_pipeline_layout_trades_concurrency_for_group_size():
+    """A group buffer and a group's native working set both scale with the
+    group size, so a larger group buys read-ahead out of concurrency. The
+    thread budget is then split between whatever concurrency survives."""
+    grid = _GridSpec(
+        minimum=(0.0, 0.0, 0.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(0.1, 0.1, 0.1),
+        frame="lab",
+        chunk_shape=(8, 8, 8),
+    )
+    tiles = [(0, 256, 0, 1024), (256, 512, 0, 1024)]
+    budget = 8 * 1024**3
+    previous_workers = None
+    for frames_per_group in (1, 2, 4, 8, 16):
+        spec = _ReconstructionSpec(
+            grids=(grid,),
+            max_depth=0,
+            threads=24,
+            frames_per_group=frames_per_group,
+        )
+        workers, threads, depth = _group_pipeline_layout(spec, tiles, budget, 4)
+        assert workers >= 1
+        assert threads >= 1
+        assert workers * threads <= 24
+        # Always at least one group of read-ahead beyond the calls in
+        # flight, or there is no double-buffering and every call stalls at
+        # its group boundary.
+        assert depth > workers
+        if previous_workers is not None:
+            assert workers <= previous_workers
+        previous_workers = workers
+
+
+def test_group_pipeline_layout_never_returns_zero_workers_on_a_tiny_budget():
+    grid = _GridSpec(
+        minimum=(0.0, 0.0, 0.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(0.1, 0.1, 0.1),
+        frame="lab",
+        chunk_shape=(8, 8, 8),
+    )
+    spec = _ReconstructionSpec(
+        grids=(grid,), max_depth=0, threads=8, frames_per_group=16
+    )
+
+    workers, threads, depth = _group_pipeline_layout(
+        spec, [(0, 2048, 0, 2048)], 1024**2, 4
+    )
+
+    assert (workers, threads) == (1, 8)
+    assert depth > workers
+
+
+def _layout_spec(frames_per_group=None, threads=24):
+    grid = _GridSpec(
+        minimum=(0.0, 0.0, 0.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(0.1, 0.1, 0.1),
+        frame="lab",
+        chunk_shape=(8, 8, 8),
+    )
+    return _ReconstructionSpec(
+        grids=(grid,),
+        max_depth=0,
+        threads=threads,
+        frames_per_group=frames_per_group,
+    )
+
+
+def test_choose_frames_per_group_stops_where_frames_stop_overlapping():
+    """Grouping merges frames that reach the same voxels. Once a frame
+    advances a whole voxel they tile instead, and the group buffer costs
+    concurrency for nothing."""
+    tiles = [(0, 256, 0, 1024), (256, 512, 0, 1024)]
+    budget = 8 * 1024**3
+
+    assert (
+        _choose_frames_per_group(_layout_spec(), tiles, budget, 0.7, 4) > 1
+    )
+    assert _choose_frames_per_group(_layout_spec(), tiles, budget, 1.0, 4) == 1
+    assert _choose_frames_per_group(_layout_spec(), tiles, budget, 3.2, 4) == 1
+
+
+def test_choose_frames_per_group_keeps_concurrency_rather_than_density():
+    """Records fall monotonically with the group size, so density alone
+    would pick the largest group memory allows -- which measured *slowest*
+    on the reference job, because the group crowds out concurrent calls.
+    The choice must stop where concurrency does.
+
+    Sized so the floor actually binds inside the candidate list, the way
+    it does on a real detector: a tile small enough for every candidate to
+    fit would test nothing.
+    """
+    tiles = [(0, 1024, 0, 2048)]
+    spec = _layout_spec()
+    budget = 8 * 1024**3
+
+    chosen = _choose_frames_per_group(spec, tiles, budget, 0.7, 4)
+
+    assert 1 < chosen < max(_GROUP_SIZE_CANDIDATES)
+    workers, _threads, _depth = _group_pipeline_layout(
+        dataclasses.replace(spec, frames_per_group=chosen), tiles, budget, 4
+    )
+    assert workers >= 3
+    # The next size up must be the one that broke the floor, or the choice
+    # stopped early and left throughput on the table.
+    larger = _group_pipeline_layout(
+        dataclasses.replace(spec, frames_per_group=chosen * 2), tiles, budget, 4
+    )[0]
+    assert larger < 3
+
+
+def test_choose_frames_per_group_falls_back_to_one_on_a_tight_budget():
+    """A budget that cannot afford concurrent group calls must not group:
+    one call with every thread is the configuration that measured worst."""
+    tiles = [(0, 2048, 0, 2048)]
+
+    assert (
+        _choose_frames_per_group(_layout_spec(), tiles, 512 * 1024**2, 0.5, 4)
+        == 1
+    )
+
+
+def test_frame_advance_voxels_is_zero_when_the_grid_does_not_rotate():
+    """A lab-frame grid is the degenerate case worth pinning: Q in the lab
+    frame does not depend on the sample angles, so every frame reaches the
+    same voxels however far the sample turns. Zero travel is the correct
+    answer, and it is the case grouping helps most."""
+    grid = ReconstructionGrid(
+        minimum=(-20.0, -20.0, -20.0),
+        maximum=(20.0, 20.0, 20.0),
+        step=(0.05, 0.05, 0.05),
+        frame="lab",
+        chunk_shape=(8, 8, 8),
+    )
+    config = _config()
+    spec = _ReconstructionSpec(grids=(_GridSpec(**grid.__dict__),), max_depth=0)
+    kernel = reconstruction_job_module._kernel_for_grid(
+        spec, spec.grids[0], config.ub_calculator, threads=1
+    )
+    rays = reconstruction_job_module._detector_corner_rays(
+        config.detector, (0, 2, 0, 2)
+    )
+    bounds = np.zeros((3, 2, 4), dtype=np.float64)
+    bounds[:, 0, 1] = np.deg2rad(5.0) * np.arange(3)
+    bounds[:, 1, 1] = bounds[:, 0, 1]
+
+    assert reconstruction_job_module._frame_advance_voxels(
+        kernel, spec.grids[0], rays, bounds, [(0, 1)]
+    ) == 0.0
+
+
+def test_frame_advance_voxels_scales_with_the_angular_step():
+    """The probe has to measure the job, so a scan that turns twice as far
+    per frame must read as twice the travel."""
+    grid = ReconstructionGrid(
+        minimum=(-1.0, -1.0, -1.0),
+        maximum=(1.0, 1.0, 1.0),
+        step=(0.002, 0.002, 0.002),
+        frame="hkl",
+        chunk_shape=(8, 8, 8),
+    )
+    config = _config()
+    spec = _ReconstructionSpec(grids=(_GridSpec(**grid.__dict__),), max_depth=0)
+    kernel = reconstruction_job_module._kernel_for_grid(
+        spec, spec.grids[0], config.ub_calculator, threads=1
+    )
+    rays = reconstruction_job_module._detector_corner_rays(
+        config.detector, (0, 2, 0, 2)
+    )
+
+    def advance(step_degrees):
+        bounds = np.zeros((3, 2, 4), dtype=np.float64)
+        angles = np.deg2rad(step_degrees) * np.arange(3)
+        bounds[:, 0, 1] = angles
+        bounds[:, 1, 1] = angles
+        return reconstruction_job_module._frame_advance_voxels(
+            kernel, spec.grids[0], rays, bounds, [(0, 1)]
+        )
+
+    small = advance(0.1)
+    large = advance(0.2)
+    assert small > 0.0
+    assert large == pytest.approx(2.0 * small, rel=0.05)
+
+
+def _large_detector_job(tmp_path, depth):
+    scan = SimulationScan((2, 2), 0.0, 1.0, 8)
+    assets = tmp_path / f"scratch{depth}" / "job-assets.nxs"
+    assets.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(assets, "w") as h5file:
+        h5file.attrs["orgui_job_assets"] = 1
+    config = _config()
+    config.detector.detector.shape = (2527, 2463)
+    config.detector.detector.max_shape = (2527, 2463)
+    grid = ReconstructionGrid(
+        minimum=(-20.0, -20.0, -20.0),
+        maximum=(20.0, 20.0, 20.0),
+        step=(20.0, 20.0, 20.0),
+        frame="lab",
+        chunk_shape=(2, 2, 2),
+    )
+    scan_reference = ScanReference.from_scan(scan).to_dict()
+    job = ReconstructionJob(
+        config=config_data_to_json(config),
+        scan_reference=scan_reference,
+        grids=[grid.__dict__],
+        scratch_path=str(assets.parent),
+        output_path=str(tmp_path / f"result{depth}.h5"),
+        compression="Raw",
+        assets_path=str(assets),
+        assets_sha256=sha256(assets.read_bytes()).hexdigest(),
+        source_fingerprint_sha256="0" * 64,
+        threads_per_image=None,
+        accumulation_budget_bytes=None,
+        advanced_depth=depth,
+        runtime_threads=24,
+        runtime_memory_bytes=10 * 1000**3,
+        frame_batch=4,
+    )
+    return scan, job, config
+
+
+def test_detector_bands_do_not_collapse_at_high_adaptive_depth(tmp_path):
+    """Band height is bounded by the record ceiling, not by the worst-case
+    leaf count.
+
+    ``8**depth`` bytes per pixel is what this site was left with when the
+    two memory prechecks were corrected to the record ceiling. It is
+    enormously conservative: at depth 5 it asks for 2.6 MB per pixel,
+    which bands a Pilatus 6M into one row per band -- 2527 native calls
+    per frame instead of six. Thin bands are not free, and one row is not
+    a band at all.
+    """
+    band_counts = {}
+    for depth in (0, 2, 5):
+        scan, job, config = _large_detector_job(tmp_path, depth)
+        _ranges, tiles = reconstruction_job_module._execution_layout(
+            job, scan, config
+        )
+        band_counts[depth] = len(tiles)
+        # Full detector width, so a tile is a contiguous slice of the frame.
+        assert all(
+            (column_start, column_stop) == (0, 2463)
+            for _rs, _re, column_start, column_stop in tiles
+        )
+
+    assert band_counts[0] == band_counts[2] == band_counts[5]
+    assert band_counts[5] < 20

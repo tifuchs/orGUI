@@ -11,7 +11,7 @@ units.  All diffractometer angles accepted here are in radians.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 import bisect
@@ -186,6 +186,17 @@ class _ReconstructionSpec:
     #: (see ReconstructionJob.internal_spec, which derives it); 4096 is the
     #: measured optimum for this class's own default depth of 2.
     work_block_pixels: int = 4096
+    #: Frames mapped in one native call. On a rotation scan two adjacent
+    #: frames are as close in reciprocal space as two adjacent pixels are
+    #: (measured 0.71 voxels per frame against 0.49 and 0.80 for the next
+    #: column and row), so a work block that is a brick in (row, column,
+    #: frame) collapses redundancy a per-image block cannot see. One frame
+    #: per call is the degenerate case of the same machinery, not a
+    #: separate path. Past roughly one voxel of travel per frame the gain
+    #: is gone, so this is a per-job quantity rather than a constant --
+    #: ``None`` measures the job and chooses (the normal case), an
+    #: explicit integer overrides that measurement.
+    frames_per_group: int | None = None
     memory_budget_bytes: int = 512 * 1024 * 1024
     checkpoint_count: int = 10
     compression: str = "bitshuffle-lz4"
@@ -209,6 +220,8 @@ class _ReconstructionSpec:
             raise ValueError("threads must be positive")
         if self.work_block_pixels < 1:
             raise ValueError("work_block_pixels must be positive")
+        if self.frames_per_group is not None and self.frames_per_group < 1:
+            raise ValueError("frames_per_group must be positive when set")
         if self.memory_budget_bytes < 1024 * 1024:
             raise ValueError("memory_budget_bytes must be at least 1 MiB")
         if self.checkpoint_count < 1:
@@ -1169,6 +1182,9 @@ class _CheckpointRouter:
             for grid_name, ranges in self._boundaries.items()
         }
         self._resumed = set(resumed)
+        #: Records handed to :meth:`route` over this router's lifetime,
+        #: summed across grids. Diagnostic only -- nothing schedules on it.
+        self.routed_records = 0
         self._accumulators: dict[tuple[str, int], _CheckpointAccumulator] = {}
         self._parts: dict[tuple[str, int], int] = {}
         self._frames_in_part: dict[tuple[str, int], int] = {}
@@ -1202,8 +1218,23 @@ class _CheckpointRouter:
             )
         return position
 
-    def route(self, grid_name, frame_index, batch) -> None:
-        """Insert one frame's reduced batch into its checkpoint accumulator.
+    def route(self, grid_name, frame_index, batch, *, frames=1) -> None:
+        """Insert one reduced batch into its checkpoint accumulator.
+
+        ``frames`` is how many frames the batch covers, starting at
+        ``frame_index``: one for a single-frame batch, ``F`` for a frame
+        group mapped in one native call, whose contributions merge inside
+        the kernel and can no longer be told apart afterwards. The
+        checkpoint's own remaining-frame countdown and the
+        ``frames_covered`` attribute that makes a part resumable both
+        count frames, not ``route()`` calls, so a group must declare its
+        own size here or its checkpoint would never reach zero and could
+        never be resumed from.
+
+        A group must lie entirely inside one planned checkpoint range and
+        must be contiguous in frame index; both are checked, since getting
+        either wrong corrupts the resume bookkeeping silently rather than
+        loudly.
 
         A no-op if that ``(grid, checkpoint)`` was already resumed from a
         previous run. May flush the checkpoint (or a part of it, under the
@@ -1226,9 +1257,26 @@ class _CheckpointRouter:
         running -- which would otherwise silently lose that frame's
         contribution to a ``finalize()``-reset accumulator.
         """
+        frames = max(1, int(frames))
         index = self.checkpoint_index_for_frame(grid_name, frame_index)
+        if frames > 1:
+            last = self.checkpoint_index_for_frame(
+                grid_name, int(frame_index) + frames - 1
+            )
+            if last != index:
+                raise ValueError(
+                    f"Frame group [{int(frame_index)}, "
+                    f"{int(frame_index) + frames}) straddles grid "
+                    f"{grid_name!r}'s planned checkpoint boundaries"
+                )
         key = (grid_name, index)
         with self._lock:
+            # Counted before the resumed-checkpoint early return, and
+            # across every grid: this exists so a caller can tell "mapped
+            # and produced nothing" from "mapped and produced records",
+            # which is otherwise invisible until a reconstruction comes
+            # out empty. See _warn_if_nothing_was_routed.
+            self.routed_records += int(np.asarray(batch["chunk_id"]).size)
             if key in self._resumed:
                 return
             accumulator = self._accumulators.get(key)
@@ -1236,12 +1284,14 @@ class _CheckpointRouter:
                 accumulator = _CheckpointAccumulator()
                 self._accumulators[key] = accumulator
             self._inflight[key] = self._inflight.get(key, 0) + 1
-            self._remaining[key] -= 1
+            self._remaining[key] -= frames
         accumulator.insert(batch)
         to_flush = None
         with self._lock:
             self._inflight[key] -= 1
-            self._frames_in_part[key] = self._frames_in_part.get(key, 0) + 1
+            self._frames_in_part[key] = (
+                self._frames_in_part.get(key, 0) + frames
+            )
             # Gate both flush triggers on no-other-insert-in-flight-for-this-
             # key, not just "done": an over-budget flush racing a still-
             # running sibling insert() for the same key would tear down
@@ -1444,71 +1494,163 @@ def _build_kernels(spec, ub_calculator, *, threads=None, memory_budget_bytes=Non
     }
 
 
-def _map_one_frame(
+def _map_frame_group(
     spec: _ReconstructionSpec,
     kernels: Mapping[str, object],
     ray_arrays: Mapping[tuple[int, int, int, int], np.ndarray],
     detector_tiles: Iterable[tuple[int, int, int, int]],
     correction_pipeline: Callable,
-    image_payload: object,
-    frame_index: int,
+    image_payloads: Sequence[object],
+    frame_indices: Sequence[int],
     angles_start: np.ndarray,
     angles_end: np.ndarray,
     router: _CheckpointRouter,
+    *,
+    corrected_frames: Sequence[tuple] | None = None,
 ) -> None:
-    """Process one already-loaded frame: correction, per-tile-per-grid
-    kernel accumulate, merge, and route.
+    """Process one already-loaded group of frames: correction, per-tile-
+    per-grid kernel accumulate, merge, and route.
 
-    This is the compute-side half of what ``_map_frame_range``'s loop
-    body used to do in one serial per-frame step (design doc Sec7):
-    image loading (I/O) happens separately, in the prefetch pipeline, so
-    ``image_payload`` here is already loaded -- this function does no
-    I/O of its own and is safe to call concurrently for different frames
-    from multiple compute workers, provided each worker uses its own
-    ``kernels`` (see :func:`_build_kernels`) and every worker shares the
-    same read-only ``ray_arrays``.
+    This is the compute-side half of the mapping pipeline (design doc
+    Sec7): image loading (I/O) happens separately, in the prefetch
+    pipeline, so ``image_payloads`` here are already loaded -- this
+    function does no I/O of its own and is safe to call concurrently for
+    different groups from multiple compute workers, provided each worker
+    uses its own ``kernels`` (see :func:`_build_kernels`) and every
+    worker shares the same read-only ``ray_arrays``.
+
+    ``frame_indices`` must be contiguous and ascending, and must lie
+    inside one planned checkpoint range for every grid: the group's
+    frames merge inside the kernel and cannot be told apart afterwards,
+    so they must all belong to the same checkpoint. The caller forms
+    groups under those rules; :meth:`_CheckpointRouter.route` re-checks
+    the checkpoint one.
+
+    A single-frame group is the degenerate case of the same call, not a
+    separate path -- but note it is *not* bit-for-bit with a per-image
+    ``accumulate()``: a brick partitions the detector into rectangles
+    where a block partitions it into runs of the flattened image, so
+    pixels group into accumulators differently and their sums associate
+    differently. Same voxels, same contributor counts, totals equal to
+    rounding, and about 3.4% fewer records from the better block shape.
 
     The correction pipeline's whole-frame ``correct_frame`` step (pixel
-    repair, static factors) runs here, in the compute worker, not in the
-    prefetch reader -- it is CPU-bound work that belongs inside the
-    ``image_workers``/``kernel_threads`` thread budget, not hidden inside
-    I/O-rate bookkeeping the reader pool's blocked-fraction signal
-    depends on staying clean.
+    repair, static factors) runs here by default, in the compute worker.
+    Pass ``corrected_frames`` to have it run somewhere else instead: the
+    grouped scheduler corrects in its prepare pool, so that the GIL-held
+    Python work of group N+1 overlaps group N's native call rather than
+    queueing behind it. A pipeline with no ``correct_frame`` corrects per
+    tile here either way, since there is nothing whole-frame to hoist.
+
+    :param image_payloads:
+        Loaded payloads, one per frame in the group, in frame order. May
+        be ``None`` when ``corrected_frames`` supplies the arrays and the
+        pipeline has a ``correct_frame`` step, since the raw images are
+        then no longer needed and are better released.
+    :param frame_indices:
+        The group's frame indices: contiguous, ascending, all inside one
+        checkpoint range per grid.
+    :param corrected_frames:
+        Optional pre-corrected ``(intensity, variance, mask)`` triples,
+        one per frame, each full-detector sized.
+    :param angles_start:
+        ``(frames, 4)`` exposure-start diffractometer angles, radians.
+    :param angles_end:
+        ``(frames, 4)`` exposure-end angles, radians. Equal to
+        ``angles_start`` for a stationary exposure; the kernel decides
+        per frame, so a group may mix the two.
     """
-    image = np.asarray(image_payload.img)
-    frame_correction = getattr(correction_pipeline, "correct_frame", None)
-    corrected_frame = (
-        frame_correction(image_payload, image, frame_index)
-        if callable(frame_correction)
-        else None
+    frame_indices = [int(index) for index in frame_indices]
+    images = (
+        [np.asarray(payload.img) for payload in image_payloads]
+        if image_payloads is not None
+        else [None] * len(frame_indices)
     )
+    frame_correction = getattr(correction_pipeline, "correct_frame", None)
+    # The whole group's corrected frames stay resident until every tile
+    # has been mapped: a tile is a row band of the detector, so each
+    # frame is revisited once per band. This is the group buffer, and it
+    # is what _frame_parallelism sizes a compute worker against.
+    if corrected_frames is None and callable(frame_correction):
+        corrected_frames = [
+            frame_correction(payload, image, frame_index)
+            for payload, image, frame_index in zip(
+                image_payloads, images, frame_indices
+            )
+        ]
     # Collect every tile's contribution per grid, then route exactly once
-    # per (frame, grid) -- the router's remaining-frame countdown
-    # (Sec9/Sec10) counts frames, not tile-level route() calls, so a
-    # multi-tile frame must be merged down to one routed batch per grid
-    # before reaching it.
+    # per (group, grid) -- the router's remaining-frame countdown
+    # (Sec9/Sec10) counts frames, so a multi-tile group must be merged
+    # down to one routed batch per grid before reaching it.
     tile_batches: dict[str, list[Mapping[str, np.ndarray]]] = {
         grid.grid_name: [] for grid in spec.grids
     }
+    if corrected_frames is not None:
+        # Checked once for the whole group rather than once per tile, and
+        # a no-op on what ``correct_frame`` returns. The kernel reads
+        # these in place, so the layout it needs is settled here instead
+        # of being repaired six times over by the tile loop below.
+        corrected_frames = [
+            (
+                np.ascontiguousarray(intensity, dtype=np.float64),
+                np.ascontiguousarray(variance, dtype=np.float64),
+                np.ascontiguousarray(mask, dtype=bool),
+            )
+            for intensity, variance, mask in corrected_frames
+        ]
     for detector_tile in detector_tiles:
         row_start, row_stop, column_start, column_stop = detector_tile
+        if corrected_frames is not None:
+            # Whole frames plus the rectangle to map. Detector tiles
+            # partition the detector, so gathering each tile into its own
+            # contiguous buffer would copy every corrected frame exactly
+            # once per group -- ~105 MB a frame, in Python, under the GIL
+            # -- purely to give the call a shape it does not need. The
+            # kernel already walks rows within a tile, so it reads the
+            # rectangle through the frame's own row stride instead.
+            for grid in spec.grids:
+                batch = kernels[grid.grid_name].accumulate_group_tile(
+                    [values[0] for values in corrected_frames],
+                    [values[1] for values in corrected_frames],
+                    [values[2] for values in corrected_frames],
+                    ray_arrays[detector_tile],
+                    angles_start,
+                    angles_end,
+                    row_start,
+                    row_stop,
+                    column_start,
+                    column_stop,
+                )
+                tile_batches[grid.grid_name].append(batch)
+            continue
+        # A pipeline with no whole-frame ``correct_frame`` step corrects
+        # per tile, and its output is tile-sized already: there is no
+        # whole frame to take a view of, so the group's frames are
+        # stacked into one contiguous buffer as before.
         selection = np.s_[row_start:row_stop, column_start:column_stop]
-        if corrected_frame is None:
-            intensity, variance, mask = correction_pipeline(
-                image_payload,
+        tile_values = [
+            correction_pipeline(
+                payload,
                 image[selection],
                 frame_index,
                 detector_tile,
             )
-        else:
-            intensity, variance, mask = (
-                values[selection] for values in corrected_frame
+            for payload, image, frame_index in zip(
+                image_payloads, images, frame_indices
             )
-        intensity = np.ascontiguousarray(intensity, dtype=np.float64)
-        variance = np.ascontiguousarray(variance, dtype=np.float64)
-        mask = np.ascontiguousarray(mask, dtype=bool)
+        ]
+        intensity = np.ascontiguousarray(
+            np.stack([values[0] for values in tile_values]), dtype=np.float64
+        )
+        variance = np.ascontiguousarray(
+            np.stack([values[1] for values in tile_values]), dtype=np.float64
+        )
+        mask = np.ascontiguousarray(
+            np.stack([values[2] for values in tile_values]), dtype=bool
+        )
+        del tile_values
         for grid in spec.grids:
-            batch = kernels[grid.grid_name].accumulate(
+            batch = kernels[grid.grid_name].accumulate_group(
                 intensity,
                 variance,
                 mask,
@@ -1519,7 +1661,12 @@ def _map_one_frame(
             tile_batches[grid.grid_name].append(batch)
     for grid in spec.grids:
         merged = _reduce_batches(tile_batches[grid.grid_name])
-        router.route(grid.grid_name, frame_index, merged)
+        router.route(
+            grid.grid_name,
+            frame_indices[0],
+            merged,
+            frames=len(frame_indices),
+        )
 
 
 def _compression_kwargs(name):
