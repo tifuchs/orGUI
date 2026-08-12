@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
+from functools import lru_cache
 from hashlib import sha256
+import importlib
 import json
 import math
 from pathlib import Path
@@ -1031,6 +1033,22 @@ def _load_assets(job):
     return result
 
 
+@lru_cache(maxsize=1)
+def _correction_extension():
+    """The native extension, or ``None`` where it is not installed.
+
+    Correction has always had a pure-NumPy implementation and keeps one:
+    unlike mapping, it is not a place the pipeline refuses to run without
+    the extension, and the two must stay numerically interchangeable.
+    """
+    try:
+        return importlib.import_module(
+            "orgui.datautils.xrayutils._reciprocal_reconstruction_cpp"
+        )
+    except ImportError:
+        return None
+
+
 def _correction_pipeline(config, scan, assets, provenance):
     correction = config.corrections
     detector = config.detector
@@ -1124,15 +1142,90 @@ def _correction_pipeline(config, scan, assets, provenance):
             variance *= factor**2
             variance += intensity**2 * factor_variance
             intensity *= factor
-            provenance.setdefault("factor_uncertainty", {})[
-                name
-            ] = "propagated"
         else:
             intensity *= factor
             variance *= factor**2
-            provenance.setdefault("factor_uncertainty", {})[
-                name
-            ] = "deterministic-no-uncertainty"
+
+    def record_factor(name, factor_variance):
+        provenance.setdefault("factor_uncertainty", {})[name] = (
+            "propagated"
+            if factor_variance is not None
+            else "deterministic-no-uncertainty"
+        )
+
+    def scalar_factors(frame_index):
+        """This frame's exposure and monitor factors, in application order.
+
+        :returns:
+            ``[(factor, factor_squared, factor_variance_or_None, name)]``.
+            ``factor_squared`` is carried rather than recomputed because
+            it is what the NumPy form multiplied by, and ``x ** 2`` is
+            ``pow`` -- the native pass must scale by the same value, not
+            by one that agrees to the last bit on most platforms.
+        :rtype: list[tuple]
+        """
+        found = []
+        if exposure is not None:
+            value = frame_value(exposure, frame_index)
+            if value <= 0 or not math.isfinite(value):
+                raise ValueError("Exposure time must be finite and positive")
+            factor = 1.0 / value
+            factor_variance = None
+            if exposure_variance is not None:
+                value_variance = frame_value(exposure_variance, frame_index)
+                factor_variance = value_variance / value**4
+            found.append((factor, factor**2, factor_variance, "exposure"))
+        elif correction.normalize_exposure:
+            provenance["exposure_normalization"] = "unavailable"
+        for name, values in monitor_values.items():
+            value = frame_value(values, frame_index)
+            if value == 0 or not math.isfinite(value):
+                raise ValueError(f"Monitor {name} must be finite and nonzero")
+            monitor_variance = monitor_variances[name]
+            factor_variance = None
+            if monitor_variance is not None:
+                value_variance = frame_value(monitor_variance, frame_index)
+                factor_variance = value_variance / value**4
+            factor = 1.0 / value
+            found.append((factor, factor**2, factor_variance, f"monitor:{name}"))
+        return found
+
+    def apply_scaling(intensity, variance, mask, factors):
+        """Scale, propagate and mask off non-finite pixels.
+
+        Fused into one native pass where the extension is available. It
+        is the same arithmetic on the same values in the same order --
+        correction is element-wise, with nothing to reassociate -- so the
+        two paths are bit-for-bit, and a test pins that. What changes is
+        that eight or nine full-detector NumPy passes over ~50 MB each
+        become one, and that the pass releases the GIL for its whole
+        duration instead of taking and dropping it between operations.
+        """
+        native = _correction_extension()
+        if native is not None and all(
+            array.flags.c_contiguous for array in (intensity, variance, mask)
+        ):
+            native.apply_correction_factors(
+                intensity,
+                variance,
+                mask,
+                static_factor,
+                static_factor_squared,
+                [factor for factor, _squared, _variance, _name in factors],
+                [squared for _factor, squared, _variance, _name in factors],
+                [
+                    math.nan if variance_ is None else variance_
+                    for _factor, _squared, variance_, _name in factors
+                ],
+            )
+            return mask
+        if static_factor is not None:
+            intensity *= static_factor
+            variance *= static_factor_squared
+        for factor, _squared, factor_variance, name in factors:
+            apply_factor(intensity, variance, factor, factor_variance, name)
+        mask |= ~np.isfinite(intensity) | ~np.isfinite(variance)
+        return mask
 
     def correct_frame(payload, raw, frame_index):
         source_variance = getattr(payload, "variance", None)
@@ -1159,46 +1252,10 @@ def _correction_pipeline(config, scan, assets, provenance):
             mask = static_mask.copy()
         if repair_plan is not None:
             mask, _ = repair_plan.apply_inplace(intensity, variance)
-        if static_factor is not None:
-            intensity *= static_factor
-            variance *= static_factor_squared
-        if exposure is not None:
-            value = frame_value(exposure, frame_index)
-            if value <= 0 or not math.isfinite(value):
-                raise ValueError("Exposure time must be finite and positive")
-            factor = 1.0 / value
-            factor_variance = None
-            if exposure_variance is not None:
-                value_variance = frame_value(
-                    exposure_variance, frame_index
-                )
-                factor_variance = value_variance / value**4
-            apply_factor(
-                intensity,
-                variance,
-                factor,
-                factor_variance,
-                "exposure",
-            )
-        elif correction.normalize_exposure:
-            provenance["exposure_normalization"] = "unavailable"
-        for name, values in monitor_values.items():
-            value = frame_value(values, frame_index)
-            if value == 0 or not math.isfinite(value):
-                raise ValueError(f"Monitor {name} must be finite and nonzero")
-            monitor_variance = monitor_variances[name]
-            factor_variance = None
-            if monitor_variance is not None:
-                value_variance = frame_value(monitor_variance, frame_index)
-                factor_variance = value_variance / value**4
-            apply_factor(
-                intensity,
-                variance,
-                1.0 / value,
-                factor_variance,
-                f"monitor:{name}",
-            )
-        mask |= ~np.isfinite(intensity) | ~np.isfinite(variance)
+        factors = scalar_factors(frame_index)
+        for _factor, _squared, factor_variance, name in factors:
+            record_factor(name, factor_variance)
+        mask = apply_scaling(intensity, variance, mask, factors)
         return intensity, variance, mask
 
     def correct(payload, raw, frame_index, tile):

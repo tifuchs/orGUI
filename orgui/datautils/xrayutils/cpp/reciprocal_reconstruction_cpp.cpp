@@ -73,6 +73,111 @@ std::string xxh3_128_buffer(const py::buffer &buffer) {
     return xxh128_hex(hash);
 }
 
+void apply_correction_factors(
+    py::array_t<double, py::array::c_style> intensity,
+    py::array_t<double, py::array::c_style> variance,
+    py::array_t<bool, py::array::c_style> mask,
+    const py::object &static_factor,
+    const py::object &static_factor_squared,
+    const std::vector<double> &factors,
+    const std::vector<double> &factors_squared,
+    const std::vector<double> &factor_variances
+) {
+    // The scaling half of ``_correction_pipeline.correct_frame``, in one
+    // pass: the per-pixel static factor, then each scalar factor in turn,
+    // then the finiteness check folded into the mask.
+    //
+    // NumPy does this in eight or nine full-detector passes over ~50 MB
+    // each, which on a detector this size is around 800 MB of memory
+    // traffic per frame, and it takes and drops the GIL between them.
+    // The arithmetic here is unchanged: the same operations, on the same
+    // values, in the same order, one pixel at a time. Correction is
+    // entirely element-wise -- no reduction, nothing that could
+    // reassociate -- so this is bit-for-bit with the NumPy form, and a
+    // test pins that rather than assuming it.
+    //
+    // ``factors_squared`` and ``factor_variances`` are computed by the
+    // caller rather than here, deliberately: ``factor ** 2`` in Python is
+    // ``pow``, and pow's last bit is not guaranteed to equal a
+    // multiplication's on every platform. The caller already has the
+    // value it used before, so it passes that.
+    const py::buffer_info intensity_info = intensity.request();
+    const py::buffer_info variance_info = variance.request();
+    const py::buffer_info mask_info = mask.request();
+    if (
+        variance_info.size != intensity_info.size
+        || mask_info.size != intensity_info.size
+    ) {
+        throw py::value_error(
+            "intensity, variance and mask must have the same size"
+        );
+    }
+    if (
+        factors_squared.size() != factors.size()
+        || factor_variances.size() != factors.size()
+    ) {
+        throw py::value_error(
+            "factors, factors_squared and factor_variances must match"
+        );
+    }
+    const bool has_static = !static_factor.is_none();
+    py::array_t<double, py::array::c_style> static_array;
+    py::array_t<double, py::array::c_style> static_squared_array;
+    const double *static_data = nullptr;
+    const double *static_squared_data = nullptr;
+    if (has_static) {
+        static_array = static_factor.cast<py::array_t<double, py::array::c_style>>();
+        static_squared_array =
+            static_factor_squared.cast<py::array_t<double, py::array::c_style>>();
+        const py::buffer_info static_info = static_array.request();
+        const py::buffer_info static_squared_info = static_squared_array.request();
+        if (
+            static_info.size != intensity_info.size
+            || static_squared_info.size != intensity_info.size
+        ) {
+            throw py::value_error(
+                "static_factor must have the same size as intensity"
+            );
+        }
+        static_data = static_cast<const double *>(static_info.ptr);
+        static_squared_data =
+            static_cast<const double *>(static_squared_info.ptr);
+    }
+    auto *intensity_data = static_cast<double *>(intensity_info.ptr);
+    auto *variance_data = static_cast<double *>(variance_info.ptr);
+    auto *mask_data = static_cast<bool *>(mask_info.ptr);
+    const std::size_t pixels = static_cast<std::size_t>(intensity_info.size);
+    const std::size_t factor_count = factors.size();
+    {
+        py::gil_scoped_release release;
+        for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+            double value = intensity_data[pixel];
+            double spread = variance_data[pixel];
+            if (static_data != nullptr) {
+                value *= static_data[pixel];
+                spread *= static_squared_data[pixel];
+            }
+            for (std::size_t index = 0; index < factor_count; ++index) {
+                const double factor_variance = factor_variances[index];
+                if (std::isnan(factor_variance)) {
+                    value *= factors[index];
+                    spread *= factors_squared[index];
+                } else {
+                    // Order matters: the propagated term uses the
+                    // intensity from *before* this factor is applied.
+                    spread *= factors_squared[index];
+                    spread += value * value * factor_variance;
+                    value *= factors[index];
+                }
+            }
+            intensity_data[pixel] = value;
+            variance_data[pixel] = spread;
+            mask_data[pixel] =
+                mask_data[pixel] || !std::isfinite(value) || !std::isfinite(spread);
+        }
+    }
+}
+
 py::dict merge_sorted_batches(
     const ContiguousUInt32Array &left_chunk,
     const ContiguousUInt32Array &left_local,
@@ -2901,6 +3006,20 @@ PYBIND11_MODULE(_reciprocal_reconstruction_cpp, module) {
         &xxh3_128_buffer,
         py::arg("buffer"),
         "Return the canonical XXH3-128 digest of a C-contiguous buffer."
+    );
+    module.def(
+        "apply_correction_factors",
+        &apply_correction_factors,
+        py::arg("intensity"),
+        py::arg("variance"),
+        py::arg("mask"),
+        py::arg("static_factor"),
+        py::arg("static_factor_squared"),
+        py::arg("factors"),
+        py::arg("factors_squared"),
+        py::arg("factor_variances"),
+        "Apply the per-pixel and scalar correction factors in one pass, "
+        "in place, and fold the finiteness check into the mask."
     );
     module.def(
         "merge_sorted_batches",

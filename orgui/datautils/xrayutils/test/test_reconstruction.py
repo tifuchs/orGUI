@@ -666,6 +666,111 @@ def test_shared_correction_pipeline_propagates_factor_uncertainty():
     assert provenance["factor_uncertainty"]["exposure"] == "propagated"
 
 
+class _CorrectionScan:
+    """A scan carrying an exposure time and one monitor, with variances."""
+
+    def __init__(self, image):
+        self.image = image
+        self.exposure_time = np.array([0.37])
+        self.exposure_time_variance = np.array([0.011])
+        self.ic2 = np.array([1.7e5])
+        self.ic2_variance = np.array([913.0])
+
+    def __len__(self):
+        return 1
+
+    def get_raw_img(self, index):
+        return h5_Image(self.image)
+
+
+class _SolidAngleDetector:
+    """Just enough detector for the static per-pixel correction factor."""
+
+    _polFactor = 0.93
+    _polAxis = 0.11
+
+    def __init__(self, shape):
+        self.shape = shape
+
+    def solidAngleArray(self):
+        rows, columns = self.shape
+        grid = np.arange(rows * columns, dtype=np.float64).reshape(rows, columns)
+        return 1.0 + grid / (rows * columns)
+
+    def polarization(self, factor, axis_offset):
+        rows, columns = self.shape
+        grid = np.arange(rows * columns, dtype=np.float64).reshape(rows, columns)
+        return 0.5 + factor * 0.25 + axis_offset + grid / (2 * rows * columns)
+
+
+@pytest.mark.parametrize("propagate", [False, True])
+def test_native_correction_is_bit_for_bit_with_the_numpy_form(
+    monkeypatch, propagate
+):
+    """The fused native pass must not move a single bit.
+
+    Correction applies a per-pixel factor and then each scalar factor in
+    turn, and NumPy does it in eight or nine full-detector passes. Doing
+    the same arithmetic one pixel at a time in the extension is a pure
+    memory-traffic change: every operation is element-wise, so there is
+    no reduction to reassociate and no reason for a result to move.
+
+    Both variance branches are exercised, because they differ in *order*
+    -- a propagated factor scales the variance, then uses the intensity
+    from before the factor was applied, then scales the intensity -- and
+    an implementation that got that order wrong would still look
+    plausible on the deterministic branch.
+    """
+    import orgui.reconstruction_job as job_module
+
+    rows, columns = 9, 11
+    rng = np.random.default_rng(20260811)
+    image = rng.uniform(0.0, 5000.0, size=(rows, columns))
+    # A pixel that must come back masked whatever else happens.
+    image[4, 5] = np.inf
+    scan = _CorrectionScan(image)
+    if not propagate:
+        del scan.exposure_time_variance
+        del scan.ic2_variance
+    config = type(
+        "Config",
+        (),
+        {
+            "corrections": CorrectionState(
+                use_mask=True,
+                use_solid_angle=True,
+                use_polarization=True,
+                normalize_exposure=True,
+                monitor_corrections=("ic2",),
+            ),
+            "detector": _SolidAngleDetector((rows, columns)),
+        },
+    )()
+    static_mask = np.zeros((rows, columns), dtype=bool)
+    static_mask[0, 0] = True
+    assets = {"mask": static_mask}
+
+    def corrected():
+        pipeline = _correction_pipeline(config, scan, assets, {})
+        return pipeline.correct_frame(h5_Image(image), image, 0)
+
+    native_intensity, native_variance, native_mask = corrected()
+    monkeypatch.setattr(job_module, "_correction_extension", lambda: None)
+    numpy_intensity, numpy_variance, numpy_mask = corrected()
+
+    assert job_module._correction_extension() is None
+    np.testing.assert_array_equal(native_intensity, numpy_intensity)
+    np.testing.assert_array_equal(native_variance, numpy_variance)
+    np.testing.assert_array_equal(native_mask, numpy_mask)
+    # ... and the comparison has to be worth something: the factors must
+    # actually have changed the values, and the non-finite pixel must be
+    # masked while its neighbours are not.
+    assert not np.array_equal(native_intensity, image)
+    assert native_mask[4, 5]
+    assert native_mask[0, 0]
+    assert native_mask.sum() == 2
+
+
 def test_shared_correction_repairs_across_detector_tile_boundaries():
     scan = _FakeScan([0.0])
     config = type(
