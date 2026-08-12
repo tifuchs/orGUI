@@ -812,12 +812,22 @@ Not required by either finding; do not fold it in.
    contributor counts, totals equal to rounding. The fallback is
    scientifically identical rather than byte-identical — and slightly better,
    at 3.4% fewer records.
-2. *Brick loop, depth 0.* Precompute the brick's unit centre rays once into a
-   24 KiB stack buffer, iterate frames-outer / pixels-inner. Note separately
-   that at depth 0 the centre ray is frame-invariant for the whole job — pure
-   detector geometry, currently recomputed 3651 times per pixel. A
+2. *Brick loop, depth 0.* **Done, and it landed with step 1** — the
+   `max_depth_ == 0` branch of `accumulate_brick` precomputes the brick's
+   unit centre rays into a 24 KiB buffer and iterates frames-outer /
+   pixels-inner, exactly as specified here. It is what makes a single-frame
+   group 1.1x faster from block shape alone.
+
+   *The follow-on idea is not done, and is not worth doing.* A
    whole-detector centre-ray cache (149 MB, alongside the existing 143 MiB
-   corner cache) removes it entirely, with or without grouping.
+   corner cache) would remove the recomputation entirely rather than once
+   per brick per call. But the brick buffer already amortises `ray_at` over
+   the `F` frames of a group, so what remains to save is roughly
+   `7 ns / F` against a per-sample cost of 40-80 ns — about 2-4% of
+   depth-0 kernel time at `F = 4`, for 149 MB and a new whole-job cache to
+   invalidate. Estimated, not measured; if anyone wants it, measure before
+   building, because phase 4 is a standing reminder that a saving of known
+   size need not convert.
 3. *Banding.* **Done, and it needed no new code.** The detector tiling that
    already exists is the banding: `_execution_layout` gives this job six
    full-width bands of ~421 x 2463 (1.04 Mpx), and `_map_frame_group` maps
@@ -1216,6 +1226,46 @@ in the user-facing documentation what they cost and what they buy.
 Instrument: `benchmarks/benchmark_reconstruction_depth_convergence.py`.
 Unlike everything else in this document it is immune to machine noise —
 it compares numbers, not times.
+
+## What comes next
+
+Every phase in this document is resolved, so this is where the work
+stands rather than a plan to continue it. In priority order:
+
+1. **The zero-record defect, before anything else.** Roughly one run in
+   twenty maps nothing and says it succeeded. It now warns, but the cause
+   is unknown and four candidates have been eliminated (see the findings
+   document's measurement traps). This is correctness and it gates using
+   the branch on real data; nothing below matters beside it.
+2. **The branch is ready to merge otherwise.** Phases 1-4 are complete or
+   deliberately closed, the association-order decision is settled — the
+   feature has never been released, so nothing published moves — and the
+   tests pin voxels, contributor counts and totals.
+3. **The binding constraint is no longer the kernel.** This is the useful
+   thing phase 4 turned up by accident. At depth 0 the whole pipeline
+   runs at ~110 ms/frame on the coarse grid using **7-8 of 24 cores**,
+   bound by GIL-held loading and correction rather than by mapping. That
+   is findings open item 1, it is now measured rather than inferred, and
+   it is worth up to 2.1x — bounded by the 51.5 ms/frame cold-read floor,
+   not by the idle cores — which is more than anything left in this
+   document. **It is the next feature, and it has its own plan in
+   [`reciprocal_space_mapping_serial_fraction.md`](reciprocal_space_mapping_serial_fraction.md).**
+4. **The group constants have never been tested off this job.**
+   `_GROUP_ADVANCE_VOXEL_LIMIT` (one voxel) and
+   `_GROUP_MINIMUM_CONCURRENT_CALLS` (three) reproduce this scan's optimum
+   and nothing else is known about them. A second dataset would say
+   whether they generalise, and phase 4 narrows where they even apply:
+   only depth 0, and only where the kernel dominates.
+
+Deliberately *not* next, and why:
+
+- **Anything above depth 3.** Phases 1 and 2 made those depths
+  affordable, and they turn out to change no intensity a measurement can
+  resolve. Findings open item 3 — that depth 3+ block sizes are
+  extrapolated rather than measured — loses most of its value with them.
+- **Better bricks above depth 0** — phase 4, measured and closed.
+- **Band height and group size** — both measured flat, and they
+  substitute for each other.
 
 ## Risks and open questions
 

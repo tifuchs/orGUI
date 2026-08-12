@@ -2,7 +2,9 @@
 
 Companion to `reciprocal_space_scratch_architecture.md`, which describes what
 the pipeline *is*. This one records what was measured, what those measurements
-settled, and what is still open.
+settled, and what is still open. Two work streams have grown out of it into
+plans of their own: `reciprocal_space_mapping_locality_and_subdivision.md`
+(complete) and `reciprocal_space_mapping_serial_fraction.md` (next).
 
 > **Read `reciprocal_space_mapping_locality_and_subdivision.md` alongside
 > this.** Since these numbers were taken, the subdivision was rewritten
@@ -194,6 +196,24 @@ only above one frame per group; the per-frame path still has the serial
 fraction described above, and the per-tile slice/copy is still in Python on
 both paths.
 
+**Now the binding constraint, and measured rather than inferred.** Phase 4
+turned this up by accident. On the current (coarse) reference job at depth
+0 the whole pipeline runs at ~110 ms/frame while using **7-8 of 24 cores** —
+sampled per process during live runs, not derived from a model. Mapping is
+not the limit there at all; loading and correcting are. The Amdahl estimate
+above put the ceiling at 6.1x and measured 4.2x, which understated how
+lopsided this gets once the kernel is cheap: a coarse grid, a fast disk and
+depth 0 leave two thirds of the machine idle. **This is the largest
+remaining win in the mapping phase**, and it is now better evidenced than
+anything in the locality document's remaining ideas.
+
+Worth **up to 2.1x, not more**: cold reads cap the pipeline at 51.5
+ms/frame (49.8 MB at 967 MB/s) however free the CPU work becomes, and an
+earlier draft that reasoned from idle cores alone and claimed 3x was
+wrong. This item is now a plan of its own —
+`reciprocal_space_mapping_serial_fraction.md` — and further work on it
+belongs there rather than here.
+
 ### 2. `bounded_block_size` still clamps memory with a depth-blind constant
 
 The Python side now caps the work block against the arena the kernel will
@@ -219,6 +239,13 @@ same record ceiling.
 
 The `16384 >> depth` rule was measured at depths 0, 1 and 2 (optima 16384, 8192,
 4096, consistent at 12 and 24 threads). Depths 3-8 follow by extrapolation only.
+
+**Mostly retired by the depth-convergence result.** Depths above 2 change
+no intensity a measurement can resolve, so tuning their block size
+optimises settings nobody should be running for production. Worth doing
+only if someone is using them deliberately to check convergence, and even
+then the runtime is dominated by the subdivision itself rather than by
+block-size choice.
 
 ### 4. `image_workers = min(len(pending_ranges), ...)`
 
