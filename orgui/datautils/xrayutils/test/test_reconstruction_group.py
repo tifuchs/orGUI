@@ -293,6 +293,141 @@ def test_group_emits_fewer_records_than_the_frames_do_apart():
     assert brick_records < 0.85 * apart
 
 
+def _tile_arguments(rays, intensity, variance, mask, tile):
+    """The same group, as whole frames plus a rectangle."""
+    row_start, row_stop, column_start, column_stop = tile
+    return (
+        [np.ascontiguousarray(frame) for frame in intensity],
+        [np.ascontiguousarray(frame) for frame in variance],
+        [np.ascontiguousarray(frame) for frame in mask],
+        np.ascontiguousarray(
+            rays[row_start : row_stop + 1, column_start : column_stop + 1]
+        ),
+    )
+
+
+@pytest.mark.parametrize("moving", [False, True])
+@pytest.mark.parametrize("max_depth", [0, 1, 2])
+@pytest.mark.parametrize(
+    "tile", [(0, ROWS, 0, COLUMNS), (5, 19, 3, 20), (0, 7, 21, COLUMNS)]
+)
+def test_tile_view_is_bit_for_bit_with_the_copied_tile(tile, max_depth, moving):
+    """Reading a tile in place must be the identical computation.
+
+    The mapping pipeline hands the kernel whole corrected frames and the
+    rectangle to map, rather than gathering each tile into its own
+    ``(frames, rows, columns)`` buffer first. That is a pure optimisation:
+    the same values, in the same order, into the same accumulators. Not
+    "agrees to rounding" -- bit for bit, because nothing about the
+    arithmetic or its association has changed.
+    """
+    frames = 4
+    case = _case(frames, moving, max_depth)
+    kernel, rays, start, end, intensity, variance, mask = case
+    row_start, row_stop, column_start, column_stop = tile
+    selection = np.s_[:, row_start:row_stop, column_start:column_stop]
+    tile_rays = np.ascontiguousarray(
+        rays[row_start : row_stop + 1, column_start : column_stop + 1]
+    )
+    copied = kernel.accumulate_group(
+        np.ascontiguousarray(intensity[selection]),
+        np.ascontiguousarray(variance[selection]),
+        np.ascontiguousarray(mask[selection]),
+        tile_rays,
+        start,
+        end,
+    )
+    frame_intensity, frame_variance, frame_mask, _rays_again = _tile_arguments(
+        rays, intensity, variance, mask, tile
+    )
+    viewed = kernel.accumulate_group_tile(
+        frame_intensity,
+        frame_variance,
+        frame_mask,
+        tile_rays,
+        start,
+        end,
+        row_start,
+        row_stop,
+        column_start,
+        column_stop,
+    )
+    assert copied["chunk_id"].size > 1
+    for name in (
+        "chunk_id",
+        "local_voxel_id",
+        "contributors",
+        "weighted_intensity",
+        "weighted_variance",
+        "weight",
+    ):
+        np.testing.assert_array_equal(viewed[name], copied[name], name)
+
+
+def test_tiles_partition_the_detector():
+    """Row bands mapped separately and merged reach the whole frame's voxels.
+
+    The tiling the mapping pipeline uses is a set of row bands, and their
+    merged batches have to reproduce the ungrouped whole-frame call --
+    which is what makes reading a band in place safe at the band's edges.
+    """
+    case = _case(4, True, 1)
+    kernel, rays, start, end, intensity, variance, mask = case
+    whole = kernel.accumulate_group(intensity, variance, mask, rays, start, end)
+    bands = []
+    for row_start in range(0, ROWS, 9):
+        row_stop = min(row_start + 9, ROWS)
+        frame_intensity, frame_variance, frame_mask, band_rays = _tile_arguments(
+            rays, intensity, variance, mask, (row_start, row_stop, 0, COLUMNS)
+        )
+        bands.append(
+            kernel.accumulate_group_tile(
+                frame_intensity,
+                frame_variance,
+                frame_mask,
+                band_rays,
+                start,
+                end,
+                row_start,
+                row_stop,
+                0,
+                COLUMNS,
+            )
+        )
+    merged = _reduce_batches(bands)
+    assert len(bands) > 1
+    assert set(_as_mapping(merged)) == set(_as_mapping(whole))
+    for name in ("contributors",):
+        assert merged[name].sum() == whole[name].sum()
+    for name in ("weighted_intensity", "weight"):
+        np.testing.assert_allclose(
+            merged[name].sum(), whole[name].sum(), rtol=1e-12, err_msg=name
+        )
+
+
+def test_tile_view_rejects_impossible_requests():
+    kernel, rays, start, end, intensity, variance, mask = _case(4, False, 0)
+    frames = [np.ascontiguousarray(frame) for frame in intensity]
+    variances = [np.ascontiguousarray(frame) for frame in variance]
+    masks = [np.ascontiguousarray(frame) for frame in mask]
+    with pytest.raises(ValueError, match="outside the frame"):
+        kernel.accumulate_group_tile(
+            frames, variances, masks, rays, start, end, 0, ROWS + 1, 0, COLUMNS
+        )
+    with pytest.raises(ValueError, match="non-empty"):
+        kernel.accumulate_group_tile(
+            frames, variances, masks, rays, start, end, 4, 4, 0, COLUMNS
+        )
+    with pytest.raises(ValueError, match="one frame each"):
+        kernel.accumulate_group_tile(
+            frames, variances[:2], masks, rays, start, end, 0, ROWS, 0, COLUMNS
+        )
+    with pytest.raises(ValueError, match=r"\(rows \+ 1, columns \+ 1, 3\)"):
+        kernel.accumulate_group_tile(
+            frames, variances, masks, rays, start, end, 0, 6, 0, COLUMNS
+        )
+
+
 def test_group_rejects_mismatched_shapes():
     kernel, rays, start, end, intensity, variance, mask = _case(4, False, 0)
     with pytest.raises(ValueError, match="three-dimensional"):

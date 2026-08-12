@@ -554,6 +554,23 @@ struct BrickExtent {
     std::size_t column_end;
 };
 
+// A frame group's pixel data as the caller already holds it: one pointer
+// per frame at the tile's first pixel, plus the distance between two
+// rows of the caller's own array.
+//
+// The stride is what makes the tile a view rather than a copy. A tile cut
+// out of whole corrected frames strides by the frame's row length and is
+// read in place; a tile that has been gathered into its own
+// ``(frames, rows, columns)`` buffer strides by the tile's own row
+// length. The brick loop cannot tell the two apart, and reads the same
+// values in the same order either way.
+struct GroupPixels {
+    std::vector<const double *> intensity;
+    std::vector<const double *> variance;
+    std::vector<const bool *> mask;
+    std::size_t row_stride = 0;
+};
+
 struct BlockProfile {
     std::uint64_t pixels_seen = 0;
     std::uint64_t valid_pixels = 0;
@@ -846,6 +863,12 @@ public:
         //
         // The caller chooses the group size by how many frames it passes;
         // one frame reproduces accumulate() exactly.
+        //
+        // This form takes one contiguous ``(frames, rows, columns)``
+        // buffer per array. :meth:`accumulate_group_tile` takes the same
+        // data as whole frames plus a rectangle, and is what the mapping
+        // pipeline uses; both run the identical brick loop over the
+        // identical values.
         const auto total_started = std::chrono::steady_clock::now();
         const py::buffer_info intensity_info = intensity.request();
         const py::buffer_info variance_info = variance.request();
@@ -867,9 +890,6 @@ public:
         const auto *variance_data =
             static_cast<const double *>(variance_info.ptr);
         const auto *mask_data = static_cast<const bool *>(mask_info.ptr);
-        const auto *ray_data = static_cast<const double *>(ray_info.ptr);
-        const auto *start_data = static_cast<const double *>(start_info.ptr);
-        const auto *end_data = static_cast<const double *>(end_info.ptr);
 
         const std::size_t frames =
             static_cast<std::size_t>(intensity_info.shape[0]);
@@ -877,6 +897,148 @@ public:
             static_cast<std::size_t>(intensity_info.shape[1]);
         const std::size_t cols =
             static_cast<std::size_t>(intensity_info.shape[2]);
+
+        GroupPixels pixels;
+        pixels.row_stride = cols;
+        pixels.intensity.reserve(frames);
+        pixels.variance.reserve(frames);
+        pixels.mask.reserve(frames);
+        for (std::size_t frame = 0; frame < frames; ++frame) {
+            const std::size_t offset = frame * rows * cols;
+            pixels.intensity.push_back(intensity_data + offset);
+            pixels.variance.push_back(variance_data + offset);
+            pixels.mask.push_back(mask_data + offset);
+        }
+        return accumulate_group_impl(
+            pixels,
+            frames,
+            rows,
+            cols,
+            static_cast<const double *>(ray_info.ptr),
+            static_cast<const double *>(start_info.ptr),
+            static_cast<const double *>(end_info.ptr),
+            profile,
+            total_started
+        );
+    }
+
+    py::dict accumulate_group_tile(
+        const py::sequence &intensity,
+        const py::sequence &variance,
+        const py::sequence &mask,
+        const FloatArray &corner_rays,
+        const FloatArray &angles_start,
+        const FloatArray &angles_end,
+        const std::size_t row_start,
+        const std::size_t row_stop,
+        const std::size_t column_start,
+        const std::size_t column_stop,
+        const bool profile = false
+    ) const {
+        // The same call as :meth:`accumulate_group`, taking whole frames
+        // and the rectangle to map instead of a buffer already cut down
+        // to it.
+        //
+        // Detector tiles partition the detector, so gathering each tile
+        // into its own contiguous buffer copies every corrected frame
+        // exactly once per group -- around 105 MB a frame, in Python,
+        // holding the GIL, purely to give this call a shape it does not
+        // need. The brick loop walks rows within a tile in either form,
+        // so reading through the frame's own row stride costs it nothing.
+        const auto total_started = std::chrono::steady_clock::now();
+        const py::buffer_info ray_info = corner_rays.request();
+        const py::buffer_info start_info = angles_start.request();
+        const py::buffer_info end_info = angles_end.request();
+
+        const std::size_t frames = static_cast<std::size_t>(py::len(intensity));
+        if (frames < 1) {
+            throw py::value_error("A frame group needs at least one frame");
+        }
+        if (
+            static_cast<std::size_t>(py::len(variance)) != frames
+            || static_cast<std::size_t>(py::len(mask)) != frames
+        ) {
+            throw py::value_error(
+                "variance and mask must hold one frame each, as intensity does"
+            );
+        }
+        if (row_stop <= row_start || column_stop <= column_start) {
+            throw py::value_error("The tile rectangle must be non-empty");
+        }
+        const std::size_t rows = row_stop - row_start;
+        const std::size_t cols = column_stop - column_start;
+
+        // The casts hold references for as long as this call runs, which
+        // is what keeps the frames alive while the GIL is released.
+        std::vector<FloatArray> intensity_frames;
+        std::vector<FloatArray> variance_frames;
+        std::vector<BoolArray> mask_frames;
+        intensity_frames.reserve(frames);
+        variance_frames.reserve(frames);
+        mask_frames.reserve(frames);
+        GroupPixels pixels;
+        pixels.intensity.reserve(frames);
+        pixels.variance.reserve(frames);
+        pixels.mask.reserve(frames);
+        std::size_t frame_columns = 0;
+        for (std::size_t frame = 0; frame < frames; ++frame) {
+            intensity_frames.push_back(intensity[frame].cast<FloatArray>());
+            variance_frames.push_back(variance[frame].cast<FloatArray>());
+            mask_frames.push_back(mask[frame].cast<BoolArray>());
+            const py::buffer_info intensity_info =
+                intensity_frames.back().request();
+            const py::buffer_info variance_info =
+                variance_frames.back().request();
+            const py::buffer_info mask_info = mask_frames.back().request();
+            validate_tile_frame(
+                intensity_info, variance_info, mask_info, row_stop, column_stop
+            );
+            const std::size_t columns_here =
+                static_cast<std::size_t>(intensity_info.shape[1]);
+            if (frame == 0) {
+                frame_columns = columns_here;
+            } else if (columns_here != frame_columns) {
+                throw py::value_error(
+                    "every frame in a group must have the same shape"
+                );
+            }
+            const std::size_t offset = row_start * frame_columns + column_start;
+            pixels.intensity.push_back(
+                static_cast<const double *>(intensity_info.ptr) + offset
+            );
+            pixels.variance.push_back(
+                static_cast<const double *>(variance_info.ptr) + offset
+            );
+            pixels.mask.push_back(
+                static_cast<const bool *>(mask_info.ptr) + offset
+            );
+        }
+        pixels.row_stride = frame_columns;
+        validate_group_geometry(ray_info, start_info, end_info, frames, rows, cols);
+        return accumulate_group_impl(
+            pixels,
+            frames,
+            rows,
+            cols,
+            static_cast<const double *>(ray_info.ptr),
+            static_cast<const double *>(start_info.ptr),
+            static_cast<const double *>(end_info.ptr),
+            profile,
+            total_started
+        );
+    }
+
+    py::dict accumulate_group_impl(
+        const GroupPixels &pixels,
+        const std::size_t frames,
+        const std::size_t rows,
+        const std::size_t cols,
+        const double *ray_data,
+        const double *start_data,
+        const double *end_data,
+        const bool profile,
+        const std::chrono::steady_clock::time_point total_started
+    ) const {
         const std::size_t frame_pixels = rows * cols;
         const std::size_t samples = frames * frame_pixels;
 
@@ -992,11 +1154,8 @@ public:
                         block_results[index] = accumulate_brick(
                             bricks[index],
                             frames,
-                            rows,
                             cols,
-                            intensity_data,
-                            variance_data,
-                            mask_data,
+                            pixels,
                             ray_data,
                             transforms,
                             stationary,
@@ -1190,6 +1349,75 @@ private:
             seconds(merge_finished, conversion_finished);
         details["total_seconds"] = seconds(total_started, conversion_finished);
         return details;
+    }
+
+    static void validate_tile_frame(
+        const py::buffer_info &intensity,
+        const py::buffer_info &variance,
+        const py::buffer_info &mask,
+        const std::size_t row_stop,
+        const std::size_t column_stop
+    ) {
+        // The frames are read in place, so their layout is part of the
+        // contract rather than something a cast quietly repairs: one row
+        // stride has to serve every frame and every array.
+        if (intensity.ndim != 2) {
+            throw py::value_error(
+                "each frame's intensity must be a two-dimensional "
+                "(rows, columns) array"
+            );
+        }
+        for (const py::buffer_info *other : {&variance, &mask}) {
+            if (
+                other->ndim != 2
+                || other->shape[0] != intensity.shape[0]
+                || other->shape[1] != intensity.shape[1]
+            ) {
+                throw py::value_error(
+                    "each frame's variance and mask must match its intensity "
+                    "shape"
+                );
+            }
+        }
+        if (
+            static_cast<std::size_t>(intensity.shape[0]) < row_stop
+            || static_cast<std::size_t>(intensity.shape[1]) < column_stop
+        ) {
+            throw py::value_error(
+                "the tile rectangle reaches outside the frame"
+            );
+        }
+    }
+
+    static void validate_group_geometry(
+        const py::buffer_info &rays,
+        const py::buffer_info &start,
+        const py::buffer_info &end,
+        const std::size_t frames,
+        const std::size_t rows,
+        const std::size_t cols
+    ) {
+        if (
+            rays.ndim != 3
+            || static_cast<std::size_t>(rays.shape[0]) != rows + 1
+            || static_cast<std::size_t>(rays.shape[1]) != cols + 1
+            || rays.shape[2] != 3
+        ) {
+            throw py::value_error(
+                "corner_rays must have shape (rows + 1, columns + 1, 3)"
+            );
+        }
+        for (const py::buffer_info *angles : {&start, &end}) {
+            if (
+                angles->ndim != 2
+                || static_cast<std::size_t>(angles->shape[0]) != frames
+                || angles->shape[1] != 4
+            ) {
+                throw py::value_error(
+                    "angles_start and angles_end must have shape (frames, 4)"
+                );
+            }
+        }
     }
 
     static void validate_group_inputs(
@@ -2071,11 +2299,8 @@ private:
     std::vector<Record> accumulate_brick(
         const BrickExtent &brick,
         const std::size_t frames,
-        const std::size_t rows,
         const std::size_t columns,
-        const double *intensity,
-        const double *variance,
-        const bool *mask,
+        const GroupPixels &pixels,
         const double *rays,
         const std::vector<std::vector<CoordinateTransform>> &transforms,
         const std::vector<char> &stationary,
@@ -2084,7 +2309,6 @@ private:
         BlockProfile *profile,
         std::pmr::monotonic_buffer_resource &arena
     ) const {
-        (void)rows;
         arena.release();
         std::pmr::map<RecordKey, RecordAccum> tree(&arena);
         std::uint64_t unreduced_count = 0;
@@ -2103,7 +2327,7 @@ private:
         };
         const std::size_t brick_rows = brick.row_end - brick.row_begin;
         const std::size_t brick_columns = brick.column_end - brick.column_begin;
-        const std::size_t frame_stride = rows * columns;
+        const std::size_t row_stride = pixels.row_stride;
 
         if (max_depth_ == 0) {
             // A pixel's centre ray is pure detector geometry -- the frame's
@@ -2132,9 +2356,11 @@ private:
                 transforms[frame];
             const CoordinateTransform &centre_transform =
                 frame_transforms[frame_transforms.size() / 2];
+            const double *const intensity = pixels.intensity[frame];
+            const double *const variance = pixels.variance[frame];
+            const bool *const mask = pixels.mask[frame];
             for (std::size_t row = brick.row_begin; row < brick.row_end; ++row) {
-                const std::size_t row_offset =
-                    frame * frame_stride + row * columns;
+                const std::size_t row_offset = row * row_stride;
                 for (
                     std::size_t column = brick.column_begin;
                     column < brick.column_end;
@@ -2742,6 +2968,21 @@ PYBIND11_MODULE(_reciprocal_reconstruction_cpp, module) {
             py::arg("corner_rays"),
             py::arg("angles_start"),
             py::arg("angles_end"),
+            py::arg("profile") = false
+        )
+        .def(
+            "accumulate_group_tile",
+            &ReconstructionKernel::accumulate_group_tile,
+            py::arg("intensity"),
+            py::arg("variance"),
+            py::arg("mask"),
+            py::arg("corner_rays"),
+            py::arg("angles_start"),
+            py::arg("angles_end"),
+            py::arg("row_start"),
+            py::arg("row_stop"),
+            py::arg("column_start"),
+            py::arg("column_stop"),
             py::arg("profile") = false
         )
         .def(

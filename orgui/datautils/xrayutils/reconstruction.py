@@ -1585,29 +1585,60 @@ def _map_frame_group(
     tile_batches: dict[str, list[Mapping[str, np.ndarray]]] = {
         grid.grid_name: [] for grid in spec.grids
     }
+    if corrected_frames is not None:
+        # Checked once for the whole group rather than once per tile, and
+        # a no-op on what ``correct_frame`` returns. The kernel reads
+        # these in place, so the layout it needs is settled here instead
+        # of being repaired six times over by the tile loop below.
+        corrected_frames = [
+            (
+                np.ascontiguousarray(intensity, dtype=np.float64),
+                np.ascontiguousarray(variance, dtype=np.float64),
+                np.ascontiguousarray(mask, dtype=bool),
+            )
+            for intensity, variance, mask in corrected_frames
+        ]
     for detector_tile in detector_tiles:
         row_start, row_stop, column_start, column_stop = detector_tile
+        if corrected_frames is not None:
+            # Whole frames plus the rectangle to map. Detector tiles
+            # partition the detector, so gathering each tile into its own
+            # contiguous buffer would copy every corrected frame exactly
+            # once per group -- ~105 MB a frame, in Python, under the GIL
+            # -- purely to give the call a shape it does not need. The
+            # kernel already walks rows within a tile, so it reads the
+            # rectangle through the frame's own row stride instead.
+            for grid in spec.grids:
+                batch = kernels[grid.grid_name].accumulate_group_tile(
+                    [values[0] for values in corrected_frames],
+                    [values[1] for values in corrected_frames],
+                    [values[2] for values in corrected_frames],
+                    ray_arrays[detector_tile],
+                    angles_start,
+                    angles_end,
+                    row_start,
+                    row_stop,
+                    column_start,
+                    column_stop,
+                )
+                tile_batches[grid.grid_name].append(batch)
+            continue
+        # A pipeline with no whole-frame ``correct_frame`` step corrects
+        # per tile, and its output is tile-sized already: there is no
+        # whole frame to take a view of, so the group's frames are
+        # stacked into one contiguous buffer as before.
         selection = np.s_[row_start:row_stop, column_start:column_stop]
-        if corrected_frames is None:
-            tile_values = [
-                correction_pipeline(
-                    payload,
-                    image[selection],
-                    frame_index,
-                    detector_tile,
-                )
-                for payload, image, frame_index in zip(
-                    image_payloads, images, frame_indices
-                )
-            ]
-        else:
-            tile_values = [
-                tuple(values[selection] for values in corrected)
-                for corrected in corrected_frames
-            ]
-        # One contiguous (frames, rows, columns) buffer per array, which
-        # is the copy the per-tile ascontiguousarray already made for a
-        # single frame -- the group spends it over F frames instead of 1.
+        tile_values = [
+            correction_pipeline(
+                payload,
+                image[selection],
+                frame_index,
+                detector_tile,
+            )
+            for payload, image, frame_index in zip(
+                image_payloads, images, frame_indices
+            )
+        ]
         intensity = np.ascontiguousarray(
             np.stack([values[0] for values in tile_values]), dtype=np.float64
         )
