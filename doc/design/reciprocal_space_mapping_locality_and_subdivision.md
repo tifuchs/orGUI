@@ -442,6 +442,16 @@ because of it.
 | `benchmark_reconstruction_group.py` | one `accumulate_group` call against per-image `accumulate`, by group size | seconds |
 | `benchmark_reconstruction_pipeline.py` | the whole mapping phase — reader pool, correction, kernel, router, checkpoint writes | ~1 min per 234-frame arm at depth 0 |
 | `benchmark_reconstruction_depth_convergence.py` | reconstructed intensities across depths, in units of each voxel's own error bar | ~7 min for depths 0–5 on one tile |
+| `benchmark_reconstruction_stages.py` | the same pipeline split by stage: wall against on-core time per stage, plus a direct GIL-contention probe | as the pipeline benchmark |
+| `benchmark_reconstruction_ab.py` | two arms interleaved, with per-run foreign-load accounting, checkpoint-fingerprint checking and hang retry | ~2 min per pair at depth 0 |
+
+The last two exist because the rules below kept having to be applied by
+hand. `benchmark_reconstruction_ab.py` takes a plan naming two arms as
+sets of files to copy into the checkout, so a native change can be
+measured against its own baseline binary without rebuilding between
+runs; it alternates the arms, flips their order every repeat, and
+reports the paired ratios and whether they separate cleanly. Its
+fingerprint check caught a zero-record run on its first outing.
 
 `benchmark_reconstruction_mapping.py` is dead: it imports `_map_frame_range`
 and the Parquet writers, both retired. Do not resurrect it; the pipeline

@@ -102,6 +102,22 @@ Scientific correctness and performance fixes:
   giving 2527 native calls per image instead of six. Band height no longer
   depends on the accuracy setting. Measured throughput at ``balanced``
   accuracy is unchanged; the fix matters at the two highest settings.
+- Reciprocal-space mapping no longer copies each detector tile out of the
+  corrected images before mapping it. Detector tiles partition the image,
+  so gathering every tile into its own buffer copied each corrected image
+  exactly once — about 105 MB per image on a Pilatus 6M — purely to give
+  the native call a shape it did not need. It now takes the whole images
+  plus the rectangle to map and reads that rectangle in place. Measured
+  0.84x the mapping wall time at ``Center only`` accuracy on a 3651-frame
+  rotation scan, with every reconstructed value identical bit for bit.
+- Image correction now applies the per-pixel solid-angle and polarization
+  factor, the exposure and monitor normalizations, and the non-finite
+  check that masks bad pixels in a single native pass, instead of eight or
+  nine full-image NumPy passes over the same arrays. The arithmetic, its
+  order and its uncertainty propagation are unchanged, and the results are
+  identical bit for bit. Measured 0.92x the mapping wall time at ``Center
+  only`` accuracy on the same scan; the saving is memory traffic, so it is
+  largest where the mapping itself is cheap.
 - The reciprocal-space reconstruction documentation now says which footprint
   accuracy setting to choose, and why. Each setting's effect on a
   reconstructed intensity was measured against that voxel's own counting

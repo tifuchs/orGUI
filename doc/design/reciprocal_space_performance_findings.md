@@ -214,6 +214,19 @@ wrong. This item is now a plan of its own —
 `reciprocal_space_mapping_serial_fraction.md` — and further work on it
 belongs there rather than here.
 
+**Measured, and the diagnosis in this item is wrong.** The serial-fraction
+document's step 1 put a probe on the GIL itself: a Python thread wanting
+to run waits **23%** of its wall time during a depth-0 run (1% idle), on
+both grids. The pipeline is not GIL-bound, the prepare pool that was
+supposed to be blocked is idle 87% of the time, and "loading and
+correcting hold the GIL, so adding workers does not help" is not what
+holds this pipeline at 6.4 of 24 cores. What does is memory: the same
+correction costs 2.3x the cycles inside the pipeline that it costs alone
+on one thread. The useful consequence is that **work removed anywhere
+helps, including off the critical path** — which is not what a serial
+fraction predicts. Two changes came out of it (0.84x and 0.92x); see that
+document.
+
 ### 2. `bounded_block_size` still clamps memory with a depth-blind constant
 
 The Python side now caps the work block against the arena the kernel will
@@ -354,34 +367,145 @@ ms/frame against ~250, i.e. a 5x "speed-up". Always compare a run's
 checkpoint fingerprint against its partner's and discard mismatches; a
 timing-only harness will silently take these as wins.
 
+*It happened again during the serial-fraction work, once in about 50
+runs, and `benchmark_reconstruction_ab.py`'s fingerprint check caught it
+automatically — which is what that check is for.* Two details worth
+adding to the description above. It was on the **unchanged** arm of the
+comparison, so whatever it is has nothing to do with the changes being
+measured. And it was **46.4 ms/frame against 71-100 for its neighbours**,
+under half rather than a fifth: the "5x faster" signature is not
+reliable, because how fast a real run is depends on the page cache. The
+fingerprint is the reliable signal; the clock is not.
+
 `_map_pending_ranges` now warns, on both schedulers and through the
 progress channel as well as `warnings`, when a whole run routes nothing.
-That makes the next occurrence visible; it does not explain it. What the
-investigation ruled out, each by direct measurement rather than
-inspection:
+That makes the next occurrence visible; it does not explain it.
 
-- **Not the static correction factor.** `1 / solidAngleArray` and the
-  polarization array are bit-identical across 12 fresh job loads, with no
-  zeros and no non-finite entries. A bad one would poison a whole run,
-  which fits the symptom, but it does not vary.
-- **Not the angle bounds or the grid.** Bit-identical across 20 fresh
-  loads. This was the best remaining candidate — garbage bounds would put
-  every sample outside the grid, which is silent, fast and record-free.
+**The cause is still unknown, and the search was stopped deliberately
+rather than exhausted.** Everything below was measured, not reasoned
+about. What it adds up to is a reframing worth having before anyone
+starts again: *every static input the run is built from is
+deterministic*, so this is not a bad value read at setup — it is a race
+or a load-dependent condition during execution.
+
+Bit-identical across repeated fresh job loads, so none of them can be
+the poison:
+
+| input | repeats |
+|---|---|
+| solid angle and polarization (`static_factor`) | 12 |
+| exposure angle bounds, grid minimum/step/shape | 20 |
+| UB, U, wavevector K (`det(U)` = 1.000000000) | 8 |
+| detector corner rays (all unit norm) | 6 |
+| static mask (0.0857 masked) | 12 |
+
+Also eliminated:
+
 - **Not a swallowed exception.** Both schedulers re-raise the first
   recorded exception, and the failing runs exited 0 with no traceback, so
   correction did not raise.
 - **Not the native memory precheck.** It throws; it has no path that
   returns empty.
-- **Not reproducible on demand.** 30 consecutive runs of a 39-frame
-  window returned the identical record count every time.
+- **Not the pixel repair plan**, despite being the best structural
+  candidate: a shared native object called concurrently by every prepare
+  thread, whose return value *replaces* the mask outright. Its
+  `apply_inplace` is `const`, holds no `mutable` members, and keeps all
+  scratch local to the call. Thread-safe.
+- **Not reproducible on demand.** 108 attempts across four
+  configurations — subprocess and in-process, coarse grid and fine,
+  grouped scheduler and per-frame, depths 0 and 1 — returned the
+  identical record count and the identical 0.0857 masked fraction every
+  time. Against an observed rate of ~2 in 40, that is not merely bad
+  luck: whatever triggers it is not uniformly random per run.
 
-What remains is that the raw frames themselves, or the mask derived from
-them, occasionally come back degenerate for an entire run — consistent
-with the `RuntimeWarning` seen at `intensity *= static_factor` on one
-occurrence, which implies a non-finite *raw* image rather than a bad
-factor. Both observed failures came late in long, memory-heavy sequences.
-Unproven. A separate one-off hang of the same pipeline under `pytest`,
-not reproduced, may or may not be related.
+**A second, milder failure of the same family was caught in 2026-08, and
+it is the sharpest evidence yet.** One run in twelve of an interleaved
+sweep reported a total weighted intensity of **2,240,706.86 against
+1,839,128.67** — 22% high — and a total weighted variance of **236.23
+against 136.96**, 72% high, while the other eleven agreed with each other
+to one or two units in the last place. In the same run:
+
+| quantity | anomalous run | the other eleven |
+|---|---|---|
+| voxel fingerprint | identical | identical |
+| contributors | 1,329,409,714 | 1,329,409,714 |
+| total weight | 1,329,409,714.0 | 1,329,409,714.0 |
+| rows written | 47,226,553 | 47,226,553 (three others) |
+| **weighted intensity** | **2,240,706.86** | 1,839,128.665149 |
+| **weighted variance** | **236.23** | 136.960292 |
+
+Read what that excludes. Identical voxels and identical contributor
+counts mean the geometry, the angle bounds, the grid *and the mask* were
+all right: the same detector samples reached the same voxels. Only the
+*values* they carried were wrong. So this is not a geometry failure at
+all — it is the pixel data or the factors applied to it, which is the
+same half of the pipeline the zero-record failure points at, reached from
+the opposite direction.
+
+And the two totals moved by **different** factors, 1.22 against 1.72.
+A wrong image would move both alike, since the variance is the clipped
+image itself. A wrong *scalar factor* moves the intensity by `k` and the
+variance by `k**2`, which is the shape actually observed. The per-frame
+exposure and monitor factors are the only per-frame scalars in the
+pipeline, and they are read from arrays captured once at pipeline
+construction — so on the face of it they cannot vary, which is exactly
+what makes this worth writing down rather than explaining away.
+
+Two honesty notes. The run was on the **unchanged** arm of the
+comparison, so it is not caused by whatever was being measured. But it
+was on a build carrying the fused native correction pass
+(`apply_correction_factors`), which is verified bit-for-bit against the
+NumPy form by test and over a 78-frame real window — verified, not
+exonerated. Anyone hunting this should not assume that pass is innocent
+merely because its unit test passes.
+
+**The instrument to use next time is one bit.** Only two things can
+produce an empty result: every pixel masked, or every coordinate outside
+the grid. So record the masked fraction when it happens. Normal is
+0.0857; ~1.0 means the raw data or the correction went non-finite, and
+0.0857-with-no-records means the pixels were fine and the geometry
+applied during mapping is at fault. That single number halves the search
+space, and the guard above is what will tell you a run is worth looking
+at.
+
+*Add a second: the per-frame factor actually applied.* The 22% run above
+says the failure mode is not always all-or-nothing, and that a run can
+look completely healthy on every count anyone currently checks —
+records, voxels, contributors, masked fraction — while carrying wrong
+values. Logging the exposure and monitor factor per frame, or simply the
+per-frame corrected sum, would separate "the image was wrong" from "the
+factor was wrong" the first time it happens again. Total weighted
+intensity per checkpoint is worth comparing between runs for the same
+reason; `benchmark_reconstruction_ab.py` now does exactly that, which is
+how this one was found.
+
+Both observed failures came late in long, memory-heavy sequences with
+desktop applications resident, which the reproduction loops could not
+recreate. A separate one-off hang of the same pipeline under `pytest`,
+also not reproduced, may or may not be related.
+
+**The hang happened twice more in 2026-08, and this time it was caught
+alive.** Both were the pipeline benchmark on unchanged code. The state
+of the hung process is specific enough to be worth writing down, because
+it rules out most of where one would look first:
+
+| | |
+|---|---|
+| checkpoints | **all three written**, full size, on disk |
+| threads | 58, still alive |
+| resident memory | 883 MB |
+| CPU consumed before the hang | 188 s |
+| CPU while hung | **0.00 cores**, indefinitely |
+
+So mapping had finished and every record had been flushed; the process
+then stopped with its pools still up and nothing running. That points at
+the coordinator's exit condition or a pool join, not at mapping,
+correction or the kernel — and it is a *different* failure from the
+zero-record one, which completes and exits 0. `benchmark_reconstruction_ab.py`
+now kills and retries a run that exceeds a per-run timeout, so a hang
+costs a run rather than a sweep; it still deserves a stack dump the next
+time one is caught alive (`py-spy dump --pid`), which is the one thing
+not done here.
 
 ## Calibration constants and what they rest on
 
