@@ -328,6 +328,9 @@ def test_settings_are_grouped_and_have_tooltips(tmp_path):
     assert dialog.accuracy.currentData() == "balanced"
 
     setting_controls = [
+        dialog.use_pixel_mask,
+        dialog.use_solid_angle,
+        dialog.use_polarization,
         dialog.angle_fallback,
         dialog.user_note,
         dialog.grid_table,
@@ -591,6 +594,9 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
         accumulation_budget_bytes=96 * 1024**2,
         config_data=SimpleNamespace(
             corrections=CorrectionState(
+                use_mask=True,
+                use_solid_angle=True,
+                use_polarization=True,
                 normalize_exposure=False,
                 monitor_corrections=("monitor", "ring"),
             )
@@ -616,6 +622,15 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
         "job_status",
         lambda path: {"status": "prepared"},
     )
+    shared_options = {
+        "mask": False,
+        "solidAngle": False,
+        "polarization": False,
+    }
+    dialog.orgui.scanSelector = SimpleNamespace(
+        get_integration_options=lambda: dict(shared_options),
+        set_integration_options=lambda values: shared_options.update(values),
+    )
     monkeypatch.setattr(dialog, "_show_execution_settings", Mock())
 
     dialog.open_job()
@@ -625,6 +640,14 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
     )
     assert dialog.angle_fallback.currentData() == "midpoint"
     assert dialog.user_note.text() == "restored note"
+    assert dialog.use_pixel_mask.isChecked()
+    assert dialog.use_solid_angle.isChecked()
+    assert dialog.use_polarization.isChecked()
+    assert shared_options == {
+        "mask": True,
+        "solidAngle": True,
+        "polarization": True,
+    }
     assert not dialog.normalize_exposure.isChecked()
     assert dialog.monitor_corrections.text() == "monitor, ring"
     assert dialog.orgui.reconstruction_monitor_corrections == (
@@ -647,6 +670,42 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
     dialog._set_accuracy("low", 7)
     assert dialog.accuracy.currentText() == "Advanced (depth 7)"
     assert dialog._accuracy_settings() == ("low", 7)
+
+    dialog.close()
+    dialog._test_parent.close()
+
+
+def test_reconstruction_correction_switches_sync_with_integration_options(
+    tmp_path,
+):
+    """Scientific correction switches must reflect and update shared state."""
+    dialog = _dialog(tmp_path)
+    shared_options = {
+        "mask": True,
+        "solidAngle": False,
+        "polarization": True,
+        "advanced": {"unchanged": True},
+    }
+    dialog.orgui.scanSelector = SimpleNamespace(
+        get_integration_options=lambda: dict(shared_options),
+        set_integration_options=lambda values: shared_options.update(values),
+    )
+
+    dialog._sync_integration_options()
+
+    assert dialog.use_pixel_mask.isChecked()
+    assert not dialog.use_solid_angle.isChecked()
+    assert dialog.use_polarization.isChecked()
+
+    dialog.use_solid_angle.setChecked(True)
+    dialog.use_polarization.setChecked(False)
+
+    assert shared_options == {
+        "mask": True,
+        "solidAngle": True,
+        "polarization": False,
+        "advanced": {"unchanged": True},
+    }
 
     dialog.close()
     dialog._test_parent.close()

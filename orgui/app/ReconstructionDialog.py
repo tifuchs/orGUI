@@ -224,7 +224,36 @@ class ReconstructionDialog(qt.QDialog):
         layout.addWidget(experiment_group)
 
         correction_group = qt.QGroupBox("Corrections and exclusions")
-        shared = qt.QHBoxLayout(correction_group)
+        correction_layout = qt.QVBoxLayout(correction_group)
+        correction_switches = qt.QHBoxLayout()
+        shared_tooltip = (
+            "This correction is shared with the ROI integration options. "
+            "Changing it here also updates the main integration panel."
+        )
+        self.use_pixel_mask = qt.QCheckBox("Use pixel mask")
+        self.use_pixel_mask.setToolTip(
+            shared_tooltip
+            + " Masked-pixel repair keeps the mask active when repair is enabled."
+        )
+        self.use_solid_angle = qt.QCheckBox("Solid angle correction")
+        self.use_solid_angle.setToolTip(shared_tooltip)
+        self.use_polarization = qt.QCheckBox("Polarization correction")
+        self.use_polarization.setToolTip(shared_tooltip)
+        for control, key in (
+            (self.use_pixel_mask, "mask"),
+            (self.use_solid_angle, "solidAngle"),
+            (self.use_polarization, "polarization"),
+        ):
+            control.toggled.connect(
+                lambda checked, option=key: self._set_integration_option(
+                    option, checked
+                )
+            )
+            correction_switches.addWidget(control)
+        correction_switches.addStretch(1)
+        correction_layout.addLayout(correction_switches)
+
+        shared = qt.QHBoxLayout()
         mask = qt.QPushButton("Mask and repair")
         mask.setToolTip(
             "Open the shared detector-mask and masked-pixel repair settings."
@@ -258,7 +287,10 @@ class ReconstructionDialog(qt.QDialog):
         shared.addWidget(mask)
         shared.addWidget(background)
         shared.addWidget(exclusions)
+        shared.addStretch(1)
+        correction_layout.addLayout(shared)
         layout.addWidget(correction_group)
+        self._sync_integration_options()
 
         metadata_group = qt.QGroupBox("Exposure and job metadata")
         form = qt.QFormLayout(metadata_group)
@@ -319,6 +351,26 @@ class ReconstructionDialog(qt.QDialog):
         )
         layout.addWidget(normalization_group)
         return widget
+
+    def _set_integration_option(self, key, checked):
+        """Update one correction shared with the main integration panel."""
+        selector = getattr(self.orgui, "scanSelector", None)
+        if selector is not None:
+            selector.set_integration_options({key: bool(checked)})
+
+    def _sync_integration_options(self):
+        """Refresh shared correction switches from the integration panel."""
+        selector = getattr(self.orgui, "scanSelector", None)
+        if selector is None:
+            return
+        options = selector.get_integration_options()
+        for control, key in (
+            (self.use_pixel_mask, "mask"),
+            (self.use_solid_angle, "solidAngle"),
+            (self.use_polarization, "polarization"),
+        ):
+            with qt.QSignalBlocker(control):
+                control.setChecked(bool(options.get(key, False)))
 
     def _on_normalize_exposure_changed(self, checked):
         self.orgui.reconstruction_normalize_exposure = bool(checked)
@@ -1345,6 +1397,7 @@ class ReconstructionDialog(qt.QDialog):
     def refresh_live_state(self):
         """Refresh the experiment and correction summary from orGUI."""
         try:
+            self._sync_integration_options()
             if self.orgui.fscan is None:
                 self.experiment_summary.setPlainText("No active scan.")
                 return
@@ -1912,6 +1965,9 @@ class ReconstructionDialog(qt.QDialog):
             self.angle_fallback.setCurrentIndex(angle_index)
             self.user_note.setText(job.user_note)
             corrections = job.config_data.corrections
+            self.use_pixel_mask.setChecked(corrections.use_mask)
+            self.use_solid_angle.setChecked(corrections.use_solid_angle)
+            self.use_polarization.setChecked(corrections.use_polarization)
             self.normalize_exposure.setChecked(
                 corrections.normalize_exposure
             )

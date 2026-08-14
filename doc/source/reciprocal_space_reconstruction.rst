@@ -82,6 +82,21 @@ bundle.
 Corrections and Exclusions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+``Use pixel mask``
+   Enables the active detector mask for reconstruction. Masked-pixel repair
+   also requires the mask and keeps it active while repair is enabled.
+
+``Solid angle correction``
+   Applies the detector solid-angle correction to reconstructed intensities.
+
+``Polarization correction``
+   Applies the detector polarization correction using the configured
+   polarization factor and axis.
+
+These three switches are shared with the main ROI integration options. A
+change in either location is reflected in the other when the reconstruction
+settings are refreshed.
+
 ``Mask and repair``
    Opens the shared orGUI mask and pixel-repair settings. Reconstruction uses
    the same active detector mask as image integration. A matching mask is
