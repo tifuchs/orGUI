@@ -565,3 +565,88 @@ def test_live_summary_resolves_active_mask_instead_of_showing_null_asset(
 
     dialog.close()
     dialog._test_parent.close()
+
+
+def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
+    """Opening a job must not leave controls at unrelated live defaults."""
+    dialog = _dialog(tmp_path)
+    job_path = tmp_path / "prepared.json"
+    dialog.job_path.setText(str(job_path))
+    dialog.memory_override[1].setChecked(True)
+    dialog.threads_per_image[1].setChecked(True)
+    job = SimpleNamespace(
+        output_path=str(tmp_path / "result.h5"),
+        scratch_path=str(tmp_path / "scratch"),
+        accuracy="high",
+        advanced_depth=None,
+        angle_fallback="midpoint",
+        user_note="restored note",
+        checkpoint_count=17,
+        thread_override=12,
+        memory_override_bytes=None,
+        frame_batch=7,
+        tile_shape=(32, 48),
+        work_block_pixels="small",
+        threads_per_image=None,
+        accumulation_budget_bytes=96 * 1024**2,
+        config_data=SimpleNamespace(
+            corrections=CorrectionState(
+                normalize_exposure=False,
+                monitor_corrections=("monitor", "ring"),
+            )
+        ),
+        grids=[
+            ReconstructionGrid(
+                minimum=(0.0, 0.0, 0.0),
+                maximum=(1.0, 2.0, 3.0),
+                step=(0.1, 0.2, 0.3),
+                frame="hkl",
+                name="opened",
+            ).__dict__
+        ],
+        compression="Raw",
+        cluster_settings={},
+    )
+    monkeypatch.setattr(dialog, "_browse", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        reconstruction_dialog_module, "read_job", lambda path: job
+    )
+    monkeypatch.setattr(
+        reconstruction_dialog_module,
+        "job_status",
+        lambda path: {"status": "prepared"},
+    )
+    monkeypatch.setattr(dialog, "_show_execution_settings", Mock())
+
+    dialog.open_job()
+
+    assert dialog.accuracy.currentData() == "high", (
+        dialog.preview_output.toPlainText()
+    )
+    assert dialog.angle_fallback.currentData() == "midpoint"
+    assert dialog.user_note.text() == "restored note"
+    assert not dialog.normalize_exposure.isChecked()
+    assert dialog.monitor_corrections.text() == "monitor, ring"
+    assert dialog.orgui.reconstruction_monitor_corrections == (
+        "monitor",
+        "ring",
+    )
+    assert dialog.checkpoint_count.value() == 17
+    assert dialog._optional_value(dialog.thread_override) == 12
+    assert dialog._optional_value(dialog.memory_override) is None
+    assert dialog._optional_value(dialog.frame_batch) == 7
+    assert dialog._optional_value(dialog.tile_rows) == 32
+    assert dialog._optional_value(dialog.tile_columns) == 48
+    assert dialog._optional_value(dialog.work_block) == "small"
+    assert dialog._optional_value(dialog.threads_per_image) is None
+    assert dialog._optional_value(dialog.accumulation_memory) == 96
+    assert dialog._grids()[0].name == "opened"
+    assert dialog.output_path.text() == job.output_path
+    assert dialog.scratch_path.text() == job.scratch_path
+
+    dialog._set_accuracy("low", 7)
+    assert dialog.accuracy.currentText() == "Advanced (depth 7)"
+    assert dialog._accuracy_settings() == ("low", 7)
+
+    dialog.close()
+    dialog._test_parent.close()

@@ -478,7 +478,12 @@ class ReconstructionDialog(qt.QDialog):
             grids = self._grids()
             config = ConfigData.from_gui(self.orgui)
             scan = self.orgui.fscan
-            depth = ACCURACY_DEPTHS[self.accuracy.currentData()]
+            accuracy, advanced_depth = self._accuracy_settings()
+            depth = (
+                ACCURACY_DEPTHS[accuracy]
+                if advanced_depth is None
+                else advanced_depth
+            )
             threads = (
                 self._optional_value(self.thread_override)
                 or self.orgui.numberthreads
@@ -1578,6 +1583,54 @@ class ReconstructionDialog(qt.QDialog):
             max(editor.minimum(), min(editor.maximum(), int(round(value))))
         )
 
+    @staticmethod
+    def _set_optional_value(control, value):
+        """Restore an optional override without losing automatic mode."""
+        _, enabled, editor = control
+        is_override = value is not None
+        if is_override:
+            if isinstance(editor, qt.QComboBox):
+                index = editor.findData(value)
+                if index < 0:
+                    editor.addItem(f"Custom ({value})", value)
+                    index = editor.count() - 1
+                editor.setCurrentIndex(index)
+            else:
+                editor.setValue(int(round(value)))
+        enabled.setChecked(is_override)
+        editor.setEnabled(is_override)
+
+    def _set_accuracy(self, accuracy, advanced_depth):
+        """Restore a preset or an advanced depth from a prepared job."""
+        if advanced_depth is None:
+            index = self.accuracy.findData(accuracy)
+            if index < 0:
+                raise ValueError(f"Unknown accuracy preset: {accuracy}")
+        else:
+            depth = int(advanced_depth)
+            if not 0 <= depth <= 8:
+                raise ValueError(
+                    "Advanced split depth must be between 0 and 8"
+                )
+            if accuracy not in ACCURACY_DEPTHS:
+                raise ValueError(f"Unknown accuracy preset: {accuracy}")
+            data = f"advanced:{accuracy}:{depth}"
+            index = self.accuracy.findData(data)
+            if index < 0:
+                self.accuracy.addItem(
+                    f"Advanced (depth {depth})", data
+                )
+                index = self.accuracy.count() - 1
+        self.accuracy.setCurrentIndex(index)
+
+    def _accuracy_settings(self):
+        """Return the preset and optional advanced depth selected in the UI."""
+        accuracy = self.accuracy.currentData()
+        if isinstance(accuracy, str) and accuracy.startswith("advanced:"):
+            _, preset, depth = accuracy.split(":", 2)
+            return preset, int(depth)
+        return accuracy, None
+
     def _show_execution_settings(self, job, *, scan=None, config=None):
         settings = reconstruction_execution_settings(
             job, scan=scan, config=config
@@ -1630,13 +1683,15 @@ class ReconstructionDialog(qt.QDialog):
             raise ValueError("Select a scratch directory")
         if not output_path:
             raise ValueError("Select an output HDF5 path")
+        accuracy, advanced_depth = self._accuracy_settings()
         job = prepare_job(
             self.orgui,
             job_path,
             grids=self._grids(),
             scratch_path=scratch_path,
             output_path=output_path,
-            accuracy=self.accuracy.currentData(),
+            accuracy=accuracy,
+            advanced_depth=advanced_depth,
             compression_override=(
                 self.orgui.reconstruction_compression_override
             ),
@@ -1682,7 +1737,12 @@ class ReconstructionDialog(qt.QDialog):
                     "Load a scan before previewing a reconstruction job"
                 )
             grids = self._grids()
-            depth = ACCURACY_DEPTHS[self.accuracy.currentData()]
+            accuracy, advanced_depth = self._accuracy_settings()
+            depth = (
+                ACCURACY_DEPTHS[accuracy]
+                if advanced_depth is None
+                else advanced_depth
+            )
             grid_rows = []
             final_bytes = 0
             chunk_count = 0
@@ -1842,6 +1902,49 @@ class ReconstructionDialog(qt.QDialog):
             )
             self.output_path.setText(job.output_path)
             self.scratch_path.setText(job.scratch_path)
+            self._set_accuracy(job.accuracy, job.advanced_depth)
+            angle_index = self.angle_fallback.findData(job.angle_fallback)
+            if angle_index < 0:
+                raise ValueError(
+                    "The prepared job has an unknown angle fallback: "
+                    f"{job.angle_fallback}"
+                )
+            self.angle_fallback.setCurrentIndex(angle_index)
+            self.user_note.setText(job.user_note)
+            corrections = job.config_data.corrections
+            self.normalize_exposure.setChecked(
+                corrections.normalize_exposure
+            )
+            self.monitor_corrections.setText(
+                ", ".join(corrections.monitor_corrections)
+            )
+            self._on_monitor_corrections_changed()
+            self.checkpoint_count.setValue(job.checkpoint_count)
+            self._set_optional_value(
+                self.thread_override, job.thread_override
+            )
+            self._set_optional_value(
+                self.memory_override,
+                None
+                if job.memory_override_bytes is None
+                else job.memory_override_bytes / 1024**2,
+            )
+            self._set_optional_value(self.frame_batch, job.frame_batch)
+            tile_shape = job.tile_shape or (None, None)
+            self._set_optional_value(self.tile_rows, tile_shape[0])
+            self._set_optional_value(self.tile_columns, tile_shape[1])
+            self._set_optional_value(
+                self.work_block, job.work_block_pixels
+            )
+            self._set_optional_value(
+                self.threads_per_image, job.threads_per_image
+            )
+            self._set_optional_value(
+                self.accumulation_memory,
+                None
+                if job.accumulation_budget_bytes is None
+                else job.accumulation_budget_bytes / 1024**2,
+            )
             chunk_shapes = {
                 tuple(values["chunk_shape"]) for values in job.grids
             }
