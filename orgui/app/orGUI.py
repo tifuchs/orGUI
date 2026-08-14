@@ -1641,6 +1641,14 @@ ub : gui for UB matrix and angle calculations
                 "Fitted local background requires the compiled ROI accelerator; "
                 "using summed background ROIs instead."
             )
+        if use_fitted_background and fitted_background_order >= 1:
+            logger.warning(
+                "Fitted local background order %d underestimates the "
+                "background error: the saved uncertainty still assumes an "
+                "unweighted flat-background sample and does not propagate "
+                "the polynomial fit's covariance.",
+                fitted_background_order,
+            )
         if HAS_ACCEL:
             repair_enabled, repair, row_gaps, col_gaps = self._repair_config_for_image(
                 image.img.shape
@@ -2044,6 +2052,11 @@ ub : gui for UB matrix and angle calculations
                     croibg1_bgimg_a = (croi1_a - factor * bgimg_croi1_norm) * (
                         roi_size / cpixel1_a
                     )
+                    # NOTE: this error term reuses the unscaled method-1 formula and
+                    # does not propagate `factor`. It is only exact when the
+                    # background image is spatially flat across both the center and
+                    # background ROI footprints; for a structured background image it
+                    # underestimates or overestimates the true error.
                     croibg1_bgimg_err_a = np.sqrt(
                         croi1_a + ((cpixel1_a / bgpixel1_a) ** 2) * bgroi1_a
                     ) * (roi_size / cpixel1_a)
@@ -5519,6 +5532,14 @@ ub : gui for UB matrix and angle calculations
                 "Fitted local background requires the compiled ROI accelerator; "
                 "using summed background ROIs instead."
             )
+        if use_fitted_background and fitted_background_order >= 1:
+            logger.warning(
+                "Fitted local background order %d underestimates the "
+                "background error: the saved uncertainty still assumes an "
+                "unweighted flat-background sample and does not propagate "
+                "the polynomial fit's covariance.",
+                fitted_background_order,
+            )
         repair_enabled, repair, row_gaps, col_gaps = self._repair_config_for_image(
             image.img.shape
         )
@@ -5936,6 +5957,11 @@ ub : gui for UB matrix and angle calculations
                 croibg1_bgimg_a = (croi1_a - factor * bgimg_croi1_norm) * (
                     roi_size1 / cpixel1_a
                 )
+                # NOTE: this error term reuses the unscaled method-1 formula and
+                # does not propagate `factor`. It is only exact when the
+                # background image is spatially flat across both the center and
+                # background ROI footprints; for a structured background image it
+                # underestimates or overestimates the true error.
                 croibg1_bgimg_err_a = np.sqrt(
                     croi1_a + ((cpixel1_a / bgpixel1_a) ** 2) * bgroi1_a
                 ) * (roi_size1 / cpixel1_a)
