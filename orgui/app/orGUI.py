@@ -1779,26 +1779,38 @@ ub : gui for UB matrix and angle calculations
                     return all_counters, Carr_counters
 
         else:
+            has_bg_img = (
+                background_image is not None
+                and background_image.shape == image.img.shape
+            )
 
             def sumImage(i):
                 """CLI-safe worker: read and integrate one image without acceleration."""  # noqa: E501
                 image = self.fscan.get_raw_img(i).img.astype(
                     np.float64, order="C", copy=True
                 )
-                if (
-                    background_image is not None
-                    and background_image.shape == image.shape
-                ):
-                    np.subtract(image, background_image, out=image)
                 if imgmask is not None:
                     image[imgmask] = np.nan
                     pixelavail = (~imgmask).astype(np.float64)
                 else:
                     pixelavail = np.ones_like(image)
-                if corr:
-                    image *= C_arr
 
-                all_counters1 = np.zeros((xylist.shape[0],) + (4,))
+                # Keep raw counts and correction factors separate, matching
+                # the accelerated path.  Applying C_arr to image here would
+                # corrupt the Poisson counts used for error propagation.
+                all_counters = np.zeros((xylist.shape[0], 4), dtype=np.float64)
+                Carr_counters = np.zeros_like(all_counters)
+                correction_image = C_arr.copy()
+                if imgmask is not None:
+                    correction_image[imgmask] = np.nan
+
+                if has_bg_img:
+                    background = background_image.astype(
+                        np.float64, order="C", copy=True
+                    )
+                    if imgmask is not None:
+                        background[imgmask] = np.nan
+                    BgImg_counters = np.zeros_like(all_counters)
 
                 for crnr in range(xylist.shape[0]):
                     # set ROI (moved to rocking-function)
@@ -1812,11 +1824,20 @@ ub : gui for UB matrix and angle calculations
                         rois["bottom"][crnr],
                     ]
                     # fill counters
-                    counters1 = fill_counters(image, pixelavail, key, bgkey)
+                    all_counters[crnr] = fill_counters(
+                        image, pixelavail, key, bgkey
+                    )
+                    Carr_counters[crnr] = fill_counters(
+                        correction_image, pixelavail, key, bgkey
+                    )
+                    if has_bg_img:
+                        BgImg_counters[crnr] = fill_counters(
+                            background, pixelavail, key, bgkey
+                        )
 
-                    all_counters1[crnr] = counters1
-
-                return all_counters1
+                if has_bg_img:
+                    return all_counters, Carr_counters, BgImg_counters
+                return all_counters, Carr_counters
 
         cancelled = False
         with concurrent.futures.ThreadPoolExecutor(

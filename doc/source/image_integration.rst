@@ -50,6 +50,25 @@ because the rocking dimension helps separate the CTR signal from broad or
 environmental background. It is more computationally expensive than stationary
 integration.
 
+.. warning::
+
+   A ***critical bug*** was fixed that affects rocking-scan ROI integration.
+   Versions up to and including v1.5.0
+   under-subtracted the background when more than one one-dimensional
+   background ROI was used (including the default ``Add All`` configuration).
+   They also used inconsistent ROI endpoint weights and, in some cases,
+   incorrect propagated uncertainties. Consequently, previously saved rocking
+   ``croibg`` and ``F2_hkl`` intensities and their errors are incorrect. The effect is most
+   severe for background-dominated reflections and integrations with multiple
+   background ROIs (underestimates the background).
+
+   To recover an affected result, repeat the final rocking integration with the
+   corrected version. The Nexus database retains the source rocking ROI curves
+   (``rois/croibg`` and ``rois/croibg_errors``) and the one-dimensional ROI
+   definitions, so the detector images do not need to be integrated again when
+   those source datasets are still available. Retain or clearly label the old
+   measurement rather than treating it as comparable with the regenerated one.
+
 ROI summing uses the C++ acceleration backend by default. See
 :doc:`acceleration_backends` for the process-global backend selector and the
 optional Numba ROI backend.

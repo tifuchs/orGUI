@@ -81,6 +81,326 @@ else:
     _trapz_impl = np.trapz  # noqa: NPY201  # numpy < 2.0
 
 
+def _compute_rocking_integration(
+    s_array,
+    axis,
+    croibg_curves,
+    croibg_errors_curves,
+    roi_info,
+    aux,
+    use_lorentz,
+    use_footprint,
+    C_Lor=1.0,
+    C_rod=1.0,
+    C_flux_on_sample=1.0,
+    C_illum_area=1.0,
+    progress_callback=None,
+    should_cancel=None,
+):
+    """Aggregate rocking-scan ROI counts into signal, background, and F2_hkl.
+
+    Pure-numpy core of :meth:`RockingPeakIntegrator.integrate`, factored out
+    so it can be unit tested without a running Qt application or an on-disk
+    database. This function does not read or write HDF5 and does not touch
+    GUI state; ``RockingPeakIntegrator.integrate`` is responsible for
+    resolving inputs from the database and writing the result back.
+
+    :param numpy.ndarray s_array:
+        Rocking-scan parameter values, shape ``(n_s,)``.
+    :param numpy.ndarray axis:
+        Rocking axis values (deg), shape ``(n_pts,)``, shared by every
+        ``s`` point.
+    :param numpy.ndarray croibg_curves:
+        Background-subtracted per-image ROI curve for every ``s`` point,
+        shape ``(n_s, n_pts)``.
+    :param numpy.ndarray croibg_errors_curves:
+        1-sigma errors of ``croibg_curves``, same shape.
+    :param dict roi_info:
+        Mapping of ROI name (``sig_*``/``bg_*``) to a dict with
+        ``from``/``to`` arrays of shape ``(n_s,)``, in the same units as
+        ``axis``.
+    :param dict aux:
+        Mapping of auxiliary counter name to an array of shape ``(n_pts,)``.
+    :param bool use_lorentz:
+        Apply the Lorentz/rod-intersection correction and compute
+        ``F2_hkl``/``F2_hkl_errors``.
+    :param bool use_footprint:
+        Apply the footprint (illuminated flux/area) correction to the
+        corrected intensities.
+    :param C_Lor:
+        Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, Lorentz factor.
+    :param C_rod:
+        Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, rod-intersection
+        factor.
+    :param C_flux_on_sample:
+        Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, footprint flux
+        factor.
+    :param C_illum_area:
+        Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, illuminated-area
+        factor.
+    :param progress_callback:
+        Optional callable invoked with the current ``s`` index after each
+        point is processed.
+    :param should_cancel:
+        Optional zero-argument callable; if it returns truthy after a given
+        ``s`` point, the remaining points are left unintegrated (matching
+        the original in-GUI cancel behavior).
+    :returns:
+        Mapping with keys ``int_data``, ``croi``, ``croi_errors``,
+        ``raw_croi``, ``raw_croi_errors``, ``bgroi``, ``bgroi_errors``,
+        ``raw_bgroi``, ``raw_bgroi_errors``, ``croibg``, ``croibg_errors``,
+        ``raw_croibg``, ``raw_croibg_errors``, ``auxil``, and, only when
+        ``use_lorentz`` is ``True``, ``F2_hkl`` and ``F2_hkl_errors``.
+    :rtype: dict
+    """
+    int_data = {}
+    for roikey in roi_info:
+        if roikey.startswith("sig") or roikey.startswith("bg"):
+            int_data[roikey] = {
+                "cnts": [],
+                "cnts_errors": [],
+                "raw_cnts": [],
+                "raw_cnts_errors": [],
+                "int_interval": [],
+                "C_Lor": [],
+                "C_rod": [],
+                "C_flux_on_sample": [],
+                "C_illum_area": [],
+                "auxillary": dict((a, []) for a in aux),
+                "auxillary_int": dict((a, []) for a in aux),
+                "auxillary_num": dict((a, []) for a in aux),
+            }
+
+    for i, s in enumerate(s_array):
+        croibg = croibg_curves[i]
+        croibg_errors = croibg_errors_curves[i]
+
+        for roikey in int_data:
+            roi = roi_info[roikey]
+
+            idx_from = np.argmin(np.abs(axis - roi["from"][i]))
+            idx_to = np.argmin(np.abs(axis - roi["to"][i]))
+            if idx_from > idx_to:
+                idx_from, idx_to = idx_to, idx_from
+            int_interval = np.abs(axis[idx_to] - axis[idx_from])  # can be negative!
+            sign_interval = np.sign(
+                axis[idx_to] - axis[idx_from]
+            )  # we force integrals positive
+            int_data[roikey]["int_interval"].append(int_interval)
+
+            # ROI boundaries are included so the integrated samples, error
+            # weights, and reported interval all describe the same domain.
+            roi_slice = slice(idx_from, idx_to + 1)
+            roi_axis = axis[roi_slice]
+            cnts = croibg[roi_slice]
+            cnts_errors = croibg_errors[roi_slice]
+
+            C_corr = np.ones(cnts.size, dtype=float)
+            if use_lorentz:
+                int_data[roikey]["C_Lor"].append(np.mean(C_Lor[i][roi_slice]))
+                int_data[roikey]["C_rod"].append(np.mean(C_rod[i][roi_slice]))
+
+            if use_footprint:
+                int_data[roikey]["C_flux_on_sample"].append(
+                    np.mean(C_flux_on_sample[i][roi_slice])
+                )
+                int_data[roikey]["C_illum_area"].append(
+                    np.mean(C_illum_area[i][roi_slice])
+                )
+                C_corr *= (
+                    C_flux_on_sample[i][roi_slice] * C_illum_area[i][roi_slice]
+                )
+
+            I_raw = (
+                _trapz_impl(cnts, roi_axis) * sign_interval
+            )  # we force integrals positive
+            I_corr = (
+                _trapz_impl(cnts / C_corr, roi_axis) * sign_interval
+            )  # we force integrals positive
+
+            # The trapezoidal weights must be calculated over the local ROI,
+            # since each ROI has its own endpoints.
+            roi_dx = np.diff(roi_axis)
+            deltaaxis = np.zeros_like(roi_axis)
+            if roi_dx.size:
+                deltaaxis[0] = roi_dx[0] / 2
+                deltaaxis[-1] = roi_dx[-1] / 2
+                deltaaxis[1:-1] = (roi_dx[:-1] + roi_dx[1:]) / 2
+            I_raw_error = np.sqrt(np.sum((cnts_errors * deltaaxis) ** 2))
+            # Propagate directly instead of dividing by I_raw, which can be
+            # zero for an empty or cancelling ROI.
+            I_corr_error = np.sqrt(
+                np.sum(((cnts_errors / C_corr) * deltaaxis) ** 2)
+            )
+
+            int_data[roikey]["raw_cnts"].append(I_raw)
+            int_data[roikey]["raw_cnts_errors"].append(I_raw_error)
+
+            int_data[roikey]["cnts"].append(I_corr)
+            int_data[roikey]["cnts_errors"].append(I_corr_error)
+
+            for a in aux:
+                int_data[roikey]["auxillary_int"][a].append(
+                    _trapz_impl(aux[a][roi_slice], roi_axis)
+                    * sign_interval
+                )  # we force integrals positive
+                int_data[roikey]["auxillary"][a].append(
+                    np.sum(aux[a][roi_slice])
+                )
+                int_data[roikey]["auxillary_num"][a].append(
+                    float(aux[a][roi_slice].size)
+                )
+
+        if progress_callback is not None:
+            progress_callback(i)
+        if should_cancel is not None and should_cancel():
+            break
+
+    for roikey in int_data:
+        for d in list(int_data[roikey].keys()):
+            if not d.startswith("auxillary"):
+                int_data[roikey][d] = np.array(int_data[roikey][d])
+            else:
+                for dd in list(int_data[roikey][d].keys()):
+                    int_data[roikey][d][dd] = np.array(int_data[roikey][d][dd])
+
+    # signals:
+
+    croi = np.zeros(s_array.size, dtype=float)
+    croi_errors = np.zeros(s_array.size, dtype=float)
+    raw_croi = np.zeros(s_array.size, dtype=float)
+    raw_croi_errors = np.zeros(s_array.size, dtype=float)
+    sig_interval = np.zeros(s_array.size, dtype=float)
+    C_Lorentz = np.zeros(s_array.size, dtype=float)
+    C_rod_intersect = np.zeros(s_array.size, dtype=float)
+    aux_cnts_integral = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
+    aux_cnts_integral_mean = dict(
+        (a, np.zeros(s_array.size, dtype=float)) for a in aux
+    )
+    aux_cnts_sum = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
+    aux_cnts_mean = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
+    aux_cnts_num = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
+
+    for roikey in int_data:
+        if roikey.startswith("sig"):
+            sig_interval += int_data[roikey]["int_interval"]
+            for a in aux_cnts_num:
+                aux_cnts_num[a] += int_data[roikey]["auxillary_num"][a]
+
+    for roikey in int_data:
+        if roikey.startswith("sig"):
+            croi += int_data[roikey]["cnts"]
+            croi_errors += int_data[roikey]["cnts_errors"] ** 2
+            raw_croi += int_data[roikey]["raw_cnts"]
+            raw_croi_errors += int_data[roikey]["raw_cnts_errors"] ** 2
+            for a in aux_cnts_sum:
+                aux_cnts_sum[a] += int_data[roikey]["auxillary"][a]
+                aux_cnts_mean[a] += (
+                    int_data[roikey]["auxillary"][a] / aux_cnts_num[a]
+                )
+                aux_cnts_integral[a] += int_data[roikey]["auxillary_int"][a]
+                aux_cnts_integral_mean[a] += (
+                    int_data[roikey]["auxillary_int"][a] / sig_interval
+                )
+            if use_lorentz:
+                C_Lorentz += int_data[roikey]["C_Lor"] * (
+                    int_data[roikey]["int_interval"] / sig_interval
+                )
+                C_rod_intersect += int_data[roikey]["C_rod"] * (
+                    int_data[roikey]["int_interval"] / sig_interval
+                )
+
+    raw_croi_errors = np.sqrt(raw_croi_errors)
+    croi_errors = np.sqrt(croi_errors)
+
+    bgroi = np.zeros(s_array.size, dtype=float)
+    bgroi_errors = np.zeros(s_array.size, dtype=float)
+    raw_bgroi = np.zeros(s_array.size, dtype=float)
+    raw_bgroi_errors = np.zeros(s_array.size, dtype=float)
+    bg_interval = np.zeros(s_array.size, dtype=float)
+    bgaux_cnts_integral = dict(
+        (a, np.zeros(s_array.size, dtype=float)) for a in aux
+    )
+    bgaux_cnts_integral_mean = dict(
+        (a, np.zeros(s_array.size, dtype=float)) for a in aux
+    )
+    bgaux_cnts_sum = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
+    bgaux_cnts_mean = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
+    bgaux_cnts_num = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
+
+    for roikey in int_data:
+        if roikey.startswith("bg"):
+            bg_interval += int_data[roikey]["int_interval"]
+            for a in bgaux_cnts_num:
+                bgaux_cnts_num[a] += int_data[roikey]["auxillary_num"][a]
+
+    for roikey in int_data:
+        if roikey.startswith("bg"):
+            ratio = sig_interval / bg_interval
+            bgroi += int_data[roikey]["cnts"] * ratio
+            bgroi_errors += (
+                int_data[roikey]["cnts_errors"] * ratio
+            ) ** 2
+            raw_bgroi += int_data[roikey]["raw_cnts"] * ratio
+            raw_bgroi_errors += (int_data[roikey]["raw_cnts_errors"] * ratio) ** 2
+            for a in bgaux_cnts_sum:
+                bgaux_cnts_sum[a] += int_data[roikey]["auxillary"][a]
+                bgaux_cnts_mean[a] += (
+                    int_data[roikey]["auxillary"][a] / bgaux_cnts_num[a]
+                )
+                bgaux_cnts_integral[a] += int_data[roikey]["auxillary_int"][a]
+                bgaux_cnts_integral_mean[a] += (
+                    int_data[roikey]["auxillary_int"][a] / bg_interval
+                )
+
+    raw_bgroi_errors = np.sqrt(raw_bgroi_errors)
+    bgroi_errors = np.sqrt(bgroi_errors)
+
+    # not divided by sig_interval - see issue #25
+    croibg = croi - bgroi  # / sig_interval # already normalized bg
+    croibg_errors = np.sqrt(croi_errors**2 + bgroi_errors**2)  # / sig_interval
+
+    raw_croibg = raw_croi - raw_bgroi  # already normalized bg
+    raw_croibg_errors = np.sqrt(raw_croi_errors**2 + raw_bgroi_errors**2)
+
+    result = {
+        "int_data": int_data,
+        "croi": croi,
+        "croi_errors": croi_errors,
+        "raw_croi": raw_croi,
+        "raw_croi_errors": raw_croi_errors,
+        "bgroi": bgroi,
+        "bgroi_errors": bgroi_errors,
+        "raw_bgroi": raw_bgroi,
+        "raw_bgroi_errors": raw_bgroi_errors,
+        "croibg": croibg,
+        "croibg_errors": croibg_errors,
+        "raw_croibg": raw_croibg,
+        "raw_croibg_errors": raw_croibg_errors,
+    }
+
+    auxil = {"@NX_class": "NXcollection"}
+    for a in aux_cnts_sum:
+        auxil[a] = {
+            "@NX_class": "NXcollection",
+            "csum": aux_cnts_sum[a],
+            "cmean": aux_cnts_mean[a],
+            "cintegral": aux_cnts_integral[a],
+            "cintegral_mean": aux_cnts_integral_mean[a],
+            "bgsum": bgaux_cnts_sum[a],
+            "bgmean": bgaux_cnts_mean[a],
+            "bgintegral": bgaux_cnts_integral[a],
+            "bgintegral_mean": bgaux_cnts_integral_mean[a],
+        }
+    result["auxil"] = auxil
+
+    if use_lorentz:
+        result["F2_hkl"] = croibg / (C_Lorentz * C_rod_intersect)
+        result["F2_hkl_errors"] = croibg_errors / (C_Lorentz * C_rod_intersect)
+
+    return result
+
+
 class RockingPeakIntegrator(qt.QMainWindow):
     def __init__(self, database, parent=None):
         qt.QMainWindow.__init__(self, parent)
@@ -1014,235 +1334,45 @@ class RockingPeakIntegrator(qt.QMainWindow):
             self.database.nxfile, self._currentRoInfo["name"] + "/integration/"
         )
 
-        int_data = {}
-        for roikey in roi_info:
-            if roikey.startswith("sig") or roikey.startswith("bg"):
-                int_data[roikey] = {
-                    "cnts": [],
-                    "cnts_errors": [],
-                    "raw_cnts": [],
-                    "raw_cnts_errors": [],
-                    "int_interval": [],
-                    "C_Lor": [],
-                    "C_rod": [],
-                    "C_flux_on_sample": [],
-                    "C_illum_area": [],
-                    "auxillary": dict((a, []) for a in aux),
-                    "auxillary_int": dict((a, []) for a in aux),
-                    "auxillary_num": dict((a, []) for a in aux),
-                }
-
-        # for error propagation of trapezoidal integral
-        dx = np.diff(axis)
-        deltaaxis = np.empty_like(axis)
-        deltaaxis[0] = dx[0] / 2
-        deltaaxis[-1] = dx[-1] / 2
-        deltaaxis[1:-1] = (dx[:-1] + dx[1:]) / 2
-
-        # deltaaxis = np.gradient(axis) # wrong
-
         progress = logger_utils.create_progress_logger(
             self, s_array.size, "Integrating rocking scans"
         )
 
-        for i, s in enumerate(s_array):
-            croibg = curves["croibg"][i]
-            croibg_errors = curves["croibg_errors"][i]
-
-            for roikey in int_data:
-                roi = roi_info[roikey]
-
-                idx_from = np.argmin(np.abs(axis - roi["from"][i]))
-                idx_to = np.argmin(np.abs(axis - roi["to"][i]))
-                if idx_from > idx_to:
-                    idx_from, idx_to = idx_to, idx_from
-                int_interval = np.abs(axis[idx_to] - axis[idx_from])  # can be negative!
-                sign_interval = np.sign(
-                    axis[idx_to] - axis[idx_from]
-                )  # we force integrals positive
-                int_data[roikey]["int_interval"].append(int_interval)
-
-                cnts = croibg[idx_from:idx_to]
-                cnts_errors = croibg_errors[idx_from:idx_to]
-
-                C_corr = np.ones(cnts.size, dtype=float)
-                if self.lorentzButton.isChecked():
-                    int_data[roikey]["C_Lor"].append(np.mean(C_Lor[i][idx_from:idx_to]))
-                    int_data[roikey]["C_rod"].append(np.mean(C_rod[i][idx_from:idx_to]))
-
-                if self.footprintButton.isChecked():
-                    int_data[roikey]["C_flux_on_sample"].append(
-                        np.mean(C_flux_on_sample[i][idx_from:idx_to])
-                    )
-                    int_data[roikey]["C_illum_area"].append(
-                        np.mean(C_illum_area[i][idx_from:idx_to])
-                    )
-                    C_corr *= (
-                        C_flux_on_sample[i][idx_from:idx_to]
-                        * C_illum_area[i][idx_from:idx_to]
-                    )
-
-                I_raw = (
-                    _trapz_impl(cnts, axis[idx_from:idx_to]) * sign_interval
-                )  # we force integrals positive
-                I_corr = (
-                    _trapz_impl(cnts / C_corr, axis[idx_from:idx_to]) * sign_interval
-                )  # we force integrals positive
-
-                I_raw_error = np.sqrt(
-                    np.sum((cnts_errors * deltaaxis[idx_from:idx_to]) ** 2)
-                )  # to be checked!
-                I_corr_error = (I_raw_error / I_raw) * I_corr
-
-                int_data[roikey]["raw_cnts"].append(I_raw)
-                int_data[roikey]["raw_cnts_errors"].append(I_raw_error)
-
-                int_data[roikey]["cnts"].append(I_corr)
-                int_data[roikey]["cnts_errors"].append(I_corr_error)
-
-                for a in aux:
-                    int_data[roikey]["auxillary_int"][a].append(
-                        _trapz_impl(aux[a][idx_from:idx_to], axis[idx_from:idx_to])
-                        * sign_interval
-                    )  # we force integrals positive
-                    int_data[roikey]["auxillary"][a].append(
-                        np.sum(aux[a][idx_from:idx_to])
-                    )
-                    int_data[roikey]["auxillary_num"][a].append(
-                        float(aux[a][idx_from:idx_to].size)
-                    )
-
-            progress.update(i)
-            if progress.wasCanceled():
-                break
+        result = _compute_rocking_integration(
+            s_array,
+            axis,
+            curves["croibg"],
+            curves["croibg_errors"],
+            roi_info,
+            aux,
+            self.lorentzButton.isChecked(),
+            self.footprintButton.isChecked(),
+            C_Lor=C_Lor,
+            C_rod=C_rod,
+            C_flux_on_sample=C_flux_on_sample,
+            C_illum_area=C_illum_area,
+            progress_callback=progress.update,
+            should_cancel=progress.wasCanceled,
+        )
         progress.finish()
 
-        for roikey in int_data:
-            for d in list(int_data[roikey].keys()):
-                if not d.startswith("auxillary"):
-                    int_data[roikey][d] = np.array(int_data[roikey][d])
-                else:
-                    for dd in list(int_data[roikey][d].keys()):
-                        int_data[roikey][d][dd] = np.array(int_data[roikey][d][dd])
-
-        # signals:
-
-        croi = np.zeros(s_array.size, dtype=float)
-        croi_errors = np.zeros(s_array.size, dtype=float)
-        raw_croi = np.zeros(s_array.size, dtype=float)
-        raw_croi_errors = np.zeros(s_array.size, dtype=float)
-        sig_interval = np.zeros(s_array.size, dtype=float)
-        C_Lorentz = np.zeros(s_array.size, dtype=float)
-        C_rod_intersect = np.zeros(s_array.size, dtype=float)
-        aux_cnts_integral = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
-        aux_cnts_integral_mean = dict(
-            (a, np.zeros(s_array.size, dtype=float)) for a in aux
-        )
-        aux_cnts_sum = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
-        aux_cnts_mean = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
-        aux_cnts_num = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
-
-        for roikey in int_data:
-            if roikey.startswith("sig"):
-                sig_interval += int_data[roikey]["int_interval"]
-                for a in aux_cnts_num:
-                    aux_cnts_num[a] += int_data[roikey]["auxillary_num"][a]
-
-        for roikey in int_data:
-            if roikey.startswith("sig"):
-                croi += int_data[roikey]["cnts"]
-                croi_errors += int_data[roikey]["cnts_errors"] ** 2
-                raw_croi += int_data[roikey]["raw_cnts"]
-                raw_croi_errors += int_data[roikey]["raw_cnts_errors"] ** 2
-                for a in aux_cnts_sum:
-                    aux_cnts_sum[a] += int_data[roikey]["auxillary"][a]
-                    aux_cnts_mean[a] += (
-                        int_data[roikey]["auxillary"][a] / aux_cnts_num[a]
-                    )
-                    aux_cnts_integral[a] += int_data[roikey]["auxillary_int"][a]
-                    aux_cnts_integral_mean[a] += (
-                        int_data[roikey]["auxillary_int"][a] / sig_interval
-                    )
-                if self.lorentzButton.isChecked():
-                    C_Lorentz += int_data[roikey]["C_Lor"] * (
-                        int_data[roikey]["int_interval"] / sig_interval
-                    )
-                    C_rod_intersect += int_data[roikey]["C_rod"] * (
-                        int_data[roikey]["int_interval"] / sig_interval
-                    )
-
-        raw_croi_errors = np.sqrt(raw_croi_errors)
-        croi_errors = np.sqrt(croi_errors)
-
-        bgroi = np.zeros(s_array.size, dtype=float)
-        bgroi_errors = np.zeros(s_array.size, dtype=float)
-        raw_bgroi = np.zeros(s_array.size, dtype=float)
-        raw_bgroi_errors = np.zeros(s_array.size, dtype=float)
-        bg_interval = np.zeros(s_array.size, dtype=float)
-        bgaux_cnts_integral = dict(
-            (a, np.zeros(s_array.size, dtype=float)) for a in aux
-        )
-        bgaux_cnts_integral_mean = dict(
-            (a, np.zeros(s_array.size, dtype=float)) for a in aux
-        )
-        bgaux_cnts_sum = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
-        bgaux_cnts_mean = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
-        bgaux_cnts_num = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
-
-        for roikey in int_data:
-            if roikey.startswith("bg"):
-                bg_interval += int_data[roikey]["int_interval"]
-                for a in bgaux_cnts_num:
-                    bgaux_cnts_num[a] += int_data[roikey]["auxillary_num"][a]
-
-        for roikey in int_data:
-            if roikey.startswith("bg"):
-                ratio = (sig_interval / bg_interval) * (
-                    int_data[roikey]["int_interval"] / bg_interval
-                )
-                bgroi += int_data[roikey]["cnts"] * ratio
-                bgroi_errors += (
-                    int_data[roikey]["cnts_errors"] * ratio
-                ) ** 2  # should improve error propagation here!
-                raw_bgroi += int_data[roikey]["raw_cnts"] * ratio
-                raw_bgroi_errors += (int_data[roikey]["raw_cnts_errors"] * ratio) ** 2
-                for a in bgaux_cnts_sum:
-                    bgaux_cnts_sum[a] += int_data[roikey]["auxillary"][a]
-                    bgaux_cnts_mean[a] += (
-                        int_data[roikey]["auxillary"][a] / bgaux_cnts_num[a]
-                    )
-                    bgaux_cnts_integral[a] += int_data[roikey]["auxillary_int"][a]
-                    bgaux_cnts_integral_mean[a] += (
-                        int_data[roikey]["auxillary_int"][a] / bg_interval
-                    )
-
-        raw_bgroi_errors = np.sqrt(raw_croi_errors)
-        bgroi_errors = np.sqrt(croi_errors)
-
-        # not divided by sig_interval - see issue #25
-        croibg = croi - bgroi  # / sig_interval # already normalized bg
-        croibg_errors = np.sqrt(croi_errors**2 + bgroi_errors**2)  # / sig_interval
-
-        raw_croibg = raw_croi - raw_bgroi  # already normalized bg
-        raw_croibg_errors = np.sqrt(raw_croi_errors**2 + raw_bgroi_errors**2)
-
+        int_data = result["int_data"]
+        croi = result["croi"]
+        croi_errors = result["croi_errors"]
+        raw_croi = result["raw_croi"]
+        raw_croi_errors = result["raw_croi_errors"]
+        bgroi = result["bgroi"]
+        bgroi_errors = result["bgroi_errors"]
+        raw_bgroi = result["raw_bgroi"]
+        raw_bgroi_errors = result["raw_bgroi_errors"]
+        croibg = result["croibg"]
+        croibg_errors = result["croibg_errors"]
+        raw_croibg = result["raw_croibg"]
+        raw_croibg_errors = result["raw_croibg_errors"]
+        auxil = result["auxil"]
         if self.lorentzButton.isChecked():
-            F2_hkl = croibg / (C_Lorentz * C_rod_intersect)
-            F2_hkl_errors = raw_croibg_errors / (C_Lorentz * C_rod_intersect)
-
-        auxil = {"@NX_class": "NXcollection"}
-        for a in aux_cnts_sum:
-            auxil[a] = {
-                "@NX_class": "NXcollection",
-                "csum": aux_cnts_sum[a],
-                "cmean": aux_cnts_mean[a],
-                "cintegral": aux_cnts_integral[a],
-                "cintegral_mean": aux_cnts_integral_mean[a],
-                "bgsum": bgaux_cnts_sum[a],
-                "bgmean": bgaux_cnts_mean[a],
-                "bgintegral": bgaux_cnts_integral[a],
-                "bgintegral_mean": bgaux_cnts_integral_mean[a],
-            }
+            F2_hkl = result["F2_hkl"]
+            F2_hkl_errors = result["F2_hkl_errors"]
 
         int_data["@NX_class"] = "NXdetector"
 

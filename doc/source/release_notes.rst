@@ -18,6 +18,9 @@ Scientific and analysis additions:
 
 Scientific correctness and performance fixes:
 
+A ***critical bug*** was fixed that affects rocking-scan ROI integration:
+
+- Versions up to and including v1.5.0 under-subtracted background when more than one background ROI was used, including the default ``Add All`` configuration; they could therefore overstate saved ``croibg`` and ``F2_hkl`` intensities and report incorrect errors. The correction also aligns integration endpoint handling and propagated uncertainties. Regenerate affected measurements by repeating the final rocking integration with this version. The saved source rocking ROI curves and ROI definitions are sufficient when they remain in the Nexus database; re-integrating the original detector images is not required.
 - Corrected the reciprocal-coordinate transform of the Film reference slabs generated for multi-cell ``PoissonSurface`` terminations. Previously, these slabs retained the underlying one-cell transform, so surface-minus-Film replacement failed to cancel for a bulk-equivalent supercell and introduced artificial finite-slab oscillations into calculated CTRs.
 - Corrected ``PoissonSurface`` etching to retain every empty structural layer that subtracts material from the underlying Film. Deterministic negative integer widths now remove exactly the requested number of layers and retain the correct exposed termination and surface height.
 - Corrected ``EpitaxyInterface`` to accumulate the strain-coupled height of every structural layer. The previous calculation advanced a complete unit cell using only its final layer's strain, creating a layer-cycle-periodic displacement and artificial quasi-Bragg intensity at systematic extinctions for broad interfaces.
