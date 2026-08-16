@@ -326,6 +326,8 @@ def test_settings_are_grouped_and_have_tooltips(tmp_path):
         for index in range(dialog.accuracy.count())
     ] == list(range(6))
     assert dialog.accuracy.currentData() == "balanced"
+    assert dialog.work_block.currentData() == "medium"
+    assert "starting cache-scale" in dialog.work_block.toolTip()
 
     setting_controls = [
         dialog.use_pixel_mask,
@@ -342,7 +344,7 @@ def test_settings_are_grouped_and_have_tooltips(tmp_path):
         dialog.frame_batch[0],
         dialog.tile_rows[0],
         dialog.tile_columns[0],
-        dialog.work_block[0],
+        dialog.work_block,
         dialog.checkpoint_count,
         dialog.performance_summary,
         dialog.cluster_scheduler,
@@ -702,7 +704,7 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
     assert dialog._optional_value(dialog.frame_batch) == 7
     assert dialog._optional_value(dialog.tile_rows) == 32
     assert dialog._optional_value(dialog.tile_columns) == 48
-    assert dialog._optional_value(dialog.work_block) == "small"
+    assert dialog.work_block.currentData() == "small"
     assert dialog._optional_value(dialog.threads_per_image) is None
     assert dialog._optional_value(dialog.accumulation_memory) == 96
     assert dialog._grids()[0].name == "opened"

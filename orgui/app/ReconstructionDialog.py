@@ -819,29 +819,30 @@ class ReconstructionDialog(qt.QDialog):
             tile_tooltip,
         )
         block_tooltip = (
-            "Size of one native work block. A block's working set is the "
-            "pixel data it reads plus the accumulator it builds, and "
-            "throughput is best when that fits the CPU cache, so these "
-            "names select a cache scale rather than a raw count: 'Minimum' "
-            "is about an L1 data cache, 'Medium' about a 1 MiB L2. Left "
-            "alone, the block is chosen automatically -- 'Medium', halved "
-            "for each adaptive depth so the working set stays put, and "
-            "capped so the native arenas fit the memory budget."
+            "Selects the starting cache-scale for one native work block. "
+            "A block's working set is the pixel data it reads plus the "
+            "accumulator it builds, and throughput is best when that fits "
+            "the CPU cache: 'Minimum' is about an L1 data cache, 'Medium' "
+            "about a 1 MiB L2. The final pixel count is calculated "
+            "automatically from the adaptive depth and capped to fit the "
+            "memory budget."
         )
-        self.work_block = self._optional_combo(
-            [
-                (f"{name.capitalize()} ({pixels:,} px at center accuracy)", name)
-                for name, pixels in sorted(
-                    WORK_BLOCK_PRESETS.items(), key=lambda item: item[1]
-                )
-            ],
-            block_tooltip,
-            current="medium",
+        self.work_block = qt.QComboBox()
+        self.work_block.setSizeAdjustPolicy(
+            qt.QComboBox.AdjustToMinimumContentsLengthWithIcon
         )
+        self.work_block.setMinimumContentsLength(20)
+        for name, pixels in sorted(
+            WORK_BLOCK_PRESETS.items(), key=lambda item: item[1]
+        ):
+            self.work_block.addItem(
+                f"{name.capitalize()} ({pixels:,} px at center accuracy)", name
+            )
+        self.work_block.setCurrentIndex(self.work_block.findData("medium"))
         self._add_form_row(
             advanced_form,
             "Native block pixels:",
-            self.work_block[0],
+            self.work_block,
             block_tooltip,
         )
         checkpoint_tooltip = (
@@ -1717,6 +1718,15 @@ class ReconstructionDialog(qt.QDialog):
         enabled.setChecked(is_override)
         editor.setEnabled(is_override)
 
+    @staticmethod
+    def _set_combo_value(combo, value):
+        """Select a named value, retaining custom values from saved jobs."""
+        index = combo.findData(value)
+        if index < 0:
+            combo.addItem(f"Custom ({value})", value)
+            index = combo.count() - 1
+        combo.setCurrentIndex(index)
+
     def _set_accuracy(self, accuracy, advanced_depth):
         """Restore a preset or an advanced depth from a prepared job."""
         if advanced_depth is None:
@@ -1763,7 +1773,6 @@ class ReconstructionDialog(qt.QDialog):
             (self.frame_batch, settings["frames_per_task"]),
             (self.tile_rows, tile_rows),
             (self.tile_columns, tile_columns),
-            (self.work_block, settings["native_work_block_pixels"]),
             (self.threads_per_image, settings["native_threads_per_image"]),
         ):
             self._set_detected_value(control, value)
@@ -1826,7 +1835,7 @@ class ReconstructionDialog(qt.QDialog):
                 if tile_rows is None
                 else (tile_rows, tile_columns)
             ),
-            work_block_pixels=self._optional_value(self.work_block),
+            work_block_pixels=self.work_block.currentData(),
             checkpoint_count=self.checkpoint_count.value(),
             threads_per_image=self._optional_value(self.threads_per_image),
             accumulation_budget_bytes=(
@@ -2053,8 +2062,9 @@ class ReconstructionDialog(qt.QDialog):
             tile_shape = job.tile_shape or (None, None)
             self._set_optional_value(self.tile_rows, tile_shape[0])
             self._set_optional_value(self.tile_columns, tile_shape[1])
-            self._set_optional_value(
-                self.work_block, job.work_block_pixels
+            self._set_combo_value(
+                self.work_block,
+                "medium" if job.work_block_pixels is None else job.work_block_pixels,
             )
             self._set_optional_value(
                 self.threads_per_image, job.threads_per_image
