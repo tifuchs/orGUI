@@ -23,7 +23,7 @@ def _count_unmasked(mask, roi):
     return np.sum(~mask[roi[1, 0] : roi[1, 1], roi[0, 0] : roi[0, 1]])
 
 
-def test_default_import_uses_cpp_without_loading_numba():
+def test_default_import_uses_cpp_without_loading_numba(tmp_path):
     script = (
         "import sys; "
         "import orgui.app._roi_sum_accel as roi_sum; "
@@ -37,13 +37,14 @@ def test_default_import_uses_cpp_without_loading_numba():
         [sys.executable, "-c", script],
         check=True,
         capture_output=True,
+        cwd=tmp_path,
         env=env,
         text=True,
     )
     assert result.stdout.splitlines() == ["cpp", "False", "True"]
 
 
-def test_numba_backend_is_explicit_opt_in():
+def test_numba_backend_is_explicit_opt_in(tmp_path):
     script = (
         "import sys; "
         "import orgui.app._roi_sum_accel as roi_sum; "
@@ -55,13 +56,14 @@ def test_numba_backend_is_explicit_opt_in():
         [sys.executable, "-c", script],
         check=True,
         capture_output=True,
+        cwd=tmp_path,
         env={**os.environ, "ORGUI_ACCEL_BACKEND": "numba"},
         text=True,
     )
     assert result.stdout.splitlines() == ["numba", "True", "True"]
 
 
-def test_numpy_backend_is_explicit_selectable():
+def test_numpy_backend_is_explicit_selectable(tmp_path):
     script = (
         "import sys; "
         "import orgui.app._roi_sum_accel as roi_sum; "
@@ -74,6 +76,7 @@ def test_numpy_backend_is_explicit_selectable():
         [sys.executable, "-c", script],
         check=True,
         capture_output=True,
+        cwd=tmp_path,
         env={**os.environ, "ORGUI_ACCEL_BACKEND": "numpy"},
         text=True,
     )

@@ -56,17 +56,29 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # silx[full] carries the GUI extras the widgets import at runtime, such
-      # as qtawesome. It also installs PySide6, which silx prefers over both
-      # PyQt bindings, so QT_API below pins the binding this leg is meant to
-      # exercise.
+      # Qt itself needs libEGL even under the "minimal" platform plugin. Kept
+      # to the one library the runner was missing; widen only if a later run
+      # names another.
+      - name: Install Qt system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1
+
+      # qtawesome is the silx GUI extra the widgets import at runtime. It is
+      # installed on its own rather than through silx[full], which also pulls
+      # pyopencl (fails at import on the macOS runner) and PySide6 (which silx
+      # would prefer over the binding this leg is meant to exercise).
       - name: Install test dependencies
         run: >-
           python -m pip install --upgrade pip pytest
-          "silx[full]" ${{ matrix.qt-binding }}
+          qtawesome ${{ matrix.qt-binding }}
 
+      # -Dstatic_xxhash=true matches build-wheels.yml and release.yml. Without
+      # it the extensions that depend on xxhash link a shared library that is
+      # not installed beside them, and fail to load on Windows.
       - name: Install package
-        run: python -m pip install ".[speedup,extendedfilesupport,symmetry]"
+        run: >-
+          python -m pip install -C setup-args=-Dstatic_xxhash=true
+          ".[speedup,extendedfilesupport,symmetry]"
 
       # Runs against the installed package, so the compiled extensions under
       # test are the ones that ship. Covers orgui/app, orgui/backend and
