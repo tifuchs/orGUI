@@ -86,6 +86,9 @@ defaultconfigfile = os.path.expanduser("~/orgui")
 
 def main():
     """Launch the GUI or dispatch an orGUI command."""
+    if sys._xoptions.get("frozen_modules") != "off":
+        os.environ.setdefault("PYDEVD_DISABLE_FILE_VALIDATION", "1")
+
     if len(sys.argv) > 1 and sys.argv[1] == "rsmap":
         from .reconstruction_cli import main as reconstruction_main
 
@@ -200,6 +203,7 @@ def main():
     # INFO notification is expected and does not affect the scientific data.
     # Keep actual renderer warnings and errors visible.
     logging.getLogger("silx.gui.plot3d.scene.primitives").setLevel(logging.WARNING)
+    logging.getLogger("silx.gui._glutils.OpenGLWidget").setLevel(logging.WARNING)
 
     if options.logfile:
         # use root logger, i.e. log everything
@@ -258,6 +262,10 @@ def main():
 
     if "NUMEXPR_MAX_THREADS" not in os.environ:
         os.environ["NUMEXPR_MAX_THREADS"] = "1"  # to avoid oversubscription
+    if "NUMEXPR_NUM_THREADS" not in os.environ:
+        # NumExpr 2.11 otherwise initially requests its compiled-in maximum,
+        # which conflicts with the one-thread cap above before it settles.
+        os.environ["NUMEXPR_NUM_THREADS"] = os.environ["NUMEXPR_MAX_THREADS"]
 
     if options.cli:
         os.environ["QT_QPA_PLATFORM"] = (
