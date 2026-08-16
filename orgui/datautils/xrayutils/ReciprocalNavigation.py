@@ -88,7 +88,12 @@ def allowedReflections(
     F = F[indices_valid]
     G = G[indices_valid]
 
-    sortarg = np.argsort(G)
+    # Symmetry-equivalent reflections have bit-identical G, so the default
+    # (unstable) sort leaves their relative order up to the numpy build: the
+    # tie order differs between numpy 1.x and 2.x and between SIMD paths.
+    # Callers such as autoBraggSearch pick a representative per group by
+    # taking the first of a tie, so that order has to be reproducible.
+    sortarg = np.argsort(G, kind="stable")
     if "returnF" in keyargs and keyargs["returnF"]:
         return hkls[sortarg], (F[sortarg], G[sortarg])
     else:

@@ -243,9 +243,12 @@ def test_allowed_bragg_same_q_returns_full_same_norm_group():
     assert len(hkls) == 3
     assert intensity[0] > 0.0
     np.testing.assert_allclose(norms, qnorm)
+    # One representative per Friedel pair. Which one is kept follows the
+    # stable |Q| sort in ReciprocalNavigation.allowedReflections, so it is
+    # reproducible across numpy versions rather than left to the sort kernel.
     assert {tuple(hkl) for hkl in hkls} == {
-        (-1, 0, 0),
-        (0, -1, 0),
+        (1, 0, 0),
+        (0, 1, 0),
         (0, 0, 1),
     }
 
