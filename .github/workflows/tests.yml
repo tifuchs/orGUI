@@ -71,16 +71,13 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1
 
-      # qtawesome and PyOpenGL are the silx GUI extras orgui.app pulls in on
-      # import (silx.gui.data.DataViews reaches silx.gui.plot3d, which raises
-      # unless PyOpenGL is present). They are installed on their own rather
-      # than through silx[full], which also pulls pyopencl (fails at import on
-      # the macOS runner) and PySide6 (which silx would prefer over the
-      # binding this leg is meant to exercise).
+      # Only the Qt binding is installed here. qtawesome and PyOpenGL are now
+      # declared in pyproject.toml, so the package install below must pull
+      # them in on its own; naming them here as well would hide a regression
+      # in those declarations. The binding stays explicit because none is
+      # declared -- silx requires none, and each leg pins its own.
       - name: Install test dependencies
-        run: >-
-          python -m pip install --upgrade pip pytest
-          qtawesome PyOpenGL ${{ matrix.qt-binding }}
+        run: python -m pip install --upgrade pip pytest ${{ matrix.qt-binding }}
 
       # -Dstatic_xxhash=true matches build-wheels.yml and release.yml, which
       # also pass --vsenv on Windows (see the matrix entry above).

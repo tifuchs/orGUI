@@ -35,6 +35,11 @@ dependencies = [
 	'matplotlib >= 3.6',
 	'fabio >= 0.7',
 	'silx >= 1.1',
+	# Required at import, not optional: orgui.app imports
+	# silx.gui.data.DataViewerFrame, which reaches silx.gui.plot3d (raises
+	# without PyOpenGL) and silx.gui.data.Hdf5TableView (imports qtawesome).
+	'PyOpenGL',
+	'qtawesome',
 	'pyFAI >= 2023.3,!=2025.12.0,!=2025.12.1,!=2026.2.0',
 	'xraydb >= 4.0',
 	'pytz >= 2022'
@@ -58,7 +63,12 @@ full = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin', 'pyxtal', 'py3Dm
 full-devel = ['qtconsole', 'ase', 'numba' , 'PyOpenGL', 'hdf5plugin', 'pyxtal', 'py3Dmol', 'ruff', 'pyupgrade']
 
 [build-system]
-requires = ["meson-python", "pybind11", "setuptools-scm>=8", "numpy"]
+# pybind11 >= 2.12: the extensions reach NumPy's C API through
+# pybind11/numpy.h, which resolves it at runtime rather than at compile time.
+# NumPy 2 moved numpy.core to numpy._core, and only 2.12 onwards looks it up
+# correctly, so an older pybind11 yields a binary that fails to import under
+# NumPy 2.
+requires = ["meson-python", "pybind11 >= 2.12", "setuptools-scm>=8", "numpy"]
 build-backend = "mesonpy"
 
 [tool.setuptools.packages.find]

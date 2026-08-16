@@ -13,6 +13,12 @@ For a smaller installation with only the core dependencies, use:
 
    pip install orGUI
 
+Neither command installs Qt, which is large and often supplied by the
+surrounding environment. Install one binding yourself —
+`PyQt5 <https://pypi.org/project/PyQt5/>`_, `PyQt6 <https://pypi.org/project/PyQt6/>`_
+or `PySide6 <https://pypi.org/project/PySide6/>`_ — and select it with
+``QT_API`` if several are present.
+
 The application is started from the command line with:
 
 .. code-block:: bash
