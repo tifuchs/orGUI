@@ -99,7 +99,3 @@ select = [
 ignore = [
     # Add ignores here if needed
 ]
-
-
-[tool.ruff.lint.per-file-ignores]
-"tests/*" = ["NPY002"]  # Example: ignore certain NumPy rules in tests

@@ -483,8 +483,10 @@ class ConfigData:
             "@orgui_meta": "config",
             "@orgui_config_role": role,
             "@orgui_schema_version": SCHEMA_VERSION,
+            # datetime.timezone.utc, not the datetime.UTC alias, which only
+            # exists from Python 3.11 while orGUI supports 3.10.
             "@orgui_config_created": datetime.datetime.now(
-                datetime.UTC
+                datetime.timezone.utc
             ).isoformat(),
             "instrument": {
                 "@NX_class": "NXinstrument",
