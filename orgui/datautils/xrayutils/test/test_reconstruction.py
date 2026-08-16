@@ -1181,11 +1181,24 @@ def test_kernel_threads_sweep_stops_early_on_plateau(monkeypatch):
     doc Sec7), so this drives the sweep's own control flow (candidate
     loop, plateau early-stop, inherited values) with a fake, deterministic
     per-candidate kernel/timing instead of relying on real thread-scaling
-    behavior."""
+    behavior.
+
+    The clock is faked along with the kernel. Sleeping for the scripted
+    durations and measuring them with the real ``perf_counter`` puts CI
+    scheduling jitter inside the measured interval: the plateau compares a
+    candidate against 0.9x the previous one, so an overshoot on the short
+    candidate alone can invert the comparison. That was observed on a macOS
+    runner, where candidate 8 was measured even though 4 had already
+    plateaued.
+    """
     import orgui.datautils.xrayutils.reconstruction as reconstruction_module
 
     call_log = []
     durations = {1: 0.15, 2: 0.03, 4: 0.05, 8: 0.001}
+    fake_now = [0.0]
+    monkeypatch.setattr(
+        reconstruction_module.time, "perf_counter", lambda: fake_now[0]
+    )
 
     class _FakeSweepKernel:
         def __init__(self, threads):
@@ -1193,7 +1206,7 @@ def test_kernel_threads_sweep_stops_early_on_plateau(monkeypatch):
 
         def accumulate(self, *args, **kwargs):
             call_log.append(self._threads)
-            time.sleep(durations[self._threads])
+            fake_now[0] += durations[self._threads]
             return {}
 
     def fake_kernel_for_grid(

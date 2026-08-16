@@ -38,6 +38,9 @@ def test_default_import_uses_cpp_without_loading_numba(tmp_path):
         check=True,
         capture_output=True,
         cwd=tmp_path,
+        # A child that blocks would otherwise hang the whole job: importing
+        # the backend takes seconds, so anything near this is a failure.
+        timeout=120,
         env=env,
         text=True,
     )
@@ -57,6 +60,9 @@ def test_numba_backend_is_explicit_opt_in(tmp_path):
         check=True,
         capture_output=True,
         cwd=tmp_path,
+        # A child that blocks would otherwise hang the whole job: importing
+        # the backend takes seconds, so anything near this is a failure.
+        timeout=120,
         env={**os.environ, "ORGUI_ACCEL_BACKEND": "numba"},
         text=True,
     )
@@ -77,6 +83,9 @@ def test_numpy_backend_is_explicit_selectable(tmp_path):
         check=True,
         capture_output=True,
         cwd=tmp_path,
+        # A child that blocks would otherwise hang the whole job: importing
+        # the backend takes seconds, so anything near this is a failure.
+        timeout=120,
         env={**os.environ, "ORGUI_ACCEL_BACKEND": "numpy"},
         text=True,
     )

@@ -23,6 +23,23 @@ xxhash_dep = dependency(
 cpp = meson.get_compiler('cpp')
 native_args = []
 
+# Clang (notably Apple clang on arm64) contracts `a + b * c` into a single
+# fused multiply-add by default, which rounds once where NumPy rounds twice.
+# That is what makes the corrected-variance loop in
+# reciprocal_reconstruction_cpp.cpp differ from the NumPy form it replaced,
+# by one unit in the last place. Off by default so release builds keep the
+# compiler's own code generation; test builds turn it on to hold the
+# bit-for-bit comparison. MSVC does not contract by default and returns no
+# supported argument here.
+if get_option('strict_fp_contract')
+  contract_args = cpp.get_supported_arguments('-ffp-contract=off')
+  if contract_args.length() > 0
+    add_project_arguments(contract_args, language: 'cpp')
+  else
+    warning('strict_fp_contract requested, but this C++ compiler does not support -ffp-contract=off')
+  endif
+endif
+
 if get_option('native_optimization')
   native_args = cpp.get_supported_arguments('-march=native')
 

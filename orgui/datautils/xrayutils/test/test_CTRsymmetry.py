@@ -735,6 +735,8 @@ class TestOptionalSymmetryImports(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            # A blocked child would otherwise hang the whole job.
+            timeout=120,
         )
 
         self.assertEqual(completed.stdout.strip(), "False")

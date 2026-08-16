@@ -11,3 +11,10 @@ option(
   value: false,
   description: 'Force the pinned static xxHash subproject instead of a system library'
 )
+
+option(
+  'strict_fp_contract',
+  type: 'boolean',
+  value: false,
+  description: 'Disable floating-point contraction (-ffp-contract=off) so native results stay bit-for-bit with the NumPy reference; used by the test workflow, not by release builds'
+)
