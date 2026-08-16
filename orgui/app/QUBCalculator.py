@@ -929,7 +929,10 @@ class QUBCalculator(qt.QSplitter):
         self.polfactor = 0
         self.azimuth = 0
         self.detectorCal = DetectorCalibration.Detector2D_SXRD()
-        self.detectorCal.detector = pyFAI.detector_factory("pilatus44mcdte")
+        self.detectorCal.detector = pyFAI.detector_factory(
+            "pilatus44mcdte",
+            {"sensor": {"material": "CdTe", "thickness": 1e-3}},
+        )
         self.detectorCal.setFit2D(
             sdd * 1e3, cp[0], cp[1], pixelX=pixelsize * 1e6, pixelY=pixelsize * 1e6
         )
