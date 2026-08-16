@@ -42,6 +42,7 @@ Load the scan and experiment configuration normally, then open
 * ``Performance``: footprint accuracy, CPU and memory allocation, and advanced
   task layout;
 * ``Job and output``: job descriptor, scratch directory, and final HDF5 path;
+* ``Cluster``: scheduler, environment, mapping, and finalization resources;
 * ``Preview and status``: estimates, prepared JSON, status, results, and
   user-facing errors.
 

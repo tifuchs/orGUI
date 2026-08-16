@@ -7,7 +7,7 @@ finding another Bragg peak predicted by the trial matrix. The goal is to obtain
 a reliable starting orientation without first manually identifying two
 reference reflections.
 
-The controls are in the ``Auto UB/Reflections`` group of the
+The controls are in the ``Auto UB`` group of the
 ``Reciprocal space navigation`` panel.
 
 Prerequisites

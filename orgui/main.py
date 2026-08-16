@@ -196,6 +196,11 @@ def main():
 
     orgui_logger.setLevel(logging.INFO)
 
+    # silx converts OpenGL vertex buffers to float32 internally.  Its repeated
+    # INFO notification is expected and does not affect the scientific data.
+    # Keep actual renderer warnings and errors visible.
+    logging.getLogger("silx.gui.plot3d.scene.primitives").setLevel(logging.WARNING)
+
     if options.logfile:
         # use root logger, i.e. log everything
         formatter = logging.Formatter(
@@ -365,12 +370,16 @@ def _start_GUI(options, ncpu):
     from silx.gui import qt
     import silx
 
-    if options.opengl:
-        silx.config.DEFAULT_PLOT_BACKEND = "opengl"
-
     if os.path.isfile(options.configfile) or options.configfile == defaultconfigfile:
         app = qt.QApplication(sys.argv)
-        app.setApplicationName("orGUI")
+        from orgui.app.ui_preferences import (
+            apply_saved_ui_preferences,
+            configure_application_identity,
+        )
+
+        configure_application_identity(app)
+        if apply_saved_ui_preferences(app, force_opengl=options.opengl):
+            silx.config.DEFAULT_PLOT_BACKEND = "opengl"
         from .resources import getQicon
 
         app.setWindowIcon(getQicon("orguiicon"))

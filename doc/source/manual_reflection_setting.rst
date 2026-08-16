@@ -55,7 +55,7 @@ contains the manual tools for adjusting the selected reference reflection.
 Adding Calculated Bragg Reflections Manually
 --------------------------------------------
 
-The ``Auto UB/Reflections`` group also contains ``add Bragg reflection``. This
+The ``Auto UB`` group also contains ``add Bragg reflection``. This
 is a semi-manual helper for cases where a usable ``UB`` matrix already exists.
 It calculates allowed Bragg reflections from the current crystal, detector
 calibration, scan range, and current ``UB`` matrix, then orders candidates by
@@ -206,7 +206,7 @@ The pixel-equivalent mismatch score is
 
 Thus :math:`s_i \le 1` means that the reflection mismatch is within roughly one
 local detector pixel of the current instrumental angular resolution. The
-``Resolution limit`` control in the reference-reflection panel sets the maximum
+``Resolution`` control in the reference-reflection panel sets the maximum
 allowed value of :math:`s_i` for this absolute test. Reflections below that
 limit are marked blue to indicate that the agreement is resolution-limited.
 All other reflections keep the relative green-to-red coloring from

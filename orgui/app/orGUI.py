@@ -68,6 +68,7 @@ from .peak1Dintegr import RockingPeakIntegrator
 from .ArrayTableDialog import ArrayTableDialog
 from .MaskConfigDialog import MaskConfigDialog
 from .HDF5SettingsDialog import HDF5SettingsDialog
+from .StyleDialog import StyleDialog
 from .ReconstructionDialog import ReconstructionDialog
 from .bgroi import RectangleBgROI
 from .database import DataBase, FILTERS
@@ -539,6 +540,10 @@ ub : gui for UB matrix and angle calculations
             consoleViewAct = self.console_dockwidget.toggleViewAction()
             view_menu.addAction(consoleViewAct)
 
+        view_menu.addSeparator()
+        selectStyleAct = view_menu.addAction("Application style")
+        selectStyleAct.triggered.connect(self._onSelectApplicationStyle)
+
         ##############################
 
         editUAct = qt.QAction("Edit orientation matrix", self)
@@ -593,6 +598,19 @@ ub : gui for UB matrix and angle calculations
             self.centralPlot.setSelectionMask(
                 np.ascontiguousarray(mask, dtype=np.uint8)
             )
+
+    # GUI-only: user-triggered application-style selection dialog.
+    def _onSelectApplicationStyle(self):
+        """Open the dialog for changing the current Qt widget style."""
+        dialog = StyleDialog(
+            plots=(
+                self.centralPlot,
+                self.integrdataPlot,
+                self.roPkIntegrTab.plotROIselect,
+            ),
+            parent=self,
+        )
+        dialog.exec()
 
     # GUI-only: user-triggered reciprocal-space reconstruction dialog.
     def _onShowReconstruction(self):

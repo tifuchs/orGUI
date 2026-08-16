@@ -163,25 +163,28 @@ class QUBCalculator(qt.QSplitter):
         self.reflectionWidget.setOrientation(qt.Qt.Horizontal)
         label = qt.QLabel("H:")
         self.reflectionWidget.addWidget(label)
-        self.Hbox = qt.QDoubleSpinBox()
+        self.Hbox = qutils.CompactDoubleSpinBox()
         self.Hbox.setRange(-100, 100)
         self.Hbox.setDecimals(3)
         self.reflectionWidget.addWidget(self.Hbox)
         label = qt.QLabel("K:")
         self.reflectionWidget.addWidget(label)
-        self.Kbox = qt.QDoubleSpinBox()
+        self.Kbox = qutils.CompactDoubleSpinBox()
         self.Kbox.setRange(-100, 100)
         self.Kbox.setDecimals(3)
         self.reflectionWidget.addWidget(self.Kbox)
         label = qt.QLabel("L:")
         self.reflectionWidget.addWidget(label)
-        self.Lbox = qt.QDoubleSpinBox()
+        self.Lbox = qutils.CompactDoubleSpinBox()
         self.Lbox.setRange(-100, 100)
         self.Lbox.setDecimals(3)
         self.reflectionWidget.addWidget(self.Lbox)
-        hkl_width = self.Hbox.fontMetrics().horizontalAdvance("-00.000") + 24
+        # keep the width the fixed "-00.000" sizing used to give, but let the
+        # tool bar compress the boxes when it gets narrow instead of pushing
+        # them into the overflow menu
         for spinbox in (self.Hbox, self.Kbox, self.Lbox):
-            spinbox.setFixedWidth(hkl_width)
+            spinbox.setPreferredChars(6)
+            spinbox.setVisibleChars(5)
 
         addReflAct = qt.QAction(
             resources.getQicon("add-bragg-reflection"),

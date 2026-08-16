@@ -85,7 +85,7 @@ class QScanSelector(qt.QMainWindow):
 
         self.mainwidget = qt.QWidget()
         self.mainLayout = qt.QVBoxLayout()
-        maintab = qt.QTabWidget()
+        maintab = qutils.compactTabWidget()
 
         self.openFileAction = qt.QAction(
             icons.getQIcon("document-open"), "Open file", self
@@ -153,7 +153,7 @@ class QScanSelector(qt.QMainWindow):
         scannoSelector.setOrientation(qt.Qt.Horizontal)
         qt.QLabel("Scan #:", scannoSelector)
 
-        self.scannoBox = qt.QSpinBox(scannoSelector)
+        self.scannoBox = qutils.CompactSpinBox(scannoSelector)
         self.scannoBox.setRange(1, 2147483647)
         self.scannoBox.setValue(1)
 
@@ -169,6 +169,15 @@ class QScanSelector(qt.QMainWindow):
         qt.QLabel("Backend:", btidsplit)
         self.btid = qt.QComboBox(btidsplit)
         [self.btid.addItem(bt) for bt in backends.fscans]
+        # do not reserve the width of the longest backend name: the combo box
+        # may shrink to a few characters and elide, the full name stays
+        # available in the popup and in the tool tip
+        self.btid.setSizeAdjustPolicy(
+            qt.QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.btid.setMinimumContentsLength(8)
+        self.btid.currentTextChanged.connect(self.btid.setToolTip)
+        self.btid.setToolTip(self.btid.currentText())
         # keep the manual selection in sync with the beamtime autodetect
         # fallback, so both paths default to the same backend
         self.btid.setCurrentText(backends.default_beamtime)
@@ -206,11 +215,11 @@ class QScanSelector(qt.QMainWindow):
         # decreaseImageNo = qt.QAction(lefticon,"previous image")
 
         imglabel = qt.QLabel("No:")
-        self.noSelector = qt.QSpinBox()
+        self.noSelector = qutils.CompactSpinBox()
         self.noSelector.setRange(0, 0)
 
         self.axislabel = qt.QLabel("axis:")
-        self.axisSelector = qt.QDoubleSpinBox()
+        self.axisSelector = qutils.CompactDoubleSpinBox()
         self.axisSelector.setRange(-1000, 1000)
         self.axisSelector.setReadOnly(True)
         self.axisSelector.setSuffix(" °")
@@ -351,55 +360,49 @@ class QScanSelector(qt.QMainWindow):
         self.roiIntegrateTab = qt.QWidget()
         self.roiIntegrateTabLayout = qt.QVBoxLayout()
 
-        roiGroup = qt.QGroupBox("ROI definition (in pixel)")
+        roiGroup = qt.QGroupBox("ROI definition (px)")
         roiGroupLayout = qt.QGridLayout()
 
-        self.hsize = qt.QDoubleSpinBox()
-        self.vsize = qt.QDoubleSpinBox()
-        self.left = qt.QDoubleSpinBox()
-        self.right = qt.QDoubleSpinBox()
-        self.top = qt.QDoubleSpinBox()
-        self.bottom = qt.QDoubleSpinBox()
+        self.hsize = qutils.CompactDoubleSpinBox()
+        self.vsize = qutils.CompactDoubleSpinBox()
+        self.left = qutils.CompactDoubleSpinBox()
+        self.right = qutils.CompactDoubleSpinBox()
+        self.top = qutils.CompactDoubleSpinBox()
+        self.bottom = qutils.CompactDoubleSpinBox()
 
         self.hsize.setRange(1, 20000)
         self.hsize.setDecimals(1)
-        self.hsize.setSuffix(" px")
         self.hsize.setValue(6.0)
 
         self.vsize.setRange(1, 20000)
         self.vsize.setDecimals(1)
-        self.vsize.setSuffix(" px")
         self.vsize.setValue(6.0)
 
         self.left.setRange(0, 20000)
         self.left.setDecimals(1)
-        self.left.setSuffix(" px")
         self.left.setValue(6.0)
 
         self.right.setRange(0, 20000)
         self.right.setDecimals(1)
-        self.right.setSuffix(" px")
         self.right.setValue(6.0)
 
         self.top.setRange(0, 20000)
         self.top.setDecimals(1)
-        self.top.setSuffix(" px")
         self.top.setValue(0.0)
 
         self.bottom.setRange(0, 20000)
         self.bottom.setDecimals(1)
-        self.bottom.setSuffix(" px")
         self.bottom.setValue(0.0)
 
-        roiGroupLayout.addWidget(qt.QLabel("center roi (h x v):"), 0, 0)
+        roiGroupLayout.addWidget(qt.QLabel("center (h, v):"), 0, 0)
         roiGroupLayout.addWidget(self.hsize, 0, 1)
         roiGroupLayout.addWidget(self.vsize, 0, 2)
 
-        roiGroupLayout.addWidget(qt.QLabel("bg roi (left, right):"), 1, 0)
+        roiGroupLayout.addWidget(qt.QLabel("bg (left, right):"), 1, 0)
         roiGroupLayout.addWidget(self.left, 1, 1)
         roiGroupLayout.addWidget(self.right, 1, 2)
 
-        roiGroupLayout.addWidget(qt.QLabel("bg roi (top, bottom):"), 2, 0)
+        roiGroupLayout.addWidget(qt.QLabel("bg (top, bottom):"), 2, 0)
         roiGroupLayout.addWidget(self.top, 2, 1)
         roiGroupLayout.addWidget(self.bottom, 2, 2)
 
@@ -424,7 +427,7 @@ class QScanSelector(qt.QMainWindow):
 
         # hkl scan
 
-        self.H_0 = [qt.QDoubleSpinBox() for i in range(3)]
+        self.H_0 = [qutils.CompactDoubleSpinBox() for i in range(3)]
         [h.setRange(-20000, 20000) for h in self.H_0]
         [h.setDecimals(4) for h in self.H_0]
         self.H_0[0].setValue(1.0)
@@ -432,7 +435,7 @@ class QScanSelector(qt.QMainWindow):
         self.H_0[2].setValue(0.0)
         [h.valueChanged.connect(lambda: self.sigROIChanged.emit()) for h in self.H_0]
 
-        self.H_1 = [qt.QDoubleSpinBox() for i in range(3)]
+        self.H_1 = [qutils.CompactDoubleSpinBox() for i in range(3)]
         [h.setRange(-20000, 20000) for h in self.H_1]
         [h.setDecimals(4) for h in self.H_1]
         self.H_1[0].setValue(0.0)
@@ -453,14 +456,16 @@ class QScanSelector(qt.QMainWindow):
         hklscanwidget = qt.QWidget()
         hklscanwidgetlayout = qt.QVBoxLayout()
 
-        hklscanwidgetlayout.addWidget(qt.QLabel("Integrate along:\nH(s) = H₁ 🞄 s + H₀"))
+        hklscanwidgetlayout.addWidget(
+            qutils.wrappingLabel("Integrate along:\nH(s) = H₁ 🞄 s + H₀")
+        )
         hklscanwidgetlayout.addWidget(directionGroup)
         hklscanwidgetlayout.addWidget(locationGroup)
 
         hklscanwidget.setLayout(hklscanwidgetlayout)
         # static roi scan
 
-        self.xy_static = [qt.QDoubleSpinBox() for i in range(2)]
+        self.xy_static = [qutils.CompactDoubleSpinBox() for i in range(2)]
 
         [h.setRange(-20000, 20000) for h in self.xy_static]
         [h.setDecimals(3) for h in self.xy_static]
@@ -471,7 +476,7 @@ class QScanSelector(qt.QMainWindow):
             for h in self.xy_static
         ]
 
-        self.hkl_static = [qt.QDoubleSpinBox() for i in range(3)]
+        self.hkl_static = [qutils.CompactDoubleSpinBox() for i in range(3)]
         [h.setRange(-20000, 20000) for h in self.hkl_static]
         [h.setDecimals(3) for h in self.hkl_static]
         [h.setValue(0.0) for h in self.hkl_static]
@@ -534,29 +539,33 @@ class QScanSelector(qt.QMainWindow):
         # self._selectH_1_btn.setMaximumWidth(width)
         self._selectH_1_btn.setMaximumHeight(height)
 
-        self._H_0_label = qt.QLabel("")
-        self._H_1_label = qt.QLabel("")
+        self._H_0_label = qutils.wrappingLabel("")
+        self._H_1_label = qutils.wrappingLabel("")
 
         ro_panel_layout = qt.QGridLayout()
         ro_panel_layout.addWidget(
-            qt.QLabel("Rocking points along H(s) = H₁ 🞄 s + H₀"), 0, 0, 1, -1
+            qutils.wrappingLabel("Rocking points along H(s) = H₁ 🞄 s + H₀"), 0, 0, 1, -1
         )
 
-        ro_panel_layout.addWidget(qt.QLabel("Start H_0:"), 1, 0)
+        ro_panel_layout.addWidget(
+            qutils.labelWithToolTip("H_0:", "Start H_0 of the rocking scan"), 1, 0
+        )
         ro_panel_layout.addWidget(self._H_0_label, 1, 1, 1, 2)
         ro_panel_layout.addWidget(self._selectH_0_btn, 1, 3)
 
-        ro_panel_layout.addWidget(qt.QLabel("Direction H_1:"), 2, 0)
+        ro_panel_layout.addWidget(
+            qutils.labelWithToolTip("H_1:", "Direction H_1 of the rocking scan"), 2, 0
+        )
         ro_panel_layout.addWidget(self._H_1_label, 2, 1, 1, 2)
         ro_panel_layout.addWidget(self._selectH_1_btn, 2, 3)
 
         self._H_max_label = qt.QLabel("")
-        self.roscanMaxS = qt.QDoubleSpinBox()
+        self.roscanMaxS = qutils.CompactDoubleSpinBox()
         self.roscanMaxS.setRange(-20000, 20000)
         self.roscanMaxS.setDecimals(3)
         self.roscanMaxS.setValue(6.0)
         self.roscanMaxS.valueChanged.connect(self.onRoSChanged)
-        self.roscanDeltaS = qt.QDoubleSpinBox()
+        self.roscanDeltaS = qutils.CompactDoubleSpinBox()
         self.roscanDeltaS.setRange(0.00000001, 20000)
         self.roscanDeltaS.setDecimals(5)
         self.roscanDeltaS.setValue(0.1)
@@ -625,7 +634,11 @@ class QScanSelector(qt.QMainWindow):
         self.autoROIVsize.toggled.connect(lambda: self.sigROIChanged.emit())
         self.autoROIHsize.toggled.connect(lambda: self.sigROIChanged.emit())
 
-        ro_panel_layout.addWidget(qt.QLabel("ROI size (hxv):"), 5, 0)
+        ro_panel_layout.addWidget(
+            qutils.labelWithToolTip("ROI (h, v):", "ROI size, horizontal x vertical"),
+            5,
+            0,
+        )
         ro_panel_layout.addWidget(self.autoSize_label, 5, 1)
         ro_panel_layout.addWidget(self.autoROIHsize, 5, 2)
         ro_panel_layout.addWidget(self.autoROIVsize, 5, 3)
@@ -650,20 +663,22 @@ class QScanSelector(qt.QMainWindow):
 
         # Bragg reflection integration
 
-        rocking_Bragg_integration_group = qt.QGroupBox(
-            "Bragg reflection rocking integration"
-        )
+        rocking_Bragg_integration_group = qt.QGroupBox("Bragg rocking integration")
 
         ro_br_panel_layout = qt.QGridLayout()
         ro_br_panel_layout.addWidget(
-            qt.QLabel("Create rocking scans at Bragg reflections"), 0, 0, 1, -1
+            qutils.wrappingLabel("Create rocking scans at Bragg reflections"),
+            0,
+            0,
+            1,
+            -1,
         )
 
         ro_br_panel_layout.addWidget(
-            qt.QLabel("Strain (relative to set lattice, in %)"), 1, 0, 1, -1
+            qutils.wrappingLabel("Strain (relative to set lattice, in %)"), 1, 0, 1, -1
         )
 
-        self.strain_Bragg = [qt.QDoubleSpinBox() for i in range(3)]
+        self.strain_Bragg = [qutils.CompactDoubleSpinBox() for i in range(3)]
         [h.setRange(-20000, 20000) for h in self.strain_Bragg]
         [h.setDecimals(3) for h in self.strain_Bragg]
         [h.setValue(0.0) for h in self.strain_Bragg]
@@ -680,11 +695,14 @@ class QScanSelector(qt.QMainWindow):
 
         ro_br_panel_layout.addLayout(bragg_strain_xyzlayout, 2, 0, 1, -1)
 
-        self.bragg_multiple_enable = qt.QCheckBox("Integrate at multiples of:")
+        self.bragg_multiple_enable = qt.QCheckBox("Multiples of:")
+        self.bragg_multiple_enable.setToolTip(
+            "Integrate at multiples of the given hkl steps"
+        )
 
         ro_br_panel_layout.addWidget(self.bragg_multiple_enable, 3, 0, 1, -1)
 
-        self.bragg_multiple = [qt.QDoubleSpinBox() for i in range(3)]
+        self.bragg_multiple = [qutils.CompactDoubleSpinBox() for i in range(3)]
         [h.setRange(0.00, 20000) for h in self.bragg_multiple]
         [h.setDecimals(3) for h in self.bragg_multiple]
         [h.setValue(1.0) for h in self.bragg_multiple]
@@ -709,7 +727,7 @@ class QScanSelector(qt.QMainWindow):
 
         #  roi scan tab
 
-        self.scanstab = qt.QTabWidget()
+        self.scanstab = qutils.compactTabWidget()
         self.scanstab.addTab(hklscanwidget, "hklscan")
         self.scanstab.addTab(static_loc_Group, "fixed")
         self.scanstab.addTab(rocking_integration_group, "rocking hklscan")
@@ -720,17 +738,19 @@ class QScanSelector(qt.QMainWindow):
         # options group
 
         optionsGroup = qt.QGroupBox("Integration options")
-        optionsGroupLayout = qt.QGridLayout()
+        # the check boxes reflow into one or two columns, depending on the
+        # width the dock is given, instead of forcing a two column minimum
+        optionsGroupLayout = qutils.FlowLayout()
         self.useMaskBox = qt.QCheckBox("Use pixel mask")
         self.useLorentzBox = qt.QCheckBox("Lorentz correction")
         self.useLorentzBox.setEnabled(False)
         self.useSolidAngleBox = qt.QCheckBox("Solid angle correction")
         self.usePolarizationBox = qt.QCheckBox("Polarization correction")
 
-        optionsGroupLayout.addWidget(self.useMaskBox, 0, 0)
-        optionsGroupLayout.addWidget(self.useLorentzBox, 1, 0)
-        optionsGroupLayout.addWidget(self.useSolidAngleBox, 0, 1)
-        optionsGroupLayout.addWidget(self.usePolarizationBox, 1, 1)
+        optionsGroupLayout.addWidget(self.useMaskBox)
+        optionsGroupLayout.addWidget(self.useSolidAngleBox)
+        optionsGroupLayout.addWidget(self.useLorentzBox)
+        optionsGroupLayout.addWidget(self.usePolarizationBox)
 
         optionsGroup.setLayout(optionsGroupLayout)
 
@@ -1477,8 +1497,8 @@ class ROIAdvancedOptions(qt.QWidget):
         self.offsetGroup.setCheckable(True)
         self.offsetGroup.setChecked(False)
 
-        self._offsetx = qt.QDoubleSpinBox()
-        self._offsety = qt.QDoubleSpinBox()
+        self._offsetx = qutils.CompactDoubleSpinBox()
+        self._offsety = qutils.CompactDoubleSpinBox()
 
         self._offsetx.setRange(-20000, 20000)
         self._offsetx.setDecimals(1)
@@ -1508,7 +1528,7 @@ class ROIAdvancedOptions(qt.QWidget):
         sizeLayout = qt.QGridLayout()
         sizeLayout.addWidget(qt.QLabel("Project sample size"), 0, 0, 1, -1)
 
-        self._sizeXsample = qt.QDoubleSpinBox()
+        self._sizeXsample = qutils.CompactDoubleSpinBox()
         self._sizeXsample.setRange(1, 100000)
         self._sizeXsample.setDecimals(1)
         self._sizeXsample.setSuffix(" µm")
@@ -1516,7 +1536,7 @@ class ROIAdvancedOptions(qt.QWidget):
         self._sizeXsample.setSingleStep(10.0)
         self._sizeXsample.valueChanged.connect(self._onAnyValueChanged)
 
-        self._sizeYsample = qt.QDoubleSpinBox()
+        self._sizeYsample = qutils.CompactDoubleSpinBox()
         self._sizeYsample.setRange(1, 100000)
         self._sizeYsample.setDecimals(1)
         self._sizeYsample.setSuffix(" µm")
@@ -1524,7 +1544,7 @@ class ROIAdvancedOptions(qt.QWidget):
         self._sizeYsample.setSingleStep(10.0)
         self._sizeYsample.valueChanged.connect(self._onAnyValueChanged)
 
-        self._sizeZsample = qt.QDoubleSpinBox()
+        self._sizeZsample = qutils.CompactDoubleSpinBox()
         self._sizeZsample.setRange(1, 100000)
         self._sizeZsample.setDecimals(1)
         self._sizeZsample.setSuffix(" µm")
@@ -1552,7 +1572,7 @@ class ROIAdvancedOptions(qt.QWidget):
 
         factorLayout = qt.QGridLayout()
 
-        self._sizeFactor = qt.QDoubleSpinBox()
+        self._sizeFactor = qutils.CompactDoubleSpinBox()
         self._sizeFactor.setRange(-10000.0, 100000.0)
         self._sizeFactor.setDecimals(3)
         self._sizeFactor.setSuffix(" %")
@@ -1570,7 +1590,7 @@ class ROIAdvancedOptions(qt.QWidget):
         self.backgroundFitGroup.setChecked(False)
 
         backgroundFitLayout = qt.QGridLayout()
-        self._backgroundFitOrder = qt.QSpinBox()
+        self._backgroundFitOrder = qutils.CompactSpinBox()
         self._backgroundFitOrder.setRange(0, 2)
         self._backgroundFitOrder.setValue(1)
         self._backgroundFitOrder.setToolTip(

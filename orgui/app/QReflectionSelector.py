@@ -195,7 +195,7 @@ class QReflectionSelector(qt.QWidget):
 
         self.plot.sigKeyPressDelete.connect(self._onDelete)
 
-        editorTabWidget = qt.QTabWidget()
+        editorTabWidget = qutils.compactTabWidget()
 
         self.refleditor = ArrayEditWidget(True, 1)
         header = ["H", "K", "L", "x", "y", "imageno"]
@@ -229,6 +229,7 @@ class QReflectionSelector(qt.QWidget):
 
         layout.addWidget(editorTabWidget)
         self.mismatchLabel = qt.QLabel("Mismatch: unavailable")
+        self.mismatchLabel.setWordWrap(True)
         self.mismatchLabel.setToolTip(
             "Mean absolute mismatch across the reference reflections. "
             "The first value is the angular difference between Q calculated "
@@ -238,8 +239,13 @@ class QReflectionSelector(qt.QWidget):
         layout.addWidget(self.mismatchLabel)
 
         pixelMismatchLayout = qt.QHBoxLayout()
-        pixelMismatchLayout.addWidget(qt.QLabel("Resolution limit:"))
-        self.pixelMismatchLimit = qt.QDoubleSpinBox()
+        pixelMismatchLayout.addWidget(
+            qutils.labelWithToolTip(
+                "Resolution:",
+                "Detector pixel equivalent mismatch limit used to color the rows",
+            )
+        )
+        self.pixelMismatchLimit = qutils.CompactDoubleSpinBox()
         self.pixelMismatchLimit.setDecimals(2)
         self.pixelMismatchLimit.setRange(0.1, 20.0)
         self.pixelMismatchLimit.setSingleStep(0.1)
@@ -257,7 +263,7 @@ class QReflectionSelector(qt.QWidget):
         layout.addLayout(pixelMismatchLayout)
         # self.addWidget(editorTabWidget)
 
-        controlsLayout = qt.QHBoxLayout()
+        controlsLayout = qutils.FlowLayout()
 
         self.editControlsGroup = qt.QGroupBox("Reflection edit")
         editControlsLayout = qt.QHBoxLayout()
@@ -268,7 +274,8 @@ class QReflectionSelector(qt.QWidget):
         editControlsLayout.addWidget(self.editToolbar)
         self.editControlsGroup.setLayout(editControlsLayout)
 
-        self.autoControlsGroup = qt.QGroupBox("Auto UB/Reflections")
+        self.autoControlsGroup = qt.QGroupBox("Auto UB")
+        self.autoControlsGroup.setToolTip("Automatic UB and reflection search")
         autoControlsLayout = qt.QHBoxLayout()
         autoControlsLayout.setContentsMargins(6, 3, 6, 3)
         self.autoToolbar = qt.QToolBar()
@@ -333,7 +340,6 @@ class QReflectionSelector(qt.QWidget):
         self.autoToolbar.addAction(self.addBraggReflAct)
 
         controlsLayout.addWidget(self.editControlsGroup)
-        controlsLayout.addStretch(1)
         controlsLayout.addWidget(self.autoControlsGroup)
         layout.addLayout(controlsLayout)
 

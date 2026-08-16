@@ -157,6 +157,29 @@ A ***critical bug*** was fixed that affects bulk CTR calculations:
 
 GUI changes:
 
+- The "Scan data" and "Reciprocal space navigation" panels no longer reserve
+  horizontal space they do not need. In the "Scan data" panel, spin boxes are
+  sized for the values that are typically entered instead of
+  the widest value of their range, the integration option check boxes reflow
+  into one or two columns depending on the available width, tab labels and the
+  backend combo box elide, and long descriptions wrap. That panel can now be
+  made about 20% narrower than before and, unlike before, can be resized at
+  all. All widths follow the font metrics and the current widget style, so
+  they scale with high DPI settings. Some labels were shortened: the ROI sizes
+  state their pixel unit in the group title instead of on every spin box,
+  "Start H_0:"/"Direction H_1:" became "H_0:"/"H_1:", "ROI size (hxv):" became
+  "ROI (h, v):", and "Integrate at multiples of:" became "Multiples of:"; the
+  full wording is available as a tool tip.
+- In the "Reciprocal space navigation" panel, the ``H``/``K``/``L`` boxes of the
+  reflection tool bar keep their previous width but are no longer fixed, so the
+  tool bar compresses them before it moves controls into its overflow menu. The
+  reflection edit and automatic UB tool bar groups wrap onto a second row when
+  the panel is narrow, the mismatch read-out wraps, and the reflection table
+  tabs elide. That panel can now be made about 45% narrower. The
+  ``Auto UB/Reflections`` group is now called ``Auto UB`` and the
+  ``Resolution limit`` control ``Resolution``; the documentation was updated
+  accordingly.
+
 - The position readout of the image plot now shows ``HKL`` as a single
   bracketed triplet instead of three separate ``H``, ``K`` and ``L`` fields,
   and reports the momentum transfer of the selected reciprocal-space frame as

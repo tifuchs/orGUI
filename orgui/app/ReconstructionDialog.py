@@ -143,14 +143,16 @@ class ReconstructionDialog(qt.QDialog):
         if not hasattr(self.orgui, "reconstruction_monitor_corrections"):
             self.orgui.reconstruction_monitor_corrections = ()
         self.setWindowTitle("Reciprocal-space reconstruction")
-        self.resize(1100, 760)
+        self.resize(900, 760)
         layout = qt.QVBoxLayout(self)
         self.tabs = qt.QTabWidget()
-        self.tabs.addTab(self._data_tab(), "Experiment")
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.setElideMode(qt.Qt.ElideRight)
+        self.tabs.addTab(self._scrollable_tab(self._data_tab()), "Experiment")
         self.tabs.addTab(self._grid_tab(), "Output grids")
         self.tabs.addTab(self._performance_tab(), "Performance")
-        self.tabs.addTab(self._cluster_tab(), "Cluster")
         self.tabs.addTab(self._paths_tab(), "Job and output")
+        self.tabs.addTab(self._cluster_tab(), "Cluster")
         self.output_tab = qt.QWidget()
         output_layout = qt.QVBoxLayout(self.output_tab)
         self.preview_output = qt.QPlainTextEdit()
@@ -174,33 +176,72 @@ class ReconstructionDialog(qt.QDialog):
             signal.connect(self._refresh_file_count_summary)
         self._refresh_file_count_summary()
         layout.addWidget(self.tabs, stretch=1)
-        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Close)
-        for label, slot in (
-            ("Preview", self.preview),
-            ("Prepare Job", self.prepare),
-            ("Run Locally", self.run_local),
-            ("Create Cluster Scripts", self.create_cluster_scripts),
-            ("Open Job", self.open_job),
-            ("Resume", self.resume),
-        ):
-            button = buttons.addButton(label, qt.QDialogButtonBox.ActionRole)
-            button.clicked.connect(slot)
-            button.setToolTip(
-                {
-                    "Preview": "Estimate coverage, storage, and execution layout.",
-                    "Prepare Job": "Freeze the current settings into a resumable job.",
-                    "Run Locally": "Prepare and execute the configured job locally.",
-                    "Create Cluster Scripts": (
-                        "Prepare the job and create an SGE or Slurm map array "
-                        "with a dependent reduction/finalization job."
-                    ),
-                    "Open Job": "Select an existing reconstruction job JSON file.",
-                    "Resume": "Verify and continue the selected prepared job.",
-                }[label]
-            )
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        footer = qt.QVBoxLayout()
+        current_actions = qt.QDialogButtonBox()
+        prepared_actions = qt.QDialogButtonBox(qt.QDialogButtonBox.Close)
+        action_rows = (
+            (
+                current_actions,
+                (
+                    ("Preview", self.preview),
+                    ("Prepare Job", self.prepare),
+                    ("Run Locally", self.run_local),
+                    ("Create Cluster Scripts", self.create_cluster_scripts),
+                ),
+            ),
+            (
+                prepared_actions,
+                (("Open Job", self.open_job), ("Resume", self.resume)),
+            ),
+        )
+        self.action_buttons = {}
+        for button_box, actions in action_rows:
+            for label, slot in actions:
+                button = button_box.addButton(
+                    label, qt.QDialogButtonBox.ActionRole
+                )
+                self.action_buttons[label] = button
+                button.clicked.connect(slot)
+                button.setToolTip(
+                    {
+                        "Preview": (
+                            "Estimate coverage, storage, and execution layout."
+                        ),
+                        "Prepare Job": (
+                            "Freeze the current settings into a resumable job."
+                        ),
+                        "Run Locally": (
+                            "Prepare and execute the configured job locally."
+                        ),
+                        "Create Cluster Scripts": (
+                            "Prepare the job and create an SGE or Slurm map "
+                            "array with a dependent reduction/finalization job."
+                        ),
+                        "Open Job": (
+                            "Select an existing reconstruction job JSON file."
+                        ),
+                        "Resume": (
+                            "Verify and continue the selected prepared job."
+                        ),
+                    }[label]
+                )
+            footer.addWidget(button_box)
+        prepared_actions.rejected.connect(self.reject)
+        layout.addLayout(footer)
         self.refresh_live_state()
+
+    @staticmethod
+    def _scrollable_tab(widget):
+        """Wrap a settings page so smaller screens can reach every control."""
+        widget.setSizePolicy(
+            qt.QSizePolicy.Preferred,
+            qt.QSizePolicy.Ignored,
+        )
+        scroll = qt.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(qt.QFrame.NoFrame)
+        scroll.setWidget(widget)
+        return scroll
 
     def _data_tab(self):
         widget = qt.QWidget()
@@ -225,7 +266,7 @@ class ReconstructionDialog(qt.QDialog):
 
         correction_group = qt.QGroupBox("Corrections and exclusions")
         correction_layout = qt.QVBoxLayout(correction_group)
-        correction_switches = qt.QHBoxLayout()
+        correction_switches = qt.QGridLayout()
         shared_tooltip = (
             "This correction is shared with the ROI integration options. "
             "Changing it here also updates the main integration panel."
@@ -239,18 +280,18 @@ class ReconstructionDialog(qt.QDialog):
         self.use_solid_angle.setToolTip(shared_tooltip)
         self.use_polarization = qt.QCheckBox("Polarization correction")
         self.use_polarization.setToolTip(shared_tooltip)
-        for control, key in (
-            (self.use_pixel_mask, "mask"),
-            (self.use_solid_angle, "solidAngle"),
-            (self.use_polarization, "polarization"),
+        for control, key, row, column in (
+            (self.use_pixel_mask, "mask", 0, 0),
+            (self.use_solid_angle, "solidAngle", 0, 1),
+            (self.use_polarization, "polarization", 1, 0),
         ):
             control.toggled.connect(
                 lambda checked, option=key: self._set_integration_option(
                     option, checked
                 )
             )
-            correction_switches.addWidget(control)
-        correction_switches.addStretch(1)
+            correction_switches.addWidget(control, row, column)
+        correction_switches.setColumnStretch(2, 1)
         correction_layout.addLayout(correction_switches)
 
         shared = qt.QHBoxLayout()
@@ -299,6 +340,10 @@ class ReconstructionDialog(qt.QDialog):
         self.angle_fallback.addItem(
             "Midpoint inference (explicit fallback)", "midpoint"
         )
+        self.angle_fallback.setSizeAdjustPolicy(
+            qt.QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.angle_fallback.setMinimumContentsLength(24)
         self._add_form_row(
             form,
             "Missing exact angle bounds:",
@@ -414,12 +459,19 @@ class ReconstructionDialog(qt.QDialog):
         )
         for column, tooltip in enumerate(header_tooltips):
             self.grid_table.horizontalHeaderItem(column).setToolTip(tooltip)
-        self.grid_table.horizontalHeader().setSectionResizeMode(
-            qt.QHeaderView.ResizeToContents
-        )
+        header = self.grid_table.horizontalHeader()
+        header.setSectionResizeMode(qt.QHeaderView.Interactive)
+        for column in range(len(_GRID_COLUMNS)):
+            header.resizeSection(
+                column,
+                130 if column in {0, 14} else 82,
+            )
+        header.setStretchLastSection(False)
         self.grid_table.cellChanged.connect(self._on_grid_cell_changed)
         grid_layout.addWidget(self.grid_table)
-        buttons = qt.QHBoxLayout()
+        buttons = qt.QVBoxLayout()
+        grid_definition_buttons = qt.QHBoxLayout()
+        grid_setting_buttons = qt.QHBoxLayout()
         add_hkl = qt.QPushButton("Add derived HKL grid")
         add_hkl.setToolTip(
             "Estimate editable HKL bounds and spacing from the active scan."
@@ -445,14 +497,18 @@ class ReconstructionDialog(qt.QDialog):
             "the active database compression."
         )
         hdf5_settings.clicked.connect(self._edit_hdf5_settings)
-        buttons.addWidget(add_hkl)
-        buttons.addWidget(add_q)
-        buttons.addWidget(remove)
-        buttons.addWidget(estimate_steps)
-        buttons.addWidget(hdf5_settings)
-        buttons.addStretch(1)
+        grid_definition_buttons.addWidget(add_hkl)
+        grid_definition_buttons.addWidget(add_q)
+        grid_definition_buttons.addWidget(remove)
+        grid_definition_buttons.addStretch(1)
+        grid_setting_buttons.addWidget(estimate_steps)
+        grid_setting_buttons.addWidget(hdf5_settings)
+        grid_setting_buttons.addStretch(1)
+        buttons.addLayout(grid_definition_buttons)
+        buttons.addLayout(grid_setting_buttons)
         grid_layout.addLayout(buttons)
         self.hdf5_summary = qt.QLabel()
+        self.hdf5_summary.setWordWrap(True)
         self.hdf5_summary.setToolTip(
             "Shared HDF5 chunk shape and compression selection for every grid."
         )
@@ -658,6 +714,10 @@ class ReconstructionDialog(qt.QDialog):
         self.accuracy.addItem("High (depth 3)", "high")
         self.accuracy.addItem("Very high (depth 4)", "very_high")
         self.accuracy.addItem("Maximum (depth 5)", "maximum")
+        self.accuracy.setSizeAdjustPolicy(
+            qt.QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.accuracy.setMinimumContentsLength(24)
         self.accuracy.setCurrentIndex(
             self.accuracy.findData("balanced")
         )
@@ -1222,6 +1282,10 @@ class ReconstructionDialog(qt.QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         enabled = qt.QCheckBox("Override")
         editor = qt.QComboBox()
+        editor.setSizeAdjustPolicy(
+            qt.QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        editor.setMinimumContentsLength(20)
         for label, value in items:
             editor.addItem(label, value)
         if current is not None:
