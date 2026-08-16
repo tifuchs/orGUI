@@ -30,7 +30,7 @@ classifiers = [
 ]
 
 dependencies = [
-	'numpy >= 1.16',
+	'numpy >= 1.17',
 	'scipy >= 1.9',
 	'matplotlib >= 3.6',
 	'fabio >= 0.7',

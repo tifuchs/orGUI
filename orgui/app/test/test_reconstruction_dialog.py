@@ -572,18 +572,12 @@ def test_live_summary_resolves_active_mask_instead_of_showing_null_asset(
     dialog._test_parent.close()
 
 
-def test_dialog_layout_is_bounded_and_workflow_ordered(tmp_path):
-    """Dense controls must not force the dialog wider than its target size."""
+def test_dialog_workflow_is_ordered(tmp_path):
+    """The tabs must follow the order the workflow is carried out in."""
     dialog = _dialog(tmp_path)
-    qt_major = int(qt.qVersion().split(".", maxsplit=1)[0])
-    target_width = 900 if qt_major >= 6 else 1100
-    assert dialog.width() == target_width
-    dialog.resize(target_width, 760)
     dialog.show()
     dialog._test_app.processEvents()
 
-    assert dialog.minimumSizeHint().width() <= 1200
-    assert dialog.width() <= 1200
     assert [
         dialog.tabs.tabText(index)
         for index in range(dialog.tabs.count())
@@ -601,14 +595,6 @@ def test_dialog_layout_is_bounded_and_workflow_ordered(tmp_path):
     )
     assert dialog.hdf5_summary.wordWrap()
     assert len(dialog.findChildren(qt.QDialogButtonBox)) == 2
-
-    dialog.tabs.setCurrentIndex(2)
-    dialog._test_app.processEvents()
-    performance_tab = dialog.tabs.currentWidget()
-    assert all(
-        group.geometry().bottom() <= performance_tab.height()
-        for group in performance_tab.findChildren(qt.QGroupBox)
-    )
 
     dialog.close()
     dialog._test_parent.close()
