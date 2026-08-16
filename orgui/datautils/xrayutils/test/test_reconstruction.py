@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import time
 
 import numpy as np
@@ -33,6 +35,15 @@ from orgui.datautils.xrayutils.reconstruction import (
 
 native = pytest.importorskip(
     "orgui.datautils.xrayutils._reciprocal_reconstruction_cpp"
+)
+
+#: The GitHub-hosted macOS runner overshoots short ``time.sleep`` calls badly
+#: -- a 20 ms sleep was measured at 178 ms there -- which breaks timing
+#: assertions that compare two independently measured sweeps. Only that runner
+#: substitutes a fake clock; every other environment, local runs included,
+#: keeps measuring real elapsed time.
+_FAKE_SWEEP_CLOCK = (
+    sys.platform == "darwin" and os.environ.get("GITHUB_ACTIONS") == "true"
 )
 
 
@@ -1129,12 +1140,23 @@ def test_kernel_threads_sweep_scales_its_sample_to_a_whole_frame():
     time to map a whole frame. Measured against the sample alone it came
     out low by the ratio of a frame to that tile, six times over on a
     real detector, which made every thread count look affordable.
+
+    Timing is real everywhere except the GitHub macOS runner, which cannot
+    hold a 20 ms sleep to anything like 20 ms (see ``_FAKE_SWEEP_CLOCK``).
+    The property under test -- that the reported time scales by
+    ``frame_pixels / sampled_pixels`` -- is arithmetic, so a faked clock
+    tests it exactly rather than approximately.
     """
     import orgui.datautils.xrayutils.reconstruction as reconstruction_module
 
+    fake_now = [0.0]
+
     class _FakeSweepKernel:
         def accumulate(self, *args, **kwargs):
-            time.sleep(0.02)
+            if _FAKE_SWEEP_CLOCK:
+                fake_now[0] += 0.02
+            else:
+                time.sleep(0.02)
             return {}
 
     grid = _GridSpec(
@@ -1169,11 +1191,19 @@ def test_kernel_threads_sweep_scales_its_sample_to_a_whole_frame():
             "_kernel_for_grid",
             lambda *args, **kwargs: _FakeSweepKernel(),
         )
+        if _FAKE_SWEEP_CLOCK:
+            patch.setattr(
+                reconstruction_module.time,
+                "perf_counter",
+                lambda: fake_now[0],
+            )
         unscaled = sweep(None)
         per_frame = sweep(sampled_pixels * 100)
 
     # A frame a hundred times the sample must report a hundredfold time.
-    assert per_frame[1] == pytest.approx(100 * unscaled[1], rel=0.25)
+    # Real sleeps only hold that to within a quarter; a faked clock is exact.
+    tolerance = 1e-9 if _FAKE_SWEEP_CLOCK else 0.25
+    assert per_frame[1] == pytest.approx(100 * unscaled[1], rel=tolerance)
 
 
 def test_kernel_threads_sweep_stops_early_on_plateau(monkeypatch):
