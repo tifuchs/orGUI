@@ -217,7 +217,9 @@ class FlowLayout(qt.QLayout):
         return parent.spacing()
 
     def expandingDirections(self):
-        return qt.Qt.Orientations(0)
+        # Qt5 bindings expose the flags type as Qt.Orientations, which no longer
+        # exists in Qt6. Qt.Orientation(0) yields the empty flag set on both.
+        return qt.Qt.Orientation(0)
 
     def hasHeightForWidth(self):
         return True
