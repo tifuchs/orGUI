@@ -739,3 +739,114 @@ def test_reconstruction_correction_switches_sync_with_integration_options(
 
     dialog.close()
     dialog._test_parent.close()
+
+
+def test_feature_selection_limits_are_symmetric_by_default(tmp_path):
+    """A single upper index limit mirrors onto the lower one."""
+    _dialog(tmp_path)
+    selection = reconstruction_dialog_module._FeatureSelectionDialog()
+
+    assert selection.limits(0) == (-3, 3)
+    _, _, upper, _ = selection.limit_editors[0]
+    upper.setValue(2)
+    assert selection.limits(0) == (-2, 2)
+
+    _, lower, _, symmetric = selection.limit_editors[1]
+    symmetric.setChecked(False)
+    lower.setValue(0)
+    assert selection.limits(1) == (0, 3)
+
+    selection.close()
+
+
+def test_ctr_selection_takes_its_l_range_from_the_scan(tmp_path):
+    """Rods have no L index limit, so that control is off for them."""
+    _dialog(tmp_path)
+    selection = reconstruction_dialog_module._FeatureSelectionDialog()
+
+    assert selection.kind == "ctr"
+    assert selection.limits(2) is None
+    assert selection.half_width[2] == 0.0
+
+    selection.kind_editor.setCurrentIndex(1)
+    assert selection.kind == "bragg"
+    assert selection.limits(2) == (-3, 3)
+    # A Bragg box needs extent on all three axes, so the third half-width
+    # follows the first instead of staying at the rod's zero.
+    assert selection.half_width[2] == selection.half_width[0]
+
+    selection.close()
+
+
+def test_selected_feature_grids_replace_the_grid_table(
+    tmp_path, monkeypatch
+):
+    """One accepted selection fills the table with one row per feature."""
+    dialog = _dialog(tmp_path)
+    dialog.orgui.fscan = object()
+    dialog.orgui.reconstruction_chunk_shape = (32, 32, 32)
+    dialog.add_derived_grid = lambda frame: None
+    dialog._append_grid(
+        ReconstructionGrid(
+            minimum=(0.0, 0.0, 0.0),
+            maximum=(1.0, 1.0, 1.0),
+            step=(0.1, 0.1, 0.1),
+            name="stale",
+        )
+    )
+
+    selected = [
+        ReconstructionGrid(
+            minimum=(h - 0.05, -0.05, 0.2),
+            maximum=(h + 0.05, 0.05, 3.0),
+            step=(0.01, 0.01, 0.005),
+            name=f"ctr_{h}_0",
+        )
+        for h in (0, 1)
+    ]
+    monkeypatch.setattr(
+        reconstruction_dialog_module,
+        "ConfigData",
+        SimpleNamespace(from_gui=lambda gui: object()),
+    )
+    monkeypatch.setattr(
+        reconstruction_dialog_module,
+        "sample_hkl_coverage",
+        lambda config, scan, **kwargs: np.zeros((4, 3)),
+    )
+    captured = {}
+
+    def fake_derive(config, scan, **kwargs):
+        captured.update(kwargs)
+        return selected
+
+    monkeypatch.setattr(
+        reconstruction_dialog_module, "derive_ctr_grids", fake_derive
+    )
+    monkeypatch.setattr(
+        qt.QDialog, "exec", lambda self: qt.QDialog.Accepted
+    )
+    refreshes = []
+    monkeypatch.setattr(
+        dialog,
+        "_refresh_file_count_summary",
+        lambda: refreshes.append(dialog.grid_table.rowCount()),
+    )
+
+    dialog._select_features()
+
+    assert dialog.grid_table.rowCount() == 2
+    assert [
+        dialog.grid_table.item(row, 0).text() for row in range(2)
+    ] == ["ctr_0_0", "ctr_1_0"]
+    # The checkpoint estimate runs a live probe over every grid, so a batch
+    # selection must refresh it once, not once per appended row.
+    assert refreshes == [2]
+    assert captured["frame"] == "hkl"
+    assert captured["chunk_shape"] == (32, 32, 32)
+    assert captured["h_limits"] == (-3, 3)
+    assert captured["k_limits"] == (-3, 3)
+    assert "l_limits" not in captured
+
+    dialog.close()
+    dialog._test_parent.close()

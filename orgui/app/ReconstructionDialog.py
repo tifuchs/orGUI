@@ -28,6 +28,12 @@ from ..reconstruction_job import (
     reconstruction_execution_settings,
     run_job,
 )
+from ..reconstruction_selection import (
+    STATIC_FRAMES,
+    derive_bragg_grids,
+    derive_ctr_grids,
+    sample_hkl_coverage,
+)
 from .config_data import ConfigData
 from .database import FILTERS
 from .HDF5SettingsDialog import (
@@ -115,6 +121,207 @@ class _GeometryResolutionDialog(qt.QDialog):
     def percentile(self):
         """Return the selected local-resolution percentile."""
         return self.percentile_editor.value()
+
+
+class _FeatureSelectionDialog(qt.QDialog):
+    """Choose which crystallographic features become their own output grids.
+
+    Collects the feature kind, the output frame, the integer index limits, the
+    per-axis half-widths, and the three voxel steps shared by every selected
+    grid. Half-widths and steps are in r.l.u. for ``hkl`` and ``Angstrom^-1``
+    for ``crystal``.
+    """
+
+    def __init__(self, parent=None, *, steps=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select reciprocal-space volumes")
+        layout = qt.QVBoxLayout(self)
+        explanation = qt.QLabel(
+            "Build one small output grid per crystallographic feature: a "
+            "column along L for every allowed crystal truncation rod, or a "
+            "box around every allowed Bragg reflection. Features the active "
+            "scan never reaches are dropped. Every selected grid shares one "
+            "frame and one voxel step, so the reconstruction extracts them "
+            "all in a single pass over the images."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+
+        form = qt.QFormLayout()
+        self.kind_editor = qt.QComboBox()
+        self.kind_editor.addItem("Crystal truncation rods (columns along L)", "ctr")
+        self.kind_editor.addItem("Bragg reflections (one box each)", "bragg")
+        self.kind_editor.setToolTip(
+            "Rods span the measured L range at each allowed integer (H, K); "
+            "Bragg boxes are centered on each allowed integer (H, K, L)."
+        )
+        self.kind_editor.currentIndexChanged.connect(self._sync_kind)
+        form.addRow("Feature:", self.kind_editor)
+
+        self.frame_editor = qt.QComboBox()
+        for frame in STATIC_FRAMES:
+            self.frame_editor.addItem(frame, frame)
+        self.frame_editor.setToolTip(
+            "Output frame for every selected grid. Only frames that do not "
+            "rotate with the sample can hold a fixed (H, K, L) feature: hkl "
+            "in r.l.u., crystal in Angstrom^-1."
+        )
+        form.addRow("Frame:", self.frame_editor)
+        layout.addLayout(form)
+
+        limits_group = qt.QGroupBox("Index limits")
+        limits_group.setToolTip(
+            "Integer index range enumerated before the coverage test. "
+            "Symmetric by default; clear the checkbox to take the limits "
+            "from the measured scan coverage instead."
+        )
+        limits_form = qt.QFormLayout(limits_group)
+        self.limit_editors = {}
+        for axis, label in enumerate("HKL"):
+            enabled = qt.QCheckBox("limit")
+            enabled.setChecked(True)
+            lower = qt.QSpinBox()
+            lower.setRange(-99, 99)
+            lower.setValue(-3)
+            upper = qt.QSpinBox()
+            upper.setRange(-99, 99)
+            upper.setValue(3)
+            symmetric = qt.QCheckBox("symmetric")
+            symmetric.setChecked(True)
+            row = qt.QWidget()
+            row_layout = qt.QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            for widget in (enabled, lower, upper, symmetric):
+                row_layout.addWidget(widget)
+            row_layout.addStretch(1)
+
+            def _apply_symmetry(_value=None, lower=lower, upper=upper,
+                                symmetric=symmetric):
+                if symmetric.isChecked():
+                    with qt.QSignalBlocker(lower):
+                        lower.setValue(-abs(upper.value()))
+
+            def _toggle(checked, lower=lower, upper=upper, symmetric=symmetric,
+                        apply_symmetry=_apply_symmetry):
+                lower.setEnabled(checked)
+                upper.setEnabled(checked)
+                symmetric.setEnabled(checked)
+                apply_symmetry()
+
+            upper.valueChanged.connect(_apply_symmetry)
+            symmetric.toggled.connect(_apply_symmetry)
+            enabled.toggled.connect(_toggle)
+            lower.setEnabled(True)
+            _apply_symmetry()
+            self.limit_editors[axis] = (enabled, lower, upper, symmetric)
+            limits_form.addRow(f"{label}:", row)
+        layout.addWidget(limits_group)
+
+        widths_group = qt.QGroupBox("Half-widths and voxel steps")
+        widths_form = qt.QFormLayout(widths_group)
+        self.half_width_editors = []
+        self.step_editors = []
+        default_half_widths = (0.05, 0.05, 0.0)
+        for axis in range(3):
+            half_width = qt.QDoubleSpinBox()
+            half_width.setDecimals(6)
+            half_width.setRange(0.0, 1e6)
+            half_width.setSingleStep(0.01)
+            half_width.setValue(default_half_widths[axis])
+            half_width.setToolTip(
+                "Padding added on each side of the feature along this output "
+                "axis, in the frame's own units. For a rod in hkl, axes 1 and "
+                "2 are the column's H and K half-widths and axis 3 extends "
+                "the measured L range."
+            )
+            step = qt.QDoubleSpinBox()
+            step.setDecimals(6)
+            step.setRange(1e-6, 1e6)
+            step.setSingleStep(0.001)
+            step.setValue(
+                float(steps[axis]) if steps is not None else 0.005
+            )
+            step.setToolTip(
+                "Voxel width along this output axis, in the frame's own "
+                "units. Shared by every selected grid."
+            )
+            self.half_width_editors.append(half_width)
+            self.step_editors.append(step)
+            row = qt.QWidget()
+            row_layout = qt.QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(qt.QLabel("half-width"))
+            row_layout.addWidget(half_width)
+            row_layout.addWidget(qt.QLabel("step"))
+            row_layout.addWidget(step)
+            row_layout.addStretch(1)
+            widths_form.addRow(f"Axis {axis + 1}:", row)
+        layout.addWidget(widths_group)
+
+        self.replace_editor = qt.QCheckBox("Replace the existing grid rows")
+        self.replace_editor.setChecked(True)
+        self.replace_editor.setToolTip(
+            "Clear the grid table first. Leave unchecked to append the "
+            "selection to the grids already defined."
+        )
+        layout.addWidget(self.replace_editor)
+
+        buttons = qt.QDialogButtonBox(
+            qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._sync_kind()
+
+    def _sync_kind(self):
+        """Rods have no L index limit, and default to the measured L range."""
+        is_ctr = self.kind == "ctr"
+        enabled, lower, upper, symmetric = self.limit_editors[2]
+        # A rod already runs the whole measured L range, so an L index limit
+        # would mean nothing; the control is switched off rather than merely
+        # greyed out, so that limits(2) reports the coverage default.
+        enabled.setChecked(not is_ctr)
+        for widget in (enabled, lower, upper, symmetric):
+            widget.setEnabled(not is_ctr)
+        if is_ctr:
+            self.half_width_editors[2].setValue(0.0)
+        elif self.half_width_editors[2].value() == 0.0:
+            self.half_width_editors[2].setValue(
+                self.half_width_editors[0].value()
+            )
+
+    @property
+    def kind(self):
+        """Return ``ctr`` or ``bragg``."""
+        return self.kind_editor.currentData()
+
+    @property
+    def frame(self):
+        """Return the selected output frame."""
+        return self.frame_editor.currentData()
+
+    @property
+    def replace(self):
+        """Whether the selection replaces the existing grid rows."""
+        return self.replace_editor.isChecked()
+
+    def limits(self, axis):
+        """Return ``(lower, upper)`` for one axis, or ``None`` for coverage."""
+        enabled, lower, upper, _ = self.limit_editors[axis]
+        if not enabled.isChecked():
+            return None
+        return (lower.value(), upper.value())
+
+    @property
+    def half_width(self):
+        """Return the three per-axis half-widths in the frame's units."""
+        return tuple(editor.value() for editor in self.half_width_editors)
+
+    @property
+    def step(self):
+        """Return the three voxel steps in the frame's units."""
+        return tuple(editor.value() for editor in self.step_editors)
 
 
 def _format_size(size_bytes):
@@ -482,6 +689,14 @@ class ReconstructionDialog(qt.QDialog):
             "Add an editable momentum-transfer grid in a selected frame."
         )
         add_q.clicked.connect(self._add_q_grid)
+        select_features = qt.QPushButton("Select CTRs or Bragg peaks")
+        select_features.setToolTip(
+            "Add one small grid per crystal truncation rod or per Bragg "
+            "reflection the active scan reaches. Every selected grid shares "
+            "a frame and a voxel step, so they are all extracted together in "
+            "one pass over the images."
+        )
+        select_features.clicked.connect(self._select_features)
         remove = qt.QPushButton("Remove selected grid")
         remove.setToolTip("Remove every grid row containing a selected cell.")
         remove.clicked.connect(self._remove_grid)
@@ -499,6 +714,7 @@ class ReconstructionDialog(qt.QDialog):
         hdf5_settings.clicked.connect(self._edit_hdf5_settings)
         grid_definition_buttons.addWidget(add_hkl)
         grid_definition_buttons.addWidget(add_q)
+        grid_definition_buttons.addWidget(select_features)
         grid_definition_buttons.addWidget(remove)
         grid_definition_buttons.addStretch(1)
         grid_setting_buttons.addWidget(estimate_steps)
@@ -1527,7 +1743,79 @@ class ReconstructionDialog(qt.QDialog):
         except Exception as error:
             self._report_failure("Cannot derive output grid", error)
 
-    def _append_grid(self, grid):
+    def _select_features(self):
+        """Replace or extend the grid table with one grid per feature."""
+        if self.orgui.fscan is None:
+            self._report_message(
+                "No scan loaded",
+                "Load a scan before selecting reciprocal-space volumes.",
+            )
+            return
+        try:
+            config = ConfigData.from_gui(self.orgui)
+            dialog = _FeatureSelectionDialog(self)
+            if dialog.exec() != qt.QDialog.Accepted:
+                return
+            # One coverage sample serves both the enumeration limits and the
+            # reachability test; it is the only part that touches the scan.
+            qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+            try:
+                coverage = sample_hkl_coverage(config, self.orgui.fscan)
+            finally:
+                qt.QApplication.restoreOverrideCursor()
+            common = {
+                "step": dialog.step,
+                "half_width": dialog.half_width,
+                "frame": dialog.frame,
+                "coverage": coverage,
+                "chunk_shape": tuple(self.orgui.reconstruction_chunk_shape),
+                "h_limits": dialog.limits(0),
+                "k_limits": dialog.limits(1),
+            }
+            if dialog.kind == "ctr":
+                grids = derive_ctr_grids(config, self.orgui.fscan, **common)
+                described = "crystal truncation rod"
+            else:
+                grids = derive_bragg_grids(
+                    config,
+                    self.orgui.fscan,
+                    l_limits=dialog.limits(2),
+                    **common,
+                )
+                described = "Bragg reflection"
+            if not grids:
+                self._report_message(
+                    "No volumes selected",
+                    f"No allowed {described} inside the given index limits "
+                    "falls within the coverage of the active scan. Widen the "
+                    "index limits or the half-widths.",
+                )
+                return
+            if dialog.replace:
+                with qt.QSignalBlocker(self.grid_table):
+                    self.grid_table.setRowCount(0)
+            for grid in grids:
+                self._append_grid(grid, refresh=False)
+            self._refresh_file_count_summary()
+            logger.info(
+                "Selected %d %s volume%s in the %s frame",
+                len(grids),
+                described,
+                "" if len(grids) == 1 else "s",
+                dialog.frame,
+            )
+        except Exception as error:
+            self._report_failure("Cannot select reciprocal-space volumes", error)
+
+    def _append_grid(self, grid, *, refresh=True):
+        """Append one grid row.
+
+        :param bool refresh:
+            Re-estimate the checkpoint file counts afterwards. That estimate
+            runs a live calibration probe over every grid in the table, so a
+            batch insertion passes ``False`` and refreshes once at the end
+            instead of once per row.
+        """
         row = self.grid_table.rowCount()
         with qt.QSignalBlocker(self.grid_table):
             self.grid_table.insertRow(row)
@@ -1546,7 +1834,8 @@ class ReconstructionDialog(qt.QDialog):
                 )
                 self.grid_table.setItem(row, column, item)
             self._update_grid_row(row)
-        self._refresh_file_count_summary()
+        if refresh:
+            self._refresh_file_count_summary()
 
     def _on_grid_cell_changed(self, row, column):
         try:
