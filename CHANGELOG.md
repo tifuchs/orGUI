@@ -34,6 +34,21 @@ Scientific and analysis additions:
   positions instead of deltas relative to the Wyckoff position. Wyckoff
   parameter fitting was development-only and never part of a release, so no
   migration is provided.
+- The reciprocal-space reconstruction dialog can now select its output volumes
+  automatically, with ``Select CTRs or Bragg peaks`` on the ``Output grids``
+  tab. It builds one small grid per crystallographic feature — a column along
+  ``L`` for every allowed crystal truncation rod, or a box around every allowed
+  Bragg reflection — taking the candidate indices from the reference unit cell
+  and dropping every feature the active scan does not reach. Index limits are
+  symmetric by default, half-widths and voxel steps are given once per axis and
+  shared by every selected grid, and the output frame may be ``hkl`` (r.l.u.)
+  or ``crystal`` (``Angstrom^-1``); the sample-rotating Q frames have no fixed
+  box for a fixed ``(H, K, L)`` and are not offered. Since every selected grid
+  shares a frame and a step, the reconstruction maps them all from the same
+  corrected images, reading and correcting the scan once regardless of how many
+  features were selected. The same selection is available to scripts as
+  ``orgui.reconstruction_selection.derive_ctr_grids`` and
+  ``derive_bragg_grids``.
 
 Scientific correctness and performance fixes:
 

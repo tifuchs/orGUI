@@ -208,8 +208,62 @@ Adding and Removing Grids
 ``Add derived Q grid``
    Prompts for a Q reference frame and adds its derived coverage.
 
+``Select CTRs or Bragg peaks``
+   Replaces or extends the table with one small grid per crystallographic
+   feature; see :ref:`automatic-volume-selection` below.
+
 ``Remove selected grid``
    Removes every row containing a selected table cell.
+
+.. _automatic-volume-selection:
+
+Automatic Reciprocal-Space Volume Selection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Instead of one large grid covering the whole measured volume, a scan can be
+reconstructed as many small grids, each holding one crystallographic feature.
+``Select CTRs or Bragg peaks`` builds them:
+
+``Crystal truncation rods``
+   One column along ``L`` per allowed integer ``(H, K)``, spanning the ``L``
+   range the scan actually measured. Rods carry no ``L`` index limit.
+
+``Bragg reflections``
+   One box centered on each allowed integer ``(H, K, L)``.
+
+Candidate indices come from the reference unit cell: a rod is kept when the
+unit-cell structure factor is non-zero somewhere in the measured ``L`` range, a
+reflection when its structure factor is non-zero. Index limits are symmetric by
+default -- entering ``H = 3`` enumerates ``-3`` to ``3`` -- and clearing the
+``limit`` checkbox takes the range from the measured coverage instead.
+
+Each feature becomes the box that bounds it, expanded by the three
+``half-width`` values, and every selected grid shares the three voxel
+``step`` values. Half-widths and steps are in r.l.u. for the ``hkl`` frame and
+``Angstrom^-1`` for the ``crystal`` frame. For a rod in ``hkl``, the first two
+half-widths are the column's ``H`` and ``K`` half-widths and the third extends
+the measured ``L`` range beyond what was measured; the default of zero leaves
+the ``L`` range as measured.
+
+Only ``hkl`` and ``crystal`` can be selected as the output frame. The
+remaining Q frames (``lab``, ``alpha``, ``omega``, ``chi``, ``phi``) rotate
+with the sample during the scan, so a fixed ``(H, K, L)`` feature has no fixed
+box in them.
+
+Features the scan never reaches are dropped. The reachability test samples the
+swept detector surface -- 33 pixel centers along each detector axis, up to 128
+included frames, both exposure endpoints -- so a feature touched by only a few
+pixels of a few frames can fall between samples and be missed. Excluded frames
+do not contribute.
+
+Because every selected grid shares a frame, a step, and therefore its units,
+the reconstruction maps all of them from the same corrected frame group: the
+images are read, corrected, and traversed once, no matter how many features
+were selected. The per-grid cost is not zero, though. Each grid gets its own
+HDF5 output group and its own checkpoint stream, the checkpoint memory budget
+is divided between the grids, and the detector tile size shrinks as the grid
+count grows. A selection of a few dozen features is routine; several hundred is
+not, and the selection refuses to return more than 512 grids.
 
 Automatic Coverage and Initial Steps
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
