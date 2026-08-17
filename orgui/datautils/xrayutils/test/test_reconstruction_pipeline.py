@@ -20,6 +20,7 @@ from orgui.reconstruction_job import (
     _BoundedGate,
     _kernel_threads_candidates,
     _map_pending_ranges,
+    _FrameFingerprintLog,
 )
 from orgui.datautils.xrayutils.reconstruction import _GridSpec, _ReconstructionSpec
 
@@ -277,14 +278,16 @@ def _mask_everything(payload, raw, frame, tile):
     )
 
 
-def test_map_pending_ranges_warns_when_nothing_is_routed(tmp_path):
-    """Mapping frames and producing nothing must not be silent.
+def test_map_pending_ranges_fails_when_nothing_is_routed(tmp_path):
+    """Mapping frames and producing nothing must fail the run.
 
     Observed in the field: a run mapped every frame, routed no records,
     wrote a checkpoint claiming its full frame count with zero rows, and
     exited successfully in a fifth of the usual time. Nothing downstream
     could distinguish that from a fast, legitimately empty run, and on
-    resume the empty part counts as complete.
+    resume the empty part counts as complete. Warning was not enough --
+    the result reads as a completed reconstruction -- so this raises, and
+    the progress channel still carries the reason.
     """
     frame_count = 4
     scan = _SlowScan(frame_count, delay=0.0)
@@ -295,7 +298,7 @@ def test_map_pending_ranges_warns_when_nothing_is_routed(tmp_path):
     router = _router({grid_name: [(0, frame_count)]}, tmp_path=tmp_path)
     reported = []
 
-    with pytest.warns(RuntimeWarning, match="produced no records"):
+    with pytest.raises(RuntimeError, match="produced no records"):
         _map_pending_ranges(
             spec,
             scan,
@@ -314,12 +317,12 @@ def test_map_pending_ranges_warns_when_nothing_is_routed(tmp_path):
         )
 
     assert router.routed_records == 0
-    # The GUI never sees a warnings.warn, so the same statement has to
-    # reach the progress channel it does watch.
+    # The GUI never sees the exception text either, so the same statement
+    # has to reach the progress channel it does watch.
     assert any("produced no records" in message for message in reported)
 
 
-def test_map_frame_groups_streamed_warns_when_nothing_is_routed(tmp_path):
+def test_map_frame_groups_streamed_fails_when_nothing_is_routed(tmp_path):
     """The grouped scheduler returns early, so it needs its own check.
 
     Its ``return`` sits before the per-frame path's end, and a guard
@@ -330,6 +333,42 @@ def test_map_frame_groups_streamed_warns_when_nothing_is_routed(tmp_path):
     scan = _SlowScan(frame_count, delay=0.0)
     config = _FakeConfig()
     spec = dataclasses.replace(_spec(), frames_per_group=2)
+    bounds = np.zeros((frame_count, 2, 4), dtype=np.float64)
+    grid_name = spec.grids[0].grid_name
+    router = _router({grid_name: [(0, frame_count)]}, tmp_path=tmp_path)
+
+    with pytest.raises(RuntimeError, match="produced no records"):
+        _map_pending_ranges(
+            spec,
+            scan,
+            config,
+            bounds,
+            [(0, 1, 0, 1)],
+            [(0, frame_count)],
+            router,
+            correction_pipeline=_mask_everything,
+            effective_memory=256 * 1024**2,
+            threads_per_image=1,
+            accumulation_budget_bytes=None,
+            total_images=frame_count,
+            completed_images=0,
+            progress=None,
+        )
+
+    assert router.routed_records == 0
+
+
+def test_empty_mapping_can_be_allowed_explicitly(tmp_path, monkeypatch):
+    """A grid that this slice of the scan never reaches is legitimate.
+
+    Rare against the failure it now guards, but real, so it stays
+    reachable: the environment variable restores the old warning.
+    """
+    monkeypatch.setenv("ORGUI_ALLOW_EMPTY_MAPPING", "1")
+    frame_count = 4
+    scan = _SlowScan(frame_count, delay=0.0)
+    config = _FakeConfig()
+    spec = _spec()
     bounds = np.zeros((frame_count, 2, 4), dtype=np.float64)
     grid_name = spec.grids[0].grid_name
     router = _router({grid_name: [(0, frame_count)]}, tmp_path=tmp_path)
@@ -606,3 +645,108 @@ def test_map_pending_ranges_automatic_mode_rebalances_and_stays_stable(
     # would otherwise converge to.
     assert len(compute_pool_sizes) <= 2
     assert len(set(compute_pool_sizes)) == len(compute_pool_sizes)
+
+
+def test_frame_fingerprint_flags_a_reused_read_buffer(tmp_path):
+    """A frame served another frame's pixels must be visible.
+
+    The instrument for the intermittent empty/wrong-value runs: a stale or
+    unfilled read buffer keeps the geometry right, so voxels and
+    contributor counts match a healthy run exactly and nothing downstream
+    notices. Identical content under two frame indices does not.
+    """
+    log_path = tmp_path / "fingerprints.jsonl"
+    log = _FrameFingerprintLog(str(log_path))
+    rng = np.random.default_rng(4)
+    first = rng.integers(0, 500, size=(64, 48)).astype(np.int32)
+    second = rng.integers(0, 500, size=(64, 48)).astype(np.int32)
+
+    log.record(0, first)
+    log.record(1, second)
+    with pytest.warns(RuntimeWarning, match="identical image content"):
+        log.record(2, first)
+    log.record(3, np.zeros_like(first))
+
+    assert [(previous, repeat) for previous, repeat, _ in log.duplicates] == [(0, 2)]
+    assert log.empty_frames == [3]
+    assert len(log_path.read_text().splitlines()) == 4
+
+
+def test_frame_fingerprint_is_off_unless_requested(monkeypatch):
+    """It costs a sampled pass over every frame, so it is opt-in."""
+    monkeypatch.delenv("ORGUI_FRAME_FINGERPRINT", raising=False)
+    assert _FrameFingerprintLog.from_environment() is None
+    monkeypatch.setenv("ORGUI_FRAME_FINGERPRINT", "1")
+    assert _FrameFingerprintLog.from_environment() is not None
+
+
+def test_shutdown_watchdog_reports_worker_state(monkeypatch):
+    """A join that will not finish must say which exit condition was live.
+
+    The 2026-08 hang left a pool joining a worker forever. A sampling
+    profiler shows where a thread is but not whether the events it polls
+    are set, which is the one thing needed to tell a parked thread from a
+    polling thread that never sees its flag.
+    """
+    monkeypatch.setenv("ORGUI_SHUTDOWN_WATCHDOG_SECONDS", "0.5")
+    release = threading.Event()
+
+    def stubborn(retire, cancellation):
+        release.wait(timeout=10)          # ignores both events on purpose
+
+    pool = _AdjustablePool(stubborn, initial_size=1, name="watchdog-test")
+    pool.diagnostics = lambda: {"frame_queue.qsize()": 7}
+    threading.Timer(1.5, release.set).start()
+
+    with pytest.warns(RuntimeWarning, match="has taken over") as caught:
+        pool.shutdown(wait=True)
+
+    report = str(caught[0].message)
+    assert "cancellation.is_set() = True" in report
+    assert "retire.is_set()=False" in report
+    assert "frame_queue.qsize() = 7" in report
+
+
+def test_shutdown_watchdog_can_be_disabled(monkeypatch):
+    """Zero seconds means join as before, with no watchdog at all."""
+    monkeypatch.setenv("ORGUI_SHUTDOWN_WATCHDOG_SECONDS", "0")
+
+    def worker(retire, cancellation):
+        while not retire.is_set() and not cancellation.is_set():
+            time.sleep(0.01)
+
+    pool = _AdjustablePool(worker, initial_size=2, name="watchdog-off")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")     # any warning would fail here
+        pool.shutdown(wait=True)
+
+
+def test_shutdown_wakes_a_consumer_parked_on_its_queue():
+    """Cancellation alone cannot reach a worker blocked in ``get()``.
+
+    The worker here never polls the events -- it only ever returns from a
+    blocking ``get`` -- which is the behaviour the 2026-08 hang showed:
+    every exit condition true, the worker still inside the queue wait.
+    ``shutdown`` must therefore wake it with data, not only with a flag.
+    """
+    from queue import SimpleQueue
+
+    from orgui.reconstruction_job import _SHUTDOWN_SENTINEL
+
+    work = SimpleQueue()
+    exited = threading.Event()
+
+    def consumer(retire, cancellation):
+        while True:
+            item = work.get()          # no timeout: only data can wake it
+            if item is _SHUTDOWN_SENTINEL:
+                exited.set()
+                return
+
+    pool = _AdjustablePool(consumer, initial_size=1, name="wake-test")
+    pool.wake_workers = lambda count: [
+        work.put(_SHUTDOWN_SENTINEL) for _ in range(count)
+    ]
+
+    pool.shutdown(wait=True)
+    assert exited.is_set()

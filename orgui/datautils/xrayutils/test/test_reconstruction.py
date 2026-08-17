@@ -720,6 +720,12 @@ def test_native_correction_is_bit_for_bit_with_the_numpy_form(
 ):
     """The fused native pass must not move a single bit.
 
+    True under ``-ffp-contract=off``, which the ``strict_fp_contract`` build
+    option sets and the test workflow enables. A compiler that fuses
+    ``spread += value * value * factor_variance`` into an ``fma`` (Apple clang
+    on arm64) rounds once where NumPy rounds twice and moves the variance by
+    one ULP; release wheels are built that way deliberately.
+
     Correction applies a per-pixel factor and then each scalar factor in
     turn, and NumPy does it in eight or nine full-detector passes. Doing
     the same arithmetic one pixel at a time in the extension is a pure

@@ -1243,10 +1243,16 @@ Every phase in this document is resolved, so this is where the work
 stands rather than a plan to continue it. In priority order:
 
 1. **The zero-record defect, before anything else.** Roughly one run in
-   twenty maps nothing and says it succeeded. It now warns, but the cause
-   is unknown and four candidates have been eliminated (see the findings
-   document's measurement traps). This is correctness and it gates using
-   the branch on real data; nothing below matters beside it.
+   twenty maps nothing and says it succeeded. The cause is still unknown.
+   *Updated 2026-08-16:* it no longer says it succeeded — the run raises,
+   unless `ORGUI_ALLOW_EMPTY_MAPPING` is set — and the leading hypothesis
+   (a wrong per-frame scalar factor) is now excluded arithmetically by the
+   scan's own counters, which moves the search to the image path. A
+   content fingerprint per frame exists to catch it there. Five
+   candidates are eliminated rather than four, and 22 instrumented runs
+   have not reproduced it. This is correctness and it gates using the
+   branch on real data; nothing below matters beside it. See
+   [`reciprocal_space_mapping_shutdown_hang.md`](reciprocal_space_mapping_shutdown_hang.md).
 2. **The branch is ready to merge otherwise.** Phases 1-4 are complete or
    deliberately closed, the association-order decision is settled — the
    feature has never been released, so nothing published moves — and the

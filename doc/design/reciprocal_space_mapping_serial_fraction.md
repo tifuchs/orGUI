@@ -7,7 +7,11 @@
 > measured false at step 1, and what replaced it is that this machine is
 > short of memory bandwidth rather than of cores. Both changes that
 > survived are traffic reductions, and the one that was purely a
-> scheduling change is the one that failed.
+> scheduling change is the one that failed. B's bit-for-bit property is
+> qualified: it holds under `-ffp-contract=off` (the `strict_fp_contract`
+> build option, which the test workflow sets and release wheels do not),
+> and to within one ULP of the variance on compilers that fuse
+> multiply-add. See B.
 >
 > It exists because phase 4 of
 > `reciprocal_space_mapping_locality_and_subdivision.md` measured
@@ -303,6 +307,26 @@ recompute it. And the propagated-uncertainty branch scales the variance,
 scales the intensity — an order an independent implementation would very
 plausibly get wrong, so the test exercises both branches. The end-to-end
 run agrees on voxels, contributors and all three totals by `repr`.
+
+**It holds only where the compiler does not contract, and release wheels
+are built where it does.** *Found 2026-08, when the app suite first ran
+on macOS in CI.* The propagated branch computes `spread += value * value
+* factor_variance`, and clang defaults to `-ffp-contract=fast`, so on
+arm64 that becomes a single `fma`: one rounding where NumPy does two. The
+result differs by **one unit in the last place** — 19 of 99 elements, max
+relative difference 2.36e-16 against a double epsilon of 2.22e-16, max
+absolute 5.4e-20 on values of ~1e-4. Only variance moves; intensity is
+pure multiplication and stayed identical. The FMA result is the *more*
+accurate of the two, so this is a code-generation choice, not an error.
+
+The `strict_fp_contract` Meson option (`-ffp-contract=off`, default
+**false**) exists so the test suite can hold the invariant, and
+`tests.yml` sets it. Release wheels are deliberately built without it, to
+keep the compiler's own code generation. So the claim above should be
+read as: **bit-for-bit under `-ffp-contract=off`, and to within one ULP
+of the variance otherwise.** Anyone comparing a shipped macOS arm64 build
+against the NumPy form directly should expect the last bit to move; x86
+and MSVC do not contract by default and are unaffected either way.
 
 **Measured, six interleaved pairs twice over**, because the first sweep
 ran into rising background load and the second into both that and a

@@ -295,6 +295,28 @@ ESRF ID31 beamline support and reciprocal-space display:
 
 Reciprocal-space reconstruction:
 
+- Fixed a rare hang at the end of a mapping run. Every frame was mapped and
+  every checkpoint written, and the job then waited forever while shutting
+  down its worker pools, consuming no CPU. Worker pools now wake their
+  workers explicitly when they stop instead of relying on a queue timeout,
+  which a CPython 3.12 defect could leave pending indefinitely. Affected
+  runs produced no wrong data: the reconstruction was complete and could be
+  resumed after killing the process.
+- A run that maps frames but produces no records now fails instead of
+  writing an empty checkpoint that later resumes count as finished. Set
+  ``ORGUI_ALLOW_EMPTY_MAPPING=1`` for the legitimate case of a grid that
+  covers no part of the reciprocal space the selected frames reach.
+- Known limitation: roughly one mapping run in twenty was observed during
+  development to produce no records at all for reasons not yet understood,
+  which the check above now turns into a failed run that can simply be
+  repeated rather than a silently empty result.
+- Added optional per-frame content fingerprinting
+  (``ORGUI_FRAME_FINGERPRINT``) that reports detector frames arriving with
+  duplicated or empty content, and a shutdown watchdog
+  (``ORGUI_SHUTDOWN_WATCHDOG_SECONDS``, default 300 s) that reports the
+  state of a worker pool taking unusually long to stop. Both are diagnostic
+  only and change no results; see the reciprocal-space reconstruction
+  documentation.
 - Added a centralized, out-of-core reciprocal-space reconstruction pipeline.
   A new "Reconstruct reciprocal space" dialog (Configuration menu) defines
   HKL/Q output grids, previews coverage and storage cost, and prepares,

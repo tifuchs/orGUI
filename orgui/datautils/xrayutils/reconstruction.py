@@ -1275,7 +1275,7 @@ class _CheckpointRouter:
             # across every grid: this exists so a caller can tell "mapped
             # and produced nothing" from "mapped and produced records",
             # which is otherwise invisible until a reconstruction comes
-            # out empty. See _warn_if_nothing_was_routed.
+            # out empty. See _fail_if_nothing_was_routed.
             self.routed_records += int(np.asarray(batch["chunk_id"]).size)
             if key in self._resumed:
                 return
@@ -1324,6 +1324,16 @@ class _CheckpointRouter:
                 "grid_name": grid_name,
                 "part": part,
                 "frames_covered": frames_covered,
+                # A part that claims frames but carries no rows is legitimate
+                # for a grid this slice of the scan never reaches, and is also
+                # what the intermittent empty-run failure leaves behind. Not
+                # fatal here -- the run-level check owns that decision -- but
+                # recorded, so a later reconstruction can say which parts were
+                # empty instead of only that the total was.
+                "zero_records": bool(
+                    frames_covered > 0
+                    and int(np.asarray(batch["chunk_id"]).size) == 0
+                ),
             },
         )
         with self._lock:

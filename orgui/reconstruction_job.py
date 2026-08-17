@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from functools import lru_cache
-from hashlib import sha256
+from hashlib import blake2b, sha256
 import importlib
 import json
 import math
+import os
 from pathlib import Path
 from queue import Empty, SimpleQueue
 import shutil
+import sys
 import threading
 import time
 from typing import Any
@@ -2096,10 +2098,25 @@ class _AdjustablePool:
     def __init__(self, worker_fn, *, initial_size, name):
         self._worker_fn = worker_fn
         self._name = name
+        # Fires only when a shutdown is already stuck, so it is on by
+        # default; set the variable to 0 to silence it. 300 s is an order
+        # of magnitude beyond the longest legitimate teardown: a worker
+        # exits between items, and one item is a single group call, so
+        # this bound does not scale with how long the job ran.
+        self._watchdog_seconds = float(
+            os.environ.get(SHUTDOWN_WATCHDOG_ENV_VAR, "300")
+        )
+        #: Optional callable returning extra state to print, set by the
+        #: scheduler that owns this pool (queue depths, dispatch flags).
+        self.diagnostics = None
+        #: Optional ``wake(count)`` set by the scheduler that owns this
+        #: pool: it must unblock ``count`` consumers parked on its queue,
+        #: normally by putting that many ``_SHUTDOWN_SENTINEL`` values.
+        self.wake_workers = None
         self._cancellation = threading.Event()
         self._lock = threading.Lock()
         self._active: list[tuple[threading.Thread, threading.Event]] = []
-        self._retiring: list[threading.Thread] = []
+        self._retiring: list[tuple[threading.Thread, threading.Event]] = []
         self._next_id = 0
         self.retarget(initial_size)
 
@@ -2136,7 +2153,7 @@ class _AdjustablePool:
                 self._active = self._active[:size]
                 for thread, retire in retiring:
                     retire.set()
-                    self._retiring.append(thread)
+                    self._retiring.append((thread, retire))
 
     def reap(self) -> None:
         """Drop worker threads that have finished retiring. Call this
@@ -2144,17 +2161,68 @@ class _AdjustablePool:
         joined eagerly, so the caller never stalls waiting for one to
         finish its in-flight item."""
         with self._lock:
-            self._retiring = [thread for thread in self._retiring if thread.is_alive()]
+            self._retiring = [
+                (thread, retire)
+                for thread, retire in self._retiring
+                if thread.is_alive()
+            ]
 
     def shutdown(self, *, wait=True) -> None:
+        """Cancel every worker and, by default, wait for them to exit.
+
+        A join that does not finish is the shape of a hang observed in
+        2026-08: mapping had completed and every checkpoint was on disk,
+        yet the process sat with its pools up and no CPU. The watchdog
+        below reports which exit condition each outstanding worker should
+        have seen, since a sampling profiler can show where a thread is
+        but not whether the events it polls are set.
+
+        It only reports. The join that follows is unbounded, exactly as
+        before, so a slow teardown is never cut short -- the cost of a
+        false positive is one warning, not a lost job. Thread stacks are
+        deliberately not dumped: ``py-spy dump --pid`` gives better ones
+        without putting a wall of stderr in front of a user whose job was
+        merely slow.
+        """
         with self._lock:
             self._cancellation.set()
-            threads = [thread for thread, _retire in self._active] + self._retiring
+            pairs = list(self._active) + list(self._retiring)
             self._active = []
             self._retiring = []
-        if wait:
-            for thread in threads:
-                thread.join()
+        if self.wake_workers is not None and pairs:
+            # Setting the event is not enough: a worker blocked in get()
+            # never reaches the check that reads it.
+            self.wake_workers(len(pairs))
+        if not wait:
+            return
+        for thread, retire in pairs:
+            if self._watchdog_seconds > 0:
+                thread.join(timeout=self._watchdog_seconds)
+                if thread.is_alive():
+                    self._report_stalled_shutdown(thread, retire, pairs)
+            thread.join()
+
+    def _report_stalled_shutdown(self, thread, retire, pairs):
+        """Say what the state was when a join failed to finish in time."""
+        lines = [
+            f"{self._name}: joining {thread.name} has taken over "
+            f"{self._watchdog_seconds:g}s. Worker state at this point:",
+            f"  cancellation.is_set() = {self._cancellation.is_set()}",
+        ]
+        for other, other_retire in pairs:
+            lines.append(
+                f"  {other.name}: alive={other.is_alive()} "
+                f"retire.is_set()={other_retire.is_set()}"
+            )
+        if self.diagnostics is not None:
+            try:
+                for key, value in self.diagnostics().items():
+                    lines.append(f"  {key} = {value!r}")
+            except Exception as error:  # noqa: BLE001 -- diagnostics only
+                lines.append(f"  diagnostics raised {error!r}")
+        report = "\n".join(lines)
+        warnings.warn(report, RuntimeWarning, stacklevel=2)
+        print(report, file=sys.stderr, flush=True)
 
 
 class _BoundedGate:
@@ -2210,6 +2278,19 @@ _BLOCKED_FRACTION_SHRINK = 0.02
 """Sec7's own already-resolved open item: illustrative 20%/2% bands, not
 tuned against real production load."""
 _COORDINATOR_TICK_SECONDS = 0.3
+SHUTDOWN_WATCHDOG_ENV_VAR = "ORGUI_SHUTDOWN_WATCHDOG_SECONDS"
+
+_SHUTDOWN_SENTINEL = object()
+"""Put on a work queue to wake a consumer that is parked in ``get()``.
+
+Cancellation is only visible between loop iterations, and an iteration
+begins by blocking on a queue. Relying on the ``get`` timeout to end that
+block is what left a prepare worker parked while every exit condition was
+already true -- observed repeatedly in 2026-08, on two builds, with
+``cancellation`` and ``dispatch_done`` set and the queue empty. A sentinel
+wakes the consumer with data instead of with the clock.
+"""
+
 _POLL_TIMEOUT_SECONDS = 0.2
 _REBALANCE_INITIAL_SECONDS = 30
 """How soon automatic mode first re-evaluates its thread/worker pair.
@@ -2330,23 +2411,62 @@ class _GroupAssembly:
     across every worker in the pool.
     """
 
-    __slots__ = ("frames", "payloads", "corrected", "_remaining", "_lock", "failed")
+    __slots__ = (
+        "frames",
+        "payloads",
+        "corrected",
+        "_remaining",
+        "_claimed",
+        "_lock",
+        "failed",
+    )
 
     def __init__(self, frames):
         self.frames = list(frames)
         self.payloads = [None] * len(self.frames)
         self.corrected = [None] * len(self.frames)
         self._remaining = len(self.frames)
+        self._claimed = [False] * len(self.frames)
         self._lock = threading.Lock()
         self.failed = False
 
     def complete_one(self, *, failed=False) -> bool:
-        """Record one frame finished. ``True`` when the group is whole."""
+        """Record one frame finished. ``True`` when the group is whole.
+
+        Raises rather than saturating when more completions arrive than the
+        group has frames. ``<= 0`` would let two threads both see the group
+        as whole and queue it twice, which maps every frame in it twice and
+        is invisible in the result except as inflated intensities.
+
+        :raises RuntimeError: if a slot is completed more than once.
+        """
         with self._lock:
             if failed:
                 self.failed = True
             self._remaining -= 1
-            return self._remaining <= 0
+            if self._remaining < 0:
+                raise RuntimeError(
+                    f"frame group over-completed: {len(self.frames)} frames, "
+                    f"{len(self.frames) - self._remaining} completions"
+                )
+            return self._remaining == 0
+
+    def claim(self, slot) -> None:
+        """Mark ``slot`` as being filled, refusing a second claim.
+
+        A slot handed to two prepare workers would leave one frame's image
+        paired with another frame's index, which reaches the kernel as the
+        right geometry carrying the wrong values.
+
+        :raises RuntimeError: if the slot was already claimed.
+        """
+        with self._lock:
+            if self._claimed[slot]:
+                raise RuntimeError(
+                    f"frame group slot {slot} claimed twice "
+                    f"(frame {self.frames[slot]})"
+                )
+            self._claimed[slot] = True
 
 
 def _group_pipeline_layout(spec, tiles, memory_bytes, prepare_workers):
@@ -2429,22 +2549,138 @@ def _group_pipeline_layout(spec, tiles, memory_bytes, prepare_workers):
     return compute_workers, kernel_threads, pipeline_depth
 
 
-def _warn_if_nothing_was_routed(router, routed_before, total_images, progress):
-    """Say so when a whole mapping run produced no records at all.
+ALLOW_EMPTY_MAPPING_ENV_VAR = "ORGUI_ALLOW_EMPTY_MAPPING"
 
-    Mapping every frame of a range and emitting nothing is possible
+FRAME_FINGERPRINT_ENV_VAR = "ORGUI_FRAME_FINGERPRINT"
+
+
+def _frame_fingerprint(image):
+    """Cheap content fingerprint of one raw detector frame.
+
+    Not a cryptographic digest: hashing 25 MB a frame would cost a fifth
+    of the frame's whole budget. This samples a fixed stride through the
+    raw bytes and folds in the total, the shape and the dtype, which is
+    enough to tell one frame from another -- the question being asked is
+    "did two frames arrive with identical contents", not "prove these
+    bytes were not tampered with".
+
+    :param numpy.ndarray image: raw frame as read from the scan.
+    :returns: 16-character hex fingerprint.
+    :rtype: str
+    """
+    raw = np.ascontiguousarray(image)
+    flat = raw.reshape(-1).view(np.uint8)
+    # ~4000 samples across any detector, independent of its size.
+    stride = max(1, flat.size // 4096)
+    digest = blake2b(digest_size=8)
+    digest.update(flat[::stride].tobytes())
+    total = float(np.nansum(raw, dtype=np.float64))
+    digest.update(repr((raw.shape, raw.dtype.str, total)).encode())
+    return digest.hexdigest()
+
+
+class _FrameFingerprintLog:
+    """Record which image content arrived for which frame index.
+
+    Exists to test one hypothesis about the intermittent empty/wrong-value
+    runs: that a frame is occasionally served another frame's pixels, or a
+    buffer that was never filled. Both are invisible in the result -- the
+    geometry stays right, so voxels and contributor counts match a healthy
+    run exactly -- and both are obvious here, as either a repeated
+    fingerprint under two frame indices or an all-zero frame.
+
+    Off unless :data:`FRAME_FINGERPRINT_ENV_VAR` is set, because it costs
+    a sampled pass over every frame. Set it to ``1`` to keep the log in
+    memory and report duplicates, or to a path to also append a JSON line
+    per frame for post-mortem analysis.
+    """
+
+    def __init__(self, destination=None):
+        self._path = (
+            Path(destination)
+            if destination and destination not in ("1", "true", "yes")
+            else None
+        )
+        self._seen: dict[str, int] = {}
+        self._lock = threading.Lock()
+        self.duplicates: list[tuple[int, int, str]] = []
+        self.empty_frames: list[int] = []
+
+    @classmethod
+    def from_environment(cls):
+        """Build from ``ORGUI_FRAME_FINGERPRINT``, or ``None`` when unset."""
+        setting = os.environ.get(FRAME_FINGERPRINT_ENV_VAR)
+        return cls(setting) if setting else None
+
+    def record(self, frame_index, image):
+        """Fingerprint one frame and flag a repeat or an empty frame.
+
+        A repeat means two frame indices carried byte-identical images,
+        which for a rotation scan is the signature of a reused buffer
+        rather than a coincidence. Reported, not raised: two genuinely
+        blank frames would also collide, and this is an instrument, not a
+        guard.
+        """
+        fingerprint = _frame_fingerprint(image)
+        empty = not np.any(image)
+        with self._lock:
+            previous = self._seen.get(fingerprint)
+            if previous is None:
+                self._seen[fingerprint] = int(frame_index)
+            elif previous != int(frame_index):
+                self.duplicates.append((previous, int(frame_index), fingerprint))
+                warnings.warn(
+                    f"Frames {previous} and {int(frame_index)} arrived with "
+                    f"identical image content ({fingerprint}); a reused or "
+                    "unfilled read buffer would look exactly like this.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            if empty:
+                self.empty_frames.append(int(frame_index))
+            if self._path is not None:
+                with open(self._path, "a", encoding="utf-8") as handle:
+                    handle.write(
+                        json.dumps(
+                            {
+                                "frame": int(frame_index),
+                                "fingerprint": fingerprint,
+                                "empty": bool(empty),
+                                "thread": threading.current_thread().name,
+                                "time": time.time(),
+                            }
+                        )
+                        + "\n"
+                    )
+        return fingerprint
+
+
+def _fail_if_nothing_was_routed(router, routed_before, total_images, progress):
+    """Fail a mapping run that produced no records at all.
+
+    Mapping every frame of a range and emitting nothing is *possible*
     legitimately -- a grid can cover a region this slice of the scan never
-    reaches -- so this warns rather than raising. But it is also what an
-    intermittent failure observed in 2026-08 looks like from the outside:
-    roughly one run in twenty mapped nothing, wrote a checkpoint claiming
-    its full frame count with zero rows, and exited successfully, in about
-    a fifth of the usual time. Nothing downstream could tell that from a
-    fast, empty-but-correct run, and on resume the empty part counts as
-    done.
+    reaches -- which is why this only warned until 2026-08. It is also
+    what an intermittent failure looks like from the outside: roughly one
+    run in twenty mapped nothing, wrote a checkpoint claiming its full
+    frame count with zero rows, and exited successfully in about a fifth
+    of the usual time. Nothing downstream could tell that from a fast,
+    empty-but-correct run, and on resume the empty part counts as done.
 
-    Reported through ``progress`` as well as :mod:`warnings`, because a
-    warning alone is invisible in the GUI, which is where an empty
+    Between the two readings, the failure is far likelier than the
+    legitimate case and much more expensive: a silently empty result is
+    indistinguishable from a completed one, and a resume will not redo it.
+    So this raises, and a caller who genuinely means to map frames that
+    reach no grid sets :data:`ALLOW_EMPTY_MAPPING_ENV_VAR` to keep the old
+    warning behaviour.
+
+    Reported through ``progress`` as well, because an exception alone is
+    invisible in the GUI's progress channel, which is where an empty
     reconstruction is most expensive to discover late.
+
+    :raises RuntimeError:
+        If the run mapped frames and routed no records, unless
+        ``ORGUI_ALLOW_EMPTY_MAPPING`` is set.
     """
     routed = getattr(router, "routed_records", None)
     if routed is None or total_images <= 0 or routed > routed_before:
@@ -2454,11 +2690,18 @@ def _warn_if_nothing_was_routed(router, routed_before, total_images, progress):
         "This is expected only if the grids genuinely cover no part of "
         "the reciprocal space these frames reach; otherwise the frames "
         "were masked away or their geometry placed every sample outside "
-        "every grid, and the resulting checkpoints will be empty."
+        "every grid, and the resulting checkpoints would be empty while "
+        "counting as complete on resume."
     )
-    warnings.warn(message, RuntimeWarning, stacklevel=2)
     if progress is not None:
         progress(total_images, total_images, message)
+    if os.environ.get(ALLOW_EMPTY_MAPPING_ENV_VAR):
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        return
+    raise RuntimeError(
+        message
+        + f" Set {ALLOW_EMPTY_MAPPING_ENV_VAR}=1 to allow it and warn instead."
+    )
 
 
 def _angles_advance_monotonically(bounds, frame_indices):
@@ -2733,6 +2976,9 @@ def _map_frame_groups_streamed(
     def should_stop():
         return bool(first_exception)
 
+    # Off unless ORGUI_FRAME_FINGERPRINT is set; see _FrameFingerprintLog.
+    fingerprints = _FrameFingerprintLog.from_environment()
+
     def all_groups_retired():
         with counter_lock:
             return dispatch_done.is_set() and completed[0] >= dispatched[0]
@@ -2781,9 +3027,10 @@ def _map_frame_groups_streamed(
                 if retire.is_set() or cancellation.is_set():
                     return
                 try:
-                    assembly, slot = frame_queue.get(
-                        timeout=_POLL_TIMEOUT_SECONDS
-                    )
+                    item = frame_queue.get(timeout=_POLL_TIMEOUT_SECONDS)
+                    if item is _SHUTDOWN_SENTINEL:
+                        return
+                    assembly, slot = item
                 except Empty:
                     if dispatch_done.is_set() and frame_queue.empty():
                         return
@@ -2797,7 +3044,14 @@ def _map_frame_groups_streamed(
                 else:
                     frame_index = assembly.frames[slot]
                     try:
+                        # Before any work: a slot handed out twice pairs one
+                        # frame's image with another frame's index.
+                        assembly.claim(slot)
                         payload = scan.get_raw_img(frame_index)
+                        if fingerprints is not None:
+                            fingerprints.record(
+                                frame_index, np.asarray(payload.img)
+                            )
                         if corrects_whole_frame:
                             assembly.corrected[slot] = frame_correction(
                                 payload, np.asarray(payload.img), frame_index
@@ -2834,6 +3088,8 @@ def _map_frame_groups_streamed(
                         assembly = ready_queue.get(
                             timeout=_POLL_TIMEOUT_SECONDS
                         )
+                        if assembly is _SHUTDOWN_SENTINEL:
+                            return
                     except Empty:
                         counts[0] += 1
                         counts[1] += 1
@@ -2844,6 +3100,24 @@ def _map_frame_groups_streamed(
                     try:
                         if not assembly.failed:
                             group = assembly.frames
+                            # Every slot must have been filled. A None here
+                            # would be corrected as a frame of zeros, which
+                            # maps nothing and reports success.
+                            filled = (
+                                assembly.corrected
+                                if corrects_whole_frame
+                                else assembly.payloads
+                            )
+                            missing = [
+                                group[slot]
+                                for slot, value in enumerate(filled)
+                                if value is None
+                            ]
+                            if missing:
+                                raise RuntimeError(
+                                    "frame group reached mapping with "
+                                    f"unfilled frames: {missing}"
+                                )
                             _map_frame_group(
                                 spec,
                                 kernels,
@@ -2891,9 +3165,35 @@ def _map_frame_groups_streamed(
     prepare_pool = _AdjustablePool(
         prepare_loop, initial_size=prepare_workers, name="orgui-rsmap-prepare"
     )
+
+    def _pipeline_state():
+        """What a stalled shutdown needs: the loop's own exit conditions."""
+        return {
+            "dispatch_done.is_set()": dispatch_done.is_set(),
+            "frame_queue.qsize()": frame_queue.qsize(),
+            "frame_queue.empty()": frame_queue.empty(),
+            "ready_queue.qsize()": ready_queue.qsize(),
+            "dispatched": dispatched[0],
+            "completed": completed[0],
+            "first_exception": bool(first_exception),
+        }
+
+    prepare_pool.diagnostics = _pipeline_state
+
+    def _wake_prepare(count):
+        for _ in range(count):
+            frame_queue.put(_SHUTDOWN_SENTINEL)
+
+    def _wake_compute(count):
+        for _ in range(count):
+            ready_queue.put(_SHUTDOWN_SENTINEL)
+
+    prepare_pool.wake_workers = _wake_prepare
     compute_pool = _AdjustablePool(
         compute_loop, initial_size=compute_workers, name="orgui-rsmap-compute"
     )
+    compute_pool.diagnostics = _pipeline_state
+    compute_pool.wake_workers = _wake_compute
     previous_blocked = 0
     previous_total = 0
     try:
@@ -3187,7 +3487,7 @@ def _map_pending_ranges(
             completed_images=completed_images,
             progress=progress,
         )
-        _warn_if_nothing_was_routed(
+        _fail_if_nothing_was_routed(
             router, routed_before, total_images, progress
         )
         return
@@ -3251,6 +3551,9 @@ def _map_pending_ranges(
 
     def should_stop():
         return bool(first_exception)
+
+    # Off unless ORGUI_FRAME_FINGERPRINT is set; see _FrameFingerprintLog.
+    fingerprints = _FrameFingerprintLog.from_environment()
 
     def mark_group_delivered(group_frames, *, succeeded=True):
         """One group off the reader pool's plate.
@@ -3321,6 +3624,11 @@ def _map_pending_ranges(
                     image_payloads = [
                         scan.get_raw_img(frame_index) for frame_index in group
                     ]
+                    if fingerprints is not None:
+                        for frame_index, payload in zip(group, image_payloads):
+                            fingerprints.record(
+                                frame_index, np.asarray(payload.img)
+                            )
                 except BaseException as exc:  # noqa: BLE001
                     gate.release()
                     record_exception(exc)
@@ -3573,7 +3881,7 @@ def _map_pending_ranges(
     finally:
         reader_pool.shutdown(wait=True)
         compute_pool.shutdown(wait=True)
-    _warn_if_nothing_was_routed(router, routed_before, total_images, progress)
+    _fail_if_nothing_was_routed(router, routed_before, total_images, progress)
 
 
 def run_cluster_map_task(

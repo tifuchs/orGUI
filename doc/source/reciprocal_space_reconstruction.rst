@@ -829,6 +829,35 @@ All scientific arrays default to float64 except the contributor count. The
 file is conventional HDF5 and can be read with h5py, silx, and NeXus-aware
 tools.
 
+Diagnostic Environment Variables
+--------------------------------
+
+Three environment variables change how the reconstruction reports trouble.
+None of them alters a reconstruction's numbers, and all are read when the
+job starts.
+
+``ORGUI_ALLOW_EMPTY_MAPPING``
+   A run that maps frames but produces no records fails, because an empty
+   result is otherwise indistinguishable from a completed one and a resume
+   counts it as done. Set this to ``1`` when a grid genuinely covers no
+   part of the reciprocal space the selected frames reach; the run then
+   warns and continues.
+
+``ORGUI_FRAME_FINGERPRINT``
+   Off by default. Set to ``1`` to fingerprint every detector frame as it
+   is read and report frames that arrive with identical content, or with
+   no content at all -- the signature of a stale or unfilled read. Set it
+   to a file path to also append one JSON line per frame for later
+   analysis. Costs roughly 2.5 percent of a frame's processing time, so it
+   can be left on for a whole job when chasing a suspect reconstruction.
+
+``ORGUI_SHUTDOWN_WATCHDOG_SECONDS``
+   Defaults to ``300``. When a worker pool takes longer than this to shut
+   down, orGUI prints which exit condition each outstanding worker should
+   have seen, together with the queue depths. It only reports: the job
+   still waits for its workers, so a slow shutdown is never cut short. Set
+   to ``0`` to silence it.
+
 Practical Guidance
 ------------------
 

@@ -381,6 +381,15 @@ fingerprint is the reliable signal; the clock is not.
 progress channel as well as `warnings`, when a whole run routes nothing.
 That makes the next occurrence visible; it does not explain it.
 
+*Superseded 2026-08-16: it raises.* A warning was not enough, because a
+silently empty result is indistinguishable from a completed one and a
+resume treats the empty part as done, so the failure survives the one
+mechanism that would otherwise have corrected it.
+`ORGUI_ALLOW_EMPTY_MAPPING=1` restores the warning for the legitimate case
+(a grid this slice of the scan never reaches). See
+[`reciprocal_space_mapping_shutdown_hang.md`](reciprocal_space_mapping_shutdown_hang.md)
+for the current status of this defect.
+
 **The cause is still unknown, and the search was stopped deliberately
 rather than exhausted.** Everything below was measured, not reasoned
 about. What it adds up to is a reframing worth having before anyone
@@ -451,6 +460,22 @@ pipeline, and they are read from arrays captured once at pipeline
 construction — so on the face of it they cannot vary, which is exactly
 what makes this worth writing down rather than explaining away.
 
+**Excluded, 2026-08-16, by the scan's own counters.** This hypothesis is
+quantitative, so it was tested rather than argued. Inverting the two
+totals under "a fraction `f` of the weighted total carried a factor `k`
+times too large" gives `k = 2.319` and `f = 16.55%`. The job normalizes by
+`ic2` and exposure time, and scan 39's per-frame factors are near-constant
+— median log-ratio between neighbours 2.2e-3, only **2 frames of 3651**
+deviating. An index off by one moves the total by +0.018%; off by two,
+three or ten by +0.038%; and giving *every* frame the largest factor in
+the scan — an upper bound, not a plausible bug — moves it by +4.1%,
+against the +21.8% observed. **No per-frame scalar error can produce this
+anomaly on this dataset.** The wrong values must come from the pixel data
+or the per-pixel static factor, and the image path is the more economical
+candidate because it is the only one that also explains a zero-record run.
+Full derivation in
+[`reciprocal_space_mapping_shutdown_hang.md`](reciprocal_space_mapping_shutdown_hang.md).
+
 Two honesty notes. The run was on the **unchanged** arm of the
 comparison, so it is not caused by whatever was being measured. But it
 was on a build carrying the fused native correction pass
@@ -468,6 +493,12 @@ applied during mapping is at fault. That single number halves the search
 space, and the guard above is what will tell you a run is worth looking
 at.
 
+*Both instruments now exist.* The masked fraction is the one still to
+add; the per-frame instrument that was built instead is a content
+fingerprint (`ORGUI_FRAME_FINGERPRINT`, off by default), which answers the
+sharper question the exclusion above leaves: whether a frame arrived
+carrying another frame's pixels, or none at all.
+
 *Add a second: the per-frame factor actually applied.* The 22% run above
 says the failure mode is not always all-or-nothing, and that a run can
 look completely healthy on every count anyone currently checks —
@@ -482,7 +513,10 @@ how this one was found.
 Both observed failures came late in long, memory-heavy sequences with
 desktop applications resident, which the reproduction loops could not
 recreate. A separate one-off hang of the same pipeline under `pytest`,
-also not reproduced, may or may not be related.
+also not reproduced, may or may not be related. *That hang is now
+identified and fixed — a shutdown deadlock, unrelated to the zero-record
+defect beyond sharing a pipeline. See
+[`reciprocal_space_mapping_shutdown_hang.md`](reciprocal_space_mapping_shutdown_hang.md).*
 
 **The hang happened twice more in 2026-08, and this time it was caught
 alive.** Both were the pipeline benchmark on unchanged code. The state
