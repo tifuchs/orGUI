@@ -22,16 +22,29 @@ env:
   CIBW_TEST_ENVIRONMENT: "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 MPLBACKEND=Agg QT_QPA_PLATFORM=minimal"
   CIBW_TEST_REQUIRES: pytest
   CIBW_TEST_EXTRAS: extendedfilesupport,symmetry
+  # Every compiled extension must load from the built wheel: a bad link or a
+  # missing dependent DLL shows up here rather than as a test that skips.
+  # None of these imports needs Qt, which the test environment does not have.
   CIBW_TEST_COMMAND: >-
+    python -c "import orgui.datautils.xrayutils._CTRcalc_cpp,
+    orgui.datautils.xrayutils._reciprocal_reconstruction_cpp,
+    orgui.app._roi_sum_cpp, orgui.app._peak_search_cpp,
+    orgui.app._qconversion_cpp; print('all five extensions loaded')" &&
     python -c "from orgui.datautils.xrayutils import CTRuc;
     assert CTRuc.HAS_CPP_ACCEL;
     CTRuc.set_accel_backend('cpp');
     print('CTR_ACCEL_BACKEND=', CTRuc.CTR_ACCEL_BACKEND)" &&
+    python -c "from orgui.app import _roi_sum_accel as accel;
+    assert accel.ROI_ACCEL_BACKEND == 'cpp', accel.ROI_ACCEL_BACKEND;
+    print('ROI_ACCEL_BACKEND=', accel.ROI_ACCEL_BACKEND)" &&
     pytest --pyargs orgui.datautils.xrayutils.test.test_CTRcalc
     orgui.datautils.xrayutils.test.test_CTRsymmetry
     orgui.datautils.xrayutils.test.test_CTRresolution
     orgui.datautils.xrayutils.test.test_CTRoptical_profile
     orgui.datautils.xrayutils.test.test_scattering_factor_cache
+    orgui.datautils.xrayutils.test.test_reconstruction_subdivision
+    orgui.datautils.xrayutils.test.test_reconstruction_checkpoint
+    orgui.datautils.xrayutils.test.test_reconstruction_group
   CIBW_TEST_SKIP: "*-manylinux_aarch64"
 
 jobs:
