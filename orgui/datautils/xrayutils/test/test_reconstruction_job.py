@@ -3,6 +3,7 @@
 import dataclasses
 from hashlib import sha256
 import json
+import logging
 import threading
 import time
 
@@ -1317,3 +1318,43 @@ def test_detector_bands_do_not_collapse_at_high_adaptive_depth(tmp_path):
 
     assert band_counts[0] == band_counts[2] == band_counts[5]
     assert band_counts[5] < 20
+
+
+def test_cluster_stages_log_their_identity_slice_and_timing(tmp_path, caplog):
+    """A batch task's log alone must identify which job ran, which frames
+    this node owned, and how long each stage took -- the SGE/Slurm scripts
+    capture nothing else."""
+    scan, job = _multi_frame_job(
+        tmp_path, "logged.h5", 4, cluster=True, array_task_count=2
+    )
+    job_path = tmp_path / "job.json"
+    write_job(job, job_path)
+
+    with caplog.at_level(logging.INFO, logger="orgui.reconstruction_job"):
+        run_cluster_map_task(
+            job_path, 0, total_tasks=2, cpus=1, memory_bytes=64 * 1024 * 1024
+        )
+        map_messages = [record.getMessage() for record in caplog.records]
+        caplog.clear()
+        run_cluster_map_task(
+            job_path, 1, total_tasks=2, cpus=1, memory_bytes=64 * 1024 * 1024
+        )
+        caplog.clear()
+        run_cluster_finalize(
+            job_path, total_tasks=2, cpus=1, memory_bytes=64 * 1024 * 1024
+        )
+        finalize_messages = [record.getMessage() for record in caplog.records]
+
+    map_log = "\n".join(map_messages)
+    assert f"job digest {job.digest}" in map_log
+    assert "cluster map task 0/2" in map_log
+    assert "scheduler allocation 1 cpu(s), 0.06 GiB" in map_log
+    assert "owns 2 frame(s)" in map_log
+    assert "mapping finished in" in map_log
+    assert "cluster map task 0/2: complete in" in map_log
+
+    finalize_log = "\n".join(finalize_messages)
+    assert "reducing 2 map task(s)" in finalize_log
+    assert "contributes" in finalize_log
+    assert str(job.output_path) in finalize_log
+    assert "HDF5 written in" in finalize_log

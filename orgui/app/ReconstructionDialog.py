@@ -14,6 +14,7 @@ from ..reconstruction_cluster import (
     ClusterSettings,
     generate_cluster_scripts,
 )
+from ..reconstruction_selection import sample_hkl_coverage_by_frame
 from ..reconstruction_job import (
     ACCURACY_DEPTHS,
     WORK_BLOCK_PRESETS,
@@ -819,6 +820,10 @@ class ReconstructionDialog(qt.QDialog):
             checkpoint_count = self.checkpoint_count.value()
             angle_fallback = self.angle_fallback.currentData()
 
+            # Sampled once and shared by both estimates below: it depends
+            # only on the scan geometry, not on the node split, and it is
+            # the most expensive part of a call with few grids.
+            coverage = sample_hkl_coverage_by_frame(config, scan)
             single = estimate_checkpoint_plan(
                 config,
                 scan,
@@ -829,6 +834,7 @@ class ReconstructionDialog(qt.QDialog):
                 checkpoint_count=checkpoint_count,
                 angle_fallback=angle_fallback,
                 budget_seconds=0.05,
+                coverage=coverage,
             )
             lines = [
                 f"Estimated checkpoint files (single node): "
@@ -863,6 +869,7 @@ class ReconstructionDialog(qt.QDialog):
                     angle_fallback=angle_fallback,
                     extra_excluded_frames=node_excluded,
                     budget_seconds=0.05,
+                    coverage=coverage,
                 )
                 lines.append(
                     f"If run as a {array_task_count}-node cluster job: "
@@ -1360,6 +1367,37 @@ class ReconstructionDialog(qt.QDialog):
         )
         layout.addWidget(reduce_group)
 
+        logging_group = qt.QGroupBox("Logging")
+        logging_form = qt.QFormLayout(logging_group)
+        self.cluster_log_level = qt.QComboBox()
+        for level in ("INFO", "DEBUG", "WARNING", "ERROR"):
+            self.cluster_log_level.addItem(level, level)
+        self._add_form_row(
+            logging_form,
+            "Log level:",
+            self.cluster_log_level,
+            "Verbosity of each task's log. The log goes to the scheduler's "
+            "own output file; DEBUG adds frame ranges, detector tiles, and "
+            "build metadata.",
+        )
+        self.cluster_log_directory = qt.QLineEdit()
+        self._add_form_row(
+            logging_form,
+            "Log directory:",
+            self._path_row(
+                self.cluster_log_directory,
+                "directory",
+                tooltip=(
+                    "Optional directory receiving one log file per task, "
+                    "next to the scheduler's own output files."
+                ),
+            ),
+            "Optional directory receiving one log file per task, next to "
+            "the scheduler's own output files. Leave empty to rely on the "
+            "scheduler's output files alone.",
+        )
+        layout.addWidget(logging_group)
+
         advanced_group = qt.QGroupBox("Scheduler-specific settings")
         advanced_form = qt.QFormLayout(advanced_group)
         self.cluster_sge_pe = qt.QLineEdit("smp")
@@ -1425,6 +1463,8 @@ class ReconstructionDialog(qt.QDialog):
             extra_reduce_directives=(
                 self.cluster_reduce_directives.toPlainText()
             ),
+            log_level=self.cluster_log_level.currentData(),
+            log_directory=self.cluster_log_directory.text().strip(),
         )
 
     def _set_cluster_settings(self, values):
@@ -1457,6 +1497,10 @@ class ReconstructionDialog(qt.QDialog):
         self.cluster_reduce_directives.setPlainText(
             settings.extra_reduce_directives
         )
+        self.cluster_log_level.setCurrentIndex(
+            self.cluster_log_level.findData(settings.log_level)
+        )
+        self.cluster_log_directory.setText(settings.log_directory)
 
     @staticmethod
     def _set_control_tooltip(control, tooltip):

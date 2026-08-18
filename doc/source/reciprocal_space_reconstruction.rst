@@ -615,6 +615,30 @@ The direct alias is equivalent:
 ``run`` and ``resume`` both verify and continue deterministic task state.
 ``status`` is read-only and prints the current descriptor status as JSON.
 
+Logging
+~~~~~~~
+
+Every command writes a log to standard error and prints only its result
+JSON to standard output, so the output of a batch job stays machine
+readable while the log stays human readable. At the default ``INFO``
+level the log records the orGUI version and interpreter, the host and
+process ID, the scheduler environment variables that are set, the job
+digest, output and scratch paths, the selected grids, the resolved
+thread and memory budgets, the frame ranges this process owns, how many
+checkpoints were reused rather than remapped, and the wall-clock time
+each stage took. ``--verbose`` (``--log-level DEBUG``) adds the frame
+ranges, detector tiles, build metadata, and scan reference:
+
+.. code-block:: bash
+
+   orGUI rsmap run JOB.json --verbose
+   orGUI rsmap run JOB.json --log-level WARNING
+   orGUI rsmap run JOB.json --log-file run.log
+
+``--log-file`` appends the same records to a file in addition to standard
+error, creating missing parent directories. Both options are accepted
+before or after the sub-command name.
+
 Cluster Batch Execution
 -----------------------
 
@@ -754,6 +778,18 @@ Scheduler Parameters
 ``Extra map/finalizer directives``
    Optional scheduler-specific header lines. Each non-empty line must start
    with ``#$`` for SGE or ``#SBATCH`` for Slurm.
+
+``Log level``
+   Verbosity passed to the generated ``cluster-map``/``cluster-finalize``
+   commands as ``--log-level``. ``INFO`` is the default; ``DEBUG`` adds
+   frame ranges, detector tiles, and build metadata. The log is written to
+   standard error, which both schedulers capture per task.
+
+``Log directory``
+   Optional directory receiving one log file per task
+   (``<job name>-map-<task index>.log`` and ``<job name>-finalize.log``),
+   in addition to the scheduler's own output files. Leave it empty to rely
+   on the scheduler capture alone.
 
 See the `Grid Engine qsub reference
 <https://gridengine.eu/mangridengine/htmlman1/qsub.html>`_ and the `Slurm job

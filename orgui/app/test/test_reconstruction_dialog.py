@@ -248,6 +248,15 @@ def test_file_count_summary_reports_single_node_multi_grid_and_cluster(
     monkeypatch.setattr(
         reconstruction_dialog_module, "estimate_checkpoint_plan", fake_estimate
     )
+    # The dialog samples the scan's frame-by-frame coverage once and shares
+    # it between the single-node and cluster estimates. The stub config here
+    # carries no detector, and the fake estimator above ignores the sample
+    # anyway, so it is stubbed out rather than computed.
+    monkeypatch.setattr(
+        reconstruction_dialog_module,
+        "sample_hkl_coverage_by_frame",
+        lambda config, scan, **kwargs: None,
+    )
 
     def grid(name, frame):
         return ReconstructionGrid(

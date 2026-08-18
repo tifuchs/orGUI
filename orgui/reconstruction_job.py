@@ -7,12 +7,12 @@ from functools import lru_cache
 from hashlib import blake2b, sha256
 import importlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
 from queue import Empty, SimpleQueue
 import shutil
-import sys
 import threading
 import time
 from typing import Any
@@ -125,6 +125,12 @@ frame (not per detector tile) and holds the raw image plus every
 corrected array, all full-detector-sized, simultaneously. This is real
 per-in-flight-frame resident memory the native kernel's own per-tile
 working-set estimate (_frame_parallelism) does not see at all."""
+
+logger = logging.getLogger(__name__)
+"""Job-lifecycle log. Kept out of per-frame hot loops: progress inside a
+mapping run is reported through the ``progress`` callbacks instead, so
+this logger only records stage boundaries and the layout decisions that
+are useful when debugging a batch job after the fact."""
 
 
 def _build_metadata():
@@ -630,6 +636,95 @@ def estimate_geometry_steps(
     return tuple(float(value) for value in steps)
 
 
+def _grid_frame_reach(config, scan, grids, coverage, excluded):
+    """Which sampled frames reach each grid, and one that does.
+
+    A small feature volume is only crossed at some sample rotations, so the
+    frame the record-density probe runs on decides whether it measures
+    anything at all. This scores every grid against a frame-tagged coverage
+    sample of the scan (see
+    :func:`~orgui.reconstruction_selection.sample_hkl_coverage_by_frame`)
+    and returns, per grid, the fraction of frames that reach it and the
+    frame that reaches it most strongly.
+
+    The coverage cloud is in r.l.u.; a grid in the ``crystal`` frame is
+    compared after mapping the cloud through
+    :func:`~orgui.reconstruction_selection.hkl_to_frame_matrix`, the same
+    fixed transform automatic volume selection places its feature boxes
+    with. A grid in a sample-rotating frame has no fixed box, so it is
+    reported as reached by every frame rather than guessed at.
+
+    :param coverage:
+        ``(frames, coordinates)`` from
+        :func:`sample_hkl_coverage_by_frame`.
+    :param excluded:
+        Frame indices the job excludes; sampled frames among them are
+        dropped before scoring.
+    :returns:
+        ``{grid_name: (reaching_fraction, frames)}``, where ``frames`` is
+        the frames to probe in preference order -- a typical reaching frame
+        first, then the one that reaches most strongly as a fallback for
+        when the typical one is too light for the sample to find anything.
+        The fraction is never zero: a grid no sampled frame reaches is
+        credited with one sampled frame's worth, since the sample is a cloud
+        of points and can fall either side of a volume a few frames graze.
+    :rtype: dict[str, tuple[float, tuple[int, ...]]]
+    """
+    from .reconstruction_selection import (
+        STATIC_FRAMES,
+        _normalized_frame,
+        hkl_to_frame_matrix,
+    )
+
+    sampled_frames, cloud = coverage
+    keep = np.asarray(
+        [index not in excluded for index in sampled_frames], dtype=bool
+    )
+    if not keep.any():
+        keep = np.ones(sampled_frames.shape, dtype=bool)
+    sampled_frames = sampled_frames[keep]
+    cloud = cloud[keep]
+    sampled_count = int(sampled_frames.size)
+    fallback_frame = int(sampled_frames[sampled_count // 2])
+    # A sample is a point cloud, so a volume it never lands in is not proved
+    # unreached -- only unresolved. One sampled frame's worth is the
+    # smallest non-zero claim the sample can support.
+    floor = 1.0 / max(1, sampled_count)
+
+    reach = {}
+    for grid in grids:
+        normalized = _normalized_frame(grid.frame)
+        if normalized not in {_normalized_frame(name) for name in STATIC_FRAMES}:
+            reach[grid.grid_name] = (1.0, (fallback_frame,))
+            continue
+        matrix = hkl_to_frame_matrix(config.ub_calculator, grid.frame)
+        placed = cloud @ np.asarray(matrix, dtype=np.float64).T
+        lower = np.asarray(grid.minimum, dtype=np.float64)
+        upper = lower + np.asarray(grid.shape, dtype=np.int64) * np.asarray(
+            grid.step, dtype=np.float64
+        )
+        inside = np.all((placed >= lower) & (placed < upper), axis=-1)
+        per_frame = inside.sum(axis=1)
+        reaching = np.flatnonzero(per_frame)
+        if reaching.size == 0:
+            reach[grid.grid_name] = (floor, (fallback_frame,))
+            continue
+        # The median reaching frame, not the strongest. The probe's
+        # density is multiplied by every reaching frame, so probing the
+        # frame that reaches the volume most squarely reports a peak as if
+        # it were the average -- measured 8.7x the records a rod actually
+        # accumulated. The median is what "a frame that reaches this" means.
+        order = reaching[np.argsort(per_frame[reaching], kind="stable")]
+        typical = int(sampled_frames[order[order.size // 2]])
+        strongest = int(sampled_frames[order[-1]])
+        candidates = (typical,) if typical == strongest else (typical, strongest)
+        reach[grid.grid_name] = (
+            max(floor, float(reaching.size) / max(1, sampled_count)),
+            candidates,
+        )
+    return reach
+
+
 def estimate_checkpoint_plan(
     config,
     scan,
@@ -644,6 +739,9 @@ def estimate_checkpoint_plan(
     budget_seconds=0.1,
     memory_budget_bytes=None,
     extra_excluded_frames=(),
+    coverage=None,
+    coverage_detector_samples=17,
+    coverage_frame_samples=128,
 ):
     """Estimate per-grid job data volume and checkpoint file counts.
 
@@ -684,7 +782,17 @@ def estimate_checkpoint_plan(
         mask it is given -- callers with a real mask available (a live
         GUI's detector mask, or a prepared job's assets) should supply it.
     :param float budget_seconds:
-        Wall-time budget for the underlying calibration probe.
+        Wall-time budget for the underlying calibration probe, **per grid**.
+        The probes are independent measurements and are not divided between
+        grids, so the total scales with the grid count.
+    :param coverage:
+        Optional precomputed ``(frames, coordinates)`` from
+        :func:`~orgui.reconstruction_selection.sample_hkl_coverage_by_frame`,
+        shared across calls. Sampled here when omitted.
+    :param int coverage_detector_samples, coverage_frame_samples:
+        Resolution of that coverage sample when it is taken here. Finer
+        resolves which frames reach a small feature volume more sharply,
+        at a cost paid once for the whole call rather than per grid.
     :param memory_budget_bytes:
         Optional override for the native kernel's own memory-budget
         precheck; defaults to ``ram_budget_bytes``.
@@ -723,11 +831,7 @@ def estimate_checkpoint_plan(
     included = [index for index in range(len(scan)) if index not in excluded]
     if not included:
         raise ValueError("No included frames are available for estimation")
-    representative_frame = included[len(included) // 2]
-
     bounds = scan.exposure_angle_bounds(config, fallback=angle_fallback)
-    angles_start = np.ascontiguousarray(bounds[representative_frame, 0])
-    angles_end = np.ascontiguousarray(bounds[representative_frame, 1])
     corner_rays = _detector_corner_rays(detector, (0, rows, 0, columns))
 
     grid_values = [
@@ -748,13 +852,45 @@ def estimate_checkpoint_plan(
         ),
     )
 
+    from .reconstruction_selection import sample_hkl_coverage_by_frame
+
+    # A supplied sample is reused only if enough of it falls inside the
+    # frames this call is actually about. A caller sharing one whole-scan
+    # sample across a cluster estimate would otherwise score each node's
+    # slice against frames the node never maps -- and a short slice may
+    # contain no sampled frame at all.
+    if coverage is not None:
+        in_scope = int(
+            sum(1 for index in coverage[0] if index not in excluded)
+        )
+        if in_scope < _MINIMUM_SCOPED_COVERAGE_FRAMES:
+            coverage = None
+    if coverage is None:
+        coverage = sample_hkl_coverage_by_frame(
+            config,
+            scan,
+            detector_samples=coverage_detector_samples,
+            frame_samples=coverage_frame_samples,
+            frames=included,
+        )
+    reach = _grid_frame_reach(config, scan, grid_specs, coverage, excluded)
+
+    angles = {
+        grid_name: [
+            (
+                np.ascontiguousarray(bounds[frame_index, 0]),
+                np.ascontiguousarray(bounds[frame_index, 1]),
+            )
+            for frame_index in frame_indices
+        ]
+        for grid_name, (_fraction, frame_indices) in reach.items()
+    }
     probe = _calibration_probe_all_grids(
         spec,
         config.ub_calculator,
         mask,
         corner_rays,
-        angles_start,
-        angles_end,
+        angles,
         budget_seconds=budget_seconds,
         kernel_threads=threads,
     )
@@ -764,11 +900,19 @@ def estimate_checkpoint_plan(
     per_grid = {}
     files_total = 0
     for grid_name, result in probe.items():
+        reaching_fraction, probed_frames = reach[grid_name]
+        # The probe measures one frame that reaches this grid, so its
+        # density describes a reaching frame, not an average one. Frames
+        # that do not reach the grid contribute nothing, so the job's
+        # volume is the reaching ones' share of the scan -- without this,
+        # a rod crossed by a few per cent of a rotation scan would be
+        # credited with the whole scan's worth of records.
+        reaching_frames = frame_count * reaching_fraction
         job_data_bytes_estimate = (
             result["records_per_pixel"]
             * _CHECKPOINT_BYTES_PER_ROW
             * valid_pixels
-            * frame_count
+            * reaching_frames
         )
         files_per_job = _files_per_job(
             job_data_bytes_estimate, ram_budget_bytes, checkpoint_count
@@ -776,6 +920,8 @@ def estimate_checkpoint_plan(
         per_grid[grid_name] = {
             "job_data_bytes_estimate": job_data_bytes_estimate,
             "files_per_job": files_per_job,
+            "reaching_frame_fraction": reaching_fraction,
+            "probed_frame": probed_frames[0],
         }
         files_total += files_per_job
 
@@ -849,6 +995,24 @@ def _node_excluded_frames(scan_length, excluded, total_tasks, task_index) -> set
     share_stop = ((task_index + 1) * len(included)) // total_tasks
     owned = set(included[share_start:share_stop])
     return (set(range(scan_length)) - owned) | set(excluded)
+
+
+#: Sampled frames that must fall inside the frames an estimate covers
+#: before a caller-supplied coverage sample is reused rather than resampled.
+#: A whole-scan sample shared into a per-node estimate can contribute one
+#: frame or none to a short slice, which is not enough to say which volumes
+#: that slice reaches.
+_MINIMUM_SCOPED_COVERAGE_FRAMES = 16
+
+
+#: Per-grid wall-clock budget for the record-density probe when a job is
+#: frozen. Four times the dialog's live figure: measuring a small feature
+#: volume means covering enough of the frame to find the thin locus of
+#: pixels that reaches it, and a job is prepared once. Not more than this,
+#: because it is a button press -- on a 27-rod job it resolved every grid
+#: in about five seconds, where 0.5 s per grid took sixteen and moved the
+#: total estimate by around a tenth.
+_PREPARE_PROBE_SECONDS = 0.2
 
 
 def prepare_job(
@@ -982,6 +1146,11 @@ def prepare_job(
         checkpoint_count=job.checkpoint_count,
         angle_fallback=angle_fallback,
         mask=mask,
+        # Deliberately slower than the dialog's live estimate. This runs
+        # once, when the job is frozen, and the plan it produces is what
+        # the whole run is scheduled around -- seconds here are worth more
+        # than a sharper number is anywhere else.
+        budget_seconds=_PREPARE_PROBE_SECONDS,
     )
     excluded = set(config.corrections.excluded_frames)
     job.checkpoint_plan = {
@@ -2222,7 +2391,9 @@ class _AdjustablePool:
                 lines.append(f"  diagnostics raised {error!r}")
         report = "\n".join(lines)
         warnings.warn(report, RuntimeWarning, stacklevel=2)
-        print(report, file=sys.stderr, flush=True)
+        # Also logged, so a stalled shutdown lands in a batch job's log
+        # file and not only in the scheduler's raw stderr capture.
+        logger.warning("%s", report)
 
 
 class _BoundedGate:
@@ -3884,6 +4055,66 @@ def _map_pending_ranges(
     _fail_if_nothing_was_routed(router, routed_before, total_images, progress)
 
 
+def _log_job_summary(job, path, *, stage):
+    """Log the identity and layout of the job a stage is about to run.
+
+    Everything logged here is read from the frozen job descriptor, so a
+    scheduler output file alone is enough to tell which job ran, which
+    build ran it, and where its scratch and output files live.
+
+    :param str stage:
+        Short stage name, e.g. ``"cluster map"`` or ``"single-node run"``.
+    """
+    logger.info("%s: job file %s", stage, Path(path).absolute())
+    logger.info("%s: job digest %s, status '%s'", stage, job.digest, job.status)
+    logger.info("%s: scratch path %s", stage, job.scratch_path)
+    logger.info("%s: output path %s", stage, job.output_path)
+    logger.info("%s: %d output grid(s)", stage, len(job.grids))
+    for grid in job.grids:
+        spec = _GridSpec(**grid)
+        logger.info(
+            "%s:   grid '%s' in the %s frame, shape %s, step %s",
+            stage,
+            spec.grid_name,
+            grid["frame"],
+            spec.shape,
+            grid["step"],
+        )
+    logger.info(
+        "%s: accuracy '%s', angle fallback '%s', compression '%s'",
+        stage,
+        job.accuracy,
+        job.angle_fallback,
+        job.compression,
+    )
+    logger.info(
+        "%s: prepared for %d thread(s) and %.2f GiB, %d checkpoint(s) per grid",
+        stage,
+        job.thread_override or job.runtime_threads,
+        (job.memory_override_bytes or job.runtime_memory_bytes) / 1024**3,
+        job.checkpoint_count,
+    )
+    logger.debug("%s: build metadata %s", stage, job.build_metadata)
+    logger.debug("%s: scan reference %s", stage, job.scan_reference)
+
+
+def _log_execution_spec(spec, stage, *, effective_memory=None):
+    """Log the resolved execution settings a mapping run will use."""
+    logger.info(
+        "%s: executing with %d thread(s), depth %d, work block %s pixels",
+        stage,
+        spec.threads,
+        spec.max_depth,
+        spec.work_block_pixels,
+    )
+    if effective_memory is not None:
+        logger.info(
+            "%s: frame pipeline memory budget %.2f GiB",
+            stage,
+            effective_memory / 1024**3,
+        )
+
+
 def run_cluster_map_task(
     path,
     task_index,
@@ -3924,18 +4155,34 @@ def run_cluster_map_task(
         (already-resumed frames skipped).
     :rtype: dict
     """
+    stage = f"cluster map task {int(task_index)}/{int(total_tasks)}"
+    started = time.monotonic()
     path = Path(path).absolute()
     job = read_job(path)
+    _log_job_summary(job, path, stage=stage)
+    logger.info(
+        "%s: scheduler allocation %d cpu(s), %.2f GiB",
+        stage,
+        int(cpus),
+        memory_bytes / 1024**3,
+    )
     verify_job(job)
+    logger.debug("%s: job verified against its recorded assets", stage)
     scan = job.scan
     config = job.config_data
     assets = _load_assets(job)
     mask = assets.get("mask")
+    logger.info(
+        "%s: scan opened, %d frame(s) in the scan", stage, len(scan)
+    )
 
     plan = _node_checkpoint_plan(
         job, scan, config, mask, total_tasks=total_tasks, task_index=task_index
     )
     if plan is None:
+        logger.info(
+            "%s: no frames assigned to this task, nothing to do", stage
+        )
         return {
             "status": "complete",
             "task_index": int(task_index),
@@ -3957,8 +4204,20 @@ def run_cluster_map_task(
     active_budget_bytes, effective_memory = split_memory_budget(
         effective_memory, number_of_grids
     )
+    _log_execution_spec(execution_spec, stage, effective_memory=effective_memory)
+    logger.info(
+        "%s: checkpoint directory %s, %d planned checkpoint(s), "
+        "%.2f GiB accumulator budget",
+        stage,
+        node_dir,
+        sum(len(items) for items in boundaries.values()),
+        active_budget_bytes / 1024**3,
+    )
     resumed, _existing_files = _discover_checkpoint_state(
         node_dir, boundaries, job.digest, cleanup_stale=True
+    )
+    logger.info(
+        "%s: %d checkpoint(s) already on disk and resumable", stage, len(resumed)
     )
     router = _CheckpointRouter(
         boundaries,
@@ -3984,6 +4243,19 @@ def run_cluster_map_task(
     reused_frames = total_frames - sum(
         stop - start for start, stop in pending_ranges
     )
+    logger.info(
+        "%s: owns %d frame(s) in %d range(s); %d frame(s) reused from "
+        "checkpoints, %d to map in %d pending range(s)",
+        stage,
+        total_frames,
+        len(ranges),
+        reused_frames,
+        total_frames - reused_frames,
+        len(pending_ranges),
+    )
+    logger.debug("%s: pending frame ranges %s", stage, pending_ranges)
+    logger.debug("%s: detector tiles %s", stage, tiles)
+    mapping_started = time.monotonic()
 
     _map_pending_ranges(
         execution_spec,
@@ -4002,6 +4274,12 @@ def run_cluster_map_task(
         progress=progress,
     )
 
+    logger.info(
+        "%s: mapping finished in %.1f s",
+        stage,
+        time.monotonic() - mapping_started,
+    )
+
     resumed_after, _files = _discover_checkpoint_state(
         node_dir, boundaries, job.digest, cleanup_stale=False
     )
@@ -4012,12 +4290,26 @@ def run_cluster_map_task(
     }
     missing = expected - resumed_after
     if missing:
+        logger.error(
+            "%s: %d of %d expected checkpoint(s) missing under %s: %s",
+            stage,
+            len(missing),
+            len(expected),
+            node_dir,
+            sorted(missing)[:10],
+        )
         raise RuntimeError(
             f"Node {task_index} mapping did not produce {len(missing)} "
             f"expected checkpoint(s): {sorted(missing)[:10]}"
         )
+    logger.info(
+        "%s: all %d expected checkpoint(s) written", stage, len(expected)
+    )
 
     _atomic_json(node_dir / "provenance.json", provenance)
+    logger.info(
+        "%s: complete in %.1f s", stage, time.monotonic() - started
+    )
 
     return {
         "status": "complete",
@@ -4061,10 +4353,23 @@ def run_cluster_finalize(
         ``_CheckpointRangeReader`` regardless of this value, matching the
         single-node path, so it is currently informational only.
     """
+    stage = "cluster finalize"
+    started = time.monotonic()
     path = Path(path).absolute()
     job = read_job(path)
     if job.status == "complete":
+        logger.info(
+            "%s: job %s is already complete, nothing to do", stage, path
+        )
         return job_status(path)
+    _log_job_summary(job, path, stage=stage)
+    logger.info(
+        "%s: reducing %d map task(s), scheduler allocation %d cpu(s), %.2f GiB",
+        stage,
+        int(total_tasks),
+        int(cpus),
+        memory_bytes / 1024**3,
+    )
     verify_job(job)
     if int(cpus) < 1:
         raise ValueError("cpus must be at least one")
@@ -4088,6 +4393,9 @@ def run_cluster_finalize(
             task_index=task_index,
         )
         if plan is None:
+            logger.info(
+                "%s: map task %d owned no frames, skipping", stage, task_index
+            )
             continue
         node_dir = _node_checkpoint_dir(job, task_index)
         boundaries = {
@@ -4103,8 +4411,22 @@ def run_cluster_finalize(
             for index in range(len(ranges_for_grid))
         }
         if expected - resumed:
+            logger.error(
+                "%s: map task %d is missing %d of %d checkpoint(s) under %s",
+                stage,
+                task_index,
+                len(expected - resumed),
+                len(expected),
+                node_dir,
+            )
             incomplete.append(task_index)
             continue
+        logger.info(
+            "%s: map task %d contributes %d checkpoint file(s)",
+            stage,
+            task_index,
+            sum(len(paths) for paths in files.values()),
+        )
         for grid_name, paths in files.items():
             checkpoint_files.setdefault(grid_name, []).extend(paths)
         provenance_path = node_dir / "provenance.json"
@@ -4122,6 +4444,16 @@ def run_cluster_finalize(
 
     job.correction_provenance = provenance
     spec = job.internal_spec()
+    _log_execution_spec(spec, stage)
+    for grid_name, paths in sorted(checkpoint_files.items()):
+        logger.info(
+            "%s: merging %d checkpoint file(s) for grid '%s'",
+            stage,
+            len(paths),
+            grid_name,
+        )
+    logger.info("%s: writing %s", stage, job.output_path)
+    finalize_started = time.monotonic()
     result = _finalize_reconstruction(
         spec,
         checkpoint_files,
@@ -4139,6 +4471,12 @@ def run_cluster_finalize(
             )
         ),
     )
+    logger.info(
+        "%s: HDF5 written in %.1f s, sha256 %s",
+        stage,
+        time.monotonic() - finalize_started,
+        result["sha256"],
+    )
     job.output_sha256 = result["sha256"]
     job.status = "complete"
     for task_index in range(int(total_tasks)):
@@ -4147,18 +4485,26 @@ def run_cluster_finalize(
             if target.is_dir():
                 shutil.rmtree(target)
         except OSError as error:
+            logger.warning("%s: could not remove %s: %s", stage, target, error)
             job.cleanup_errors.append(f"{target}: {error}")
     checkpoints_root = Path(job.scratch_path) / "checkpoints"
     try:
         if checkpoints_root.is_dir() and not any(checkpoints_root.iterdir()):
             checkpoints_root.rmdir()
     except OSError as error:
+        logger.warning(
+            "%s: could not remove %s: %s", stage, checkpoints_root, error
+        )
         job.cleanup_errors.append(f"{checkpoints_root}: {error}")
     try:
         Path(job.assets_path).unlink()
     except OSError as error:
+        logger.warning(
+            "%s: could not remove %s: %s", stage, job.assets_path, error
+        )
         job.cleanup_errors.append(f"{job.assets_path}: {error}")
     write_job(job, path)
+    logger.info("%s: complete in %.1f s", stage, time.monotonic() - started)
     return job_status(path)
 
 
@@ -4169,15 +4515,22 @@ def run_job(
     execution_memory_bytes=None,
 ):
     """Run or resume one prepared reconstruction job."""
+    stage = "single-node run"
+    started = time.monotonic()
     path = Path(path).absolute()
     job = read_job(path)
     if job.status == "complete":
+        logger.info(
+            "%s: job %s is already complete, nothing to do", stage, path
+        )
         return job_status(path)
+    _log_job_summary(job, path, stage=stage)
     verify_job(job)
     scan = job.scan
     config = job.config_data
     assets = _load_assets(job)
     spec = job.internal_spec()
+    logger.info("%s: scan opened, %d frame(s) in the scan", stage, len(scan))
     bounds = scan.exposure_angle_bounds(
         config, fallback=job.angle_fallback
     )
@@ -4196,9 +4549,21 @@ def run_job(
     active_budget_bytes, effective_memory = split_memory_budget(
         effective_memory, number_of_grids
     )
+    _log_execution_spec(spec, stage, effective_memory=effective_memory)
+    logger.info(
+        "%s: checkpoint directory %s, %d planned checkpoint(s), "
+        "%.2f GiB accumulator budget",
+        stage,
+        checkpoint_dir,
+        sum(len(items) for items in boundaries.values()),
+        active_budget_bytes / 1024**3,
+    )
 
     resumed, _existing_files = _discover_checkpoint_state(
         checkpoint_dir, boundaries, job.digest, cleanup_stale=True
+    )
+    logger.info(
+        "%s: %d checkpoint(s) already on disk and resumable", stage, len(resumed)
     )
     router = _CheckpointRouter(
         boundaries,
@@ -4219,12 +4584,25 @@ def run_job(
     completed_images = total_images - sum(
         stop - start for start, stop in pending_ranges
     )
+    logger.info(
+        "%s: %d frame(s) in %d range(s); %d reused from checkpoints, "
+        "%d to map in %d pending range(s)",
+        stage,
+        total_images,
+        len(ranges),
+        completed_images,
+        total_images - completed_images,
+        len(pending_ranges),
+    )
+    logger.debug("%s: pending frame ranges %s", stage, pending_ranges)
+    logger.debug("%s: detector tiles %s", stage, tiles)
     if progress is not None:
         progress(
             completed_images,
             total_images + 1,
             f"Mapping images {completed_images}/{total_images}",
         )
+    mapping_started = time.monotonic()
 
     _map_pending_ranges(
         spec,
@@ -4243,6 +4621,11 @@ def run_job(
         progress=progress,
     )
 
+    logger.info(
+        "%s: mapping finished in %.1f s",
+        stage,
+        time.monotonic() - mapping_started,
+    )
     if progress is not None:
         progress(total_images, total_images + 1, "Verifying checkpoints")
     resumed_after, checkpoint_files = _discover_checkpoint_state(
@@ -4255,6 +4638,14 @@ def run_job(
     }
     missing = expected - resumed_after
     if missing:
+        logger.error(
+            "%s: %d of %d expected checkpoint(s) missing under %s: %s",
+            stage,
+            len(missing),
+            len(expected),
+            checkpoint_dir,
+            sorted(missing)[:10],
+        )
         raise RuntimeError(
             "Reconstruction mapping did not produce "
             f"{len(missing)} expected checkpoint(s): {sorted(missing)[:10]}"
@@ -4264,6 +4655,8 @@ def run_job(
     write_job(job, path)
     if progress is not None:
         progress(total_images, total_images + 1, "Finalizing HDF5")
+    logger.info("%s: writing %s", stage, job.output_path)
+    finalize_started = time.monotonic()
     result = _finalize_reconstruction(
         spec,
         checkpoint_files,
@@ -4283,6 +4676,12 @@ def run_job(
             )
         ),
     )
+    logger.info(
+        "%s: HDF5 written in %.1f s, sha256 %s",
+        stage,
+        time.monotonic() - finalize_started,
+        result["sha256"],
+    )
     job.output_sha256 = result["sha256"]
     job.status = "complete"
     for target in (checkpoint_dir, Path(job.assets_path)):
@@ -4292,8 +4691,10 @@ def run_job(
             elif target.exists():
                 target.unlink()
         except OSError as error:
+            logger.warning("%s: could not remove %s: %s", stage, target, error)
             job.cleanup_errors.append(f"{target}: {error}")
     write_job(job, path)
     if progress is not None:
         progress(total_images + 1, total_images + 1, "Complete")
+    logger.info("%s: complete in %.1f s", stage, time.monotonic() - started)
     return job_status(path)

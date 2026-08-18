@@ -117,6 +117,10 @@ def sample_hkl_coverage(
 ):
     """Sample the reciprocal-space positions the scan actually reaches.
 
+    A flattened view of :func:`sample_hkl_coverage_by_frame`; see there for
+    the sampling itself and for the per-frame form, which is what a caller
+    asking *which frames* reach a feature needs.
+
     The returned cloud is a *sample* of the swept detector surface, not its
     exact hull: a feature touched only by a few detector pixels of a few frames
     can fall between samples and then be missed by the selection functions
@@ -140,6 +144,57 @@ def sample_hkl_coverage(
     :raises ValueError:
         If the sampling counts are invalid or no frame is included.
     """
+    _frames, coordinates = sample_hkl_coverage_by_frame(
+        config,
+        scan,
+        detector_samples=detector_samples,
+        frame_samples=frame_samples,
+    )
+    return coordinates.reshape(-1, 3)
+
+
+def sample_hkl_coverage_by_frame(
+    config,
+    scan,
+    *,
+    detector_samples=33,
+    frame_samples=128,
+    frames=None,
+):
+    """Sample the reciprocal space the scan reaches, keeping the frame.
+
+    Same sampling as :func:`sample_hkl_coverage`, but the samples stay
+    grouped by the frame they came from, so a caller can ask which frames
+    reach a given volume rather than only whether any of them does. That
+    distinction is what separates a feature the whole scan sweeps through
+    from one a handful of frames graze: a crystal truncation rod at a fixed
+    ``(H, K)`` is crossed over a narrow range of sample rotations, while the
+    specular rod is reached by every frame.
+
+    :param config:
+        Central :class:`~orgui.app.config_data.ConfigData` experiment
+        snapshot.
+    :param scan:
+        Active scan backend providing exposure angle bounds in radians.
+    :param int detector_samples:
+        Pixel centers sampled along each detector axis; at least two.
+    :param int frame_samples:
+        Maximum number of included scan frames sampled; at least one.
+    :param frames:
+        Optional explicit frame indices to draw the sample from, instead of
+        every frame the config includes. A caller estimating one cluster
+        node's own slice needs the sample drawn from that slice: spread over
+        the whole scan, a few dozen samples may land in a short range not at
+        all, and a volume is then scored against frames the node will never
+        map.
+    :returns:
+        ``(frames, coordinates)`` -- the sampled frame indices, shape
+        ``(f,)``, and their reciprocal-lattice coordinates in r.l.u., shape
+        ``(f, n, 3)`` with ``n`` samples per frame.
+    :rtype: tuple[numpy.ndarray, numpy.ndarray]
+    :raises ValueError:
+        If the sampling counts are invalid or no frame is included.
+    """
     detector_samples = int(detector_samples)
     frame_samples = int(frame_samples)
     if detector_samples < 2 or frame_samples < 1:
@@ -155,11 +210,14 @@ def sample_hkl_coverage(
     )
     if bounds.shape != (len(scan), 2, 4):
         raise ValueError("Exposure angle bounds must have shape (frames, 2, 4)")
-    excluded = set(config.corrections.excluded_frames)
-    included = np.asarray(
-        [index for index in range(len(scan)) if index not in excluded],
-        dtype=np.int64,
-    )
+    if frames is None:
+        excluded = set(config.corrections.excluded_frames)
+        included = np.asarray(
+            [index for index in range(len(scan)) if index not in excluded],
+            dtype=np.int64,
+        )
+    else:
+        included = np.unique(np.asarray(frames, dtype=np.int64))
     if included.size == 0:
         raise ValueError(
             "No included frames are available for coverage sampling"
@@ -220,6 +278,7 @@ def sample_hkl_coverage(
     for frame_index in sampled_frames:
         angles_start = np.ascontiguousarray(bounds[frame_index, 0])
         angles_end = np.ascontiguousarray(bounds[frame_index, 1])
+        per_frame = []
         for row_index in range(pixel_rays.shape[0]):
             for column_index in range(pixel_rays.shape[1]):
                 # A degenerate 2x2 corner patch of the one pixel-center ray:
@@ -232,12 +291,16 @@ def sample_hkl_coverage(
                     )
                 )
                 for t in (0.0, 1.0):
-                    coordinates.append(
+                    per_frame.append(
                         kernel.coordinate(
                             rays, angles_start, angles_end, 0, 0, 0.0, 0.0, t
                         )
                     )
-    return np.asarray(coordinates, dtype=np.float64)
+        coordinates.append(per_frame)
+    return (
+        np.asarray(sampled_frames, dtype=np.int64),
+        np.asarray(coordinates, dtype=np.float64),
+    )
 
 
 def _bulk_unit_cell(xtal):

@@ -1,5 +1,6 @@
 """Tests for reciprocal-space cluster execution helpers."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -92,3 +93,63 @@ def test_cluster_settings_reject_scheduler_mismatched_directives():
 def test_cluster_settings_reject_non_positive_array_task_count():
     with pytest.raises(ValueError, match="array_task_count"):
         ClusterSettings(array_task_count=0)
+
+
+@pytest.mark.parametrize("scheduler", ["sge", "slurm"])
+def test_cluster_scripts_pass_logging_options_to_every_stage(
+    tmp_path, scheduler
+):
+    """Generated commands ask for a verbose log and a per-task log file,
+    so a failed array element can be debugged from its own output."""
+    settings = ClusterSettings(
+        scheduler=scheduler,
+        job_name="verbose-rsmap",
+        array_task_count=3,
+        log_level="debug",
+        log_directory=str(tmp_path / "logs"),
+    )
+    job = SimpleNamespace(cluster_settings=settings.to_dict())
+
+    result = generate_cluster_scripts(
+        tmp_path / "job.json", job, output_directory=tmp_path / "scripts"
+    )
+
+    map_text = Path(result["map"]).read_text(encoding="utf-8")
+    finalize_text = Path(result["finalize"]).read_text(encoding="utf-8")
+    for text in (map_text, finalize_text):
+        assert "--log-level DEBUG" in text
+        assert 'mkdir -p "$log_dir"' in text
+    assert (
+        '--log-file "$log_dir/verbose-rsmap-map-${task_index}.log"' in map_text
+    )
+    assert (
+        '--log-file "$log_dir/verbose-rsmap-finalize.log"' in finalize_text
+    )
+    # The array index is normalized once, then reused by both the command
+    # and the log file name.
+    assert '--task-index "${task_index}"' in map_text
+    if scheduler == "sge":
+        assert 'task_index="$((SGE_TASK_ID - 1))"' in map_text
+    else:
+        assert 'task_index="${SLURM_ARRAY_TASK_ID}"' in map_text
+
+
+def test_cluster_scripts_omit_log_files_without_a_log_directory(tmp_path):
+    """Without a log directory, the scheduler's own capture is enough."""
+    settings = ClusterSettings(job_name="quiet-rsmap", array_task_count=2)
+    job = SimpleNamespace(cluster_settings=settings.to_dict())
+
+    result = generate_cluster_scripts(
+        tmp_path / "job.json", job, output_directory=tmp_path / "scripts"
+    )
+
+    map_text = Path(result["map"]).read_text(encoding="utf-8")
+    assert "--log-file" not in map_text
+    assert "log_dir" not in map_text
+    assert "--log-level INFO" in map_text
+
+
+def test_cluster_settings_reject_unknown_log_level():
+    """Log levels are validated when the job is prepared, not on the node."""
+    with pytest.raises(ValueError, match="Log level"):
+        ClusterSettings(log_level="chatty")

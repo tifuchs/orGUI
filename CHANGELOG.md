@@ -152,6 +152,36 @@ A ***critical bug*** was fixed that affects bulk CTR calculations:
   voxels are reached, and how many detector samples reach each of them, are
   unchanged. A new ``skipped_pixels`` profile counter reports how many
   pixels were settled this way.
+- The reciprocal-space checkpoint estimate now measures each output grid
+  on a frame that actually reaches it, and scales it by how much of the scan
+  does. It previously probed one frame in the middle of the scan for every
+  grid, which is sound for a single grid spanning the measured volume but
+  not for the small feature volumes automatic selection produces: a crystal
+  truncation rod at a fixed ``(H, K)`` is crossed over a narrow range of
+  sample rotations, so the middle frame usually reaches none of them and the
+  estimate came back as no data at all, for every grid, whatever its size.
+  On a 27-rod job every grid now returns an estimate, where none did before.
+  Three things were wrong underneath and are fixed together: one wall-clock
+  probe budget was divided between the grids, leaving as few as two sampled
+  pixels of a six-megapixel frame at a few dozen grids (the budget is now
+  per grid); the sample was capped at two megapixels regardless of detector
+  size, so a thin locus of reaching pixels was found or missed depending on
+  where the sample tiles landed (the cap is now the detector, which is
+  affordable because a pixel that cannot reach the grid is no longer
+  subdivided); and a run of sample tiles that found no records has a spread
+  of exactly zero, which the convergence test read as a converged
+  measurement and stopped on, ending the sampling precisely on the grids it
+  had learned nothing about. The frame it probes is a typical reaching one
+  rather than the one that reaches most squarely, since the density is
+  multiplied by every reaching frame and a peak reported as an average
+  overstated a rod's records by nearly nine times; the strongest frame is
+  kept as a fallback for volumes a typical frame grazes too lightly to
+  measure. Checked against a mapped slice of a 27-rod scan, the estimate is
+  now within about twice the records actually accumulated, where the same
+  comparison before these changes was zero. It remains an estimate from a
+  sampled frame and a sampled set of pixels, not a count. Estimated file
+  counts and sizes shown in the dialog are affected; the mapping itself is
+  not.
 - Corrected the detector band height used for reciprocal-space mapping,
   which was still derived from the worst-case adaptive leaf count rather
   than from the record ceiling the memory prechecks use. At the
@@ -326,6 +356,21 @@ ESRF ID31 beamline support and reciprocal-space display:
   mistaken for the ``1.1`` fast-counter subscan.
 
 Reciprocal-space reconstruction:
+
+- Reciprocal-space jobs run from the command line, including SGE and Slurm
+  batch tasks, are now much more verbose. Every ``orGUI rsmap`` command
+  writes a log to standard error (the result JSON still goes to standard
+  output alone) recording the orGUI version and interpreter, host and
+  process ID, the scheduler environment variables that are set, the job
+  digest, output and scratch paths, the selected grids, the resolved thread
+  and memory budgets, the frame ranges the process owns, how many
+  checkpoints were reused instead of remapped, and how long each stage
+  took. A failing task logs its traceback before exiting. New
+  ``--log-level``/``--verbose`` and ``--log-file`` options select the
+  verbosity and keep an additional copy on disk; the Cluster tab has
+  matching ``Log level`` and ``Log directory`` fields that are baked into
+  the generated batch scripts, which now also echo the task index, host,
+  and start time before Python starts.
 
 - Fixed a rare hang at the end of a mapping run. Every frame was mapped and
   every checkpoint written, and the job then waited forever while shutting

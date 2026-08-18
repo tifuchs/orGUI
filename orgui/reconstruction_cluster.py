@@ -11,6 +11,7 @@ import shlex
 
 _SCHEDULERS = {"sge", "slurm"}
 _JOB_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,12 @@ class ClusterSettings:
     sge_memory_resource: str = "h_vmem"
     extra_array_directives: str = ""
     extra_reduce_directives: str = ""
+    #: Verbosity passed to ``--log-level`` in the generated commands. The
+    #: log goes to stderr, which both schedulers capture per task.
+    log_level: str = "INFO"
+    #: Optional directory for an additional per-task log file. Empty
+    #: means "scheduler output files only".
+    log_directory: str = ""
 
     def __post_init__(self):
         scheduler = self.scheduler.lower()
@@ -65,6 +72,12 @@ class ClusterSettings:
         for name in ("array_walltime", "reduce_walltime"):
             if not str(getattr(self, name)).strip():
                 raise ValueError(f"{name} cannot be empty")
+        log_level = str(self.log_level).upper()
+        object.__setattr__(self, "log_level", log_level)
+        if log_level not in _LOG_LEVELS:
+            raise ValueError(
+                "Log level must be one of " + ", ".join(_LOG_LEVELS)
+            )
         if scheduler == "sge":
             if not self.sge_parallel_environment.strip():
                 raise ValueError("SGE parallel environment cannot be empty")
@@ -103,22 +116,32 @@ def _quote(value):
     return shlex.quote(str(value).replace("\\", "/"))
 
 
-def _script_preamble(settings, working_directory):
+def _script_preamble(settings, working_directory, log_directory=None):
     lines = [
         "set -euo pipefail",
         f"cd {_quote(working_directory)}",
     ]
+    if log_directory is not None:
+        lines.append(f"log_dir={_quote(log_directory)}")
+        lines.append('mkdir -p "$log_dir"')
     if settings.environment_setup.strip():
         lines.extend(settings.environment_setup.rstrip().splitlines())
     return lines
 
 
-def _python_command(settings, arguments):
+def _python_command(settings, arguments, raw_arguments=()):
+    """Build one ``orgui.reconstruction_cli`` invocation.
+
+    :param arguments:
+        Values quoted for the shell.
+    :param raw_arguments:
+        Fragments inserted verbatim, for arguments that must keep shell
+        expansions such as ``"$log_dir/...-$task_index.log"``.
+    """
     executable = _quote(settings.python_executable)
-    return (
-        f"{executable} -m orgui.reconstruction_cli "
-        + " ".join(_quote(value) for value in arguments)
-    )
+    parts = [_quote(value) for value in arguments]
+    parts.extend(raw_arguments)
+    return f"{executable} -m orgui.reconstruction_cli " + " ".join(parts)
 
 
 def _sge_directives(settings, *, array_tasks=None):
@@ -212,6 +235,12 @@ def generate_cluster_scripts(job_path, job, output_directory=None):
     ``--memory-gib`` already are. Only each array element's own index
     comes from the scheduler.
 
+    Both generated commands carry ``--log-level`` (and ``--log-file``
+    when ``settings.log_directory`` is set), so an array task's stderr --
+    which both schedulers capture per task -- records the job identity,
+    the frame slice, the resolved execution settings, and per-stage
+    timings rather than progress percentages alone.
+
     :param job_path:
         Prepared reconstruction job JSON.
     :param ReconstructionJob job:
@@ -238,54 +267,94 @@ def generate_cluster_scripts(job_path, job, output_directory=None):
     map_path = directory / f"{settings.job_name}-map.{suffix}"
     finalize_path = directory / f"{settings.job_name}-finalize.{suffix}"
     submit_path = directory / f"{settings.job_name}-submit.sh"
-    preamble = _script_preamble(settings, working_directory)
+    log_directory = (
+        str(Path(settings.log_directory).absolute())
+        if settings.log_directory.strip()
+        else None
+    )
+    preamble = _script_preamble(settings, working_directory, log_directory)
 
     if settings.scheduler == "sge":
-        map_index = '"$((SGE_TASK_ID - 1))"'
+        map_index_expression = '"$((SGE_TASK_ID - 1))"'
         map_directives = _sge_directives(settings, array_tasks=array_tasks)
         finalize_directives = _sge_directives(settings)
     else:
-        map_index = '"${SLURM_ARRAY_TASK_ID}"'
+        map_index_expression = '"${SLURM_ARRAY_TASK_ID}"'
         map_directives = _slurm_directives(settings, array_tasks=array_tasks)
         finalize_directives = _slurm_directives(settings)
+    # The scheduler's own per-task index is normalized once into a shell
+    # variable, so both the command and the per-task log file name can
+    # refer to it (the job name is validated to shell-safe characters).
+    map_preamble = [
+        *preamble,
+        f"task_index={map_index_expression}",
+        'echo "Starting map task ${task_index} on $(hostname) at $(date -Is)"',
+    ]
+    finalize_preamble = [
+        *preamble,
+        'echo "Starting finalize on $(hostname) at $(date -Is)"',
+    ]
+
+    map_arguments = [
+        "cluster-map",
+        job_path,
+        "--task-index",
+        "__ARRAY_INDEX__",
+        "--total-tasks",
+        array_tasks,
+        "--cpus",
+        settings.array_cpus,
+        "--memory-gib",
+        settings.array_memory_gib,
+        "--log-level",
+        settings.log_level,
+    ]
+    finalize_arguments = [
+        "cluster-finalize",
+        job_path,
+        "--total-tasks",
+        array_tasks,
+        "--cpus",
+        settings.reduce_cpus,
+        "--memory-gib",
+        settings.reduce_memory_gib,
+        "--log-level",
+        settings.log_level,
+    ]
+    map_raw = []
+    finalize_raw = []
+    if log_directory is not None:
+        map_raw = [
+            "--log-file",
+            f'"$log_dir/{settings.job_name}-map-${{task_index}}.log"',
+        ]
+        finalize_raw = [
+            "--log-file",
+            f'"$log_dir/{settings.job_name}-finalize.log"',
+        ]
 
     map_command = _python_command(
-        settings,
-        (
-            "cluster-map",
-            job_path,
-            "--task-index",
-            "__ARRAY_INDEX__",
-            "--total-tasks",
-            array_tasks,
-            "--cpus",
-            settings.array_cpus,
-            "--memory-gib",
-            settings.array_memory_gib,
-        ),
-    ).replace(_quote("__ARRAY_INDEX__"), map_index)
+        settings, map_arguments, map_raw
+    ).replace(_quote("__ARRAY_INDEX__"), '"${task_index}"')
     finalize_command = _python_command(
-        settings,
-        (
-            "cluster-finalize",
-            job_path,
-            "--total-tasks",
-            array_tasks,
-            "--cpus",
-            settings.reduce_cpus,
-            "--memory-gib",
-            settings.reduce_memory_gib,
-        ),
+        settings, finalize_arguments, finalize_raw
     )
     map_text = "\n".join(
-        ["#!/usr/bin/env bash", *map_directives, "", *preamble, map_command, ""]
+        [
+            "#!/usr/bin/env bash",
+            *map_directives,
+            "",
+            *map_preamble,
+            map_command,
+            "",
+        ]
     )
     finalize_text = "\n".join(
         [
             "#!/usr/bin/env bash",
             *finalize_directives,
             "",
-            *preamble,
+            *finalize_preamble,
             finalize_command,
             "",
         ]

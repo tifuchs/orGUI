@@ -1,10 +1,27 @@
 """Tests for reciprocal-space reconstruction command dispatch."""
 
+import logging
+import os
+import platform
 import sys
 from unittest import mock
 
+import pytest
+
 from orgui import main as orgui_main
 from orgui import reconstruction_cli
+
+
+@pytest.fixture(autouse=True)
+def _reset_rsmap_log_handlers():
+    """Drop handlers installed by the CLI, so a captured stream from one
+    test is never written to by a later one."""
+    yield
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if getattr(handler, "_orgui_rsmap_handler", False):
+            root.removeHandler(handler)
+            handler.close()
 
 
 def test_reconstruction_main_accepts_forwarded_arguments():
@@ -113,3 +130,69 @@ def test_cluster_map_cli_passes_array_resources(capsys):
         "memory_bytes": 16 * 1024**3,
     }
     assert '"status": "complete"' in capsys.readouterr().out
+
+
+def test_cli_logs_startup_banner_with_scheduler_environment(
+    capsys, monkeypatch
+):
+    """Batch tasks record their identity, host, and scheduler context."""
+    monkeypatch.setenv("SLURM_ARRAY_TASK_ID", "5")
+    monkeypatch.setenv("SLURM_JOB_ID", "774411")
+    monkeypatch.setattr(
+        reconstruction_cli, "job_status", lambda path: {"status": "prepared"}
+    )
+
+    reconstruction_cli.main(["status", "job.json"])
+
+    err = capsys.readouterr().err
+    assert "reciprocal-space command 'status' starting" in err
+    assert "SLURM_ARRAY_TASK_ID=5" in err
+    assert "SLURM_JOB_ID=774411" in err
+    assert platform.node() in err
+    assert f"[{os.getpid()}]" in err
+    assert "Command 'status' completed" in err
+
+
+def test_cli_log_level_is_honoured_before_the_subcommand(capsys, monkeypatch):
+    """Sub-parser defaults must not discard a level given up front."""
+    monkeypatch.setattr(
+        reconstruction_cli, "job_status", lambda path: {"status": "prepared"}
+    )
+
+    reconstruction_cli.main(["--log-level", "WARNING", "status", "job.json"])
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert '"status": "prepared"' in captured.out
+
+
+def test_cli_writes_an_additional_log_file(tmp_path, monkeypatch):
+    """--log-file keeps a copy outside the scheduler's own output files."""
+    monkeypatch.setattr(
+        reconstruction_cli, "job_status", lambda path: {"status": "prepared"}
+    )
+    log_file = tmp_path / "logs" / "task.log"
+
+    reconstruction_cli.main(
+        ["status", "job.json", "--log-file", str(log_file), "--verbose"]
+    )
+
+    text = log_file.read_text(encoding="utf-8")
+    assert "reciprocal-space command 'status' starting" in text
+    assert "Command line:" in text  # DEBUG record, from --verbose
+
+
+def test_cli_logs_a_failing_command_before_reraising(capsys, monkeypatch):
+    """A crashed batch task leaves its traceback in the log."""
+
+    def explode(path):
+        raise RuntimeError("scratch directory is unreadable")
+
+    monkeypatch.setattr(reconstruction_cli, "job_status", explode)
+
+    with pytest.raises(RuntimeError, match="scratch directory"):
+        reconstruction_cli.main(["status", "job.json"])
+
+    err = capsys.readouterr().err
+    assert "Command 'status' failed after" in err
+    assert "scratch directory is unreadable" in err

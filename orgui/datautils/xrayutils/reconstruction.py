@@ -306,6 +306,18 @@ def _kernel_for_grid(
     threads=None,
     memory_budget_bytes=None,
 ):
+    """Build one grid's native kernel.
+
+    The integer arguments are coerced here rather than trusted: the native
+    signature takes them as C++ integers and rejects a float outright, and a
+    memory budget in bytes reaches this from several directions that do not
+    all round it -- a GUI memory setting in MiB is a float, so
+    ``maxMemory * 1024 * 1024`` is a float too, which used to surface as an
+    "incompatible constructor arguments" dump in the dialog's live checkpoint
+    estimate while ``prepare_job`` (which does round) worked. Truncation is
+    the right direction for all four: each is a budget or a count that must
+    not be rounded up past what was asked for.
+    """
     ub = np.asarray(ub_calculator.getUB(), dtype=np.float64)
     u = np.asarray(ub_calculator.getU(), dtype=np.float64)
     return _native_module().ReconstructionKernel(
@@ -317,10 +329,10 @@ def _kernel_for_grid(
         float(ub_calculator.getK()),
         np.ascontiguousarray(np.linalg.inv(ub)),
         np.ascontiguousarray(np.linalg.inv(u)),
-        spec.max_depth,
-        spec.threads if threads is None else threads,
-        spec.work_block_pixels,
-        (
+        int(spec.max_depth),
+        int(spec.threads if threads is None else threads),
+        int(spec.work_block_pixels),
+        int(
             spec.memory_budget_bytes
             if memory_budget_bytes is None
             else memory_budget_bytes
@@ -512,7 +524,7 @@ def _calibration_probe(
     target_relative_error=0.05,
     sample_tiles=9,
     min_sample_pixels=256,
-    max_sample_pixels=2_000_000,
+    max_sample_pixels=None,
     rng=None,
 ):
     """Estimate per-pixel mapping cost and record volume, live, in-budget.
@@ -562,6 +574,15 @@ def _calibration_probe(
         convergence, so it is an upper bound rather than a fixed count.
     :param int min_sample_pixels, max_sample_pixels:
         Clamp on the sized pass's total target sample size.
+        ``max_sample_pixels`` defaults to the whole detector, which is the
+        only honest ceiling for a small output volume: such a volume is
+        reached by a thin locus of pixels, and a sample of a fixed fraction
+        of the frame misses it depending on where the tiles land, giving a
+        density that varies with the draw rather than with the job. Covering
+        the frame is affordable because a pixel that cannot reach the grid
+        is rejected before it is subdivided; the wall-clock budget still
+        bounds the call, and a grid that most pixels *do* reach costs enough
+        per pixel that the budget stops it long before this ceiling.
     :param rng:
         Optional :class:`numpy.random.Generator` for deterministic tests;
         defaults to a fresh, unseeded generator.
@@ -575,6 +596,8 @@ def _calibration_probe(
     :rtype: dict
     """
     rows, columns = mask.shape
+    if max_sample_pixels is None:
+        max_sample_pixels = rows * columns
     started = time.perf_counter()
 
     def sample_tile(row_start, row_stop, column_start, column_stop):
@@ -661,6 +684,13 @@ def _calibration_probe(
             break
         if (
             len(densities) >= _MINIMUM_CONVERGENCE_TILES
+            # Tiles that found nothing agree with each other perfectly, so
+            # their relative standard error is zero and reads as converged
+            # -- which stopped the probe early on exactly the grids it had
+            # learned nothing about. Having found no record at all is the
+            # absence of a measurement, not a precise one, so it does not
+            # end the sampling; the budget and the pixel ceiling do.
+            and total_records > 0
             and total_pixels >= min_sample_pixels
             and _relative_standard_error(densities) <= target_relative_error
         ):
@@ -721,40 +751,68 @@ def _calibration_probe_all_grids(
     ub_calculator,
     mask,
     corner_rays,
-    angles_start,
-    angles_end,
+    angles,
     *,
     budget_seconds=0.1,
     kernel_threads=None,
 ):
     """Run :func:`_calibration_probe` once per grid in ``spec.grids``.
 
-    Reuses the same sampled-tile geometry (mask, corner rays, angles)
-    across every grid -- only the kernel differs per grid, so no new
-    geometry sampling is needed per grid (see the design doc's multi-grid
-    calibration-probe extension). The overall ``budget_seconds`` is split
-    evenly across grids.
+    Reuses the same sampled-tile geometry (mask, corner rays) across every
+    grid -- only the kernel and the frame differ per grid, so no new
+    detector sampling is needed per grid (see the design doc's multi-grid
+    calibration-probe extension).
+
+    ``budget_seconds`` is **per grid**, not a total to divide. Dividing one
+    budget by the grid count is what automatic volume selection broke: at a
+    few dozen grids each probe was left with a millisecond, which bought as
+    few as two sampled pixels out of a six-megapixel frame, and the
+    resulting record density was noise. The probes are independent
+    measurements, and one grid's cost tells you nothing about another's;
+    the caller bounds the total by choosing the per-grid figure.
+
+    :param angles:
+        Mapping ``grid_name -> sequence of (angles_start, angles_end)``,
+        each shape ``(4,)`` in radians. Per grid rather than shared because
+        a small feature volume is only reached at some sample rotations:
+        probing a rod on a frame that does not reach it measures zero
+        records and says nothing about the job (see
+        :func:`~orgui.reconstruction_job.estimate_checkpoint_plan`, which
+        picks the reaching frames per grid).
+
+        A sequence rather than one pair because the first choice is a
+        *typical* reaching frame, which keeps the density from being a peak
+        reported as an average -- but a typical frame can still graze the
+        volume too lightly for the sample to find anything. The candidates
+        are tried in order and the first that finds a record wins, so the
+        fallbacks only apply where the preferred frame measured nothing at
+        all.
 
     :returns:
         Dict keyed by ``grid.grid_name``, values are
         :func:`_calibration_probe` result dicts.
     :rtype: dict[str, dict]
     """
-    per_grid_budget = budget_seconds / max(1, len(spec.grids))
     results = {}
     for grid in spec.grids:
         kernel = _kernel_for_grid(spec, grid, ub_calculator, threads=kernel_threads)
-        results[grid.grid_name] = _calibration_probe(
-            kernel,
-            mask,
-            corner_rays,
-            angles_start,
-            angles_end,
-            budget_seconds=per_grid_budget,
-            kernel_threads=(
-                kernel_threads if kernel_threads is not None else spec.threads
-            ),
-        )
+        candidates = angles[grid.grid_name]
+        result = None
+        for angles_start, angles_end in candidates:
+            result = _calibration_probe(
+                kernel,
+                mask,
+                corner_rays,
+                angles_start,
+                angles_end,
+                budget_seconds=budget_seconds,
+                kernel_threads=(
+                    kernel_threads if kernel_threads is not None else spec.threads
+                ),
+            )
+            if result["records_per_pixel"] > 0.0:
+                break
+        results[grid.grid_name] = result
     return results
 
 
