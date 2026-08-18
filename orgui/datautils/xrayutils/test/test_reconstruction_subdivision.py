@@ -364,6 +364,94 @@ def _case(rows, columns, *, moving, voxels_per_pixel=0.5, chunk_shape=(16, 16, 1
     }
 
 
+def _pixel_footprint(case, row, column):
+    """The mapped coordinates of one pixel's four corners and its centre.
+
+    :returns:
+        ``(corners, centre)``; ``corners`` is ``(4, 3)``, ``centre`` is
+        ``(3,)``, both in the grid's own r.l.u. frame.
+    """
+    probe = _probe_kernel()
+
+    def at(u, v, t):
+        return np.asarray(
+            probe.coordinate(
+                case["rays"],
+                case["angles_start"],
+                case["angles_end"],
+                row,
+                column,
+                u,
+                v,
+                t,
+            )
+        )
+
+    corners = np.asarray(
+        [at(u, v, 0.0) for u in (0.0, 1.0) for v in (0.0, 1.0)]
+    )
+    return corners, at(0.5, 0.5, 0.5)
+
+
+def _with_grid(case, minimum, step, shape):
+    """``case`` with its output grid replaced, payload and rays untouched."""
+    replaced = dict(case)
+    replaced["minimum"] = np.ascontiguousarray(np.asarray(minimum, dtype=np.float64))
+    replaced["step"] = np.ascontiguousarray(np.asarray(step, dtype=np.float64))
+    replaced["shape"] = np.ascontiguousarray(np.asarray(shape, dtype=np.int64))
+    return replaced
+
+
+def _assert_matches_reference(case, max_depth):
+    """The native records for ``case`` are exactly the reference's."""
+    result = _accumulate(case, max_depth)
+    kernel = _kernel(
+        case["minimum"],
+        case["step"],
+        case["shape"],
+        case["chunk_shape"],
+        max_depth,
+        1,
+        64,
+    )
+    expected = _reference_records(
+        kernel,
+        case["rays"],
+        case["intensity"],
+        case["variance"],
+        case["mask"],
+        case["angles_start"],
+        case["angles_end"],
+        case["minimum"],
+        case["step"],
+        case["shape"],
+        case["chunk_shape"],
+        max_depth,
+    )
+    produced = dict(
+        zip(
+            zip(
+                result["chunk_id"].tolist(),
+                result["local_voxel_id"].tolist(),
+            ),
+            zip(
+                result["weighted_intensity"].tolist(),
+                result["weighted_variance"].tolist(),
+                result["weight"].tolist(),
+                result["contributors"].tolist(),
+            ),
+        )
+    )
+    assert set(produced) == set(expected)
+    for key, (intensity, variance, weight, contributors) in produced.items():
+        reference = expected[key]
+        assert contributors == reference[3], key
+        assert intensity == pytest.approx(reference[0], rel=1e-12), key
+        assert variance == pytest.approx(reference[1], rel=1e-12), key
+        assert weight == pytest.approx(reference[2], rel=1e-12), key
+    return result
+
+
 def _accumulate(case, max_depth, threads=1, block=64, profile=False):
     kernel = _kernel(
         case["minimum"],
@@ -579,3 +667,108 @@ def test_deeper_subdivision_resolves_more_voxels_but_converges(moving):
     assert counts[-1] < 2 * counts[1], counts
     # Converged: the last step changes the count by only a few per cent.
     assert counts[-1] - counts[-2] <= 0.05 * counts[-2], counts
+
+
+# ---------------------------------------------------------------------------
+# Whole-pixel rejection (sparse output volumes)
+#
+# Automatic reciprocal-space volume selection maps many small grids in one
+# pass, so most pixels miss most grids. The subdivision resolves a cell whose
+# corners share one voxel, but had no case for a cell whose corners are all
+# *outside* the grid, so a missing pixel used to cost the full lattice. These
+# pin both halves of the guard that fixes it: that it fires, and that it never
+# fires when the footprint could still reach the grid.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("moving", [False, True])
+@pytest.mark.parametrize("max_depth", [1, 2, 3])
+def test_unreachable_grid_is_settled_at_the_pixel_corners(moving, max_depth):
+    """A grid no pixel can reach costs only that pixel's corners.
+
+    Four for a stationary exposure, eight for a moving one, whose reject
+    reasons about the chord between the exposure's two ends and so needs
+    both. Either way the whole lattice below them -- 41 evaluations per
+    pixel at stationary depth two -- is what the guard skips.
+    """
+    case = _case(6, 7, moving=moving)
+    # Far outside anything the detector maps to, in every axis at once.
+    offset = 1000.0 * np.asarray(case["step"]) * np.asarray(case["shape"])
+    unreachable = _with_grid(
+        case, np.asarray(case["minimum"]) + offset, case["step"], case["shape"]
+    )
+
+    result = _accumulate(unreachable, max_depth, profile=True)
+    profile = result["_profile"]
+
+    assert result["chunk_id"].size == 0
+    assert profile["valid_pixels"] == 6 * 7 - 1  # one masked pixel
+    assert profile["skipped_pixels"] == profile["valid_pixels"]
+    corners_per_pixel = 8 if moving else 4
+    assert (
+        profile["coordinate_evaluations"]
+        == corners_per_pixel * profile["valid_pixels"]
+    )
+
+
+@pytest.mark.parametrize("moving", [False, True])
+@pytest.mark.parametrize("max_depth", [1, 2, 3])
+def test_sparse_grid_matches_reference(moving, max_depth):
+    """A grid only part of the detector reaches still maps exactly.
+
+    The reference implements the subdivision *without* the reject, so any
+    pixel wrongly proved to miss shows up here as a missing record.
+    """
+    case = _case(16, 16, moving=moving)
+    step = np.asarray(case["step"])
+    shape = np.asarray(case["shape"])
+    # One eighth of the mapped volume along each axis, offset off-centre so
+    # the boundary crosses the detector rather than clipping a corner.
+    small_shape = np.maximum(1, shape // 8)
+    minimum = np.asarray(case["minimum"]) + 0.4 * shape * step
+    sparse = _with_grid(case, minimum, step, small_shape)
+
+    result = _assert_matches_reference(sparse, max_depth)
+
+    profile = _accumulate(sparse, max_depth, profile=True)["_profile"]
+    assert result["chunk_id"].size > 0, "the grid must still be reached"
+    assert profile["skipped_pixels"] > 0, "and most pixels must still miss it"
+
+
+@pytest.mark.parametrize("moving", [False, True])
+@pytest.mark.parametrize("max_depth", [1, 2, 3])
+def test_grid_smaller_than_a_pixel_footprint_is_not_rejected(moving, max_depth):
+    """A grid that fits *between* a pixel's corners is still subdivided.
+
+    The case the reject has to get right, and the reason it tests a bounding
+    box rather than the cheaper "all four corners are invalid": a grid
+    narrower than one pixel's footprint leaves every corner outside while the
+    footprint's interior still crosses it.
+
+    Whether that pixel then emits a record is a separate question and not
+    asserted here -- the subdivision only records the voxel a *leaf centre*
+    falls in, and a grid this small sits between the leaf centres at most
+    depths. What must hold is that the pixel is still subdivided rather than
+    proved away, and that the result matches the reference either way.
+    """
+    case = _case(6, 7, moving=moving)
+    corners, centre = _pixel_footprint(case, 3, 3)
+    spread = corners.max(axis=0) - corners.min(axis=0)
+    assert np.all(spread > 0.0)
+    # One voxel, an eighth of the pixel footprint across, centred on the
+    # pixel centre -- so no corner of that pixel is inside it, and no
+    # neighbouring pixel's footprint reaches it either.
+    step = spread / 8.0
+    minimum = centre - 0.5 * step
+    tiny = _with_grid(case, minimum, step, np.ones(3, dtype=np.int64))
+    inside = [
+        np.all(corner >= minimum) and np.all(corner < minimum + step)
+        for corner in corners
+    ]
+    assert not any(inside), "the test pixel's corners must all be outside"
+
+    _assert_matches_reference(tiny, max_depth)
+
+    profile = _accumulate(tiny, max_depth, profile=True)["_profile"]
+    # Every pixel but the one the grid sits inside is provably outside it.
+    assert profile["skipped_pixels"] == profile["valid_pixels"] - 1

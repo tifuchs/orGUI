@@ -680,6 +680,9 @@ struct BlockProfile {
     std::uint64_t pixels_seen = 0;
     std::uint64_t valid_pixels = 0;
     std::uint64_t coordinate_evaluations = 0;
+    // Pixels whose whole footprint was proved to miss the grid, so no
+    // subdivision was run for them at all (see pixel_misses_grid).
+    std::uint64_t skipped_pixels = 0;
     std::uint64_t voxel_weights = 0;
     std::uint64_t maximum_weights_per_pixel = 0;
     std::uint64_t unreduced_records = 0;
@@ -1420,6 +1423,7 @@ private:
             combined.pixels_seen += block.pixels_seen;
             combined.valid_pixels += block.valid_pixels;
             combined.coordinate_evaluations += block.coordinate_evaluations;
+            combined.skipped_pixels += block.skipped_pixels;
             combined.voxel_weights += block.voxel_weights;
             combined.maximum_weights_per_pixel = std::max(
                 combined.maximum_weights_per_pixel,
@@ -1437,6 +1441,7 @@ private:
         details["pixels_seen"] = combined.pixels_seen;
         details["valid_pixels"] = combined.valid_pixels;
         details["coordinate_evaluations"] = combined.coordinate_evaluations;
+        details["skipped_pixels"] = combined.skipped_pixels;
         details["voxel_weights"] = combined.voxel_weights;
         details["maximum_weights_per_pixel"] =
             combined.maximum_weights_per_pixel;
@@ -1860,6 +1865,213 @@ private:
         return inside != 0;
     }
 
+    // One evaluated lattice node: the continuous coordinate and the voxel
+    // it falls in. The subdivision recursion only ever needs the voxel;
+    // the coordinate is what the whole-pixel reject test below reasons
+    // about, so it is kept out of LatticeVoxel and off the recursion's
+    // stack frames.
+    struct LatticeSample {
+        Vec3 coordinate;
+        LatticeVoxel voxel;
+    };
+
+    // How far a pixel's mapped footprint can stray outside the convex hull
+    // of its four evaluated corner coordinates. Both terms are rigorous
+    // upper bounds rather than estimates: the only use of this quantity is
+    // to prove a pixel cannot reach the grid, and an underestimate would
+    // silently drop real intensity.
+    //
+    // ``matrix_norm`` carries the curvature term. A cell's ray is the
+    // radial projection of the bilinear patch through its corner rays, so
+    // with ``c`` a convex combination of the unit corner rays ``r_i``,
+    //     |c|^2 = 1 - sum_{i<j} mu_i mu_j |r_i - r_j|^2 >= 1 - d^2 / 4,
+    // where ``d`` is the largest chord between corner rays. The ray is
+    // ``c / |c|``, so it lies within ``1 - |c| <= d^2 / 4`` of the hull,
+    // and after the transform within ``|A| d^2 / 4`` of the hull of the
+    // corner coordinates. On a real detector pixel ``d`` is around 1e-4,
+    // putting this term near 1e-8 r.l.u. -- orders below one voxel, which
+    // is why the test still rejects essentially every missing pixel.
+    //
+    // ``rotation_spread`` carries the exposure sweep, and it is a sagitta
+    // rather than the sweep itself. A moving cell's eight corners already
+    // straddle the exposure, at t = 0 and t = 1, so a convex combination of
+    // them reaches every point of the straight chord between the two ends;
+    // what it misses is only how far the rotation's arc bows off that
+    // chord. So this bounds
+    // ``|A_i r + b_i - ((1 - l_i) (A_0 r + b_0) + l_i (A_N r + b_N))|``
+    // over the lattice, with ``l_i`` the lattice position -- of order
+    // ``|A| dtheta^2 / 8`` rather than ``|A| dtheta``. Bounding the sweep
+    // itself instead was correct but useless: on a 0.1 degree exposure it
+    // put the slack near a hundredth of a r.l.u., which is wider than a
+    // small feature volume, so nothing was ever provably outside. Zero for
+    // a stationary exposure.
+    struct PixelReach {
+        double matrix_norm = 0.0;
+        double rotation_spread = 0.0;
+    };
+
+    static double squared_length(const Vec3 &vector) {
+        return vector.x * vector.x + vector.y * vector.y + vector.z * vector.z;
+    }
+
+    static double component(const Vec3 &vector, const int axis) {
+        return axis == 0 ? vector.x : (axis == 1 ? vector.y : vector.z);
+    }
+
+    // Frobenius bounds the spectral norm from above, which is the
+    // direction the reject test needs.
+    static double frobenius_norm(const Mat3 &matrix) {
+        double total = 0.0;
+        for (const double value : matrix.value) {
+            total += value * value;
+        }
+        return std::sqrt(total);
+    }
+
+    static PixelReach stationary_reach(const CoordinateTransform &transform) {
+        return {frobenius_norm(transform.matrix), 0.0};
+    }
+
+    // Measured against the chord between the exposure's two ends, which
+    // is what the caller's eight corners span.
+    static PixelReach moving_reach(
+        const std::vector<CoordinateTransform> &transforms
+    ) {
+        const CoordinateTransform &first = transforms.front();
+        const CoordinateTransform &last = transforms.back();
+        const double positions = static_cast<double>(transforms.size() - 1);
+        PixelReach reach;
+        for (std::size_t index = 0; index < transforms.size(); ++index) {
+            const CoordinateTransform &transform = transforms[index];
+            reach.matrix_norm =
+                std::max(reach.matrix_norm, frobenius_norm(transform.matrix));
+            const double position =
+                positions > 0.0
+                    ? static_cast<double>(index) / positions
+                    : 0.0;
+            Mat3 difference;
+            for (std::size_t entry = 0; entry < 9; ++entry) {
+                const double chord =
+                    (1.0 - position) * first.matrix.value[entry]
+                    + position * last.matrix.value[entry];
+                difference.value[entry] = transform.matrix.value[entry] - chord;
+            }
+            const Vec3 offset{
+                transform.offset.x
+                    - ((1.0 - position) * first.offset.x
+                       + position * last.offset.x),
+                transform.offset.y
+                    - ((1.0 - position) * first.offset.y
+                       + position * last.offset.y),
+                transform.offset.z
+                    - ((1.0 - position) * first.offset.z
+                       + position * last.offset.z),
+            };
+            reach.rotation_spread = std::max(
+                reach.rotation_spread,
+                frobenius_norm(difference) + std::sqrt(squared_length(offset))
+            );
+        }
+        return reach;
+    }
+
+    // The largest chord between the pixel's four corner rays, squared,
+    // written in the differences PixelRays already stores: the corner rays
+    // are r00, r00 + du, r00 + dv and r00 + du + dv + duv, so the six
+    // chords are du, dv, du + dv + duv, dv - du, dv + duv and du + duv.
+    // No normalisation: the kernel already takes the caller's corner rays
+    // to be unit vectors (stationary_lattice_voxel's corner shortcut uses
+    // them without normalising).
+    static double squared_ray_diameter(const PixelRays &rays) {
+        const auto add = [](const Vec3 &first, const Vec3 &second) {
+            return Vec3{
+                first.x + second.x, first.y + second.y, first.z + second.z
+            };
+        };
+        const auto subtract = [](const Vec3 &first, const Vec3 &second) {
+            return Vec3{
+                first.x - second.x, first.y - second.y, first.z - second.z
+            };
+        };
+        double largest = std::max(
+            squared_length(rays.du), squared_length(rays.dv)
+        );
+        largest = std::max(
+            largest, squared_length(add(add(rays.du, rays.dv), rays.duv))
+        );
+        largest = std::max(largest, squared_length(subtract(rays.dv, rays.du)));
+        largest = std::max(largest, squared_length(add(rays.dv, rays.duv)));
+        largest = std::max(largest, squared_length(add(rays.du, rays.duv)));
+        return largest;
+    }
+
+    static double footprint_slack(
+        const PixelRays &rays, const PixelReach &reach
+    ) {
+        return reach.matrix_norm * squared_ray_diameter(rays) * 0.25
+            + reach.rotation_spread;
+    }
+
+    // True only when the pixel's whole footprint provably lies outside the
+    // grid, so subdividing it could not produce a single valid voxel. The
+    // subdivision this guards terminates on all-corners-in-one-voxel but
+    // has no all-corners-outside case, so an entirely missing pixel used
+    // to cost the full lattice -- 41 coordinate evaluations at depth two,
+    // the same as a pixel landing squarely inside.
+    bool pixel_misses_grid(
+        const Vec3 *coordinates,
+        const std::size_t count,
+        const PixelRays &rays,
+        const PixelReach &reach
+    ) const {
+        // Two passes, cheap one first. A pixel whose corner box overlaps
+        // the grid on every axis can never be rejected however small the
+        // slack is, and that is the common case on a grid the detector
+        // actually covers -- so it leaves here having done nothing but
+        // three min/max reductions over four coordinates. Only a pixel
+        // that already separates pays for the slack, and for the
+        // finiteness check the slack comparison needs to be meaningful.
+        double lowest = 0.0;
+        double highest = 0.0;
+        double grid_low = 0.0;
+        double grid_high = 0.0;
+        bool separated = false;
+        for (int axis = 0; axis < 3 && !separated; ++axis) {
+            lowest = component(coordinates[0], axis);
+            highest = lowest;
+            for (std::size_t corner = 1; corner < count; ++corner) {
+                const double value = component(coordinates[corner], axis);
+                lowest = std::min(lowest, value);
+                highest = std::max(highest, value);
+            }
+            // voxel_id() accepts an axis when the scaled coordinate floors
+            // into [0, shape), so the grid occupies
+            // [minimum, minimum + shape * step) -- step is validated
+            // strictly positive at construction.
+            grid_low = grid_.minimum[axis];
+            grid_high =
+                grid_low + grid_.shape_as_double[axis] * grid_.step[axis];
+            separated = highest < grid_low || lowest > grid_high;
+        }
+        if (!separated) {
+            return false;
+        }
+        for (std::size_t corner = 0; corner < count; ++corner) {
+            const Vec3 &coordinate = coordinates[corner];
+            if (
+                !std::isfinite(coordinate.x)
+                || !std::isfinite(coordinate.y)
+                || !std::isfinite(coordinate.z)
+            ) {
+                // Nothing can be proved about a non-finite corner; leave
+                // the pixel to the subdivision, which rejects per node.
+                return false;
+            }
+        }
+        const double slack = footprint_slack(rays, reach);
+        return highest + slack < grid_low || lowest - slack > grid_high;
+    }
+
     RecordKey record_key(const std::uint64_t voxel) const {
         // Both halves of this decomposition used to be 64-bit integer
         // divisions -- four to recover the axis indices from a row-major
@@ -1907,17 +2119,15 @@ private:
         return key;
     }
 
-    LatticeVoxel stationary_lattice_voxel(
+    // The coordinate-carrying form. stationary_lattice_voxel narrows it;
+    // keeping one body means the whole-pixel reject test below cannot
+    // drift from the coordinates the subdivision actually classifies.
+    Vec3 stationary_lattice_coordinate(
         const PixelRays &rays,
         const std::size_t u_index,
         const std::size_t v_index,
-        const CoordinateTransform &transform,
-        BlockProfile *profile
+        const CoordinateTransform &transform
     ) const {
-        LatticeVoxel result;
-        if (profile != nullptr) {
-            ++profile->coordinate_evaluations;
-        }
         if (
             (u_index == 0 || u_index == 8)
             && (v_index == 0 || v_index == 8)
@@ -1938,21 +2148,48 @@ private:
                 ray.y += rays.duv.y;
                 ray.z += rays.duv.z;
             }
-            result.valid = voxel_id(
-                coordinate_from_unit_ray(ray, transform),
-                result.voxel
-            );
-            return result;
+            return coordinate_from_unit_ray(ray, transform);
+        }
+        return coordinate_at(
+            rays,
+            static_cast<double>(u_index) * 0.125,
+            static_cast<double>(v_index) * 0.125,
+            transform
+        );
+    }
+
+    LatticeVoxel stationary_lattice_voxel(
+        const PixelRays &rays,
+        const std::size_t u_index,
+        const std::size_t v_index,
+        const CoordinateTransform &transform,
+        BlockProfile *profile
+    ) const {
+        LatticeVoxel result;
+        if (profile != nullptr) {
+            ++profile->coordinate_evaluations;
         }
         result.valid = voxel_id(
-            coordinate_at(
-                rays,
-                static_cast<double>(u_index) * 0.125,
-                static_cast<double>(v_index) * 0.125,
-                transform
-            ),
+            stationary_lattice_coordinate(rays, u_index, v_index, transform),
             result.voxel
         );
+        return result;
+    }
+
+    LatticeSample stationary_lattice_sample(
+        const PixelRays &rays,
+        const std::size_t u_index,
+        const std::size_t v_index,
+        const CoordinateTransform &transform,
+        BlockProfile *profile
+    ) const {
+        LatticeSample result;
+        if (profile != nullptr) {
+            ++profile->coordinate_evaluations;
+        }
+        result.coordinate =
+            stationary_lattice_coordinate(rays, u_index, v_index, transform);
+        result.voxel.valid = voxel_id(result.coordinate, result.voxel.voxel);
         return result;
     }
 
@@ -1974,6 +2211,7 @@ private:
     void split_pixel_stationary_depth2(
         const PixelRays &rays,
         const CoordinateTransform &transform,
+        const PixelReach &reach,
         std::vector<VoxelWeight> &weights,
         BlockProfile *profile
     ) const {
@@ -1996,10 +2234,33 @@ private:
                 evaluated |= bit;
             }
         };
-        evaluate_corner(0, 0);
-        evaluate_corner(8, 0);
-        evaluate_corner(0, 8);
-        evaluate_corner(8, 8);
+        // The four pixel corners, kept as coordinates as well as voxels:
+        // a pixel whose whole footprint misses the grid is settled here,
+        // before any of the remaining twenty-one lattice nodes is touched.
+        {
+            Vec3 footprint[4];
+            std::size_t slot = 0;
+            const auto root_corner = [&](const std::size_t u, const std::size_t v) {
+                const LatticeSample sample = stationary_lattice_sample(
+                    rays, u, v, transform, profile
+                );
+                const std::size_t index = corner_index(u, v);
+                corners[index] = sample.voxel;
+                evaluated |= std::uint32_t{1}
+                    << static_cast<unsigned int>(index);
+                footprint[slot++] = sample.coordinate;
+            };
+            root_corner(0, 0);
+            root_corner(8, 0);
+            root_corner(0, 8);
+            root_corner(8, 8);
+            if (pixel_misses_grid(footprint, 4, rays, reach)) {
+                if (profile != nullptr) {
+                    ++profile->skipped_pixels;
+                }
+                return;
+            }
+        }
         if (
             same_lattice_voxel(
                 corners[corner_index(0, 0)],
@@ -2091,6 +2352,24 @@ private:
         return (iu * 3 + iv) * 3 + it;
     }
 
+    // t selects one of the rotations frame_rotations() precomputed over
+    // the dyadic lattice, by the same rounding the removed shared-corner
+    // cache used, so coordinates here are bit-for-bit what it produced.
+    Vec3 lattice_coordinate(
+        const PixelRays &rays,
+        const double u,
+        const double v,
+        const double t,
+        const std::vector<CoordinateTransform> &transforms
+    ) const {
+        const double rotation_scale =
+            static_cast<double>(transforms.size() - 1);
+        const std::size_t it = static_cast<std::size_t>(
+            std::llround(t * rotation_scale)
+        );
+        return coordinate_at(rays, u, v, transforms[it]);
+    }
+
     LatticeVoxel evaluate_lattice_voxel(
         const PixelRays &rays,
         const double u,
@@ -2099,22 +2378,30 @@ private:
         const std::vector<CoordinateTransform> &transforms,
         BlockProfile *profile
     ) const {
-        // t selects one of the rotations frame_rotations() precomputed over
-        // the dyadic lattice, by the same rounding the removed shared-corner
-        // cache used, so coordinates here are bit-for-bit what it produced.
         LatticeVoxel result;
         if (profile != nullptr) {
             ++profile->coordinate_evaluations;
         }
-        const double rotation_scale =
-            static_cast<double>(transforms.size() - 1);
-        const std::size_t it = static_cast<std::size_t>(
-            std::llround(t * rotation_scale)
-        );
         result.valid = voxel_id(
-            coordinate_at(rays, u, v, transforms[it]),
-            result.voxel
+            lattice_coordinate(rays, u, v, t, transforms), result.voxel
         );
+        return result;
+    }
+
+    LatticeSample evaluate_lattice_sample(
+        const PixelRays &rays,
+        const double u,
+        const double v,
+        const double t,
+        const std::vector<CoordinateTransform> &transforms,
+        BlockProfile *profile
+    ) const {
+        LatticeSample result;
+        if (profile != nullptr) {
+            ++profile->coordinate_evaluations;
+        }
+        result.coordinate = lattice_coordinate(rays, u, v, t, transforms);
+        result.voxel.valid = voxel_id(result.coordinate, result.voxel.voxel);
         return result;
     }
 
@@ -2228,6 +2515,12 @@ private:
         }
     }
 
+    // The stationary counterpart of evaluate_lattice_voxel: t is pinned,
+    // so the rotation is chosen once by the caller instead of being
+    // recovered from t on every node. transforms[size / 2] and
+    // llround(0.5 * (size - 1)) are the same index for every depth --
+    // both are 2^max_depth -- so this is bit-for-bit what the cached
+    // path evaluated.
     LatticeVoxel evaluate_stationary_voxel(
         const PixelRays &rays,
         const double u,
@@ -2235,20 +2528,29 @@ private:
         const CoordinateTransform &transform,
         BlockProfile *profile
     ) const {
-        // The stationary counterpart of evaluate_lattice_voxel: t is pinned,
-        // so the rotation is chosen once by the caller instead of being
-        // recovered from t on every node. transforms[size / 2] and
-        // llround(0.5 * (size - 1)) are the same index for every depth --
-        // both are 2^max_depth -- so this is bit-for-bit what the cached
-        // path evaluated.
         LatticeVoxel result;
         if (profile != nullptr) {
             ++profile->coordinate_evaluations;
         }
         result.valid = voxel_id(
-            coordinate_at(rays, u, v, transform),
-            result.voxel
+            coordinate_at(rays, u, v, transform), result.voxel
         );
+        return result;
+    }
+
+    LatticeSample evaluate_stationary_sample(
+        const PixelRays &rays,
+        const double u,
+        const double v,
+        const CoordinateTransform &transform,
+        BlockProfile *profile
+    ) const {
+        LatticeSample result;
+        if (profile != nullptr) {
+            ++profile->coordinate_evaluations;
+        }
+        result.coordinate = coordinate_at(rays, u, v, transform);
+        result.voxel.valid = voxel_id(result.coordinate, result.voxel.voxel);
         return result;
     }
 
@@ -2339,18 +2641,28 @@ private:
     void split_pixel_stationary(
         const PixelRays &rays,
         const CoordinateTransform &transform,
+        const PixelReach &reach,
         std::vector<VoxelWeight> &weights,
         BlockProfile *profile
     ) const {
         LatticeVoxel corners[4];
+        Vec3 footprint[4];
         for (int corner = 0; corner < 4; ++corner) {
-            corners[corner] = evaluate_stationary_voxel(
+            const LatticeSample sample = evaluate_stationary_sample(
                 rays,
                 (corner & 1) != 0 ? 1.0 : 0.0,
                 (corner & 2) != 0 ? 1.0 : 0.0,
                 transform,
                 profile
             );
+            corners[corner] = sample.voxel;
+            footprint[corner] = sample.coordinate;
+        }
+        if (pixel_misses_grid(footprint, 4, rays, reach)) {
+            if (profile != nullptr) {
+                ++profile->skipped_pixels;
+            }
+            return;
         }
         subdivide_stationary(
             rays,
@@ -2370,12 +2682,19 @@ private:
     void split_pixel_moving(
         const PixelRays &rays,
         const std::vector<CoordinateTransform> &transforms,
+        const PixelReach &reach,
         std::vector<VoxelWeight> &weights,
         BlockProfile *profile
     ) const {
         LatticeVoxel corners[8];
+        // All eight, both ends of the exposure included: the reject reasons
+        // about the chord between them, so it needs both. That is eight
+        // evaluations for a pixel it then rejects, against four for the
+        // stationary path -- and against the whole octree, which is what it
+        // saves.
+        Vec3 footprint[8];
         for (int corner = 0; corner < 8; ++corner) {
-            corners[corner] = evaluate_lattice_voxel(
+            const LatticeSample sample = evaluate_lattice_sample(
                 rays,
                 (corner & 1) != 0 ? 1.0 : 0.0,
                 (corner & 2) != 0 ? 1.0 : 0.0,
@@ -2383,6 +2702,14 @@ private:
                 transforms,
                 profile
             );
+            corners[corner] = sample.voxel;
+            footprint[corner] = sample.coordinate;
+        }
+        if (pixel_misses_grid(footprint, 8, rays, reach)) {
+            if (profile != nullptr) {
+                ++profile->skipped_pixels;
+            }
+            return;
         }
         subdivide_moving(
             rays,
@@ -2461,6 +2788,13 @@ private:
                 transforms[frame];
             const CoordinateTransform &centre_transform =
                 frame_transforms[frame_transforms.size() / 2];
+            // One reach per frame, not per pixel: it depends only on the
+            // frame's transforms, and the moving form walks the whole
+            // rotation lattice.
+            const PixelReach reach =
+                stationary[frame] != 0
+                    ? stationary_reach(centre_transform)
+                    : moving_reach(frame_transforms);
             const double *const intensity = pixels.intensity[frame];
             const double *const variance = pixels.variance[frame];
             const bool *const mask = pixels.mask[frame];
@@ -2525,17 +2859,30 @@ private:
                     weights.clear();
                     if (stationary[frame] != 0 && max_depth_ == 2) {
                         split_pixel_stationary_depth2(
-                            prepared_rays, centre_transform, weights, profile
+                            prepared_rays,
+                            centre_transform,
+                            reach,
+                            weights,
+                            profile
                         );
                     } else if (stationary[frame] != 0) {
                         split_pixel_stationary(
-                            prepared_rays, centre_transform, weights, profile
+                            prepared_rays,
+                            centre_transform,
+                            reach,
+                            weights,
+                            profile
                         );
                     } else {
                         split_pixel_moving(
-                            prepared_rays, frame_transforms, weights, profile
+                            prepared_rays,
+                            frame_transforms,
+                            reach,
+                            weights,
+                            profile
                         );
                     }
+
                     if (profile != nullptr) {
                         profile->voxel_weights += weights.size();
                         profile->maximum_weights_per_pixel = std::max(
@@ -2662,6 +3009,12 @@ private:
             cached_accumulator = &accumulator;
             return accumulator;
         };
+        // One reach for the whole block: it depends only on this frame's
+        // transforms, so nothing per pixel is recomputed.
+        const PixelReach reach =
+            stationary
+                ? stationary_reach(transforms[transforms.size() / 2])
+                : moving_reach(transforms);
         const auto mapping_started = std::chrono::steady_clock::now();
         for (std::size_t flat = begin; flat < end; ++flat) {
             const std::size_t row = row_cursor;
@@ -2740,6 +3093,7 @@ private:
                 split_pixel_stationary_depth2(
                     prepared_rays,
                     transforms[transforms.size() / 2],
+                    reach,
                     weights,
                     profile
                 );
@@ -2747,6 +3101,7 @@ private:
                 split_pixel_stationary(
                     prepared_rays,
                     transforms[transforms.size() / 2],
+                    reach,
                     weights,
                     profile
                 );
@@ -2754,6 +3109,7 @@ private:
                 split_pixel_moving(
                     prepared_rays,
                     transforms,
+                    reach,
                     weights,
                     profile
                 );

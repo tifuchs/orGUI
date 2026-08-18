@@ -135,6 +135,23 @@ A ***critical bug*** was fixed that affects bulk CTR calculations:
   Scans whose angles do not advance monotonically, such as interlaced ones,
   map one image per call as before. On a 0.1 deg/frame rotation scan this
   chooses four images per call and maps at 0.88x the previous wall time.
+- Reciprocal-space mapping now proves a detector pixel cannot reach the
+  output grid before subdividing it, instead of subdividing every pixel to
+  full depth whatever it reaches. The adaptive subdivision stopped early
+  when a cell's corners shared one voxel, but had no case for a cell whose
+  corners all fall *outside* the grid, so a pixel that contributed nothing
+  cost exactly as much as one landing squarely inside — 41 coordinate
+  evaluations per pixel at ``balanced`` accuracy either way. That is the
+  common case for the small feature volumes automatic volume selection
+  produces, where most pixels miss most grids: mapping one crystal
+  truncation rod measured 7.7x faster, and a grid the scan does not reach at
+  all 6.5x, with mapping a grid every pixel reaches unchanged. The test is a
+  bounding box around the pixel's mapped corners, widened by a rigorous
+  bound on how far the footprint's interior can stray outside them, so a
+  grid narrower than a single pixel's footprint is still subdivided; which
+  voxels are reached, and how many detector samples reach each of them, are
+  unchanged. A new ``skipped_pixels`` profile counter reports how many
+  pixels were settled this way.
 - Corrected the detector band height used for reciprocal-space mapping,
   which was still derived from the worst-case adaptive leaf count rather
   than from the record ceiling the memory prechecks use. At the
