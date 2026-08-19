@@ -62,6 +62,7 @@ import traceback
 
 from . import qutils, ROIutils, autoBraggWorkflow
 from .QScanSelector import QScanSelector
+from . import integration_corrections
 from .QReflectionSelector import QReflectionSelector, QReflectionAnglesDialog
 from .QUBCalculator import QUBCalculator
 from .peak1Dintegr import RockingPeakIntegrator
@@ -290,6 +291,11 @@ class orGUI(qt.QMainWindow):
         self.integrdataPlot.addDockWidget(qt.Qt.RightDockWidgetArea, dbdockwidget)
 
         self.roPkIntegrTab = RockingPeakIntegrator(self.database)
+        # One beam profile per session: the rocking-scan and stationary-scan
+        # integrations correct the same incident beam.
+        self.roPkIntegrTab.useSharedFootprintOptions(
+            self.scanSelector.correctionsDialog.footprintOptions_shared()
+        )
 
         self.scanSelector.sigRefreshH5.connect(self._onRefreshH5)
         self.scanSelector.sigImageNoChanged.connect(self._onSliderValueChanged)
@@ -1579,7 +1585,7 @@ ub : gui for UB matrix and angle calculations
         if self.scanSelector.useSolidAngleBox.isChecked():
             C_arr /= dc.solidAngleArray()
         if self.scanSelector.usePolarizationBox.isChecked():
-            C_arr /= dc.polarization(factor=dc._polFactor, axis_offset=dc._polAxis)
+            C_arr /= dc.polarizationArray()
 
         def fill_counters(image, pixelavail, key, bkgkey):
             """CLI-safe: sum one center ROI and its background ROIs."""
@@ -2037,17 +2043,21 @@ ub : gui for UB matrix and angle calculations
 
             Corr_croi1_a = Corr_croi1_all[..., d]
             Corr_cpixel1_a = Corr_cpixel1_all[..., d]
+            # NOTE: Corr_bgroi1_a is stored as Cfactors_bgroi but is not applied.
+            # The background is corrected with the center ROI's mean factor; see
+            # the audit note in the changelog.
             Corr_bgroi1_a = Corr_bgroi1_all[..., d]
-            Corr_bgpixel1_all[..., d]
 
             bgimg_croi1_a = bgimg_croi1_all[..., d]
             bgimg_cpixel1_a = bgimg_cpixel1_all[..., d]
             bgimg_bgroi1_a = bgimg_bgroi1_all[..., d]
             bgimg_bgpixel1_a = bgimg_bgpixel1_all[..., d]
 
-            Corr1 = Corr_croi1_a * (
-                roi_size / Corr_cpixel1_a
-            )  # normalize to number of pixels of center roi (croi)
+            # Mean correction over the valid pixels of the center ROI; see
+            # the stationary path for why the ROI area must not appear here.
+            Corr1 = integration_corrections.roi_mean_correction(
+                Corr_croi1_a, Corr_cpixel1_a
+            )
 
             if np.any(
                 bgimg_cpixel1_a
@@ -5477,7 +5487,7 @@ ub : gui for UB matrix and angle calculations
         if self.scanSelector.useSolidAngleBox.isChecked():
             C_arr /= dc.solidAngleArray()
         if self.scanSelector.usePolarizationBox.isChecked():
-            C_arr /= dc.polarization(factor=dc._polFactor, axis_offset=dc._polAxis)
+            C_arr /= dc.polarizationArray()
 
         hkl_del_gam_s1, hkl_del_gam_s2 = self.getROIloc()
 
@@ -5947,10 +5957,18 @@ ub : gui for UB matrix and angle calculations
         roi_size1 = roi_hsize1_a * roi_vsize1_a
         roi_size2 = roi_hsize2_a * roi_vsize2_a
 
-        Corr1 = Corr_croi1_a * (
-            roi_size1 / Corr_cpixel1_a
-        )  # normalize to number of pixels of center roi (croi)
-        Corr2 = Corr_croi2_a * (roi_size2 / Corr_cpixel2_a)
+        # Mean correction over the valid pixels of the center ROI. The ROI sum
+        # of the correction array must not be rescaled to the nominal ROI area
+        # here: croibg already carries that (roi_size / cpixel) factor, so
+        # including it again multiplied every corrected intensity by the ROI
+        # area. Because the projected ROI size varies over the detector, that
+        # scaled two measurements of one rod differently.
+        Corr1 = integration_corrections.roi_mean_correction(
+            Corr_croi1_a, Corr_cpixel1_a
+        )
+        Corr2 = integration_corrections.roi_mean_correction(
+            Corr_croi2_a, Corr_cpixel2_a
+        )
         croibg1_bgimg_a = None
         croibg1_bgimg_err_a = None
 
@@ -6054,6 +6072,91 @@ ub : gui for UB matrix and angle calculations
             if croibg2_bgimg_a is not None:
                 croibg2_bgimg_a *= Corr2
                 croibg2_bgimg_err_a *= Corr2
+
+        # Geometrical, footprint and normalization corrections. Every factor
+        # is a divisor, as in the rocking-scan integration: the footprint and
+        # normalization factors are divided out of the stored intensity, and
+        # the Lorentz factor and rod interception are divided out again to
+        # form F2_hkl. Stationary scans use the stationary-mode Lorentz
+        # factor 1/sin(gamma), not the rocking-scan one.
+        mu_all, om_all = self.getMuOm()
+        alpha_all = np.broadcast_to(
+            np.atleast_1d(np.asarray(mu_all, dtype=np.float64)), (nodatapoints,)
+        )
+        options = self.scanSelector.get_integration_options()
+        beam_profile = None
+        sample_size = None
+        if options["footprint"]:
+            footprint_dialog = (
+                self.scanSelector.correctionsDialog.footprintOptions_shared()
+            )  # noqa: E501
+            beam_profile = footprint_dialog.beamProfile()
+            sample_size = footprint_dialog.L.value() * 1e-3  # mm -> m
+        normalization = None
+        normalization_applied = []
+        if options["normalization"]:
+            normalization, normalization_applied = (
+                integration_corrections.normalization_divisor(
+                    self.fscan,
+                    bool(getattr(self, "reconstruction_normalize_exposure", True)),
+                    tuple(getattr(self, "reconstruction_monitor_corrections", ())),
+                    nodatapoints,
+                )
+            )
+
+        correction_factors = []
+        for hkl_del_gam in (hkl_del_gam_1, hkl_del_gam_2):
+            correction_factors.append(
+                integration_corrections.stationary_correction_factors(
+                    alpha_all,
+                    hkl_del_gam[:, 3],
+                    hkl_del_gam[:, 4],
+                    use_lorentz=options["lorentz"],
+                    use_footprint=options["footprint"],
+                    beam_profile=beam_profile,
+                    sample_size=sample_size,
+                    normalization=normalization,
+                )
+            )
+        factors1, factors2 = correction_factors
+        if factors1.applied:
+            logger.info(
+                "Stationary scan corrections applied: %s%s",
+                ", ".join(factors1.applied),
+                (
+                    f" (normalization: {', '.join(normalization_applied)})"
+                    if normalization_applied
+                    else ""
+                ),
+            )
+
+        croibg1_a, croibg1_err_a = integration_corrections.apply_stationary_corrections(
+            croibg1_a, croibg1_err_a, factors1
+        )
+        croibg2_a, croibg2_err_a = integration_corrections.apply_stationary_corrections(
+            croibg2_a, croibg2_err_a, factors2
+        )
+        if croibg1_bgimg_a is not None:
+            croibg1_bgimg_a, croibg1_bgimg_err_a = (
+                integration_corrections.apply_stationary_corrections(
+                    croibg1_bgimg_a, croibg1_bgimg_err_a, factors1
+                )
+            )
+        if croibg2_bgimg_a is not None:
+            croibg2_bgimg_a, croibg2_bgimg_err_a = (
+                integration_corrections.apply_stationary_corrections(
+                    croibg2_bgimg_a, croibg2_bgimg_err_a, factors2
+                )
+            )
+
+        F2_hkl1 = F2_hkl1_err = F2_hkl2 = F2_hkl2_err = None
+        if options["lorentz"]:
+            F2_hkl1, F2_hkl1_err = integration_corrections.structure_factor(
+                croibg1_a, croibg1_err_a, factors1
+            )
+            F2_hkl2, F2_hkl2_err = integration_corrections.structure_factor(
+                croibg2_a, croibg2_err_a, factors2
+            )
 
         rod_mask1 = np.isfinite(croibg1_a)
         rod_mask2 = np.isfinite(croibg2_a)
@@ -6178,6 +6281,15 @@ ub : gui for UB matrix and angle calculations
                 "Cfactors_bgroi": Corr_bgroi1_a,
                 "bgimg_croi": bgimg_croi1_a,
                 "bgimg_bgroi": bgimg_bgroi1_a,
+                # None entries do not create a data set, so only the
+                # corrections that were enabled are stored.
+                "F2_hkl": F2_hkl1,
+                "F2_hkl_errors": F2_hkl1_err,
+                "C_Lorentz": factors1.get("C_Lorentz"),
+                "C_rod": factors1.get("C_rod"),
+                "C_flux_on_sample": factors1.get("C_flux_on_sample"),
+                "C_illum_area": factors1.get("C_illum_area"),
+                "C_norm": factors1.get("C_norm"),
             },
             "pixelcoord": {
                 "@NX_class": "NXdetector",
@@ -6189,7 +6301,9 @@ ub : gui for UB matrix and angle calculations
                 "hsize_corr": roi_hsize1_a,
             },
             "trajectory": traj1,
-            "@signal": "counters/croibg",
+            "@signal": (
+                "counters/F2_hkl" if F2_hkl1 is not None else "counters/croibg"
+            ),
             "@axes": "trajectory/s",
             "@title": self.activescanname + "_" + availname1,
             "@orgui_meta": "roi",
@@ -6228,6 +6342,15 @@ ub : gui for UB matrix and angle calculations
                 "Cfactors_bgroi": Corr_bgroi2_a,
                 "bgimg_croi": bgimg_croi2_a,
                 "bgimg_bgroi": bgimg_bgroi2_a,
+                # None entries do not create a data set, so only the
+                # corrections that were enabled are stored.
+                "F2_hkl": F2_hkl2,
+                "F2_hkl_errors": F2_hkl2_err,
+                "C_Lorentz": factors2.get("C_Lorentz"),
+                "C_rod": factors2.get("C_rod"),
+                "C_flux_on_sample": factors2.get("C_flux_on_sample"),
+                "C_illum_area": factors2.get("C_illum_area"),
+                "C_norm": factors2.get("C_norm"),
             },
             "pixelcoord": {
                 "@NX_class": "NXdetector",
@@ -6239,7 +6362,9 @@ ub : gui for UB matrix and angle calculations
                 "hsize_corr": roi_hsize2_a,
             },
             "trajectory": traj2,
-            "@signal": "counters/croibg",
+            "@signal": (
+                "counters/F2_hkl" if F2_hkl2 is not None else "counters/croibg"
+            ),
             "@axes": "trajectory/s",
             "@title": self.activescanname + "_" + availname2,
             "@orgui_meta": "roi",
