@@ -57,17 +57,33 @@ from . import qutils
 from .config_data import ConfigData
 from .. import resources
 from .. import logger_utils
+from ..datautils.xrayutils import beamprofile, geometrycorrections
 
 import numpy as np
-from scipy import special
 from scipy import interpolate as interp
 
+from contextlib import contextmanager
 from functools import partial
+from typing import NamedTuple
 
 from silx.io import dictdump
 from silx.io.dictdump import h5todict
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def blockSignals(qobjects):
+    try:
+        for obj in qobjects:
+            obj.blockSignals(True)
+        yield
+        for obj in qobjects:
+            obj.blockSignals(False)
+    except TypeError:
+        qobjects.blockSignals(True)
+        yield
+        qobjects.blockSignals(False)
 
 
 QTVERSION = qt.qVersion()
@@ -595,7 +611,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.lorentzButton = qt.QCheckBox("Lorentz")
         self.footprintButton = qt.QCheckBox("footprint")
         self.footprintOptionsButton = qt.QPushButton("options")
-        self.footprintOptionsButton.clicked.connect(self.integrationCorrection.exec)
+        self.footprintOptionsButton.clicked.connect(self._showFootprintOptions)
 
         integrateOptionsGroupLayout.addWidget(self.lorentzButton)
         integrateOptionsGroupLayout.addWidget(self.footprintButton)
@@ -667,6 +683,36 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 raise ValueError(f"Scan {n} is not in database.")
         else:
             raise ValueError("No rocking scan loaded.")
+
+    # GUI-only: user-triggered non-modal dialog.
+    def _showFootprintOptions(self):
+        """Show the beam-profile settings without blocking this window.
+
+        .. note::
+           GUI-only. The dialog is non-modal so the beam profile can be
+           adjusted while the integrated curves stay visible.
+        """
+        self.integrationCorrection.show()
+        self.integrationCorrection.raise_()
+        self.integrationCorrection.activateWindow()
+
+    def useSharedFootprintOptions(self, dialog):
+        """Use an externally owned beam-profile dialog instead of the own one.
+
+        The incident beam is a property of the experiment, not of one
+        integration mode, so the rocking-scan and stationary-scan
+        integrations are pointed at a single dialog rather than each keeping
+        their own beam profile.
+
+        :param dialog: The
+            :class:`IntegrationCorrectionsDialog` to adopt.
+        """
+        if dialog is None or dialog is self.integrationCorrection:
+            return
+        previous = self.integrationCorrection
+        self.integrationCorrection = dialog
+        if previous is not None:
+            previous.deleteLater()
 
     def onIntegrate(self):
         try:
@@ -1296,34 +1342,35 @@ class RockingPeakIntegrator(qt.QMainWindow):
         if (
             self.lorentzButton.isChecked()
         ):  # force Lorentz positive, sign of integrated intensities is forced positive.
+            # A mu scan rocks the incidence angle, which is how a
+            # reflectivity curve is measured; a th scan rocks the sample.
+            # The two take different Lorentz factors from the z-axis table,
+            # and neither is the stationary-scan factor.
             if curves["axisname"] == "mu":
-                C_Lor = np.abs(1 / np.sin(2 * alpha))
-                C_rod = np.cos(gamma)
+                C_Lor = geometrycorrections.lorentz_factor(
+                    geometrycorrections.REFLECTIVITY_ROCKING, alpha=alpha
+                )
             elif curves["axisname"] == "th":
-                C_Lor = np.abs(1 / (np.sin(delta) * np.cos(alpha) * np.cos(gamma)))
-                C_rod = np.cos(gamma)
+                C_Lor = geometrycorrections.lorentz_factor(
+                    geometrycorrections.ROCKING,
+                    alpha=alpha,
+                    delta=delta,
+                    gamma=gamma,
+                )
             else:
                 raise NotImplementedError()
+            C_rod = geometrycorrections.rod_interception(gamma)
         else:
             C_Lor = 1.0
             C_rod = 1.0
 
         if self.footprintButton.isChecked():
-
-            def total_flux_sample(alpha_i, L, sigma):
-                arg = ((L * np.sin(alpha_i)) / (np.sqrt(2) * sigma)) * 0.5
-                return (1 / 2) * (special.erf(arg) - special.erf(-arg))
-
-            L = self.integrationCorrection.L.value() * 1e-3  # sample size (mm)
-            beamsize = self.integrationCorrection.beam.value() * 1e-6  # FWHM (mum)
-
-            sigma_beam = beamsize / (2 * np.sqrt(2 * np.log(2)))
-
-            C_flux_on_sample = total_flux_sample(alpha, L, sigma_beam)
-
-            C_illum_area = (np.sqrt(2 * np.pi) * sigma_beam * C_flux_on_sample) / (
-                L * np.sin(alpha)
-            )
+            L = self.integrationCorrection.L.value() * 1e-3  # sample size (mm -> m)
+            # Gaussian or measured beam profile, depending on the dialog; both
+            # evaluate the same overspill and active-area definitions, the
+            # measured one by numerical integration of the tabulated profile.
+            profile = self.integrationCorrection.beamProfile()
+            C_flux_on_sample, C_illum_area = profile.corrections(alpha, L)
 
         else:
             C_flux_on_sample = 1.0
@@ -2087,7 +2134,110 @@ class RockingPeakIntegrator(qt.QMainWindow):
         return ddict
 
 
+class _ShapeParameter(NamedTuple):
+    """One numeric control of an analytical beam shape.
+
+    :param str label: Text shown next to the spin box.
+    :param str suffix: Unit shown in the spin box, empty when dimensionless.
+    :param float default: Value the control starts at.
+    :param int decimals: Digits shown after the decimal point.
+    :param float minimum: Smallest accepted value.
+    :param float maximum: Largest accepted value.
+    :param float scale: Factor converting the shown value to the SI value
+        the beam-profile factories expect, ``1e-6`` for micrometers.
+    """
+
+    label: str
+    suffix: str
+    default: float
+    decimals: int
+    minimum: float
+    maximum: float
+    scale: float
+
+
+class _BeamShape(NamedTuple):
+    """An analytical beam shape offered by the corrections dialog."""
+
+    name: str
+    factory: object
+    parameters: tuple
+
+
+_MICRONS = (" microns", 4, 1e-6, 1e6, 1e-6)
+
+
+def _width(label, default):
+    """Build a width parameter shown in micrometers."""
+    suffix, decimals, minimum, maximum, scale = _MICRONS
+    return _ShapeParameter(label, suffix, default, decimals, minimum, maximum, scale)
+
+
+#: Analytical beam shapes, in the order they appear in the dialog. The first
+#: is the default and reproduces the Gaussian correction orGUI has always
+#: applied; see :mod:`orgui.datautils.xrayutils.beamprofile`.
+BEAM_SHAPES = (
+    _BeamShape(
+        "Gaussian",
+        beamprofile.gaussian_profile,
+        (_width("beam size (FWHM):", 20.0),),
+    ),
+    _BeamShape(
+        "Top hat",
+        beamprofile.top_hat_profile,
+        (_width("beam width:", 20.0),),
+    ),
+    _BeamShape(
+        "Trapezoid",
+        beamprofile.trapezoid_profile,
+        (_width("base width:", 30.0), _width("flat width:", 10.0)),
+    ),
+    _BeamShape(
+        "Smoothed top hat",
+        beamprofile.smoothed_top_hat_profile,
+        (_width("beam width:", 20.0), _width("edge sigma:", 2.0)),
+    ),
+    _BeamShape(
+        "Generalized normal",
+        beamprofile.generalized_normal_profile,
+        (
+            _width("beam size (FWHM):", 20.0),
+            _ShapeParameter("flatness:", "", 2.0, 3, 0.1, 100.0, 1.0),
+        ),
+    ),
+    _BeamShape(
+        "Skew normal",
+        beamprofile.skew_normal_profile,
+        (
+            _width("beam size (FWHM):", 20.0),
+            _ShapeParameter("skew:", "", 0.0, 3, -50.0, 50.0, 1.0),
+        ),
+    ),
+)
+
+#: Largest number of numeric controls any shape in :data:`BEAM_SHAPES` needs.
+_MAX_SHAPE_PARAMETERS = max(len(shape.parameters) for shape in BEAM_SHAPES)
+
+
 class IntegrationCorrectionsDialog(qt.QDialog):
+    """Settings of the footprint (overspill and active-area) corrections.
+
+    The incident beam is described either by an analytical shape from
+    :data:`BEAM_SHAPES` or by a beam profile measured at the beamline. Both
+    are evaluated by :mod:`orgui.datautils.xrayutils.beamprofile`, which
+    integrates the same two definitions over the projected sample
+    footprint; only a measured profile can represent a beam that is
+    asymmetric or has several maxima.
+
+    User-facing units are millimeters for the sample size and micrometers
+    for beam widths and offsets; :meth:`beamProfile` converts to the meters
+    the correction module works in.
+    """
+
+    #: File-column meaning of the loaded beam-profile file.
+    CONTENT_PROFILE = "beam profile"
+    CONTENT_HEIGHT_SCAN = "height scan (-dI/dz)"
+
     def __init__(self, parent=None):
         qt.QDialog.__init__(self, parent)
         verticalLayout = qt.QVBoxLayout(self)
@@ -2098,13 +2248,17 @@ class IntegrationCorrectionsDialog(qt.QDialog):
 
         verticalLayout.addWidget(img)
 
+        self._settings_save = None
+        # Tabulated measured profile, in meters and arbitrary intensity units.
+        self._profile_z = None
+        self._profile_intensity = None
+        # Per-shape memory, so switching shapes and back keeps the values.
+        self._shape_values = {
+            shape.name: [p.default for p in shape.parameters] for shape in BEAM_SHAPES
+        }
+
         layout = qt.QGridLayout()
-
-        self._L_save = 5
-        self._beam_save = 20
-
         layout.addWidget(qt.QLabel("Sample size L:"), 0, 0)
-
         self.L = qt.QDoubleSpinBox()
         self.L.setRange(0.00001, 1000000)
         self.L.setDecimals(4)
@@ -2112,34 +2266,424 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         self.L.setValue(5)
         layout.addWidget(self.L, 0, 1)
 
-        layout.addWidget(qt.QLabel("beam size (FWHM):"), 1, 0)
-        self.beam = qt.QDoubleSpinBox()
-        self.beam.setRange(0.000001, 1000000)
-        self.beam.setDecimals(4)
-        self.beam.setSuffix(" microns")
-        self.beam.setValue(20)
-        layout.addWidget(self.beam, 1, 1)
+        self.analyticalButton = qt.QRadioButton("analytical beam shape")
+        self.analyticalButton.setChecked(True)
+        self.analyticalButton.setToolTip(
+            "Describe the beam by an analytical distribution."
+        )
+        self.measuredButton = qt.QRadioButton("measured beam profile")
+        self.measuredButton.setToolTip(
+            "Use a beam profile measured at the beamline. Required for a "
+            "beam that is asymmetric or has more than one maximum."
+        )
+        layout.addWidget(self.analyticalButton, 1, 0)
+        layout.addWidget(self.measuredButton, 1, 1)
+        verticalLayout.addLayout(layout)
+
+        verticalLayout.addWidget(self._createShapeGroup())
+        verticalLayout.addWidget(self._createProfileGroup())
+        verticalLayout.addWidget(self._createCenteringGroup())
+        verticalLayout.addWidget(self._createPreviewGroup())
 
         buttons = qt.QDialogButtonBox(
             qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
         )
-        layout.addWidget(buttons, 2, 0, 1, -1)
-
         buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.onOk)
         buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.onCancel)
-
-        verticalLayout.addLayout(layout)
+        verticalLayout.addWidget(buttons)
 
         self.setLayout(verticalLayout)
 
+        self.analyticalButton.toggled.connect(self._onModeChanged)
+        self._onShapeChanged()
+        self._onModeChanged()
+        self._settings_save = self.settings()
+
+    def _createShapeGroup(self):
+        """Build the analytical-shape group box."""
+        self.shapeGroup = qt.QGroupBox("Analytical shape parameters")
+        grid = qt.QGridLayout()
+
+        grid.addWidget(qt.QLabel("shape:"), 0, 0)
+        self.shapeSelector = qt.QComboBox()
+        self.shapeSelector.addItems([shape.name for shape in BEAM_SHAPES])
+        grid.addWidget(self.shapeSelector, 0, 1)
+
+        self.shapeParameterLabels = []
+        self.shapeParameters = []
+        for row in range(_MAX_SHAPE_PARAMETERS):
+            label = qt.QLabel("")
+            spin = qt.QDoubleSpinBox()
+            grid.addWidget(label, row + 1, 0)
+            grid.addWidget(spin, row + 1, 1)
+            self.shapeParameterLabels.append(label)
+            self.shapeParameters.append(spin)
+            spin.valueChanged.connect(self._onShapeValueChanged)
+
+        self.shapeGroup.setLayout(grid)
+        self.shapeSelector.currentIndexChanged.connect(self._onShapeChanged)
+        return self.shapeGroup
+
+    def _createProfileGroup(self):
+        """Build the measured-profile group box."""
+        self.profileGroup = qt.QGroupBox("Measured profile file")
+        grid = qt.QGridLayout()
+
+        grid.addWidget(qt.QLabel("file:"), 0, 0)
+        self.profileFileEdit = qt.QLineEdit()
+        self.profileFileEdit.setToolTip(
+            "Text file with a position column and an intensity column. "
+            "Comment lines start with '#'."
+        )
+        grid.addWidget(self.profileFileEdit, 0, 1)
+        self.profileBrowseButton = qt.QPushButton("browse")
+        grid.addWidget(self.profileBrowseButton, 0, 2)
+
+        grid.addWidget(qt.QLabel("file contains:"), 1, 0)
+        self.profileContent = qt.QComboBox()
+        self.profileContent.addItems([self.CONTENT_PROFILE, self.CONTENT_HEIGHT_SCAN])
+        self.profileContent.setToolTip(
+            "'height scan' differentiates the transmitted intensity of a "
+            "sample height scan into the beam profile, and keeps only the "
+            "range over which the sample cuts into the beam."
+        )
+        grid.addWidget(self.profileContent, 1, 1, 1, 2)
+
+        grid.addWidget(qt.QLabel("position column unit:"), 2, 0)
+        self.profileUnit = qt.QComboBox()
+        self.profileUnit.addItems(["mm", "microns"])
+        grid.addWidget(self.profileUnit, 2, 1, 1, 2)
+
+        self.profileGroup.setLayout(grid)
+
+        # GUI-only: user-triggered file dialog path.
+        self.profileBrowseButton.clicked.connect(self._onBrowseProfile)
+        self.profileFileEdit.editingFinished.connect(self.loadProfile)
+        self.profileContent.currentIndexChanged.connect(self.loadProfile)
+        self.profileUnit.currentIndexChanged.connect(self.loadProfile)
+        return self.profileGroup
+
+    def _createCenteringGroup(self):
+        """Build the group box placing the sample within the beam."""
+        group = qt.QGroupBox("Sample position in the beam")
+        grid = qt.QGridLayout()
+
+        grid.addWidget(qt.QLabel("sample centered on:"), 0, 0)
+        self.profileCenter = qt.QComboBox()
+        self.profileCenter.addItems(["centroid", "peak", "median"])
+        self.profileCenter.setToolTip(
+            "Point of the beam profile the center of the sample is aligned "
+            "to. 'median' is the half-cut position an edge-scan alignment "
+            "converges to. All three coincide for a symmetric beam."
+        )
+        grid.addWidget(self.profileCenter, 0, 1)
+
+        grid.addWidget(qt.QLabel("sample offset:"), 1, 0)
+        self.profileOffset = qt.QDoubleSpinBox()
+        self.profileOffset.setRange(-1000000, 1000000)
+        self.profileOffset.setDecimals(4)
+        self.profileOffset.setSuffix(" microns")
+        self.profileOffset.setValue(0)
+        self.profileOffset.setToolTip(
+            "Displacement of the sample center from the reference point "
+            "above, positive toward larger positions."
+        )
+        grid.addWidget(self.profileOffset, 1, 1)
+
+        group.setLayout(grid)
+        self.profileCenter.currentIndexChanged.connect(self._updatePreview)
+        self.profileOffset.valueChanged.connect(self._updatePreview)
+        return group
+
+    def _createPreviewGroup(self):
+        """Build the preview of the beam profile currently described."""
+        group = qt.QGroupBox("Beam profile")
+        box = qt.QVBoxLayout()
+        # The plot itself is built on first display only: this dialog is
+        # constructed for every session, including headless CLI runs that
+        # never show it.
+        self.profilePlot = None
+        self._previewLayout = box
+
+        self.profileInfo = qt.QLabel("no beam profile")
+        self.profileInfo.setWordWrap(True)
+        box.addWidget(self.profileInfo)
+
+        group.setLayout(box)
+        return group
+
+    def _onModeChanged(self):
+        """Enable the widgets belonging to the selected beam model."""
+        analytical = self.analyticalButton.isChecked()
+        self.shapeGroup.setEnabled(analytical)
+        self.profileGroup.setEnabled(not analytical)
+        self._updatePreview()
+
+    def _onShapeChanged(self):
+        """Relabel the numeric controls for the newly selected shape."""
+        shape = self.currentShape()
+        stored = self._shape_values[shape.name]
+        widgets = self.shapeParameters + self.shapeParameterLabels
+        with blockSignals(widgets):
+            for index, spin in enumerate(self.shapeParameters):
+                label = self.shapeParameterLabels[index]
+                if index < len(shape.parameters):
+                    parameter = shape.parameters[index]
+                    label.setText(parameter.label)
+                    spin.setDecimals(parameter.decimals)
+                    spin.setRange(parameter.minimum, parameter.maximum)
+                    spin.setSuffix(parameter.suffix)
+                    spin.setValue(stored[index])
+                    label.setVisible(True)
+                    spin.setVisible(True)
+                else:
+                    label.setVisible(False)
+                    spin.setVisible(False)
+        self._updatePreview()
+
+    def _onShapeValueChanged(self):
+        """Remember the edited values for the current shape and redraw."""
+        shape = self.currentShape()
+        self._shape_values[shape.name] = [
+            self.shapeParameters[i].value() for i in range(len(shape.parameters))
+        ]
+        self._updatePreview()
+
+    def currentShape(self):
+        """Return the selected analytical beam shape.
+
+        :rtype: _BeamShape
+        """
+        return BEAM_SHAPES[max(self.shapeSelector.currentIndex(), 0)]
+
+    # GUI-only: creates a plot widget, on the path that displays the dialog.
+    def showEvent(self, event):
+        """Create the profile preview plot the first time the dialog is shown.
+
+        .. note::
+           GUI-only. Everything the corrections need is available without
+           the preview, so headless use never builds a plot widget.
+        """
+        if self.profilePlot is None:
+            self.profilePlot = silx.gui.plot.Plot1D(self)
+            self.profilePlot.setGraphXLabel("position rel. to sample center / microns")
+            self.profilePlot.setGraphYLabel("normalized profile / mm$^{-1}$")
+            self.profilePlot.setMinimumHeight(220)
+            self._previewLayout.insertWidget(0, self.profilePlot)
+            self._updatePreview()
+        qt.QDialog.showEvent(self, event)
+
+    # GUI-only: user-triggered dialog path.
+    def _onBrowseProfile(self):
+        """Pick a beam-profile file.
+
+        .. note::
+           GUI-only. Opens a blocking file dialog and must not be called
+           from CLI, batch, or other shared non-interactive code.
+        """
+        filename, _ = qt.QFileDialog.getOpenFileName(
+            self,
+            "Open beam profile",
+            os.path.dirname(self.profileFileEdit.text()),
+            "Text files (*.dat *.txt *.csv);;All files (*)",
+        )
+        if filename:
+            self.profileFileEdit.setText(filename)
+            self.loadProfile()
+
+    def loadProfile(self):
+        """Read the beam-profile file named in the dialog.
+
+        Failures are reported as warnings and leave the dialog without a
+        profile, so that an unreadable file cannot silently be integrated
+        with stale data.
+
+        :returns: ``True`` if a profile was loaded.
+        :rtype: bool
+        """
+        path = self.profileFileEdit.text().strip()
+        self._profile_z = None
+        self._profile_intensity = None
+        if not path:
+            self._updatePreview()
+            return False
+        height_scan = self.profileContent.currentText() == self.CONTENT_HEIGHT_SCAN
+        z_scale = 1e-3 if self.profileUnit.currentText() == "mm" else 1e-6
+        try:
+            z, intensity = beamprofile.read_profile_file(
+                path, z_scale=z_scale, height_scan=height_scan
+            )
+            # Construct once here so a malformed profile is reported while
+            # the dialog is open rather than in the middle of an integration.
+            beamprofile.MeasuredBeamProfile(z, intensity)
+        except Exception:
+            logger.warning("Cannot read beam profile %s", path, exc_info=True)
+            self._updatePreview()
+            return False
+        self._profile_z = z
+        self._profile_intensity = intensity
+        self._updatePreview()
+        return True
+
+    def _updatePreview(self):
+        """Redraw the profile preview and its summary line.
+
+        The preview plot only exists once the dialog has been shown; the
+        summary line is kept up to date either way.
+        """
+        if self.profilePlot is not None:
+            self.profilePlot.remove(kind="curve")
+            self.profilePlot.remove(kind="marker")
+        try:
+            profile = self.beamProfile()
+        except (ValueError, TypeError) as error:
+            self.profileInfo.setText(str(error))
+            return
+
+        z, density = profile.profile_curve()
+        centroid = profile.centroid_position
+        if self.profilePlot is not None:
+            self.profilePlot.addCurve(z * 1e6, density * 1e-3, legend="beam profile")
+            # No text: the axis label already names the origin, and a
+            # second label collides with the centroid when they are close.
+            self.profilePlot.addXMarker(0.0, legend="sample center", color="black")
+            if np.isfinite(centroid):
+                self.profilePlot.addXMarker(
+                    centroid * 1e6, legend="centroid", text="centroid", color="green"
+                )
+
+        summary = (
+            f"FWHM {profile.fwhm * 1e6:.1f} microns, "
+            f"extent {z[0] * 1e6:.1f} to {z[-1] * 1e6:.1f} microns "
+            f"relative to the sample center"
+        )
+        rms = getattr(profile, "rms_width", None)
+        if rms is not None and np.isfinite(rms):
+            summary += f", rms width {rms * 1e6:.1f} microns"
+        if np.isfinite(centroid):
+            summary += f", centroid at {centroid * 1e6:+.1f} microns"
+        else:
+            summary += ", centroid undefined (the profile has no center of mass)"
+        self.profileInfo.setText(summary)
+
+    def measuredProfile(self):
+        """Return the loaded measured beam profile.
+
+        :returns: The tabulated profile, referenced to the sample center
+            chosen in the dialog.
+        :rtype: orgui.datautils.xrayutils.beamprofile.MeasuredBeamProfile
+        :raises ValueError: If no profile file has been loaded.
+        """
+        if self._profile_z is None:
+            raise ValueError(
+                "No beam profile loaded. Select a valid beam profile file in "
+                "the footprint correction options, or switch back to an "
+                "analytical beam shape."
+            )
+        return beamprofile.MeasuredBeamProfile(
+            self._profile_z,
+            self._profile_intensity,
+            center=self.profileCenter.currentText(),
+            offset=self.profileOffset.value() * 1e-6,  # microns -> m
+        )
+
+    def analyticalProfile(self):
+        """Return the analytical beam profile described by the dialog.
+
+        :rtype: orgui.datautils.xrayutils.beamprofile.BeamProfile
+        :raises ValueError: If the shape rejects the entered parameters.
+        """
+        shape = self.currentShape()
+        values = [
+            self.shapeParameters[index].value() * parameter.scale
+            for index, parameter in enumerate(shape.parameters)
+        ]
+        return shape.factory(
+            *values,
+            center=self.profileCenter.currentText(),
+            offset=self.profileOffset.value() * 1e-6,  # microns -> m
+        )
+
+    def beamProfile(self):
+        """Return the incident-beam profile selected in the dialog.
+
+        :returns: An analytical or measured beam profile, in meters.
+        :rtype: orgui.datautils.xrayutils.beamprofile.BeamProfile
+        :raises ValueError: If the measured profile is selected but no
+            profile file has been loaded, or if the analytical parameters
+            do not describe a usable profile.
+        """
+        if self.analyticalButton.isChecked():
+            return self.analyticalProfile()
+        return self.measuredProfile()
+
+    def settings(self):
+        """Return the dialog state as a plain dict.
+
+        :rtype: dict
+        """
+        shape = self.currentShape()
+        return {
+            "L": self.L.value(),
+            "analytical": self.analyticalButton.isChecked(),
+            "shape": shape.name,
+            "shape_values": list(self._shape_values[shape.name]),
+            "profile_file": self.profileFileEdit.text(),
+            "profile_content": self.profileContent.currentText(),
+            "profile_unit": self.profileUnit.currentText(),
+            "profile_center": self.profileCenter.currentText(),
+            "profile_offset": self.profileOffset.value(),
+        }
+
+    def setSettings(self, settings):
+        """Restore the dialog state from :meth:`settings`.
+
+        :param dict settings: State to apply. Missing keys are left alone.
+        """
+        widgets = [
+            self.profileFileEdit,
+            self.profileContent,
+            self.profileUnit,
+            self.profileCenter,
+            self.profileOffset,
+            self.analyticalButton,
+            self.shapeSelector,
+        ] + self.shapeParameters
+        with blockSignals(widgets):
+            if "L" in settings:
+                self.L.setValue(settings["L"])
+            if "analytical" in settings:
+                self.analyticalButton.setChecked(bool(settings["analytical"]))
+                self.measuredButton.setChecked(not settings["analytical"])
+            if "profile_file" in settings:
+                self.profileFileEdit.setText(settings["profile_file"])
+            for key, widget in (
+                ("shape", self.shapeSelector),
+                ("profile_content", self.profileContent),
+                ("profile_unit", self.profileUnit),
+                ("profile_center", self.profileCenter),
+            ):
+                if key in settings:
+                    index = widget.findText(settings[key])
+                    if index >= 0:
+                        widget.setCurrentIndex(index)
+            if "shape_values" in settings:
+                self._shape_values[self.currentShape().name] = list(
+                    settings["shape_values"]
+                )
+            if "profile_offset" in settings:
+                self.profileOffset.setValue(settings["profile_offset"])
+        self._onShapeChanged()
+        self._onModeChanged()
+        self.loadProfile()
+
     def onOk(self):
-        self._L_save = self.L.value()
-        self._beam_save = self.beam.value()
+        self._settings_save = self.settings()
         self.accept()
 
     def onCancel(self):
-        self.L.setValue(self._L_save)
-        self.beam.setValue(self._beam_save)
+        if self._settings_save is not None:
+            self.setSettings(self._settings_save)
         self.reject()
 
 

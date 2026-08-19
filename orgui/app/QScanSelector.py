@@ -48,6 +48,7 @@ import traceback
 from .. import resources
 from ..backend import backends, scans
 from . import qutils
+from . import integration_corrections
 from .QReflectionSelector import QReflectionAnglesDialog
 from .QHKLDialog import HKLDialog
 
@@ -738,19 +739,43 @@ class QScanSelector(qt.QMainWindow):
         # options group
 
         optionsGroup = qt.QGroupBox("Integration options")
-        # the check boxes reflow into one or two columns, depending on the
-        # width the dock is given, instead of forcing a two column minimum
-        optionsGroupLayout = qutils.FlowLayout()
+        optionsGroupLayout = qt.QVBoxLayout()
+
+        # The switches themselves live in the corrections dialog; they stay
+        # attributes of this widget so that get_integration_options() and the
+        # integration code keep reading them from the same place.
         self.useMaskBox = qt.QCheckBox("Use pixel mask")
-        self.useLorentzBox = qt.QCheckBox("Lorentz correction")
-        self.useLorentzBox.setEnabled(False)
         self.useSolidAngleBox = qt.QCheckBox("Solid angle correction")
         self.usePolarizationBox = qt.QCheckBox("Polarization correction")
+        self.useLorentzBox = qt.QCheckBox("Lorentz and rod interception")
+        self.useFootprintBox = qt.QCheckBox("Beam footprint")
+        self.useNormalizationBox = qt.QCheckBox("Normalize integrated intensities")
 
-        optionsGroupLayout.addWidget(self.useMaskBox)
-        optionsGroupLayout.addWidget(self.useSolidAngleBox)
-        optionsGroupLayout.addWidget(self.useLorentzBox)
-        optionsGroupLayout.addWidget(self.usePolarizationBox)
+        self.correctionsDialog = IntegrationOptionsDialog(self, parent=self)
+        self.correctionsBtn = qt.QPushButton("Corrections and normalization ...")
+        self.correctionsBtn.setToolTip(
+            "Open the correction settings. The dialog stays open while you "
+            "work, so corrections can be changed between integrations."
+        )
+        # GUI-only: user-triggered non-modal dialog.
+        self.correctionsBtn.clicked.connect(self._showCorrectionsDialog)
+        optionsGroupLayout.addWidget(self.correctionsBtn)
+
+        self.correctionsStatus = qt.QLabel()
+        self.correctionsStatus.setTextFormat(qt.Qt.RichText)
+        self.correctionsStatus.setWordWrap(True)
+        optionsGroupLayout.addWidget(self.correctionsStatus)
+
+        for box in (
+            self.useMaskBox,
+            self.useSolidAngleBox,
+            self.usePolarizationBox,
+            self.useLorentzBox,
+            self.useFootprintBox,
+            self.useNormalizationBox,
+        ):
+            box.toggled.connect(self._updateCorrectionsStatus)
+        self._updateCorrectionsStatus()
 
         optionsGroup.setLayout(optionsGroupLayout)
 
@@ -868,6 +893,12 @@ class QScanSelector(qt.QMainWindow):
                 self.useSolidAngleBox.setChecked(ddict[key])
             elif key == "polarization":
                 self.usePolarizationBox.setChecked(ddict[key])
+            elif key == "lorentz":
+                self.useLorentzBox.setChecked(ddict[key])
+            elif key == "footprint":
+                self.useFootprintBox.setChecked(ddict[key])
+            elif key == "normalization":
+                self.useNormalizationBox.setChecked(ddict[key])
             elif key == "advanced":
                 self.roioptions.set_parameters(ddict[key])
 
@@ -876,8 +907,76 @@ class QScanSelector(qt.QMainWindow):
         ddict["mask"] = self.useMaskBox.isChecked()
         ddict["solidAngle"] = self.useSolidAngleBox.isChecked()
         ddict["polarization"] = self.usePolarizationBox.isChecked()
+        ddict["lorentz"] = self.useLorentzBox.isChecked()
+        ddict["footprint"] = self.useFootprintBox.isChecked()
+        ddict["normalization"] = self.useNormalizationBox.isChecked()
         ddict["advanced"] = self.roioptions.get_parameters()
         return ddict
+
+    #: Enabled corrections, as ``(checkbox attribute, abbreviation, color,
+    #: tooltip)``. The abbreviations are what the status line under the
+    #: corrections button shows.
+    CORRECTION_BADGES = (
+        ("useMaskBox", "MASK", "#b58900", "Pixel mask applied"),
+        ("useSolidAngleBox", "SOLA", "#268bd2", "Solid angle correction"),
+        ("usePolarizationBox", "POL", "#6c71c4", "Polarization correction"),
+        (
+            "useLorentzBox",
+            "LOR",
+            "#2aa198",
+            "Lorentz factor and rod interception; the structure factor F2_hkl "
+            "is calculated",
+        ),
+        (
+            "useFootprintBox",
+            "FOOT",
+            "#859900",
+            "Beam overspill and active surface area from the beam profile",
+        ),
+        (
+            "useNormalizationBox",
+            "NORM",
+            "#d33682",
+            "Exposure time and monitor normalization",
+        ),
+    )
+
+    def _updateCorrectionsStatus(self):
+        """Refresh the coloured summary of the enabled corrections."""
+        enabled = [
+            (abbreviation, color, tooltip)
+            for name, abbreviation, color, tooltip in self.CORRECTION_BADGES
+            if getattr(self, name).isChecked()
+        ]
+        if not enabled:
+            self.correctionsStatus.setText(
+                "<i>no corrections applied &#8212; raw ROI counts</i>"
+            )
+            self.correctionsStatus.setToolTip(
+                "Integrated intensities are stored as summed detector counts."
+            )
+            return
+        badges = " ".join(
+            f'<b><span style="color:{color};">{abbreviation}</span></b>'
+            for abbreviation, color, _ in enabled
+        )
+        self.correctionsStatus.setText(badges)
+        self.correctionsStatus.setToolTip(
+            "\n".join(f"{abbrev}: {tip}" for abbrev, _, tip in enabled)
+        )
+
+    # GUI-only: user-triggered non-modal dialog.
+    def _showCorrectionsDialog(self):
+        """Show the corrections dialog without blocking the main window.
+
+        .. note::
+           GUI-only. The dialog is non-modal so that corrections can be
+           changed while the scan and ROIs stay visible.
+        """
+        self.correctionsDialog.refresh()
+        self.correctionsDialog.show()
+        self.correctionsDialog.raise_()
+        self.correctionsDialog.activateWindow()
 
     def _on_ro_H_0_changed(self, hkl):
         label = "H: {} K: {} L: {}".format(*tuple(hkl))
@@ -1754,3 +1853,214 @@ class ROIAdvancedOptionsDialog(qt.QDialog):
     def onCancel(self):
         self.resetParameters()
         self.hide()
+
+
+class IntegrationOptionsDialog(qt.QDialog):
+    """Non-modal settings of every integration correction.
+
+    The correction switches themselves belong to
+    :class:`QScanSelector`; this dialog only arranges them, so the
+    integration code and :meth:`QScanSelector.get_integration_options` keep
+    reading one set of widgets. The dialog is deliberately non-modal: an
+    integration is often repeated with a correction switched on or off, and
+    the scan and its ROIs stay visible meanwhile.
+
+    Detector masks are configured with the mask tool of the image view and
+    the reconstruction settings have their own dialog; both are reachable
+    from here through their buttons, rather than being duplicated.
+
+    :param QScanSelector selector: Owner of the correction switches.
+    :param parent: Qt parent widget.
+    """
+
+    def __init__(self, selector, parent=None):
+        qt.QDialog.__init__(self, parent)
+        self.setWindowTitle("Integration corrections and normalization")
+        self._selector = selector
+        # Shared with the rocking-scan integration; see
+        # RockingPeakIntegrator.useSharedFootprintOptions.
+        self.footprintOptions = None
+
+        layout = qt.QVBoxLayout(self)
+
+        detector = qt.QGroupBox("Detector corrections")
+        detectorLayout = qt.QVBoxLayout()
+        detectorLayout.addWidget(selector.useMaskBox)
+        self.maskToolBtn = qt.QPushButton("Open mask tool ...")
+        self.maskToolBtn.setToolTip(
+            "Masks are drawn with the mask tool of the image view. This "
+            "switch only decides whether the mask is applied."
+        )
+        self.maskToolBtn.clicked.connect(self._openMaskTool)
+        detectorLayout.addWidget(self.maskToolBtn)
+        detectorLayout.addWidget(selector.useSolidAngleBox)
+        detectorLayout.addWidget(selector.usePolarizationBox)
+        detector.setLayout(detectorLayout)
+        layout.addWidget(detector)
+
+        geometry = qt.QGroupBox("Geometrical corrections")
+        geometryLayout = qt.QVBoxLayout()
+        geometryLayout.addWidget(selector.useLorentzBox)
+        selector.useLorentzBox.setToolTip(
+            "Divide out the Lorentz factor and the rod interception and store "
+            "the structure factor F2_hkl. The z-axis Lorentz factor depends "
+            "on how the scan was measured: 1/sin(gamma) for a stationary "
+            "scan, 1/(sin(delta) cos(alpha) cos(gamma)) for a rocking scan "
+            "and 1/sin(2 alpha) for a reflectivity rocking scan."
+        )
+        self.lorentzInfo = qt.QLabel(
+            "<i>Stationary scans use the stationary-mode factor "
+            "1/sin(&gamma;), rocking scans their own; rod interception "
+            "cos(&gamma;) is applied with it.</i>"
+        )
+        self.lorentzInfo.setWordWrap(True)
+        # Wrapped labels report a one-line height to a layout that has not
+        # laid them out yet, which clips them in a freshly sized dialog.
+        self.lorentzInfo.setMinimumHeight(self.lorentzInfo.fontMetrics().height() * 3)
+        geometryLayout.addWidget(self.lorentzInfo)
+
+        geometryLayout.addWidget(selector.useFootprintBox)
+        selector.useFootprintBox.setToolTip(
+            "Correct the beam overspill and the active surface area from the "
+            "vertical beam profile. Both depend on the incidence angle."
+        )
+        self.footprintBtn = qt.QPushButton("Beam profile and sample size ...")
+        self.footprintBtn.clicked.connect(self._openFootprintOptions)
+        geometryLayout.addWidget(self.footprintBtn)
+        geometry.setLayout(geometryLayout)
+        layout.addWidget(geometry)
+
+        normalization = qt.QGroupBox("Exposure and monitor normalization")
+        normalizationLayout = qt.QVBoxLayout()
+        normalizationLayout.addWidget(selector.useNormalizationBox)
+        selector.useNormalizationBox.setToolTip(
+            "Divide each image by its exposure time and by the monitor "
+            "counters below, the same normalization the reciprocal-space "
+            "reconstruction applies."
+        )
+        self.normalizeExposureBox = qt.QCheckBox("Normalize by exposure time")
+        self.normalizeExposureBox.setChecked(True)
+        self.normalizeExposureBox.toggled.connect(self._onNormalizationChanged)
+        normalizationLayout.addWidget(self.normalizeExposureBox)
+
+        monitorRow = qt.QHBoxLayout()
+        monitorRow.addWidget(qt.QLabel("Monitor counters:"))
+        self.monitorEdit = qt.QLineEdit()
+        self.monitorEdit.setPlaceholderText("Optional scan counters, comma-separated")
+        self.monitorEdit.setToolTip(
+            "Counters applied as divisive normalizations. Shared with the "
+            "reciprocal-space reconstruction settings."
+        )
+        self.monitorEdit.editingFinished.connect(self._onNormalizationChanged)
+        monitorRow.addWidget(self.monitorEdit)
+        normalizationLayout.addLayout(monitorRow)
+
+        self.monitorInfo = qt.QLabel("")
+        self.monitorInfo.setWordWrap(True)
+        normalizationLayout.addWidget(self.monitorInfo)
+        normalization.setLayout(normalizationLayout)
+        layout.addWidget(normalization)
+
+        self.reconstructionBtn = qt.QPushButton("Reciprocal-space reconstruction ...")
+        self.reconstructionBtn.setToolTip(
+            "The reconstruction shares these normalization settings and has "
+            "its own dialog for everything else."
+        )
+        self.reconstructionBtn.clicked.connect(self._openReconstructionSettings)
+        layout.addWidget(self.reconstructionBtn)
+
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Close)
+        buttons.rejected.connect(self.hide)
+        layout.addWidget(buttons)
+
+    def _mainWindow(self):
+        """Return the orGUI main window, or ``None`` outside the app."""
+        return getattr(self._selector, "parentmainwindow", None)
+
+    def refresh(self):
+        """Reload the settings shared with other parts of the application."""
+        main = self._mainWindow()
+        if main is not None:
+            with blockSignals([self.normalizeExposureBox, self.monitorEdit]):
+                self.normalizeExposureBox.setChecked(
+                    bool(getattr(main, "reconstruction_normalize_exposure", True))
+                )
+                self.monitorEdit.setText(
+                    ", ".join(getattr(main, "reconstruction_monitor_corrections", ()))
+                )
+        self._updateMonitorInfo()
+
+    def _updateMonitorInfo(self):
+        """Show which counters of the loaded scan could be used as monitors."""
+        main = self._mainWindow()
+        scan = getattr(main, "fscan", None) if main is not None else None
+        if scan is None:
+            self.monitorInfo.setText("<i>No scan loaded.</i>")
+            return
+        available = integration_corrections.monitor_counter_candidates(scan)
+        if available:
+            self.monitorInfo.setText(
+                "<i>Available in this scan: " + ", ".join(available) + "</i>"
+            )
+        else:
+            self.monitorInfo.setText("<i>This scan provides no usable counters.</i>")
+
+    def _onNormalizationChanged(self):
+        """Write the normalization settings back to the shared state."""
+        main = self._mainWindow()
+        if main is None:
+            return
+        main.reconstruction_normalize_exposure = bool(
+            self.normalizeExposureBox.isChecked()
+        )
+        main.reconstruction_monitor_corrections = tuple(
+            value.strip()
+            for value in self.monitorEdit.text().split(",")
+            if value.strip()
+        )
+
+    def footprintOptions_shared(self):
+        """Return the beam-profile dialog, creating it on first use.
+
+        The same instance is handed to the rocking-scan integrator, so both
+        integration modes correct against one incident beam.
+
+        :rtype: orgui.app.peak1Dintegr.IntegrationCorrectionsDialog
+        """
+        if self.footprintOptions is None:
+            from .peak1Dintegr import IntegrationCorrectionsDialog
+
+            self.footprintOptions = IntegrationCorrectionsDialog(self)
+        return self.footprintOptions
+
+    # GUI-only: user-triggered dialog.
+    def _openFootprintOptions(self):
+        """Open the shared beam-profile settings."""
+        self.footprintOptions_shared()
+        self.footprintOptions.show()
+        self.footprintOptions.raise_()
+        self.footprintOptions.activateWindow()
+
+    # GUI-only: user-triggered dialog.
+    def _openMaskTool(self):
+        """Bring up the mask tool of the image view."""
+        plot = getattr(self._mainWindow(), "centralPlot", None)
+        getter = getattr(plot, "getMaskToolsDockWidget", None)
+        if getter is None:
+            logger.warning(
+                "The mask tool is part of the image view and is not reachable here."
+            )
+            return
+        tool = getter()
+        tool.setVisible(True)
+        tool.raise_()
+
+    # GUI-only: user-triggered dialog.
+    def _openReconstructionSettings(self):
+        """Bring up the reciprocal-space reconstruction dialog."""
+        main = self._mainWindow()
+        show = getattr(main, "_onShowReconstruction", None)
+        if show is None:
+            logger.warning("The reciprocal-space reconstruction dialog is unavailable.")
+            return
+        show()
