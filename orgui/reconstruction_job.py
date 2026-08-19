@@ -1247,12 +1247,7 @@ def _correction_pipeline(config, scan, assets, provenance):
             "solid_angle"
         ] = "deterministic-no-uncertainty"
     if correction.use_polarization:
-        polarization = np.asarray(
-            detector.polarization(
-                factor=detector._polFactor, axis_offset=detector._polAxis
-            ),
-            dtype=np.float64,
-        )
+        polarization = np.asarray(detector.polarizationArray(), dtype=np.float64)
         if static_factor is None:
             static_factor = 1.0 / polarization
         else:

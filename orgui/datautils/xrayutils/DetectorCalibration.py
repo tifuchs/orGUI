@@ -248,6 +248,43 @@ class Detector2D_SXRD(geometry.Geometry):
     def getPolarization(self):
         return self._polAxis, self._polFactor
 
+    def polarizationArray(self, shape=None):
+        r"""Polarization correction of every detector pixel.
+
+        pyFAI evaluates the polarization in its own detector frame, so both
+        of its parameters have to be translated from orGUI's diffractometer
+        conventions before they are handed over:
+
+        *Orientation.* pyFAI's ``axis_offset`` places the polarization node
+        at its own azimuth ``chi = -axis_offset``, while orGUI measures
+        azimuth in the diffractometer frame, ``azimuth = chi + deltaChi``
+        (see :meth:`primBeamAngles`). The node therefore has to be requested
+        at ``axis_offset = deltaChi - polAxis``. Leaving the azimuthal
+        reference out rotates the polarization plane by that angle -- for
+        the common vertical-scattering setup, ``deltaChi = 90`` degrees,
+        which swaps the polarized and unpolarized directions entirely.
+
+        *Amount.* ``polarization_factor`` is the **fraction of horizontal
+        polarization** used by :meth:`.HKLVlieg.UBCalculator.polarization`
+        and by the ANA/ROD manual, whereas pyFAI's ``factor`` is
+        ``(Ih - Iv) / (Ih + Iv)``. The two are related by
+        ``factor = 2 * fraction - 1``; they agree only for a fully
+        horizontally polarized beam.
+
+        With both translations applied this reproduces
+        :meth:`.HKLVlieg.UBCalculator.polarization`, the z-axis expression
+        of the ANA/ROD manual, to machine precision.
+
+        :param shape: Detector shape; taken from the detector when omitted.
+        :returns: 2D polarization correction array.
+        :rtype: numpy.ndarray
+        """
+        return self.polarization(
+            shape=shape,
+            factor=2.0 * self._polFactor - 1.0,
+            axis_offset=self._deltaChi - self._polAxis,
+        )
+
     def primBeamAngles(self, shape=None):
         """gives angles in laboratory reference frame."""
         if (
@@ -615,9 +652,7 @@ class Detector2D_SXRD(geometry.Geometry):
         else:
             self._cached_array["corrarr"] = self.solidAngleArray(
                 shape
-            ) * self.polarization(
-                shape=shape, factor=self._polFactor, axis_offset=self._polAxis
-            )
+            ) * self.polarizationArray(shape)
         return self._cached_array.get("corrarr")
 
     def _edge_pixcoord(self):

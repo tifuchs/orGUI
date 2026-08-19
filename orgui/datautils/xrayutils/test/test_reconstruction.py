@@ -33,9 +33,7 @@ from orgui.datautils.xrayutils.reconstruction import (
 )
 
 
-native = pytest.importorskip(
-    "orgui.datautils.xrayutils._reciprocal_reconstruction_cpp"
-)
+native = pytest.importorskip("orgui.datautils.xrayutils._reciprocal_reconstruction_cpp")
 
 #: The GitHub-hosted macOS runner overshoots short ``time.sleep`` calls badly
 #: -- a 20 ms sleep was measured at 178 ms there -- which breaks timing
@@ -67,9 +65,7 @@ def test_native_merge_sorted_batches():
     )
 
     np.testing.assert_array_equal(merged["local_voxel_id"], [1, 2, 3])
-    np.testing.assert_array_equal(
-        merged["weighted_intensity"], [10.0, 20.0, 34.0]
-    )
+    np.testing.assert_array_equal(merged["weighted_intensity"], [10.0, 20.0, 34.0])
     np.testing.assert_array_equal(merged["weighted_variance"], [1.0, 1.0, 2.0])
     np.testing.assert_array_equal(merged["weight"], [1.0, 1.0, 2.0])
     np.testing.assert_array_equal(merged["contributors"], [1, 3, 6])
@@ -250,12 +246,15 @@ def test_native_chunk_local_ids_match_independently_computed_voxel_indices(
 
     assert expected
     assert len(expected) > 1
-    assert set(
-        zip(
-            result["chunk_id"].tolist(),
-            result["local_voxel_id"].tolist(),
+    assert (
+        set(
+            zip(
+                result["chunk_id"].tolist(),
+                result["local_voxel_id"].tolist(),
+            )
         )
-    ) == expected
+        == expected
+    )
 
 
 def test_native_center_accumulation_survives_revisiting_voxels_out_of_order():
@@ -312,13 +311,11 @@ def test_native_center_accumulation_survives_revisiting_voxels_out_of_order():
             chunk_index, local_index = np.divmod(index, chunk_shape)
             key = (
                 int(
-                    (chunk_index[0] * chunk_grid[1] + chunk_index[1])
-                    * chunk_grid[2]
+                    (chunk_index[0] * chunk_grid[1] + chunk_index[1]) * chunk_grid[2]
                     + chunk_index[2]
                 ),
                 int(
-                    (local_index[0] * chunk_shape[1] + local_index[1])
-                    * chunk_shape[2]
+                    (local_index[0] * chunk_shape[1] + local_index[1]) * chunk_shape[2]
                     + local_index[2]
                 ),
             )
@@ -328,9 +325,7 @@ def test_native_center_accumulation_survives_revisiting_voxels_out_of_order():
             totals[2] += 1.0
             totals[3] += 1
 
-    result = kernel.accumulate(
-        intensity, variance, mask, rays, angles, angles
-    )
+    result = kernel.accumulate(intensity, variance, mask, rays, angles, angles)
 
     # More voxels than one, revisited more often than they are distinct --
     # otherwise the cache would never be exercised in both directions.
@@ -699,6 +694,7 @@ class _SolidAngleDetector:
 
     _polFactor = 0.93
     _polAxis = 0.11
+    _deltaChi = 1.5707963267948966
 
     def __init__(self, shape):
         self.shape = shape
@@ -713,11 +709,16 @@ class _SolidAngleDetector:
         grid = np.arange(rows * columns, dtype=np.float64).reshape(rows, columns)
         return 0.5 + factor * 0.25 + axis_offset + grid / (2 * rows * columns)
 
+    def polarizationArray(self, shape=None):
+        """Mirror the conversion Detector2D_SXRD applies before pyFAI."""
+        return self.polarization(
+            factor=2.0 * self._polFactor - 1.0,
+            axis_offset=self._deltaChi - self._polAxis,
+        )
+
 
 @pytest.mark.parametrize("propagate", [False, True])
-def test_native_correction_is_bit_for_bit_with_the_numpy_form(
-    monkeypatch, propagate
-):
+def test_native_correction_is_bit_for_bit_with_the_numpy_form(monkeypatch, propagate):
     """The fused native pass must not move a single bit.
 
     True under ``-ffp-contract=off``, which the ``strict_fp_contract`` build
@@ -901,9 +902,7 @@ def test_native_coordinate_frames_match_vlieg():
             np.linalg.inv(calculator.getUB()),
             np.linalg.inv(calculator.getU()),
         )
-        actual = kernel.coordinate(
-            rays, sample_angles, sample_angles, 0, 0
-        )
+        actual = kernel.coordinate(rays, sample_angles, sample_angles, 0, 0)
         assert np.allclose(actual, coordinates, rtol=1e-13, atol=1e-13), frame
 
 
@@ -1043,9 +1042,7 @@ def test_sobol_tile_origins_cover_every_quadrant():
     whole detector. Eight origins must touch all four quadrants; eight
     independent draws frequently do not.
     """
-    origins = _sobol_tile_origins(
-        1000, 1000, 8, rng=np.random.default_rng(0)
-    )
+    origins = _sobol_tile_origins(1000, 1000, 8, rng=np.random.default_rng(0))
 
     assert len(origins) == 8
     assert all(0.0 <= row <= 1.0 and 0.0 <= column <= 1.0 for row, column in origins)
@@ -1232,9 +1229,7 @@ def test_kernel_threads_sweep_stops_early_on_plateau(monkeypatch):
     call_log = []
     durations = {1: 0.15, 2: 0.03, 4: 0.05, 8: 0.001}
     fake_now = [0.0]
-    monkeypatch.setattr(
-        reconstruction_module.time, "perf_counter", lambda: fake_now[0]
-    )
+    monkeypatch.setattr(reconstruction_module.time, "perf_counter", lambda: fake_now[0])
 
     class _FakeSweepKernel:
         def __init__(self, threads):
@@ -1250,9 +1245,7 @@ def test_kernel_threads_sweep_stops_early_on_plateau(monkeypatch):
     ):
         return _FakeSweepKernel(threads)
 
-    monkeypatch.setattr(
-        reconstruction_module, "_kernel_for_grid", fake_kernel_for_grid
-    )
+    monkeypatch.setattr(reconstruction_module, "_kernel_for_grid", fake_kernel_for_grid)
 
     grid = _GridSpec(
         minimum=(-1.0, -1.0, -1.0),
@@ -1306,9 +1299,7 @@ def test_footprint_split_conserves_weight_and_pixel_variance():
     assert result["weight"].size > 1
     assert np.sum(result["weight"]) == 1.0
     assert np.sum(result["weighted_intensity"]) == 10.0
-    assert np.allclose(
-        result["weighted_variance"], result["weight"] ** 2 * 10.0
-    )
+    assert np.allclose(result["weighted_variance"], result["weight"] ** 2 * 10.0)
     assert np.all(result["contributors"] == 1)
 
 
@@ -1435,7 +1426,7 @@ def test_map_frame_group_routes_batches_and_skips_resumed_checkpoints(tmp_path):
     # checkpoint 0's file was written -- checkpoint 1 was pre-resumed.
     assert scan.image_loads == 2
     written_indices = {
-        int(path.name.split("_")[0][len("ckpt"):]) for path in router.written
+        int(path.name.split("_")[0][len("ckpt") :]) for path in router.written
     }
     assert written_indices == {0}
 

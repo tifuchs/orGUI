@@ -34,6 +34,7 @@ from .. import DetectorCalibration
 import pyFAI
 
 import numpy as np
+import pytest
 import os
 import warnings
 
@@ -384,3 +385,150 @@ def test_del_gam_range():
 
 
 """
+
+
+def _polarization_reference(sxrddet, alpha_i):
+    """Polarization from orGUI's own z-axis expression.
+
+    :meth:`orgui.datautils.xrayutils.HKLVlieg.UBCalculator.polarization` is
+    the z-axis entry of Appendix A of the ANA/ROD manual, written in
+    diffractometer angles. It is an independent implementation of the same
+    physics as the pyFAI detector-frame expression, so it pins the
+    conventions ``polarizationArray`` has to translate between.
+    """
+    if hasattr(sxrddet, "_alpha_i"):
+        del sxrddet._alpha_i
+    gamma, delta = sxrddet.surfaceAngles(alpha_i)
+    fraction = sxrddet._polFactor
+    p_hor = (
+        1.0
+        - (
+            np.sin(alpha_i) * np.cos(delta) * np.cos(gamma)
+            + np.cos(alpha_i) * np.sin(gamma)
+        )
+        ** 2
+    )
+    p_ver = 1.0 - (np.sin(delta) ** 2) * (np.cos(gamma) ** 2)
+    return fraction * p_hor + (1.0 - fraction) * p_ver
+
+
+def _sxrd_detector(azimuth_deg, pol_axis_deg, fraction):
+    """A small calibrated detector with the given polarization settings."""
+    sxrddet = DetectorCalibration.Detector2D_SXRD()
+    # A private detector: detector_factory hands out one shared instance per
+    # name, and pyFAI caches angle arrays against it, which makes tests that
+    # share it depend on execution order.
+    sxrddet.detector = pyFAI.detectors.Detector(
+        pixel1=172e-6, pixel2=172e-6, max_shape=(619, 487)
+    )
+    # Close in, with the beam near one corner, so the detector spans a wide
+    # range of 2theta and azimuth. The polarization correction scales with
+    # sin^2(2theta), so a small-angle geometry would be ~1 everywhere and
+    # could not tell any two conventions apart.
+    sxrddet.poni1 = 0.005
+    sxrddet.poni2 = 0.005
+    sxrddet.rot1 = 0.0
+    sxrddet.rot2 = 0.0
+    sxrddet.rot3 = 0.0
+    sxrddet.dist = 0.06
+    sxrddet.set_energy(20.0)
+    sxrddet.setAzimuthalReference(np.deg2rad(azimuth_deg))
+    sxrddet.setPolarization(np.deg2rad(pol_axis_deg), fraction)
+    # pyFAI caches its angle arrays, and detector_factory hands out shared
+    # detector objects, so drop both caches rather than inherit whatever a
+    # previously executed test left behind.
+    sxrddet.reset()
+    sxrddet._cached_array = {}
+    return sxrddet
+
+
+@pytest.mark.parametrize("azimuth_deg", [0.0, 30.0, 90.0, -40.0])
+@pytest.mark.parametrize("fraction", [1.0, 0.95, 0.5, 0.0])
+def test_polarization_array_matches_the_z_axis_expression(azimuth_deg, fraction):
+    """``polarizationArray`` reproduces the ANA/ROD z-axis polarization.
+
+    pyFAI works in its own detector frame and parameterizes the amount of
+    polarization differently, so both arguments have to be translated. Two
+    independent implementations agreeing to the precision pyFAI stores its
+    result in is what pins that translation.
+    """
+    alpha_i = np.deg2rad(6.0)
+    sxrddet = _sxrd_detector(azimuth_deg, 0.0, fraction)
+
+    correction = np.asarray(sxrddet.polarizationArray(), dtype=np.float64)
+    reference = _polarization_reference(sxrddet, alpha_i)
+
+    # pyFAI stores the polarization as float32.
+    np.testing.assert_allclose(correction, reference, atol=1e-6)
+
+
+def test_polarization_uses_the_azimuthal_reference():
+    """Leaving the azimuthal reference out is a large, angle-dependent error.
+
+    A vertical scattering geometry sets the azimuthal reference to 90
+    degrees, which swaps the polarized and unpolarized directions of the
+    detector. Because the error varies across the detector, two rod branches
+    recorded on opposite sides of it are corrected differently and stop
+    agreeing -- the symptom this test exists to prevent.
+    """
+    alpha_i = np.deg2rad(6.0)
+    sxrddet = _sxrd_detector(90.0, 0.0, 1.0)
+    reference = _polarization_reference(sxrddet, alpha_i)
+
+    correct = np.asarray(sxrddet.polarizationArray(), dtype=np.float64)
+    sxrddet._cached_array = {}
+    # What orGUI passed before: the polarization axis without the azimuthal
+    # reference.
+    without_reference = np.asarray(
+        sxrddet.polarization(factor=sxrddet._polFactor, axis_offset=sxrddet._polAxis),
+        dtype=np.float64,
+    )
+
+    np.testing.assert_allclose(correct, reference, atol=1e-6)
+    # The error is not a constant scale factor but varies over the detector,
+    # which is what makes it distort a rod rather than just rescale it.
+    ratio = without_reference / correct
+    assert ratio.max() / ratio.min() > 2.0
+    assert ratio.min() < 0.8
+
+
+def test_polarization_factor_is_the_horizontal_fraction():
+    """``polarization_factor`` is a fraction, not pyFAI's ``(Ih-Iv)/(Ih+Iv)``.
+
+    The config field and orGUI's own z-axis expression treat it as the
+    fraction of horizontally polarized light, so it has to be rescaled to
+    pyFAI's convention. The two coincide only for a fully horizontally
+    polarized beam, which is why the difference stayed hidden.
+    """
+    alpha_i = np.deg2rad(6.0)
+    fraction = 0.75
+    sxrddet = _sxrd_detector(90.0, 0.0, fraction)
+    reference = _polarization_reference(sxrddet, alpha_i)
+
+    correct = np.asarray(sxrddet.polarizationArray(), dtype=np.float64)
+    sxrddet._cached_array = {}
+    # What orGUI passed before: the fraction used as pyFAI's factor.
+    unscaled = np.asarray(
+        sxrddet.polarization(factor=fraction, axis_offset=sxrddet._deltaChi),
+        dtype=np.float64,
+    )
+
+    np.testing.assert_allclose(correct, reference, atol=1e-6)
+    assert np.abs(unscaled - reference).max() > 1e-2
+    # A fully horizontal beam is the one case where both agree.
+    full = _sxrd_detector(90.0, 0.0, 1.0)
+    np.testing.assert_allclose(
+        np.asarray(full.polarizationArray(), dtype=np.float64),
+        _polarization_reference(full, alpha_i),
+        atol=1e-6,
+    )
+
+
+def test_unpolarized_beam_has_no_azimuthal_dependence():
+    """An unpolarized beam gives ``(1 + cos^2(2theta)) / 2`` everywhere."""
+    sxrddet = _sxrd_detector(90.0, 0.0, 0.5)
+
+    correction = np.asarray(sxrddet.polarizationArray(), dtype=np.float64)
+
+    tth = sxrddet.center_array(sxrddet.get_shape(), unit=pyFAI.units.TTH_RAD)
+    np.testing.assert_allclose(correction, 0.5 * (1.0 + np.cos(tth) ** 2), atol=1e-6)
