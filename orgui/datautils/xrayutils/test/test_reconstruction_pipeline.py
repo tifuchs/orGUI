@@ -508,6 +508,142 @@ def test_map_pending_ranges_propagates_first_exception_after_draining(tmp_path):
     assert len(router.written) >= 1
 
 
+def _run_bounded(call, *, seconds):
+    """Run ``call`` in a daemon thread and report what happened.
+
+    A pipeline that fails to end is the defect under test, so the test
+    must not join it unbounded: that would hang the suite instead of
+    failing it. Returns ``(finished, error)``.
+    """
+    outcome = {}
+
+    def run():
+        try:
+            call()
+        except BaseException as exc:  # noqa: BLE001 -- reported, not raised
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout=seconds)
+    return not thread.is_alive(), outcome.get("error")
+
+
+def _pipeline_call(spec, scan, router, tmp_path, frame_count, **overrides):
+    kwargs = dict(
+        correction_pipeline=_correction,
+        effective_memory=256 * 1024**2,
+        threads_per_image=1,
+        accumulation_budget_bytes=None,
+        total_images=frame_count,
+        completed_images=0,
+        progress=None,
+    )
+    kwargs.update(overrides)
+    bounds = np.zeros((frame_count, 2, 4), dtype=np.float64)
+    return lambda: _map_pending_ranges(
+        spec,
+        scan,
+        _FakeConfig(),
+        bounds,
+        [(0, 1, 0, 1)],
+        [(0, frame_count)],
+        router,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("frames_per_group", [1, 2])
+def test_pipeline_completes_without_relying_on_the_poll_timeout(
+    tmp_path, monkeypatch, frames_per_group
+):
+    """A run must end because it is finished, not because a get() expired.
+
+    A compute worker parked in ``ready_queue.get(timeout=...)`` only
+    re-reads its exit conditions when that get returns, and the
+    coordinator will not leave its loop until every compute worker has
+    exited -- so if the poll is what carries completion, one get that
+    fails to time out holds the whole run open. CPython 3.10-3.12 can do
+    exactly that (see doc/design/reciprocal_space_mapping_shutdown_hang.md,
+    and the Linux 3.10 CI hang of 2026-08-19).
+
+    Raising the poll interval far above the run's own duration stands in
+    for that failure without depending on the interpreter's race: with
+    completion carried by a sentinel the run still ends immediately, and
+    with completion carried by the timeout it would take the full poll.
+    """
+    monkeypatch.setattr(reconstruction_job_module, "_POLL_TIMEOUT_SECONDS", 30.0)
+    frame_count = 8
+    spec = dataclasses.replace(_spec(), frames_per_group=frames_per_group)
+    grid_name = spec.grids[0].grid_name
+    router = _router({grid_name: [(0, frame_count)]}, tmp_path=tmp_path)
+    scan = _SlowScan(frame_count, delay=0.0)
+
+    finished, error = _run_bounded(
+        _pipeline_call(spec, scan, router, tmp_path, frame_count),
+        seconds=15.0,
+    )
+
+    assert finished, "the pipeline waited for its poll interval to expire"
+    assert error is None
+    assert router.routed_records > 0
+
+
+def test_grouped_pipeline_surfaces_a_failure_instead_of_waiting_for_retirement(
+    tmp_path, monkeypatch
+):
+    """A group that can no longer retire must not hold the run open.
+
+    The grouped scheduler's compute workers left their loop only when
+    every dispatched group had completed. A group that is dispatched and
+    then never completed -- a prepare worker lost between claiming a slot
+    and completing it, a compute worker that died building its kernels --
+    makes that condition permanently false, so the workers waited for it
+    while the coordinator waited for the workers, and the exception the
+    run had already recorded could never be reported. Dropping one
+    group's completion stands in for those losses.
+    """
+    frame_count = 8
+    spec = dataclasses.replace(_spec(), frames_per_group=2)
+    grid_name = spec.grids[0].grid_name
+    router = _router({grid_name: [(0, frame_count)]}, tmp_path=tmp_path)
+
+    complete_one = reconstruction_job_module._GroupAssembly.complete_one
+    dropped = []
+
+    def drop_one_group(self, *, failed=False):
+        whole = complete_one(self, failed=failed)
+        if whole and not dropped:
+            dropped.append(True)
+            return False  # never queued, so this group never completes
+        return whole
+
+    monkeypatch.setattr(
+        reconstruction_job_module._GroupAssembly,
+        "complete_one",
+        drop_one_group,
+    )
+
+    class FailingScan:
+        def __len__(self):
+            return frame_count
+
+        def get_raw_img(self, index):
+            if index == frame_count - 1:
+                raise RuntimeError("simulated read failure")
+            return h5_Image(np.array([[float(index)]]))
+
+    finished, error = _run_bounded(
+        _pipeline_call(spec, FailingScan(), router, tmp_path, frame_count),
+        seconds=30.0,
+    )
+
+    assert dropped, "the test did not exercise a lost group"
+    assert finished, "the grouped pipeline never returned after a failure"
+    assert isinstance(error, RuntimeError)
+    assert "simulated read failure" in str(error)
+
+
 # ---------------------------------------------------------------------------
 # _kernel_threads_candidates
 # ---------------------------------------------------------------------------

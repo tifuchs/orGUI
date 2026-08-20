@@ -11,7 +11,7 @@ import logging
 import math
 import os
 from pathlib import Path
-from queue import Empty, SimpleQueue
+from queue import Empty, Queue
 import shutil
 import threading
 import time
@@ -2291,6 +2291,20 @@ class _AdjustablePool:
         with self._lock:
             return len(self._active)
 
+    @property
+    def live(self) -> int:
+        """Workers still running, stragglers included.
+
+        ``size`` is a target; this is what a wake has to cover, since a
+        straggler retiring after a shrink is parked on the same queue as
+        an active worker.
+        """
+        with self._lock:
+            return sum(
+                thread.is_alive()
+                for thread, _retire in self._active + self._retiring
+            )
+
     def _spawn(self):
         retire = threading.Event()
         thread = threading.Thread(
@@ -3120,9 +3134,18 @@ def _map_frame_groups_streamed(
     frame_correction = getattr(correction_pipeline, "correct_frame", None)
     corrects_whole_frame = callable(frame_correction)
 
-    progress_events = SimpleQueue()
-    frame_queue = SimpleQueue()
-    ready_queue = SimpleQueue()
+    # Queue, not SimpleQueue: CPython 3.10-3.12 can turn an expired
+    # SimpleQueue.get(timeout=...) into an untimed wait when consumers
+    # contend for an empty queue, which parks a pipeline thread for good
+    # (doc/design/reciprocal_space_mapping_shutdown_hang.md). Queue waits on
+    # a condition variable and has no such path. The queues carry one item
+    # per frame group, not per pixel, so the heavier primitive costs
+    # nothing measurable: +0.03% on a 2 ms/frame run, well inside the
+    # run-to-run spread, and +11 us/frame in the degenerate case of frames
+    # with no read or compute cost at all.
+    progress_events = Queue()
+    frame_queue = Queue()
+    ready_queue = Queue()
     gate = _BoundedGate(pipeline_depth)
     dispatch_done = threading.Event()
     mapped_images = completed_images
@@ -3259,7 +3282,15 @@ def _map_frame_groups_streamed(
                     except Empty:
                         counts[0] += 1
                         counts[1] += 1
-                        if all_groups_retired() and ready_queue.empty():
+                        # should_stop() matters as much as retirement: the
+                        # coordinator breaks on first_exception, but only
+                        # once every compute worker has exited, so a worker
+                        # that waits for groups which will now never retire
+                        # holds the whole run open. Draining first is
+                        # deliberate, and matches the per-frame loop.
+                        if (
+                            all_groups_retired() or should_stop()
+                        ) and ready_queue.empty():
                             return
                         continue
                     counts[1] += 1
@@ -3404,6 +3435,16 @@ def _map_frame_groups_streamed(
                     prepare_pool.retarget(prepare_pool.size - 1)
             prepare_pool.reap()
             compute_pool.reap()
+            if all_groups_retired() and ready_queue.empty():
+                # Completion must not depend on a poll timing out. A
+                # consumer parked in get() re-reads its exit conditions
+                # only when that get returns. Nothing may depend on a
+                # timeout firing for the run to end -- the queue type is one
+                # decision away from a get that never returns, as the
+                # SimpleQueue note above records. Both conditions together
+                # mean nothing can reach ready_queue any more, so a sentinel
+                # per live worker cannot displace real work.
+                _wake_compute(compute_pool.live)
             with blocked_counts_lock:
                 still_computing = bool(blocked_counts)
             if not still_computing and (all_groups_retired() or first_exception):
@@ -3684,8 +3725,10 @@ def _map_pending_ranges(
 
     reader_pool_size = min(_PREFETCH_POOL_INITIAL, max_readers)
 
-    progress_events = SimpleQueue()
-    ready_queue = SimpleQueue()
+    # Queue rather than SimpleQueue, for the reason given in
+    # _map_frame_groups_streamed.
+    progress_events = Queue()
+    ready_queue = Queue()
     gate = _BoundedGate(image_workers + _PREFETCH_QUEUE_SLACK)
     mapped_images = completed_images
 
@@ -3838,9 +3881,7 @@ def _map_pending_ranges(
                     if retire.is_set() or pool_cancellation.is_set():
                         return
                     try:
-                        group, image_payloads = ready_queue.get(
-                            timeout=_POLL_TIMEOUT_SECONDS
-                        )
+                        item = ready_queue.get(timeout=_POLL_TIMEOUT_SECONDS)
                     except Empty:
                         counts[0] += 1
                         counts[1] += 1
@@ -3849,6 +3890,9 @@ def _map_pending_ranges(
                         ) and ready_queue.empty():
                             return
                         continue
+                    if item is _SHUTDOWN_SENTINEL:
+                        return
+                    group, image_payloads = item
                     counts[1] += 1
                     gate.release()
                     try:
@@ -3880,6 +3924,14 @@ def _map_pending_ranges(
     compute_pool = _AdjustablePool(
         compute_loop, initial_size=image_workers, name="orgui-rsmap-compute"
     )
+
+    def _wake_compute(count):
+        for _ in range(count):
+            ready_queue.put(_SHUTDOWN_SENTINEL)
+
+    # Readers take their work from a one-shot iterator rather than a
+    # queue, so only the compute side can be parked in a get().
+    compute_pool.wake_workers = _wake_compute
     previous_blocked = 0
     previous_total = 0
     last_rebalance_monotonic = time.monotonic()
@@ -4009,6 +4061,7 @@ def _map_pending_ranges(
                                 initial_size=new_image_workers,
                                 name="orgui-rsmap-compute",
                             )
+                            compute_pool.wake_workers = _wake_compute
                             # Blocks until every straggler on the retired
                             # generation finishes its in-flight
                             # _map_frame_group call -- a deliberate, rare
@@ -4038,6 +4091,13 @@ def _map_pending_ranges(
             # Completion: every frame delivered or errored, and every
             # compute worker has drained the queue and exited on its own.
             if readers_done.is_set():
+                if ready_queue.empty():
+                    # Every group was put on the queue before its delivery
+                    # was marked, so readers_done with an empty queue means
+                    # nothing more can arrive. Wake the drained workers with
+                    # data rather than trusting their poll to time out; see
+                    # the grouped scheduler for why that is not a given.
+                    _wake_compute(compute_pool.live)
                 with blocked_counts_lock:
                     still_computing = bool(blocked_counts)
                 if not still_computing:
