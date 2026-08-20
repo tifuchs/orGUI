@@ -7,6 +7,27 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **Fixed the angle-to-pixel conversion being half a pixel off.**
+  ``pixelsTthChi``, and with it ``pixelsPrimeBeam`` and
+  ``pixelsSurfaceAngles``, converted a distance on the detector into a pixel
+  coordinate by dividing by the pixel pitch, which yields a pixel *edge*
+  index. The forward direction (``primBeamPoints``, ``surfaceAnglesPoint``,
+  and everything built on pyFAI's ``calc_cartesian_positions``) indexes
+  pixels by their *centre*, so the two were not inverses: a round trip
+  through both came back displaced by exactly 0.5 pixel in each direction,
+  at every geometry. This shifted calculated Bragg-reflection markers,
+  the reflection positions offered by the CTR navigation helpers, and the
+  on-detector test used to decide whether a reflection is visible at all.
+  Measured intensities were unaffected, since the integration path converts
+  in the forward direction only. The round trip is now exact rather than half
+  a pixel off, and a new regression test asserts it on well-conditioned
+  geometries for both a module and a regular detector.
+- Known limitation, now documented rather than changed: ``surfaceAngles``
+  recovers the in-plane ``delta`` with an arcsin, so it saturates instead of
+  wrapping once a pixel reaches ``|delta| = 90`` degrees, and the conversion
+  is not invertible there. This only arises for a detector large enough, or
+  close enough to the sample, to span 90 degrees in plane.
+
 - **Fixed ROI integration multiplying every corrected intensity by the size of
   its ROI.** When any per-pixel detector correction was enabled, the factor
   applied to an ROI was the summed correction array rescaled to the nominal

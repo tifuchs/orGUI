@@ -318,7 +318,18 @@ class Detector2D_SXRD(geometry.Geometry):
         return gamma_p, delta_p
 
     def surfaceAngles(self, alpha_i, shape=None):
-        """Angles in the reference frame, where the crystal is tilted by alpha_i."""
+        """Angles in the reference frame, where the crystal is tilted by alpha_i.
+
+        :param float alpha_i: incidence angle in rad.
+        :param shape: detector shape, defaults to the calibrated one.
+        :returns: ``(gamma, delta)`` surface-frame angles in rad.
+        :rtype: tuple[numpy.ndarray, numpy.ndarray]
+
+        ``delta`` is recovered with an arcsin and is therefore only defined
+        for ``|delta| < pi/2``. A detector large enough, or close enough, to
+        reach 90 deg in-plane saturates instead of wrapping, and the
+        conversion stops being invertible by :meth:`pixelsSurfaceAngles`.
+        """
         if hasattr(self, "_alpha_i"):
             if self._alpha_i == alpha_i:
                 if (
@@ -421,6 +432,25 @@ class Detector2D_SXRD(geometry.Geometry):
         return gamma_cry, delta, alpha_i_cry
 
     def pixelsTthChi(self, tth, chi):
+        """Detector coordinates of the given pyFAI scattering angles.
+
+        Inverse of the pyFAI forward direction, and therefore the exact
+        inverse of :meth:`primBeamPoints` and :meth:`surfaceAnglesPoint`.
+
+        :param numpy.ndarray tth: scattering angles in rad.
+        :param numpy.ndarray chi: pyFAI azimuthal angles in rad.
+        :returns:
+            Array shaped ``(*tth.shape, 2)`` holding pixel coordinates as
+            ``(dim1, dim2)``, i.e. ``(slow, fast)``, using the same
+            pixel-centre indexing that :meth:`primBeamPoints` consumes.
+            Coordinates outside the detector are returned unclipped.
+        :rtype: numpy.ndarray
+
+        The inversion assumes a uniform pixel pitch. That holds for the
+        regular and module detectors pyFAI models by a uniform grid,
+        including ones whose gaps live only in the mask, but not for a
+        detector supplying a genuinely non-uniform ``get_pixel_corners``.
+        """
         tth = np.atleast_1d(np.asarray(tth))
         chi = np.atleast_1d(np.asarray(chi))
         shape = tth.shape
@@ -515,6 +545,13 @@ class Detector2D_SXRD(geometry.Geometry):
         p = (
             np.column_stack((ptilde1, ptilde2)) + np.array([self.poni1, self.poni2])
         ) / np.array([self.pixel1, self.pixel2])
+
+        # ``calc_cartesian_positions`` places pixel index ``i`` at its centre,
+        # ``(i + 0.5) * pitch``, so dividing a distance by the pitch above
+        # yields a pixel edge coordinate. Shift onto the same pixel-centre
+        # indexing the forward direction consumes, which makes this the exact
+        # inverse of :meth:`primBeamPoints` rather than a half-pixel off it.
+        p -= 0.5
 
         return p.reshape((*shape, 2))
 

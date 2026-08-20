@@ -119,13 +119,52 @@ class TestAnglePixelConversion(unittest.TestCase):
         self.sxrddet.setAzimuthalReference(np.deg2rad(90.0))
         self.sxrddet.setPolarization(np.deg2rad(90.0), 0.75)
 
-        self.p1 = np.arange(self.sxrddet.detector.shape[1]) + 0.5  # pixel center
-        self.p2 = np.arange(self.sxrddet.detector.shape[0]) + 0.5
+        # Pixel-centre indexing: ``calc_cartesian_positions`` places index ``i``
+        # at ``(i + 0.5) * pitch``, so the centre of pixel ``i`` is the integer
+        # index ``i`` itself. This is the convention both the forward
+        # (``primBeamPoints``) and the inverse (``pixelsTthChi``) direction use.
+        self.p1 = np.arange(self.sxrddet.detector.shape[1], dtype=float)
+        self.p2 = np.arange(self.sxrddet.detector.shape[0], dtype=float)
         self.p12 = np.moveaxis(np.array(np.meshgrid(self.p1, self.p2)), 0, -1)[
             :, :, ::-1
         ]
 
         self.mu = np.deg2rad(0.1)  # should be differed, but probably ok
+
+    def test_prim_beam_points_inverse_is_exact(self):
+        """``pixelsPrimeBeam`` must invert ``primBeamPoints`` exactly.
+
+        Both directions index pixels by their centre, so the round trip is the
+        identity rather than the half-pixel offset it used to carry. Checked on
+        a module detector and on a plain regular one, since ``pixelsTthChi``
+        inverts assuming a uniform pixel pitch.
+        """
+        rows = np.array([0.0, 1.0, 100.0, 517.0, 1000.0])
+        columns = np.array([0.0, 3.0, 250.0, 733.0, 1400.0])
+
+        for name in ("Pilatus 2M CdTe", None):
+            with self.subTest(detector=name or "regular"):
+                det = DetectorCalibration.Detector2D_SXRD()
+                if name is None:
+                    det.detector = pyFAI.detectors.Detector(
+                        172e-6, 172e-6, max_shape=(1500, 1500)
+                    )
+                else:
+                    det.detector = pyFAI.detector_factory(name)
+                det.poni1 = 0.1
+                det.poni2 = 0.1
+                det.rot1 = np.pi / 20
+                det.rot2 = -np.pi / 20
+                det.rot3 = np.pi / 30
+                det.dist = 1.5
+                det.wavelength = 0.8e-10
+                det.setAzimuthalReference(np.deg2rad(90.0))
+
+                gamma_p, delta_p = det.primBeamPoints(rows, columns)
+                back = det.pixelsPrimeBeam(gamma_p, delta_p)
+
+                np.testing.assert_allclose(back[:, 0], rows, atol=1e-9)
+                np.testing.assert_allclose(back[:, 1], columns, atol=1e-9)
 
     def test_surface_angles_trial_parameters_match_active_geometry(self):
         d1 = np.array([100.0, 500.0, 1000.0])
@@ -148,26 +187,42 @@ class TestAnglePixelConversion(unittest.TestCase):
         self.assertTrue(np.allclose(actual[0], expected[0]))
         self.assertTrue(np.allclose(actual[1], expected[1]))
 
+    def assertRoundTripPixelError(self, p12_conv, abserr, msg):
+        """Report the angle-to-pixel round-trip error over the whole detector.
+
+        Deliberately a warning rather than an assertion, as it has been since
+        these sweeps were written. They drive the geometry far past anything
+        physical -- ``rot`` up to 180 degrees, ``poni`` metres off a detector
+        1.7 m across -- and there the surface-angle parametrisation is at or
+        over the edge of being invertible at all (see
+        ``Detector2D_SXRD.surfaceAngles`` on the arcsin saturation). Whether a
+        given sweep value tips over depends on process state, which makes a
+        hard assertion here flaky for reasons unrelated to what is being
+        tested.
+
+        The pixel-coordinate convention these were meant to guard is asserted
+        exactly, and deterministically, in
+        :meth:`TestAnglePixelConversion.test_prim_beam_points_inverse_is_exact`
+        on well-conditioned geometries instead.
+        """
+        maxerror = np.nanmax(np.abs(self.p12 - p12_conv))
+        if maxerror > abserr:
+            warnings.warn(f"too large error: {maxerror:.5f} {msg}")
+
     def assertPixelErrorSurfaceAnglesLessThan(self, abserr=1e-3, msg=""):
         gamma, delta = self.sxrddet.surfaceAngles(self.mu)
         p12_conv = self.sxrddet.pixelsSurfaceAngles(gamma, delta, self.mu)
-        maxerror = np.nanmax(np.abs(self.p12 - p12_conv))
-        if maxerror > abserr:
-            warnings.warn(
-                f"too large error: {maxerror:.5f} pixel coord from surface angles, {msg}"  # noqa: E501
-            )
-        # self.assertLessEqual(maxerror, abserr,  "too large error pixel coord from surface angles, %s" % msg)  # noqa: E501
+        self.assertRoundTripPixelError(
+            p12_conv, abserr, f"pixel coord from surface angles, {msg}"
+        )
 
     def assertPixelErrorTthChiLessThan(self, abserr=1e-3, msg=""):
         tth = self.sxrddet.twoThetaArray()
         chi = self.sxrddet.chiArray()
         p12_conv = self.sxrddet.pixelsTthChi(tth, chi)
-        maxerror = np.nanmax(np.abs(self.p12 - p12_conv))
-        if maxerror > abserr:
-            warnings.warn(
-                f"too large error: {maxerror:.5f} pixel coord from tth and chi, {msg}"
-            )
-        # self.assertLessEqual(maxerror, abserr, "too large error pixel coord from tth and chi, %s" % msg)  # noqa: E501
+        self.assertRoundTripPixelError(
+            p12_conv, abserr, f"pixel coord from tth and chi, {msg}"
+        )
 
     def assertGamDelRangeErrorLessThan(self, abserr=1e-3, msg=""):
         exact = self.sxrddet._rangegamdel_p_full_det
