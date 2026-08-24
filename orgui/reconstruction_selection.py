@@ -57,6 +57,7 @@ from __future__ import annotations
 import numpy as np
 
 from .datautils.xrayutils import ReciprocalNavigation
+from .datautils.xrayutils.reconstruction import _sample_angle_bounds
 from .reconstruction_job import ReconstructionGrid
 
 
@@ -208,8 +209,12 @@ def sample_hkl_coverage_by_frame(
         scan.exposure_angle_bounds(config, fallback="stationary"),
         dtype=np.float64,
     )
-    if bounds.shape != (len(scan), 2, 4):
-        raise ValueError("Exposure angle bounds must have shape (frames, 2, 4)")
+    if bounds.shape not in {(len(scan), 2, 4), (len(scan), 2, 6)}:
+        raise ValueError(
+            "Exposure angle bounds must have shape (frames, 2, 4) or "
+            "(frames, 2, 6)"
+        )
+    bounds = _sample_angle_bounds(bounds)
     if frames is None:
         excluded = set(config.corrections.excluded_frames)
         included = np.asarray(

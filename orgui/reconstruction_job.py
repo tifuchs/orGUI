@@ -39,6 +39,7 @@ from .datautils.xrayutils.reconstruction import (
     _kernel_for_grid,
     _kernel_threads_sweep,
     _map_frame_group,
+    _sample_angle_bounds,
     _tile_ray_arrays,
     _validate_mapping_setup,
 )
@@ -389,7 +390,9 @@ def derive_grid(config, scan, *, frame="hkl", name=None):
         )
     )
     corner_rays = np.ascontiguousarray(edge_rays.reshape(2, 2, 3))
-    bounds = scan.exposure_angle_bounds(config, fallback="stationary")
+    bounds = _sample_angle_bounds(
+        scan.exposure_angle_bounds(config, fallback="stationary")
+    )
     from .datautils.xrayutils.reconstruction import _native_module
 
     ub = config.ub_calculator
@@ -499,10 +502,12 @@ def estimate_geometry_steps(
         scan.exposure_angle_bounds(config, fallback="stationary"),
         dtype=np.float64,
     )
-    if bounds.shape != (len(scan), 2, 4):
+    if bounds.shape not in {(len(scan), 2, 4), (len(scan), 2, 6)}:
         raise ValueError(
-            "Exposure angle bounds must have shape (frames, 2, 4)"
+            "Exposure angle bounds must have shape (frames, 2, 4) or "
+            "(frames, 2, 6)"
         )
+    bounds = _sample_angle_bounds(bounds)
     excluded = set(config.corrections.excluded_frames)
     included = np.asarray(
         [index for index in range(len(scan)) if index not in excluded],
@@ -831,7 +836,9 @@ def estimate_checkpoint_plan(
     included = [index for index in range(len(scan)) if index not in excluded]
     if not included:
         raise ValueError("No included frames are available for estimation")
-    bounds = scan.exposure_angle_bounds(config, fallback=angle_fallback)
+    bounds = _sample_angle_bounds(
+        scan.exposure_angle_bounds(config, fallback=angle_fallback)
+    )
     corner_rays = _detector_corner_rays(detector, (0, rows, 0, columns))
 
     grid_values = [
@@ -1882,8 +1889,8 @@ def reconstruction_execution_settings(job, scan=None, config=None):
         1 if job.threads_per_image is None else job.threads_per_image
     )
     ranges, tiles = _execution_layout(job, scan, config)
-    bounds = scan.exposure_angle_bounds(
-        config, fallback=job.angle_fallback
+    bounds = _sample_angle_bounds(
+        scan.exposure_angle_bounds(config, fallback=job.angle_fallback)
     )
     ray_cache_bytes = sum(
         (tile[1] - tile[0] + 1)
@@ -4288,7 +4295,9 @@ def run_cluster_map_task(
     ranges, tiles = _execution_layout(
         job, scan, config, extra_excluded_frames=node_excluded
     )
-    bounds = scan.exposure_angle_bounds(config, fallback=job.angle_fallback)
+    bounds = _sample_angle_bounds(
+        scan.exposure_angle_bounds(config, fallback=job.angle_fallback)
+    )
     pending_ranges = [
         frame_range
         for frame_range in ranges
@@ -4586,8 +4595,8 @@ def run_job(
     assets = _load_assets(job)
     spec = job.internal_spec()
     logger.info("%s: scan opened, %d frame(s) in the scan", stage, len(scan))
-    bounds = scan.exposure_angle_bounds(
-        config, fallback=job.angle_fallback
+    bounds = _sample_angle_bounds(
+        scan.exposure_angle_bounds(config, fallback=job.angle_fallback)
     )
     ranges, tiles = _execution_layout(job, scan, config)
     checkpoint_dir = Path(job.scratch_path) / "checkpoints"

@@ -1505,13 +1505,51 @@ def _validate_mapping_setup(
         ):
             raise ValueError("Invalid detector tile")
     bounds = np.asarray(angle_bounds_rad, dtype=np.float64)
-    if bounds.shape != (len(scan), 2, 4):
-        raise ValueError("angle_bounds_rad must have shape (len(scan), 2, 4)")
+    if bounds.shape not in {(len(scan), 2, 4), (len(scan), 2, 6)}:
+        raise ValueError(
+            "angle_bounds_rad must have shape (len(scan), 2, 4) or "
+            "(len(scan), 2, 6)"
+        )
     if not np.all(np.isfinite(bounds)):
         raise ValueError("angle_bounds_rad contains non-finite values")
+    bounds = _sample_angle_bounds(bounds)
     if not callable(correction_pipeline):
         raise TypeError("correction_pipeline must be the central job correction")
     return detector_tiles, bounds
+
+
+def _sample_angle_bounds(bounds):
+    """Reduce exposure bounds to the four sample circles the kernel takes.
+
+    The scan data model carries two extra columns for the detector arm
+    (``gamma_arm``, ``delta_arm``). The native kernel folds the detector into
+    the fixed ray array built once per run, so it can only map a detector that
+    stays where it was calibrated.
+
+    A moving arm is refused rather than dropped: the arm columns do not enter
+    the kernel, so ignoring them would map every frame as if the detector had
+    never moved and yield a plausible-looking but wrong volume.
+
+    :param numpy.ndarray bounds:
+        ``(frames, 2, 4)`` or ``(frames, 2, 6)`` in radians.
+    :returns: ``(frames, 2, 4)``.
+    :rtype: numpy.ndarray
+    :raises NotImplementedError: If the detector arm moves during the scan.
+    """
+    bounds = np.asarray(bounds, dtype=np.float64)
+    if bounds.shape[-1] == 4:
+        return np.ascontiguousarray(bounds)
+    arm = bounds[..., 4:6]
+    if not np.allclose(arm, arm.reshape(-1, 2)[0], atol=1e-12):
+        raise NotImplementedError(
+            "Reciprocal-space reconstruction cannot yet handle a moving "
+            "detector arm: gamma_arm/delta_arm vary across this scan (range "
+            f"{np.rad2deg(np.ptp(arm[..., 0])):.4f} deg gamma, "
+            f"{np.rad2deg(np.ptp(arm[..., 1])):.4f} deg delta). The detector "
+            "geometry is baked into the ray array once per run, so mapping "
+            "would silently use the calibrated arm position for every frame."
+        )
+    return np.ascontiguousarray(bounds[..., :4])
 
 
 def _tile_ray_arrays(detector, detector_tiles, corner_rays=None):
