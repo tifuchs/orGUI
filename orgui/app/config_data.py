@@ -270,6 +270,14 @@ class ConfigData:
     mu: float = 0.0
     chi: float = 0.0
     phi: float = 0.0
+    # Fixed detector arm position, radians, for backends that do not read the
+    # arm motors. A scan supplying its own per-frame values overrides these.
+    gamma_arm: float = 0.0
+    delta_arm: float = 0.0
+    # Which angles the arm motors report: 'prim' for the true scattering
+    # angles gamma_p/delta_p, 'surface' for six-circle gamma/delta.
+    arm_angle_frame: str = "prim"
+
     refraction_index: float = 1.0
     reference_reflections: list = field(default_factory=list)
     corrections: CorrectionState = field(default_factory=CorrectionState)
@@ -327,6 +335,14 @@ class ConfigData:
             np.deg2rad(diffrac.getfloat("polarization_axis", 0)),
             diffrac.getfloat("polarization_factor", 0),
         )
+        # Optional moveable detector arm. Absent keys mean a calibration taken
+        # with the arm at zero and no arm motion, i.e. exactly the static
+        # geometry every existing config describes.
+        detarm = config["DetectorArm"] if config.has_section("DetectorArm") else {}
+        detector.setArmReference(
+            gamma_arm=np.deg2rad(float(detarm.get("gamma_arm_0", 0.0))),
+            delta_arm=np.deg2rad(float(detarm.get("delta_arm_0", 0.0))),
+        )
         return cls(
             detector=detector,
             unit_cell=cell,
@@ -334,6 +350,9 @@ class ConfigData:
             mu=np.deg2rad(diffrac.getfloat("mu", 0.05)),
             chi=np.deg2rad(diffrac.getfloat("chi", 0.0)),
             phi=np.deg2rad(diffrac.getfloat("phi", 0.0)),
+            gamma_arm=np.deg2rad(float(detarm.get("gamma_arm", 0.0))),
+            delta_arm=np.deg2rad(float(detarm.get("delta_arm", 0.0))),
+            arm_angle_frame=str(detarm.get("angle_frame", "prim")),
             refraction_index=1.0 - lattice.getfloat("refractionindex", 0.0),
         )
 
@@ -399,6 +418,9 @@ class ConfigData:
             mu=getattr(ub_widget, "mu", 0.0),
             chi=getattr(ub_widget, "chi", 0.0),
             phi=getattr(ub_widget, "phi", 0.0),
+            gamma_arm=getattr(ub_widget, "gamma_arm", 0.0),
+            delta_arm=getattr(ub_widget, "delta_arm", 0.0),
+            arm_angle_frame=getattr(ub_widget, "arm_angle_frame", "prim"),
             refraction_index=getattr(ub_widget, "n", 1.0),
             reference_reflections=reflections,
             corrections=corrections,
@@ -416,6 +438,9 @@ class ConfigData:
         ub_widget.mu = self.mu
         ub_widget.chi = self.chi
         ub_widget.phi = self.phi
+        ub_widget.gamma_arm = self.gamma_arm
+        ub_widget.delta_arm = self.delta_arm
+        ub_widget.arm_angle_frame = self.arm_angle_frame
         ub_widget.n = self.refraction_index
         if hasattr(ub_widget, "uedit"):
             ub_widget.uedit.setU(ub_widget.ubCal.getU())
@@ -503,6 +528,9 @@ class ConfigData:
                     "mu": self.mu,
                     "chi": self.chi,
                     "phi": self.phi,
+                    "gamma_arm": self.gamma_arm,
+                    "delta_arm": self.delta_arm,
+                    "arm_angle_frame": self.arm_angle_frame,
                     "@unit": "rad",
                 },
                 "source": {
@@ -555,6 +583,9 @@ class ConfigData:
             mu=float(diffrac.get("mu", 0.0)),
             chi=float(diffrac.get("chi", 0.0)),
             phi=float(diffrac.get("phi", 0.0)),
+            gamma_arm=float(diffrac.get("gamma_arm", 0.0)),
+            delta_arm=float(diffrac.get("delta_arm", 0.0)),
+            arm_angle_frame=_as_text(diffrac.get("arm_angle_frame", "prim")),
             refraction_index=float(
                 nxdict.get("orgui", {}).get("refraction_index", 1.0)
             ),

@@ -37,6 +37,8 @@ import os
 from pathlib import Path
 import runpy
 
+from ..datautils.xrayutils import DetectorCalibration
+
 
 class Scan(ABC):
     """Base class for every backend.
@@ -87,6 +89,29 @@ class Scan(ABC):
         *  om : = -th (just populate the value)
         *  mu : motor value
         with actual data
+
+        Optional, for a diffractometer with a moveable detector arm. Motor
+        positions are degrees like ``th``/``mu``; explicit bounds are radians:
+
+        *  gamma_arm, delta_arm : detector arm motor values, scalar or one per
+           frame. Absent means the fixed value from the configuration.
+        *  gamma_arm_bounds_rad, delta_arm_bounds_rad : ``(frames, 2)``
+           exposure start/end, for an arm that moves during the exposure.
+        *  continuous_exposure : set True when the motors move *during* each
+           exposure rather than settling between frames. Without it the arm is
+           assumed stationary within a frame; it is never inferred from the
+           data.
+        *  arm_angle_frame : ``'prim'`` (default) when the arm motors read the
+           true scattering angles ``gamma_p``/``delta_p``, which is what a
+           floor-mounted arm reports and does not depend on the incidence
+           angle. Set ``'surface'`` when they read the six-circle surface-frame
+           ``gamma``/``delta`` instead; the values are then converted with
+           :func:`.DetectorCalibration.armAnglesFromSurface` using this scan's
+           own alpha.
+
+        These are mechanical arm angles, and are **not** the per-pixel
+        ``(gamma, delta)`` of the diffraction equations. Rotations do not add,
+        so the two differ by up to degrees away from the beam centre.
         """  # noqa: E501
         self.axisname = None  # either "th" or "mu", this defines the scan axis
         self.axis = None  # value of either "th" or "mu"
@@ -180,10 +205,11 @@ class Scan(ABC):
             Active orGUI configuration providing fixed ``mu``, ``chi``, and
             ``phi`` values.
         :param str fallback:
-            ``"stationary"`` or the explicitly requested ``"midpoint"``.
+            ``"stationary"`` or the explicitly requested ``"midpoint"``,
+            governing the sample circles.
         :returns:
-            Array shaped ``(frames, 2, 4)`` ordered
-            ``alpha, omega, chi, phi``.
+            Array shaped ``(frames, 2, 6)`` ordered
+            ``alpha, omega, chi, phi, gamma_arm, delta_arm``.
         """
         return scan_exposure_angle_bounds(self, config, fallback=fallback)
 
@@ -284,6 +310,63 @@ def _frame_values(values, count, name):
     raise ValueError(f"{name} must be scalar or contain one value per frame")
 
 
+def _alpha_centers(scan, config, count):
+    """Per-frame incidence angle, in radians."""
+    if hasattr(scan, "mu"):
+        return np.deg2rad(_frame_values(scan.mu, count, "alpha"))
+    return _frame_values(config.mu, count, "alpha")
+
+
+def _arm_angle_frame(scan, config):
+    """Which angles the arm motors report: ``'prim'`` or ``'surface'``."""
+    frame = getattr(scan, "arm_angle_frame", None) or getattr(
+        config, "arm_angle_frame", "prim"
+    )
+    if frame not in {"prim", "surface"}:
+        raise ValueError("arm_angle_frame must be 'prim' or 'surface'")
+    return frame
+
+
+def scan_arm_angles(scan, config):
+    """Per-frame detector arm position, as true scattering angles.
+
+    The single place that resolves where the arm was for each frame: the
+    scan's own motor readback if it has one, otherwise the fixed value from the
+    configuration, converted out of the six-circle frame when the scan says its
+    motors report that instead.
+
+    :param scan: a loaded orGUI scan.
+    :param ConfigData config: supplies the fixed diffractometer values.
+    :returns:
+        ``(gamma_arm, delta_arm)``, one value per frame, in radians in the
+        primary-beam frame -- what :meth:`.Detector2D_SXRD.paramAtArm` and the
+        per-pixel conversions expect.
+    :rtype: tuple[numpy.ndarray, numpy.ndarray]
+    """
+    count = len(scan)
+    gamma_arm = _arm_centers(scan, config, count, "gamma_arm")
+    delta_arm = _arm_centers(scan, config, count, "delta_arm")
+    if _arm_angle_frame(scan, config) == "surface":
+        gamma_arm, delta_arm = DetectorCalibration.armAnglesFromSurface(
+            gamma_arm, delta_arm, _alpha_centers(scan, config, count)
+        )
+    return gamma_arm, delta_arm
+
+
+def _arm_centers(scan, config, count, name):
+    """Per-frame detector arm angle, in radians.
+
+    The scan's own motor readback wins; otherwise the fixed value from the
+    configuration, which is zero unless a ``[DetectorArm]`` section says
+    otherwise. Scan motor positions are degrees, config values already radians,
+    matching how ``mu`` and ``chi`` are handled above.
+    """
+    values = getattr(scan, name, None)
+    if values is not None:
+        return np.deg2rad(_frame_values(values, count, name))
+    return _frame_values(getattr(config, name, 0.0), count, name)
+
+
 def _midpoint_bounds(values):
     values = np.unwrap(np.asarray(values, dtype=np.float64))
     if values.size == 1:
@@ -295,11 +378,36 @@ def _midpoint_bounds(values):
     return np.column_stack((edges[:-1], edges[1:]))
 
 
+#: Order of the angle axis of the exposure-bounds array. The first four are
+#: sample circles, the last two the detector arm.
+EXPOSURE_ANGLE_NAMES = ("alpha", "omega", "chi", "phi", "gamma_arm", "delta_arm")
+
+#: Number of sample-circle angles, i.e. the width of the array before the
+#: detector arm was added. Consumers that cannot yet handle a moving arm slice
+#: to this and check that the arm columns are constant.
+SAMPLE_ANGLE_COUNT = 4
+
+
 def scan_exposure_angle_bounds(scan, config, fallback="stationary"):
     """Return centralized exposure bounds for any loaded orGUI scan.
 
     Scan motor positions are degrees. Fixed diffractometer values from
     :class:`ConfigData` and the returned bounds are radians.
+
+    :param scan: a loaded orGUI scan.
+    :param ConfigData config: supplies the fixed diffractometer values.
+    :param str fallback:
+        ``"stationary"`` or ``"midpoint"``, governing the **sample** circles
+        when the scan supplies no explicit bounds for them.
+    :returns:
+        Array shaped ``(frames, 2, 6)`` ordered by
+        :data:`EXPOSURE_ANGLE_NAMES`, in radians.
+    :rtype: numpy.ndarray
+
+    The detector arm is treated more conservatively than the sample circles:
+    its bounds are stationary unless the scan supplies explicit arm bounds, or
+    declares ``continuous_exposure``, or the caller asked for ``"midpoint"``.
+    A continuously moving arm therefore has to be stated, never guessed.
     """
     if fallback not in {"stationary", "midpoint"}:
         raise ValueError("fallback must be 'stationary' or 'midpoint'")
@@ -315,10 +423,7 @@ def scan_exposure_angle_bounds(scan, config, fallback="stationary"):
             bounds = bounds[np.asarray(indices, dtype=np.int64)]
         return np.ascontiguousarray(bounds)
     count = len(scan)
-    if hasattr(scan, "mu"):
-        alpha = np.deg2rad(_frame_values(scan.mu, count, "alpha"))
-    else:
-        alpha = _frame_values(config.mu, count, "alpha")
+    alpha = _alpha_centers(scan, config, count)
     omega = np.deg2rad(
         _frame_values(getattr(scan, "omega", 0.0), count, "omega")
     )
@@ -328,31 +433,54 @@ def scan_exposure_angle_bounds(scan, config, fallback="stationary"):
             omega,
             np.full(count, config.chi),
             np.full(count, config.phi),
+            _arm_centers(scan, config, count, "gamma_arm"),
+            _arm_centers(scan, config, count, "delta_arm"),
         )
     )
     bounds = np.repeat(centers[:, None, :], 2, axis=1)
     explicit = getattr(scan, "exposure_bounds_rad", None)
     if explicit is not None:
         explicit = np.asarray(explicit, dtype=np.float64)
-        if explicit.shape != bounds.shape:
+        if explicit.shape == bounds.shape:
+            return np.ascontiguousarray(explicit)
+        if explicit.shape == (count, 2, SAMPLE_ANGLE_COUNT):
+            # Written before the detector arm existed: honour its sample
+            # circles and let the arm columns follow the rules below.
+            bounds[:, :, :SAMPLE_ANGLE_COUNT] = explicit
+        else:
             raise ValueError("scan exposure_bounds_rad has an invalid shape")
-        return np.ascontiguousarray(explicit)
-    for axis, name in enumerate(("alpha", "omega", "chi", "phi")):
-        explicit_axis = getattr(scan, f"{name}_bounds_rad", None)
-        if explicit_axis is None:
-            continue
-        explicit_axis = np.asarray(explicit_axis, dtype=np.float64)
-        if explicit_axis.shape != (count, 2):
-            raise ValueError(f"scan {name}_bounds_rad has an invalid shape")
-        bounds[:, :, axis] = explicit_axis
-    if fallback == "midpoint":
-        angle_names = ("alpha", "omega", "chi", "phi")
-        for axis in range(4):
-            explicit_axis = getattr(
-                scan, f"{angle_names[axis]}_bounds_rad", None
-            )
+    else:
+        for axis, name in enumerate(EXPOSURE_ANGLE_NAMES[:SAMPLE_ANGLE_COUNT]):
+            explicit_axis = getattr(scan, f"{name}_bounds_rad", None)
             if explicit_axis is None:
-                bounds[:, :, axis] = _midpoint_bounds(centers[:, axis])
+                if fallback == "midpoint":
+                    bounds[:, :, axis] = _midpoint_bounds(centers[:, axis])
+                continue
+            explicit_axis = np.asarray(explicit_axis, dtype=np.float64)
+            if explicit_axis.shape != (count, 2):
+                raise ValueError(f"scan {name}_bounds_rad has an invalid shape")
+            bounds[:, :, axis] = explicit_axis
+
+    # The arm never picks up the midpoint estimate by accident: a continuously
+    # moving arm is either stated by the scan or asked for by the caller.
+    continuous = bool(getattr(scan, "continuous_exposure", False))
+    for offset, name in enumerate(EXPOSURE_ANGLE_NAMES[SAMPLE_ANGLE_COUNT:]):
+        axis = SAMPLE_ANGLE_COUNT + offset
+        explicit_axis = getattr(scan, f"{name}_bounds_rad", None)
+        if explicit_axis is not None:
+            explicit_axis = np.asarray(explicit_axis, dtype=np.float64)
+            if explicit_axis.shape != (count, 2):
+                raise ValueError(f"scan {name}_bounds_rad has an invalid shape")
+            bounds[:, :, axis] = explicit_axis
+        elif continuous or fallback == "midpoint":
+            bounds[:, :, axis] = _midpoint_bounds(centers[:, axis])
+
+    if _arm_angle_frame(scan, config) == "surface":
+        # Converted last, so that the alpha it needs is the resolved one and
+        # explicit arm bounds are converted on the same footing as the centres.
+        bounds[:, :, 4], bounds[:, :, 5] = DetectorCalibration.armAnglesFromSurface(
+            bounds[:, :, 4], bounds[:, :, 5], bounds[:, :, 0]
+        )
     return np.ascontiguousarray(bounds)
 
 

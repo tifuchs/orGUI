@@ -82,3 +82,26 @@ compression = Raw
 ## used only when module positions are known but the detector gap width is not;
 ## it is not a mask dilation radius.
 #gap_size_px = 6
+
+#[DetectorArm]
+## Optional moveable detector arm, all in degrees, all defaulting to 0.
+## gamma_arm_0 / delta_arm_0 are the arm motor readings at which the detector
+## calibration above was taken. Only the difference from these matters, so the
+## motor zero itself need not mean anything and the direct beam need not be on
+## the detector at zero.
+## gamma_arm / delta_arm are a fixed arm position for backends that do not read
+## the arm motors. A scan supplying its own per-frame values overrides them.
+## Convention: delta is the base circle about the vertical axis and the gamma
+## circle rides on the delta arm, matching orGUI's Vlieg equations.
+## angle_frame selects which angles the arm motors report:
+##   prim    (default) the true scattering angles gamma_p / delta_p, what a
+##           floor-mounted arm reads; independent of the incidence angle
+##   surface the six-circle gamma / delta of the diffraction equations, which
+##           are converted using the incidence angle of each frame
+#angle_frame = prim
+## These are mechanical angles: they are NOT the per-pixel (gamma, delta) of the
+## diffraction equations, and the two do not differ by a constant.
+#gamma_arm_0 = 0
+#delta_arm_0 = 0
+#gamma_arm = 0
+#delta_arm = 0
