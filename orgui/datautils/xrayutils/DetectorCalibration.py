@@ -33,12 +33,19 @@ import numpy as np
 import pyFAI
 from pyFAI import geometry
 from pyFAI.utils.mathutil import binning
+from scipy.spatial.transform import Rotation
 
 # import pyFAI.azimuthalIntegrator
 import copy
 import warnings
 
-from .HKLVlieg import crystalAngles_singleArray, vacAngles_singleArray
+from .HKLVlieg import (
+    calcDELTA,
+    calcGAMMA,
+    crystalAngles_singleArray,
+    primBeamAngles,
+    vacAngles_singleArray,
+)
 
 
 def load(ponifile):
@@ -74,11 +81,294 @@ x,y seem to be inverted
 """
 
 
+def azimuthRelabel(deltaChi):
+    """Matrix taking a pyFAI laboratory vector into the Vlieg laboratory frame.
+
+    pyFAI orders its laboratory components ``(t1, t2, t3)`` -- slow detector
+    dimension, fast detector dimension, along the beam -- while the Vlieg
+    diffractometer equations in :mod:`~orgui.datautils.xrayutils.HKLVlieg` use
+    ``(x, y, z)`` with ``y`` along the beam and ``z`` along the surface normal.
+    The azimuthal reference fixes the roll between the two.
+
+    :param float deltaChi:
+        Azimuthal reference of the detector calibration, in rad, as returned by
+        :meth:`Detector2D_SXRD.getAzimuthalReference`.
+    :returns: 3x3 matrix mapping ``(t1, t2, t3)`` onto ``(x, y, z)``.
+    :rtype: numpy.ndarray
+    """
+    cosine = np.cos(deltaChi)
+    sine = np.sin(deltaChi)
+    return np.array(
+        [
+            [cosine, sine, 0.0],
+            [0.0, 0.0, 1.0],
+            [-sine, cosine, 0.0],
+        ]
+    )
+
+
+def _primBeamFromTthAzimuth(tth, azimuth):
+    """Laboratory-frame ``(gamma_p, delta_p)`` from pyFAI scattering angles.
+
+    :param tth: scattering angle in rad.
+    :param azimuth: pyFAI azimuth already offset by the azimuthal reference,
+        in rad.
+    :returns: ``(gamma_p, delta_p)`` in rad.
+    :rtype: tuple
+    """
+    sintth = np.sin(tth)
+    costth = np.cos(tth)
+    delta_p = np.arctan2(sintth * np.sin(azimuth), costth)
+    gamma_p = np.arctan2(sintth * np.cos(azimuth) * np.cos(delta_p), costth)
+    return gamma_p, delta_p
+
+
+def pyFAIRotationMatrix(rot1, rot2, rot3):
+    """Detector rotation matrix of a pyFAI geometry.
+
+    Reproduces :meth:`pyFAI.geometry.Geometry.rotation_matrix` as a free
+    function, so that a geometry can be rotated without an instance to hang it
+    on. pyFAI builds ``rot3 @ rot2 @ rot1``, which is the intrinsic Z-Y-X Euler
+    sequence ``Rz(rot3) Ry(-rot2) Rx(-rot1)``.
+
+    :param float rot1, rot2, rot3: pyFAI detector rotations in rad.
+    :returns: 3x3 rotation matrix in pyFAI's laboratory frame.
+    :rtype: numpy.ndarray
+    """
+    return Rotation.from_euler("ZYX", [rot3, -rot2, -rot1]).as_matrix()
+
+
+def pyFAIRotationAngles(matrix, tolerance=1e-9):
+    """Decompose a pyFAI detector rotation matrix into ``(rot1, rot2, rot3)``.
+
+    Inverse of :func:`pyFAIRotationMatrix`.
+
+    :param numpy.ndarray matrix: 3x3 rotation matrix in pyFAI's laboratory frame.
+    :param float tolerance:
+        How close ``|rot2|`` may come to ``pi/2`` before the decomposition is
+        rejected, in rad.
+    :returns: ``(rot1, rot2, rot3)`` in rad.
+    :rtype: tuple[float, float, float]
+    :raises ValueError:
+        At the gimbal lock of this Euler sequence, ``|rot2| = pi/2``, where
+        ``rot1`` and ``rot3`` are no longer separable. Raised rather than
+        silently returning the degenerate triple SciPy would pick.
+    """
+    with warnings.catch_warnings():
+        # SciPy warns and zeroes the third angle at gimbal lock; we would
+        # rather report it, so silence the warning and test for it below.
+        warnings.simplefilter("ignore", UserWarning)
+        rot3, minus_rot2, minus_rot1 = Rotation.from_matrix(
+            np.asarray(matrix, dtype=float)
+        ).as_euler("ZYX")
+    rot1, rot2 = -minus_rot1, -minus_rot2
+    if abs(abs(rot2) - np.pi / 2) < tolerance:
+        raise ValueError(
+            "Detector orientation is at the gimbal lock of the pyFAI rotation "
+            f"parameterization (rot2 = {rot2:.6f} rad, i.e. +/- pi/2), where "
+            "rot1 and rot3 are degenerate. For a detector arm this means an "
+            "out-of-plane angle of +/- 90 degrees."
+        )
+    return float(rot1), float(rot2), float(rot3)
+
+
+def _validatedRotation(matrix, name):
+    """Check that ``matrix`` is a proper rotation, and return it as float64."""
+    matrix = np.ascontiguousarray(matrix, dtype=float)
+    if matrix.shape != (3, 3):
+        raise ValueError(f"{name} must be a 3x3 matrix, got shape {matrix.shape}")
+    if not np.allclose(matrix @ matrix.T, np.identity(3), atol=1e-8):
+        raise ValueError(f"{name} must be orthogonal")
+    if not np.isclose(np.linalg.det(matrix), 1.0, atol=1e-8):
+        raise ValueError(
+            f"{name} must be a proper rotation with determinant +1, "
+            f"got {np.linalg.det(matrix):.6f}"
+        )
+    return matrix
+
+
+def armAnglesFromSurface(gamma_arm, delta_arm, alpha_i):
+    """Convert six-circle arm angles into true scattering angles.
+
+    The arm API works in the primary-beam frame, i.e. in ``gamma_p`` and
+    ``delta_p`` (see :func:`armRotation`). A diffractometer whose arm motors
+    are read out in the six-circle surface frame -- ``gamma``, ``delta``,
+    the angles the Vlieg equations use -- converts them here once, at the
+    point where the motor values enter, rather than everywhere downstream.
+
+    Reuses :func:`~orgui.datautils.xrayutils.HKLVlieg.primBeamAngles`, the
+    same surface-to-primary-beam conversion the per-pixel code path uses. The
+    arm has only two degrees of freedom, so its orientation is fully fixed by
+    the direction of its central ray and nothing is lost in the conversion.
+
+    :param float gamma_arm: out-of-plane arm angle in the surface frame, rad.
+    :param float delta_arm: in-plane arm angle in the surface frame, rad.
+    :param float alpha_i: incidence angle in rad.
+    :returns: ``(gamma_p_arm, delta_p_arm)`` in rad.
+    :rtype: tuple[float, float]
+
+    This assumes the arm is mounted independently of the incidence circle, so
+    that it rotates in the laboratory frame. For an arm carried *by* the alpha
+    circle the laboratory rotation is ``ALPHA @ R_arm @ ALPHA^T`` instead,
+    which differs from this by a roll about the outgoing beam of up to a
+    degree at grazing incidence and much more beyond it.
+    """
+    _, delta_p, gamma_p = primBeamAngles(
+        [alpha_i, delta_arm, gamma_arm, 0.0, 0.0, 0.0]
+    )[:3]
+    return gamma_p, delta_p
+
+
+def armRotation(gamma_arm=0.0, delta_arm=0.0):
+    """Rotation matrix of a two-circle detector arm, in the Vlieg frame.
+
+    The angles are the **true scattering angles** of the arm's central ray,
+    measured from the primary beam: ``gamma_arm`` is ``gamma_p`` and
+    ``delta_arm`` is ``delta_p``. They do not depend on the incidence angle,
+    which is what a floor-mounted arm reads. Six-circle surface-frame motor
+    readouts have to be converted first, with :func:`armAnglesFromSurface`.
+
+    The composition ``DELTA(delta) @ GAMMA(gamma)`` puts ``delta`` on the base
+    circle about the vertical axis with the ``gamma`` circle riding on the
+    delta arm. A diffractometer that stacks its circles the other way round
+    should build its own matrix and pass it in directly; the two orderings
+    differ by up to tens of degrees of detector roll.
+
+    :param float gamma_arm: out-of-plane arm angle ``gamma_p`` in rad.
+    :param float delta_arm: in-plane arm angle ``delta_p`` in rad.
+    :returns: 3x3 rotation matrix in the Vlieg laboratory frame.
+    :rtype: numpy.ndarray
+    """
+    return calcDELTA(delta_arm) @ calcGAMMA(gamma_arm)
+
+
+def armAdjustedParam(param, arm, reference=None, deltaChi=0.0):
+    """pyFAI geometry of a detector whose arm has moved.
+
+    A detector arm rotates the detector rigidly about the sample, which leaves
+    the sample-to-PONI distance and the detector-internal PONI offsets alone, so
+    only the three rotations change. This is a pure function of its arguments:
+    it is called per frame, concurrently, against a geometry shared read-only
+    between workers, and must never mutate anything.
+
+    :param param:
+        Home geometry ``[dist, poni1, poni2, rot1, rot2, rot3]`` in m and rad,
+        i.e. the calibrated geometry at the arm position given by ``reference``.
+    :param numpy.ndarray arm:
+        3x3 rotation of the detector body in the Vlieg laboratory frame, from
+        :func:`armRotation`.
+    :param numpy.ndarray reference:
+        3x3 arm rotation at which ``param`` was calibrated. ``None`` means the
+        identity, i.e. a calibration taken with the arm at zero.
+    :param float deltaChi: azimuthal reference of the calibration, in rad.
+    :returns: ``(dist, poni1, poni2, rot1, rot2, rot3)`` in m and rad.
+    :rtype: tuple
+    :raises ValueError: At the gimbal lock of the pyFAI rotations.
+    """
+    param = np.asarray(param, dtype=float)
+    arm = np.asarray(arm, dtype=float)
+    if reference is not None:
+        arm = arm @ np.asarray(reference, dtype=float).T
+    relabel = azimuthRelabel(deltaChi)
+    rotation = relabel.T @ arm @ relabel @ pyFAIRotationMatrix(*param[3:6])
+    return (*param[:3], *pyFAIRotationAngles(rotation))
+
+
 class Detector2D_SXRD(geometry.Geometry):
+    """pyFAI detector geometry carrying the SXRD angle conventions.
+
+    The calibrated pyFAI geometry describes the detector at the *home* arm
+    position, recorded by :meth:`setArmReference`. A detector arm is a scanned
+    motor, so its per-frame position is **not** stored here: it is passed to the
+    conversions as ``gamma_arm`` / ``delta_arm``, and turned into a geometry by
+    :meth:`paramAtArm`. This object is shared read-only between reconstruction
+    workers, so nothing about the moving arm may become mutable state on it.
+    """
+
     def __init__(self, *args, **keyargs):
         super().__init__(*args, **keyargs)
+        self._R_arm_reference = np.identity(3)
         self.setAzimuthalReference(0)
         self.setPolarization(0, 0)
+
+    # ------------------------------------------------------------------
+    # Detector arm
+    # ------------------------------------------------------------------
+
+    def setArmReference(self, R_arm=None, *, gamma_arm=None, delta_arm=None):
+        """Record the arm position at which this geometry was calibrated.
+
+        The calibration is only ever interpreted relative to this reference, so
+        the arm's absolute motor zero never has to mean anything and the direct
+        beam never has to be on the detector. Defaults to the identity, i.e. a
+        calibration taken at ``(gamma_arm, delta_arm) = (0, 0)``.
+
+        :param numpy.ndarray R_arm:
+            3x3 rotation of the detector body at calibration time. Mutually
+            exclusive with the angle arguments.
+        :param float gamma_arm:
+            Out-of-plane arm angle ``gamma_p`` at calibration, in rad.
+        :param float delta_arm:
+            In-plane arm angle ``delta_p`` at calibration, in rad.
+        :raises ValueError: If the rotation is not a proper rotation matrix.
+        """
+        if R_arm is not None and (gamma_arm is not None or delta_arm is not None):
+            raise ValueError(
+                "Give the arm reference either as a matrix or as arm angles, not both"
+            )
+        if R_arm is None:
+            if gamma_arm is None and delta_arm is None:
+                raise ValueError(
+                    "setArmReference requires a matrix or at least one arm angle"
+                )
+            R_arm = armRotation(gamma_arm or 0.0, delta_arm or 0.0)
+        self._R_arm_reference = _validatedRotation(R_arm, "arm reference")
+
+    def getArmReference(self):
+        """Arm rotation at which this geometry was calibrated.
+
+        :rtype: numpy.ndarray
+        """
+        return self._R_arm_reference.copy()
+
+    def _armRelative(self, gamma_arm, delta_arm):
+        """Rotation from the calibrated arm position to the requested one.
+
+        :returns: 3x3 matrix, or ``None`` for "at the calibrated position".
+        :rtype: numpy.ndarray or None
+        :raises ValueError: If exactly one of the two angles is given.
+        """
+        if gamma_arm is None and delta_arm is None:
+            return None
+        if gamma_arm is None or delta_arm is None:
+            raise ValueError(
+                "Give both gamma_arm and delta_arm, or neither. One alone is "
+                "ambiguous, because the calibration reference is a rotation "
+                "rather than a pair of independent offsets."
+            )
+        return armRotation(gamma_arm, delta_arm) @ self._R_arm_reference.T
+
+    def paramAtArm(self, gamma_arm=None, delta_arm=None):
+        """pyFAI geometry of this detector with its arm at the given position.
+
+        Pure: it neither mutates this object nor touches its caches, so it is
+        safe to call per frame and from several workers at once.
+
+        ``None`` means *at the calibrated arm position*, which returns the home
+        geometry unchanged. Note that this is not the same as passing ``0.0``
+        unless the calibration was taken with the arm at zero -- ``None`` is
+        "wherever the calibration was taken", ``0.0`` is "the motor reads zero".
+
+        :param float gamma_arm: out-of-plane arm angle ``gamma_p`` in rad.
+        :param float delta_arm: in-plane arm angle ``delta_p`` in rad.
+        :returns: ``(dist, poni1, poni2, rot1, rot2, rot3)`` in m and rad.
+        :rtype: tuple
+        :raises ValueError: At the gimbal lock of the pyFAI rotations.
+        """
+        relative = self._armRelative(gamma_arm, delta_arm)
+        if relative is None:
+            return tuple(np.asarray(self.param[:6], dtype=float))
+        return armAdjustedParam(self.param, relative, deltaChi=self._deltaChi)
 
     def toNXdict(self):
         """To be used with silx.io.dictdump.dicttonx
@@ -111,6 +401,9 @@ class Detector2D_SXRD(geometry.Geometry):
                 "polarization": self._polFactor,
                 "polarization_axis": self._polAxis,
                 "binning": np.array(self.detector.binning),
+                # The arm position this calibration was taken at. The scanned
+                # arm itself belongs to the scan, not here.
+                "arm_reference": np.asarray(self._R_arm_reference),
             },
             "@NX_class": "NXcollection",
             "@creator": f"datautils v {__version__}",
@@ -146,6 +439,10 @@ class Detector2D_SXRD(geometry.Geometry):
             self.detector.shape = tuple(shape)
         self.setAzimuthalReference(detdict["azimuth"])
         self.setPolarization(detdict["polarization_axis"], detdict["polarization"])
+        # Calibrations written before the moveable detector arm carry no
+        # reference; an absent one is the identity, i.e. calibrated at arm zero.
+        if "arm_reference" in detdict:
+            self.setArmReference(np.asarray(detdict["arm_reference"], dtype=float))
         if "binning" in detdict:
             self.detector.binning = tuple(detdict["binning"])
         if "roi" in detdict:
@@ -248,6 +545,49 @@ class Detector2D_SXRD(geometry.Geometry):
     def getPolarization(self):
         return self._polAxis, self._polFactor
 
+    def polarizationAtPoints(self, x, y, alpha_i, gamma_arm=None, delta_arm=None):
+        r"""Polarization correction at the given pixels, for one frame.
+
+        Evaluates the z-axis expression of the ANA/ROD manual directly in
+        the surface-frame angles,
+
+        .. math::
+
+            P = p_h \left[1 - (\sin\alpha \cos\delta \cos\gamma
+                + \cos\alpha \sin\gamma)^2\right]
+              + (1 - p_h)\left[1 - \sin^2\delta \cos^2\gamma\right]
+
+        with :math:`p_h` the fraction of horizontally polarized light.
+
+        Unlike :meth:`polarizationArray`, this follows the detector arm.
+        pyFAI derives its scattering angles from the calibrated geometry
+        alone, so with a moving arm it reports only the angles the detector
+        subtends at its calibration position and the correction comes out
+        far too small: on a specular scan reaching a scattering angle of 18
+        degrees it gives 0.6% where the true correction is 10%.
+
+        :param x: detector coordinates along pyFAI dimension 1, in pixels.
+        :param y: detector coordinates along pyFAI dimension 2, in pixels.
+        :param float alpha_i: incidence angle of this frame, in rad.
+        :param float gamma_arm, delta_arm: detector arm position of this
+            frame as true scattering angles, in rad; ``None`` is the
+            calibrated position.
+        :returns: The polarization correction at each pixel.
+        :rtype: numpy.ndarray
+        """
+        gamma, delta = self.surfaceAnglesPoint(x, y, alpha_i, gamma_arm, delta_arm)
+        fraction = self._polFactor
+        p_hor = (
+            1.0
+            - (
+                np.sin(alpha_i) * np.cos(delta) * np.cos(gamma)
+                + np.cos(alpha_i) * np.sin(gamma)
+            )
+            ** 2
+        )
+        p_ver = 1.0 - (np.sin(delta) ** 2) * (np.cos(gamma) ** 2)
+        return fraction * p_hor + (1.0 - fraction) * p_ver
+
     def polarizationArray(self, shape=None):
         r"""Polarization correction of every detector pixel.
 
@@ -307,15 +647,43 @@ class Detector2D_SXRD(geometry.Geometry):
         return self._cached_array["gamma_p"], self._cached_array["delta_p"]
 
     # numpy array!!!
-    def primBeamPoints(self, x, y):
-        azimuth = self.chi(x, y) + self._deltaChi
-        tth = self.tth(x, y)
-        sintth = np.sin(tth)
-        costth = np.cos(tth)
-        delta_p = np.arctan2(sintth * np.sin(azimuth), costth)
-        gamma_p = np.arctan2(sintth * np.cos(azimuth) * np.cos(delta_p), costth)
+    def primBeamPoints(self, x, y, gamma_arm=None, delta_arm=None):
+        """Laboratory-frame detector angles of the given pixels.
 
-        return gamma_p, delta_p
+        :param x: detector coordinates along pyFAI dimension 1, in pixels.
+        :param y: detector coordinates along pyFAI dimension 2, in pixels.
+        :param float gamma_arm, delta_arm:
+            Detector arm position of this frame, as true scattering angles
+            ``gamma_p``/``delta_p`` in rad. ``None`` (both) means the
+            calibrated arm position, which takes the original code path and
+            reproduces a static detector exactly. See :meth:`paramAtArm`.
+        :returns: ``(gamma_p, delta_p)`` in rad.
+        :rtype: tuple
+        """
+        relative = self._armRelative(gamma_arm, delta_arm)
+        if relative is None:
+            azimuth = self.chi(x, y) + self._deltaChi
+            tth = self.tth(x, y)
+        else:
+            tth, azimuth = self._tthAzimuthAtArm(x, y, gamma_arm, delta_arm)
+
+        return _primBeamFromTthAzimuth(tth, azimuth)
+
+    def _tthAzimuthAtArm(self, x, y, gamma_arm, delta_arm):
+        """Scattering angles of given pixels with the arm at a given position.
+
+        :returns: ``(tth, azimuth)`` in rad, azimuth already offset by the
+            azimuthal reference.
+        :rtype: tuple
+        """
+        t3, t1, t2 = self.calc_pos_zyx(
+            d1=np.asarray(x),
+            d2=np.asarray(y),
+            param=np.asarray(self.paramAtArm(gamma_arm, delta_arm), dtype=float),
+            do_parallax=True,
+        )
+        tth = np.arctan2(np.sqrt(t1 * t1 + t2 * t2), t3)
+        return tth, np.arctan2(t1, t2) + self._deltaChi
 
     def surfaceAngles(self, alpha_i, shape=None):
         """Angles in the reference frame, where the crystal is tilted by alpha_i.
@@ -373,8 +741,20 @@ class Detector2D_SXRD(geometry.Geometry):
             self._alpha_i_ref,
         )
 
-    def surfaceAnglesPoint(self, x, y, alpha_i):
-        gamma_p, delta_p = self.primBeamPoints(x, y)
+    def surfaceAnglesPoint(self, x, y, alpha_i, gamma_arm=None, delta_arm=None):
+        """Surface-frame detector angles of the given pixels.
+
+        :param x: detector coordinates along pyFAI dimension 1, in pixels.
+        :param y: detector coordinates along pyFAI dimension 2, in pixels.
+        :param alpha_i: incidence angle in rad.
+        :param float gamma_arm, delta_arm:
+            Detector arm position of this frame, as true scattering angles
+            ``gamma_p``/``delta_p`` in rad; ``None`` means the calibrated
+            position. See :meth:`paramAtArm`.
+        :returns: ``(gamma, delta)`` in rad.
+        :rtype: tuple
+        """
+        gamma_p, delta_p = self.primBeamPoints(x, y, gamma_arm, delta_arm)
         gamma = np.arcsin(
             np.cos(alpha_i) * np.sin(gamma_p)
             - np.sin(alpha_i) * np.cos(delta_p) * np.cos(gamma_p)
@@ -384,7 +764,9 @@ class Detector2D_SXRD(geometry.Geometry):
         )  # evil, revise!!!
         return gamma, delta
 
-    def surfaceAnglesPointParam(self, x, y, alpha_i, param):
+    def surfaceAnglesPointParam(
+        self, x, y, alpha_i, param, gamma_arm=None, delta_arm=None
+    ):
         """Calculate surface-frame detector angles for trial geometry.
 
         This follows the pyFAI refinement pattern by passing trial geometry
@@ -398,12 +780,21 @@ class Detector2D_SXRD(geometry.Geometry):
         :param numpy.ndarray alpha_i:
             Incidence angles in rad.
         :param numpy.ndarray param:
-            Trial pyFAI geometry
-            ``[dist, poni1, poni2, rot1, rot2, rot3]`` in m and rad.
+            Trial **home** pyFAI geometry
+            ``[dist, poni1, poni2, rot1, rot2, rot3]`` in m and rad, i.e. the
+            geometry at the calibrated arm position. The arm below is folded
+            into it, so a refinement fits the home geometry while each
+            reflection keeps the arm position it was measured at.
+        :param float gamma_arm, delta_arm:
+            Arm position of the frame each point was measured on, in rad;
+            ``None`` means the calibrated position.
         :returns:
             ``(gamma, delta)`` surface-frame detector angles in rad.
         :rtype: tuple[numpy.ndarray, numpy.ndarray]
         """
+        relative = self._armRelative(gamma_arm, delta_arm)
+        if relative is not None:
+            param = armAdjustedParam(param, relative, deltaChi=self._deltaChi)
         t3, t1, t2 = self.calc_pos_zyx(
             d1=np.asarray(x),
             d2=np.asarray(y),
@@ -425,13 +816,28 @@ class Detector2D_SXRD(geometry.Geometry):
         delta = np.arcsin(np.sin(delta_p) * np.cos(gamma_p) / np.cos(gamma))
         return gamma, delta
 
-    def crystalAnglesPoint(self, x, y, alpha_i, refraction_index):
-        gamma, delta = self.surfaceAnglesPoint(x, y, alpha_i)
+    def crystalAnglesPoint(
+        self, x, y, alpha_i, refraction_index, gamma_arm=None, delta_arm=None
+    ):
+        """Refraction-corrected detector angles of the given pixels.
+
+        Used by stationary-scan integration, where a detector tracking the
+        reflection keeps it at fixed ``(x, y)`` while the exit angles at that
+        pixel, and hence its ``hkl``, change frame by frame.
+
+        :param float gamma_arm, delta_arm:
+            Detector arm position of this frame, as true scattering angles
+            ``gamma_p``/``delta_p`` in rad; ``None`` means the calibrated
+            position.
+        :returns: ``(gamma_cry, delta, alpha_i_cry)`` in rad.
+        :rtype: tuple
+        """
+        gamma, delta = self.surfaceAnglesPoint(x, y, alpha_i, gamma_arm, delta_arm)
         gamma_cry = crystalAngles_singleArray(gamma, refraction_index)
         alpha_i_cry = crystalAngles_singleArray(alpha_i, refraction_index)
         return gamma_cry, delta, alpha_i_cry
 
-    def pixelsTthChi(self, tth, chi):
+    def pixelsTthChi(self, tth, chi, gamma_arm=None, delta_arm=None):
         """Detector coordinates of the given pyFAI scattering angles.
 
         Inverse of the pyFAI forward direction, and therefore the exact
@@ -439,6 +845,12 @@ class Detector2D_SXRD(geometry.Geometry):
 
         :param numpy.ndarray tth: scattering angles in rad.
         :param numpy.ndarray chi: pyFAI azimuthal angles in rad.
+        :param float gamma_arm, delta_arm:
+            Detector arm position of this frame, as true scattering angles
+            ``gamma_p``/``delta_p`` in rad; ``None`` means the calibrated
+            position. A given scattering direction lands on a
+            different pixel once the arm moves, which is what lets a rocking
+            curve at fixed exit angles be extracted from a moving detector.
         :returns:
             Array shaped ``(*tth.shape, 2)`` holding pixel coordinates as
             ``(dim1, dim2)``, i.e. ``(slow, fast)``, using the same
@@ -460,7 +872,6 @@ class Detector2D_SXRD(geometry.Geometry):
         # tanchi = np.tan(chi.flatten())
         # nu = np.tan(tth.flatten()) * np.sin(chi.flatten())
 
-        R = self.rotation_matrix()  # detector rotation
         # M = np.empty((np.prod(shape), 2, 2))
         # A = np.empty((np.prod(shape), 2))
         chi = chi.flatten()
@@ -474,7 +885,10 @@ class Detector2D_SXRD(geometry.Geometry):
 
         nu = sintth * sinchi
 
-        R = self.rotation_matrix()  # detector rotation
+        # Detector rotation with the arm where this frame had it. ``dist`` and
+        # the PONI offsets used below are unchanged by the arm, which rotates
+        # the detector rigidly about the sample.
+        R = pyFAIRotationMatrix(*self.paramAtArm(gamma_arm, delta_arm)[3:6])
 
         a = R[0, 0] * coschi - R[1, 0] * sinchi
         b = R[0, 1] * coschi - R[1, 1] * sinchi
@@ -569,19 +983,43 @@ class Detector2D_SXRD(geometry.Geometry):
 
     @property
     def Qrange(self):
-        """in A-1"""
-        xx, yy = self._edge_pixcoord()
-        Q = self.qFunction(xx, yy) / 10.0  # qFunction returns Q at pixel center
+        """Momentum transfer the detector reaches, at the calibrated arm.
 
-        f2d_cal = self.getFit2D()
+        :returns: ``(Qmin, Qmax)`` in Angstrom^-1.
+        :rtype: tuple[float, float]
+
+        See :meth:`qRangeAtArm` for a detector whose arm has moved: a moving
+        arm changes what the detector can reach, so this value goes stale.
+        """
+        return self.qRangeAtArm()
+
+    def qRangeAtArm(self, gamma_arm=None, delta_arm=None):
+        """Momentum transfer the detector reaches with its arm at a position.
+
+        :param float gamma_arm, delta_arm:
+            Detector arm position, as true scattering angles in rad; ``None``
+            means the calibrated position.
+        :returns: ``(Qmin, Qmax)`` in Angstrom^-1.
+        :rtype: tuple[float, float]
+
+        Swinging the arm out moves the whole accessible band to higher ``Q``,
+        so a range taken at the calibrated position both under-reports what a
+        moved detector reaches and wrongly keeps the low end at zero.
+        """
+        xx, yy = self._edge_pixcoord()
+        param = np.asarray(self.paramAtArm(gamma_arm, delta_arm), dtype=float)
+        # qFunction returns Q at pixel center
+        Q = self.qFunction(xx, yy, param=param) / 10.0
+
+        beam = self.pixelsPrimeBeam(0.0, 0.0, gamma_arm, delta_arm)[0]
         # beam on detector ?
         if (
-            0 <= f2d_cal["centerX"] <= self.detector.shape[1]
-            and 0 <= f2d_cal["centerY"] <= self.detector.shape[0]
+            0 <= beam[1] <= self.detector.shape[1]
+            and 0 <= beam[0] <= self.detector.shape[0]
         ):
-            return 0.0, np.amax(Q)
+            return 0.0, float(np.amax(Q))
         else:
-            return np.amin(Q), np.amax(Q)
+            return float(np.amin(Q)), float(np.amax(Q))
 
     @property
     def rangegamdel_p(self):
@@ -619,7 +1057,17 @@ class Detector2D_SXRD(geometry.Geometry):
         gamrange = np.amin(gamma_p), np.amax(gamma_p)
         return gamrange, delrange
 
-    def pixelsPrimeBeam(self, gamma_p, delta_p):
+    def pixelsPrimeBeam(self, gamma_p, delta_p, gamma_arm=None, delta_arm=None):
+        """Detector coordinates of laboratory-frame detector angles.
+
+        :param gamma_p, delta_p: laboratory-frame detector angles in rad.
+        :param float gamma_arm, delta_arm:
+            Detector arm position of this frame, as true scattering angles
+            ``gamma_p``/``delta_p`` in rad; ``None`` means the calibrated
+            position.
+        :returns: pixel coordinates as ``(dim1, dim2)``.
+        :rtype: numpy.ndarray
+        """
         gamma_p = np.atleast_1d(np.asarray(gamma_p))
         delta_p = np.atleast_1d(np.asarray(delta_p))
         assert gamma_p.shape == delta_p.shape
@@ -632,20 +1080,46 @@ class Detector2D_SXRD(geometry.Geometry):
 
         chi = azimuth - self._deltaChi
 
-        return self.pixelsTthChi(tth, chi)
+        return self.pixelsTthChi(tth, chi, gamma_arm, delta_arm)
 
-    def pixelsSurfaceAngles(self, gamma, delta, alpha_i):
+    def pixelsSurfaceAngles(
+        self, gamma, delta, alpha_i, gamma_arm=None, delta_arm=None
+    ):
+        """Detector coordinates of surface-frame detector angles.
+
+        With the arm supplied, this is the pixel a given pair of exit angles
+        falls on *for that frame*. A rocking curve is the intensity at fixed
+        ``(delta, gamma)`` versus sample rotation, so on a moving detector the
+        pixel it has to be read from moves with the arm.
+
+        :param gamma, delta: surface-frame detector angles in rad.
+        :param alpha_i: incidence angle in rad.
+        :param float gamma_arm, delta_arm:
+            Detector arm position of this frame, as true scattering angles
+            ``gamma_p``/``delta_p`` in rad; ``None`` means the calibrated
+            position.
+        :returns: pixel coordinates as ``(dim1, dim2)``.
+        :rtype: numpy.ndarray
+        """
         gamma_p = np.arcsin(
             np.cos(alpha_i) * np.sin(gamma)
             + np.sin(alpha_i) * np.cos(delta) * np.cos(gamma)
         )
         delta_p = np.arcsin((np.sin(delta) * np.cos(gamma)) / np.cos(gamma_p))
-        return self.pixelsPrimeBeam(gamma_p, delta_p)
+        return self.pixelsPrimeBeam(gamma_p, delta_p, gamma_arm, delta_arm)
 
-    def pixelsCrystalAngles(self, gamma_cry, delta, alpha_i_cry, refraction_index):
+    def pixelsCrystalAngles(
+        self,
+        gamma_cry,
+        delta,
+        alpha_i_cry,
+        refraction_index,
+        gamma_arm=None,
+        delta_arm=None,
+    ):
         gamma = vacAngles_singleArray(gamma_cry, refraction_index)
         alpha_i = vacAngles_singleArray(alpha_i_cry, refraction_index)
-        return self.pixelsSurfaceAngles(gamma, delta, alpha_i)
+        return self.pixelsSurfaceAngles(gamma, delta, alpha_i, gamma_arm, delta_arm)
 
     # for now numerical solution, only iterables!
     # in rad
