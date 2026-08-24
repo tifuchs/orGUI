@@ -67,19 +67,23 @@ def test_style_dialog_lists_and_applies_available_styles():
     application.setStyle(qt.QStyleFactory.create(original_style))
 
 
-def test_style_dialog_applies_backend_to_all_plots(monkeypatch, tmp_path):
-    """The OpenGL choice applies consistently to every main plot."""
+def test_style_dialog_defers_backend_change_until_restart(monkeypatch, tmp_path):
+    """A remembered OpenGL choice is saved without mutating live windows."""
     application = qt.QApplication.instance() or qt.QApplication([])
     plots = [PlotStub(OpenGLBackend) for _ in range(3)]
+    settings = _settings(tmp_path)
     dialog = StyleDialog(
         application=application,
         plots=plots,
-        settings=_settings(tmp_path),
+        settings=settings,
     )
 
     dialog.opengl_selector.setChecked(False)
+    dialog.remember_selector.setChecked(True)
     assert dialog.apply() is True
-    assert all(plot.backend_names == ["matplotlib"] for plot in plots)
+    assert all(not plot.backend_names for plot in plots)
+    assert settings.value(OPENGL_KEY, type=bool) is False
+    assert "restart orGUI" in dialog.backend_notice.text()
 
     monkeypatch.setattr(
         "orgui.app.StyleDialog.glutils.isOpenGLAvailable",
@@ -87,7 +91,8 @@ def test_style_dialog_applies_backend_to_all_plots(monkeypatch, tmp_path):
     )
     dialog.opengl_selector.setChecked(True)
     assert dialog.apply() is True
-    assert all(plot.backend_names == ["matplotlib", "opengl"] for plot in plots)
+    assert all(not plot.backend_names for plot in plots)
+    assert settings.value(OPENGL_KEY, type=bool) is True
 
 
 def test_style_dialog_only_persists_when_requested(tmp_path):

@@ -14,7 +14,7 @@ class StyleDialog(qt.QDialog):
 
         :param QApplication application: Application whose widget style is
             changed. The current Qt application is used when omitted.
-        :param tuple plots: Plot widgets whose backend is changed together.
+        :param tuple plots: Plot widgets whose current backend is reported.
         :param QSettings settings: Optional store used for persistent settings.
         :param QWidget parent: Optional parent widget.
         :raises RuntimeError: If no Qt application is available.
@@ -38,15 +38,24 @@ class StyleDialog(qt.QDialog):
         form.addRow("Style:", self.style_selector)
 
         self.opengl_selector = qt.QCheckBox("OpenGL rendering")
+        self._plot_opengl_states = tuple(
+            self._plot_uses_opengl(plot) for plot in self.plots
+        )
         self.opengl_selector.setChecked(
-            bool(self.plots)
-            and all(self._plot_uses_opengl(plot) for plot in self.plots)
+            bool(self._plot_opengl_states) and all(self._plot_opengl_states)
         )
         self.opengl_selector.setToolTip(
-            "Use OpenGL for the scan, integrated-data, and rocking plots."
+            "Use OpenGL for the scan, integrated-data, and rocking plots "
+            "after restarting orGUI."
         )
         form.addRow(self.opengl_selector)
         layout.addLayout(form)
+
+        self.backend_notice = qt.QLabel(
+            "Plot rendering changes take effect after restarting orGUI."
+        )
+        self.backend_notice.setWordWrap(True)
+        layout.addWidget(self.backend_notice)
 
         self.remember_selector = qt.QCheckBox("remember this selection")
         self.remember_selector.setToolTip(
@@ -62,7 +71,13 @@ class StyleDialog(qt.QDialog):
         layout.addWidget(buttons)
 
     def apply(self):
-        """Apply the selected style and rendering backend to this session."""
+        """Apply the style now and save a requested backend for next launch.
+
+        Switching a visible Qt widget hierarchy between raster and OpenGL
+        rendering can recreate its native top-level window.  The backend is
+        therefore never changed in place; a remembered selection is applied
+        during startup, before any plot widget is constructed.
+        """
         style = qt.QStyleFactory.create(self.style_selector.currentText())
         if style is not None:
             self.application.setStyle(style)
@@ -78,13 +93,29 @@ class StyleDialog(qt.QDialog):
                 )
                 return False
 
-        for plot in self.plots:
-            plot.setBackend("opengl" if use_opengl else "matplotlib")
+        backend_changed = any(
+            state != use_opengl for state in self._plot_opengl_states
+        )
 
         if self.remember_selector.isChecked():
             self.settings.setValue(STYLE_KEY, self.style_selector.currentText())
             self.settings.setValue(OPENGL_KEY, use_opengl)
             self.settings.sync()
+            if backend_changed:
+                self.backend_notice.setText(
+                    "Plot rendering preference saved; restart orGUI to apply it."
+                )
+            else:
+                self.backend_notice.setText(
+                    "Plot rendering preference saved; the plots already use it."
+                )
+        elif backend_changed:
+            self.backend_notice.setText(
+                "Plot rendering was not changed. Select “remember this "
+                "selection” and apply, then restart orGUI."
+            )
+        else:
+            self.backend_notice.setText("Plot rendering is unchanged.")
         return True
 
     @staticmethod

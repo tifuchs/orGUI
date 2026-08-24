@@ -751,7 +751,13 @@ class QScanSelector(qt.QMainWindow):
         self.useFootprintBox = qt.QCheckBox("Beam footprint")
         self.useNormalizationBox = qt.QCheckBox("Normalize integrated intensities")
 
-        self.correctionsDialog = IntegrationOptionsDialog(self, parent=self)
+        # Parent this top-level dialog to the stable application window, not
+        # to this widget inside a dock.  Dock tab/visibility changes can
+        # recreate the selector's native window while a non-modal child
+        # dialog is hidden, leaving a stale, blank dialog on the next show.
+        self.correctionsDialog = IntegrationOptionsDialog(
+            self, parent=self.parentmainwindow
+        )
         self.correctionsBtn = qt.QPushButton("Corrections and normalization ...")
         self.correctionsBtn.setToolTip(
             "Open the correction settings. The dialog stays open while you "
@@ -1876,6 +1882,10 @@ class IntegrationOptionsDialog(qt.QDialog):
     def __init__(self, selector, parent=None):
         qt.QDialog.__init__(self, parent)
         self.setWindowTitle("Integration corrections and normalization")
+        # This dialog is reused for the lifetime of the application.  Keep
+        # all close paths hide-only so its controls cannot be destroyed while
+        # QScanSelector still holds and reads them.
+        self.setAttribute(qt.Qt.WA_DeleteOnClose, False)
         self._selector = selector
         # Shared with the rocking-scan integration; see
         # RockingPeakIntegrator.useSharedFootprintOptions.
@@ -1970,8 +1980,22 @@ class IntegrationOptionsDialog(qt.QDialog):
         layout.addWidget(self.reconstructionBtn)
 
         buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Close)
-        buttons.rejected.connect(self.hide)
+        buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def reject(self):
+        """Hide this persistent non-modal dialog.
+
+        The correction checkboxes are also the live controls read by
+        :class:`QScanSelector`, so rejecting this dialog must not destroy its
+        widget tree.
+        """
+        self.hide()
+
+    def closeEvent(self, event):
+        """Hide the persistent dialog when its window is closed."""
+        self.hide()
+        event.accept()
 
     def _mainWindow(self):
         """Return the orGUI main window, or ``None`` outside the app."""
