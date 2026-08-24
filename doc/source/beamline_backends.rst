@@ -216,6 +216,32 @@ intentional and must match the API name:
 After integration, orGUI looks for attributes with these names on the ``Scan``
 object and copies matching values into the database.
 
+A backend that declares a counter its file does not always contain, and sets
+the attribute only where it does, is handled: both the declaration and the
+value are checked.
+
+In a segmented ("interlaced") scan the counters of the segments are merged, and
+the combined scan provides the counters that *every* segment has -- a counter
+only some segments provide would misalign every value after the gap, so it is
+dropped, and the log names it. A counter held once for a whole segment, such as
+an exposure time set for the segment as a whole, is expanded to one value per
+image, so segments measured with different settings combine correctly.
+``exposure_time`` and ``exposure_time_variance`` are merged whether or not a
+backend declares them, since the analysis reads them by name.
+
+The detector arm of a segmented scan is merged as well, but as geometry rather
+than as a counter: it is not listed among the auxiliary counters. ``gamma_arm``
+and ``delta_arm`` have to be provided by every segment and all in the same
+form -- either a single fixed value per segment, or one value per image. A mix
+of the two is refused, since a fixed value often means that a backend did not
+find the motor rather than that the arm was parked. Fixed values that differ
+between segments are expanded to one value per image. ``arm_angle_frame`` and
+``continuous_exposure`` must match exactly; segments that disagree, or that
+state one of them only in part, are reported and the property is left to the
+``[DetectorArm]`` configuration. Segments that disagree about
+``arm_angle_frame`` also keep their arm angles out of the combined scan,
+because the motor values would then be in different conventions.
+
 Minimal Backend Skeleton
 ------------------------
 
