@@ -655,17 +655,26 @@ class QUBCalculator(qt.QSplitter):
         return self.ubCal.getReflectionMismatch(hkls, angles)
 
     def updateReflectionMismatch(self):
-        """Refresh reflection quality indicators for the current UB matrix."""
+        """Refresh reflection quality indicators for the current UB matrix.
+
+        Every caller runs this immediately before emitting
+        :attr:`sigReplotRequest`, so a failure here used to take the replot
+        down with it and the ROIs would quietly stop following the crystal and
+        machine parameters. The mismatch is an auxiliary indicator; it reports
+        itself as unavailable rather than blocking the update it precedes.
+        """
         if not hasattr(self, "reflections"):
             return
-        hkls, angles = self.reflections()
-        if len(hkls) == 0:
-            mismatch = None
-        else:
-            try:
+        mismatch = None
+        try:
+            hkls, angles = self.reflections()
+            if len(hkls) > 0:
                 mismatch = self.getReflectionMismatch(hkls, angles)
-            except ValueError:
-                mismatch = None
+        except ValueError:
+            mismatch = None
+        except Exception:
+            logger.exception("Cannot calculate the reflection mismatch")
+            mismatch = None
         self.sigReflectionMismatchChanged.emit(mismatch)
 
     def readConfig(self, configfile):

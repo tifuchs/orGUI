@@ -16,6 +16,7 @@ from silx.gui import qt
 
 from orgui.app.peak1Dintegr import BEAM_SHAPES, IntegrationCorrectionsDialog
 from orgui.datautils.xrayutils.beamprofile import (
+    DistributionBeamProfile,
     GaussianBeamProfile,
     MeasuredBeamProfile,
 )
@@ -367,3 +368,36 @@ def test_settings_round_trip(dialog, tmp_path):
         )
     finally:
         restored.deleteLater()
+
+
+def test_choosing_a_profile_file_selects_it_as_the_beam(dialog, tmp_path):
+    """A loaded profile must not sit behind an analytical shape.
+
+    Loading a profile while the analytical shape stayed selected left the
+    default 20 micron Gaussian correcting the data. Against a 10 mm sample
+    that is a wholly different correction -- it falls monotonically as
+    1/sin(alpha) instead of peaking where the beam fills the sample -- with
+    nothing in the result to show which beam was used.
+    """
+    path = tmp_path / "gauss.dat"
+    _write_gaussian_profile(path, 250e-6)
+    assert dialog.analyticalButton.isChecked()
+
+    dialog.profileFileEdit.setText(str(path))
+    dialog._onProfileFileChosen()
+
+    assert dialog.measuredButton.isChecked()
+    assert isinstance(dialog.beamProfile(), MeasuredBeamProfile)
+    assert dialog.beamProfile().fwhm == pytest.approx(250e-6, rel=1e-3)
+
+
+def test_an_unreadable_profile_does_not_switch_the_beam(dialog, tmp_path):
+    """A file that fails to load leaves the analytical shape in charge."""
+    broken = tmp_path / "broken.dat"
+    broken.write_text("not a profile\n")
+
+    dialog.profileFileEdit.setText(str(broken))
+    dialog._onProfileFileChosen()
+
+    assert dialog.analyticalButton.isChecked()
+    assert isinstance(dialog.beamProfile(), DistributionBeamProfile)

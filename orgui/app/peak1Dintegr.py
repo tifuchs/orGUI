@@ -223,9 +223,7 @@ def _compute_rocking_integration(
                 int_data[roikey]["C_illum_area"].append(
                     np.mean(C_illum_area[i][roi_slice])
                 )
-                C_corr *= (
-                    C_flux_on_sample[i][roi_slice] * C_illum_area[i][roi_slice]
-                )
+                C_corr *= C_flux_on_sample[i][roi_slice] * C_illum_area[i][roi_slice]
 
             I_raw = (
                 _trapz_impl(cnts, roi_axis) * sign_interval
@@ -245,9 +243,7 @@ def _compute_rocking_integration(
             I_raw_error = np.sqrt(np.sum((cnts_errors * deltaaxis) ** 2))
             # Propagate directly instead of dividing by I_raw, which can be
             # zero for an empty or cancelling ROI.
-            I_corr_error = np.sqrt(
-                np.sum(((cnts_errors / C_corr) * deltaaxis) ** 2)
-            )
+            I_corr_error = np.sqrt(np.sum(((cnts_errors / C_corr) * deltaaxis) ** 2))
 
             int_data[roikey]["raw_cnts"].append(I_raw)
             int_data[roikey]["raw_cnts_errors"].append(I_raw_error)
@@ -257,12 +253,9 @@ def _compute_rocking_integration(
 
             for a in aux:
                 int_data[roikey]["auxillary_int"][a].append(
-                    _trapz_impl(aux[a][roi_slice], roi_axis)
-                    * sign_interval
+                    _trapz_impl(aux[a][roi_slice], roi_axis) * sign_interval
                 )  # we force integrals positive
-                int_data[roikey]["auxillary"][a].append(
-                    np.sum(aux[a][roi_slice])
-                )
+                int_data[roikey]["auxillary"][a].append(np.sum(aux[a][roi_slice]))
                 int_data[roikey]["auxillary_num"][a].append(
                     float(aux[a][roi_slice].size)
                 )
@@ -290,9 +283,7 @@ def _compute_rocking_integration(
     C_Lorentz = np.zeros(s_array.size, dtype=float)
     C_rod_intersect = np.zeros(s_array.size, dtype=float)
     aux_cnts_integral = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
-    aux_cnts_integral_mean = dict(
-        (a, np.zeros(s_array.size, dtype=float)) for a in aux
-    )
+    aux_cnts_integral_mean = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
     aux_cnts_sum = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
     aux_cnts_mean = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
     aux_cnts_num = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
@@ -311,9 +302,7 @@ def _compute_rocking_integration(
             raw_croi_errors += int_data[roikey]["raw_cnts_errors"] ** 2
             for a in aux_cnts_sum:
                 aux_cnts_sum[a] += int_data[roikey]["auxillary"][a]
-                aux_cnts_mean[a] += (
-                    int_data[roikey]["auxillary"][a] / aux_cnts_num[a]
-                )
+                aux_cnts_mean[a] += int_data[roikey]["auxillary"][a] / aux_cnts_num[a]
                 aux_cnts_integral[a] += int_data[roikey]["auxillary_int"][a]
                 aux_cnts_integral_mean[a] += (
                     int_data[roikey]["auxillary_int"][a] / sig_interval
@@ -334,9 +323,7 @@ def _compute_rocking_integration(
     raw_bgroi = np.zeros(s_array.size, dtype=float)
     raw_bgroi_errors = np.zeros(s_array.size, dtype=float)
     bg_interval = np.zeros(s_array.size, dtype=float)
-    bgaux_cnts_integral = dict(
-        (a, np.zeros(s_array.size, dtype=float)) for a in aux
-    )
+    bgaux_cnts_integral = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
     bgaux_cnts_integral_mean = dict(
         (a, np.zeros(s_array.size, dtype=float)) for a in aux
     )
@@ -354,9 +341,7 @@ def _compute_rocking_integration(
         if roikey.startswith("bg"):
             ratio = sig_interval / bg_interval
             bgroi += int_data[roikey]["cnts"] * ratio
-            bgroi_errors += (
-                int_data[roikey]["cnts_errors"] * ratio
-            ) ** 2
+            bgroi_errors += (int_data[roikey]["cnts_errors"] * ratio) ** 2
             raw_bgroi += int_data[roikey]["raw_cnts"] * ratio
             raw_bgroi_errors += (int_data[roikey]["raw_cnts_errors"] * ratio) ** 2
             for a in bgaux_cnts_sum:
@@ -2358,7 +2343,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
 
         # GUI-only: user-triggered file dialog path.
         self.profileBrowseButton.clicked.connect(self._onBrowseProfile)
-        self.profileFileEdit.editingFinished.connect(self.loadProfile)
+        self.profileFileEdit.editingFinished.connect(self._onProfileFileChosen)
         self.profileContent.currentIndexChanged.connect(self.loadProfile)
         self.profileUnit.currentIndexChanged.connect(self.loadProfile)
         return self.profileGroup
@@ -2489,7 +2474,18 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         )
         if filename:
             self.profileFileEdit.setText(filename)
-            self.loadProfile()
+            self._onProfileFileChosen()
+
+    def _onProfileFileChosen(self):
+        """Load the named profile file and make it the beam model.
+
+        Choosing a profile is an explicit request to use it. Without this,
+        the analytical shape stays selected and silently keeps correcting
+        with its own beam, which is a correction that can be wrong by orders
+        of magnitude without anything looking amiss.
+        """
+        if self.loadProfile():
+            self.measuredButton.setChecked(True)
 
     def loadProfile(self):
         """Read the beam-profile file named in the dialog.

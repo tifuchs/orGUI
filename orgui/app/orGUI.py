@@ -75,7 +75,9 @@ from .bgroi import RectangleBgROI
 from .database import DataBase, FILTERS
 from .mask_config import MaskManager
 from .config_data import ConfigData
-from ..backend.scans import SimulationScan
+from types import SimpleNamespace
+
+from ..backend.scans import SimulationScan, scan_arm_angles
 from ..backend import backends
 from ..backend import universalScanLoader
 from ..backend import interlacedScanLoader
@@ -2476,7 +2478,11 @@ ub : gui for UB matrix and angle calculations
             try:
                 self.updateROI()
             except Exception:
-                pass
+                # updateROI handles the expected misses itself -- a rod that
+                # does not reach the detector, an out-of-range frame -- so
+                # anything escaping it is a defect. Swallowing it silently only
+                # shows up as ROIs that quietly stop following the parameters.
+                logger.exception("Cannot update the ROI location")
 
         if self.reflectionsVisible:
             if recalculate:
@@ -3322,8 +3328,12 @@ ub : gui for UB matrix and angle calculations
                 mu, om, delta, gamma, Q = resolved
             else:
                 mu, om = self.getMuOm(self.imageno)
+                # The detector arm of *this* frame: on a scan that moves the
+                # arm, the same pixel looks in a different direction on every
+                # frame, so the readout has to follow it.
+                gamma_arm, delta_arm = self.getArmAngles(self.imageno)
                 gamma_arr, delta_arr = self.ubcalc.detectorCal.surfaceAnglesPoint(
-                    np.array([y]), np.array([x]), mu
+                    np.array([y]), np.array([x]), mu, gamma_arm, delta_arm
                 )
                 delta, gamma = delta_arr[0], gamma_arr[0]
                 Q = None
@@ -3444,6 +3454,46 @@ ub : gui for UB matrix and angle calculations
             return rotation @ self.ubcalc.angles.QAlpha(pos[0], pos[1], pos[2])
         except Exception:
             return np.full(3, np.nan)
+
+    def getArmAngles(self, imageno=None):
+        """Return the detector arm position for an image or the whole scan.
+
+        :param imageno:
+            Optional image index. If omitted, arrays for the full scan are
+            returned.
+        :returns:
+            ``(gamma_arm, delta_arm)`` as true scattering angles in rad, ready
+            to hand to the detector conversions. Zero when neither the scan nor
+            the configuration knows about an arm, which reproduces the static
+            detector exactly.
+        :rtype: tuple
+
+        .. note::
+           CLI-safe when a scan is loaded.
+        """
+        if self.fscan is None:
+            return 0.0, 0.0
+        # Only the four fields scan_arm_angles reads, rather than a full
+        # ConfigData: this is called from the cursor readout on every mouse
+        # move, and rebuilding the crystal and UB there would be wasteful.
+        fallback = SimpleNamespace(
+            mu=self.ubcalc.mu,
+            gamma_arm=getattr(self.ubcalc, "gamma_arm", 0.0),
+            delta_arm=getattr(self.ubcalc, "delta_arm", 0.0),
+            arm_angle_frame=getattr(self.ubcalc, "arm_angle_frame", "prim"),
+        )
+        try:
+            gamma_arm, delta_arm = scan_arm_angles(self.fscan, fallback)
+        except Exception:
+            logger.debug("Cannot resolve the detector arm position", exc_info=True)
+            return 0.0, 0.0
+        if imageno is None:
+            return gamma_arm, delta_arm
+        if not self.isValidImageNo(imageno):
+            raise IndexError(
+                f"Image number {imageno} is outside the active scan range."
+            )
+        return float(gamma_arm[imageno]), float(delta_arm[imageno])
 
     def getMuOm(self, imageno=None):
         """Return mu and omega for an image or the whole active scan.
@@ -5187,6 +5237,122 @@ ub : gui for UB matrix and angle calculations
         self.roiManager._roisUpdated()
         # self.centralPlot.removeMarker('main_croi_loc')
 
+    def _qRangePerFrame(self, shape, imageno=None):
+        """Reachable momentum transfer per frame, following the arm.
+
+        The detector reaches a different band of ``Q`` at every arm position,
+        so a range taken once at the calibrated position would reject
+        reflections the detector actually saw. That is what used to hide every
+        ROI past the point where a scanned arm swung beyond the calibrated
+        reach.
+
+        :param shape: shape of the ``Q`` array the bounds are compared against.
+        :param imageno:
+            Frame the bounds are for; the displayed frame when omitted. Callers
+            that work on a frame other than the displayed one have to say so:
+            the background preview runs while ``self.imageno`` still points at
+            the previous frame, and taking the arm from there would place the
+            patch at the previous frame's arm position.
+        :returns: ``(Qmin, Qmax)`` broadcastable to ``shape``, Angstrom^-1.
+        :rtype: tuple[numpy.ndarray, numpy.ndarray]
+        """
+        dc = self.ubcalc.detectorCal
+        count = int(np.prod(shape)) if shape else 1
+        lower = np.empty(count, dtype=np.float64)
+        upper = np.empty(count, dtype=np.float64)
+        if count != len(self.fscan):
+            frame = self.imageno if imageno is None else imageno
+            lower[:], upper[:] = dc.qRangeAtArm(*self.getArmAngles(frame))
+        else:
+            for selection, gamma_arm, delta_arm in self.armFrameGroups(count):
+                lower[selection], upper[selection] = dc.qRangeAtArm(
+                    gamma_arm, delta_arm
+                )
+        return lower.reshape(shape), upper.reshape(shape)
+
+    def _pixelsCrystalAnglesPerFrame(
+        self, gamma_cry, delta, alpha_i_cry, imageno=None
+    ):
+        """Detector pixels of crystal-frame angles, following the arm.
+
+        The angles may be one per frame, in which case the detector arm of each
+        frame is used; a scalar pair is a single frame at the current arm.
+
+        :param gamma_cry, delta: crystal-frame detector angles in rad.
+        :param alpha_i_cry: incidence angle in the crystal frame, in rad.
+        :param imageno:
+            Frame these angles belong to; the displayed frame when omitted.
+            See :meth:`_qRangePerFrame` on why the caller has to say.
+        :returns: pixel coordinates as ``(dim1, dim2)``.
+        :rtype: numpy.ndarray
+        """
+        dc = self.ubcalc.detectorCal
+        gamma_cry = np.atleast_1d(np.asarray(gamma_cry, dtype=np.float64))
+        delta = np.atleast_1d(np.asarray(delta, dtype=np.float64))
+        count = gamma_cry.shape[0]
+        if count != len(self.fscan):
+            # Not a per-frame trajectory (a single reflection, say), so one
+            # arm position applies to all of it -- the frame the caller named.
+            frame = self.imageno if imageno is None else imageno
+            gamma_arm, delta_arm = self.getArmAngles(frame)
+            return dc.pixelsCrystalAngles(
+                gamma_cry, delta, alpha_i_cry, self.ubcalc.n, gamma_arm, delta_arm
+            )
+        alpha_frames = np.broadcast_to(
+            np.asarray(alpha_i_cry, dtype=np.float64), (count,)
+        )
+        pixels = np.empty((count, 2), dtype=np.float64)
+        for selection, gamma_arm, delta_arm in self.armFrameGroups(count):
+            pixels[selection] = dc.pixelsCrystalAngles(
+                np.atleast_1d(gamma_cry[selection]),
+                np.atleast_1d(delta[selection]),
+                alpha_frames[selection],
+                self.ubcalc.n,
+                gamma_arm,
+                delta_arm,
+            )
+        return pixels
+
+    def armFrameGroups(self, count=None):
+        """Group frame indices by detector arm position.
+
+        A detector geometry describes one orientation, so a conversion can only
+        be vectorised across frames while the arm holds still. This returns the
+        groups a caller has to loop over: a parked arm gives a single group
+        covering the whole scan, which keeps the fast path, and a scanned arm
+        gives one group per frame.
+
+        :param int count:
+            Number of frames; the active scan length when omitted.
+        :returns:
+            List of ``(selection, gamma_arm, delta_arm)``, where ``selection``
+            indexes the frames of that group and the angles are true scattering
+            angles in rad.
+        :rtype: list
+
+        .. note::
+           CLI-safe when a scan is loaded.
+        """
+        if count is None:
+            count = len(self.fscan)
+        gamma_arm, delta_arm = self.getArmAngles()
+        gamma_arm = np.broadcast_to(
+            np.asarray(gamma_arm, dtype=np.float64), (count,)
+        )
+        delta_arm = np.broadcast_to(
+            np.asarray(delta_arm, dtype=np.float64), (count,)
+        )
+        if np.all(gamma_arm == gamma_arm[0]) and np.all(delta_arm == delta_arm[0]):
+            return [(slice(None), float(gamma_arm[0]), float(delta_arm[0]))]
+        # A one-element slice rather than a bare index, so every group selects
+        # a 1-d array. Indexing with an int would hand the conversions a scalar
+        # and take back a shape-(1,) result, which numpy 1 assigns into a
+        # scalar slot with a deprecation warning and numpy 2 refuses outright.
+        return [
+            (slice(index, index + 1), float(gamma_arm[index]), float(delta_arm[index]))
+            for index in range(count)
+        ]
+
     def getStaticROIparams(self, xy, **kwargs):
         """Calculate hkl, detector angles, and pixel metadata for fixed ROIs.
 
@@ -5212,16 +5378,33 @@ ub : gui for UB matrix and angle calculations
         if len(np.asarray(om).shape) == 0:
             om = np.full(len(self.fscan), om)
 
-        hkl_del_gam = np.empty((xy.shape[0], len(self.fscan), 6), dtype=np.float64)
-        for i, xy_i in enumerate(xy):
-            x = np.full(len(self.fscan), xy_i[0])
-            y = np.full(len(self.fscan), xy_i[1])
-            gamma, delta, alpha = self.ubcalc.detectorCal.crystalAnglesPoint(
-                y, x, mu, self.ubcalc.n
-            )
+        count = len(self.fscan)
+        mu_frames = np.broadcast_to(np.asarray(mu, dtype=np.float64), (count,))
+        # A fixed pixel looks in a different direction on every frame once the
+        # detector arm moves, so the conversion follows the arm frame by frame.
+        arm_groups = self.armFrameGroups(count)
 
-            if len(np.asarray(alpha).shape) == 0:
-                alpha = np.full(len(self.fscan), alpha)
+        hkl_del_gam = np.empty((xy.shape[0], count, 6), dtype=np.float64)
+        for i, xy_i in enumerate(xy):
+            x = np.full(count, xy_i[0])
+            y = np.full(count, xy_i[1])
+            gamma = np.empty(count, dtype=np.float64)
+            delta = np.empty(count, dtype=np.float64)
+            alpha = np.empty(count, dtype=np.float64)
+            for selection, gamma_arm, delta_arm in arm_groups:
+                gamma_s, delta_s, alpha_s = (
+                    self.ubcalc.detectorCal.crystalAnglesPoint(
+                        np.atleast_1d(y[selection]),
+                        np.atleast_1d(x[selection]),
+                        mu_frames[selection],
+                        self.ubcalc.n,
+                        gamma_arm,
+                        delta_arm,
+                    )
+                )
+                gamma[selection] = gamma_s
+                delta[selection] = delta_s
+                alpha[selection] = alpha_s
 
             hkl = self.ubcalc.angles.anglesToHkl(
                 alpha, delta, gamma, om, self.ubcalc.chi, self.ubcalc.phi
@@ -5275,16 +5458,30 @@ ub : gui for UB matrix and angle calculations
                 x = np.full(len(self.fscan), self.scanSelector.xy_static[0].value())
                 y = np.full(len(self.fscan), self.scanSelector.xy_static[1].value())
 
-                gamma, delta, alpha = self.ubcalc.detectorCal.crystalAnglesPoint(
-                    y, x, mu, self.ubcalc.n
+                count = len(self.fscan)
+                mu_frames = np.broadcast_to(
+                    np.asarray(mu, dtype=np.float64), (count,)
                 )
-                np.arange(len(self.fscan))
+                gamma = np.empty(count, dtype=np.float64)
+                delta = np.empty(count, dtype=np.float64)
+                alpha = np.empty(count, dtype=np.float64)
+                for selection, gamma_arm, delta_arm in self.armFrameGroups(count):
+                    gamma_s, delta_s, alpha_s = (
+                        self.ubcalc.detectorCal.crystalAnglesPoint(
+                            np.atleast_1d(y[selection]),
+                            np.atleast_1d(x[selection]),
+                            mu_frames[selection],
+                            self.ubcalc.n,
+                            gamma_arm,
+                            delta_arm,
+                        )
+                    )
+                    gamma[selection] = gamma_s
+                    delta[selection] = delta_s
+                    alpha[selection] = alpha_s
 
                 if len(np.asarray(om).shape) == 0:
                     om = np.full(len(self.fscan), om)
-
-                if len(np.asarray(alpha).shape) == 0:
-                    alpha = np.full(len(self.fscan), alpha)
 
                 yx1 = np.vstack((y, x)).T
                 yx2 = np.full_like(yx1, np.inf)
@@ -5318,8 +5515,14 @@ ub : gui for UB matrix and angle calculations
                     om = om[imageno]
                 if len(np.asarray(mu).shape) > 0:
                     mu = mu[imageno]
+                frame_gamma_arm, frame_delta_arm = self.getArmAngles(imageno)
                 gamma, delta, alpha = self.ubcalc.detectorCal.crystalAnglesPoint(
-                    np.array([y]), np.array([x]), mu, self.ubcalc.n
+                    np.array([y]),
+                    np.array([x]),
+                    mu,
+                    self.ubcalc.n,
+                    frame_gamma_arm,
+                    frame_delta_arm,
                 )
                 gamma, delta, alpha = (
                     gamma[0],
@@ -5348,15 +5551,24 @@ ub : gui for UB matrix and angle calculations
             gam1 = hkl_del_gam_1[..., 4]
             gam2 = hkl_del_gam_2[..., 4]
 
-            Qmin, Qmax = dc.Qrange
             Qa_1_n = np.linalg.norm(Qa_1, axis=-1)
             Qa_2_n = np.linalg.norm(Qa_2, axis=-1)
+            # Per frame: a scanned arm reaches a different Q band on each one.
+            Qmin, Qmax = self._qRangePerFrame(np.shape(Qa_1_n), imageno)
 
             mask1 = np.logical_and(Qmin <= Qa_1_n, Qmax >= Qa_1_n)
             mask2 = np.logical_and(Qmin <= Qa_2_n, Qmax >= Qa_2_n)
 
-            yx1 = dc.pixelsCrystalAngles(gam1, delta1, mu, self.ubcalc.n)
-            yx2 = dc.pixelsCrystalAngles(gam2, delta2, mu, self.ubcalc.n)
+            # ``mu_cryst``, not ``mu``: the angles above were solved in the
+            # crystal frame, and pixelsCrystalAngles refracts its incidence
+            # angle back out to vacuum, so it has to be given the same frame.
+            # Passing the vacuum value refracted twice and displaced both ROIs.
+            yx1 = self._pixelsCrystalAnglesPerFrame(
+                gam1, delta1, mu_cryst, imageno
+            )
+            yx2 = self._pixelsCrystalAnglesPerFrame(
+                gam2, delta2, mu_cryst, imageno
+            )
             yx1[~mask1] = np.inf
             yx2[~mask2] = np.inf
 
