@@ -7,6 +7,96 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **Added the geometry and scan support for a moveable detector arm.** The
+  calibrated pyFAI geometry now describes the detector at a *home* arm
+  position, and the conversions accept the arm position of the frame they are
+  working on. A detector arm rotates the detector rigidly about the sample,
+  which pyFAI's ``rot1/rot2/rot3`` represent exactly while leaving the
+  sample-detector distance and the PONI offsets untouched, so the six-circle
+  diffraction equations are unchanged: they still receive per-pixel
+  ``(gamma, delta)`` meaning what they always meant.
+
+  The arm is a scanned motor, so it is passed to the conversions rather than
+  stored on the detector, and per-frame geometry is a pure function that is
+  safe to call concurrently against the one calibration the reconstruction
+  workers share. Scans may expose ``gamma_arm``/``delta_arm`` per frame, plus
+  ``gamma_arm_bounds_rad``/``delta_arm_bounds_rad`` and
+  ``continuous_exposure`` for an arm that moves *during* the exposure; a
+  continuously moving arm always has to be declared and is never inferred.
+  ``Scan.exposure_angle_bounds`` therefore returns six angles per frame rather
+  than four, and a backend that supplies the old four-column
+  ``exposure_bounds_rad`` keeps working unchanged.
+
+  The mechanical arm angles are deliberately distinct from the per-pixel
+  ``(gamma, delta)``: rotations do not add, and treating the arm position as a
+  constant offset is wrong by up to 1.4 degrees at the detector edge for an arm
+  at 30/60 degrees. The circle order follows orGUI's own Vlieg equations, with
+  ``delta`` as the base circle and the ``gamma`` circle riding on the delta
+  arm. The arm position at which the calibration was taken is recorded with it,
+  so only the difference between the two matters and the arm's motor zero need
+  not mean anything.
+
+  Arm angles are the **true scattering angles** ``gamma_p``/``delta_p``,
+  measured from the primary beam, which is what a floor-mounted arm reads and
+  does not depend on the incidence angle. A diffractometer whose arm motors
+  report the six-circle surface-frame ``gamma``/``delta`` instead declares
+  ``arm_angle_frame = "surface"`` on the scan, or ``angle_frame = surface`` in
+  the ``[DetectorArm]`` config section, and the values are converted once with
+  each frame's own incidence angle. ``armAnglesFromSurface`` performs the same
+  conversion for callers that need it directly.
+
+  Nothing changes for a detector that does not move: the conversions take their
+  original code path and produce bit-identical arrays, and configurations and
+  stored calibrations written before this release load as a detector calibrated
+  at arm zero. The optional ``[DetectorArm]`` config section is documented in
+  ``examples/config_minimal``.
+
+- **Fixed reciprocal-space ROIs disappearing once a scanned detector arm swung
+  past its calibrated reach.** The momentum transfer a detector can reach was
+  taken once from the calibrated arm position and then used to reject ROIs as
+  unreachable. Swinging the arm out moves that whole band to higher ``Q``, so
+  on a theta-2theta scan the calculated position climbed past the stale
+  ceiling partway through and every frame after that lost its ROI, even though
+  the detector was pointing straight at the reflection. The bound now follows
+  the arm, through the new ``Detector2D_SXRD.qRangeAtArm``; ``Qrange`` keeps
+  reporting the calibrated position and is unchanged for a detector that does
+  not move.
+
+- **Fixed the refraction correction modifying the angles it was given.**
+  ``crystalAngles_singleArray`` and ``vacAngles_singleArray`` converted their
+  input array in place, so anything that handed the same incidence angles to
+  more than one consumer refracted them once more on every pass: the first
+  consumer got the right angle and each later one drifted further. This hit
+  code that reuses one ``mu`` array across several ROIs or scan segments, and
+  it also quietly corrupted the detector's cached surface angles, since
+  ``crystalAngles`` converted the cache in place. Both helpers now return a
+  new array and leave their argument untouched.
+
+- **Fixed the incidence angle being refraction-corrected twice when placing
+  reciprocal-space ROIs.** The rod intersections are solved in the crystal
+  frame, but their conversion back to detector pixels was handed the vacuum
+  incidence angle where it expects the crystal-frame one, so it refracted it a
+  second time and displaced both ROIs of an hkl scan. The shift is small --
+  about 2 pixels at 0.36 degrees incidence with a typical refraction index --
+  and grows towards the critical angle. Verified against the specular
+  condition, which the corrected calculation now reproduces exactly.
+
+  ROI positions for stationary scans and hkl scans also follow the detector
+  arm, so they stay on the reflection when the detector moves during a scan.
+
+  The cursor readout under the image follows the arm: on a scan that moves the
+  detector, ``delta``, ``gamma``, the hkl and the momentum transfer reported
+  for a pixel now change from frame to frame, instead of being reported at the
+  calibrated arm position for the whole scan. The rest of the GUI -- searching
+  for an hkl, the reflection overlays, ROI integration and the Q-plot -- does
+  not follow the arm yet.
+
+  Reciprocal-space reconstruction cannot map a moving arm yet -- the detector
+  geometry is baked into a ray array built once per run -- so it **refuses** a
+  scan whose arm moves rather than silently mapping every frame at the
+  calibrated position, which would produce a plausible-looking but wrong
+  volume. Scans with a stationary arm are unaffected.
+
 - **Fixed the angle-to-pixel conversion being half a pixel off.**
   ``pixelsTthChi``, and with it ``pixelsPrimeBeam`` and
   ``pixelsSurfaceAngles``, converted a distance on the detector into a pixel
@@ -367,6 +457,39 @@ A ***critical bug*** was fixed that affects bulk CTR calculations:
   4x, 15x and 100x the runtime. ``Center only`` is genuinely lossy and also
   misses about 4% of the voxels the other settings reach. No behaviour or
   default has changed.
+- A segmented ("interlaced") scan now provides the counters its segments
+  share. It previously reported no counters at all, so combining scans in the
+  segmented scan loader silently dropped every monitor, the exposure time and
+  everything else the backend reads from the file: the monitor normalization
+  offered nothing to pick, exposure normalization was skipped, and no
+  auxiliary counter was written to the database. A counter is taken over when
+  *every* segment provides it, since one that only some segments have would
+  misalign all following values, and the counters that are dropped for this
+  reason are named in the log. Counters held once per segment, such as a
+  segment's exposure time, are expanded to one value per image, so segments
+  measured with different exposure times or monitors now normalize correctly
+  against each other. Sorting the segments by axis value reorders the counters
+  with the images.
+- A segmented scan now also describes its detector arm. ``gamma_arm``,
+  ``delta_arm``, ``arm_angle_frame`` and ``continuous_exposure`` were dropped
+  along with the counters, so the per-pixel conversions fell back to the fixed
+  arm position from the configuration and converted every image of a segmented
+  scan at the wrong place -- an XRR measurement split into several
+  ``a2scan th tth`` segments was the case that showed it. The arm is merged
+  conservatively, since a wrong arm position yields plausible-looking angles
+  rather than an error: the arm motors have to be provided by every segment
+  and all in the same form, either a single fixed value per segment or one
+  value per image, and a mix of the two is refused because a fixed value often
+  means a backend did not find the motor. Fixed values that differ between
+  segments are expanded to one value per image, which is where the arm
+  actually was. ``arm_angle_frame`` and ``continuous_exposure`` must match
+  exactly; segments that disagree, or that state one of them only in part, are
+  reported in the log and the property is left to the configuration.
+  Disagreement about ``arm_angle_frame`` also blocks the arm angles
+  themselves, since the segments' motor values would then be in different
+  conventions. Reciprocal-space reconstruction was never affected: its
+  exposure bounds already read each segment's own arm, and they now agree with
+  the arm the rest of the program sees.
 
 GUI changes:
 
