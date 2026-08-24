@@ -159,7 +159,19 @@ def crystalAngles(pos, refraction_index):
 
 
 def crystalAngles_singleArray(angle, refraction_index):
+    """Refract angles from vacuum into the crystal.
+
+    :param angle: angle(s) in rad. Angles below the sample horizon are
+        returned unchanged, and angles below the critical angle become zero.
+    :param float refraction_index: refractive index of the crystal.
+    :returns: refracted angle(s) in rad, as a new array.
+
+    Does not modify ``angle``. It used to convert the caller's array in
+    place, so a second call on the same array refracted it twice and every
+    consumer after the first saw a wrong incidence angle.
+    """
     if isinstance(angle, np.ndarray):
+        angle = np.array(angle, dtype=np.float64)
         sign = np.sign(angle)
         mask = sign > 0.0
         # with warnings.catch_warnings(record=True) as w:
@@ -206,7 +218,18 @@ def vacAngles(pos, refraction_index):
 
 
 def vacAngles_singleArray(angle, refraction_index):
+    """Refract angles from the crystal back out into vacuum.
+
+    Inverse of :func:`crystalAngles_singleArray` above the critical angle.
+
+    :param angle: angle(s) in rad.
+    :param float refraction_index: refractive index of the crystal.
+    :returns: refracted angle(s) in rad, as a new array.
+
+    Does not modify ``angle``; see :func:`crystalAngles_singleArray`.
+    """
     if isinstance(angle, np.ndarray):
+        angle = np.array(angle, dtype=np.float64)
         sign = np.sign(angle)
         mask = sign > 0.0
         angle[mask] = np.arccos(np.cos(angle[mask]) * refraction_index)

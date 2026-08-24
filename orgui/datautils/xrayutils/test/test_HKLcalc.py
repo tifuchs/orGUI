@@ -35,6 +35,47 @@ from .. import HKLVlieg
 import numpy as np
 
 
+class TestRefractionConversions(unittest.TestCase):
+    """The refraction helpers must not convert their caller's array."""
+
+    REFRACTION_INDEX = 1.0 - 3.16e-6
+
+    def test_conversions_leave_the_input_alone(self):
+        """They used to refract in place, so a reused array drifted.
+
+        Any loop that handed the same incidence angles to more than one
+        consumer -- several ROIs sharing one ``mu`` array, say -- refracted
+        them once more on every pass, so the first consumer was right and
+        every later one was progressively wrong.
+        """
+        for convert in (
+            HKLVlieg.crystalAngles_singleArray,
+            HKLVlieg.vacAngles_singleArray,
+        ):
+            with self.subTest(convert=convert.__name__):
+                angles = np.deg2rad(np.array([0.6, 1.3, 2.0]))
+                original = angles.copy()
+
+                first = convert(angles, self.REFRACTION_INDEX)
+                second = convert(angles, self.REFRACTION_INDEX)
+
+                np.testing.assert_array_equal(angles, original)
+                np.testing.assert_array_equal(first, second)
+                self.assertFalse(np.shares_memory(first, angles))
+
+    def test_conversions_accept_a_read_only_array(self):
+        """Broadcast views are read-only, and are a normal way to pass angles."""
+        angles = np.broadcast_to(np.deg2rad(0.6), (3,))
+        for convert in (
+            HKLVlieg.crystalAngles_singleArray,
+            HKLVlieg.vacAngles_singleArray,
+        ):
+            with self.subTest(convert=convert.__name__):
+                result = convert(angles, self.REFRACTION_INDEX)
+                self.assertEqual(np.shape(result), (3,))
+                self.assertTrue(np.all(np.isfinite(result)))
+
+
 class TestLattice(unittest.TestCase):
     def testCreateLattice(self):
         lat = HKLVlieg.Lattice([3.9242, 3.9242, 3.9242], [90.0000, 90.0000, 120.0000])
