@@ -3721,6 +3721,54 @@ ub : gui for UB matrix and angle calculations
             entries.append((dict(ddict), None))
         return entries
 
+    @staticmethod
+    def _scanAxisHasOnlyScalars(scansegments, axis):
+        """Whether every segment provides only a scalar selected axis.
+
+        :param scansegments: Scan segments selected by the user.
+        :param str axis: Selected motor name, currently ``"th"`` or ``"mu"``.
+        :rtype: bool
+
+        .. note::
+           CLI-safe.
+        """
+        if not scansegments:
+            return False
+        try:
+            return all(
+                np.asarray(getattr(segment, axis)).ndim == 0
+                for segment in scansegments
+            )
+        except AttributeError:
+            return False
+
+    def _warnForScalarScanAxis(self, scansegments, axis):
+        """Warn when the selected segmented-scan axis has only fixed values.
+
+        :param scansegments: Scan segments selected by the user.
+        :param str axis: Selected motor name, currently ``"th"`` or ``"mu"``.
+
+        .. note::
+           GUI-only. This path creates a blocking warning dialog.
+        """
+        if not self._scanAxisHasOnlyScalars(scansegments, axis):
+            return
+
+        other_axis = "mu" if axis == "th" else "th"
+        if self._scanAxisHasOnlyScalars(scansegments, other_axis):
+            suggestion = "Choose an axis that provides one value per image."
+        else:
+            suggestion = f"Select '{other_axis}' as the scan axis instead."
+        qutils.warning_detailed_message(
+            self,
+            "Scalar segmented scan axis",
+            f"The selected '{axis}' scan axis provides only scalar, fixed "
+            f"values. {suggestion}",
+            "A scalar motor value normally identifies the fixed motor rather "
+            "than the motor scanned during acquisition. Loading will continue "
+            "and repeat each segment's fixed value for all of its images.",
+        )
+
     def _onLoadInterlacedScan(self):
         """GUI-only: build an interlaced scan from selected HDF5 scans."""
         # GUI function to concatenate multiple scans into one
@@ -3867,9 +3915,11 @@ ub : gui for UB matrix and angle calculations
             return
 
         # create interlaced scan object
+        selected_axis = axisbox.currentText()
+        self._warnForScalarScanAxis(scansegments, selected_axis)
         self.scanno = 1
         self.fscan = interlacedScanLoader.InterlacedScan(
-            scansegments, noScans.isChecked(), axisbox.currentText()
+            scansegments, noScans.isChecked(), selected_axis
         )
         self.imageno = 0
         self.plotImage()

@@ -6,6 +6,9 @@ every entry of the file root. Neither route may disagree with how a single scan
 is opened, because the identifiers produced here are handed to ``openScan``.
 """
 
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 
 from orgui.backend import scans
@@ -240,3 +243,51 @@ def test_both_routes_agree_on_the_same_file(h5node):
     assert [ddict["scanno"] for ddict, _ in fallback] == [
         ddict["scanno"] for ddict, _ in fast
     ]
+
+
+# --- selected axis -------------------------------------------------------
+
+
+def test_all_scalar_selected_axis_shows_a_warning(monkeypatch):
+    segments = [
+        SimpleNamespace(th=1.0, mu=[0.0, 1.0]),
+        SimpleNamespace(th=np.array(2.0), mu=[2.0, 3.0]),
+    ]
+    warnings = []
+    monkeypatch.setattr(
+        orGUI.qutils,
+        "warning_detailed_message",
+        lambda *args: warnings.append(args),
+    )
+    parent = SimpleNamespace(
+        _scanAxisHasOnlyScalars=orGUI.orGUI._scanAxisHasOnlyScalars
+    )
+
+    result = orGUI.orGUI._warnForScalarScanAxis(parent, segments, "th")
+
+    assert result is None
+    assert len(warnings) == 1
+    assert warnings[0][0] is parent
+    assert "'th'" in warnings[0][2]
+    assert "Select 'mu'" in warnings[0][2]
+
+
+def test_a_per_image_selected_axis_does_not_show_a_warning(monkeypatch):
+    segments = [
+        SimpleNamespace(th=1.0, mu=[0.0, 1.0]),
+        SimpleNamespace(th=[2.0, 3.0], mu=[2.0, 3.0]),
+    ]
+    warnings = []
+    monkeypatch.setattr(
+        orGUI.qutils,
+        "warning_detailed_message",
+        lambda *args: warnings.append(args),
+    )
+
+    parent = SimpleNamespace(
+        _scanAxisHasOnlyScalars=orGUI.orGUI._scanAxisHasOnlyScalars
+    )
+    result = orGUI.orGUI._warnForScalarScanAxis(parent, segments, "th")
+
+    assert result is None
+    assert warnings == []
