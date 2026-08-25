@@ -173,24 +173,38 @@ Scientific and analysis additions:
   reciprocal-space reconstruction that had the polarization correction
   enabled needs to be repeated**; results with it disabled are unaffected.
 
+- **Fixed the beam footprint being divided out twice in rocking and stationary
+  integrations.** ``C_illum_area`` is Vlieg's numerically illuminated active
+  surface area: its numerator is already the beam/sample overlap stored as
+  ``C_flux_on_sample``. The integrations divided by their product, making the
+  overlap enter as ``C_flux_on_sample**2``. A centered sample hid much of the
+  error once it intercepted the whole beam, but a beam clipping a sample edge
+  produced orders-of-magnitude overcorrections at low incidence angle.
+  Integrated intensities now divide only by ``C_illum_area``;
+  ``C_flux_on_sample`` remains stored as a useful diagnostic. Any rocking or
+  stationary integration made with ``Beam footprint`` enabled by an affected
+  build must be repeated.
+
 - Stationary-scan integration (``hklscan`` and ``fixed``) now applies the same
   correction factors as the rocking-scan integration. Previously only the
   solid-angle and polarization corrections reached it, and its ``Lorentz
   correction`` switch was permanently disabled. It now applies the Lorentz
-  factor and rod interception, the beam footprint corrections, and an exposure
-  and monitor normalization, and stores the structure factor ``F2_hkl``
-  alongside the intensity together with every factor that was applied
-  (``C_Lorentz``, ``C_rod``, ``C_flux_on_sample``, ``C_illum_area``,
-  ``C_norm``). **The Lorentz factor of a stationary scan is not the
+  factor, the numerical beam footprint, and an exposure and monitor
+  normalization, and stores the structure factor ``F2_hkl``
+  alongside the intensity together with every applied factor
+  (``C_Lorentz``, ``C_illum_area``, ``C_norm``) and the diagnostic overlap
+  ``C_flux_on_sample``.
+  **The Lorentz factor of a stationary scan is not the
   rocking-scan one**: the z-axis geometry of the ANA/ROD manual (E. Vlieg,
   *J. Appl. Cryst.* 30 (1997) 532) gives ``1/sin(gamma)`` for a stationary
   measurement, against ``1/(sin(delta) cos(alpha) cos(gamma))`` for a rocking
-  scan and ``1/sin(2 alpha)`` for a reflectivity rocking scan, with rod
-  interception ``cos(gamma)``. orGUI picks the factor from the integration
-  mode rather than from a setting, because using the wrong one is a silent
-  scaling error. The formulas moved into
-  ``orgui.datautils.xrayutils.geometrycorrections``; the values the rocking
-  integration produces are unchanged, and a test pins that.
+  scan and ``1/sin(2 alpha)`` for a reflectivity rocking scan. Rocking scans
+  also use rod interception ``cos(gamma)``; stationary integration does not,
+  as stated before equation (54) of Vlieg. orGUI picks the factor from the
+  integration mode rather than from a setting, because using the wrong one is
+  a silent scaling error. The formulas moved into
+  ``orgui.datautils.xrayutils.geometrycorrections``; the rocking-scan Lorentz
+  and rod-interception values are unchanged, and a test pins them.
 - Stationary-scan integration can divide each image by its exposure time and
   by monitor counters, the normalization the reciprocal-space reconstruction
   already applied. The settings are shared with the reconstruction, so one
@@ -198,10 +212,11 @@ Scientific and analysis additions:
   without an exposure time skips that part; a missing, zero or non-finite
   monitor counter stops the integration instead of scaling by infinity.
 
-- The footprint corrections of rocking-scan integration can now use a beam
+- The footprint correction of rocking-scan integration can now use a beam
   profile measured at the beamline instead of the analytical Gaussian. Beam
-  overspill (``C_flux_on_sample``) and active surface area (``C_illum_area``)
-  were only available in closed form for a Gaussian beam, which cannot
+  overlap (``C_flux_on_sample``) and the numerical active surface area
+  (``C_illum_area``) were only available in closed form for a Gaussian beam,
+  which cannot
   represent a beam that is asymmetric or has several maxima — a measured
   profile of that kind differs from the equal-FWHM Gaussian by over 10% in the
   total correction, non-monotonically in the incidence angle, so no single
@@ -212,11 +227,11 @@ Scientific and analysis additions:
   (``p(z) = -dI/dz``), keeping only the range over which the sample cuts into
   the beam. Because a measured profile has no absolute position, the point the
   center of the sample is aligned to is selectable (intensity centroid, maximum
-  or half-cut median) together with an explicit offset. The definitions of both
-  corrections are unchanged, and the Gaussian model remains the default, so
-  existing analyses are unaffected: feeding a sampled Gaussian to the numerical
-  path reproduces the analytical corrections. The corrections are available
-  outside the GUI as ``orgui.datautils.xrayutils.beamprofile``.
+  or half-cut median) together with an explicit offset. The Gaussian model
+  remains the default, and feeding a sampled Gaussian to the numerical path
+  reproduces the analytical profile quantities. The applied active area and
+  its diagnostic overlap are available outside the GUI as
+  ``orgui.datautils.xrayutils.beamprofile``.
 - The footprint corrections also accept analytical beam shapes other than a
   Gaussian. Both corrections need nothing from the beam but its cumulative
   distribution and its peak density, so any continuous distribution can

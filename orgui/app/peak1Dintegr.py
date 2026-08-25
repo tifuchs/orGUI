@@ -141,16 +141,17 @@ def _compute_rocking_integration(
         Apply the Lorentz/rod-intersection correction and compute
         ``F2_hkl``/``F2_hkl_errors``.
     :param bool use_footprint:
-        Apply the footprint (illuminated flux/area) correction to the
-        corrected intensities.
+        Apply the numerical active-area correction to the corrected
+        intensities.
     :param C_Lor:
         Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, Lorentz factor.
     :param C_rod:
         Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, rod-intersection
         factor.
     :param C_flux_on_sample:
-        Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, footprint flux
-        factor.
+        Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, intercepted-flux
+        diagnostic used to construct ``C_illum_area``. It is stored but is
+        not a second divisor.
     :param C_illum_area:
         Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, illuminated-area
         factor.
@@ -223,7 +224,11 @@ def _compute_rocking_integration(
                 int_data[roikey]["C_illum_area"].append(
                     np.mean(C_illum_area[i][roi_slice])
                 )
-                C_corr *= C_flux_on_sample[i][roi_slice] * C_illum_area[i][roi_slice]
+                # C_illum_area is the numerical Vlieg active area and already
+                # contains the beam/sample overlap integral reported as
+                # C_flux_on_sample. Multiplying both would count that overlap
+                # twice and overcorrect a beam that clips the sample edge.
+                C_corr *= C_illum_area[i][roi_slice]
 
             I_raw = (
                 _trapz_impl(cnts, roi_axis) * sign_interval
@@ -1351,9 +1356,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
         if self.footprintButton.isChecked():
             L = self.integrationCorrection.L.value() * 1e-3  # sample size (mm -> m)
-            # Gaussian or measured beam profile, depending on the dialog; both
-            # evaluate the same overspill and active-area definitions, the
-            # measured one by numerical integration of the tabulated profile.
+            # Gaussian or measured beam profile, depending on the dialog.
+            # C_flux_on_sample is saved as the diagnostic numerator of the
+            # single applied active-area factor.
             profile = self.integrationCorrection.beamProfile()
             C_flux_on_sample, C_illum_area = profile.corrections(alpha, L)
 
@@ -2205,14 +2210,15 @@ _MAX_SHAPE_PARAMETERS = max(len(shape.parameters) for shape in BEAM_SHAPES)
 
 
 class IntegrationCorrectionsDialog(qt.QDialog):
-    """Settings of the footprint (overspill and active-area) corrections.
+    """Settings of the numerical active-area correction.
 
     The incident beam is described either by an analytical shape from
     :data:`BEAM_SHAPES` or by a beam profile measured at the beamline. Both
     are evaluated by :mod:`orgui.datautils.xrayutils.beamprofile`, which
-    integrates the same two definitions over the projected sample
-    footprint; only a measured profile can represent a beam that is
-    asymmetric or has several maxima.
+    evaluates the illuminated surface integral over the projected sample
+    footprint. The intercepted-flux fraction is available as a diagnostic
+    numerator but is not applied as a second correction. Only a measured
+    profile can represent a beam that is asymmetric or has several maxima.
 
     User-facing units are millimeters for the sample size and micrometers
     for beam widths and offsets; :meth:`beamProfile` converts to the meters

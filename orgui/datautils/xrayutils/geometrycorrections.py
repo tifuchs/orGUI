@@ -49,28 +49,28 @@ Lorentz factor rocking scan                :math:`1/(\sin\delta\,
                                            \cos\alpha\,\cos\gamma)`
 Lorentz factor stationary mode             :math:`1/\sin\gamma`
 Lorentz factor reflectivity rocking scan   :math:`1/\sin 2\alpha`
-Rod interception                           :math:`\cos\gamma`
+Rod interception (rocking scans only)      :math:`\cos\gamma`
 Area correction (ignoring footprint and    :math:`1/\sin\delta`
 sample size)
 Beam profile and finite sample size        calculated numerically, see
                                            :mod:`~.beamprofile`
 =========================================  ================================
 
-Structure factors follow orGUI's established convention, in which the
-tabulated Lorentz factor and the rod interception are *divided out* of the
-integrated intensity:
+For rocking scans, the tabulated Lorentz factor and rod interception are
+divided out of the integrated intensity:
 
 .. math:: F^2_{hkl} = \frac{I}{L \cdot C_\mathrm{rod}}
 
 The three Lorentz factors are alternatives, selected by how the intensity was
-measured, not factors to be combined:
+measured, not factors to be combined. Vlieg's stationary expression has no
+rod-interception factor:
 
 * a rocking scan about the sample rotation (``th``/``omega``) uses the
   rocking-scan factor,
 * a rocking scan about the incidence angle (``mu``), which is how a
   reflectivity curve is measured, uses the reflectivity factor,
 * a scan with the sample stationary, integrated across the rod on an area
-  detector, uses the stationary factor.
+  detector, uses the stationary factor alone.
 
 The area correction :math:`1/\sin\delta` is listed for completeness and is
 **not** applied by orGUI; the numerically evaluated beam-profile and finite
@@ -151,7 +151,7 @@ def lorentz_stationary(gamma):
 
 
 def rod_interception(gamma):
-    r"""Rod interception factor, :math:`\cos\gamma`.
+    r"""Rocking-scan rod interception factor, :math:`\cos\gamma`.
 
     :param gamma: Out-of-plane detector angle, in radian.
     :returns: The rod interception factor, broadcast over the input.

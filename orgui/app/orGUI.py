@@ -6335,12 +6335,12 @@ ub : gui for UB matrix and angle calculations
                 croibg2_bgimg_a *= Corr2
                 croibg2_bgimg_err_a *= Corr2
 
-        # Geometrical, footprint and normalization corrections. Every factor
-        # is a divisor, as in the rocking-scan integration: the footprint and
-        # normalization factors are divided out of the stored intensity, and
-        # the Lorentz factor and rod interception are divided out again to
-        # form F2_hkl. Stationary scans use the stationary-mode Lorentz
-        # factor 1/sin(gamma), not the rocking-scan one.
+        # Geometrical, footprint and normalization corrections. The numerical
+        # active area and normalization are intensity divisors. The
+        # intercepted-flux fraction is stored only as the numerator from which
+        # the active area was constructed, not divided out a second time.
+        # Stationary F2 divides by 1/sin(gamma) and has no rod-interception
+        # factor (Vlieg 1997, equation 54).
         mu_all, om_all = self.getMuOm()
         alpha_all = np.broadcast_to(
             np.atleast_1d(np.asarray(mu_all, dtype=np.float64)), (nodatapoints,)
@@ -6548,7 +6548,6 @@ ub : gui for UB matrix and angle calculations
                 "F2_hkl": F2_hkl1,
                 "F2_hkl_errors": F2_hkl1_err,
                 "C_Lorentz": factors1.get("C_Lorentz"),
-                "C_rod": factors1.get("C_rod"),
                 "C_flux_on_sample": factors1.get("C_flux_on_sample"),
                 "C_illum_area": factors1.get("C_illum_area"),
                 "C_norm": factors1.get("C_norm"),
@@ -6609,7 +6608,6 @@ ub : gui for UB matrix and angle calculations
                 "F2_hkl": F2_hkl2,
                 "F2_hkl_errors": F2_hkl2_err,
                 "C_Lorentz": factors2.get("C_Lorentz"),
-                "C_rod": factors2.get("C_rod"),
                 "C_flux_on_sample": factors2.get("C_flux_on_sample"),
                 "C_illum_area": factors2.get("C_illum_area"),
                 "C_norm": factors2.get("C_norm"),

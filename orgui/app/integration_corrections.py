@@ -23,19 +23,19 @@
 # ###########################################################################*/
 r"""Per-image correction factors of a stationary-scan integration.
 
-Every factor here is a *divisor*: an integrated intensity is corrected as
+The normalization and numerical active-area factor are intensity divisors:
 
 .. math::
 
-    I_\mathrm{corr} = \frac{I}{C_\mathrm{norm}\,C_\mathrm{flux}\,
-                             C_\mathrm{area}}
+    I_\mathrm{corr} = \frac{I}{C_\mathrm{norm}\,C_\mathrm{area}}
     \qquad
-    F^2_{hkl} = \frac{I_\mathrm{corr}}{L \cdot C_\mathrm{rod}}
+    F^2_{hkl} = \frac{I_\mathrm{corr}}{L_\mathrm{stationary}}
 
-which is the convention the rocking-scan integration in
-:mod:`orgui.app.peak1Dintegr` already uses: the footprint factors are divided
-out of the stored intensity, and the Lorentz factor and rod interception are
-divided out again when the structure factor is formed.
+``C_flux_on_sample`` is retained as a diagnostic component of
+``C_illum_area``. It must not be divided out separately: the numerical active
+area already contains the same beam/sample overlap integral. Stationary
+integration has no rod-interception factor; rocking scans retain theirs in
+:mod:`orgui.app.peak1Dintegr`.
 
 The geometrical factors come from
 :mod:`orgui.datautils.xrayutils.geometrycorrections`, the footprint factors
@@ -224,9 +224,10 @@ def stationary_correction_factors(
     :param delta: In-plane detector angle per image, in radian.
     :param gamma: Out-of-plane detector angle per image, in radian.
     :param bool use_lorentz: Add ``C_Lorentz`` -- the *stationary-mode*
-        factor :math:`1/\sin\gamma`, not the rocking-scan one -- and the rod
-        interception ``C_rod``.
-    :param bool use_footprint: Add ``C_flux_on_sample`` and ``C_illum_area``.
+        factor :math:`1/\sin\gamma`, not the rocking-scan one. Stationary
+        integration has no rod-interception factor.
+    :param bool use_footprint: Add the ``C_illum_area`` divisor and its
+        diagnostic numerator ``C_flux_on_sample``.
     :param beam_profile: A
         :class:`~orgui.datautils.xrayutils.beamprofile.BeamProfile`, required
         when ``use_footprint`` is set.
@@ -269,9 +270,6 @@ def stationary_correction_factors(
         factors["C_Lorentz"] = np.broadcast_to(
             geometrycorrections.lorentz_stationary(gamma), alpha.shape
         ).copy()
-        factors["C_rod"] = np.broadcast_to(
-            geometrycorrections.rod_interception(gamma), alpha.shape
-        ).copy()
         applied.append("lorentz")
 
     return CorrectionFactors(factors, applied)
@@ -280,10 +278,9 @@ def stationary_correction_factors(
 def apply_stationary_corrections(intensity, errors, factors):
     """Divide an intensity and its errors by the intensity-level factors.
 
-    The Lorentz factor and rod interception are *not* included: they belong
-    to the structure factor, formed separately by
-    :func:`structure_factor`, so that the stored intensity keeps the same
-    meaning it has in the rocking-scan integration.
+    ``C_flux_on_sample`` is not an additional divisor. The numerical active
+    area ``C_illum_area`` already contains that overlap integral. The Lorentz
+    factor is applied separately by :func:`structure_factor`.
 
     :param intensity: Integrated intensity per image.
     :param errors: 1-sigma errors of ``intensity``.
@@ -291,23 +288,23 @@ def apply_stationary_corrections(intensity, errors, factors):
     :returns: ``(intensity, errors)`` corrected.
     :rtype: tuple of numpy.ndarray
     """
-    divisor = factors.divisor("C_norm", "C_flux_on_sample", "C_illum_area")
+    divisor = factors.divisor("C_norm", "C_illum_area")
     return np.asarray(intensity) / divisor, np.asarray(errors) / divisor
 
 
 def structure_factor(intensity, errors, factors):
     r"""Form :math:`F^2_{hkl}` from an already corrected intensity.
 
-    :math:`F^2 = I_\mathrm{corr} / (L\,C_\mathrm{rod})`, the convention of
-    the rocking-scan integration.
+    :math:`F^2 = I_\mathrm{corr} / L_\mathrm{stationary}`. Unlike a rocking
+    scan, stationary area-detector integration has no rod-interception
+    factor.
 
     :param intensity: Corrected intensity per image.
     :param errors: 1-sigma errors of ``intensity``.
-    :param CorrectionFactors factors: Must contain ``C_Lorentz`` and
-        ``C_rod``.
+    :param CorrectionFactors factors: Must contain ``C_Lorentz``.
     :returns: ``(F2_hkl, F2_hkl_errors)``.
     :rtype: tuple of numpy.ndarray
     :raises KeyError: If the Lorentz factors are absent.
     """
-    divisor = factors["C_Lorentz"] * factors["C_rod"]
+    divisor = factors["C_Lorentz"]
     return np.asarray(intensity) / divisor, np.asarray(errors) / divisor

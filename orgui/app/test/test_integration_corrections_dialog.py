@@ -1,7 +1,7 @@
 """Tests for the footprint-correction options dialog.
 
 :class:`orgui.app.peak1Dintegr.IntegrationCorrectionsDialog` owns the user
-side of the beam overspill and active-area corrections: it converts the
+side of the numerical active-area correction: it converts the
 millimeter and micrometer values shown to the user into the meters
 :mod:`orgui.datautils.xrayutils.beamprofile` works in, and decides whether an
 integration runs against an analytical beam shape or a measured profile.

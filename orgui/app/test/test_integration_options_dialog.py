@@ -24,7 +24,7 @@ def _selector():
         useMaskBox=qt.QCheckBox("Use pixel mask"),
         useSolidAngleBox=qt.QCheckBox("Solid angle correction"),
         usePolarizationBox=qt.QCheckBox("Polarization correction"),
-        useLorentzBox=qt.QCheckBox("Lorentz and rod interception"),
+        useLorentzBox=qt.QCheckBox("Lorentz correction"),
         useFootprintBox=qt.QCheckBox("Beam footprint"),
         useNormalizationBox=qt.QCheckBox("Normalize integrated intensities"),
     )

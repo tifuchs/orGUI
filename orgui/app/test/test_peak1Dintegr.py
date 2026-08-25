@@ -246,6 +246,11 @@ def test_F2_hkl_errors_uses_corrected_croibg_errors_under_footprint_correction()
         C_illum_area=C_illum_area,
     )
 
+    # C_flux_on_sample is the numerator already contained in C_illum_area;
+    # only the latter is an intensity divisor. With both arrays at 0.5 the
+    # correction is therefore 2, not 4.
+    np.testing.assert_allclose(result["croibg"], result["raw_croibg"] / 0.5)
+
     # F2_hkl = croibg / denom for some denom (C_Lorentz * C_rod_intersect);
     # recover it from the already-computed F2_hkl and croibg rather than
     # re-deriving C_Lorentz/C_rod_intersect's exact ROI-weighted average.

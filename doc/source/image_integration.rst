@@ -103,7 +103,7 @@ correction switched on or off.
 
 Below the button, a status line abbreviates the enabled corrections in colour:
 ``MASK`` (pixel mask), ``SOLA`` (solid angle), ``POL`` (polarization),
-``LOR`` (Lorentz factor and rod interception), ``FOOT`` (beam footprint) and
+``LOR`` (Lorentz correction), ``FOOT`` (beam footprint) and
 ``NORM`` (exposure and monitor normalization). With nothing enabled it reads
 *no corrections applied*. Hovering the line explains each abbreviation.
 
@@ -116,10 +116,16 @@ workflows rather than duplicated.
 Geometrical Corrections
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-``Lorentz and rod interception`` divides out the Lorentz factor :math:`L` and
-the rod interception :math:`C_\mathrm{rod}`, and stores the structure factor
+``Lorentz correction`` divides out the Lorentz factor :math:`L` and stores the
+structure factor. A rocking scan also divides out the rod interception
+:math:`C_\mathrm{rod}`:
 
-.. math:: F^2_{hkl} = \frac{I_\mathrm{corr}}{L \cdot C_\mathrm{rod}}
+.. math::
+
+   F^2_{hkl,\mathrm{rocking}} &=
+      \frac{I_\mathrm{corr}}{L_\mathrm{rocking} C_\mathrm{rod}} \\
+   F^2_{hkl,\mathrm{stationary}} &=
+      \frac{I_\mathrm{corr}}{L_\mathrm{stationary}}
 
 The factors are those tabulated for the **z-axis geometry** in Appendix A of
 the ANA/ROD manual (E. Vlieg, *J. Appl. Cryst.* **30** (1997) 532), with
@@ -131,7 +137,7 @@ in-plane and :math:`\gamma` the out-of-plane detector angle:
    L_\mathrm{rocking} &= \frac{1}{\sin\delta\,\cos\alpha\,\cos\gamma} \\
    L_\mathrm{reflectivity} &= \frac{1}{\sin 2\alpha} \\
    L_\mathrm{stationary} &= \frac{1}{\sin\gamma} \\
-   C_\mathrm{rod} &= \cos\gamma
+   C_\mathrm{rod,rocking} &= \cos\gamma
 
 The three Lorentz factors are alternatives, not factors to be combined, and
 orGUI selects between them by how the scan was measured:
@@ -141,7 +147,10 @@ orGUI selects between them by how the scan was measured:
 * a **rocking scan** about the incidence angle (``mu``), which is how a
   reflectivity curve is measured, uses :math:`L_\mathrm{reflectivity}`,
 * a **stationary scan** (``hklscan`` and ``fixed``), integrated across the rod
-  on the area detector, uses :math:`L_\mathrm{stationary}`.
+  on the area detector, uses :math:`L_\mathrm{stationary}` without a rod
+  interception factor. Vlieg's stationary expression, equation (54), omits
+  :math:`C_\mathrm{rod}` because the detector already integrates across the
+  rod.
 
 Using the rocking-scan factor for a stationary scan, or the reverse, is a
 silent scaling error, which is why the choice follows the integration mode
@@ -171,8 +180,8 @@ can be used.
 Footprint Corrections
 ~~~~~~~~~~~~~~~~~~~~~
 
-``Beam footprint`` applies two corrections that depend on the incidence angle
-:math:`\alpha` and on the
+``Beam footprint`` applies one numerical active-area correction that depends
+on the incidence angle :math:`\alpha` and on the
 vertical profile :math:`p(z)` of the incident beam, normalized to
 :math:`\int p(z)\,\mathrm{d}z = 1`. With a sample of length :math:`L` along the
 beam, its projected size across the beam is :math:`h(\alpha) = L\sin\alpha`,
@@ -185,13 +194,28 @@ and with the sample centered at :math:`z_0`:
    C_\mathrm{area} = \frac{C_\mathrm{flux}}{p_\mathrm{max}\,h}
 
 ``C_flux_on_sample`` is the fraction of the incident flux that strikes the
-sample, correcting the beam overspill at grazing incidence. ``C_illum_area``
-is the mean of :math:`p(z)/p_\mathrm{max}` over the projected sample
-footprint, the active surface area seen by the measurement; it tends to 1 when
-the sample is small compared with the beam and falls off as
-:math:`1/\sin\alpha` once the beam is fully on the sample. Integrated
-intensities are divided by the product of the two, and both factors are stored
-alongside the result.
+sample. It is the overlap integral in the numerator of ``C_illum_area`` and is
+stored as a diagnostic. ``C_illum_area`` is the mean of
+:math:`p(z)/p_\mathrm{max}` over the projected sample footprint: Vlieg's
+numerically illuminated active surface area, up to an angle-independent
+normalization. It tends to 1 when a centered sample is small compared with the
+beam and falls off as :math:`1/\sin\alpha` once the beam is fully on the
+sample.
+
+Integrated intensities are divided by ``C_illum_area`` only. Dividing by
+``C_flux_on_sample`` as well would count the same beam/sample overlap twice,
+because
+
+.. math::
+
+   C_\mathrm{illum\ area} =
+   \frac{1}{p_\mathrm{max}L\sin\alpha}
+   \int_{z_0-h/2}^{z_0+h/2}p(z)\,\mathrm{d}z.
+
+This is the one-dimensional form of equations (40)--(41) and (54) of Vlieg
+(1997). For a beam that clips a sample edge, the overlap can initially grow
+faster than :math:`\sin\alpha`, so the active-area factor can rise before it
+turns over to its large-angle :math:`1/\sin\alpha` behavior.
 
 Only the cumulative integral of :math:`p(z)` and its peak value enter these
 expressions, so any distribution can describe the beam. The ``options``
@@ -208,11 +232,11 @@ All widths are entered in micrometers.
    to and including v1.5.0.
 
 ``Top hat``
-   A beam of uniform intensity, as defined by a slit. ``C_flux_on_sample``
-   is then ``L sin(alpha) / width`` until the sample intercepts the whole
-   beam, and ``C_illum_area`` stays at 1 over the same range. This is the
-   linear geometrical correction of Gibaud, Vignaud & Sinha (1993),
-   *Acta Cryst.* A49, 642, equation (12).
+   A beam of uniform intensity, as defined by a slit. ``C_flux_on_sample`` is
+   then ``L sin(alpha) / width`` until the sample intercepts the whole beam,
+   while the applied ``C_illum_area`` stays at 1 over the same range because
+   the entire finite sample sees the peak intensity. Once the full beam is on
+   the sample, ``C_illum_area`` falls as ``width / (L sin(alpha))``.
 
 ``Trapezoid``
    Two slits of different aperture, entered as the base and flat-top widths.

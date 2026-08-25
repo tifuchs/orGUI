@@ -1,10 +1,10 @@
 """Regression tests for the stationary-scan correction factors.
 
 :mod:`orgui.app.integration_corrections` assembles the divisors a stationary
-scan is corrected with, in the same convention the rocking-scan integration
-uses: the footprint and normalization factors are divided out of the stored
-intensity, and the Lorentz factor and rod interception are divided out again
-to form the structure factor.
+scan is corrected with. The numerical active area and normalization are
+divided out of the stored intensity, and the stationary Lorentz factor is
+divided out to form the structure factor. Stationary integration has no
+rod-interception factor.
 """
 
 import numpy as np
@@ -95,13 +95,13 @@ def test_monitor_candidates_skip_multidimensional_counters():
 
 
 def test_stationary_factors_use_the_stationary_lorentz():
-    """The stationary mode must not use the rocking-scan Lorentz factor."""
+    """Stationary mode uses its Lorentz factor without rod interception."""
     factors = ic.stationary_correction_factors(ALPHA, DELTA, GAMMA, use_lorentz=True)
 
     np.testing.assert_allclose(
         factors["C_Lorentz"], gc.lorentz_stationary(GAMMA), rtol=1e-12
     )
-    np.testing.assert_allclose(factors["C_rod"], gc.rod_interception(GAMMA), rtol=1e-12)
+    assert "C_rod" not in factors
     assert not np.allclose(
         factors["C_Lorentz"], gc.lorentz_rocking_scan(DELTA, ALPHA, GAMMA)
     )
@@ -109,7 +109,7 @@ def test_stationary_factors_use_the_stationary_lorentz():
 
 
 def test_footprint_factors_depend_on_the_incidence_angle():
-    """The footprint corrections are evaluated at alpha, the mu circle."""
+    """The active area and its flux numerator use alpha, the mu circle."""
     profile = gaussian_profile(200e-6)
     factors = ic.stationary_correction_factors(
         ALPHA, DELTA, GAMMA, use_footprint=True, beam_profile=profile, sample_size=L
@@ -118,7 +118,8 @@ def test_footprint_factors_depend_on_the_incidence_angle():
     flux, area = profile.corrections(ALPHA, L)
     np.testing.assert_allclose(factors["C_flux_on_sample"], flux, rtol=1e-12)
     np.testing.assert_allclose(factors["C_illum_area"], area, rtol=1e-12)
-    # Grazing incidence intercepts less of the beam than steeper incidence.
+    # The intercepted fraction remains useful provenance, but is not itself
+    # an additional intensity divisor.
     assert factors["C_flux_on_sample"][0] < factors["C_flux_on_sample"][-1]
 
 
@@ -138,7 +139,7 @@ def test_footprint_without_a_profile_or_size_is_an_error():
 
 
 def test_corrections_are_divisors_applied_in_the_documented_order():
-    """Intensity is divided by normalization and footprint; F2 by Lorentz."""
+    """Intensity uses one footprint integral; stationary F2 only Lorentz."""
     divisor, _ = ic.normalization_divisor(_Scan(), True, ("mon",), 3)
     profile = top_hat_profile(300e-6)
     factors = ic.stationary_correction_factors(
@@ -158,17 +159,13 @@ def test_corrections_are_divisors_applied_in_the_documented_order():
         intensity, errors, factors
     )
 
-    expected = intensity / (
-        factors["C_norm"] * factors["C_flux_on_sample"] * factors["C_illum_area"]
-    )
+    expected = intensity / (factors["C_norm"] * factors["C_illum_area"])
     np.testing.assert_allclose(corrected, expected, rtol=1e-12)
     # The Lorentz factor belongs to the structure factor, not the intensity.
     assert not np.allclose(corrected, expected / factors["C_Lorentz"])
 
     f2, f2_errors = ic.structure_factor(corrected, corrected_errors, factors)
-    np.testing.assert_allclose(
-        f2, corrected / (factors["C_Lorentz"] * factors["C_rod"]), rtol=1e-12
-    )
+    np.testing.assert_allclose(f2, corrected / factors["C_Lorentz"], rtol=1e-12)
     # Dividing by a deterministic factor leaves the relative error alone.
     np.testing.assert_allclose(corrected_errors / corrected, errors / intensity)
     np.testing.assert_allclose(f2_errors / f2, errors / intensity)
@@ -192,9 +189,38 @@ def test_factors_broadcast_to_the_shape_of_alpha():
         ALPHA, DELTA, GAMMA, use_lorentz=True, normalization=2.0
     )
 
-    for name in ("C_norm", "C_Lorentz", "C_rod"):
+    for name in ("C_norm", "C_Lorentz"):
         assert factors[name].shape == ALPHA.shape
     np.testing.assert_allclose(factors["C_norm"], np.full(3, 2.0))
+
+
+def test_intercepted_flux_is_not_a_second_footprint_divisor():
+    """A fully illuminated finite sample is not corrected for overlap twice.
+
+    For a top-hat beam wider than the projected sample, ``C_flux`` is below
+    one while the entire finite sample sees peak intensity, so Vlieg's
+    numerical active area is one. The footprint correction must therefore
+    leave the intensity unchanged.
+    """
+    width = 2e-3
+    profile = top_hat_profile(width)
+    alpha = np.deg2rad(np.array([0.2]))
+    factors = ic.stationary_correction_factors(
+        alpha,
+        np.deg2rad(np.array([20.0])),
+        np.deg2rad(np.array([3.0])),
+        use_footprint=True,
+        beam_profile=profile,
+        sample_size=L,
+    )
+    assert factors["C_flux_on_sample"][0] < 1.0
+    assert factors["C_illum_area"][0] == pytest.approx(1.0)
+
+    corrected, _ = ic.apply_stationary_corrections(
+        np.array([100.0]), np.array([10.0]), factors
+    )
+
+    np.testing.assert_allclose(corrected, [100.0])
 
 
 def test_roi_mean_correction_is_independent_of_roi_size():

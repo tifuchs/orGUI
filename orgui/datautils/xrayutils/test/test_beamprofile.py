@@ -1,8 +1,9 @@
 """Regression tests for the incident-beam footprint corrections.
 
-These tests pin the two corrections defined in
-:mod:`orgui.datautils.xrayutils.beamprofile`, ``C_flux_on_sample`` (beam
-overspill) and ``C_illum_area`` (active surface area).
+These tests pin the two related quantities defined in
+:mod:`orgui.datautils.xrayutils.beamprofile`: ``C_flux_on_sample`` is the
+diagnostic beam/sample overlap, and ``C_illum_area`` is the numerical active
+surface-area divisor that already contains that overlap.
 
 The central requirement is that the numerical
 :class:`~orgui.datautils.xrayutils.beamprofile.MeasuredBeamProfile`
@@ -92,8 +93,8 @@ def test_corrections_preserve_the_shape_of_alpha():
     assert area.shape == alpha.shape
 
 
-def test_limiting_cases_of_both_corrections():
-    """Each correction tends to 1 in the regime it is meant to describe."""
+def test_limiting_cases_of_both_profile_quantities():
+    """Each profile quantity tends to 1 in its corresponding limit."""
     profile = MeasuredBeamProfile(*_sampled_gaussian(20e-6))
 
     # Sample much larger than the beam: it intercepts the whole flux.

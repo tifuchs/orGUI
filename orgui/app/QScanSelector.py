@@ -747,7 +747,7 @@ class QScanSelector(qt.QMainWindow):
         self.useMaskBox = qt.QCheckBox("Use pixel mask")
         self.useSolidAngleBox = qt.QCheckBox("Solid angle correction")
         self.usePolarizationBox = qt.QCheckBox("Polarization correction")
-        self.useLorentzBox = qt.QCheckBox("Lorentz and rod interception")
+        self.useLorentzBox = qt.QCheckBox("Lorentz correction")
         self.useFootprintBox = qt.QCheckBox("Beam footprint")
         self.useNormalizationBox = qt.QCheckBox("Normalize integrated intensities")
 
@@ -930,14 +930,14 @@ class QScanSelector(qt.QMainWindow):
             "useLorentzBox",
             "LOR",
             "#2aa198",
-            "Lorentz factor and rod interception; the structure factor F2_hkl "
-            "is calculated",
+            "Lorentz correction and F2_hkl; rocking scans also include rod "
+            "interception",
         ),
         (
             "useFootprintBox",
             "FOOT",
             "#859900",
-            "Beam overspill and active surface area from the beam profile",
+            "Numerical active surface area from the beam profile",
         ),
         (
             "useNormalizationBox",
@@ -1912,16 +1912,17 @@ class IntegrationOptionsDialog(qt.QDialog):
         geometryLayout = qt.QVBoxLayout()
         geometryLayout.addWidget(selector.useLorentzBox)
         selector.useLorentzBox.setToolTip(
-            "Divide out the Lorentz factor and the rod interception and store "
-            "the structure factor F2_hkl. The z-axis Lorentz factor depends "
-            "on how the scan was measured: 1/sin(gamma) for a stationary "
-            "scan, 1/(sin(delta) cos(alpha) cos(gamma)) for a rocking scan "
-            "and 1/sin(2 alpha) for a reflectivity rocking scan."
+            "Divide out the Lorentz factor and store the structure factor "
+            "F2_hkl. Rocking scans also divide out rod interception; "
+            "stationary scans do not. The z-axis Lorentz factor is "
+            "1/sin(gamma) for a stationary scan, "
+            "1/(sin(delta) cos(alpha) cos(gamma)) for a rocking scan and "
+            "1/sin(2 alpha) for a reflectivity rocking scan."
         )
         self.lorentzInfo = qt.QLabel(
             "<i>Stationary scans use the stationary-mode factor "
-            "1/sin(&gamma;), rocking scans their own; rod interception "
-            "cos(&gamma;) is applied with it.</i>"
+            "1/sin(&gamma;) without rod interception; rocking scans use "
+            "their own Lorentz factor and cos(&gamma;).</i>"
         )
         self.lorentzInfo.setWordWrap(True)
         # Wrapped labels report a one-line height to a layout that has not
@@ -1931,8 +1932,9 @@ class IntegrationOptionsDialog(qt.QDialog):
 
         geometryLayout.addWidget(selector.useFootprintBox)
         selector.useFootprintBox.setToolTip(
-            "Correct the beam overspill and the active surface area from the "
-            "vertical beam profile. Both depend on the incidence angle."
+            "Correct the numerical active surface area from the vertical "
+            "beam profile. Its overlap integral already includes beam "
+            "overspill and is applied only once."
         )
         self.footprintBtn = qt.QPushButton("Beam profile and sample size ...")
         self.footprintBtn.clicked.connect(self._openFootprintOptions)

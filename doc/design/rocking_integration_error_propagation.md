@@ -173,8 +173,9 @@ F2_hkl = croibg / (C_Lorentz * C_rod_intersect)
 F2_hkl_errors = raw_croibg_errors / (C_Lorentz * C_rod_intersect)
 ```
 
-`croibg` has the footprint correction (`C_flux_on_sample`, `C_illum_area`)
-folded in when the footprint button is checked; `raw_croibg_errors` does not
+In the affected implementation, `croibg` has both then-applied footprint
+factors (`C_flux_on_sample`, `C_illum_area`) folded in when the footprint
+button is checked; `raw_croibg_errors` does not
 — it is the error of the *uncorrected* integral. The two only agree when the
 footprint correction is off (`C_corr == 1` everywhere), which is presumably
 why this was never flagged.
@@ -515,3 +516,15 @@ know the old and new behavior differ.
   already-correct paths (`processImage_bg_Carr`, `processImage_Carr`, etc.) —
   verified correct during this pass (`(cpixel/bgpixel)^2` scaling, correction
   array applied after the fact) and should not be touched.
+
+## 2026-08 footprint-convention follow-up
+
+The statement above that footprint physics was not found wrong is superseded
+by a later comparison with Vlieg (1997), equations (40)--(41) and (54).
+`C_illum_area = C_flux_on_sample / (p_max L sin(alpha))` is already the
+numerically illuminated surface integral, up to an angle-independent scale.
+The integration multiplied it by `C_flux_on_sample` again, so an offset beam
+entered quadratically. Rocking and stationary integration now divide only by
+`C_illum_area`; the flux fraction remains saved as diagnostic provenance.
+The same audit found that stationary equation (54) has no rod-interception
+factor, so stationary `F2_hkl` now divides by its Lorentz factor alone.

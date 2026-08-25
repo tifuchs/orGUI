@@ -21,21 +21,20 @@
 # THE SOFTWARE.
 #
 # ###########################################################################*/
-r"""Incident-beam profiles for the footprint corrections of rocking scans.
+r"""Incident-beam profiles for numerical footprint corrections.
 
-Two corrections are applied to a rocking-scan intensity measured at incidence
-angle :math:`\alpha` on a sample of length :math:`L` along the beam (see
-:mod:`orgui.app.peak1Dintegr`):
+Two related quantities are evaluated at incidence angle :math:`\alpha` on a
+sample of length :math:`L` along the beam:
 
 ``C_flux_on_sample``
-    the fraction of the total incident flux that actually strikes the sample
-    (*beam overspill*: at grazing incidence part of the beam misses the
-    sample), and
+    the fraction of the total incident flux that actually strikes the sample.
+    This is the overlap integral used below and is stored as a diagnostic; it
+    is not an additional intensity divisor.
 
 ``C_illum_area``
-    the illuminated fraction of the sample footprint (*active surface area*),
-    referenced to a sample fully bathed in a beam of the profile's peak
-    intensity.
+    the numerical active surface area, referenced to a sample fully bathed in
+    a beam of the profile's peak intensity. This is the footprint divisor
+    applied to an integrated intensity.
 
 Both follow from the normalized vertical beam profile :math:`p(z)`, with
 :math:`\int p(z)\,\mathrm{d}z = 1`, where :math:`z` runs perpendicular to the
@@ -52,11 +51,11 @@ and the sample centered at :math:`z_0` in the beam,
     C_\mathrm{area} = \frac{C_\mathrm{flux}}{p_\mathrm{max}\, h}
 
 :math:`C_\mathrm{area}` is the mean of :math:`p(z)/p_\mathrm{max}` over the
-projected sample footprint. It tends to 1 when the sample is small compared
-with the beam -- the whole footprint then sees the peak intensity -- and falls
-off as :math:`1/\sin\alpha` once the beam is fully on the sample, which is the
-usual active-area behavior. :math:`C_\mathrm{flux}` tends to 1 in the opposite
-limit, when the sample intercepts the whole beam.
+projected sample footprint. It is the one-dimensional form of Vlieg's
+numerically illuminated area, so it already contains the overlap integral
+:math:`C_\mathrm{flux}`. Multiplying the two would count beam overspill twice.
+It tends to 1 when the sample is small compared with a centered beam and falls
+off as :math:`1/\sin\alpha` once the beam is fully on the sample.
 
 For a Gaussian :math:`p` both integrals have the closed form orGUI used before
 this module existed, reproduced exactly by :class:`GaussianBeamProfile`.
@@ -116,8 +115,8 @@ _FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 class BeamProfile(ABC):
     """Vertical intensity profile of the incident beam.
 
-    Subclasses provide the two footprint corrections of a rocking scan for
-    arbitrarily shaped arrays of incidence angles.
+    Subclasses provide the applied active-area factor and its intercepted-flux
+    diagnostic for arbitrarily shaped arrays of incidence angles.
     """
 
     @abstractmethod
@@ -142,11 +141,13 @@ class BeamProfile(ABC):
         """
 
     def corrections(self, alpha, L):
-        """Return both footprint corrections.
+        """Return the intercepted flux and numerical active area.
 
         :param alpha: Incidence angle(s) in radian, any array shape.
         :param float L: Sample size along the beam, in meters.
-        :returns: ``(C_flux_on_sample, C_illum_area)``.
+        :returns: ``(C_flux_on_sample, C_illum_area)``. Only
+            ``C_illum_area`` is an integrated-intensity divisor;
+            ``C_flux_on_sample`` is its diagnostic numerator.
         :rtype: tuple
         """
         return self.flux_on_sample(alpha, L), self.illuminated_area_fraction(alpha, L)
