@@ -2117,6 +2117,56 @@ class TestLayerStacking(unittest.TestCase):
             density_perturbed, density_baseline, atol=5e-2, rtol=1e-2
         )
 
+    def test_epitaxy_asymmetry_crossing_a_structural_layer_boundary_is_continuous(
+        self,
+    ):
+        """A structural-layer-boundary crossing must not jump either.
+
+        Regression test for the ``ideal_top_loc``/``ideal_bottom_loc`` anchor
+        (used to register the interface's generated material against the
+        semi-infinite bulk). Two issues stacked here:
+
+        1. ``ideal_top[layer_no_loc][uc_no_loc][2, 3]`` is ``uc_no_loc`` in
+           unit-cell units (``top_layer_offset`` is always 0), so converting
+           the ``loc_rescaled % n_layers`` structural-layer remainder into
+           that same unit-cell scale requires dividing by ``n_layers``. A
+           previous ``% 1`` returned the structural-layer fractional part
+           directly instead, silently dropping the integer ``layer_no_loc``
+           contribution, and jumped by up to one full structural layer every
+           time ``loc`` crossed a structural-layer boundary rather than only
+           a full unit-cell boundary -- ``n_layers`` times more often than
+           intended.
+        2. ``ideal_bottom_loc`` additionally has to land on an *exact*
+           integer number of unit cells (see
+           ``test_epitaxy_small_asymmetry_perturbation_does_not_void_density``'s
+           sibling test below for why); a merely continuous but fractional
+           anchor still misregisters the fixed-bulk cancellation.
+
+        ``asymmetry`` is chosen so ``loc`` crosses an integer (a
+        structural-layer boundary) while staying within the same unit cell
+        (``floor(loc) // n_layers`` unchanged, only ``loc % n_layers``
+        crossing its own floor); see the ``SkellamProfile.parameters``
+        formula ``mu1 - mu2 == width**2 * n_layers**2 * asymmetry`` for how
+        this maps to a specific ``asymmetry`` pair for this fixture's
+        ``width=0.5`` on a 3-layer cell.
+        """
+        baseline = self.make_epitaxy_interface()
+        perturbed = self.make_epitaxy_interface()
+        baseline.basis[1] = 0.888
+        perturbed.basis[1] = 0.890
+
+        z = np.linspace(-20.0, 20.0, 801)
+        density_baseline = np.abs(baseline.zDensity_G(z, 0.0, 0.0))
+        density_perturbed = np.abs(perturbed.zDensity_G(z, 0.0, 0.0))
+
+        # atol stays far below the ~1.4 deviation the pre-fix anchor produced
+        # for this same pair while allowing for the modest, expected change
+        # from a genuinely non-infinitesimal (0.002) asymmetry step (the
+        # fully fixed anchor measures ~0.02 here).
+        np.testing.assert_allclose(
+            density_perturbed, density_baseline, atol=5e-2, rtol=1e-2
+        )
+
     def test_epitaxy_strain_coupled_field_is_anchored_to_deep_bulk(self):
         top, bottom = self.make_epitaxy_cells()
         width = 30.0 / bottom.a[2]

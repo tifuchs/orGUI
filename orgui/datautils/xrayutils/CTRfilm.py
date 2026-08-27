@@ -861,17 +861,40 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             loc_rescaled = loc - unitcells[0]
             uc_no_loc = int(np.floor(loc_rescaled)) // n_layers
             layer_no_loc = int(np.floor(loc_rescaled)) % n_layers
-            loc_remainder = (loc_rescaled % n_layers) % 1
+            # `ideal_top[layer_no_loc][uc_no_loc][2, 3]` (== uc_no_loc; see
+            # ideal_top_i above, since top_layer_offset is 0 for every
+            # generated layer) is in unit-cell units, where one full unit
+            # cell spans n_layers structural layers. Dividing by n_layers
+            # converts the structural-layer remainder into that same
+            # unit-cell scale; the previous `% 1` instead returned the
+            # structural-layer fractional part directly, which is off by a
+            # factor of n_layers and additionally drops the integer
+            # `layer_no_loc` contribution entirely. That made this anchor
+            # discontinuous every time `loc` crossed a structural-layer
+            # boundary rather than only every full unit cell, rigidly
+            # misregistering the whole interface against the semi-infinite
+            # bulk by up to one structural layer.
+            loc_remainder = (loc_rescaled % n_layers) / n_layers
             ideal_top_loc_mat = ideal_top[layer_no_loc][uc_no_loc]
             ideal_top_loc = (
                 ideal_top_loc_mat[2, 3]
                 + loc_remainder * ideal_top_loc_mat[2, 2]
             ) * a3_top
-            ideal_bottom_loc_mat = ideal_bottom[layer_no_loc][uc_no_loc]
-            ideal_bottom_loc = (
-                ideal_bottom_loc_mat[2, 3]
-                + loc_remainder * ideal_bottom_loc_mat[2, 2]
-            ) * a3_bottom
+            # Unlike ideal_top_loc, this anchor must land on an exact integer
+            # number of bottom unit cells: the "fixed bulk" domains built
+            # from it below are a like-for-like replica of the semi-infinite
+            # bulk sum (UnitCell.F_bulk/zDensity_G_asbulk), which only has
+            # material at those exact integer repeats. A fractional shift
+            # here (this used the same continuous ideal_top_loc-style
+            # formula until this fix) leaves the fixed-bulk subtraction
+            # registered between two real bulk repeats instead of on one,
+            # so it cancels neither and the interface density collapses
+            # near the transition for whichever asymmetries push the
+            # nearby structural-layer remainder far enough from a unit-cell
+            # boundary. Rounding to the nearest unit cell keeps this anchor
+            # close to loc (bounded numerical error away from the
+            # transition) while guaranteeing exact bulk registration.
+            ideal_bottom_loc = round(loc_rescaled / n_layers) * a3_bottom
 
             offset_absolute = self._offset_absolute
             occupancy_low = np.min(probability_top)
