@@ -2083,6 +2083,40 @@ class TestLayerStacking(unittest.TestCase):
                 np.any(np.asarray(layer.coherentDomainOccupancy[split:]) < 0.0)
             )
 
+    def test_epitaxy_small_asymmetry_perturbation_does_not_void_density(self):
+        """A tiny nonzero Skellam asymmetry must not collapse the density.
+
+        Regression test for a sharp/transitional cell classification that
+        compared each generated cell's integer index against the continuous
+        distribution mean ``loc = mu1 - mu2`` instead of the cell's own
+        smooth occupancy. The two only agree when ``loc`` lands exactly on a
+        cell boundary, which is true at ``asymmetry == 0`` but not for any
+        nonzero asymmetry: a cell straddling ``loc`` then flipped between
+        "fully sharp bulk" and "fully transitional" although its actual
+        occupancy barely changed, subtracting a full unit of already-counted
+        bulk material at a cell that was only partially bulk. That collapsed
+        the interface density to near zero for any nonzero asymmetry,
+        however small. A physically sound implementation must vary
+        continuously with the asymmetry parameter: a perturbation of 1e-4
+        should change the density by a comparably small amount, not by
+        orders of magnitude.
+        """
+        baseline = self.make_epitaxy_interface()
+        perturbed = self.make_epitaxy_interface()
+        perturbed.basis[1] = 1e-4
+
+        z = np.linspace(-20.0, 20.0, 801)
+        density_baseline = np.abs(baseline.zDensity_G(z, 0.0, 0.0))
+        density_perturbed = np.abs(perturbed.zDensity_G(z, 0.0, 0.0))
+
+        # atol stays far below the ~0.78 deviation the pre-fix classification
+        # produced for this same perturbation (the fixed classification
+        # measures ~0.02 here) while allowing for the separate anchor
+        # registration imprecision fixed below.
+        np.testing.assert_allclose(
+            density_perturbed, density_baseline, atol=5e-2, rtol=1e-2
+        )
+
     def test_epitaxy_strain_coupled_field_is_anchored_to_deep_bulk(self):
         top, bottom = self.make_epitaxy_cells()
         width = 30.0 / bottom.a[2]

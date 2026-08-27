@@ -723,9 +723,17 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 (-1, n_layers)
             )
             probability_bottom = 1.0 - probability_top
-            sharp_top = (
-                (unitcells >= loc).astype(np.float64).reshape((-1, n_layers))
-            )
+            # Classify each generated cell by its own smooth occupancy, not by
+            # comparing its integer index against the continuous distribution
+            # mean `loc`. The two agree only when `loc` sits exactly on a cell
+            # boundary (the symmetric asymmetry=0 case); any nonzero asymmetry
+            # moves `loc` off that boundary, so a cell straddling it flipped
+            # from "fully sharp bulk" to "fully transitional" (or back)
+            # although its actual occupancy barely changed -- subtracting a
+            # full unit of already-counted bulk at a cell that is only
+            # partially bulk, which collapsed the interface density to near
+            # zero for any nonzero asymmetry.
+            sharp_top = (probability_top >= 0.5).astype(np.float64)
             sharp_bottom = 1.0 - sharp_top
             strain_coupling = self.basis[2]
             if (
