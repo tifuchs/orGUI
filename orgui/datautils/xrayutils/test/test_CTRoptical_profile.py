@@ -280,29 +280,29 @@ class TestLayeredWavefield(unittest.TestCase):
     energy_eV = 10000.0
 
     @staticmethod
-    def _q(n, energy_eV, alpha):
+    def _kz(n, energy_eV, alpha):
         wavelength = CTRoptics.HC_KEV_ANGSTROM / (energy_eV * 1e-3)
         k0 = 2.0 * np.pi / wavelength
         if n == 1.0:
-            return k0 * np.sin(np.deg2rad(alpha))
-        q = k0 * np.sqrt(
-            n**2 - np.cos(np.deg2rad(alpha)) ** 2
-        )
-        if q.imag > 0.0:
-            q = -q
-        return q
+            return -k0 * np.sin(alpha)
+        kz = -k0 * np.sqrt(n**2 - np.cos(alpha) ** 2)
+        if kz.imag < 0.0 or (kz.imag == 0.0 and kz.real > 0.0):
+            kz = -kz
+        return kz
 
     def test_single_interface_matches_fresnel_and_conserves_flux(self):
         profile = np.array([[-10.0, 1.0e-5, 0.0], [0.0, 0.0, 0.0]])
-        alpha = 1.0
+        alpha = np.deg2rad(1.0)
 
         for polarization in ("s", "p"):
-            field = CTRoptics.solve_wavefield(
+            field = CTRoptics.solve_electric_field(
                 profile, self.energy_eV, alpha, polarization
             )
             n = np.array([1.0 + 0.0j, 1.0 - 1.0e-5 + 0.0j])
-            q = np.array([self._q(value, self.energy_eV, alpha) for value in n])
-            admittance = q if polarization == "s" else n**2 / q
+            kz = np.array(
+                [self._kz(value, self.energy_eV, alpha) for value in n]
+            )
+            admittance = -kz if polarization == "s" else -(n**2) / kz
             expected_r = (admittance[0] - admittance[1]) / (
                 admittance[0] + admittance[1]
             )
@@ -327,19 +327,17 @@ class TestLayeredWavefield(unittest.TestCase):
                 [0.0, incident_delta, 0.0],
             ]
         )
-        alpha = 0.02
+        alpha = np.deg2rad(0.02)
 
-        field = CTRoptics.solve_wavefield(
+        field = CTRoptics.solve_electric_field(
             profile, self.energy_eV, alpha, "s"
         )
         wavelength = CTRoptics.HC_KEV_ANGSTROM / (self.energy_eV * 1e-3)
         k0 = 2.0 * np.pi / wavelength
         n_incident = 1.0 - incident_delta
-        expected_q_incident = (
-            k0 * n_incident * np.sin(np.deg2rad(alpha))
-        )
+        expected_kz_incident = -k0 * n_incident * np.sin(alpha)
 
-        np.testing.assert_allclose(-field.kz[0], expected_q_incident, rtol=1e-13)
+        np.testing.assert_allclose(field.kz[0], expected_kz_incident, rtol=1e-13)
         np.testing.assert_allclose(abs(field.r_S) ** 2, 1.0, rtol=1e-12)
 
     def test_amplitudes_satisfy_interface_continuity(self):
@@ -350,17 +348,19 @@ class TestLayeredWavefield(unittest.TestCase):
                 [20.0, 0.0, 0.0],
             ]
         )
-        field = CTRoptics.solve_wavefield(profile, self.energy_eV, 1.2, "p")
-        q = -field.kz
-        admittance = field.n**2 / q
+        field = CTRoptics.solve_electric_field(
+            profile, self.energy_eV, np.deg2rad(1.2), "p"
+        )
+        kz = field.kz
+        admittance = -(field.n**2) / kz
 
         for interface, z_value in enumerate(field.z_interfaces):
             depth = field.z_reference[interface] - z_value
             down = field.A_plus[interface] * np.exp(
-                -1j * q[interface] * depth
+                1j * kz[interface] * depth
             )
             up = field.A_minus[interface] * np.exp(
-                1j * q[interface] * depth
+                -1j * kz[interface] * depth
             )
             lower_down = field.A_plus[interface + 1]
             lower_up = field.A_minus[interface + 1]
@@ -376,43 +376,47 @@ class TestLayeredWavefield(unittest.TestCase):
 
     def test_absorbing_substrate_field_decays_with_depth(self):
         profile = np.array([[-40.0, 1.0e-5, 2.0e-6], [0.0, 0.0, 0.0]])
-        field = CTRoptics.solve_wavefield(profile, self.energy_eV, 1.0, "s")
+        field = CTRoptics.solve_electric_field(
+            profile, self.energy_eV, np.deg2rad(1.0), "s"
+        )
+        sampled = CTRoptics.sample_electric_field(field, profile[0, 0])
 
-        self.assertLess(abs(field.psi[0]), abs(field.t_S))
-        q_substrate = -field.kz[-1]
-        depth = field.z_interfaces[-1] - field.z[0]
-        expected = abs(field.t_S) * np.exp(q_substrate.imag * depth)
-        np.testing.assert_allclose(abs(field.psi[0]), expected, rtol=1e-12)
+        self.assertLess(abs(sampled), abs(field.t_S))
+        kz_substrate = field.kz[-1]
+        depth = field.z_interfaces[-1] - profile[0, 0]
+        expected = abs(field.t_S) * np.exp(-kz_substrate.imag * depth)
+        np.testing.assert_allclose(abs(sampled), expected, rtol=1e-12)
 
     def test_single_interface_critical_angle(self):
         delta = 1.0e-5
         profile = np.array([[-10.0, delta, 0.0], [0.0, 0.0, 0.0]])
-        alpha_c = np.rad2deg(np.sqrt(2.0 * delta))
+        alpha_c = np.sqrt(2.0 * delta)
 
-        below = CTRoptics.solve_wavefield(
+        below = CTRoptics.solve_electric_field(
             profile, self.energy_eV, 0.5 * alpha_c, "s"
         )
-        above = CTRoptics.solve_wavefield(
+        above = CTRoptics.solve_electric_field(
             profile, self.energy_eV, 2.0 * alpha_c, "s"
         )
 
         np.testing.assert_allclose(abs(below.r_S) ** 2, 1.0, rtol=1e-12)
         self.assertLess(abs(above.r_S) ** 2, 1.0)
-        self.assertLess((-below.kz[-1]).imag, 0.0)
+        self.assertGreater(below.kz[-1].imag, 0.0)
 
     def test_p_polarization_is_finite_at_exact_substrate_critical_angle(self):
         delta = 1.0e-5
         profile = np.array([[-10.0, delta, 0.0], [0.0, 0.0, 0.0]])
-        alpha_c = np.rad2deg(np.arccos(1.0 - delta))
+        alpha_c = np.arccos(1.0 - delta)
 
-        field = CTRoptics.solve_wavefield(
+        field = CTRoptics.solve_electric_field(
             profile, self.energy_eV, alpha_c, "p"
         )
 
         np.testing.assert_allclose(-field.kz[-1], 0.0, atol=0.0)
         np.testing.assert_allclose(field.r_S, -1.0, rtol=1e-14)
         np.testing.assert_allclose(field.t_S, 0.0, atol=0.0)
-        self.assertTrue(np.all(np.isfinite(field.psi)))
+        sampled = CTRoptics.sample_electric_field(field, profile[:, 0])
+        self.assertTrue(np.all(np.isfinite(sampled)))
         self.assertTrue(np.all(np.isfinite(field.A_plus)))
         self.assertTrue(np.all(np.isfinite(field.A_minus)))
 
@@ -425,25 +429,28 @@ class TestLayeredWavefield(unittest.TestCase):
                 [20.0, 0.0, 0.0],
             ]
         )
-        alpha_c = np.rad2deg(np.arccos(1.0 - delta))
+        alpha_c = np.arccos(1.0 - delta)
 
-        exact = CTRoptics.solve_wavefield(
+        exact = CTRoptics.solve_electric_field(
             profile, self.energy_eV, alpha_c, "p"
         )
-        below = CTRoptics.solve_wavefield(
+        below = CTRoptics.solve_electric_field(
             profile, self.energy_eV, alpha_c * (1.0 - 1.0e-8), "p"
         )
-        above = CTRoptics.solve_wavefield(
+        above = CTRoptics.solve_electric_field(
             profile, self.energy_eV, alpha_c * (1.0 + 1.0e-8), "p"
         )
 
         np.testing.assert_allclose(-exact.kz[1], 0.0, atol=0.0)
-        self.assertTrue(np.all(np.isfinite(exact.psi)))
+        exact_E = CTRoptics.sample_electric_field(exact, profile[:, 0])
+        below_E = CTRoptics.sample_electric_field(below, profile[:, 0])
+        above_E = CTRoptics.sample_electric_field(above, profile[:, 0])
+        self.assertTrue(np.all(np.isfinite(exact_E)))
         self.assertTrue(np.isfinite(exact.r_S))
         np.testing.assert_allclose(below.r_S, exact.r_S, rtol=1e-7)
         np.testing.assert_allclose(above.r_S, exact.r_S, rtol=1e-7)
-        np.testing.assert_allclose(below.psi, exact.psi, rtol=1e-7)
-        np.testing.assert_allclose(above.psi, exact.psi, rtol=1e-7)
+        np.testing.assert_allclose(below_E, exact_E, rtol=1e-7)
+        np.testing.assert_allclose(above_E, exact_E, rtol=1e-7)
 
     def test_vectorized_reflection_matches_scalar_wavefields(self):
         delta = 1.0e-5
@@ -454,8 +461,8 @@ class TestLayeredWavefield(unittest.TestCase):
                 [20.0, 0.0, 0.0],
             ]
         )
-        alpha_c = np.rad2deg(np.arccos(1.0 - delta))
-        angles = np.array([0.1, alpha_c, 0.5, 1.0])
+        alpha_c = np.arccos(1.0 - delta)
+        angles = np.array([np.deg2rad(0.1), alpha_c, np.deg2rad(0.5), np.deg2rad(1.0)])
 
         for polarization in ("s", "p"):
             actual = CTRoptics._specular_reflection(
@@ -463,7 +470,7 @@ class TestLayeredWavefield(unittest.TestCase):
             )
             expected = np.array(
                 [
-                    CTRoptics.solve_wavefield(
+                    CTRoptics.solve_electric_field(
                         profile, self.energy_eV, angle, polarization
                     ).r_S
                     for angle in angles
@@ -481,26 +488,35 @@ class TestLayeredWavefield(unittest.TestCase):
                 [20.0, 0.0, 0.0],
             ]
         )
-        alpha_c = np.rad2deg(np.arccos(1.0 - delta))
-        angles = np.array([[0.1, alpha_c], [0.5, 1.0]])
-
-        vector = CTRoptics.solve_wavefield(
-            profile, self.energy_eV, angles, "p"
+        alpha_c = np.arccos(1.0 - delta)
+        angles = np.array(
+            [
+                [np.deg2rad(0.1), alpha_c],
+                [np.deg2rad(0.5), np.deg2rad(1.0)],
+            ]
         )
 
-        self.assertEqual(vector.psi.shape, (len(profile), *angles.shape))
+        vector = CTRoptics.solve_electric_field(
+            profile, self.energy_eV, angles, "p"
+        )
+        vector_E = CTRoptics.sample_electric_field(vector, profile[:, 0])
+
+        self.assertEqual(vector_E.shape, (len(profile), *angles.shape))
         self.assertEqual(vector.kz.shape, (len(profile), *angles.shape))
         self.assertEqual(vector.A_plus.shape, (len(profile), *angles.shape))
         self.assertEqual(vector.A_minus.shape, (len(profile), *angles.shape))
         self.assertEqual(vector.r_S.shape, angles.shape)
         self.assertEqual(vector.t_S.shape, angles.shape)
         for index in np.ndindex(angles.shape):
-            scalar = CTRoptics.solve_wavefield(
+            scalar = CTRoptics.solve_electric_field(
                 profile, self.energy_eV, angles[index], "p"
             )
+            scalar_E = CTRoptics.sample_electric_field(
+                scalar, profile[:, 0]
+            )
             np.testing.assert_allclose(
-                vector.psi[(slice(None), *index)],
-                scalar.psi,
+                vector_E[(slice(None), *index)],
+                scalar_E,
                 rtol=1e-12,
                 atol=1e-12,
             )
@@ -528,13 +544,17 @@ class TestLayeredWavefield(unittest.TestCase):
                 [1.5 * thickness, 0.0, 0.0],
             ]
         )
-        alpha = 1.5
-        field = CTRoptics.solve_wavefield(profile, self.energy_eV, alpha, "s")
+        alpha = np.deg2rad(1.5)
+        field = CTRoptics.solve_electric_field(
+            profile, self.energy_eV, alpha, "s"
+        )
         n = np.array([1.0, 1.0 - 5.0e-6, 1.0 - 1.4e-5])
-        q = np.array([self._q(value, self.energy_eV, alpha) for value in n])
-        r01 = (q[0] - q[1]) / (q[0] + q[1])
-        r12 = (q[1] - q[2]) / (q[1] + q[2])
-        phase = np.exp(-1j * q[1] * thickness)
+        kz = np.array(
+            [self._kz(value, self.energy_eV, alpha) for value in n]
+        )
+        r01 = (kz[0] - kz[1]) / (kz[0] + kz[1])
+        r12 = (kz[1] - kz[2]) / (kz[1] + kz[2])
+        phase = np.exp(1j * kz[1] * thickness)
         expected = (r01 + r12 * phase**2) / (
             1.0 + r01 * r12 * phase**2
         )
@@ -545,15 +565,19 @@ class TestLayeredWavefield(unittest.TestCase):
         bulk = unitcells.unitcell("Pt100")
         bulk.setEnergy(self.energy_eV)
         crystal = CTRcalc.SXRDCrystal(bulk)
-        angles = np.array([0.5, 1.0, 2.0])
+        angles = np.deg2rad([0.5, 1.0, 2.0])
 
         s = crystal.specular_reflectivity(angles, "s")
         p = crystal.specular_reflectivity(angles, "p")
         unpolarized = crystal.specular_reflectivity(angles, "unpolarized")
 
         np.testing.assert_allclose(unpolarized, 0.5 * (s + p))
-        self.assertIsInstance(crystal.specular_reflectivity(1.0), float)
-        self.assertEqual(crystal.wavefield(1.0).polarization, "s")
+        self.assertIsInstance(
+            crystal.specular_reflectivity(np.deg2rad(1.0)), float
+        )
+        self.assertEqual(
+            crystal.wavefield(np.deg2rad(1.0)).polarization, "s"
+        )
         grid = angles.reshape(1, -1)
         np.testing.assert_allclose(
             crystal.specular_reflectivity(grid, "p"),
@@ -566,7 +590,7 @@ class TestLayeredWavefield(unittest.TestCase):
         crystal = CTRcalc.SXRDCrystal(bulk)
         full = crystal.optical_profile()
         simplified = crystal.simplified_optical_profile()
-        angles = np.array([0.5, 1.0, 2.0])
+        angles = np.deg2rad([0.5, 1.0, 2.0])
 
         self.assertEqual(len(full), 31)
         self.assertEqual(len(simplified), 3)
