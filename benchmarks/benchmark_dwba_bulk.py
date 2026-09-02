@@ -1,7 +1,7 @@
 """Non-gating serial native bulk-DWBA throughput benchmark.
 
-The scattering geometry is generated with the z-mode convenience API
-``SXRDCrystal.prepare_DWBA_Zmode``, so the benchmark measures the same call
+The scattering geometry is generated with the persistent DWBA state, so the
+benchmark measures the same call
 sequence a grazing-incidence CTR scan uses: one preparation for the rod,
 followed by repeated evaluations of the current atomic model. The timed
 comparison reports the cost of the corrected optional empirical attenuation
@@ -28,12 +28,12 @@ BENCHMARK_L_RANGE = (0.1, 3.0)
 
 
 def _timed_evaluations(crystal, prepared, repetitions, attenuation):
-    crystal.F_DWBA_prepared(
+    crystal.dwba.evaluate_prepared(
         prepared, bulk_attenuation=attenuation
     )
     start = time.perf_counter()
     for _ in range(repetitions):
-        crystal.F_DWBA_prepared(
+        crystal.dwba.evaluate_prepared(
             prepared, bulk_attenuation=attenuation
         )
     return time.perf_counter() - start
@@ -51,9 +51,10 @@ def _benchmark(points, atoms, repetitions, trials, attenuation):
     L = np.linspace(BENCHMARK_L_RANGE[0], BENCHMARK_L_RANGE[1], points)
 
     start = time.perf_counter()
-    prepared = crystal.prepare_DWBA_Zmode(
-        h, k, L, np.deg2rad(BENCHMARK_ALPHA_I_DEG), fixed="in"
+    crystal.dwba.set_ctr_geometry(
+        alpha_i=np.deg2rad(BENCHMARK_ALPHA_I_DEG)
     )
+    prepared = crystal.dwba.prepare(h, k, L)
     preparation = time.perf_counter() - start
 
     timings = {0.0: [], attenuation: []}
@@ -73,15 +74,15 @@ def _benchmark(points, atoms, repetitions, trials, attenuation):
         f"L in [{BENCHMARK_L_RANGE[0]:g}, {BENCHMARK_L_RANGE[1]:g}]"
     )
     print(
-        f"prepare_DWBA_Zmode: {points} points: "
+        f"dwba.prepare: {points} points: "
         f"{preparation:.6f} s, {points / preparation:,.0f} points/s"
     )
     print(
-        f"F_DWBA_prepared, no empirical attenuation: "
+        f"dwba.evaluate_prepared, no empirical attenuation: "
         f"{zero_elapsed:.6f} s, {evaluations / zero_elapsed:,.0f} points/s"
     )
     print(
-        f"F_DWBA_prepared, attenuation={attenuation:g}: "
+        f"dwba.evaluate_prepared, attenuation={attenuation:g}: "
         f"{attenuated_elapsed:.6f} s, "
         f"{evaluations / attenuated_elapsed:,.0f} points/s"
     )
