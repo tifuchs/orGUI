@@ -1217,9 +1217,15 @@ py::tuple solve_layered_electric_field(
         );
         field_top *= normalization;
         derivative_top *= normalization;
-        reflection_data[point] = 0.5 * (
+        const complex128 tangential_reflection = 0.5 * (
             field_top - derivative_top / incident_admittance
         );
+        // The transfer state stores tangential fields.  In the right-handed
+        // Renaud p basis, an upward branch has the opposite tangential sign,
+        // so convert at the public amplitude boundary and keep the stable
+        // transfer propagation itself unchanged.
+        reflection_data[point] = p_polarized
+            ? -tangential_reflection : tangential_reflection;
 
         field_reference[0] = field_top;
         derivative_reference[0] = derivative_top;
@@ -1260,9 +1266,11 @@ py::tuple solve_layered_electric_field(
             const complex128 plus = 0.5 * (
                 field_reference[medium] + difference
             );
-            const complex128 minus = 0.5 * (
+            const complex128 tangential_minus = 0.5 * (
                 field_reference[medium] - difference
             );
+            const complex128 minus = p_polarized
+                ? -tangential_minus : tangential_minus;
             plus_data[medium * points + point] = plus;
             minus_data[medium * points + point] = minus;
             if (medium_kz != complex128(0.0, 0.0)) {
@@ -1309,7 +1317,8 @@ py::tuple sample_layered_electric_field(
     const ComplexArray2D &A_minus,
     const Array1D &z_reference,
     const Array1D &z_interfaces,
-    const Array1D &z
+    const Array1D &z,
+    const std::string &polarization
 ) {
     const auto kz_info = kz.request();
     const auto plus_info = A_plus.request();
@@ -1323,6 +1332,9 @@ py::tuple sample_layered_electric_field(
     require_shape(reference_info, 1, "z_reference");
     require_shape(interface_info, 1, "z_interfaces");
     require_shape(z_info, 1, "z");
+    if (polarization != "s" && polarization != "p") {
+        throw py::value_error("polarization must be 's' or 'p'");
+    }
     if (plus_info.shape != kz_info.shape || minus_info.shape != kz_info.shape) {
         throw py::value_error("kz and amplitude arrays must have matching shapes");
     }
@@ -1357,9 +1369,12 @@ py::tuple sample_layered_electric_field(
             const complex128 phase = std::exp(
                 complex128(0.0, 1.0) * kz_data[offset] * depth
             );
-            E_data[sample * points + point] = (
-                plus_data[offset] * phase + minus_data[offset] / phase
-            );
+            E_data[sample * points + point] = plus_data[offset] * phase;
+            if (polarization == "p") {
+                E_data[sample * points + point] -= minus_data[offset] / phase;
+            } else {
+                E_data[sample * points + point] += minus_data[offset] / phase;
+            }
         }
     }
     }
@@ -1369,19 +1384,15 @@ py::tuple sample_layered_electric_field(
 py::array_t<double> homogeneous_bulk_optical_constants(
     const Array2D &basis,
     const Array2D &f_factors,
-    const IntArray1D &use_waasmaier_forward,
     const double scale_over_volume
 ) {
     const auto basis_info = basis.request();
     const auto factors_info = f_factors.request();
-    const auto ionic_info = use_waasmaier_forward.request();
     require_shape(basis_info, 2, "basis");
     require_shape(factors_info, 2, "f_factors");
-    require_shape(ionic_info, 1, "use_waasmaier_forward");
     if (basis_info.shape[1] < 7
         || factors_info.shape[0] != basis_info.shape[0]
-        || factors_info.shape[1] < 13
-        || ionic_info.shape[0] != basis_info.shape[0]) {
+        || factors_info.shape[1] < 13) {
         throw py::value_error("bulk optical atom arrays are inconsistent");
     }
     if (!std::isfinite(scale_over_volume) || scale_over_volume <= 0.0) {
@@ -1391,18 +1402,14 @@ py::array_t<double> homogeneous_bulk_optical_constants(
     auto *out = static_cast<double *>(result.request().ptr);
     const auto *basis_data = static_cast<const double *>(basis_info.ptr);
     const auto *factor_data = static_cast<const double *>(factors_info.ptr);
-    const auto *ionic_data = static_cast<const std::int64_t *>(ionic_info.ptr);
     double real_sum = 0.0;
     double imaginary_sum = 0.0;
     {
     py::gil_scoped_release release;
     for (py::ssize_t atom = 0; atom < basis_info.shape[0]; ++atom) {
-        double forward = get2(basis_data, basis_info, atom, 0);
-        if (ionic_data[atom] != 0) {
-            forward = get2(factor_data, factors_info, atom, 10);
-            for (int term = 0; term < 5; ++term) {
-                forward += get2(factor_data, factors_info, atom, term);
-            }
+        double forward = get2(factor_data, factors_info, atom, 10);
+        for (int term = 0; term < 5; ++term) {
+            forward += get2(factor_data, factors_info, atom, term);
         }
         const double occupancy = get2(basis_data, basis_info, atom, 6);
         real_sum += occupancy * (
@@ -1418,501 +1425,7 @@ py::array_t<double> homogeneous_bulk_optical_constants(
     return result;
 }
 
-py::array_t<complex128> unitcell_F_DWBA_bulk(
-    const Array2D &Q_parallel,
-    const ComplexArray2D &kz_i,
-    const ComplexArray2D &A_i_plus,
-    const ComplexArray2D &A_i_minus,
-    const ComplexArray2D &A_i_plus_over_kz,
-    const ComplexArray2D &A_i_minus_over_kz,
-    const ComplexArray2D &kz_f,
-    const ComplexArray2D &A_f_plus,
-    const ComplexArray2D &A_f_minus,
-    const ComplexArray2D &A_f_plus_over_kz,
-    const ComplexArray2D &A_f_minus_over_kz,
-    const Array1D &z_reference_i,
-    const Array1D &z_reference_f,
-    const Array1D &alpha_i,
-    const Array1D &alpha_f,
-    const Array1D &cos_azimuth,
-    const Array1D &sin_azimuth,
-    const double k0,
-    const std::string &polarization_i,
-    const std::string &polarization_f,
-    const IntArray1D &medium_index,
-    const bool semi_infinite,
-    const double attenuation,
-    const Array2D &basis,
-    const Array2D &f_factors,
-    const Array2D &r_mat,
-    const Array2D &r_mat_inv,
-    const Array3D &coherent_domain_matrix,
-    const Array1D &coherent_domain_occupancy
-) {
-    const auto Q_info = Q_parallel.request();
-    const auto kzi_info = kz_i.request();
-    const auto Aip_info = A_i_plus.request();
-    const auto Aim_info = A_i_minus.request();
-    const auto Aipk_info = A_i_plus_over_kz.request();
-    const auto Aimk_info = A_i_minus_over_kz.request();
-    const auto kzf_info = kz_f.request();
-    const auto Afp_info = A_f_plus.request();
-    const auto Afm_info = A_f_minus.request();
-    const auto Afpk_info = A_f_plus_over_kz.request();
-    const auto Afmk_info = A_f_minus_over_kz.request();
-    const auto zrefi_info = z_reference_i.request();
-    const auto zreff_info = z_reference_f.request();
-    const auto alphai_info = alpha_i.request();
-    const auto alphaf_info = alpha_f.request();
-    const auto cos_info = cos_azimuth.request();
-    const auto sin_info = sin_azimuth.request();
-    const auto medium_info = medium_index.request();
-    const auto basis_info = basis.request();
-    const auto factors_info = f_factors.request();
-    const auto r_info = r_mat.request();
-    const auto r_inv_info = r_mat_inv.request();
-    const auto domain_info = coherent_domain_matrix.request();
-    const auto occupancy_info = coherent_domain_occupancy.request();
-
-    require_shape(Q_info, 2, "Q_parallel");
-    require_shape(kzi_info, 2, "kz_i");
-    require_shape(Aip_info, 2, "A_i_plus");
-    require_shape(Aim_info, 2, "A_i_minus");
-    require_shape(Aipk_info, 2, "A_i_plus_over_kz");
-    require_shape(Aimk_info, 2, "A_i_minus_over_kz");
-    require_shape(kzf_info, 2, "kz_f");
-    require_shape(Afp_info, 2, "A_f_plus");
-    require_shape(Afm_info, 2, "A_f_minus");
-    require_shape(Afpk_info, 2, "A_f_plus_over_kz");
-    require_shape(Afmk_info, 2, "A_f_minus_over_kz");
-    require_shape(zrefi_info, 1, "z_reference_i");
-    require_shape(zreff_info, 1, "z_reference_f");
-    require_shape(alphai_info, 1, "alpha_i");
-    require_shape(alphaf_info, 1, "alpha_f");
-    require_shape(cos_info, 1, "cos_azimuth");
-    require_shape(sin_info, 1, "sin_azimuth");
-    require_shape(medium_info, 1, "medium_index");
-    require_shape(basis_info, 2, "basis");
-    require_shape(factors_info, 2, "f_factors");
-    require_shape(r_info, 2, "R_mat");
-    require_shape(r_inv_info, 2, "R_mat_inv");
-    require_shape(domain_info, 3, "coherentDomainMatrix");
-    require_shape(occupancy_info, 1, "coherentDomainOccupancy");
-
-    const auto points = Q_info.shape[0];
-    const auto media = kzi_info.shape[0];
-    const auto atoms = basis_info.shape[0];
-    const auto domains = domain_info.shape[0];
-    if (Q_info.shape[1] != 2) {
-        throw py::value_error("Q_parallel must have shape (N, 2)");
-    }
-    const auto same_field_shape = [media, points](const py::buffer_info &info) {
-        return info.shape[0] == media && info.shape[1] == points;
-    };
-    if (!same_field_shape(Aip_info) || !same_field_shape(Aim_info)
-        || !same_field_shape(Aipk_info) || !same_field_shape(Aimk_info)
-        || !same_field_shape(kzf_info) || !same_field_shape(Afp_info)
-        || !same_field_shape(Afm_info) || !same_field_shape(Afpk_info)
-        || !same_field_shape(Afmk_info)) {
-        throw py::value_error("all field arrays must have shape (media, points)");
-    }
-    if (zrefi_info.shape[0] != media || zreff_info.shape[0] != media) {
-        throw py::value_error("z-reference arrays must match the media count");
-    }
-    if (alphai_info.shape[0] != points || alphaf_info.shape[0] != points
-        || cos_info.shape[0] != points || sin_info.shape[0] != points) {
-        throw py::value_error("geometry arrays must match the point count");
-    }
-    if (basis_info.shape[1] < 7 || factors_info.shape[0] != atoms
-        || factors_info.shape[1] < 13 || medium_info.shape[0] != atoms) {
-        throw py::value_error("atom, factor, and medium arrays are inconsistent");
-    }
-    if (r_info.shape[0] != 3 || r_info.shape[1] != 3
-        || r_inv_info.shape[0] != 3 || r_inv_info.shape[1] != 3
-        || domain_info.shape[1] != 3 || domain_info.shape[2] != 4
-        || occupancy_info.shape[0] != domains) {
-        throw py::value_error("domain and real-space transforms have invalid shapes");
-    }
-    if (polarization_i != "s" && polarization_i != "p") {
-        throw py::value_error("polarization_i must be 's' or 'p'");
-    }
-    if (polarization_f != "s" && polarization_f != "p") {
-        throw py::value_error("polarization_f must be 's' or 'p'");
-    }
-    if (!std::isfinite(attenuation) || attenuation < 0.0) {
-        throw py::value_error("attenuation must be finite and non-negative");
-    }
-    const auto *medium_data = static_cast<const std::int64_t *>(medium_info.ptr);
-    for (py::ssize_t atom = 0; atom < atoms; ++atom) {
-        if (medium_data[atom] < 0 || medium_data[atom] >= media) {
-            throw py::value_error("medium_index contains an invalid medium");
-        }
-    }
-
-    auto result = py::array_t<complex128>(points);
-    auto *out = static_cast<complex128 *>(result.request().ptr);
-    const auto *Q_data = static_cast<const double *>(Q_info.ptr);
-    const auto *kzi_data = static_cast<const complex128 *>(kzi_info.ptr);
-    const auto *Aip_data = static_cast<const complex128 *>(Aip_info.ptr);
-    const auto *Aim_data = static_cast<const complex128 *>(Aim_info.ptr);
-    const auto *Aipk_data = static_cast<const complex128 *>(Aipk_info.ptr);
-    const auto *Aimk_data = static_cast<const complex128 *>(Aimk_info.ptr);
-    const auto *kzf_data = static_cast<const complex128 *>(kzf_info.ptr);
-    const auto *Afp_data = static_cast<const complex128 *>(Afp_info.ptr);
-    const auto *Afm_data = static_cast<const complex128 *>(Afm_info.ptr);
-    const auto *Afpk_data = static_cast<const complex128 *>(Afpk_info.ptr);
-    const auto *Afmk_data = static_cast<const complex128 *>(Afmk_info.ptr);
-    const auto *zrefi_data = static_cast<const double *>(zrefi_info.ptr);
-    const auto *zreff_data = static_cast<const double *>(zreff_info.ptr);
-    const auto *alphai_data = static_cast<const double *>(alphai_info.ptr);
-    const auto *alphaf_data = static_cast<const double *>(alphaf_info.ptr);
-    const auto *cos_data = static_cast<const double *>(cos_info.ptr);
-    const auto *sin_data = static_cast<const double *>(sin_info.ptr);
-    const auto *basis_data = static_cast<const double *>(basis_info.ptr);
-    const auto *factor_data = static_cast<const double *>(factors_info.ptr);
-    const auto *r_data = static_cast<const double *>(r_info.ptr);
-    const auto *occupancy_data = static_cast<const double *>(occupancy_info.ptr);
-    const auto domain_matrices = effective_domain_matrices(
-        domain_info, r_info, r_inv_info
-    );
-
-    constexpr double pi = 3.141592653589793238462643383279502884;
-    constexpr double dw_denominator = 16.0 * pi * pi;
-    constexpr int sigma_i[4] = {1, 1, -1, -1};
-    constexpr int sigma_f[4] = {1, -1, 1, -1};
-    const bool p_i = polarization_i == "p";
-    const bool p_f = polarization_f == "p";
-    const double c_vector[3] = {r_data[2], r_data[5], r_data[8]};
-
-    {
-    py::gil_scoped_release release;
-    const auto geometry_index = [points](
-        const py::ssize_t medium,
-        const int channel,
-        const py::ssize_t point
-    ) {
-        return (medium * 4 + channel) * points + point;
-    };
-    const std::size_t geometry_size = static_cast<std::size_t>(
-        media * 4 * points
-    );
-    std::vector<complex128> channel_Qz(geometry_size);
-    std::vector<complex128> channel_Q2(geometry_size);
-    std::vector<complex128> channel_coefficient(geometry_size);
-    for (py::ssize_t medium = 0; medium < media; ++medium) {
-        for (int channel = 0; channel < 4; ++channel) {
-            for (py::ssize_t point = 0; point < points; ++point) {
-                const auto field_offset = medium * points + point;
-                const auto index = geometry_index(medium, channel, point);
-                const double Qx = Q_data[point * 2];
-                const double Qy = Q_data[point * 2 + 1];
-                const double Q_parallel_squared = Qx * Qx + Qy * Qy;
-                const complex128 incident_amplitude = sigma_i[channel] > 0
-                    ? Aip_data[field_offset] : Aim_data[field_offset];
-                const complex128 exit_amplitude = sigma_f[channel] > 0
-                    ? Afp_data[field_offset] : Afm_data[field_offset];
-                const complex128 Qz = -(
-                    static_cast<double>(sigma_i[channel])
-                    * kzi_data[field_offset]
-                    + static_cast<double>(sigma_f[channel])
-                    * kzf_data[field_offset]
-                );
-                channel_Qz[index] = Qz;
-                channel_Q2[index] = Q_parallel_squared + Qz * Qz;
-                if (incident_amplitude == complex128(0.0, 0.0)
-                    || exit_amplitude == complex128(0.0, 0.0)) {
-                    channel_coefficient[index] = complex128(0.0, 0.0);
-                    continue;
-                }
-                const double incident_sine = std::sin(alphai_data[point]);
-                const double exit_sine = std::sin(alphaf_data[point]);
-                complex128 vector_weight;
-                if (!p_i && !p_f) {
-                    vector_weight = (
-                        incident_amplitude * exit_amplitude * cos_data[point]
-                    );
-                } else if (!p_i && p_f) {
-                    vector_weight = (
-                        -incident_amplitude * exit_amplitude
-                        * exit_sine * sin_data[point]
-                    );
-                } else if (p_i && !p_f) {
-                    vector_weight = (
-                        -incident_amplitude * incident_sine
-                        * exit_amplitude * sin_data[point]
-                    );
-                } else {
-                    const complex128 incident_over_kz = sigma_i[channel] > 0
-                        ? Aipk_data[field_offset] : Aimk_data[field_offset];
-                    const complex128 exit_over_kz = sigma_f[channel] > 0
-                        ? Afpk_data[field_offset] : Afmk_data[field_offset];
-                    const complex128 tangent = (
-                        -incident_amplitude * exit_amplitude
-                        * incident_sine * exit_sine * cos_data[point]
-                    );
-                    const complex128 incident_normal = (
-                        -k0 * std::cos(alphai_data[point]) * incident_sine
-                        * incident_over_kz
-                        / static_cast<double>(sigma_i[channel])
-                    );
-                    const complex128 exit_normal = (
-                        -k0 * std::cos(alphaf_data[point]) * exit_sine
-                        * exit_over_kz
-                        / static_cast<double>(sigma_f[channel])
-                    );
-                    vector_weight = tangent + incident_normal * exit_normal;
-                }
-                const complex128 reference_phase = std::exp(
-                    complex128(0.0, 1.0) * (
-                        static_cast<double>(sigma_i[channel])
-                        * kzi_data[field_offset] * zrefi_data[medium]
-                        + static_cast<double>(sigma_f[channel])
-                        * kzf_data[field_offset] * zreff_data[medium]
-                    )
-                );
-                channel_coefficient[index] = vector_weight * reference_phase;
-            }
-        }
-    }
-
-    struct AtomGroup {
-        py::ssize_t medium;
-        std::array<double, 13> factor_row;
-        std::array<std::shared_ptr<const std::vector<double>>, 4> factors;
-    };
-    std::vector<AtomGroup> groups;
-    std::vector<std::size_t> atom_group(static_cast<std::size_t>(atoms));
-    for (py::ssize_t atom = 0; atom < atoms; ++atom) {
-        std::array<double, 13> row;
-        for (int column = 0; column < 13; ++column) {
-            row[column] = get2(factor_data, factors_info, atom, column);
-        }
-        const auto medium = static_cast<py::ssize_t>(medium_data[atom]);
-        std::size_t group_index = groups.size();
-        for (std::size_t candidate = 0; candidate < groups.size(); ++candidate) {
-            if (groups[candidate].medium == medium
-                && std::memcmp(
-                    groups[candidate].factor_row.data(),
-                    row.data(),
-                    sizeof(row)
-                ) == 0) {
-                group_index = candidate;
-                break;
-            }
-        }
-        if (group_index == groups.size()) {
-            groups.push_back(AtomGroup{medium, row, {}});
-        }
-        atom_group[static_cast<std::size_t>(atom)] = group_index;
-    }
-    for (auto &group : groups) {
-        for (int channel = 0; channel < 4; ++channel) {
-            std::vector<double> complex_grid(
-                1 + static_cast<std::size_t>(2 * points)
-            );
-            complex_grid[0] = std::numeric_limits<double>::quiet_NaN();
-            for (py::ssize_t point = 0; point < points; ++point) {
-                const complex128 value = channel_Q2[
-                    geometry_index(group.medium, channel, point)
-                ];
-                complex_grid[1 + 2 * point] = value.real();
-                complex_grid[2 + 2 * point] = value.imag();
-            }
-            auto factors = form_factor_cache().find(
-                complex_grid, group.factor_row
-            );
-            if (!factors) {
-                std::vector<double> calculated(
-                    static_cast<std::size_t>(2 * points)
-                );
-                for (py::ssize_t point = 0; point < points; ++point) {
-                    const complex128 Q_squared = channel_Q2[
-                        geometry_index(group.medium, channel, point)
-                    ];
-                    complex128 value(
-                        group.factor_row[10] + group.factor_row[11],
-                        group.factor_row[12]
-                    );
-                    for (int term = 0; term < 5; ++term) {
-                        value += group.factor_row[term] * std::exp(
-                            -group.factor_row[term + 5] * Q_squared
-                        );
-                    }
-                    calculated[2 * point] = value.real();
-                    calculated[2 * point + 1] = value.imag();
-                }
-                factors = form_factor_cache().insert_or_get(
-                    complex_grid,
-                    group.factor_row,
-                    std::move(calculated)
-                );
-            }
-            group.factors[channel] = factors;
-        }
-    }
-
-    const bool apply_empirical_attenuation = (
-        semi_infinite && attenuation != 0.0
-    );
-    std::vector<double> atom_positions(
-        static_cast<std::size_t>(atoms * domains * 3)
-    );
-    std::vector<double> atom_repeat_coordinates;
-    if (apply_empirical_attenuation) {
-        atom_repeat_coordinates.resize(
-            static_cast<std::size_t>(atoms * domains)
-        );
-    }
-    const auto *domain_data = static_cast<const double *>(domain_info.ptr);
-    for (py::ssize_t atom = 0; atom < atoms; ++atom) {
-        const double fractional[3] = {
-            get2(basis_data, basis_info, atom, 1),
-            get2(basis_data, basis_info, atom, 2),
-            get2(basis_data, basis_info, atom, 3),
-        };
-        for (py::ssize_t domain = 0; domain < domains; ++domain) {
-            double transformed[3] = {0.0, 0.0, 0.0};
-            for (int row = 0; row < 3; ++row) {
-                transformed[row] = get3(
-                    domain_data, domain_info, domain, row, 3
-                );
-                for (int col = 0; col < 3; ++col) {
-                    transformed[row] += (
-                        domain_matrices[domain].value[row][col]
-                        * fractional[col]
-                    );
-                }
-            }
-            for (int row = 0; row < 3; ++row) {
-                double cartesian = 0.0;
-                for (int col = 0; col < 3; ++col) {
-                    cartesian += r_data[row * 3 + col] * transformed[col];
-                }
-                atom_positions[
-                    static_cast<std::size_t>((atom * domains + domain) * 3 + row)
-                ] = cartesian;
-            }
-            if (apply_empirical_attenuation) {
-                atom_repeat_coordinates[
-                    static_cast<std::size_t>(atom * domains + domain)
-                ] = transformed[2];
-            }
-        }
-    }
-
-    std::vector<double> attenuated_domain_weights;
-    if (apply_empirical_attenuation) {
-        attenuated_domain_weights.resize(
-            static_cast<std::size_t>(atoms * domains)
-        );
-        for (py::ssize_t atom = 0; atom < atoms; ++atom) {
-            for (py::ssize_t domain = 0; domain < domains; ++domain) {
-                const auto offset = static_cast<std::size_t>(
-                    atom * domains + domain
-                );
-                attenuated_domain_weights[offset] = occupancy_data[domain]
-                    * std::exp(
-                        attenuation * atom_repeat_coordinates[offset]
-                    );
-            }
-        }
-    }
-
-    for (py::ssize_t point = 0; point < points; ++point) {
-        const double Qx = Q_data[point * 2];
-        const double Qy = Q_data[point * 2 + 1];
-        const double Q_parallel_squared = Qx * Qx + Qy * Qy;
-        complex128 total(0.0, 0.0);
-
-        for (int channel = 0; channel < 4; ++channel) {
-            complex128 channel_atoms(0.0, 0.0);
-            for (py::ssize_t atom = 0; atom < atoms; ++atom) {
-                const auto medium = static_cast<py::ssize_t>(medium_data[atom]);
-                const auto index = geometry_index(medium, channel, point);
-                const complex128 coefficient = channel_coefficient[index];
-                if (coefficient == complex128(0.0, 0.0)) {
-                    continue;
-                }
-                const complex128 Qz = channel_Qz[index];
-                const auto &cached = *groups[
-                    atom_group[static_cast<std::size_t>(atom)]
-                ].factors[channel];
-                complex128 atomic_factor(
-                    cached[2 * point], cached[2 * point + 1]
-                );
-                atomic_factor *= std::exp(
-                    -(
-                        get2(basis_data, basis_info, atom, 4)
-                        * Q_parallel_squared
-                        + get2(basis_data, basis_info, atom, 5) * Qz * Qz
-                    ) / dw_denominator
-                );
-                atomic_factor *= get2(basis_data, basis_info, atom, 6);
-
-                complex128 domain_sum(0.0, 0.0);
-                if (apply_empirical_attenuation) {
-                    for (py::ssize_t domain = 0; domain < domains; ++domain) {
-                        const auto domain_offset = static_cast<std::size_t>(
-                            atom * domains + domain
-                        );
-                        const auto position_offset = 3 * domain_offset;
-                        domain_sum += attenuated_domain_weights[domain_offset]
-                            * std::exp(
-                                complex128(0.0, 1.0) * (
-                                    Qx * atom_positions[position_offset]
-                                    + Qy * atom_positions[position_offset + 1]
-                                    + Qz * atom_positions[position_offset + 2]
-                                )
-                            );
-                    }
-                } else {
-                    for (py::ssize_t domain = 0; domain < domains; ++domain) {
-                        const auto position_offset = static_cast<std::size_t>(
-                            (atom * domains + domain) * 3
-                        );
-                        domain_sum += occupancy_data[domain] * std::exp(
-                            complex128(0.0, 1.0) * (
-                                Qx * atom_positions[position_offset]
-                                + Qy * atom_positions[position_offset + 1]
-                                + Qz * atom_positions[position_offset + 2]
-                            )
-                        );
-                    }
-                }
-                channel_atoms += (
-                    coefficient * atomic_factor * domain_sum
-                );
-            }
-            if (semi_infinite && channel_atoms != complex128(0.0, 0.0)) {
-                const py::ssize_t terminal_offset = (media - 1) * points + point;
-                const complex128 Qz = -(
-                    static_cast<double>(sigma_i[channel]) * kzi_data[terminal_offset]
-                    + static_cast<double>(sigma_f[channel]) * kzf_data[terminal_offset]
-                );
-                const complex128 repeat_phase = (
-                    Qx * c_vector[0] + Qy * c_vector[1] + Qz * c_vector[2]
-                );
-                const complex128 denominator = -complex_expm1(
-                    -complex128(0.0, 1.0) * repeat_phase - attenuation
-                );
-                const double pole_tolerance = 16.0
-                    * std::numeric_limits<double>::epsilon()
-                    * (1.0 + std::abs(repeat_phase));
-                if (attenuation == 0.0
-                    && std::abs(denominator) <= pole_tolerance) {
-                    throw std::domain_error(
-                        "zero-attenuation semi-infinite bulk has an exact Bragg pole"
-                    );
-                }
-                channel_atoms /= denominator;
-            }
-            total += channel_atoms;
-        }
-        out[point] = total;
-    }
-    }
-    return result;
-}
+#include "CTRdwba_cpp.hpp"
 
 PYBIND11_MODULE(_CTRcalc_cpp, module) {
     module.doc() = "CPU C++ acceleration kernels for CTR calculations.";

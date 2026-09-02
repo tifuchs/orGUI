@@ -28,8 +28,6 @@ __version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
-from dataclasses import dataclass
-
 import numpy as np
 from .. import util
 import warnings
@@ -40,20 +38,12 @@ import errno
 
 from .CTRutil import ParameterType, Parameter, next_skip_comment
 
-from .CTRuc import (
-    HAS_CPP_ACCEL,
-    WaterModel,
-    UnitCell,
-    _coherent_domain_arrays,
-    _CTRcalc_cpp,
-)
+from .CTRuc import WaterModel, UnitCell
 from .CTRfilm import EpitaxyInterface, Film, PoissonSurface
-from .HKLVlieg import UBCalculator, VliegAngles
 from .CTRoptics import (
     _specular_reflection,
     add_structural_to_sampled_profile,
     combine_profiles,
-    HC_KEV_ANGSTROM,
     homogeneous_bulk_profile,
     simplify_profile,
     solve_electric_field,
@@ -66,48 +56,6 @@ from .CTRstacking import (  # noqa: F401
     LayerState,
     LayerTransition,
 )
-
-
-def _readonly_array(value, dtype=None):
-    array = np.ascontiguousarray(value, dtype=dtype)
-    array.flags.writeable = False
-    return array
-
-
-def _format_hkl(hkl, index):
-    """Format one column of a ``(3, n)`` hkl array for an error message."""
-    return "(" + ", ".join(f"{value:g}" for value in hkl[:, index]) + ")"
-
-
-@dataclass(frozen=True)
-class PreparedDWBA:
-    """Immutable optical and kinematic state for a bulk DWBA calculation.
-
-    Atomic occupancies, coordinates, disorder parameters, coherent-domain
-    parameters, and form factors are deliberately not captured. They are read
-    from the bulk unit cell when :meth:`SXRDCrystal.F_DWBA_prepared` is called.
-    Changing energy, lattice geometry, reciprocal coordinates, angles, or the
-    optical profile requires a new prepared state.
-    """
-
-    shape: tuple
-    scalar: bool
-    Q_parallel: np.ndarray
-    alpha_i: np.ndarray
-    alpha_f: np.ndarray
-    cos_azimuth: np.ndarray
-    sin_azimuth: np.ndarray
-    k0: float
-    polarization_i: str
-    polarization_f: str
-    field_i: object
-    field_f: object
-    bulk_identity: int
-    energy_eV: float
-    B_mat: np.ndarray
-    R_mat: np.ndarray
-    R_mat_inv: np.ndarray
-    ref_hkl_transform: np.ndarray
 
 
 class SXRDCrystal:
@@ -1132,9 +1080,34 @@ class SXRDCrystal:
         return err
 
     def setEnergy(self, E):
+        """Set every component energy and invalidate cached DWBA optics.
+
+        :param float E:
+            Photon energy in eV.
+        """
         for uc in self.uc_surface_list:
             uc.setEnergy(E)
         self.uc_bulk.setEnergy(E)
+        state = getattr(self, "_dwba_state", None)
+        if state is not None:
+            state._energy_changed()
+
+    @property
+    def dwba(self):
+        """Return the lazily created DWBA experiment state.
+
+        The state and its caches are runtime-only and are not serialized with
+        the crystal model.
+
+        :rtype: CTRdwba.DWBAState
+        """
+        state = getattr(self, "_dwba_state", None)
+        if state is None:
+            from .CTRdwba import DWBAState
+
+            state = DWBAState(self)
+            self._dwba_state = state
+        return state
 
     def zDensity_G(self, z, h, k):
         if self.enable_uc_stacking:
@@ -1236,726 +1209,13 @@ class SXRDCrystal:
             self.optical_profile(), delta_tolerance, beta_tolerance
         )
 
-    def prepare_DWBA(
-        self,
-        h,
-        k,
-        l,  # noqa: E741
-        alpha_i,
-        alpha_f,
-        *,
-        polarization_i="s",
-        polarization_f="s",
-        geometry_rtol=1e-7,
-        geometry_atol=1e-8,
+    def _optical_reference_profile(
+        self, delta_tolerance=1e-9, beta_tolerance=None
     ):
-        """Prepare bulk DWBA optics and four-channel scattering geometry.
-
-        The transformed reciprocal-lattice vector must be compatible with the
-        supplied incident and exit glancing angles. All angles are in radians.
-        The exit field is the reciprocal field evaluated at ``-k_f`` using the
-        same complex refractive profile; its amplitudes are not conjugated.
-
-        :param float or numpy.ndarray h:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param float or numpy.ndarray k:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param float or numpy.ndarray l:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param float or numpy.ndarray alpha_i:
-            Incident glancing angle in radians.
-        :param float or numpy.ndarray alpha_f:
-            Exit glancing angle in radians.
-        :param str polarization_i:
-            Incident polarization, ``"s"`` or ``"p"``.
-        :param str polarization_f:
-            Analyzed exit polarization, ``"s"`` or ``"p"``.
-        :param float geometry_rtol:
-            Relative tolerance for the Ewald-geometry checks.
-        :param float geometry_atol:
-            Absolute tolerance in inverse Angstrom for geometry checks.
-        :returns:
-            Immutable optical and kinematic snapshot.
-        :rtype: PreparedDWBA
-        :raises ValueError:
-            If broadcasting or the Ewald geometry is invalid.
-        :raises RuntimeError:
-            If the native extension is unavailable.
-        :raises NotImplementedError:
-            If surface components are present in this first bulk-only API.
-        """
-        if not HAS_CPP_ACCEL or not hasattr(
-            _CTRcalc_cpp, "unitcell_F_DWBA_bulk"
-        ):
-            raise RuntimeError(
-                "F_DWBA requires the native CTR extension with DWBA support."
-            )
-        if self.uc_surface_list:
-            raise NotImplementedError(
-                "F_DWBA currently supports only the bulk unit cell."
-            )
-        if polarization_i not in {"s", "p"}:
-            raise ValueError("polarization_i must be 's' or 'p'.")
-        if polarization_f not in {"s", "p"}:
-            raise ValueError("polarization_f must be 's' or 'p'.")
-        if (
-            not np.isfinite(geometry_rtol)
-            or geometry_rtol < 0.0
-            or not np.isfinite(geometry_atol)
-            or geometry_atol < 0.0
-        ):
-            raise ValueError("geometry tolerances must be finite and non-negative.")
-        if not hasattr(self.uc_bulk, "_E"):
-            raise ValueError("Set the bulk unit-cell energy before preparing DWBA.")
-        if self.uc_bulk._special_formfactors_present:
-            raise NotImplementedError(
-                "F_DWBA does not support Python special form-factor callbacks."
-            )
-
-        arrays = np.broadcast_arrays(
-            np.asarray(h, dtype=np.float64),
-            np.asarray(k, dtype=np.float64),
-            np.asarray(l, dtype=np.float64),
-            np.asarray(alpha_i, dtype=np.float64),
-            np.asarray(alpha_f, dtype=np.float64),
-        )
-        if arrays[0].size == 0 or not all(
-            np.all(np.isfinite(array)) for array in arrays
-        ):
-            raise ValueError("DWBA coordinates and angles must be finite and nonempty.")
-        shape = arrays[0].shape
-        scalar = arrays[0].ndim == 0
-        h_flat, k_flat, l_flat, alpha_i_flat, alpha_f_flat = (
-            np.ascontiguousarray(array.ravel()) for array in arrays
-        )
-        if np.any(alpha_i_flat <= 0.0) or np.any(
-            alpha_i_flat > 0.5 * np.pi
-        ):
-            raise ValueError("alpha_i must lie in (0, pi/2] radians.")
-        if np.any(alpha_f_flat <= 0.0) or np.any(
-            alpha_f_flat > 0.5 * np.pi
-        ):
-            raise ValueError("alpha_f must lie in (0, pi/2] radians.")
-
-        hkl = self.uc_bulk.refHKLTransform @ np.vstack(
-            (h_flat, k_flat, l_flat)
-        )
-        Q_cartesian = self.uc_bulk.B_mat @ hkl
-        Q_parallel = np.ascontiguousarray(Q_cartesian[:2].T)
-        energy_eV = float(self.uc_bulk._E)
-        wavelength = HC_KEV_ANGSTROM / (energy_eV * 1e-3)
-        k0 = 2.0 * np.pi / wavelength
-        expected_Qz = k0 * (
-            np.sin(alpha_i_flat) + np.sin(alpha_f_flat)
-        )
-        if not np.allclose(
-            Q_cartesian[2],
-            expected_Qz,
-            rtol=geometry_rtol,
-            atol=geometry_atol,
-        ):
-            maximum_error = float(
-                np.max(np.abs(Q_cartesian[2] - expected_Qz))
-            )
-            raise ValueError(
-                "The transformed hkl and alpha_i/alpha_f violate the Ewald "
-                f"normal geometry (maximum |delta Qz|={maximum_error:.6g} "
-                "Angstrom^-1)."
-            )
-
-        incident_parallel = k0 * np.cos(alpha_i_flat)
-        exit_parallel = k0 * np.cos(alpha_f_flat)
-        Q_parallel_norm_squared = np.sum(Q_parallel**2, axis=1)
-        denominator = 2.0 * incident_parallel * exit_parallel
-        cos_azimuth = np.ones_like(denominator)
-        regular = denominator > np.finfo(np.float64).eps * k0**2
-        cos_azimuth[regular] = (
-            incident_parallel[regular] ** 2
-            + exit_parallel[regular] ** 2
-            - Q_parallel_norm_squared[regular]
-        ) / denominator[regular]
-        geometry_scale = np.maximum(
-            np.maximum(incident_parallel, exit_parallel),
-            np.sqrt(Q_parallel_norm_squared),
-        )
-        dimensionless_tolerance = geometry_rtol + np.divide(
-            geometry_atol,
-            geometry_scale,
-            out=np.full_like(geometry_scale, geometry_atol),
-            where=geometry_scale > 0.0,
-        )
-        if np.any(
-            np.abs(cos_azimuth[regular])
-            > 1.0 + dimensionless_tolerance[regular]
-        ):
-            raise ValueError(
-                "The transformed in-plane scattering vector has no physical "
-                "incident/exit azimuth for the supplied angles."
-            )
-        singular = ~regular
-        singular_error = np.abs(
-            Q_parallel_norm_squared
-            - (incident_parallel - exit_parallel) ** 2
-        )
-        singular_tolerance = (
-            geometry_atol + geometry_rtol * geometry_scale
-        ) ** 2
-        if np.any(singular & (singular_error > singular_tolerance)):
-            raise ValueError(
-                "The normal-incidence in-plane scattering geometry is invalid."
-            )
-        cos_azimuth = np.clip(cos_azimuth, -1.0, 1.0)
-        sin_azimuth = np.sqrt(np.maximum(0.0, 1.0 - cos_azimuth**2))
-
-        profile = homogeneous_bulk_profile(self.uc_bulk)
-        field_i = solve_electric_field(
-            profile.values,
-            energy_eV,
-            alpha_i_flat,
-            polarization_i,
-            boundaries=profile.boundaries,
-        )
-        field_f = solve_electric_field(
-            profile.values,
-            energy_eV,
-            alpha_f_flat,
-            polarization_f,
-            boundaries=profile.boundaries,
-        )
-        if np.any(field_i.A_minus[-1] != 0.0) or np.any(
-            field_f.A_minus[-1] != 0.0
-        ):
-            raise RuntimeError(
-                "The terminal substrate must satisfy A_i_minus=A_f_minus=0."
-            )
-        return PreparedDWBA(
-            shape=shape,
-            scalar=scalar,
-            Q_parallel=_readonly_array(Q_parallel),
-            alpha_i=_readonly_array(alpha_i_flat),
-            alpha_f=_readonly_array(alpha_f_flat),
-            cos_azimuth=_readonly_array(cos_azimuth),
-            sin_azimuth=_readonly_array(sin_azimuth),
-            k0=k0,
-            polarization_i=polarization_i,
-            polarization_f=polarization_f,
-            field_i=field_i,
-            field_f=field_f,
-            bulk_identity=id(self.uc_bulk),
-            energy_eV=energy_eV,
-            B_mat=_readonly_array(self.uc_bulk.B_mat, np.float64),
-            R_mat=_readonly_array(self.uc_bulk.R_mat, np.float64),
-            R_mat_inv=_readonly_array(self.uc_bulk.R_mat_inv, np.float64),
-            ref_hkl_transform=_readonly_array(
-                self.uc_bulk.refHKLTransform, np.float64
-            ),
-        )
-
-    def prepare_DWBA_Zmode(
-        self,
-        h,
-        k,
-        l,  # noqa: E741
-        fixedangle=0.0,
-        fixed="in",
-        chi=0.0,
-        phi=0.0,
-        *,
-        mirrorx=False,
-        polarization_i="s",
-        polarization_f="s",
-        geometry_rtol=1e-7,
-        geometry_atol=1e-8,
-        return_angles=False,
-    ):
-        """Prepare bulk DWBA optics from a Vlieg z-mode angle constraint.
-
-        This is the convenience counterpart of :meth:`prepare_DWBA`. Instead of
-        explicit glancing angles it derives the incident angle ``alpha`` and
-        the exit angle ``gamma`` with
-        :meth:`~orgui.datautils.xrayutils.HKLVlieg.VliegAngles.anglesZmode`.
-        The diffractometer is populated from this crystal: the bulk unit cell
-        is the lattice, its energy sets the wavelength, and the orientation
-        matrix is ``U = 1`` so that the crystal cartesian frame coincides with
-        the z-mode sample frame at all-zero angles. The surface normal is then
-        the omega axis, which is the geometry the layered DWBA optics assume.
-
-        ``h``, ``k``, and ``l`` are in reciprocal lattice units of the
-        reference unit cell, exactly as for :meth:`prepare_DWBA`, and are
-        transformed with ``uc_bulk.refHKLTransform`` before the angles are
-        calculated. All angles are in radians.
-
-        :param float or numpy.ndarray h:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param float or numpy.ndarray k:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param float or numpy.ndarray l:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param float fixedangle:
-            Value of the fixed angle in radians. It has no effect for
-            ``fixed="eq"``.
-        :param str fixed:
-            z-mode angle constraint, ``"in"`` for a fixed incidence angle,
-            ``"out"`` for a fixed exit angle, or ``"eq"`` for equal incident
-            and exit angles.
-        :param float chi:
-            Inner sample circle in radians. Only ``0`` is supported, because a
-            tilted sample no longer has its surface normal along the omega
-            axis.
-        :param float phi:
-            Inner sample circle in radians. Only ``0`` is supported, for the
-            same reason as ``chi``.
-        :param bool mirrorx:
-            Select the solution with negative ``delta``. This does not change
-            the glancing angles, only the returned diffractometer angles.
-        :param str polarization_i:
-            Incident polarization, ``"s"`` or ``"p"``.
-        :param str polarization_f:
-            Analyzed exit polarization, ``"s"`` or ``"p"``.
-        :param float geometry_rtol:
-            Relative tolerance for the Ewald-geometry checks.
-        :param float geometry_atol:
-            Absolute tolerance in inverse Angstrom for geometry checks.
-        :param bool return_angles:
-            Also return the six z-mode diffractometer angles. For scalar input
-            a 6-tuple ``(alpha, delta, gamma, omega, chi, phi)`` is returned,
-            otherwise an array of shape ``(..., 6)``.
-        :returns:
-            Immutable optical and kinematic snapshot, or a 2-tuple of that
-            snapshot and the diffractometer angles if ``return_angles``.
-        :rtype: PreparedDWBA or tuple
-        :raises ValueError:
-            If the constraint is unknown, the sample circles are tilted, the
-            reflection is inaccessible under the constraint, or one of the
-            glancing angles is outside the physical DWBA range.
-        :raises RuntimeError:
-            If the native extension is unavailable.
-        :raises NotImplementedError:
-            If surface components are present in this first bulk-only API.
-        """
-        if fixed not in {"in", "out", "eq"}:
-            raise ValueError("fixed must be one of 'in', 'out' or 'eq'.")
-        if float(chi) != 0.0 or float(phi) != 0.0:
-            raise ValueError(
-                "prepare_DWBA_Zmode requires chi=phi=0. Non-zero inner sample "
-                "circles tilt the surface normal away from the omega axis, so "
-                "alpha and gamma would no longer be the glancing angles of the "
-                "layered DWBA optics."
-            )
-        if not np.isfinite(fixedangle):
-            raise ValueError("fixedangle must be finite.")
-        if not hasattr(self.uc_bulk, "_E"):
-            raise ValueError("Set the bulk unit-cell energy before preparing DWBA.")
-
-        arrays = np.broadcast_arrays(
-            np.asarray(h, dtype=np.float64),
-            np.asarray(k, dtype=np.float64),
-            np.asarray(l, dtype=np.float64),
-        )
-        if arrays[0].size == 0 or not all(
-            np.all(np.isfinite(array)) for array in arrays
-        ):
-            raise ValueError("DWBA coordinates must be finite and nonempty.")
-        shape = arrays[0].shape
-        scalar = arrays[0].ndim == 0
-        hkl_reference = np.vstack([array.ravel() for array in arrays])
-        hkl_bulk = self.uc_bulk.refHKLTransform @ hkl_reference
-
-        energy_eV = float(self.uc_bulk._E)
-        # The z-mode wavevector must be the wavevector of the DWBA optics,
-        # otherwise the Ewald consistency check in prepare_DWBA sees the
-        # difference between the two energy-to-wavelength constants.
-        ub_calculator = UBCalculator(self.uc_bulk, energy_eV * 1e-3)
-        ub_calculator.setLambda(HC_KEV_ANGSTROM / (energy_eV * 1e-3))
-        ub_calculator.setU(np.identity(3, dtype=np.float64))
-        with np.errstate(invalid="ignore"):
-            angles = VliegAngles(ub_calculator).anglesZmode(
-                hkl_bulk,
-                float(fixedangle),
-                fixed=fixed,
-                chi=0.0,
-                phi=0.0,
-                mirrorx=bool(mirrorx),
-            )
-        angles = np.ascontiguousarray(angles, dtype=np.float64).reshape(-1, 6)
-        alpha_i_flat = angles[:, 0]
-        alpha_f_flat = angles[:, 2]
-
-        # A reflection outside the Ewald sphere leaves the glancing angles
-        # undefined; one that the detector circles cannot reach at those
-        # glancing angles leaves delta, and with it omega, undefined.
-        unsolvable = ~np.all(np.isfinite(angles), axis=1)
-        if np.any(unsolvable):
-            index = int(np.flatnonzero(unsolvable)[0])
-            raise ValueError(
-                f"The z-mode constraint fixed={fixed!r} has no solution for "
-                f"hkl={_format_hkl(hkl_reference, index)}; "
-                f"{int(np.count_nonzero(unsolvable))} of {alpha_i_flat.size} "
-                "reflections are inaccessible."
-            )
-        unphysical = (
-            (alpha_i_flat <= 0.0)
-            | (alpha_i_flat > 0.5 * np.pi)
-            | (alpha_f_flat <= 0.0)
-            | (alpha_f_flat > 0.5 * np.pi)
-        )
-        if np.any(unphysical):
-            index = int(np.flatnonzero(unphysical)[0])
-            raise ValueError(
-                "The z-mode glancing angles must lie in (0, pi/2] radians, but "
-                f"hkl={_format_hkl(hkl_reference, index)} gives "
-                f"alpha_i={alpha_i_flat[index]:.6g} rad and "
-                f"alpha_f={alpha_f_flat[index]:.6g} rad."
-            )
-
-        prepared = self.prepare_DWBA(
-            arrays[0],
-            arrays[1],
-            arrays[2],
-            alpha_i_flat.reshape(shape),
-            alpha_f_flat.reshape(shape),
-            polarization_i=polarization_i,
-            polarization_f=polarization_f,
-            geometry_rtol=geometry_rtol,
-            geometry_atol=geometry_atol,
-        )
-        if not return_angles:
-            return prepared
-        if scalar:
-            return prepared, tuple(angles[0])
-        return prepared, angles.reshape(shape + (6,))
-
-    def l_from_glancing_angles(self, h, k, alpha_i, alpha_f):
-        """Return the out-of-plane index that satisfies the Ewald condition.
-
-        The in-plane indices and the two glancing angles fix the out-of-plane
-        momentum transfer,
-
-        .. math::
-
-           Q_z = k_0\\left(\\sin\\alpha_i+\\sin\\alpha_f\\right),
-
-        which is a linear equation in ``l`` because
-        ``B_mat @ refHKLTransform`` maps reference reciprocal lattice units to
-        cartesian :math:`\\mathbf Q` in inverse Angstrom.  This is the natural
-        parameterization near the critical angle, where the interesting range
-        of a rod is compressed into a thin ``l`` interval.
-
-        The conversion is purely kinematic. It does not require the angles to
-        lie in the physical DWBA range, which :meth:`prepare_DWBA` enforces.
-
-        :param float or numpy.ndarray h:
-            Reference-frame in-plane coordinate in r.l.u.
-        :param float or numpy.ndarray k:
-            Reference-frame in-plane coordinate in r.l.u.
-        :param float or numpy.ndarray alpha_i:
-            Incident glancing angle in radians.
-        :param float or numpy.ndarray alpha_f:
-            Exit glancing angle in radians.
-        :returns:
-            Reference-frame out-of-plane coordinate in r.l.u., with the
-            broadcast input shape.
-        :rtype: float or numpy.ndarray
-        :raises ValueError:
-            If the bulk energy is unset, the inputs are not finite, or the
-            reference out-of-plane axis has no surface-normal component and
-            therefore cannot reach ``Q_z``.
-        """
-        if not hasattr(self.uc_bulk, "_E"):
-            raise ValueError(
-                "Set the bulk unit-cell energy before converting angles."
-            )
-        arrays = np.broadcast_arrays(
-            np.asarray(h, dtype=np.float64),
-            np.asarray(k, dtype=np.float64),
-            np.asarray(alpha_i, dtype=np.float64),
-            np.asarray(alpha_f, dtype=np.float64),
-        )
-        if arrays[0].size == 0 or not all(
-            np.all(np.isfinite(array)) for array in arrays
-        ):
-            raise ValueError(
-                "In-plane coordinates and angles must be finite and nonempty."
-            )
-        transform = self.uc_bulk.B_mat @ self.uc_bulk.refHKLTransform
-        normal_row = np.asarray(transform[2], dtype=np.float64)
-        # A reference cell whose out-of-plane axis lies in the surface plane
-        # leaves Q_z independent of l, so no l solves the Ewald condition.
-        if abs(normal_row[2]) <= np.finfo(np.float64).eps * np.linalg.norm(
-            normal_row
-        ):
-            raise ValueError(
-                "The reference out-of-plane axis has no surface-normal "
-                "component, so Q_z does not depend on l."
-            )
-        energy_eV = float(self.uc_bulk._E)
-        k0 = 2.0 * np.pi / (HC_KEV_ANGSTROM / (energy_eV * 1e-3))
-        h_array, k_array, alpha_i_array, alpha_f_array = arrays
-        Qz = k0 * (np.sin(alpha_i_array) + np.sin(alpha_f_array))
-        l_value = (  # noqa: E741
-            Qz - normal_row[0] * h_array - normal_row[1] * k_array
-        ) / normal_row[2]
-        if l_value.ndim == 0:
-            return float(l_value)
-        return l_value
-
-    def prepare_DWBA_from_angles(
-        self,
-        h,
-        k,
-        alpha_i,
-        alpha_f,
-        *,
-        return_l=False,
-        polarization_i="s",
-        polarization_f="s",
-        geometry_rtol=1e-7,
-        geometry_atol=1e-8,
-    ):
-        """Prepare bulk DWBA optics from in-plane indices and glancing angles.
-
-        This is the counterpart of :meth:`prepare_DWBA_Zmode`: instead of
-        deriving the angles from a complete ``hkl``, it derives the
-        out-of-plane index from the angles with
-        :meth:`l_from_glancing_angles` and prepares the same state.  It is the
-        parameterization a rocking or Yoneda scan wants, because the glancing
-        angle rather than ``l`` is the scanned quantity.
-
-        :param float or numpy.ndarray h:
-            Reference-frame in-plane coordinate in r.l.u.
-        :param float or numpy.ndarray k:
-            Reference-frame in-plane coordinate in r.l.u.
-        :param float or numpy.ndarray alpha_i:
-            Incident glancing angle in radians.
-        :param float or numpy.ndarray alpha_f:
-            Exit glancing angle in radians.
-        :param bool return_l:
-            Also return the derived out-of-plane index.
-        :param str polarization_i:
-            Incident polarization, ``"s"`` or ``"p"``.
-        :param str polarization_f:
-            Analyzed exit polarization, ``"s"`` or ``"p"``.
-        :param float geometry_rtol:
-            Relative tolerance for the Ewald-geometry checks.
-        :param float geometry_atol:
-            Absolute tolerance in inverse Angstrom for geometry checks.
-        :returns:
-            Immutable optical and kinematic snapshot, or a 2-tuple of that
-            snapshot and the derived ``l`` if ``return_l``.
-        :rtype: PreparedDWBA or tuple
-        :raises ValueError:
-            If the inputs are invalid, the reference out-of-plane axis cannot
-            reach ``Q_z``, or the resulting geometry is unphysical.
-        :raises RuntimeError:
-            If the native extension is unavailable.
-        :raises NotImplementedError:
-            If surface components are present in this first bulk-only API.
-        """
-        l_value = self.l_from_glancing_angles(h, k, alpha_i, alpha_f)  # noqa: E741
-        prepared = self.prepare_DWBA(
-            h,
-            k,
-            l_value,
-            alpha_i,
-            alpha_f,
-            polarization_i=polarization_i,
-            polarization_f=polarization_f,
-            geometry_rtol=geometry_rtol,
-            geometry_atol=geometry_atol,
-        )
-        if return_l:
-            return prepared, l_value
-        return prepared
-
-    def F_DWBA_prepared(
-        self,
-        prepared,
-        *,
-        bulk_mode="semi_infinite",
-        bulk_attenuation=0.0,
-    ):
-        """Evaluate the current bulk atomic model on prepared DWBA optics.
-
-        No wavefield calculation is performed. The returned coherent amplitude
-        is in electrons per configured reference lateral unit cell.
-
-        :param PreparedDWBA prepared:
-            State returned by :meth:`prepare_DWBA` for this crystal.
-        :param str bulk_mode:
-            ``"unit_cell"`` or ``"semi_infinite"``.
-        :param float bulk_attenuation:
-            Optional empirical attenuation exponent per bulk repeat. It is
-            applied continuously to atom depths and bulk repeats. The default
-            is zero because absorption is already described by the complex
-            DWBA wavevectors. With zero attenuation an exact geometric-series
-            pole is rejected.
-        :returns:
-            Coherent complex DWBA amplitude with the broadcast input shape.
-        :rtype: complex or numpy.ndarray
-        """
-        if not isinstance(prepared, PreparedDWBA):
-            raise TypeError("prepared must be a PreparedDWBA instance.")
-        if not HAS_CPP_ACCEL or not hasattr(
-            _CTRcalc_cpp, "unitcell_F_DWBA_bulk"
-        ):
-            raise RuntimeError(
-                "F_DWBA requires the native CTR extension with DWBA support."
-            )
-        if self.uc_surface_list:
-            raise NotImplementedError(
-                "F_DWBA currently supports only the bulk unit cell."
-            )
-        if bulk_mode not in {"unit_cell", "semi_infinite"}:
-            raise ValueError(
-                "bulk_mode must be 'unit_cell' or 'semi_infinite'."
-            )
-        if not np.isfinite(bulk_attenuation) or bulk_attenuation < 0.0:
-            raise ValueError("bulk_attenuation must be finite and non-negative.")
-        if prepared.bulk_identity != id(self.uc_bulk):
-            raise ValueError("The prepared DWBA state belongs to another bulk cell.")
-        frozen_values = (
-            ("energy", prepared.energy_eV, getattr(self.uc_bulk, "_E", None)),
-            ("B_mat", prepared.B_mat, self.uc_bulk.B_mat),
-            ("R_mat", prepared.R_mat, self.uc_bulk.R_mat),
-            ("R_mat_inv", prepared.R_mat_inv, self.uc_bulk.R_mat_inv),
-            (
-                "refHKLTransform",
-                prepared.ref_hkl_transform,
-                self.uc_bulk.refHKLTransform,
-            ),
-        )
-        for name, frozen, current in frozen_values:
-            if current is None or not np.array_equal(frozen, current):
-                raise ValueError(
-                    f"The bulk {name} changed; call prepare_DWBA again."
-                )
-        basis, form_factors, _ = self.uc_bulk.build_selected_basis()
-        if self.uc_bulk._special_formfactors_present:
-            raise NotImplementedError(
-                "F_DWBA does not support Python special form-factor callbacks."
-            )
-        domain_matrix, domain_occupancy = _coherent_domain_arrays(
-            self.uc_bulk.coherentDomainMatrix,
-            self.uc_bulk.coherentDomainOccupancy,
-        )
-        points = prepared.alpha_i.size
-        media = len(prepared.field_i.n)
-
-        def field_array(field, value):
-            return np.ascontiguousarray(value.reshape(media, points))
-
-        medium_index = np.full(
-            len(basis), media - 1, dtype=np.int64
-        )
-        amplitude = _CTRcalc_cpp.unitcell_F_DWBA_bulk(
-            prepared.Q_parallel,
-            field_array(prepared.field_i, prepared.field_i.kz),
-            field_array(prepared.field_i, prepared.field_i.A_plus),
-            field_array(prepared.field_i, prepared.field_i.A_minus),
-            field_array(
-                prepared.field_i, prepared.field_i._A_plus_over_kz
-            ),
-            field_array(
-                prepared.field_i, prepared.field_i._A_minus_over_kz
-            ),
-            field_array(prepared.field_f, prepared.field_f.kz),
-            field_array(prepared.field_f, prepared.field_f.A_plus),
-            field_array(prepared.field_f, prepared.field_f.A_minus),
-            field_array(
-                prepared.field_f, prepared.field_f._A_plus_over_kz
-            ),
-            field_array(
-                prepared.field_f, prepared.field_f._A_minus_over_kz
-            ),
-            prepared.field_i.z_reference,
-            prepared.field_f.z_reference,
-            prepared.alpha_i,
-            prepared.alpha_f,
-            prepared.cos_azimuth,
-            prepared.sin_azimuth,
-            prepared.k0,
-            prepared.polarization_i,
-            prepared.polarization_f,
-            medium_index,
-            bulk_mode == "semi_infinite",
-            float(bulk_attenuation),
-            np.ascontiguousarray(basis, dtype=np.float64),
-            np.ascontiguousarray(form_factors, dtype=np.float64),
-            np.ascontiguousarray(self.uc_bulk.R_mat, dtype=np.float64),
-            np.ascontiguousarray(self.uc_bulk.R_mat_inv, dtype=np.float64),
-            domain_matrix,
-            domain_occupancy,
-        )
-        amplitude *= self.reference_area / self.uc_bulk.uc_area
-        result = amplitude.reshape(prepared.shape)
-        if prepared.scalar:
-            return complex(result)
-        return result
-
-    def F_DWBA(
-        self,
-        h,
-        k,
-        l,  # noqa: E741
-        alpha_i,
-        alpha_f,
-        *,
-        polarization_i="s",
-        polarization_f="s",
-        geometry_rtol=1e-7,
-        geometry_atol=1e-8,
-        bulk_mode="semi_infinite",
-        bulk_attenuation=0.0,
-    ):
-        """Prepare and evaluate the coherent bulk DWBA amplitude.
-
-        Inputs broadcast together and all angles are in radians. Use
-        :meth:`prepare_DWBA` and :meth:`F_DWBA_prepared` when evaluating the
-        same optical/kinematic state repeatedly.
-
-        :param float or numpy.ndarray h:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param float or numpy.ndarray k:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param float or numpy.ndarray l:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param float or numpy.ndarray alpha_i:
-            Incident glancing angle in radians.
-        :param float or numpy.ndarray alpha_f:
-            Exit glancing angle in radians.
-        :param str polarization_i:
-            Incident polarization, ``"s"`` or ``"p"``.
-        :param str polarization_f:
-            Analyzed exit polarization, ``"s"`` or ``"p"``.
-        :param float geometry_rtol:
-            Relative Ewald-geometry tolerance.
-        :param float geometry_atol:
-            Absolute Ewald-geometry tolerance in inverse Angstrom.
-        :param str bulk_mode:
-            ``"unit_cell"`` or ``"semi_infinite"``.
-        :param float bulk_attenuation:
-            Optional empirical attenuation exponent per bulk repeat. The
-            default is zero because absorption is already described by the
-            complex DWBA wavevectors.
-        :returns:
-            Coherent complex DWBA amplitude with the broadcast input shape.
-        :rtype: complex or numpy.ndarray
-        """
-        prepared = self.prepare_DWBA(
-            h,
-            k,
-            l,
-            alpha_i,
-            alpha_f,
-            polarization_i=polarization_i,
-            polarization_f=polarization_f,
-            geometry_rtol=geometry_rtol,
-            geometry_atol=geometry_atol,
-        )
-        return self.F_DWBA_prepared(
-            prepared,
-            bulk_mode=bulk_mode,
-            bulk_attenuation=bulk_attenuation,
+        if not self.uc_surface_list:
+            return homogeneous_bulk_profile(self.uc_bulk)
+        return self.stratified_optical_profile(
+            delta_tolerance, beta_tolerance
         )
 
     def wavefield(
@@ -1988,7 +1248,7 @@ class SXRDCrystal:
             :func:`CTRoptics.sample_electric_field` to sample ``E(z)``.
         :rtype: CTRoptics.LayeredElectricField
         """
-        profile = self.stratified_optical_profile(
+        profile = self._optical_reference_profile(
             delta_tolerance, beta_tolerance
         )
         return solve_electric_field(
@@ -2031,7 +1291,7 @@ class SXRDCrystal:
         alpha_array = np.asarray(alpha, dtype=np.float64)
         scalar = alpha_array.ndim == 0
         angles = np.atleast_1d(alpha_array).ravel()
-        profile = self.stratified_optical_profile(
+        profile = self._optical_reference_profile(
             delta_tolerance, beta_tolerance
         )
 

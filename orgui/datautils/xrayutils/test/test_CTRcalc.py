@@ -2543,8 +2543,8 @@ class TestLayerStacking(unittest.TestCase):
         np.testing.assert_allclose(
             optical_profile[[0, mid_row, -1]],
             [
-                [-12.0, -7.72508074e-10, -7.18561204e-13],
-                [0.0, 2.94939896e-06, 2.74343239e-09],
+                [-12.0, -7.72147920e-10, -7.18561204e-13],
+                [0.0, 2.94802391e-06, 2.74343239e-09],
                 [10.0, 0.0, 0.0],
             ],
             atol=1e-9,

@@ -24,22 +24,32 @@ class TestUnitCellOpticalProfile(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Set the UnitCell energy"):
             cell.optical_profile()
 
-    def test_pt100_matches_xraydb(self):
+    def test_pt100_uses_waasmaier_forward_factor_and_dispersion(self):
         cell = unitcells.unitcell("Pt100")
         cell.setEnergy(self.energy_eV)
         profile = cell.optical_profile()
         np.testing.assert_array_equal(profile, CTRoptics.optical_profile(cell))
-        density = density_from_cell(
-            xraydb.atomic_mass("Pt"), 4, cell.volume
-        )
-        delta, beta, _ = xraydb.xray_delta_beta("Pt", density, self.energy_eV)
+        wavelength = CTRoptics.HC_KEV_ANGSTROM / (self.energy_eV * 1e-3)
+        scale = 2.8179403262e-5 * wavelength**2 / (2.0 * np.pi)
+        forward = np.sum(cell.f[:, :5], axis=1) + cell.f[:, 10]
+        expected = scale * np.sum(
+            cell.basis[:, 6]
+            * (forward + cell.f[:, 11] + 1j * cell.f[:, 12])
+        ) / cell.volume
 
         self.assertEqual(profile.shape, (1, 3))
         self.assertEqual(profile.dtype, np.float64)
         self.assertTrue(profile.flags.c_contiguous)
         self.assertEqual(profile[0, 0], 0.0)
-        np.testing.assert_allclose(profile[:, 1], delta, rtol=1e-7)
-        np.testing.assert_allclose(profile[:, 2], beta, rtol=1e-7)
+        np.testing.assert_allclose(
+            profile[0, 1:], [expected.real, expected.imag], rtol=1e-14
+        )
+        homogeneous = CTRoptics.homogeneous_bulk_profile(cell)
+        np.testing.assert_allclose(
+            homogeneous.values[0, 1:],
+            [expected.real, expected.imag],
+            rtol=1e-14,
+        )
 
     def test_ionic_profile_uses_ionic_forward_scattering_factor(self):
         cell = CTRcalc.UnitCell([10.0, 10.0, 10.0], [90.0, 90.0, 90.0])
@@ -71,7 +81,10 @@ class TestUnitCellOpticalProfile(unittest.TestCase):
 
         self.assertEqual(profile.shape, (2, 3))
         np.testing.assert_allclose(profile[:, 0], [-6.5807, -3.29035])
-        np.testing.assert_allclose(profile[:, 1], delta, rtol=1e-7)
+        # xraydb uses the exact neutral-atom electron count at Q=0, whereas
+        # the CTR/DWBA path intentionally uses the Waasmaier--Kirfel fit at
+        # Q=0 so that optical and atomic amplitudes have identical limits.
+        np.testing.assert_allclose(profile[:, 1], delta, rtol=1e-3)
         np.testing.assert_allclose(profile[:, 2], beta, rtol=1e-7)
 
     def test_domain_translation_and_occupancy_weight_optical_contribution(self):
@@ -303,15 +316,17 @@ class TestLayeredWavefield(unittest.TestCase):
                 [self._kz(value, self.energy_eV, alpha) for value in n]
             )
             admittance = -kz if polarization == "s" else -(n**2) / kz
-            expected_r = (admittance[0] - admittance[1]) / (
+            tangential_r = (admittance[0] - admittance[1]) / (
                 admittance[0] + admittance[1]
             )
+            expected_r = -tangential_r if polarization == "p" else tangential_r
             expected_t = 2.0 * admittance[0] / (
                 admittance[0] + admittance[1]
             )
 
             np.testing.assert_allclose(field.r_S, expected_r, rtol=1e-13)
             np.testing.assert_allclose(field.t_S, expected_t, rtol=1e-13)
+            np.testing.assert_allclose(field.A_minus[0], field.r_S, rtol=0.0)
             flux = abs(field.r_S) ** 2 + (
                 admittance[1].real / admittance[0].real
             ) * abs(field.t_S) ** 2
@@ -364,12 +379,22 @@ class TestLayeredWavefield(unittest.TestCase):
             )
             lower_down = field.A_plus[interface + 1]
             lower_up = field.A_minus[interface + 1]
+            if field.polarization == "p":
+                tangential = down - up
+                lower_tangential = lower_down - lower_up
+                flux_field = down + up
+                lower_flux_field = lower_down + lower_up
+            else:
+                tangential = down + up
+                lower_tangential = lower_down + lower_up
+                flux_field = down - up
+                lower_flux_field = lower_down - lower_up
             np.testing.assert_allclose(
-                down + up, lower_down + lower_up, rtol=1e-12, atol=1e-12
+                tangential, lower_tangential, rtol=1e-12, atol=1e-12
             )
             np.testing.assert_allclose(
-                admittance[interface] * (down - up),
-                admittance[interface + 1] * (lower_down - lower_up),
+                admittance[interface] * flux_field,
+                admittance[interface + 1] * lower_flux_field,
                 rtol=1e-12,
                 atol=1e-12,
             )
@@ -413,7 +438,7 @@ class TestLayeredWavefield(unittest.TestCase):
         )
 
         np.testing.assert_allclose(-field.kz[-1], 0.0, atol=0.0)
-        np.testing.assert_allclose(field.r_S, -1.0, rtol=1e-14)
+        np.testing.assert_allclose(field.r_S, 1.0, rtol=1e-14)
         np.testing.assert_allclose(field.t_S, 0.0, atol=0.0)
         sampled = CTRoptics.sample_electric_field(field, profile[:, 0])
         self.assertTrue(np.all(np.isfinite(sampled)))

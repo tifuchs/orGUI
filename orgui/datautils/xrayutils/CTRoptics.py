@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .CTRutil import atomic_number
 from ._CTRnative import HAS_CPP_ACCEL, _CTRcalc_cpp
 
 
@@ -15,9 +14,13 @@ HC_KEV_ANGSTROM = 12.398419843320026
 class LayeredElectricField:
     """Unperturbed one-dimensional electric field in Renaud notation.
 
-    Slabs are ordered from the incident medium towards the substrate.
-    ``A_plus`` and ``A_minus`` are downward- and upward-propagating electric
-    field amplitudes referenced to ``z_reference`` for each slab.
+    Slabs are ordered from the incident medium towards the substrate. The
+    ``s`` and ``p`` polarization vectors use the right-handed Renaud basis
+    ``epsilon_s x epsilon_p = k_hat``. ``A_plus`` and ``A_minus`` are the
+    corresponding downward- and upward-propagating electric-field branch
+    coefficients referenced to ``z_reference`` for each slab. In particular,
+    the tangential component of an upward ``p`` branch has the opposite sign
+    from ``A_minus``.
 
     :param numpy.ndarray z_interfaces:
         Interface positions in Angstrom, ordered from ambient to substrate.
@@ -32,7 +35,8 @@ class LayeredElectricField:
     :param numpy.ndarray A_minus:
         Upward-propagating slab amplitudes.
     :param complex or numpy.ndarray r_S:
-        Specular reflection amplitude in the incident medium.
+        Specular reflection amplitude in the analyzed Renaud polarization
+        basis. It equals ``A_minus[0]`` for both ``s`` and ``p``.
     :param complex or numpy.ndarray t_S:
         Transmission amplitude at the substrate boundary.
     :param str polarization:
@@ -88,7 +92,10 @@ def optical_profile(unit_cell, include_coherent_domains=True):
     The returned C-contiguous ``(N, 3)`` float64 array has columns ``z`` in
     Angstrom, ``delta``, and ``beta``.  Each row is a domain-transformed layer
     contribution; coherent-domain occupancy is already applied to ``delta``
-    and ``beta`` in the convention ``n = 1-delta-i*beta``.
+    and ``beta`` in the convention ``n = 1-delta-i*beta``. The forward
+    scattering amplitude always uses the Waasmaier--Kirfel representation at
+    ``Q = 0`` plus the energy-dependent dispersion correction, matching the
+    structure-factor kernels exactly.
 
     :param UnitCell unit_cell:
         Unit cell with energy-dependent scattering factors populated by
@@ -145,20 +152,9 @@ def optical_profile(unit_cell, include_coherent_domains=True):
     profile = np.empty((len(layer_ids) * len(domain_matrices), 3), dtype=np.float64)
     row = 0
     for layer_index, (layer_id, layer_cell) in enumerate(layers.items()):
-        forward_static_factor = np.asarray(
-            [atomic_number(name) for name in layer_cell.names],
-            dtype=np.float64,
-        )
-        ionic_species = np.asarray(
-            [name.endswith(("+", "-")) for name in layer_cell.names],
-            dtype=bool,
-        )
-        ionic_forward_factor = (
+        forward_static_factor = (
             np.sum(layer_cell.f[:, :5], axis=1) + layer_cell.f[:, 10]
         )
-        forward_static_factor[ionic_species] = ionic_forward_factor[
-            ionic_species
-        ]
         forward_factor = np.sum(
             layer_cell.basis[:, 6]
             * (
@@ -232,9 +228,10 @@ def optical_profile_asbulk(unit_cell, noUC=30):
 def homogeneous_bulk_profile(unit_cell):
     """Return one homogeneous bulk medium below vacuum.
 
-    The optical constants are evaluated natively from the unit-cell forward
-    scattering amplitude and crystallographic volume. The interface
-    is placed at the crystallographic phase origin. This preserves the
+    The optical constants are evaluated natively from the Waasmaier--Kirfel
+    unit-cell forward scattering amplitude, dispersion correction, and
+    crystallographic volume. The interface is placed at the crystallographic
+    phase origin. This preserves the
     existing :meth:`UnitCell.F_uc` phase convention for the first bulk cell;
     deeper cells are translated by negative out-of-plane repeats.
 
@@ -252,13 +249,9 @@ def homogeneous_bulk_profile(unit_cell):
         raise RuntimeError(
             "The native CTR extension with bulk optical support is required."
         )
-    basis, form_factors, names = unit_cell.build_selected_basis()
+    basis, form_factors, _ = unit_cell.build_selected_basis()
     if len(basis) == 0:
         raise ValueError("The bulk unit cell must contain at least one atom.")
-    names = np.asarray(names, dtype=str)
-    ionic = np.logical_or(
-        np.char.endswith(names, "+"), np.char.endswith(names, "-")
-    ).astype(np.int64)
     wavelength = HC_KEV_ANGSTROM / (unit_cell._E * 1e-3)
     scale_over_volume = (
         2.8179403262e-5 * wavelength**2 / (2.0 * np.pi * unit_cell.volume)
@@ -266,7 +259,6 @@ def homogeneous_bulk_profile(unit_cell):
     average = _CTRcalc_cpp.homogeneous_bulk_optical_constants(
         np.ascontiguousarray(basis, dtype=np.float64),
         np.ascontiguousarray(form_factors, dtype=np.float64),
-        np.ascontiguousarray(ionic),
         scale_over_volume,
     )
     values = np.array(
@@ -697,7 +689,7 @@ def solve_electric_field(
 
 
 def sample_electric_field(field, z):
-    """Sample a prepared layered electric-field amplitude at arbitrary depths.
+    """Sample a prepared layered tangential electric field at arbitrary depths.
 
     :param LayeredElectricField field:
         Field returned by :func:`solve_electric_field`.
@@ -705,7 +697,10 @@ def sample_electric_field(field, z):
         Positions in Angstrom. The returned shape is ``z.shape`` followed by
         the field's incidence-angle shape.
     :returns:
-        Complex tangential electric-field amplitude ``E``.
+        Complex tangential electric-field amplitude. For ``s`` this is
+        ``E_s``. For ``p`` it is the tangential component normalized by the
+        incident vacuum factor ``sin(alpha)``; the upward branch sign implied
+        by the right-handed Renaud basis is included.
     :rtype: complex or numpy.ndarray
     """
     _require_native_optics()
@@ -727,6 +722,7 @@ def sample_electric_field(field, z):
         field.z_reference,
         field.z_interfaces,
         z_flat,
+        field.polarization,
     )
     result = E.reshape(z_shape + field.angle_shape)
     if result.ndim == 0:
