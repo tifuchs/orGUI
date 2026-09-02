@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .CTRutil import atomic_number
-from .CTRuc import HAS_CPP_ACCEL, _CTRcalc_cpp
+from ._CTRnative import HAS_CPP_ACCEL, _CTRcalc_cpp
 
 
 HC_KEV_ANGSTROM = 12.398419843320026
