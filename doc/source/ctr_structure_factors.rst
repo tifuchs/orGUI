@@ -68,13 +68,42 @@ being summed.
 Bulk distorted-wave Born amplitude
 -----------------------------------
 
-``SXRDCrystal.F_DWBA`` evaluates the four Renaud distorted-wave channels for
-one bulk unit cell or its semi-infinite repetition.  This first increment is
-deliberately bulk-only: a crystal containing surface or film components is
-rejected until those components are connected to the same graded-interface
-path.
+The DWBA interface is a lazy runtime state owned by each crystal.  It is not
+written to ``.xtal`` files.  Configure a non-specular scan once, then evaluate
+any compatible rod in reference-cell r.l.u.:
 
-The optical solver uses the signed normal wavevector
+.. code-block:: python
+
+   crystal.dwba.set_ctr_geometry(alpha_i=np.deg2rad(0.2))
+   result_20L = crystal.dwba.evaluate(2.0, 0.0, L)
+   result_00L = crystal.dwba.evaluate(0.0, 0.0, L_specular)
+
+Exactly one of ``alpha_i``, ``alpha_f``, or ``equal_angles=True`` configures a
+rule.  Angles are radians.  ``rods=None`` establishes the default
+non-specular rule; ``rods=[(h, k), ...]`` establishes overrides.  The
+``(0, 0, L)`` rod always uses equal angles.  ``set_orientation(U)`` replaces
+the default identity orientation used by the internal ``UBCalculator`` and
+``VliegAngles`` objects.
+
+``prepare`` returns an immutable ``PreparedCTR`` that freezes geometry,
+polarization, the optical reference :math:`n_0`, and incident and reciprocal
+exit fields.  ``evaluate`` caches preparations automatically, while
+``evaluate_prepared`` deliberately continues using the retained preparation's
+frozen :math:`n_0` as atomic fit parameters change.  Energy, lattice, reference
+transform, orientation, or reference-area changes invalidate retained
+geometry.  ``cache_info`` reports the split geometry, optical-reference,
+unique-angle field, and 32-entry preparation caches; ``clear_cache`` clears
+them.  Repeated glancing angles are solved and stored once, with native index
+maps selecting their field columns for each scan point.
+
+Measured geometries are available without changing a persistent rod rule.
+``prepare_from_glancing(h, k, alpha_i, alpha_f)`` derives ``l`` from the Ewald
+condition, and ``prepare_from_vlieg(alpha, delta, gamma, omega, chi, phi)``
+derives hkl using the configured orientation.  Their ``evaluate_...``
+counterparts prepare and evaluate in one call.  Inputs broadcast; scalar input
+produces scalar amplitude properties.
+
+The optical solver uses the Renaud-signed normal wavevector
 
 .. math::
 
@@ -82,142 +111,63 @@ The optical solver uses the signed normal wavevector
    \qquad \Re k_{z,j}\leq0,\quad\Im k_{z,j}\geq0,
 
 and stores downward and upward field amplitudes as ``A_plus`` and
-``A_minus``.  All core optical glancing angles, including
-``SXRDCrystal.wavefield`` and ``SXRDCrystal.specular_reflectivity``, are in
-radians.  ``sample_electric_field`` samples a ``LayeredElectricField`` only
-when local field values are needed.
-
-For channel signs :math:`\sigma_i,\sigma_f\in\{+1,-1\}`, the native kernel
-uses
+``A_minus``.  For channel signs
+:math:`\sigma_i,\sigma_f\in\{+1,-1\}` the native kernel uses
 
 .. math::
 
    Q_{z,j}^{\sigma_i\sigma_f}
    =-\left(\sigma_i k_{zj,i}+\sigma_f k_{zj,f}\right).
 
-The reciprocal exit field is solved from the same complex refractive profile
-without conjugating its amplitudes.  Explicit ``"s"`` and ``"p"`` input and
-output polarizations are contracted as local Maxwell field vectors.  Each
-channel receives its own generally complex :math:`Q^2`, Waasmaier--Kirfel
-factor, anisotropic Debye--Waller factor, and reference-position phase.
+The reciprocal exit field is solved through the same complex profile without
+conjugating its amplitudes.  Explicit ``"s"`` and ``"p"`` fields use the
+bilinear reciprocal-field contraction.  Each channel receives its own
+generally complex :math:`Q^2`, analytic Waasmaier--Kirfel factor, anisotropic
+Debye--Waller factor, and reference-position phase.  The terminal substrate
+enforces :math:`A_i^-=A_f^-=0`, so only ``++`` survives in the current
+bulk-only model.
 
-The terminal substrate enforces :math:`A_i^-=A_f^-=0`, so only the ``++``
-channel survives for the current bulk-only model.  In ``"semi_infinite"``
-mode that channel is summed before the coherent channel total:
+The optional empirical ``bulk_attenuation`` exponent defaults to zero because
+the complex DWBA wavevectors already contain physical absorption.  A nonzero
+value remains available for kinematical comparisons and is applied
+continuously within the top cell and between repeats.  At zero attenuation an
+exact Bragg pole is rejected.  ``CTRutil.set_atten_from_dwba`` estimates the
+corresponding scalar kinematical attenuation at a fixed incidence angle;
+``CTRutil.attenuation_from_dwba`` supplies its broadcast diagnostic form.
 
-.. math::
+``DWBAResult`` separates the matrix element and observable field amplitudes:
 
-   F_{\mathrm{bulk},\nu}
-   =\frac{\displaystyle
-      \sum_a F_{a,\nu}\exp(\eta z_{a,\mathrm{rel}})}
-   {1-\exp[-i\mathbf Q_\nu\cdot\mathbf c-\eta]}.
+``F_contrast``
+   The coherent DWBA contrast structure factor :math:`F_{\Delta,\mathrm{DWBA}}`.
+``unperturbed_amplitude``
+   The Fresnel reference amplitude :math:`r_0` for specular points and zero
+   for non-specular points.
+``scattered_amplitude``
+   The dimensionless first-Born scattered far-field amplitude
 
-``bulk_attenuation`` supplies the optional empirical exponent :math:`\eta`
-per bulk repeat.  The intra-cell factor uses the same transformed fractional
-depth :math:`z_{a,\mathrm{rel}}` as the kinematical bulk sum, so the envelope
-is continuous at unit-cell boundaries.  It defaults to zero because the
-complex DWBA wavevectors already describe physical X-ray absorption.  A
-nonzero value is retained for controlled comparisons with kinematical models;
-setting it to zero is allowed away from a pole, while an exact Bragg pole is
-rejected.
+   .. math::
 
-For a kinematical comparison at fixed incidence,
-``CTRutil.set_atten_from_dwba(crystal, alpha_i)`` populates the scalar
-``crystal.atten`` from the exact incident-path normal wavevector.  An optional
-scalar ``alpha_f`` includes the reciprocal exit path as well.  The equivalent
-attenuation per reference-cell repeat is
+      a_{\mathrm{scattered}}=
+      \frac{2\pi i r_e}{k_0\sin\alpha_f\,A_{\mathrm{ref}}}
+      F_{\Delta,\mathrm{DWBA}}.
+``total_amplitude``
+   ``unperturbed_amplitude + scattered_amplitude``.
+``structure_factor_squared`` and ``scattered_amplitude_squared``
+   The squared moduli of the two corresponding amplitudes.
+``differential_cross_section_kernel``
+   :math:`r_e^2|F_{\Delta,\mathrm{DWBA}}|^2` per reference lateral cell.  It is
+   not an intensity integrated over detector acceptance, footprint,
+   coherence, resolution, flux, exposure, or efficiency.
+``reflectivity`` and ``first_order_reflectivity``
+   The coherent :math:`|r_0+a_{\mathrm{scattered}}|^2` and its formal
+   first-order truncation.  These properties require an entirely specular,
+   same-polarization, semi-infinite result.
 
-.. math::
-
-   \mathrm{atten}
-   =\frac{|c_z|}{|T_{zz}|}
-    \left[\Im k_{z,\mathrm{bulk}}(\alpha_i)
-    +\Im k_{z,\mathrm{bulk}}(\alpha_f)\right],
-
-where :math:`T` is ``refHKLTransform``.  Omitting ``alpha_f`` omits its term
-and gives the large-exit-angle plateau used as a constant-incidence
-approximation.  ``CTRutil.attenuation_from_dwba`` provides the same calculation
-without mutation and accepts broadcast angle arrays for diagnostics.  There is
-no single exact scalar attenuation along a fixed-incidence rod because the
-exit angle changes with ``l``.
-
-For repeated atomic evaluations, call ``prepare_DWBA`` once and pass its
-immutable ``PreparedDWBA`` result to ``F_DWBA_prepared``.  Preparation performs
-the incident and reciprocal-exit optical solves and validates the Ewald
-geometry.  Prepared evaluation performs no wavefield solve and reads current
-bulk atom, disorder, occupancy, form-factor, and coherent-domain parameters.
-Changing energy, lattice or reference transforms, hkl, angles, polarization,
-or the intended optical profile requires preparation again.
-
-Diffractometer angles from the Vlieg z-mode
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-``prepare_DWBA`` requires explicit glancing angles.  For a scan that follows a
-diffractometer angle constraint rather than a pair of angles,
-``SXRDCrystal.prepare_DWBA_Zmode`` derives them from
-``HKLVlieg.VliegAngles.anglesZmode`` and prepares the same state:
-
-.. code-block:: python
-
-   prepared, angles = crystal.prepare_DWBA_Zmode(
-       2.0, 0.0, L, np.deg2rad(0.2), fixed="in", return_angles=True
-   )
-   F = crystal.F_DWBA_prepared(prepared)
-
-``fixed`` selects the z-mode constraint — ``"in"`` for a fixed incidence angle
-``alpha``, ``"out"`` for a fixed exit angle ``gamma``, and ``"eq"`` for the
-equal-angle constraint used on the specular rod, where ``fixedangle`` has no
-effect.  All parameters the crystal already knows are populated from it: the
-bulk cell is the lattice, its energy sets the wavelength, ``h``, ``k``, and
-``l`` are in reference-cell r.l.u. and pass through ``refHKLTransform``, and
-the orientation matrix is ``U = 1`` so that the crystal cartesian frame is the
-z-mode sample frame at all-zero angles.  The surface normal is then the omega
-axis, which is what the layered DWBA optics assume, and consequently only
-``chi = phi = 0`` is accepted: a tilted inner sample circle would make
-``alpha`` and ``gamma`` differ from the glancing angles of the optics.
-
-``return_angles`` additionally yields the six z-mode angles ``(alpha, delta,
-gamma, omega, chi, phi)`` in radians, following the shape convention of
-``anglesZmode``.  A reflection that the constraint cannot reach, or one whose
-glancing angles leave ``(0, pi/2]``, is rejected with the offending ``hkl``.
-``examples/CTR/pt100_dwba_ctr_example.ipynb`` calculates the specular ``(0 0 L)``
-and non-specular ``(2 0 L)`` rods of Pt(100) this way and compares them with
-the kinematical bulk amplitude.
-
-Glancing angles as the scan variable
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Near the critical angle ``l`` is a poor scan variable: a rod is sub-critical
-only over a thin ``l`` interval — below ``l = 0.053`` for the specular rod of
-Pt(100) at 20 keV — so the whole interesting range collapses towards ``l = 0``.
-The glancing angle is the natural parameter there, and
-``SXRDCrystal.prepare_DWBA_from_angles`` is the counterpart of
-``prepare_DWBA_Zmode`` that accepts it: the in-plane indices and both glancing
-angles are given, and ``l`` is derived rather than the angles:
-
-.. code-block:: python
-
-   prepared, l = crystal.prepare_DWBA_from_angles(
-       2.0, 0.0, np.deg2rad(0.2), alpha_f, return_l=True
-   )
-   F = crystal.F_DWBA_prepared(prepared)
-
-The conversion itself is public as
-``SXRDCrystal.l_from_glancing_angles(h, k, alpha_i, alpha_f)``, for callers
-that want to pass the result to ``prepare_DWBA`` themselves and have its Ewald
-check verify the round trip.  It solves
-
-.. math::
-
-   Q_z = k_0\left(\sin\alpha_i+\sin\alpha_f\right)
-
-for ``l``, which is linear because ``B_mat @ refHKLTransform`` maps reference
-r.l.u. to cartesian :math:`\mathbf Q`.  The solve is rejected when the
-reference out-of-plane axis has no surface-normal component, since ``Q_z`` is
-then independent of ``l``.  The conversion is purely kinematic and does not
-restrict the angle range; ``prepare_DWBA`` still enforces ``(0, pi/2]``.  The
-two convenience APIs are exact inverses: feeding a derived ``l`` back through
-``prepare_DWBA_Zmode`` returns the angles it was derived from.
+``crystal.dwba.reflectivity(..., polarization="unpolarized")`` evaluates the
+``s`` and ``p`` channels independently and averages their reflectivities
+incoherently.  The present implementation includes the bulk unit cell and its
+semi-infinite repetition only; finite surface/interface scattering and
+experimental acceptance integration remain separate future increments.
 
 Surface structure on a rough Film
 ---------------------------------
