@@ -976,6 +976,118 @@ def test_generated_model_records_preserve_the_prepared_optical_profile(
     assert np.isfinite(result.structure_factor_squared)
 
 
+def test_zero_width_epitaxy_bottom_correction_cancels_in_dwba():
+    """A sharp interface adds and removes the same lower-material planes."""
+    bulk = _layered_cell("bulk")
+    interface = CTRfilm.EpitaxyInterface(
+        _layered_cell("top"),
+        _layered_cell("bottom"),
+        profile=SkellamProfile(0.0, 0.0),
+        fixed_ucs=2,
+        name="interface",
+    )
+    crystal = CTRcalc.SXRDCrystal(
+        bulk, interface, stacking=np.array([1])
+    )
+
+    # The two points exercise the sharp-interface correction at Q_parallel = 0
+    # and Q_parallel != 0 under the same prepared optical reference.
+    prepared = crystal.dwba.prepare_from_glancing(
+        np.array([0.0, 0.6]),
+        0.0,
+        np.array([0.04, 0.04]),
+        np.array([0.04, 0.05]),
+    )
+    result = crystal.dwba.evaluate_prepared(prepared)
+    records = crystal.dwba._live_records()
+    np.testing.assert_array_equal(prepared.is_specular, [1, 0])
+
+    bottom_records = [
+        (record, contribution, prepared._atomic_model.reference_shares[index])
+        for index, (record, contribution) in enumerate(
+            zip(records, result.contributions)
+        )
+        if record.role == "interface_bottom"
+    ]
+    assert len(bottom_records) == 2
+
+    for record, contribution, reference_shares in bottom_records:
+        occupancy = np.asarray(record.cell.coherentDomainOccupancy)
+        positive = np.flatnonzero(occupancy > 0.0)
+        negative = np.flatnonzero(occupancy < 0.0)
+        np.testing.assert_array_equal(occupancy[positive], [1.0])
+        np.testing.assert_array_equal(occupancy[negative], [-1.0])
+        np.testing.assert_array_equal(
+            record.cell.coherentDomainMatrix[positive[0]],
+            record.cell.coherentDomainMatrix[negative[0]],
+        )
+
+        # The optical profile retains the same signed pair before the DWBA
+        # stratification combines coincident planes into a zero reference share.
+        optical_profile = record.cell.optical_profile()
+        positive = optical_profile[optical_profile[:, 1] > 0.0]
+        negative = optical_profile[optical_profile[:, 1] < 0.0]
+        assert positive.shape == negative.shape == (1, 3)
+        np.testing.assert_array_equal(positive[:, 0], negative[:, 0])
+        np.testing.assert_allclose(positive[:, 1:], -negative[:, 1:])
+        np.testing.assert_array_equal(reference_shares, 0.0)
+
+        # Each record is zero at both the specular and off-specular point;
+        # checking atomic and reference terms separately prevents contrast-only
+        # cancellation from concealing a decomposition error.
+        np.testing.assert_allclose(contribution.F_atomic, 0.0j, atol=2e-13)
+        np.testing.assert_array_equal(contribution.F_reference, 0.0j)
+        np.testing.assert_allclose(contribution.F_contrast, 0.0j, atol=2e-13)
+
+    # Isolate the two signed halves under the same frozen wavefield. This
+    # rules out a vacuous zero caused by the native kernel skipping the lower
+    # interface records: each half scatters, and their amplitudes are opposite.
+    original_occupancies = [
+        record.cell.coherentDomainOccupancy.copy()
+        for record, _, _ in bottom_records
+    ]
+    stacking_enabled = crystal.enable_uc_stacking
+    try:
+        # Prevent evaluate_prepared() from regenerating the interface and
+        # restoring both signs while this diagnostic isolates one at a time.
+        crystal.enable_uc_stacking = False
+        for (record, _, _), occupancy in zip(
+            bottom_records, original_occupancies
+        ):
+            record.cell.coherentDomainOccupancy = np.where(
+                occupancy > 0.0, occupancy, 0.0
+            )
+        positive_result = crystal.dwba.evaluate_prepared(prepared)
+
+        for (record, _, _), occupancy in zip(
+            bottom_records, original_occupancies
+        ):
+            record.cell.coherentDomainOccupancy = np.where(
+                occupancy < 0.0, occupancy, 0.0
+            )
+        negative_result = crystal.dwba.evaluate_prepared(prepared)
+    finally:
+        for (record, _, _), occupancy in zip(
+            bottom_records, original_occupancies
+        ):
+            record.cell.coherentDomainOccupancy = occupancy
+        crystal.enable_uc_stacking = stacking_enabled
+
+    positive_atomic = [
+        item.F_atomic
+        for item in positive_result.contributions
+        if item.role == "interface_bottom"
+    ]
+    negative_atomic = [
+        item.F_atomic
+        for item in negative_result.contributions
+        if item.role == "interface_bottom"
+    ]
+    for positive, negative in zip(positive_atomic, negative_atomic):
+        assert np.all(np.abs(positive) > 1e-12)
+        np.testing.assert_allclose(positive, -negative, rtol=2e-13, atol=2e-13)
+
+
 @pytest.mark.parametrize("mean_change", [-1.5, 0.0, 1.5])
 def test_signed_poisson_records_are_coherent_and_zero_width_cancels(mean_change):
     bulk = _layered_cell("bulk")
