@@ -3718,6 +3718,9 @@ class UnitCell(Lattice):
             calculate the absolute value to get the electron density
 
         """
+        if len(self.coherentDomainOccupancy) == 0:
+            return np.zeros_like(z, dtype=np.complex128)
+
         basis, formf, names = self.build_selected_basis()
 
         hkl = (self.refHKLTransform @ np.array([h, k, 0.0])).flatten()
