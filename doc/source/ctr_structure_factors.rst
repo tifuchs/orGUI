@@ -65,8 +65,8 @@ being summed.
    between the reference and bulk out-of-plane axis length, not only a
    rotated or reindexed reference.
 
-Bulk distorted-wave Born amplitude
------------------------------------
+Unit-cell distorted-wave Born amplitude
+----------------------------------------
 
 The DWBA interface is a lazy runtime state owned by each crystal.  It is not
 written to ``.xtal`` files.  Configure a non-specular scan once, then evaluate
@@ -86,11 +86,13 @@ the default identity orientation used by the internal ``UBCalculator`` and
 ``VliegAngles`` objects.
 
 ``prepare`` returns an immutable ``PreparedCTR`` that freezes geometry,
-polarization, the optical reference :math:`n_0`, and incident and reciprocal
-exit fields.  ``evaluate`` caches preparations automatically, while
-``evaluate_prepared`` deliberately continues using the retained preparation's
-frozen :math:`n_0` as atomic fit parameters change.  Energy, lattice, reference
-transform, orientation, or reference-area changes invalidate retained
+polarization, the optical reference :math:`n_0`, generated-record topology,
+and incident and reciprocal exit fields.  ``evaluate`` caches preparations
+automatically, while ``evaluate_prepared`` deliberately continues using the
+retained preparation's frozen :math:`n_0` as atomic coordinates, species,
+occupancies, displacement factors, component weights, and domain occupancies
+change.  Energy, lattice, reference transform, orientation, reference area,
+record set, domain matrix, or stacking-geometry changes invalidate retained
 geometry.  ``cache_info`` reports the split geometry, optical-reference,
 unique-angle field, and 32-entry preparation caches; ``clear_cache`` clears
 them.  Repeated glancing angles are solved and stored once, with native index
@@ -123,9 +125,28 @@ The reciprocal exit field is solved through the same complex profile without
 conjugating its amplitudes.  Explicit ``"s"`` and ``"p"`` fields use the
 bilinear reciprocal-field contraction.  Each channel receives its own
 generally complex :math:`Q^2`, analytic Waasmaier--Kirfel factor, anisotropic
-Debye--Waller factor, and reference-position phase.  The terminal substrate
-enforces :math:`A_i^-=A_f^-=0`, so only ``++`` survives in the current
-bulk-only model.
+Debye--Waller factor, and reference-position phase.  Every transformed atom is
+assigned to the optical medium containing its physical surface-normal
+coordinate; an atom exactly on an interface belongs to the upper medium.
+The ``++``, ``+-``, ``-+``, and ``--`` amplitudes are summed coherently.  Bulk
+repeats crossing finite graded media are evaluated explicitly.  Once a full
+repeat lies in the terminal substrate, its closed-form lattice tail contains
+only ``++`` because :math:`A_i^-=A_f^-=0` there.
+
+Atomic ``UnitCell``, ``Film``, ``EpitaxyInterface``, and ``PoissonSurface``
+components participate in this calculation.  Their stacking-generated cells,
+signed domain occupancies, crystal weights and domains, and
+:math:`A_{\mathrm{ref}}/A_{\mathrm{uc}}` lateral-area conversion are retained.
+Continuous ``WaterModel`` components, Python special form-factor callbacks,
+surface-normal tilts, changed projected areas, and in-plane strain transforms
+are rejected explicitly.
+
+At a specular point, the kernel subtracts the Fourier amplitude of each
+record's share of the same piecewise-constant :math:`\delta+i\beta` reference
+used by the electric-field solver.  Finite layers use a stable finite-slab
+integral and the substrate uses the terminal half-space integral.  This planar
+reference amplitude is exactly zero for non-specular points; no near-specular
+interpolation is applied.
 
 The optional empirical ``bulk_attenuation`` exponent defaults to zero because
 the complex DWBA wavevectors already contain physical absorption.  A nonzero
@@ -139,6 +160,19 @@ corresponding scalar kinematical attenuation at a fixed incidence angle;
 
 ``F_contrast``
    The coherent DWBA contrast structure factor :math:`F_{\Delta,\mathrm{DWBA}}`.
+``F_atomic`` and ``F_reference``
+   The coherent sums of the actual atomic amplitude and the subtracted planar
+   optical-reference amplitude.  Thus
+   ``F_contrast == F_atomic - F_reference``.
+``contributions``
+   An ordered tuple of immutable ``DWBAContribution`` records: bulk first,
+   followed by components in crystal order and their generated cells in model
+   order.  Each record identifies its component, generated-record index and
+   role, optional structural layer, and exposes read-only ``F_atomic``,
+   ``F_reference``, and ``F_contrast`` amplitudes.  Roles are ``bulk``,
+   ``unit_cell_layer``, ``film_layer``, ``interface_top``,
+   ``interface_bottom``, ``surface_termination``, ``covered_film``, and
+   ``sharp_film_correction``.
 ``unperturbed_amplitude``
    The Fresnel reference amplitude :math:`r_0` for specular points and zero
    for non-specular points.
@@ -165,9 +199,65 @@ corresponding scalar kinematical attenuation at a fixed incidence angle;
 
 ``crystal.dwba.reflectivity(..., polarization="unpolarized")`` evaluates the
 ``s`` and ``p`` channels independently and averages their reflectivities
-incoherently.  The present implementation includes the bulk unit cell and its
-semi-infinite repetition only; finite surface/interface scattering and
-experimental acceptance integration remain separate future increments.
+incoherently.  The default ``bulk_mode="semi_infinite"`` performs the physical
+atom-minus-reference calculation and includes the unperturbed specular
+reflection.  Diagnostic ``bulk_mode="unit_cell"`` instead evaluates exactly
+one bulk repeat plus every finite generated record, sets every
+``F_reference`` to zero, and omits the unperturbed reflection.  Experimental
+acceptance integration remains a separate operation.
+
+Comparing a DWBA rod with a kinematical rod
+--------------------------------------------
+
+``DWBAResult.F_contrast`` and ``SXRDCrystal.F`` are both amplitudes in
+electrons per reference lateral cell, and off specular they are directly
+comparable.  They are not identical even in the weak-scattering limit, and
+four separate terms account for the difference.  Three are physics and one is
+a difference of convention, so a comparison that does not separate them can be
+read the wrong way round.
+
+Polarization
+   The DWBA matrix element contains the bilinear polarization contraction; for
+   ``"s"`` this is :math:`P_{ss}=\cos\varphi`, available as
+   ``PreparedCTR.cos_azimuth``.  ``SXRDCrystal.F`` is a bare structure factor
+   with no polarization factor, so the DWBA amplitude is smaller by
+   :math:`\cos\varphi`.  For an in-plane scattering angle of
+   :math:`12^\circ` this is a two percent effect.
+
+Optical field amplitude
+   Every record is weighted by :math:`A_i^{\sigma_i}A_f^{\sigma_f}` of the
+   medium that contains it, not of the ambient.  A film that is denser than
+   its substrate has its own, larger critical angle, and an incidence angle
+   chosen as a safe multiple of the *substrate* critical angle can still sit on
+   the flank of the *film* resonance.  Inspect ``field_i.n`` for the
+   per-medium :math:`\delta` and ``field_i.A_plus`` and ``field_i.A_minus``
+   for the branch amplitudes actually used.
+
+Bulk truncation
+   The kinematical bulk series is damped by the empirical scalar
+   ``SXRDCrystal.atten``; the DWBA series is damped by
+   :math:`\mathrm{Im}\,k_z`.  Off Bragg this changes the bulk term by a small
+   percentage, which is invisible while the bulk term dominates the rod.  It
+   is not invisible where the bulk term and a surface correction nearly
+   cancel: a rough or partly dissolved surface has such near-cancellations
+   between its Bragg poles, and there a one percent change of the bulk term
+   can be the size of the whole remaining amplitude.  Match the two
+   prescriptions with ``CTRutil.attenuation_from_dwba`` before comparing.
+
+Refraction
+   The internal normal wavevectors are smaller than the vacuum ones, so a DWBA
+   feature sits at slightly larger nominal :math:`l`.  The shift is a fixed
+   small number in r.l.u. and is negligible on a smooth part of a rod.  It
+   dominates at any sharp feature, because :math:`|\mathrm{d}F/\mathrm{d}l|`
+   is then large compared with :math:`|F|`.  The shift is medium dependent:
+   a bulk Bragg pole follows the substrate :math:`\delta`, while the film-
+   dominated rod between the poles follows the film :math:`\delta`.
+
+``examples/CTR/RuO2_TiO2_nonspecular_DWBA.ipynb`` works this decomposition
+through for the RuO2/TiO2 Poisson dissolution family on the ``(0, 1, L)``,
+``(1, 1, L)``, and ``(2, 0, L)`` rods, and shows that once the four terms are
+accounted for, the corrected kinematical rod converges onto the DWBA rod in the
+Born limit.
 
 Surface structure on a rough Film
 ---------------------------------
@@ -572,6 +662,18 @@ included. Calculated intensity is proportional to
 
 API reference
 -------------
+
+.. autoclass:: orgui.datautils.xrayutils.CTRdwba.DWBAContribution
+   :members:
+   :member-order: bysource
+
+.. autoclass:: orgui.datautils.xrayutils.CTRdwba.DWBAResult
+   :members:
+   :member-order: bysource
+
+.. autoclass:: orgui.datautils.xrayutils.CTRdwba.DWBAState
+   :members: set_orientation, set_ctr_geometry, prepare, prepare_from_glancing, prepare_from_vlieg, evaluate, evaluate_prepared, evaluate_from_glancing, evaluate_from_vlieg, reflectivity, cache_info, clear_cache
+   :member-order: bysource
 
 .. autoclass:: orgui.datautils.xrayutils.CTRdistributions.SurfaceProfile
    :members: support, occupancy, correction, surface_occupancy
