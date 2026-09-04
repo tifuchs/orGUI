@@ -1787,6 +1787,30 @@ class TestLayerStacking(unittest.TestCase):
             -1 / 3,
         )
 
+    def test_film_layer_atoms_track_unitcell_after_deepcopy(self):
+        """``layer_ucs[i].basis`` must reflect live ``unitcell.basis`` updates.
+
+        ``set_ucs`` builds ``layer_ucs[i].basis`` once, as a numpy *view*
+        into ``self.unitcell.basis`` (via ``UnitCell.split_in_layers``).
+        ``copy.deepcopy`` -- used once per fit by ``CTROptimizer.__init__``
+        -- materializes that view as an independent, disconnected array
+        instead of preserving the aliasing, which used to freeze every
+        layer's atoms at whatever values ``unitcell.basis`` held at copy
+        time: a later fit-parameter update (Debye-Waller factor, Wyckoff
+        ``u``, strain, ...) on the copy's ``unitcell.basis`` had no effect
+        on the atoms ``F_uc`` actually sums over, for the life of that copy.
+        """
+        film = CTRfilm.Film(self.make_layered_unitcell("film"))
+        film.basis[0] = 3
+        film.createLayers()
+
+        film_copy = copy.deepcopy(film)
+        film_copy.unitcell.basis[:, 4] = 0.9  # iDW, was 0.1
+        film_copy.createLayers()
+
+        for uc in film_copy.layer_ucs:
+            np.testing.assert_allclose(uc.basis[:, 4], 0.9)
+
     def test_epitaxy_interface_rotates_cyclic_layer_order(self):
         interface = CTRfilm.EpitaxyInterface(
             self.make_layered_unitcell("top"),

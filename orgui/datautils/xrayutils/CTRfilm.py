@@ -1566,6 +1566,22 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         the component below has already generated support up to ``below_H``,
         only the remaining width is represented by Film layers.
         """
+        # `self.layer_ucs[i].basis` is built once, in `set_ucs`, as a numpy
+        # *view* into `self.unitcell.basis` (via `UnitCell.split_in_layers`).
+        # `copy.deepcopy` -- used once per fit by `CTROptimizer.__init__` --
+        # and pickling -- used by multiprocessing-based optimizers -- both
+        # materialize a numpy view as an independent, disconnected array,
+        # silently freezing every layer's atoms at whatever values
+        # `self.unitcell.basis` held at copy time, permanently, for the life
+        # of that copy: later fit-parameter updates to `self.unitcell.basis`
+        # (Debye-Waller factors, Wyckoff `u`, strain, ...) would then have no
+        # effect on the atoms actually summed in `F_uc`. Re-synchronize every
+        # layer's atom rows from the live `self.unitcell.basis` explicitly on
+        # every call instead of relying on aliasing that copying may have
+        # silently broken.
+        for layer_id, uc in zip(self._layer_ids, self._layer_ucs_base):
+            uc.basis[:] = self.unitcell.basis[self.unitcell.basis[:, 7] == layer_id]
+
         n_layers_in_uc = len(self.unitcell.layers)
         scaled_width = self.basis[0] - n_layers_in_uc * (
             (self.below_H - self.below_loc) / self.unitcell.a[2]
