@@ -1939,6 +1939,14 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
     def set_ucs(self, unitcell, **kwargs):
         """Set a legacy source cell or explicit termination-cell mapping."""
+        # Replacing the cells invalidates any existing binding to a Film.
+        # `_bind_underlying_component` returns early when it is already bound
+        # to the same Film, so without this a re-stack would keep the layer
+        # positions derived from the *previous* cells -- and those set the
+        # layer-to-height ladder, so consecutive surface layers could end up a
+        # whole unit cell apart instead of one structural layer, leaving W
+        # unable to recede the film by a single layer.
+        self.underlying_film = None
         self._source_unitcell = None
         self.termination_cells = {}
         if isinstance(unitcell, Mapping):

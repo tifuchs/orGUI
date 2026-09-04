@@ -446,6 +446,49 @@ class TestPoissonSurface(unittest.TestCase):
             any(uc.coherentDomainOccupancy for uc in surface_copy.layer_ucs)
         )
 
+    def test_set_ucs_rebinds_layer_positions_to_the_film(self):
+        """Swapping in a termination bank must re-derive the layer ladder.
+
+        The surface layer positions come from the underlying Film, but
+        ``_bind_underlying_component`` short-circuits when it is already bound
+        to that Film. Replacing the cells without clearing the binding left
+        ``_layerpos_base`` at the termination cells' own positions -- which are
+        all identical, one per cell -- so ``_unwrapped_layer_positions`` spaced
+        consecutive surface layers a whole unit cell apart instead of one
+        structural layer, and a negative W could not recede the film.
+        """
+        cell = CTRcalc.UnitCell([3.0, 3.0, 4.0], [90.0, 90.0, 90.0], name="two")
+        for layer, z in ((1, 0.0), (2, 0.5)):
+            cell.addAtom("C", [0.0, 0.0, z], 0.1, 0.1, 1.0, layer=layer)
+            cell.layerpos[float(layer)] = z
+        cell.coherentDomainOccupancy = [1.0]
+
+        surface = CTRfilm.PoissonSurface(
+            copy.deepcopy(cell),
+            profile=PoissonProfile(mean_change=-2.0, alpha=0.0),
+        )
+        film = CTRfilm.Film(copy.deepcopy(cell), name="underlying_film")
+        film.basis[0] = 6.0
+        film.createLayers()
+
+        def stack():
+            surface.stack_on(
+                0.0, film.height_absolute, film.end_layer_number,
+                below_state=film.layer_state, below_component=film,
+            )
+
+        stack()
+        expected = np.sort(np.asarray(surface._layerpos_base, dtype=float))
+
+        surface.set_ucs(dict(surface.termination_cells))
+        stack()
+
+        np.testing.assert_allclose(
+            np.sort(np.asarray(surface._layerpos_base, dtype=float)), expected
+        )
+        # One structural layer apart, not a whole unit cell.
+        self.assertTrue(np.all(np.diff(np.sort(surface.layerpos)) < 1.0))
+
     def test_create_layers_assigns_convolved_occupancies(self):
         surface = CTRfilm.PoissonSurface(
             self.unitcell,
