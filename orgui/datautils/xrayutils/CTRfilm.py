@@ -688,6 +688,26 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         return super().layer_state
 
     def createInterfaceCells(self):
+        # `uc_layers_top`/`uc_layers_bottom` hold, per structural layer, a
+        # numpy *view* into `uc_top.basis`/`uc_bottom.basis`, built once in
+        # `set_ucs` via `UnitCell.split_in_layers`. `copy.deepcopy` -- used
+        # once per fit by `CTROptimizer.__init__` -- and pickling -- used by
+        # multiprocessing-based optimizers -- both materialize a view as an
+        # independent array, silently freezing these layers at whatever the
+        # unit cells held at copy time. Fit-parameter updates to
+        # `uc_top`/`uc_bottom` (Debye-Waller factors, Wyckoff `u`, strain,
+        # ...) would then never reach the generated interface cells, so the
+        # interface would keep scattering like the unfitted template while
+        # the neighbouring Film used the fitted values -- a density step at
+        # the top of the interface support and a wrong interface plane at
+        # the nominal boundary. Re-synchronize explicitly rather than rely
+        # on aliasing that copying may have broken. Same reasoning as
+        # `Film.createLayers`.
+        for layer_id, uc in self.uc_layers_top.items():
+            uc.basis[:] = self.uc_top.basis[self.uc_top.basis[:, 7] == layer_id]
+        for layer_id, uc in self.uc_layers_bottom.items():
+            uc.basis[:] = self.uc_bottom.basis[self.uc_bottom.basis[:, 7] == layer_id]
+
         n_layers = len(self.uc_top.layers)
         if self.type == "skellam":
             tail_probability = (

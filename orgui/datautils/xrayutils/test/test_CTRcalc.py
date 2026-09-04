@@ -1811,6 +1811,36 @@ class TestLayerStacking(unittest.TestCase):
         for uc in film_copy.layer_ucs:
             np.testing.assert_allclose(uc.basis[:, 4], 0.9)
 
+    def test_epitaxy_layer_atoms_track_unitcells_after_deepcopy(self):
+        """Generated interface cells must track live ``uc_top``/``uc_bottom``.
+
+        Same failure mode as
+        ``test_film_layer_atoms_track_unitcell_after_deepcopy``: ``set_ucs``
+        builds ``uc_layers_top``/``uc_layers_bottom`` as numpy *views*, and
+        ``copy.deepcopy`` (once per fit, in ``CTROptimizer.__init__``)
+        materializes them as disconnected arrays. The interface then keeps
+        scattering like the unfitted template while the neighbouring Film
+        uses the fitted values, putting a spurious density step at the top
+        of the interface support and a wrong plane at the nominal boundary.
+        """
+        interface = CTRfilm.EpitaxyInterface(
+            self.make_layered_unitcell("top"),
+            self.make_layered_unitcell("bottom"),
+            fixed_ucs=3,
+        )
+        interface.basis[:2] = [0.5, 0.0]
+        interface.stack_on(0.0, 12.0, 1)
+
+        interface_copy = copy.deepcopy(interface)
+        interface_copy.uc_top.basis[:, 4] = 0.9  # iDW, was 0.1
+        interface_copy.uc_bottom.basis[:, 5] = 0.8  # oDW, was 0.1
+        interface_copy.createInterfaceCells()
+
+        for uc in interface_copy.top_layers:
+            np.testing.assert_allclose(uc.basis[:, 4], 0.9)
+        for uc in interface_copy.bottom_layers:
+            np.testing.assert_allclose(uc.basis[:, 5], 0.8)
+
     def test_epitaxy_interface_rotates_cyclic_layer_order(self):
         interface = CTRfilm.EpitaxyInterface(
             self.make_layered_unitcell("top"),
