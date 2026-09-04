@@ -2115,6 +2115,17 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
         self.underlying_film = component
         self._film_layer_ucs_base = [film_layers[layer] for layer in film_layer_ids]
+        # Constant per-atom z shift the termination rotation applied, so the
+        # reference cells can be re-synced from the live film basis later
+        # without regenerating them (see createLayers).
+        self._film_termination_z_offsets = {
+            layer: (
+                np.copy(ref.basis[:, 3] - film_uc.basis[:, 3])
+                if ref.basis.shape == film_uc.basis.shape
+                else None
+            )
+            for layer, ref in self._film_termination_ucs.items()
+        }
         if self._reference_unitcell is not None:
             self.setReferenceUnitCell(
                 self._reference_unitcell,
@@ -2220,6 +2231,34 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 "PoissonSurface must be stacked immediately above a Film "
                 "before layers can be created"
             )
+        # Every cell here is generated from another cell's basis --
+        # `split_in_layers` returns views, `generate_surface_termination_cells`
+        # returns rotated copies -- and `copy.deepcopy` (which
+        # `CTROptimizer.__init__` performs once per fit) and pickling both
+        # disconnect them from their source. With an explicit termination bank
+        # nothing rebuilds them, so they stay frozen at whatever the cells held
+        # when the surface was bound. That silently made the exposed
+        # terminations scatter like the unfitted template -- ignoring their own
+        # fitted Debye-Waller, occupancy and relaxation -- and made the film
+        # correction subtract atoms carrying the wrong Debye-Waller factor and
+        # the wrong Wyckoff/strain z: the right number of electrons removed in
+        # the wrong shape, leaving a layer-periodic residual density exactly
+        # where the film should be fully dissolved. Re-synchronize explicitly.
+        for layer, cell in self.termination_cells.items():
+            view = self._termination_views.get(layer)
+            if view is not None and view.basis.shape == cell.basis.shape:
+                view.basis[:] = cell.basis
+        film_basis = self.underlying_film.unitcell.basis
+        for layer_id, uc in zip(self._layer_ids, self._film_layer_ucs_base):
+            rows = film_basis[film_basis[:, 7] == layer_id]
+            if uc.basis.shape == rows.shape:
+                uc.basis[:] = rows
+        for layer, ref in self._film_termination_ucs.items():
+            offsets = getattr(self, "_film_termination_z_offsets", {}).get(layer)
+            if offsets is not None and ref.basis.shape == film_basis.shape:
+                ref.basis[:, 1:7] = film_basis[:, 1:7]
+                ref.basis[:, 3] = film_basis[:, 3] + offsets
+
         n_layers_in_uc = len(self._layer_ids)
         tail_probability = (
             self.profile.tail_probability

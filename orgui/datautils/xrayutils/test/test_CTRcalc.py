@@ -489,6 +489,42 @@ class TestPoissonSurface(unittest.TestCase):
         # One structural layer apart, not a whole unit cell.
         self.assertTrue(np.all(np.diff(np.sort(surface.layerpos)) < 1.0))
 
+    def test_generated_cells_track_their_sources_after_deepcopy(self):
+        """Terminations and film-correction cells must use live parameters.
+
+        The exposed terminations, the film-correction layers and the film
+        reference cells are all generated from another cell's basis -- views
+        from ``split_in_layers``, rotated copies from
+        ``generate_surface_termination_cells``. ``copy.deepcopy``, which
+        ``CTROptimizer.__init__`` performs once per fit, disconnects them, and
+        an explicit termination bank never rebuilds them. The surface then
+        scatters like the unfitted template, and the film correction subtracts
+        atoms with the wrong Debye-Waller factor -- removing the right number
+        of electrons in the wrong shape, so a fully dissolved region keeps a
+        layer-periodic residual density.
+        """
+        surface = CTRfilm.PoissonSurface(
+            self.unitcell,
+            profile=PoissonProfile(mean_change=-2.0, alpha=0.0),
+        )
+        self.bind_surface(surface)
+        surface.set_ucs(dict(surface.termination_cells))
+        film = self.bind_surface(surface)
+
+        copied = copy.deepcopy(surface)
+        copied.underlying_film.unitcell.basis[:, 4] = 0.42  # film iDW
+        for cell in copied.termination_cells.values():
+            cell.basis[:, 4] = 0.77                          # surface iDW
+        copied.createLayers()
+
+        for view in copied._termination_views.values():
+            np.testing.assert_allclose(view.basis[:, 4], 0.77)
+        for uc in copied._film_layer_ucs_base:
+            np.testing.assert_allclose(uc.basis[:, 4], 0.42)
+        for ref in copied._film_termination_ucs.values():
+            np.testing.assert_allclose(ref.basis[:, 4], 0.42)
+        self.assertIsNotNone(film)
+
     def test_create_layers_assigns_convolved_occupancies(self):
         surface = CTRfilm.PoissonSurface(
             self.unitcell,
