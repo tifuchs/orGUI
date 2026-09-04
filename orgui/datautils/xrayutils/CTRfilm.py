@@ -2497,16 +2497,21 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
     @property
     def fitparnames(self):
-        cells = self._owned_unitcells()
-        if len(cells) == 1:
-            names = cells[0].fitparnames
-        else:
-            names = [
-                f"{cell.name}:{name}"
-                for cell in cells
-                for name in cell.fitparnames
-            ]
-        return super().fitparnames + names
+        # Report the parameters of every owned termination cell under their
+        # own names, as `Film` and `EpitaxyInterface` do for their internal
+        # cells. Qualifying them with the cell name instead made a parameter
+        # of a termination bank impossible to reach from `SXRDCrystal`'s
+        # coupled parameters, which match strictly on the reported name: a
+        # value that is physically one quantity per exposed depth -- the
+        # Debye-Waller factor of the topmost layer, say -- occupies a
+        # different structural layer in each termination, so it can only be
+        # expressed as one fit parameter shared by all terminations. Repeated
+        # names without a matching coupled parameter stay independent, so
+        # nothing else changes. Serialization is unaffected: it keys on the
+        # cell name, not on this list.
+        return super().fitparnames + [
+            name for cell in self._owned_unitcells() for name in cell.fitparnames
+        ]
 
     @property
     def priors(self):
