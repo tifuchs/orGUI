@@ -981,32 +981,66 @@ py::tuple unitcell_F_DWBA_records(
         }
     }
 
-    struct AtomGroup {
+    struct FormFactorGroup {
         std::array<double, 13> factor_row;
         std::vector<std::shared_ptr<const std::vector<double>>> factors;
     };
-    std::vector<AtomGroup> groups;
-    std::vector<std::size_t> atom_group(static_cast<std::size_t>(atoms));
+    // Displacement and occupancy values are part of the exact state key.  This
+    // lets the complete atomic factor be reused without merging refinable atoms.
+    struct ScatteringState {
+        std::size_t form_factor_group;
+        std::array<double, 3> parameters;
+    };
+    std::vector<FormFactorGroup> form_factor_groups;
+    std::vector<ScatteringState> scattering_states;
+    std::vector<std::size_t> atom_scattering_state(static_cast<std::size_t>(atoms));
     for (py::ssize_t atom = 0; atom < atoms; ++atom) {
         std::array<double, 13> row;
         for (int column = 0; column < 13; ++column) {
             row[column] = get2(factor_data, factors_info, atom, column);
         }
-        std::size_t group_index = groups.size();
-        for (std::size_t candidate = 0; candidate < groups.size(); ++candidate) {
-            if (std::memcmp(groups[candidate].factor_row.data(), row.data(), sizeof(row)) == 0) {
-                group_index = candidate;
+        std::size_t form_factor_group = form_factor_groups.size();
+        for (std::size_t candidate = 0; candidate < form_factor_groups.size(); ++candidate) {
+            if (std::memcmp(
+                form_factor_groups[candidate].factor_row.data(), row.data(), sizeof(row)
+            ) == 0) {
+                form_factor_group = candidate;
                 break;
             }
         }
-        if (group_index == groups.size()) {
-            groups.push_back(AtomGroup{row, std::vector<std::shared_ptr<const std::vector<double>>>(
-                static_cast<std::size_t>(media * 4)
-            )});
+        if (form_factor_group == form_factor_groups.size()) {
+            form_factor_groups.push_back(FormFactorGroup{
+                row,
+                std::vector<std::shared_ptr<const std::vector<double>>>(
+                    static_cast<std::size_t>(media * 4)
+                )
+            });
         }
-        atom_group[static_cast<std::size_t>(atom)] = group_index;
+        const std::array<double, 3> parameters = {
+            get2(basis_data, basis_info, atom, 4),
+            get2(basis_data, basis_info, atom, 5),
+            get2(basis_data, basis_info, atom, 6),
+        };
+        std::size_t scattering_state = scattering_states.size();
+        for (std::size_t candidate = 0; candidate < scattering_states.size(); ++candidate) {
+            if (scattering_states[candidate].form_factor_group == form_factor_group
+                && std::memcmp(
+                    scattering_states[candidate].parameters.data(),
+                    parameters.data(),
+                    sizeof(parameters)
+                ) == 0) {
+                scattering_state = candidate;
+                break;
+            }
+        }
+        if (scattering_state == scattering_states.size()) {
+            scattering_states.push_back(ScatteringState{
+                form_factor_group, parameters
+            });
+        }
+        atom_scattering_state[static_cast<std::size_t>(atom)] = scattering_state;
     }
-    for (auto &group : groups) {
+    for (auto &group : form_factor_groups) {
         for (py::ssize_t medium = 0; medium < media; ++medium) {
             for (int channel = 0; channel < 4; ++channel) {
                 std::vector<double> complex_grid(1 + static_cast<std::size_t>(2 * points));
@@ -1076,34 +1110,92 @@ py::tuple unitcell_F_DWBA_records(
         }
     }
 
-    const auto atom_factor = [
-        &groups, &atom_group, basis_data, &basis_info,
-        &channel_Qz, &geometry_index, Q_data, points
-    ](
-        const py::ssize_t atom,
-        const py::ssize_t medium,
-        const int channel,
-        const py::ssize_t point
-    ) {
-        const auto &cached = *groups[
-            atom_group[static_cast<std::size_t>(atom)]
-        ].factors[static_cast<std::size_t>(medium * 4 + channel)];
-        complex128 factor(cached[2 * point], cached[2 * point + 1]);
-        const double Qx = Q_data[point * 2];
-        const double Qy = Q_data[point * 2 + 1];
-        const complex128 Qz = channel_Qz[geometry_index(medium, channel, point)];
-        factor *= std::exp(-(
-            get2(basis_data, basis_info, atom, 4) * (Qx * Qx + Qy * Qy)
-            + get2(basis_data, basis_info, atom, 5) * Qz * Qz
-        ) / dw_denominator);
-        factor *= get2(basis_data, basis_info, atom, 6);
-        return factor;
+    const py::ssize_t explicit_repeats = semi_infinite ? terminal_repeat : 1;
+    constexpr std::size_t missing_pair = std::numeric_limits<std::size_t>::max();
+    // Only state/medium pairs reached by a packed instance enter the scratch
+    // table.  Its size is independent of the number of scan points and domains.
+    struct ScatteringPair {
+        std::size_t state;
+        py::ssize_t medium;
     };
+    std::vector<ScatteringPair> scattering_pairs;
+    std::vector<std::size_t> pair_lookup(
+        scattering_states.size() * static_cast<std::size_t>(media), missing_pair
+    );
+    const auto register_pair = [
+        media, &pair_lookup, &scattering_pairs
+    ](const std::size_t state, const py::ssize_t medium) {
+        const auto key = state * static_cast<std::size_t>(media)
+            + static_cast<std::size_t>(medium);
+        auto &pair_index = pair_lookup[key];
+        if (pair_index == missing_pair) {
+            pair_index = scattering_pairs.size();
+            scattering_pairs.push_back(ScatteringPair{state, medium});
+        }
+        return pair_index;
+    };
+
+    std::vector<std::size_t> finite_factor_index(
+        static_cast<std::size_t>(finite_instances)
+    );
+    for (py::ssize_t instance = 0; instance < finite_instances; ++instance) {
+        const auto atom = static_cast<std::size_t>(finite_atom_data[instance]);
+        finite_factor_index[static_cast<std::size_t>(instance)] = register_pair(
+            atom_scattering_state[atom],
+            finite_medium[static_cast<std::size_t>(instance)]
+        );
+    }
+    for (py::ssize_t repeat = 0; repeat < explicit_repeats; ++repeat) {
+        for (py::ssize_t instance = 0; instance < bulk_instances; ++instance) {
+            const double z = bulk_position_data[instance * 3 + 2]
+                - repeat * repeat_data[2];
+            const auto medium = homogeneous_bulk_only ? media - 1 : medium_for_z(z);
+            const auto atom = static_cast<std::size_t>(bulk_atom_data[instance]);
+            register_pair(atom_scattering_state[atom], medium);
+        }
+    }
+    if (semi_infinite) {
+        for (py::ssize_t instance = 0; instance < bulk_instances; ++instance) {
+            const auto atom = static_cast<std::size_t>(bulk_atom_data[instance]);
+            register_pair(atom_scattering_state[atom], media - 1);
+        }
+    }
+    std::vector<complex128> atom_factors(
+        scattering_pairs.size() * 4,
+        complex128(0.0, 0.0)
+    );
 
     for (py::ssize_t point = 0; point < points; ++point) {
         const double Qx = Q_data[point * 2];
         const double Qy = Q_data[point * 2 + 1];
+        const double Q_parallel_squared = Qx * Qx + Qy * Qy;
         for (int channel = 0; channel < 4; ++channel) {
+            for (
+                std::size_t pair_index = 0;
+                pair_index < scattering_pairs.size();
+                ++pair_index
+            ) {
+                const auto pair = scattering_pairs[pair_index];
+                const auto geometry = geometry_index(pair.medium, channel, point);
+                if (channel_coefficient[geometry] == complex128(0.0, 0.0)) {
+                    atom_factors[static_cast<std::size_t>(channel) * scattering_pairs.size()
+                        + pair_index] = complex128(0.0, 0.0);
+                    continue;
+                }
+                const auto &state = scattering_states[pair.state];
+                const auto &cached = *form_factor_groups[
+                    state.form_factor_group
+                ].factors[static_cast<std::size_t>(pair.medium * 4 + channel)];
+                complex128 factor(cached[2 * point], cached[2 * point + 1]);
+                const complex128 Qz = channel_Qz[geometry];
+                factor *= std::exp(-(
+                    state.parameters[0] * Q_parallel_squared
+                    + state.parameters[1] * Qz * Qz
+                ) / dw_denominator);
+                factor *= state.parameters[2];
+                atom_factors[static_cast<std::size_t>(channel) * scattering_pairs.size()
+                    + pair_index] = factor;
+            }
             for (py::ssize_t instance = 0; instance < finite_instances; ++instance) {
                 const auto medium = finite_medium[static_cast<std::size_t>(instance)];
                 const auto geometry = geometry_index(medium, channel, point);
@@ -1113,17 +1205,17 @@ py::tuple unitcell_F_DWBA_records(
                 }
                 const complex128 Qz = channel_Qz[geometry];
                 const double *position = finite_position_data + instance * 3;
-                const auto atom = static_cast<py::ssize_t>(finite_atom_data[instance]);
                 atomic_out[finite_record_data[instance] * points + point] +=
                     finite_weight_data[instance] * coefficient
-                    * atom_factor(atom, medium, channel, point)
+                    * atom_factors[
+                        static_cast<std::size_t>(channel) * scattering_pairs.size()
+                        + finite_factor_index[static_cast<std::size_t>(instance)]
+                    ]
                     * std::exp(complex128(0.0, 1.0) * (
                         Qx * position[0] + Qy * position[1] + Qz * position[2]
                     ));
             }
         }
-
-        const py::ssize_t explicit_repeats = semi_infinite ? terminal_repeat : 1;
         for (py::ssize_t repeat = 0; repeat < explicit_repeats; ++repeat) {
             for (py::ssize_t instance = 0; instance < bulk_instances; ++instance) {
                 const double position[3] = {
@@ -1133,7 +1225,11 @@ py::tuple unitcell_F_DWBA_records(
                 };
                 const auto medium = homogeneous_bulk_only
                     ? media - 1 : medium_for_z(position[2]);
-                const auto atom = static_cast<py::ssize_t>(bulk_atom_data[instance]);
+                const auto atom = static_cast<std::size_t>(bulk_atom_data[instance]);
+                const auto factor_index = pair_lookup[
+                    atom_scattering_state[atom] * static_cast<std::size_t>(media)
+                    + static_cast<std::size_t>(medium)
+                ];
                 const double empirical = semi_infinite
                     ? std::exp(attenuation * (bulk_coordinate_data[instance] - repeat))
                     : 1.0;
@@ -1145,7 +1241,10 @@ py::tuple unitcell_F_DWBA_records(
                     }
                     const complex128 Qz = channel_Qz[geometry];
                     atomic_out[point] += bulk_weight_data[instance] * empirical
-                        * coefficient * atom_factor(atom, medium, channel, point)
+                        * coefficient * atom_factors[
+                            static_cast<std::size_t>(channel) * scattering_pairs.size()
+                            + factor_index
+                        ]
                         * std::exp(complex128(0.0, 1.0) * (
                             Qx * position[0] + Qy * position[1] + Qz * position[2]
                         ));
@@ -1167,13 +1266,17 @@ py::tuple unitcell_F_DWBA_records(
                     bulk_position_data[instance * 3 + 2]
                         - terminal_repeat * repeat_data[2],
                 };
-                const auto atom = static_cast<py::ssize_t>(bulk_atom_data[instance]);
+                const auto atom = static_cast<std::size_t>(bulk_atom_data[instance]);
+                const auto factor_index = pair_lookup[
+                    atom_scattering_state[atom] * static_cast<std::size_t>(media)
+                    + static_cast<std::size_t>(medium)
+                ];
                 const double empirical = std::exp(
                     attenuation * (bulk_coordinate_data[instance] - terminal_repeat)
                 );
                 numerator += bulk_weight_data[instance] * empirical
                     * channel_coefficient[geometry]
-                    * atom_factor(atom, medium, channel, point)
+                    * atom_factors[factor_index]
                     * std::exp(complex128(0.0, 1.0) * (
                         Qx * position[0] + Qy * position[1] + Qz * position[2]
                     ));

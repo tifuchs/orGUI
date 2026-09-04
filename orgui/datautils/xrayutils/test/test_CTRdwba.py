@@ -62,6 +62,7 @@ def _synthetic_record_call(
     basis=None,
     factors=None,
     finite_positions=None,
+    finite_atoms=None,
     finite_records=None,
     finite_weights=None,
     reference_area=1.0,
@@ -91,6 +92,8 @@ def _synthetic_record_call(
     if finite_positions is None:
         finite_positions = np.empty((0, 3), dtype=np.float64)
     count = len(finite_positions)
+    if finite_atoms is None:
+        finite_atoms = np.zeros(count, dtype=np.int64)
     if finite_records is None:
         finite_records = np.empty((0,), dtype=np.int64)
     if finite_weights is None:
@@ -128,7 +131,7 @@ def _synthetic_record_call(
         np.ascontiguousarray(basis, dtype=np.float64),
         np.ascontiguousarray(factors, dtype=np.float64),
         np.ascontiguousarray(finite_positions, dtype=np.float64).reshape(-1, 3),
-        np.zeros(count, dtype=np.int64),
+        np.ascontiguousarray(finite_atoms, dtype=np.int64),
         np.ascontiguousarray(finite_records, dtype=np.int64),
         np.ascontiguousarray(finite_weights, dtype=np.float64),
         np.empty((0, 3), dtype=np.float64),
@@ -367,6 +370,61 @@ def test_packed_record_kernel_matches_direct_four_channel_atom_sum(
                 * np.exp(1j * (q_parallel @ position[0, :2] + qz * position[0, 2]))
             )
     np.testing.assert_allclose(actual, expected, rtol=3e-14, atol=3e-14)
+
+
+def test_packed_record_kernel_keeps_distinct_debye_waller_states():
+    common = {
+        "q_parallel": np.array([0.37, 0.19]),
+        "kz_i": np.array([-1.21 + 0.04j, -1.07 + 0.09j]),
+        "kz_f": np.array([-1.46 + 0.03j, -1.18 + 0.07j]),
+        "A_i_plus": np.array([0.81 + 0.06j, 0.73 - 0.04j]),
+        "A_i_minus": np.array([-0.17 + 0.08j, 0.21 + 0.03j]),
+        "A_f_plus": np.array([0.77 - 0.05j, 0.69 + 0.02j]),
+        "A_f_minus": np.array([0.14 + 0.07j, -0.12 + 0.09j]),
+    }
+    basis = np.array(
+        [
+            [6.0, 0.0, 0.0, 0.0, 0.08, 0.21, 0.67],
+            [6.0, 0.0, 0.0, 0.0, 0.39, 0.57, -0.42],
+        ]
+    )
+    factor = np.zeros(13)
+    factor[0] = 1.7
+    factor[5] = 0.42
+    factor[10:13] = [0.8, 0.13, 0.21]
+    factors = np.repeat(factor[None, :], 2, axis=0)
+    positions = np.array(
+        [
+            [0.27, -0.18, -0.43],
+            [-0.11, 0.22, -0.67],
+            [0.08, 0.31, -0.91],
+            [-0.24, -0.07, -1.12],
+        ]
+    )
+    atom_indices = np.array([0, 1, 0, 1])
+    weights = np.array([-0.72, 0.31, 0.44, -0.19])
+
+    combined = _synthetic_record_call(
+        **common,
+        basis=basis,
+        factors=factors,
+        finite_positions=positions,
+        finite_atoms=atom_indices,
+        finite_records=np.ones(4, dtype=np.int64),
+        finite_weights=weights,
+    )[0][1, 0]
+    separate = 0.0j
+    for position, atom, weight in zip(positions, atom_indices, weights):
+        separate += _synthetic_record_call(
+            **common,
+            basis=basis[atom : atom + 1],
+            factors=factors[atom : atom + 1],
+            finite_positions=position[None, :],
+            finite_atoms=np.zeros(1, dtype=np.int64),
+            finite_records=np.ones(1, dtype=np.int64),
+            finite_weights=np.array([weight]),
+        )[0][1, 0]
+    np.testing.assert_allclose(combined, separate, rtol=3e-14, atol=3e-14)
 
 
 def test_packed_record_medium_assignment_is_half_open_at_an_interface():
