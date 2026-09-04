@@ -1,0 +1,167 @@
+\chapter{Atomic unit cells and the four coherent channels}
+\label{chap:unit-cells}
+
+\section{Prepared field channels in one optical medium}
+
+Every finite optical medium contains a downward and an upward branch of both
+the incident and reciprocal exit electric fields.  Let
+\begin{equation}
+  \sigma_i,\sigma_f\in\{+1,-1\},
+  \qquad
+  \nu=(\sigma_i,\sigma_f),
+\end{equation}
+with the fixed channel order
+\begin{equation}
+  ++,\quad +-,\quad -+,\quad --.
+  \label{eq:channel-order}
+\end{equation}
+For medium $m$, channel $\nu$ has
+\begin{equation}
+  \bm Q_{m}^{\nu}
+  =\left(\Qpar,Q_{z,m}^{\nu}\right),
+  \qquad
+  Q_{z,m}^{\nu}
+  =-\left(\sigma_i k_{z,m,i}+\sigma_f k_{z,m,f}\right),
+  \label{eq:channel-qz}
+\end{equation}
+and
+\begin{equation}
+  \left(Q_m^\nu\right)^2
+  =|\Qpar|^2+\left(Q_{z,m}^{\nu}\right)^2.
+  \label{eq:channel-q2}
+\end{equation}
+Neither $Q_{z,m}^{\nu}$ nor $(Q_m^\nu)^2$ is generally real in an absorbing
+medium.
+
+Let $A_{m,i}^{\sigma_i}$ and $A_{m,f}^{\sigma_f}$ be the local Renaud electric-
+field amplitudes, referenced by the field solver to $z_{m,i}^{\rm ref}$ and
+$z_{m,f}^{\rm ref}$.  The complete coefficient multiplying a Fourier factor
+$\exp(\ii\bm Q_m^\nu\cdot\bm r)$ is
+\begin{align}
+  \Cchan_{m,\nu}
+  ={}&A_{m,i}^{\sigma_i}A_{m,f}^{\sigma_f}
+  P_{m,\nu}\nonumber\\
+  &\times\exp\!\left\{
+    \ii\left[
+      \sigma_i k_{z,m,i}z_{m,i}^{\rm ref}
+      +\sigma_f k_{z,m,f}z_{m,f}^{\rm ref}
+    \right]
+  \right\}.
+  \label{eq:channel-coefficient}
+\end{align}
+The reference phase in Eq.~\eqref{eq:channel-coefficient} is not optional: the
+stored $A^\pm$ are local amplitudes, not amplitudes referenced to the global
+crystallographic origin.
+
+For the right-handed Renaud polarization basis used by orGUI, the bilinear
+polarization contractions are
+\begin{align}
+  P_{ss}^{\sigma_i\sigma_f}
+    &=\cos\varphi,\nonumber\\
+  P_{sp}^{\sigma_i\sigma_f}
+    &=-\sigma_f\sin\alpha_f\sin\varphi,\nonumber\\
+  P_{ps}^{\sigma_i\sigma_f}
+    &=-\sigma_i\sin\alpha_i\sin\varphi,\nonumber\\
+  P_{pp}^{\sigma_i\sigma_f}
+    &=\sin\alpha_i\sin\alpha_f
+      \left[
+        \frac{\kzero^2\cos\alpha_i\cos\alpha_f}
+             {k_{z,m,i}k_{z,m,f}}
+        -\sigma_i\sigma_f\cos\varphi
+      \right].
+  \label{eq:polarization-contractions}
+\end{align}
+The solver's upward internal tangential coefficient for $p$ polarization has
+the opposite sign from the public Renaud amplitude.  Thus
+\begin{equation}
+  A_{p,m}^{+}=T_{p,m}^{+},
+  \qquad
+  A_{p,m}^{-}=-T_{p,m}^{-}.
+  \label{eq:p-sign}
+\end{equation}
+Implementations should use the solver's analytic $A^\sigma/k_z$ limits in the
+$pp$ expression rather than divide numerically at a critical angle.
+
+\section{One generated UnitCell record}
+
+The surface model is flattened into generated unit-cell records $u$.  Before
+flattening, every source \texttt{UnitCell} is split into the same ordered
+structural-layer views used to build the optical profile.  A record therefore
+contains one such layer cell, a crystal-model weight $w_u$, its coherent domain
+transforms $d$, and possibly signed domain occupancies $p_{ud}$.  A one-layer
+source cell is already a single record.  Let
+$A_u$ be the source cell's lateral area and $A_{\rm ref}$ the crystal-wide
+reference area.  The required area conversion is
+\begin{equation}
+  s_u=\frac{A_{\rm ref}}{A_u}.
+  \label{eq:area-scale}
+\end{equation}
+Current Film and interface domain transforms preserve lateral area.  If a
+future model permits in-plane strain, $A_u$ in Eq.~\eqref{eq:area-scale} must be
+replaced by the transformed projected area, including its Jacobian.
+
+After stacking and the coherent-domain transform, atom $a$ of record $u$ and
+domain $d$ is at the physical Cartesian position $\bm r_{uad}$.  The atom is
+assigned to the unique prepared optical interval
+\begin{equation}
+  m(u,a,d)\quad\hbox{such that}\quad z_{uad}\in I_{m(u,a,d)}.
+  \label{eq:medium-assignment}
+\end{equation}
+A generated unit cell that crosses an optical boundary must therefore be split
+by atom.  Assigning one medium to the entire cell would use the wrong $A^\pm$,
+$k_z$, polarization contraction, and complex form-factor argument for some of
+its atoms.
+
+For channel $\nu$ in medium $m$, define the atomic contribution
+\begin{align}
+  \mathcal A_{u,m}^{\nu}
+  ={}&s_u w_u\Cchan_{m,\nu}
+  \sum_d p_{ud}
+  \sum_{\substack{a\in u\\m(u,a,d)=m}}
+  o_a f_a\!\left((Q_m^\nu)^2,E\right)
+  \exp\!\left[-W_a\!\left(\bm Q_m^\nu\right)\right]
+  \exp\!\left(\ii\bm Q_m^\nu\mathbin{\cdot}\bm r_{uad}\right).
+  \label{eq:atomic-channel}
+\end{align}
+Here $o_a$ is the atomic occupancy.  For the currently implemented in-plane
+and out-of-plane Debye--Waller parameters,
+\begin{equation}
+  W_a(\bm Q_m^\nu)
+  =\frac{B_{a,\parallel}|\Qpar|^2
+          +B_{a,\perp}(Q_{z,m}^\nu)^2}{16\pi^2}.
+  \label{eq:debye-waller}
+\end{equation}
+Equations~\eqref{eq:atomic-factor}, \eqref{eq:channel-q2}, and
+\eqref{eq:debye-waller} are evaluated at complex arguments without taking an
+absolute value or a real part.
+
+The complete atomic amplitude of record $u$ is
+\begin{equation}
+  \boxed{
+  F_{\mathrm{atomic},u}
+  =\sum_m\sum_{\nu\in\{++,+-,-+,--\}}
+   \mathcal A_{u,m}^{\nu}.
+  }
+  \label{eq:unit-cell-four-channel}
+\end{equation}
+The four terms in Eq.~\eqref{eq:unit-cell-four-channel} are amplitudes and must
+be added before an intensity is formed.  The incorrect expression
+$\sum_\nu|\mathcal A_{u,m}^{\nu}|^2$ discards the standing-wave interference
+between incident and exit branches.
+
+\section{Useful limits}
+
+In a terminal substrate, physical boundary conditions give
+\begin{equation}
+  A_{M,i}^{-}=A_{M,f}^{-}=0,
+\end{equation}
+so only the $++$ channel survives.  In the high-angle Born limit of a finite
+cell in vacuum, $A_i^+=A_f^+=1$ and all reflected branches vanish; the same
+reduction occurs.  These are limiting cases of the four-channel expression,
+not reasons to omit channels in finite graded layers.
+
+If the cell is wholly contained in one medium, Eq.~\eqref{eq:atomic-channel}
+reduces to four ordinary structure-factor evaluations at the four complex
+values $Q_{z,m}^\nu$.  If it crosses a boundary, there is no single structure
+factor $F_u(h,k,l)$ that can be multiplied by one set of channel coefficients;
+the atom-medium partition in Eq.~\eqref{eq:atomic-channel} is essential.
