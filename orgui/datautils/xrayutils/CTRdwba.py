@@ -7,17 +7,22 @@ import hashlib
 import numpy as np
 
 from ._CTRnative import HAS_CPP_ACCEL, _CTRcalc_cpp
+from .CTRfilm import EpitaxyInterface, Film, PoissonSurface
 from .CTRoptics import (
     HC_KEV_ANGSTROM,
     LayeredElectricField,
     StratifiedProfile,
+    homogeneous_bulk_profile,
+    profile_boundaries,
     solve_electric_field,
+    top_layer_spacing,
 )
-from .CTRuc import _coherent_domain_arrays
+from .CTRuc import UnitCell, WaterModel, _coherent_domain_arrays
 from .HKLVlieg import UBCalculator, VliegAngles
 
 
 __all__ = [
+    "DWBAContribution",
     "DWBAResult",
     "DWBAState",
     "PreparedCTR",
@@ -33,7 +38,7 @@ _OPTICAL_BETA_TOLERANCE = 1e-9
 
 
 def _readonly_array(value, dtype=None):
-    array = np.ascontiguousarray(value, dtype=dtype)
+    array = np.array(value, dtype=dtype, order="C", copy=True)
     array.flags.writeable = False
     return array
 
@@ -57,6 +62,218 @@ def _hash_arrays(*values):
 
 def _format_hkl(hkl, index):
     return "(" + ", ".join(f"{value:g}" for value in hkl[:, index]) + ")"
+
+
+@dataclass(frozen=True)
+class _LiveAtomicRecord:
+    component_index: int
+    component_name: str
+    component_type: str
+    record_index: int
+    record_name: str
+    role: str
+    layer: float | None
+    cell: UnitCell
+    component_weight: float
+    outer_domains: tuple
+    identity_token: tuple
+
+
+@dataclass(frozen=True)
+class _PreparedAtomicModel:
+    descriptors: tuple
+    reference_shares: np.ndarray
+    geometry_fingerprint: bytes
+    decomposition_fingerprint: bytes
+
+
+def _record_layer(cell):
+    layers = np.unique(np.asarray(cell.basis[:, 7], dtype=np.float64))
+    if layers.size == 1:
+        return float(layers[0])
+    return None
+
+
+def _copy_parent_domains(parent, layer):
+    layer.coherentDomainMatrix = parent.coherentDomainMatrix
+    layer.coherentDomainOccupancy = parent.coherentDomainOccupancy
+    return layer
+
+
+def _component_record_cells(component):
+    if isinstance(component, UnitCell):
+        layers = component.split_in_layers(ordered=True)
+        if component.layer_behavior == "select":
+            selected = component.build_selected_basis()[0]
+            selected_layers = set(np.asarray(selected[:, 7], dtype=np.float64))
+            layers = OrderedDict(
+                (layer_id, layer)
+                for layer_id, layer in layers.items()
+                if float(layer_id) in selected_layers
+            )
+        return [
+            ("unit_cell_layer", _copy_parent_domains(component, layer))
+            for layer in layers.values()
+        ]
+    if isinstance(component, Film):
+        if np.any(component._basis_created != component.basis):
+            component.createLayers()
+        return [("film_layer", cell) for cell in component.layer_ucs]
+    if isinstance(component, EpitaxyInterface):
+        if np.any(component._basis_created != component.basis):
+            component.createInterfaceCells()
+        return [
+            *(("interface_top", cell) for cell in component.top_layers),
+            *(("interface_bottom", cell) for cell in component.bottom_layers),
+        ]
+    if isinstance(component, PoissonSurface):
+        if np.any(component._basis_created != component.basis):
+            component.createLayers()
+        records = []
+        for surface_cell, film_cell in zip(
+            component.layer_ucs, component.film_layer_ucs
+        ):
+            records.append(("surface_termination", surface_cell))
+            records.append(("covered_film", film_cell))
+        records.extend(
+            ("sharp_film_correction", cell)
+            for cell in component._film_termination_ucs.values()
+        )
+        return records
+    if isinstance(component, WaterModel):
+        raise NotImplementedError(
+            "DWBA does not support continuous-density WaterModel components."
+        )
+    raise NotImplementedError(
+        f"DWBA does not support {type(component).__name__} components."
+    )
+
+
+def _record_descriptor(record):
+    return (
+        record.component_index,
+        record.component_name,
+        record.component_type,
+        record.record_index,
+        record.record_name,
+        record.role,
+        record.layer,
+    )
+
+
+def _hash_record_geometry(records):
+    digest = hashlib.blake2b(digest_size=20)
+    for record in records:
+        digest.update(repr(record.identity_token).encode("utf-8"))
+        cell = record.cell
+        digest.update(
+            _hash_arrays(
+                np.asarray(cell.basis.shape, dtype=np.int64),
+                np.asarray(cell.basis[:, 7], dtype=np.float64),
+                cell.B_mat,
+                cell.R_mat,
+                cell.R_mat_inv,
+                cell.refHKLTransform,
+                cell.refRealTransform,
+                np.asarray([getattr(cell, "_E", np.nan)], dtype=np.float64),
+                np.asarray(cell.coherentDomainMatrix, dtype=np.float64).reshape(
+                    (-1, 3, 4)
+                ),
+                np.asarray(
+                    [domain[0] for domain in record.outer_domains],
+                    dtype=np.float64,
+                ).reshape((-1, 3, 3)),
+            )
+        )
+    return digest.digest()
+
+
+def _combine_tagged(values, shares, z_tolerance=0.6):
+    values = np.asarray(values, dtype=np.float64)
+    shares = np.asarray(shares, dtype=np.float64)
+    if len(values) == 0:
+        return values.reshape((0, 3)), shares[:, :0]
+    order = np.argsort(values[:, 0], kind="stable")
+    values = values[order]
+    shares = shares[:, order]
+    group_starts = [0]
+    for index in range(1, len(values)):
+        if values[index, 0] - values[group_starts[-1], 0] > z_tolerance:
+            group_starts.append(index)
+    group_stops = [*group_starts[1:], len(values)]
+    combined = np.empty((len(group_starts), 3), dtype=np.float64)
+    combined_shares = np.zeros(
+        (shares.shape[0], len(group_starts), 2), dtype=np.float64
+    )
+    for group_index, (start, stop) in enumerate(zip(group_starts, group_stops)):
+        combined_shares[:, group_index] = shares[:, start:stop].sum(axis=1)
+        combined[group_index, 0] = values[start, 0]
+        combined[group_index, 1:] = combined_shares[:, group_index].sum(axis=0)
+    return np.ascontiguousarray(combined), np.ascontiguousarray(combined_shares)
+
+
+def _stratify_tagged(profile, shares, delta_tolerance, beta_tolerance):
+    profile = np.asarray(profile, dtype=np.float64)
+    shares = np.asarray(shares, dtype=np.float64)
+    boundaries = profile_boundaries(profile)
+    if delta_tolerance is None or len(profile) <= 3:
+        return (
+            StratifiedProfile(
+                np.ascontiguousarray(profile.copy()),
+                np.ascontiguousarray(boundaries),
+            ),
+            np.ascontiguousarray(shares.copy()),
+        )
+    if beta_tolerance is None:
+        beta_tolerance = delta_tolerance
+    if delta_tolerance < 0.0 or beta_tolerance < 0.0:
+        raise ValueError("delta and beta tolerances must be non-negative.")
+
+    values = [profile[0].copy()]
+    tagged = [shares[:, 0].copy()]
+    inherited_boundaries = [boundaries[0]]
+    start = 1
+    last_finite = len(profile) - 2
+    while start <= last_finite:
+        stop = start
+        delta_min = delta_max = profile[start, 1]
+        beta_min = beta_max = profile[start, 2]
+        while stop < last_finite:
+            candidate = stop + 1
+            next_delta_min = min(delta_min, profile[candidate, 1])
+            next_delta_max = max(delta_max, profile[candidate, 1])
+            next_beta_min = min(beta_min, profile[candidate, 2])
+            next_beta_max = max(beta_max, profile[candidate, 2])
+            if (
+                next_delta_max - next_delta_min > delta_tolerance
+                or next_beta_max - next_beta_min > beta_tolerance
+            ):
+                break
+            stop = candidate
+            delta_min, delta_max = next_delta_min, next_delta_max
+            beta_min, beta_max = next_beta_min, next_beta_max
+        lower = boundaries[start - 1]
+        upper = boundaries[stop]
+        thicknesses = np.diff(boundaries[start - 1 : stop + 1])
+        merged_shares = np.average(
+            shares[:, start : stop + 1], axis=1, weights=thicknesses
+        )
+        merged = profile[start].copy()
+        merged[0] = 0.5 * (lower + upper)
+        merged[1:] = merged_shares.sum(axis=0)
+        values.append(merged)
+        tagged.append(merged_shares)
+        inherited_boundaries.append(upper)
+        start = stop + 1
+    values.append(profile[-1].copy())
+    tagged.append(shares[:, -1].copy())
+    return (
+        StratifiedProfile(
+            np.ascontiguousarray(np.asarray(values, dtype=np.float64)),
+            np.ascontiguousarray(np.asarray(inherited_boundaries, dtype=np.float64)),
+        ),
+        np.ascontiguousarray(np.stack(tagged, axis=1)),
+    )
 
 
 @dataclass(frozen=True)
@@ -112,11 +329,34 @@ class PreparedCTR:
     ref_hkl_transform: np.ndarray
     orientation: np.ndarray
     reference_area: float
+    _atomic_model: _PreparedAtomicModel
 
     @property
     def k0(self):
         """Return the frozen vacuum wavevector in inverse Angstrom."""
         return self.reference.k0
+
+
+@dataclass(frozen=True)
+class DWBAContribution:
+    """One generated atomic record's coherent DWBA amplitudes.
+
+    ``component_index`` is ``-1`` for the bulk and otherwise indexes
+    ``SXRDCrystal.uc_surface_list``. Amplitudes use electrons per configured
+    reference lateral cell and have the same scalar or array shape as the
+    parent :class:`DWBAResult`.
+    """
+
+    component_index: int
+    component_name: str
+    component_type: str
+    record_index: int
+    record_name: str
+    role: str
+    layer: float | None
+    F_atomic: complex | np.ndarray
+    F_reference: complex | np.ndarray
+    F_contrast: complex | np.ndarray
 
 
 @dataclass(frozen=True)
@@ -129,6 +369,23 @@ class DWBAResult:
     scattered_amplitude: complex | np.ndarray
     total_amplitude: complex | np.ndarray
     bulk_mode: str
+    contributions: tuple[DWBAContribution, ...]
+
+    @property
+    def F_atomic(self):
+        """Return the coherent sum of actual-density record amplitudes."""
+        return sum(
+            (contribution.F_atomic for contribution in self.contributions),
+            start=0j,
+        )
+
+    @property
+    def F_reference(self):
+        """Return the coherent planar-reference amplitude that was subtracted."""
+        return sum(
+            (contribution.F_reference for contribution in self.contributions),
+            start=0j,
+        )
 
     @property
     def structure_factor_squared(self):
@@ -316,17 +573,193 @@ class DWBAState:
 
     def _require_available(self):
         if not HAS_CPP_ACCEL or not hasattr(
-            _CTRcalc_cpp, "unitcell_F_DWBA_bulk"
+            _CTRcalc_cpp, "unitcell_F_DWBA_records"
         ):
             raise RuntimeError(
                 "DWBA requires the native CTR extension with DWBA support."
             )
-        if self._crystal.uc_surface_list:
-            raise NotImplementedError(
-                "DWBA currently supports only the bulk unit cell."
-            )
         if not hasattr(self._crystal.uc_bulk, "_E"):
             raise ValueError("Set the bulk unit-cell energy before using DWBA.")
+        for component in self._crystal.uc_surface_list:
+            if isinstance(component, WaterModel):
+                raise NotImplementedError(
+                    "DWBA does not support continuous-density WaterModel "
+                    "components."
+                )
+            if not isinstance(
+                component, UnitCell | Film | EpitaxyInterface | PoissonSurface
+            ):
+                raise NotImplementedError(
+                    "DWBA supports only UnitCell, Film, EpitaxyInterface, "
+                    f"and PoissonSurface components, not {type(component).__name__}."
+                )
+
+    def _live_records(self):
+        self._require_available()
+        if self._crystal.enable_uc_stacking:
+            self._crystal.apply_stacking()
+        bulk = self._crystal.uc_bulk
+        records = [
+            _LiveAtomicRecord(
+                component_index=-1,
+                component_name=bulk.name,
+                component_type=type(bulk).__name__,
+                record_index=0,
+                record_name=bulk.name,
+                role="bulk",
+                layer=None,
+                cell=bulk,
+                component_weight=1.0,
+                outer_domains=((np.identity(3, dtype=np.float64), 1.0),),
+                identity_token=("bulk", id(bulk)),
+            )
+        ]
+        for component_index, (component, component_weight, outer_domains) in enumerate(
+            zip(
+                self._crystal.uc_surface_list,
+                self._crystal.weights,
+                self._crystal.domains,
+            )
+        ):
+            if not np.isfinite(component_weight):
+                raise ValueError("DWBA component weights must be finite.")
+            outer_domains = tuple(outer_domains)
+            for record_index, (role, cell) in enumerate(
+                _component_record_cells(component)
+            ):
+                records.append(
+                    _LiveAtomicRecord(
+                        component_index=component_index,
+                        component_name=component.name,
+                        component_type=type(component).__name__,
+                        record_index=record_index,
+                        record_name=cell.name,
+                        role=role,
+                        layer=_record_layer(cell),
+                        cell=cell,
+                        component_weight=float(component_weight),
+                        outer_domains=outer_domains,
+                        identity_token=(
+                            "surface",
+                            component_index,
+                            id(component),
+                            role,
+                            record_index,
+                            _record_layer(cell),
+                        ),
+                    )
+                )
+        return tuple(records)
+
+    def _tagged_component_profile(self, component, records, record_count):
+        values = []
+        shares = []
+        for global_index, record in records:
+            profile = record.cell.optical_profile()
+            if not len(profile):
+                continue
+            for outer_matrix, outer_occupancy in record.outer_domains:
+                if not np.isfinite(outer_occupancy):
+                    raise ValueError(
+                        "DWBA crystal-domain occupancies must be finite."
+                    )
+                position_transform = self._live_position_transform(
+                    record.cell, outer_matrix
+                )
+                normal_stretch = float(position_transform[2, 2])
+                scale = (
+                    record.component_weight
+                    * float(outer_occupancy)
+                    / normal_stretch
+                )
+                transformed = np.array(profile, copy=True)
+                transformed[:, 0] *= normal_stretch
+                transformed[:, 1:] *= scale
+                tagged = np.zeros(
+                    (record_count, len(profile), 2), dtype=np.float64
+                )
+                tagged[global_index] = transformed[:, 1:]
+                values.append(transformed)
+                shares.append(tagged)
+        if not values:
+            return (
+                np.empty((0, 3), dtype=np.float64),
+                np.empty((record_count, 0, 2), dtype=np.float64),
+            )
+        values = np.concatenate(values, axis=0)
+        shares = np.concatenate(shares, axis=1)
+        if not isinstance(component, UnitCell):
+            values, shares = _combine_tagged(values, shares)
+        return values, shares
+
+    def _atomic_model_snapshot(self):
+        records = self._live_records()
+        record_count = len(records)
+        if not self._crystal.uc_surface_list:
+            profile = homogeneous_bulk_profile(self._crystal.uc_bulk)
+            shares = np.zeros((1, 2, 2), dtype=np.float64)
+            shares[0, 0] = profile.values[0, 1:]
+            stratified = profile
+        else:
+            bulk_profile = self._crystal.uc_bulk.optical_profile_asbulk()
+            bulk_shares = np.zeros(
+                (record_count, len(bulk_profile), 2), dtype=np.float64
+            )
+            bulk_shares[0] = bulk_profile[:, 1:]
+            component_values = [bulk_profile]
+            component_shares = [bulk_shares]
+            for component_index, component in enumerate(
+                self._crystal.uc_surface_list
+            ):
+                selected = [
+                    (global_index, record)
+                    for global_index, record in enumerate(records)
+                    if record.component_index == component_index
+                ]
+                values, tagged = self._tagged_component_profile(
+                    component, selected, record_count
+                )
+                if len(values):
+                    component_values.append(values)
+                    component_shares.append(tagged)
+            structural, shares = _combine_tagged(
+                np.concatenate(component_values, axis=0),
+                np.concatenate(component_shares, axis=1),
+            )
+            dz = top_layer_spacing(structural)
+            vacuum = np.array(
+                [[structural[-1, 0] + dz, 0.0, 0.0]], dtype=np.float64
+            )
+            structural = np.concatenate((structural, vacuum), axis=0)
+            shares = np.concatenate(
+                (shares, np.zeros((record_count, 1, 2), dtype=np.float64)),
+                axis=1,
+            )
+            stratified, shares = _stratify_tagged(
+                structural,
+                shares,
+                _OPTICAL_DELTA_TOLERANCE,
+                _OPTICAL_BETA_TOLERANCE,
+            )
+        if not np.allclose(
+            shares.sum(axis=0), stratified.values[:, 1:], rtol=2e-14, atol=1e-18
+        ):
+            raise RuntimeError(
+                "DWBA record reference shares do not reconstruct the optical profile."
+            )
+        geometry_fingerprint = _hash_record_geometry(records)
+        digest = hashlib.blake2b(digest_size=20)
+        digest.update(geometry_fingerprint)
+        digest.update(_hash_arrays(shares))
+        for record in records:
+            digest.update(repr(_record_descriptor(record)).encode("utf-8"))
+        model = _PreparedAtomicModel(
+            descriptors=tuple(_record_descriptor(record) for record in records),
+            reference_shares=_readonly_array(shares[:, ::-1], np.float64),
+            geometry_fingerprint=geometry_fingerprint,
+            decomposition_fingerprint=digest.digest(),
+        )
+        return records, model, stratified
 
     def _vlieg_angles(self):
         energy_eV = float(self._crystal.uc_bulk._E)
@@ -335,11 +768,7 @@ class DWBAState:
         ub.setU(self._orientation)
         return VliegAngles(ub)
 
-    def _reference(self):
-        self._require_available()
-        profile = self._crystal._optical_reference_profile(
-            _OPTICAL_DELTA_TOLERANCE, _OPTICAL_BETA_TOLERANCE
-        )
+    def _reference(self, profile):
         values = _readonly_array(profile.values, np.float64)
         boundaries = _readonly_array(profile.boundaries, np.float64)
         energy_eV = float(self._crystal.uc_bulk._E)
@@ -583,6 +1012,7 @@ class DWBAState:
         self,
         geometry,
         reference,
+        atomic_model,
         polarization_i,
         polarization_f,
         geometry_rtol,
@@ -699,12 +1129,14 @@ class DWBAState:
             ),
             orientation=self._orientation,
             reference_area=float(self._crystal.reference_area),
+            _atomic_model=atomic_model,
         )
 
     def _prepared_key(
         self,
         geometry,
         reference,
+        atomic_model,
         polarization_i,
         polarization_f,
         geometry_rtol,
@@ -725,6 +1157,7 @@ class DWBAState:
                 np.asarray([self._crystal.reference_area]),
             ),
             reference.fingerprint,
+            atomic_model.decomposition_fingerprint,
             polarization_i,
             polarization_f,
             float(geometry_rtol),
@@ -742,10 +1175,12 @@ class DWBAState:
         geometry_atol,
         cache,
     ):
-        reference = self._reference()
+        _, atomic_model, profile = self._atomic_model_snapshot()
+        reference = self._reference(profile)
         key = self._prepared_key(
             geometry,
             reference,
+            atomic_model,
             polarization_i,
             polarization_f,
             geometry_rtol,
@@ -759,6 +1194,7 @@ class DWBAState:
         prepared = self._prepare_explicit(
             geometry,
             reference,
+            atomic_model,
             polarization_i,
             polarization_f,
             geometry_rtol,
@@ -830,9 +1266,10 @@ class DWBAState:
             raise ValueError(
                 "The reference out-of-plane axis has no surface-normal component."
             )
-        reference = self._reference()
+        energy_eV = float(self._crystal.uc_bulk._E)
+        k0 = 2.0 * np.pi / (HC_KEV_ANGSTROM / (energy_eV * 1e-3))
         h_array, k_array, ai, af = arrays
-        Qz = reference.k0 * (np.sin(ai) + np.sin(af))
+        Qz = k0 * (np.sin(ai) + np.sin(af))
         return (Qz - normal[0] * h_array - normal[1] * k_array) / normal[2]
 
     def prepare_from_glancing(
@@ -953,6 +1390,182 @@ class DWBAState:
             cache=bool(cache),
         )
 
+    def _position_transform(self, prepared, cell, outer_matrix):
+        reference_q = (
+            prepared.orientation
+            @ prepared.B_mat
+            @ prepared.ref_hkl_transform
+        )
+        return self._position_transform_from_reference(
+            reference_q, cell, outer_matrix
+        )
+
+    def _live_position_transform(self, cell, outer_matrix):
+        bulk = self._crystal.uc_bulk
+        reference_q = (
+            self._orientation @ bulk.B_mat @ bulk.refHKLTransform
+        )
+        return self._position_transform_from_reference(
+            reference_q, cell, outer_matrix
+        )
+
+    def _position_transform_from_reference(
+        self, reference_q, cell, outer_matrix
+    ):
+        outer_matrix = np.asarray(outer_matrix, dtype=np.float64)
+        if outer_matrix.shape != (3, 3) or not np.all(np.isfinite(outer_matrix)):
+            raise ValueError("Crystal domain matrices must be finite 3-by-3 arrays.")
+        q_transform = (
+            cell.B_mat
+            @ cell.refHKLTransform
+            @ outer_matrix
+            @ np.linalg.inv(reference_q)
+        )
+        position_transform = q_transform.T
+        if not np.all(np.isfinite(position_transform)):
+            raise ValueError("DWBA record coordinate transforms must be finite.")
+        self._validate_planar_transform(position_transform)
+        return position_transform
+
+    @staticmethod
+    def _validate_planar_transform(position_transform):
+        """Validate one physical Cartesian transform for layered optics."""
+        position_transform = np.asarray(position_transform, dtype=np.float64)
+        tolerance = 2e-10 * max(1.0, np.linalg.norm(position_transform))
+        if (
+            np.any(np.abs(position_transform[2, :2]) > tolerance)
+            or position_transform[2, 2] <= tolerance
+        ):
+            raise NotImplementedError(
+                "DWBA crystal domains must preserve the planar surface normal."
+            )
+        lateral = position_transform[:2, :2]
+        projected_jacobian = abs(np.linalg.det(lateral))
+        if not np.isclose(projected_jacobian, 1.0, rtol=2e-10, atol=2e-12):
+            raise NotImplementedError(
+                "DWBA does not yet support transformed lateral-area Jacobians."
+            )
+        if not np.allclose(
+            lateral.T @ lateral,
+            np.identity(2),
+            rtol=2e-10,
+            atol=2e-12,
+        ):
+            raise NotImplementedError(
+                "DWBA does not yet support in-plane strain transforms."
+            )
+
+    def _pack_atomic_records(self, prepared, records):
+        atom_basis = []
+        form_factors = []
+        finite_positions = []
+        finite_atom_index = []
+        finite_record_index = []
+        finite_weight = []
+        bulk_positions = []
+        bulk_atom_index = []
+        bulk_weight = []
+        bulk_repeat_coordinate = []
+        bulk_repeat = None
+
+        for global_record_index, record in enumerate(records):
+            cell = record.cell
+            basis, factors, _ = cell.build_selected_basis()
+            if cell._special_formfactors_present:
+                raise NotImplementedError(
+                    "DWBA does not support Python special form-factor callbacks."
+                )
+            basis = np.asarray(basis, dtype=np.float64)
+            factors = np.asarray(factors, dtype=np.float64)
+            atom_offset = sum(len(value) for value in atom_basis)
+            atom_basis.append(basis)
+            form_factors.append(factors)
+            atom_indices = np.arange(len(basis), dtype=np.int64) + atom_offset
+            domain_matrices, domain_occupancies = _coherent_domain_arrays(
+                cell.coherentDomainMatrix,
+                cell.coherentDomainOccupancy,
+            )
+            if len(domain_matrices) != len(domain_occupancies):
+                raise ValueError(
+                    f"UnitCell {cell.name!r} has inconsistent coherent domains."
+                )
+            if not np.all(np.isfinite(domain_matrices)) or not np.all(
+                np.isfinite(domain_occupancies)
+            ):
+                raise ValueError("DWBA coherent-domain values must be finite.")
+            for outer_matrix, outer_occupancy in record.outer_domains:
+                if not np.isfinite(outer_occupancy):
+                    raise ValueError("DWBA crystal-domain occupancies must be finite.")
+                position_transform = self._position_transform(
+                    prepared, cell, outer_matrix
+                )
+                if record.component_index == -1:
+                    repeat = position_transform @ np.asarray(cell.R_mat[:, 2])
+                    if bulk_repeat is None:
+                        bulk_repeat = repeat
+                    elif not np.allclose(bulk_repeat, repeat, rtol=2e-12, atol=2e-13):
+                        raise ValueError(
+                            "All bulk domains must use one physical repeat vector."
+                        )
+                for matrix, occupancy in zip(
+                    domain_matrices, domain_occupancies
+                ):
+                    effective = cell.R_mat_inv @ matrix[:, :3] @ cell.R_mat
+                    self._validate_planar_transform(
+                        position_transform @ matrix[:, :3]
+                    )
+                    fractional = basis[:, 1:4] @ effective.T + matrix[:, 3]
+                    cell_cartesian = fractional @ cell.R_mat.T
+                    positions = cell_cartesian @ position_transform.T
+                    scale = (
+                        prepared.reference_area
+                        / cell.uc_area
+                        * record.component_weight
+                        * float(outer_occupancy)
+                        * float(occupancy)
+                    )
+                    if record.component_index == -1:
+                        bulk_positions.append(positions)
+                        bulk_atom_index.append(atom_indices)
+                        bulk_weight.append(np.full(len(basis), scale))
+                        bulk_repeat_coordinate.append(fractional[:, 2])
+                    else:
+                        finite_positions.append(positions)
+                        finite_atom_index.append(atom_indices)
+                        finite_record_index.append(
+                            np.full(len(basis), global_record_index, dtype=np.int64)
+                        )
+                        finite_weight.append(np.full(len(basis), scale))
+
+        def concatenate(values, shape, dtype):
+            if not values:
+                return np.empty(shape, dtype=dtype)
+            return np.ascontiguousarray(np.concatenate(values, axis=0), dtype=dtype)
+
+        if bulk_repeat is None:
+            raise ValueError("The DWBA bulk must contain at least one domain.")
+        return {
+            "atom_basis": concatenate(atom_basis, (0, 8), np.float64),
+            "form_factors": concatenate(form_factors, (0, 13), np.float64),
+            "finite_positions": concatenate(
+                finite_positions, (0, 3), np.float64
+            ),
+            "finite_atom_index": concatenate(
+                finite_atom_index, (0,), np.int64
+            ),
+            "finite_record_index": concatenate(
+                finite_record_index, (0,), np.int64
+            ),
+            "finite_weight": concatenate(finite_weight, (0,), np.float64),
+            "bulk_positions": concatenate(bulk_positions, (0, 3), np.float64),
+            "bulk_atom_index": concatenate(bulk_atom_index, (0,), np.int64),
+            "bulk_weight": concatenate(bulk_weight, (0,), np.float64),
+            "bulk_repeat_coordinate": concatenate(
+                bulk_repeat_coordinate, (0,), np.float64
+            ),
+            "bulk_repeat": np.ascontiguousarray(bulk_repeat, dtype=np.float64),
+        }
+
     def _validate_prepared(self, prepared):
         if not isinstance(prepared, PreparedCTR):
             raise TypeError("prepared must be a PreparedCTR instance.")
@@ -978,6 +1591,17 @@ class DWBAState:
                 raise ValueError(
                     f"The crystal {name} changed; prepare the CTR again."
                 )
+        records = self._live_records()
+        if tuple(_record_descriptor(record) for record in records) != (
+            prepared._atomic_model.descriptors
+        ) or _hash_record_geometry(records) != (
+            prepared._atomic_model.geometry_fingerprint
+        ):
+            raise ValueError(
+                "The crystal's generated DWBA record geometry changed; "
+                "prepare the CTR again."
+            )
+        return records
 
     def evaluate_prepared(
         self,
@@ -999,28 +1623,18 @@ class DWBAState:
         :rtype: DWBAResult
         """
         self._require_available()
-        self._validate_prepared(prepared)
         if bulk_mode not in {"unit_cell", "semi_infinite"}:
             raise ValueError("bulk_mode must be 'unit_cell' or 'semi_infinite'.")
         if not np.isfinite(bulk_attenuation) or bulk_attenuation < 0.0:
             raise ValueError("bulk_attenuation must be finite and non-negative.")
-        bulk = self._crystal.uc_bulk
-        basis, form_factors, _ = bulk.build_selected_basis()
-        if bulk._special_formfactors_present:
-            raise NotImplementedError(
-                "DWBA does not support Python special form-factor callbacks."
-            )
-        domain_matrix, domain_occupancy = _coherent_domain_arrays(
-            bulk.coherentDomainMatrix,
-            bulk.coherentDomainOccupancy,
-        )
+        records = self._validate_prepared(prepared)
+        packed = self._pack_atomic_records(prepared, records)
         media = len(prepared.reference.n)
 
         def field_array(value):
             return np.ascontiguousarray(np.asarray(value).reshape(media, -1))
 
-        medium_index = np.full(len(basis), media - 1, dtype=np.int64)
-        amplitude = _CTRcalc_cpp.unitcell_F_DWBA_bulk(
+        atomic, reference = _CTRcalc_cpp.unitcell_F_DWBA_records(
             prepared.Q_parallel,
             prepared.is_specular,
             prepared.reference.n,
@@ -1038,6 +1652,7 @@ class DWBAState:
             field_array(prepared.field_f._A_minus_over_kz),
             prepared.field_i.z_reference,
             prepared.field_f.z_reference,
+            prepared.field_i.z_interfaces,
             prepared.alpha_i,
             prepared.alpha_f,
             prepared.cos_azimuth,
@@ -1045,19 +1660,61 @@ class DWBAState:
             prepared.k0,
             prepared.polarization_i,
             prepared.polarization_f,
-            medium_index,
+            prepared._atomic_model.reference_shares,
+            prepared.reference_area,
             bulk_mode == "semi_infinite",
             float(bulk_attenuation),
-            np.ascontiguousarray(basis, dtype=np.float64),
-            np.ascontiguousarray(form_factors, dtype=np.float64),
-            np.ascontiguousarray(bulk.R_mat, dtype=np.float64),
-            np.ascontiguousarray(bulk.R_mat_inv, dtype=np.float64),
-            domain_matrix,
-            domain_occupancy,
+            packed["atom_basis"],
+            packed["form_factors"],
+            packed["finite_positions"],
+            packed["finite_atom_index"],
+            packed["finite_record_index"],
+            packed["finite_weight"],
+            packed["bulk_positions"],
+            packed["bulk_atom_index"],
+            packed["bulk_weight"],
+            packed["bulk_repeat_coordinate"],
+            packed["bulk_repeat"],
         )
-        amplitude *= prepared.reference_area / bulk.uc_area
+        atomic = np.asarray(atomic, dtype=np.complex128)
+        reference = np.asarray(reference, dtype=np.complex128)
+        contributions = []
+        for descriptor, atomic_row, reference_row in zip(
+            prepared._atomic_model.descriptors, atomic, reference
+        ):
+            contrast_row = atomic_row - reference_row
+            contributions.append(
+                DWBAContribution(
+                    component_index=descriptor[0],
+                    component_name=descriptor[1],
+                    component_type=descriptor[2],
+                    record_index=descriptor[3],
+                    record_name=descriptor[4],
+                    role=descriptor[5],
+                    layer=descriptor[6],
+                    F_atomic=_readonly_result(
+                        atomic_row, prepared.shape, prepared.scalar, np.complex128
+                    ),
+                    F_reference=_readonly_result(
+                        reference_row,
+                        prepared.shape,
+                        prepared.scalar,
+                        np.complex128,
+                    ),
+                    F_contrast=_readonly_result(
+                        contrast_row,
+                        prepared.shape,
+                        prepared.scalar,
+                        np.complex128,
+                    ),
+                )
+            )
+        coherent_contrast = sum(
+            (contribution.F_contrast for contribution in contributions),
+            start=0j,
+        )
         F_contrast = _readonly_result(
-            amplitude, prepared.shape, prepared.scalar, np.complex128
+            coherent_contrast, prepared.shape, prepared.scalar, np.complex128
         )
         F_flat = np.asarray(F_contrast, dtype=np.complex128).reshape(-1)
         kappa_f = prepared.k0 * np.sin(prepared.alpha_f)
@@ -1093,6 +1750,7 @@ class DWBAState:
                 total_flat, prepared.shape, prepared.scalar
             ),
             bulk_mode=bulk_mode,
+            contributions=tuple(contributions),
         )
 
     def evaluate(self, h, k, l, **kwargs):  # noqa: E741

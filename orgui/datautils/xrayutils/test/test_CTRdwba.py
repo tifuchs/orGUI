@@ -1,4 +1,4 @@
-"""Focused validation of the public DWBA state and native bulk kernel."""
+"""Focused validation of the public DWBA state and native record kernel."""
 
 from dataclasses import FrozenInstanceError
 from unittest import mock
@@ -6,7 +6,8 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from .. import CTRcalc, CTRdwba, CTRuc
+from .. import CTRcalc, CTRdwba, CTRfilm, CTRuc
+from ..CTRfilm import PoissonProfile, SkellamProfile
 from ..CTRoptics import HC_KEV_ANGSTROM
 
 
@@ -16,6 +17,15 @@ def _one_atom_cell(occupancy=1.0):
     cell.setEnergy(10000.0)
     cell.f[0, 11] = 0.27
     cell.f[0, 12] = 0.19
+    return cell
+
+
+def _layered_cell(name="layered"):
+    cell = CTRuc.UnitCell([3.0, 3.0, 4.0], [90.0, 90.0, 90.0], name=name)
+    cell.addAtom("C", [0.13, 0.17, 0.0], 0.11, 0.19, 1.0, layer=1)
+    cell.addAtom("O", [0.31, 0.29, 0.5], 0.14, 0.23, 1.0, layer=2)
+    cell.layerpos = {1.0: 0.0, 2.0: 0.5}
+    cell.setEnergy(10000.0)
     return cell
 
 
@@ -29,6 +39,104 @@ def _kinematics(cell, alpha_i, alpha_f, azimuth):
     h = q_parallel * cell.a[0] / (2.0 * np.pi)
     l_value = qz * cell.a[2] / (2.0 * np.pi)
     return h, l_value
+
+
+def _synthetic_record_call(
+    *,
+    q_parallel,
+    kz_i,
+    kz_f,
+    A_i_plus,
+    A_i_minus,
+    A_f_plus,
+    A_f_minus,
+    alpha_i=0.23,
+    alpha_f=0.31,
+    cos_azimuth=np.cos(0.41),
+    sin_azimuth=np.sin(0.41),
+    polarization_i="s",
+    polarization_f="s",
+    is_specular=False,
+    interfaces=(0.0,),
+    reference_shares=None,
+    basis=None,
+    factors=None,
+    finite_positions=None,
+    finite_records=None,
+    finite_weights=None,
+    reference_area=1.0,
+):
+    """Call the packed native kernel with one synthetic scan point."""
+    kz_i = np.ascontiguousarray(kz_i, dtype=np.complex128).reshape(-1, 1)
+    kz_f = np.ascontiguousarray(kz_f, dtype=np.complex128).reshape(-1, 1)
+    media = len(kz_i)
+    A_i_plus = np.ascontiguousarray(A_i_plus, dtype=np.complex128).reshape(
+        media, 1
+    )
+    A_i_minus = np.ascontiguousarray(A_i_minus, dtype=np.complex128).reshape(
+        media, 1
+    )
+    A_f_plus = np.ascontiguousarray(A_f_plus, dtype=np.complex128).reshape(
+        media, 1
+    )
+    A_f_minus = np.ascontiguousarray(A_f_minus, dtype=np.complex128).reshape(
+        media, 1
+    )
+    if reference_shares is None:
+        reference_shares = np.zeros((2, media, 2), dtype=np.float64)
+    if basis is None:
+        basis = np.empty((0, 7), dtype=np.float64)
+    if factors is None:
+        factors = np.empty((0, 13), dtype=np.float64)
+    if finite_positions is None:
+        finite_positions = np.empty((0, 3), dtype=np.float64)
+    count = len(finite_positions)
+    if finite_records is None:
+        finite_records = np.empty((0,), dtype=np.int64)
+    if finite_weights is None:
+        finite_weights = np.ones(count, dtype=np.float64)
+    return CTRuc._CTRcalc_cpp.unitcell_F_DWBA_records(
+        np.asarray([q_parallel], dtype=np.float64),
+        np.asarray([is_specular], dtype=np.int64),
+        np.ones(media, dtype=np.complex128),
+        np.zeros(1, dtype=np.int64),
+        np.zeros(1, dtype=np.int64),
+        kz_i,
+        A_i_plus,
+        A_i_minus,
+        A_i_plus / kz_i,
+        A_i_minus / kz_i,
+        kz_f,
+        A_f_plus,
+        A_f_minus,
+        A_f_plus / kz_f,
+        A_f_minus / kz_f,
+        np.zeros(media),
+        np.zeros(media),
+        np.asarray(interfaces, dtype=np.float64),
+        np.asarray([alpha_i]),
+        np.asarray([alpha_f]),
+        np.asarray([cos_azimuth]),
+        np.asarray([sin_azimuth]),
+        5.3,
+        polarization_i,
+        polarization_f,
+        np.ascontiguousarray(reference_shares, dtype=np.float64),
+        reference_area,
+        True,
+        0.0,
+        np.ascontiguousarray(basis, dtype=np.float64),
+        np.ascontiguousarray(factors, dtype=np.float64),
+        np.ascontiguousarray(finite_positions, dtype=np.float64).reshape(-1, 3),
+        np.zeros(count, dtype=np.int64),
+        np.ascontiguousarray(finite_records, dtype=np.int64),
+        np.ascontiguousarray(finite_weights, dtype=np.float64),
+        np.empty((0, 3), dtype=np.float64),
+        np.empty((0,), dtype=np.int64),
+        np.empty((0,), dtype=np.float64),
+        np.empty((0,), dtype=np.float64),
+        np.asarray([0.0, 0.0, 4.0]),
+    )
 
 
 @pytest.mark.parametrize(
@@ -151,6 +259,195 @@ def test_native_four_channel_coefficients_use_renaud_vectors(
                 )
             expected += incident[sigma_i] * exit_[sigma_f] * factor
     np.testing.assert_allclose(actual, expected, rtol=2e-15, atol=2e-15)
+
+
+@pytest.mark.parametrize(
+    ("polarization_i", "polarization_f"),
+    [("s", "s"), ("s", "p"), ("p", "s"), ("p", "p")],
+)
+def test_packed_record_kernel_matches_direct_four_channel_atom_sum(
+    polarization_i, polarization_f
+):
+    q_parallel = np.array([0.37, 0.19])
+    kz_i = np.array([-1.21 + 0.04j, -1.07 + 0.09j])
+    kz_f = np.array([-1.46 + 0.03j, -1.18 + 0.07j])
+    A_i_plus = np.array([0.81 + 0.06j, 0.73 - 0.04j])
+    A_i_minus = np.array([-0.17 + 0.08j, 0.21 + 0.03j])
+    A_f_plus = np.array([0.77 - 0.05j, 0.69 + 0.02j])
+    A_f_minus = np.array([0.14 + 0.07j, -0.12 + 0.09j])
+    basis = np.array([[6.0, 0.0, 0.0, 0.0, 0.23, 0.31, 0.67]])
+    factors = np.zeros((1, 13))
+    factors[0, 0] = 1.7
+    factors[0, 5] = 0.42
+    factors[0, 10:13] = [0.8, 0.13, 0.21]
+    position = np.array([[0.27, -0.18, -0.43]])
+    actual = _synthetic_record_call(
+        q_parallel=q_parallel,
+        kz_i=kz_i,
+        kz_f=kz_f,
+        A_i_plus=A_i_plus,
+        A_i_minus=A_i_minus,
+        A_f_plus=A_f_plus,
+        A_f_minus=A_f_minus,
+        polarization_i=polarization_i,
+        polarization_f=polarization_f,
+        basis=basis,
+        factors=factors,
+        finite_positions=position,
+        finite_records=np.array([1]),
+        finite_weights=np.array([-0.72]),
+    )[0][1, 0]
+
+    medium = 1
+    alpha_i, alpha_f, azimuth, k0 = 0.23, 0.31, 0.41, 5.3
+    expected = 0.0j
+    for sigma_i, incident, incident_over_kz in (
+        (1, A_i_plus[medium], A_i_plus[medium] / kz_i[medium]),
+        (-1, A_i_minus[medium], A_i_minus[medium] / kz_i[medium]),
+    ):
+        for sigma_f, exit_, exit_over_kz in (
+            (1, A_f_plus[medium], A_f_plus[medium] / kz_f[medium]),
+            (-1, A_f_minus[medium], A_f_minus[medium] / kz_f[medium]),
+        ):
+            qz = -(sigma_i * kz_i[medium] + sigma_f * kz_f[medium])
+            q_squared = q_parallel @ q_parallel + qz**2
+            atom_factor = (
+                1.7 * np.exp(-0.42 * q_squared) + 0.8 + 0.13 + 0.21j
+            )
+            atom_factor *= np.exp(
+                -(0.23 * (q_parallel @ q_parallel) + 0.31 * qz**2)
+                / (16.0 * np.pi**2)
+            )
+            atom_factor *= 0.67
+            if polarization_i == polarization_f == "s":
+                vector = incident * exit_ * np.cos(azimuth)
+            elif polarization_i == "s":
+                vector = (
+                    -sigma_f
+                    * incident
+                    * exit_
+                    * np.sin(alpha_f)
+                    * np.sin(azimuth)
+                )
+            elif polarization_f == "s":
+                vector = (
+                    -sigma_i
+                    * incident
+                    * exit_
+                    * np.sin(alpha_i)
+                    * np.sin(azimuth)
+                )
+            else:
+                tangent = (
+                    -sigma_i
+                    * sigma_f
+                    * incident
+                    * exit_
+                    * np.sin(alpha_i)
+                    * np.sin(alpha_f)
+                    * np.cos(azimuth)
+                )
+                incident_normal = (
+                    -k0
+                    * np.cos(alpha_i)
+                    * np.sin(alpha_i)
+                    * incident_over_kz
+                )
+                exit_normal = (
+                    -k0
+                    * np.cos(alpha_f)
+                    * np.sin(alpha_f)
+                    * exit_over_kz
+                )
+                vector = tangent + incident_normal * exit_normal
+            expected += (
+                -0.72
+                * vector
+                * atom_factor
+                * np.exp(1j * (q_parallel @ position[0, :2] + qz * position[0, 2]))
+            )
+    np.testing.assert_allclose(actual, expected, rtol=3e-14, atol=3e-14)
+
+
+def test_packed_record_medium_assignment_is_half_open_at_an_interface():
+    q_parallel = np.array([0.17, 0.08])
+    kz_i = np.array([-1.0 + 0.02j, -1.3 + 0.05j])
+    kz_f = np.array([-1.1 + 0.03j, -1.4 + 0.06j])
+    basis = np.array([[6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]])
+    factors = np.zeros((1, 13))
+    factors[0, 10] = 1.0
+    positions = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, -1e-12]])
+    atomic = _synthetic_record_call(
+        q_parallel=q_parallel,
+        kz_i=kz_i,
+        kz_f=kz_f,
+        A_i_plus=np.array([1.0, 2.0]),
+        A_i_minus=np.zeros(2),
+        A_f_plus=np.array([1.0, 3.0]),
+        A_f_minus=np.zeros(2),
+        basis=basis,
+        factors=factors,
+        finite_positions=positions,
+        finite_records=np.array([1, 2]),
+        reference_shares=np.zeros((3, 2, 2)),
+    )[0]
+    qz_upper = -(kz_i[0] + kz_f[0])
+    qz_lower = -(kz_i[1] + kz_f[1])
+    np.testing.assert_allclose(atomic[1, 0], np.cos(0.41))
+    np.testing.assert_allclose(
+        atomic[2, 0],
+        6.0 * np.cos(0.41) * np.exp(1j * qz_lower * -1e-12),
+    )
+    assert qz_upper != qz_lower
+
+
+@pytest.mark.parametrize("q", [0.73 - 0.19j, 1e-12 + 0.0j])
+def test_packed_record_finite_reference_uses_stable_phi(q):
+    kzi = np.full(3, -0.5 * q, dtype=np.complex128)
+    shares = np.zeros((2, 3, 2))
+    shares[1, 1, 0] = (
+        2.0 * np.pi * 2.8179403262e-5 / 5.3**2
+    )
+    reference = _synthetic_record_call(
+        q_parallel=np.zeros(2),
+        kz_i=kzi,
+        kz_f=kzi,
+        A_i_plus=np.ones(3),
+        A_i_minus=np.zeros(3),
+        A_f_plus=np.ones(3),
+        A_f_minus=np.zeros(3),
+        cos_azimuth=1.0,
+        sin_azimuth=0.0,
+        is_specular=True,
+        interfaces=(2.0, 0.0),
+        reference_shares=shares,
+    )[1]
+    expected = np.exp(1j * q * 0.0) * np.expm1(1j * q * 2.0) / (1j * q)
+    np.testing.assert_allclose(reference[1, 0], expected, rtol=3e-14, atol=3e-14)
+
+
+def test_packed_record_terminal_reference_uses_half_space_integral():
+    q = 0.73 - 0.19j
+    kzi = np.full(3, -0.5 * q, dtype=np.complex128)
+    shares = np.zeros((2, 3, 2))
+    shares[1, 2, 0] = (
+        2.0 * np.pi * 2.8179403262e-5 / 5.3**2
+    )
+    reference = _synthetic_record_call(
+        q_parallel=np.zeros(2),
+        kz_i=kzi,
+        kz_f=kzi,
+        A_i_plus=np.ones(3),
+        A_i_minus=np.zeros(3),
+        A_f_plus=np.ones(3),
+        A_f_minus=np.zeros(3),
+        cos_azimuth=1.0,
+        sin_azimuth=0.0,
+        is_specular=True,
+        interfaces=(2.0, 0.0),
+        reference_shares=shares,
+    )[1]
+    np.testing.assert_allclose(reference[1, 0], 1.0 / (1j * q), rtol=3e-14)
 
 
 def test_lazy_state_and_legacy_api_removal():
@@ -372,6 +669,75 @@ def test_zero_attenuation_pole_and_unit_cell_reflectivity_rejection():
         _ = unit.reflectivity
 
 
+@pytest.mark.parametrize(
+    ("bulk_mode", "attenuation"),
+    [("unit_cell", 0.0), ("semi_infinite", 0.073)],
+)
+def test_surface_free_packed_kernel_preserves_the_bulk_kernel(
+    bulk_mode, attenuation
+):
+    cell = _one_atom_cell()
+    crystal = CTRcalc.SXRDCrystal(cell)
+    alpha_i = np.array([0.04, 0.055])
+    alpha_f = np.array([0.04, 0.08])
+    h = np.array(
+        [_kinematics(cell, ai, af, 0.27)[0] for ai, af in zip(alpha_i, alpha_f)]
+    )
+    h[0] = 0.0
+    prepared = crystal.dwba.prepare_from_glancing(h, 0.0, alpha_i, alpha_f)
+    actual = crystal.dwba.evaluate_prepared(
+        prepared,
+        bulk_mode=bulk_mode,
+        bulk_attenuation=attenuation,
+    ).F_contrast
+    basis, factors, _ = cell.build_selected_basis()
+    domains, occupancies = CTRuc._coherent_domain_arrays(
+        cell.coherentDomainMatrix,
+        cell.coherentDomainOccupancy,
+    )
+    media = len(prepared.reference.n)
+
+    def field_array(value):
+        return np.ascontiguousarray(np.asarray(value).reshape(media, -1))
+
+    expected = CTRuc._CTRcalc_cpp.unitcell_F_DWBA_bulk(
+        prepared.Q_parallel,
+        prepared.is_specular,
+        prepared.reference.n,
+        prepared.field_i_index,
+        prepared.field_f_index,
+        field_array(prepared.field_i.kz),
+        field_array(prepared.field_i.A_plus),
+        field_array(prepared.field_i.A_minus),
+        field_array(prepared.field_i._A_plus_over_kz),
+        field_array(prepared.field_i._A_minus_over_kz),
+        field_array(prepared.field_f.kz),
+        field_array(prepared.field_f.A_plus),
+        field_array(prepared.field_f.A_minus),
+        field_array(prepared.field_f._A_plus_over_kz),
+        field_array(prepared.field_f._A_minus_over_kz),
+        prepared.field_i.z_reference,
+        prepared.field_f.z_reference,
+        prepared.alpha_i,
+        prepared.alpha_f,
+        prepared.cos_azimuth,
+        prepared.sin_azimuth,
+        prepared.k0,
+        prepared.polarization_i,
+        prepared.polarization_f,
+        np.full(len(basis), media - 1, dtype=np.int64),
+        bulk_mode == "semi_infinite",
+        attenuation,
+        np.ascontiguousarray(basis),
+        np.ascontiguousarray(factors),
+        np.ascontiguousarray(cell.R_mat),
+        np.ascontiguousarray(cell.R_mat_inv),
+        np.ascontiguousarray(domains),
+        np.ascontiguousarray(occupancies),
+    )
+    np.testing.assert_allclose(actual, expected, rtol=2e-11, atol=3e-13)
+
+
 def test_energy_and_lattice_changes_reject_retained_preparation():
     crystal = CTRcalc.SXRDCrystal(_one_atom_cell())
     prepared = crystal.dwba.prepare_from_glancing(0.0, 0.0, 0.04, 0.04)
@@ -386,13 +752,21 @@ def test_energy_and_lattice_changes_reject_retained_preparation():
         crystal.dwba.evaluate_prepared(prepared)
 
 
-def test_bulk_scope_and_missing_native_extension_errors():
+def test_unit_cell_surface_support_and_missing_native_extension_errors():
     bulk = _one_atom_cell()
     surface = _one_atom_cell()
-    with pytest.raises(NotImplementedError, match="only the bulk"):
-        CTRcalc.SXRDCrystal(bulk, surface).dwba.prepare_from_glancing(
-            0.0, 0.0, 0.04, 0.04
-        )
+    surface.name = "surface"
+    crystal = CTRcalc.SXRDCrystal(bulk, surface)
+    result = crystal.dwba.evaluate_from_glancing(
+        0.0, 0.0, 0.04, 0.04, bulk_mode="unit_cell"
+    )
+    assert [item.role for item in result.contributions] == [
+        "bulk",
+        "unit_cell_layer",
+    ]
+    assert result.contributions[1].component_name == "surface"
+    assert result.F_reference == 0.0j
+
     crystal = CTRcalc.SXRDCrystal(bulk)
     with mock.patch.object(CTRdwba, "HAS_CPP_ACCEL", False):
         with pytest.raises(RuntimeError, match="native CTR extension"):
@@ -421,3 +795,231 @@ def test_preparation_lru_is_bounded_but_retained_handles_remain_usable():
     assert info["prepared_size"] == info["prepared_capacity"] == 32
     result = crystal.dwba.evaluate_prepared(retained)
     assert np.isfinite(result.reflectivity)
+
+
+def test_contributions_sum_and_reference_is_specular_only():
+    bulk = _layered_cell("bulk")
+    film = CTRfilm.Film(_layered_cell("film_cell"), name="film")
+    film.basis[0] = 3.0
+    crystal = CTRcalc.SXRDCrystal(bulk, film, stacking=np.array([1]))
+    crystal.dwba.set_ctr_geometry(alpha_i=0.05)
+    prepared = crystal.dwba.prepare([0.0, 1.0], 0.0, [0.7, 0.8])
+    result = crystal.dwba.evaluate_prepared(prepared)
+
+    assert [item.role for item in result.contributions] == [
+        "bulk",
+        "film_layer",
+        "film_layer",
+    ]
+    np.testing.assert_allclose(
+        result.F_atomic,
+        sum(item.F_atomic for item in result.contributions),
+    )
+    np.testing.assert_allclose(
+        result.F_reference,
+        sum(item.F_reference for item in result.contributions),
+    )
+    np.testing.assert_array_equal(
+        result.F_contrast,
+        sum(item.F_contrast for item in result.contributions),
+    )
+    assert result.F_reference[0] != 0.0j
+    assert result.F_reference[1] == 0.0j
+    for item in result.contributions:
+        assert item.F_reference[1] == 0.0j
+        with pytest.raises(ValueError, match="read-only"):
+            item.F_atomic[0] = 0.0j
+
+    diagnostic = crystal.dwba.evaluate_prepared(
+        prepared, bulk_mode="unit_cell"
+    )
+    np.testing.assert_array_equal(diagnostic.F_reference, 0.0j)
+    np.testing.assert_array_equal(diagnostic.unperturbed_amplitude, 0.0j)
+
+
+def test_commensurate_surface_cells_preserve_reference_area_amplitude():
+    bulk = _one_atom_cell(occupancy=0.0)
+    primitive = CTRuc.UnitCell(
+        [3.0, 3.0, 4.0], [90.0, 90.0, 90.0], name="primitive"
+    )
+    primitive.addAtom("C", [0.1, 0.2, 0.3], 0.18, 0.27, 1.0, layer=1)
+    primitive.setEnergy(10000.0)
+    supercell = CTRuc.UnitCell(
+        [6.0, 3.0, 4.0], [90.0, 90.0, 90.0], name="supercell"
+    )
+    supercell.addAtom("C", [0.05, 0.2, 0.3], 0.18, 0.27, 1.0, layer=1)
+    supercell.addAtom("C", [0.55, 0.2, 0.3], 0.18, 0.27, 1.0, layer=1)
+    supercell.setEnergy(10000.0)
+
+    amplitudes = []
+    for surface in (primitive, supercell):
+        crystal = CTRcalc.SXRDCrystal(bulk, surface)
+        crystal.dwba.set_ctr_geometry(alpha_i=0.05)
+        result = crystal.dwba.evaluate(
+            1.0, 0.0, 0.8, bulk_mode="unit_cell"
+        )
+        amplitudes.append(result.contributions[1].F_atomic)
+    np.testing.assert_allclose(amplitudes[0], amplitudes[1], rtol=3e-13)
+
+
+@pytest.mark.parametrize(
+    "model_factory, expected_roles",
+    [
+        (
+            lambda: CTRfilm.EpitaxyInterface(
+                _layered_cell("top"),
+                _layered_cell("bottom"),
+                profile=SkellamProfile(0.35, 0.0),
+                name="interface",
+            ),
+            {"interface_top", "interface_bottom"},
+        ),
+        (
+            lambda: CTRfilm.PoissonSurface(
+                _layered_cell("termination"),
+                profile=PoissonProfile(1.5, 0.5),
+                name="surface",
+            ),
+            {
+                "surface_termination",
+                "covered_film",
+                "sharp_film_correction",
+            },
+        ),
+    ],
+)
+def test_generated_model_records_preserve_the_prepared_optical_profile(
+    model_factory, expected_roles
+):
+    bulk = _layered_cell("bulk")
+    model = model_factory()
+    components = [model]
+    if isinstance(model, CTRfilm.PoissonSurface):
+        film = CTRfilm.Film(_layered_cell("film"), name="film")
+        film.basis[0] = 3.0
+        components.insert(0, film)
+    crystal = CTRcalc.SXRDCrystal(
+        bulk,
+        *components,
+        stacking=np.arange(1, len(components) + 1),
+    )
+    prepared = crystal.dwba.prepare_from_glancing(0.0, 0.0, 0.04, 0.04)
+    shares = prepared._atomic_model.reference_shares
+
+    np.testing.assert_allclose(
+        shares.sum(axis=0),
+        prepared.reference.profile.values[::-1, 1:],
+        rtol=2e-14,
+        atol=1e-18,
+    )
+    roles = {item[5] for item in prepared._atomic_model.descriptors}
+    assert expected_roles <= roles
+    result = crystal.dwba.evaluate_prepared(prepared)
+    assert np.isfinite(result.structure_factor_squared)
+
+
+@pytest.mark.parametrize("mean_change", [-1.5, 0.0, 1.5])
+def test_signed_poisson_records_are_coherent_and_zero_width_cancels(mean_change):
+    bulk = _layered_cell("bulk")
+    film = CTRfilm.Film(_layered_cell("film"), name="film")
+    film.basis[0] = 4.0
+    surface = CTRfilm.PoissonSurface(
+        _layered_cell("termination"),
+        profile=PoissonProfile(mean_change, 0.5),
+        name="surface",
+    )
+    crystal = CTRcalc.SXRDCrystal(
+        bulk, film, surface, stacking=np.array([1, 2])
+    )
+    result = crystal.dwba.evaluate_from_glancing(
+        0.0, 0.0, 0.04, 0.04, bulk_mode="unit_cell"
+    )
+    surface_records = [
+        item for item in result.contributions if item.component_name == "surface"
+    ]
+    assert surface_records
+    np.testing.assert_allclose(
+        sum(item.F_contrast for item in surface_records),
+        sum(item.F_atomic for item in surface_records),
+    )
+    if mean_change == 0.0:
+        np.testing.assert_allclose(
+            sum(item.F_atomic for item in surface_records),
+            0.0j,
+            atol=2e-13,
+        )
+
+
+def test_retained_surface_preparation_allows_atomic_changes_but_not_topology():
+    bulk = _layered_cell("bulk")
+    film = CTRfilm.Film(_layered_cell("film"), name="film")
+    film.basis[0] = 2.0
+    crystal = CTRcalc.SXRDCrystal(bulk, film, stacking=np.array([1]))
+    prepared = crystal.dwba.prepare_from_glancing(0.0, 0.0, 0.04, 0.04)
+
+    film.layer_ucs[0].basis[0, 1] += 0.03
+    live = crystal.dwba.evaluate_prepared(prepared)
+    assert np.isfinite(live.F_contrast)
+    live_film = sum(
+        item.F_atomic for item in live.contributions if item.component_index == 0
+    )
+    frozen_reference = sum(
+        item.F_reference for item in live.contributions if item.component_index == 0
+    )
+
+    crystal.weights[0] = 0.4
+    reweighted = crystal.dwba.evaluate_prepared(prepared)
+    np.testing.assert_allclose(
+        sum(
+            item.F_atomic
+            for item in reweighted.contributions
+            if item.component_index == 0
+        ),
+        0.4 * live_film,
+    )
+    np.testing.assert_array_equal(
+        sum(
+            item.F_reference
+            for item in reweighted.contributions
+            if item.component_index == 0
+        ),
+        frozen_reference,
+    )
+    rebuilt = crystal.dwba.prepare_from_glancing(0.0, 0.0, 0.04, 0.04)
+    assert rebuilt is not prepared
+    assert not np.array_equal(rebuilt.reference.n, prepared.reference.n)
+
+    film.basis[0] = 4.0
+    with pytest.raises(ValueError, match="record geometry changed"):
+        crystal.dwba.evaluate_prepared(prepared)
+
+
+def test_water_special_factors_and_unsupported_transforms_fail_clearly(
+    monkeypatch,
+):
+    bulk = _layered_cell("bulk")
+    water = CTRuc.WaterModel(bulk.a, bulk.alpha, "step")
+    water.setEnergy(10000.0)
+    with pytest.raises(NotImplementedError, match="WaterModel"):
+        CTRcalc.SXRDCrystal(bulk, water).dwba.prepare_from_glancing(
+            0.0, 0.0, 0.04, 0.04
+        )
+
+    surface = _layered_cell("surface")
+    surface.coherentDomainMatrix[0][0, 0] = 1.1
+    crystal = CTRcalc.SXRDCrystal(bulk, surface)
+    prepared = crystal.dwba.prepare_from_glancing(0.0, 0.0, 0.04, 0.04)
+    with pytest.raises(NotImplementedError, match="lateral-area"):
+        crystal.dwba.evaluate_prepared(prepared)
+
+    special = _one_atom_cell()
+    monkeypatch.setitem(
+        CTRuc.UnitCell.special_formfactors,
+        "C",
+        (lambda q: np.ones_like(q), lambda energy: (0.0, 0.0)),
+    )
+    special._test_special_formfactors()
+    crystal = CTRcalc.SXRDCrystal(special)
+    prepared = crystal.dwba.prepare_from_glancing(0.0, 0.0, 0.04, 0.04)
+    with pytest.raises(NotImplementedError, match="special form-factor"):
+        crystal.dwba.evaluate_prepared(prepared)

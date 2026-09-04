@@ -1446,4 +1446,5 @@ PYBIND11_MODULE(_CTRcalc_cpp, module) {
         &homogeneous_bulk_optical_constants
     );
     module.def("unitcell_F_DWBA_bulk", &unitcell_F_DWBA_bulk);
+    module.def("unitcell_F_DWBA_records", &unitcell_F_DWBA_records);
 }
