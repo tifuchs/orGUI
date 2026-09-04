@@ -15,7 +15,12 @@ def _import_cpp_backend():
         return importlib.import_module("orgui.app._peak_search_cpp")
     except ModuleNotFoundError as package_error:
         repo_root = Path(__file__).resolve().parents[2]
-        candidates = sorted((repo_root / "build").glob("cp*/_peak_search_cpp*.so"))
+        candidates = sorted(
+            (
+                *(repo_root / "build").glob("cp*/_peak_search_cpp*.so"),
+                *(repo_root / "build").glob("cp*/_peak_search_cpp*.pyd"),
+            )
+        )
         if not candidates:
             raise package_error
         extension_path = candidates[-1]
