@@ -417,6 +417,35 @@ class TestPoissonSurface(unittest.TestCase):
         self.assertEqual(restored.unitcell.name, self.unitcell.name)
         self.assertEqual(restored.toStr(), surface.toStr())
 
+    def test_explicit_termination_bank_survives_deepcopy(self):
+        """A termination-bank surface must still build layers after a copy.
+
+        ``_termination_domain_strain``/``_termination_domain_occupancy`` used
+        to be keyed by ``id()`` of the termination views. Object identities do
+        not survive ``copy.deepcopy`` -- which ``CTROptimizer.__init__``
+        performs once per fit -- so the copy raised ``KeyError``. A legacy
+        source cell hid this because ``_refresh_legacy_terminations`` rebuilds
+        those dicts on every ``setFitParameters``; an explicit termination
+        bank never rebuilds them, so every evaluation on the copy failed.
+        """
+        surface = CTRfilm.PoissonSurface(
+            self.unitcell,
+            profile=PoissonProfile(mean_change=2.0, alpha=0.5),
+        )
+        self.bind_surface(surface)
+        surface.set_ucs(dict(surface.termination_cells))
+        self.bind_surface(surface)
+
+        # Rebuild only through the copy itself: re-binding to a *different*
+        # film would refresh the lookup and hide the bug, and re-binding to
+        # the same one returns early, which is exactly what a fit does.
+        surface_copy = copy.deepcopy(surface)
+        surface_copy.createLayers()
+
+        self.assertTrue(
+            any(uc.coherentDomainOccupancy for uc in surface_copy.layer_ucs)
+        )
+
     def test_create_layers_assigns_convolved_occupancies(self):
         surface = CTRfilm.PoissonSurface(
             self.unitcell,

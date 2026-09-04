@@ -2054,12 +2054,19 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             view.layer_behavior = "select"
             view._start_layer = float(layer)
             self._termination_views[layer] = view
+        # Keyed by structural layer rather than by `id()` of the termination
+        # view: object identities do not survive `copy.deepcopy` (which
+        # `CTROptimizer.__init__` performs once per fit) or pickling, so an
+        # id-keyed lookup raises `KeyError` on the copy. A legacy source cell
+        # hides this because `_refresh_legacy_terminations` rebuilds these
+        # dicts on every `setFitParameters`; an explicit termination bank
+        # never rebuilds them, so the copy is broken from the first call.
         self._termination_domain_strain = {
-            id(self._termination_views[layer]): cell.coherentDomainMatrix[0][2, 2]
+            float(layer): cell.coherentDomainMatrix[0][2, 2]
             for layer, cell in self.termination_cells.items()
         }
         self._termination_domain_occupancy = {
-            id(self._termination_views[layer]): cell.coherentDomainOccupancy[0]
+            float(layer): cell.coherentDomainOccupancy[0]
             for layer, cell in self.termination_cells.items()
         }
         self._film_termination_ucs = {}
@@ -2285,7 +2292,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 relative_layer_position * self.underlying_film.unitcell.a[2]
             )
             surface_matrix = np.copy(mat_0)
-            surface_strain = self._termination_domain_strain[id(uc)]
+            surface_strain = self._termination_domain_strain[float(layer_id)]
             surface_origin = uc.layerpos[float(layer_id)]
             surface_matrix[2, 2] = surface_strain
             surface_matrix[2, 3] = (
@@ -2293,7 +2300,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             )
             uc.coherentDomainMatrix.append(surface_matrix)
             uc.coherentDomainOccupancy.append(
-                self._termination_domain_occupancy[id(uc)]
+                self._termination_domain_occupancy[float(layer_id)]
                 * surface_occupancy[layer_index]
             )
 
