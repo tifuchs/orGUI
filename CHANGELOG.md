@@ -59,6 +59,16 @@ Scientific and analysis additions:
   decomposition through on the ``(0, 1, L)``, ``(1, 1, L)``, and
   ``(2, 0, L)`` rods of the RuO2/TiO2 Poisson dissolution family and shows the
   corrected kinematical rod converging onto the DWBA rod in the Born limit.
+  A dedicated DWBA chapter now collects the calculation, observable, and
+  kinematical-comparison documentation. Its rendered
+  ``doc/source/dwba/dwba_diagnostics.ipynb`` tutorial compares flat and rough
+  RuO2/TiO2 films through the ``n = n_0 + delta_n`` split, logarithmic
+  critical-edge scan, extended specular rod, and fixed-incidence non-specular
+  rods, with kinematical curves alongside each DWBA CTR diagnostic.
+  A second rendered RuO2/TiO2 tutorial derives the fixed-incidence
+  kinematical ``atten`` value from the DWBA wavevectors and converts a
+  configurable exit-path tolerance into minimum reliable ``alpha_f`` and
+  ``L`` cutoffs.
 
 - **Added the geometry and scan support for a moveable detector arm.** The
   calibrated pyFAI geometry now describes the detector at a *home* arm
