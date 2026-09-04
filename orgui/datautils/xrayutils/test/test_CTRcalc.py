@@ -417,6 +417,114 @@ class TestPoissonSurface(unittest.TestCase):
         self.assertEqual(restored.unitcell.name, self.unitcell.name)
         self.assertEqual(restored.toStr(), surface.toStr())
 
+    def test_explicit_termination_bank_survives_deepcopy(self):
+        """A termination-bank surface must still build layers after a copy.
+
+        ``_termination_domain_strain``/``_termination_domain_occupancy`` used
+        to be keyed by ``id()`` of the termination views. Object identities do
+        not survive ``copy.deepcopy`` -- which ``CTROptimizer.__init__``
+        performs once per fit -- so the copy raised ``KeyError``. A legacy
+        source cell hid this because ``_refresh_legacy_terminations`` rebuilds
+        those dicts on every ``setFitParameters``; an explicit termination
+        bank never rebuilds them, so every evaluation on the copy failed.
+        """
+        surface = CTRfilm.PoissonSurface(
+            self.unitcell,
+            profile=PoissonProfile(mean_change=2.0, alpha=0.5),
+        )
+        self.bind_surface(surface)
+        surface.set_ucs(dict(surface.termination_cells))
+        self.bind_surface(surface)
+
+        # Rebuild only through the copy itself: re-binding to a *different*
+        # film would refresh the lookup and hide the bug, and re-binding to
+        # the same one returns early, which is exactly what a fit does.
+        surface_copy = copy.deepcopy(surface)
+        surface_copy.createLayers()
+
+        self.assertTrue(
+            any(uc.coherentDomainOccupancy for uc in surface_copy.layer_ucs)
+        )
+
+    def test_set_ucs_rebinds_layer_positions_to_the_film(self):
+        """Swapping in a termination bank must re-derive the layer ladder.
+
+        The surface layer positions come from the underlying Film, but
+        ``_bind_underlying_component`` short-circuits when it is already bound
+        to that Film. Replacing the cells without clearing the binding left
+        ``_layerpos_base`` at the termination cells' own positions -- which are
+        all identical, one per cell -- so ``_unwrapped_layer_positions`` spaced
+        consecutive surface layers a whole unit cell apart instead of one
+        structural layer, and a negative W could not recede the film.
+        """
+        cell = CTRcalc.UnitCell([3.0, 3.0, 4.0], [90.0, 90.0, 90.0], name="two")
+        for layer, z in ((1, 0.0), (2, 0.5)):
+            cell.addAtom("C", [0.0, 0.0, z], 0.1, 0.1, 1.0, layer=layer)
+            cell.layerpos[float(layer)] = z
+        cell.coherentDomainOccupancy = [1.0]
+
+        surface = CTRfilm.PoissonSurface(
+            copy.deepcopy(cell),
+            profile=PoissonProfile(mean_change=-2.0, alpha=0.0),
+        )
+        film = CTRfilm.Film(copy.deepcopy(cell), name="underlying_film")
+        film.basis[0] = 6.0
+        film.createLayers()
+
+        def stack():
+            surface.stack_on(
+                0.0, film.height_absolute, film.end_layer_number,
+                below_state=film.layer_state, below_component=film,
+            )
+
+        stack()
+        expected = np.sort(np.asarray(surface._layerpos_base, dtype=float))
+
+        surface.set_ucs(dict(surface.termination_cells))
+        stack()
+
+        np.testing.assert_allclose(
+            np.sort(np.asarray(surface._layerpos_base, dtype=float)), expected
+        )
+        # One structural layer apart, not a whole unit cell.
+        self.assertTrue(np.all(np.diff(np.sort(surface.layerpos)) < 1.0))
+
+    def test_generated_cells_track_their_sources_after_deepcopy(self):
+        """Terminations and film-correction cells must use live parameters.
+
+        The exposed terminations, the film-correction layers and the film
+        reference cells are all generated from another cell's basis -- views
+        from ``split_in_layers``, rotated copies from
+        ``generate_surface_termination_cells``. ``copy.deepcopy``, which
+        ``CTROptimizer.__init__`` performs once per fit, disconnects them, and
+        an explicit termination bank never rebuilds them. The surface then
+        scatters like the unfitted template, and the film correction subtracts
+        atoms with the wrong Debye-Waller factor -- removing the right number
+        of electrons in the wrong shape, so a fully dissolved region keeps a
+        layer-periodic residual density.
+        """
+        surface = CTRfilm.PoissonSurface(
+            self.unitcell,
+            profile=PoissonProfile(mean_change=-2.0, alpha=0.0),
+        )
+        self.bind_surface(surface)
+        surface.set_ucs(dict(surface.termination_cells))
+        film = self.bind_surface(surface)
+
+        copied = copy.deepcopy(surface)
+        copied.underlying_film.unitcell.basis[:, 4] = 0.42  # film iDW
+        for cell in copied.termination_cells.values():
+            cell.basis[:, 4] = 0.77                          # surface iDW
+        copied.createLayers()
+
+        for view in copied._termination_views.values():
+            np.testing.assert_allclose(view.basis[:, 4], 0.77)
+        for uc in copied._film_layer_ucs_base:
+            np.testing.assert_allclose(uc.basis[:, 4], 0.42)
+        for ref in copied._film_termination_ucs.values():
+            np.testing.assert_allclose(ref.basis[:, 4], 0.42)
+        self.assertIsNotNone(film)
+
     def test_create_layers_assigns_convolved_occupancies(self):
         surface = CTRfilm.PoissonSurface(
             self.unitcell,
@@ -1787,6 +1895,60 @@ class TestLayerStacking(unittest.TestCase):
             -1 / 3,
         )
 
+    def test_film_layer_atoms_track_unitcell_after_deepcopy(self):
+        """``layer_ucs[i].basis`` must reflect live ``unitcell.basis`` updates.
+
+        ``set_ucs`` builds ``layer_ucs[i].basis`` once, as a numpy *view*
+        into ``self.unitcell.basis`` (via ``UnitCell.split_in_layers``).
+        ``copy.deepcopy`` -- used once per fit by ``CTROptimizer.__init__``
+        -- materializes that view as an independent, disconnected array
+        instead of preserving the aliasing, which used to freeze every
+        layer's atoms at whatever values ``unitcell.basis`` held at copy
+        time: a later fit-parameter update (Debye-Waller factor, Wyckoff
+        ``u``, strain, ...) on the copy's ``unitcell.basis`` had no effect
+        on the atoms ``F_uc`` actually sums over, for the life of that copy.
+        """
+        film = CTRfilm.Film(self.make_layered_unitcell("film"))
+        film.basis[0] = 3
+        film.createLayers()
+
+        film_copy = copy.deepcopy(film)
+        film_copy.unitcell.basis[:, 4] = 0.9  # iDW, was 0.1
+        film_copy.createLayers()
+
+        for uc in film_copy.layer_ucs:
+            np.testing.assert_allclose(uc.basis[:, 4], 0.9)
+
+    def test_epitaxy_layer_atoms_track_unitcells_after_deepcopy(self):
+        """Generated interface cells must track live ``uc_top``/``uc_bottom``.
+
+        Same failure mode as
+        ``test_film_layer_atoms_track_unitcell_after_deepcopy``: ``set_ucs``
+        builds ``uc_layers_top``/``uc_layers_bottom`` as numpy *views*, and
+        ``copy.deepcopy`` (once per fit, in ``CTROptimizer.__init__``)
+        materializes them as disconnected arrays. The interface then keeps
+        scattering like the unfitted template while the neighbouring Film
+        uses the fitted values, putting a spurious density step at the top
+        of the interface support and a wrong plane at the nominal boundary.
+        """
+        interface = CTRfilm.EpitaxyInterface(
+            self.make_layered_unitcell("top"),
+            self.make_layered_unitcell("bottom"),
+            fixed_ucs=3,
+        )
+        interface.basis[:2] = [0.5, 0.0]
+        interface.stack_on(0.0, 12.0, 1)
+
+        interface_copy = copy.deepcopy(interface)
+        interface_copy.uc_top.basis[:, 4] = 0.9  # iDW, was 0.1
+        interface_copy.uc_bottom.basis[:, 5] = 0.8  # oDW, was 0.1
+        interface_copy.createInterfaceCells()
+
+        for uc in interface_copy.top_layers:
+            np.testing.assert_allclose(uc.basis[:, 4], 0.9)
+        for uc in interface_copy.bottom_layers:
+            np.testing.assert_allclose(uc.basis[:, 5], 0.8)
+
     def test_epitaxy_interface_rotates_cyclic_layer_order(self):
         interface = CTRfilm.EpitaxyInterface(
             self.make_layered_unitcell("top"),
@@ -2082,6 +2244,90 @@ class TestLayerStacking(unittest.TestCase):
             self.assertTrue(
                 np.any(np.asarray(layer.coherentDomainOccupancy[split:]) < 0.0)
             )
+
+    def test_epitaxy_small_asymmetry_perturbation_does_not_void_density(self):
+        """A tiny nonzero Skellam asymmetry must not collapse the density.
+
+        Regression test for a sharp/transitional cell classification that
+        compared each generated cell's integer index against the continuous
+        distribution mean ``loc = mu1 - mu2`` instead of the cell's own
+        smooth occupancy. The two only agree when ``loc`` lands exactly on a
+        cell boundary, which is true at ``asymmetry == 0`` but not for any
+        nonzero asymmetry: a cell straddling ``loc`` then flipped between
+        "fully sharp bulk" and "fully transitional" although its actual
+        occupancy barely changed, subtracting a full unit of already-counted
+        bulk material at a cell that was only partially bulk. That collapsed
+        the interface density to near zero for any nonzero asymmetry,
+        however small. A physically sound implementation must vary
+        continuously with the asymmetry parameter: a perturbation of 1e-4
+        should change the density by a comparably small amount, not by
+        orders of magnitude.
+        """
+        baseline = self.make_epitaxy_interface()
+        perturbed = self.make_epitaxy_interface()
+        perturbed.basis[1] = 1e-4
+
+        z = np.linspace(-20.0, 20.0, 801)
+        density_baseline = np.abs(baseline.zDensity_G(z, 0.0, 0.0))
+        density_perturbed = np.abs(perturbed.zDensity_G(z, 0.0, 0.0))
+
+        # atol stays far below the ~0.78 deviation the pre-fix classification
+        # produced for this same perturbation (the fixed classification
+        # measures ~0.02 here) while allowing for the separate anchor
+        # registration imprecision fixed below.
+        np.testing.assert_allclose(
+            density_perturbed, density_baseline, atol=5e-2, rtol=1e-2
+        )
+
+    def test_epitaxy_asymmetry_crossing_a_structural_layer_boundary_is_continuous(
+        self,
+    ):
+        """A structural-layer-boundary crossing must not jump either.
+
+        Regression test for the ``ideal_top_loc``/``ideal_bottom_loc`` anchor
+        (used to register the interface's generated material against the
+        semi-infinite bulk). Two issues stacked here:
+
+        1. ``ideal_top[layer_no_loc][uc_no_loc][2, 3]`` is ``uc_no_loc`` in
+           unit-cell units (``top_layer_offset`` is always 0), so converting
+           the ``loc_rescaled % n_layers`` structural-layer remainder into
+           that same unit-cell scale requires dividing by ``n_layers``. A
+           previous ``% 1`` returned the structural-layer fractional part
+           directly instead, silently dropping the integer ``layer_no_loc``
+           contribution, and jumped by up to one full structural layer every
+           time ``loc`` crossed a structural-layer boundary rather than only
+           a full unit-cell boundary -- ``n_layers`` times more often than
+           intended.
+        2. ``ideal_bottom_loc`` additionally has to land on an *exact*
+           integer number of unit cells (see
+           ``test_epitaxy_small_asymmetry_perturbation_does_not_void_density``'s
+           sibling test below for why); a merely continuous but fractional
+           anchor still misregisters the fixed-bulk cancellation.
+
+        ``asymmetry`` is chosen so ``loc`` crosses an integer (a
+        structural-layer boundary) while staying within the same unit cell
+        (``floor(loc) // n_layers`` unchanged, only ``loc % n_layers``
+        crossing its own floor); see the ``SkellamProfile.parameters``
+        formula ``mu1 - mu2 == width**2 * n_layers**2 * asymmetry`` for how
+        this maps to a specific ``asymmetry`` pair for this fixture's
+        ``width=0.5`` on a 3-layer cell.
+        """
+        baseline = self.make_epitaxy_interface()
+        perturbed = self.make_epitaxy_interface()
+        baseline.basis[1] = 0.888
+        perturbed.basis[1] = 0.890
+
+        z = np.linspace(-20.0, 20.0, 801)
+        density_baseline = np.abs(baseline.zDensity_G(z, 0.0, 0.0))
+        density_perturbed = np.abs(perturbed.zDensity_G(z, 0.0, 0.0))
+
+        # atol stays far below the ~1.4 deviation the pre-fix anchor produced
+        # for this same pair while allowing for the modest, expected change
+        # from a genuinely non-infinitesimal (0.002) asymmetry step (the
+        # fully fixed anchor measures ~0.02 here).
+        np.testing.assert_allclose(
+            density_perturbed, density_baseline, atol=5e-2, rtol=1e-2
+        )
 
     def test_epitaxy_strain_coupled_field_is_anchored_to_deep_bulk(self):
         top, bottom = self.make_epitaxy_cells()

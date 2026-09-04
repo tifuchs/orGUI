@@ -688,6 +688,26 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         return super().layer_state
 
     def createInterfaceCells(self):
+        # `uc_layers_top`/`uc_layers_bottom` hold, per structural layer, a
+        # numpy *view* into `uc_top.basis`/`uc_bottom.basis`, built once in
+        # `set_ucs` via `UnitCell.split_in_layers`. `copy.deepcopy` -- used
+        # once per fit by `CTROptimizer.__init__` -- and pickling -- used by
+        # multiprocessing-based optimizers -- both materialize a view as an
+        # independent array, silently freezing these layers at whatever the
+        # unit cells held at copy time. Fit-parameter updates to
+        # `uc_top`/`uc_bottom` (Debye-Waller factors, Wyckoff `u`, strain,
+        # ...) would then never reach the generated interface cells, so the
+        # interface would keep scattering like the unfitted template while
+        # the neighbouring Film used the fitted values -- a density step at
+        # the top of the interface support and a wrong interface plane at
+        # the nominal boundary. Re-synchronize explicitly rather than rely
+        # on aliasing that copying may have broken. Same reasoning as
+        # `Film.createLayers`.
+        for layer_id, uc in self.uc_layers_top.items():
+            uc.basis[:] = self.uc_top.basis[self.uc_top.basis[:, 7] == layer_id]
+        for layer_id, uc in self.uc_layers_bottom.items():
+            uc.basis[:] = self.uc_bottom.basis[self.uc_bottom.basis[:, 7] == layer_id]
+
         n_layers = len(self.uc_top.layers)
         if self.type == "skellam":
             tail_probability = (
@@ -723,9 +743,17 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 (-1, n_layers)
             )
             probability_bottom = 1.0 - probability_top
-            sharp_top = (
-                (unitcells >= loc).astype(np.float64).reshape((-1, n_layers))
-            )
+            # Classify each generated cell by its own smooth occupancy, not by
+            # comparing its integer index against the continuous distribution
+            # mean `loc`. The two agree only when `loc` sits exactly on a cell
+            # boundary (the symmetric asymmetry=0 case); any nonzero asymmetry
+            # moves `loc` off that boundary, so a cell straddling it flipped
+            # from "fully sharp bulk" to "fully transitional" (or back)
+            # although its actual occupancy barely changed -- subtracting a
+            # full unit of already-counted bulk at a cell that is only
+            # partially bulk, which collapsed the interface density to near
+            # zero for any nonzero asymmetry.
+            sharp_top = (probability_top >= 0.5).astype(np.float64)
             sharp_bottom = 1.0 - sharp_top
             strain_coupling = self.basis[2]
             if (
@@ -853,17 +881,40 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             loc_rescaled = loc - unitcells[0]
             uc_no_loc = int(np.floor(loc_rescaled)) // n_layers
             layer_no_loc = int(np.floor(loc_rescaled)) % n_layers
-            loc_remainder = (loc_rescaled % n_layers) % 1
+            # `ideal_top[layer_no_loc][uc_no_loc][2, 3]` (== uc_no_loc; see
+            # ideal_top_i above, since top_layer_offset is 0 for every
+            # generated layer) is in unit-cell units, where one full unit
+            # cell spans n_layers structural layers. Dividing by n_layers
+            # converts the structural-layer remainder into that same
+            # unit-cell scale; the previous `% 1` instead returned the
+            # structural-layer fractional part directly, which is off by a
+            # factor of n_layers and additionally drops the integer
+            # `layer_no_loc` contribution entirely. That made this anchor
+            # discontinuous every time `loc` crossed a structural-layer
+            # boundary rather than only every full unit cell, rigidly
+            # misregistering the whole interface against the semi-infinite
+            # bulk by up to one structural layer.
+            loc_remainder = (loc_rescaled % n_layers) / n_layers
             ideal_top_loc_mat = ideal_top[layer_no_loc][uc_no_loc]
             ideal_top_loc = (
                 ideal_top_loc_mat[2, 3]
                 + loc_remainder * ideal_top_loc_mat[2, 2]
             ) * a3_top
-            ideal_bottom_loc_mat = ideal_bottom[layer_no_loc][uc_no_loc]
-            ideal_bottom_loc = (
-                ideal_bottom_loc_mat[2, 3]
-                + loc_remainder * ideal_bottom_loc_mat[2, 2]
-            ) * a3_bottom
+            # Unlike ideal_top_loc, this anchor must land on an exact integer
+            # number of bottom unit cells: the "fixed bulk" domains built
+            # from it below are a like-for-like replica of the semi-infinite
+            # bulk sum (UnitCell.F_bulk/zDensity_G_asbulk), which only has
+            # material at those exact integer repeats. A fractional shift
+            # here (this used the same continuous ideal_top_loc-style
+            # formula until this fix) leaves the fixed-bulk subtraction
+            # registered between two real bulk repeats instead of on one,
+            # so it cancels neither and the interface density collapses
+            # near the transition for whichever asymmetries push the
+            # nearby structural-layer remainder far enough from a unit-cell
+            # boundary. Rounding to the nearest unit cell keeps this anchor
+            # close to loc (bounded numerical error away from the
+            # transition) while guaranteeing exact bulk registration.
+            ideal_bottom_loc = round(loc_rescaled / n_layers) * a3_bottom
 
             offset_absolute = self._offset_absolute
             occupancy_low = np.min(probability_top)
@@ -1535,6 +1586,22 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         the component below has already generated support up to ``below_H``,
         only the remaining width is represented by Film layers.
         """
+        # `self.layer_ucs[i].basis` is built once, in `set_ucs`, as a numpy
+        # *view* into `self.unitcell.basis` (via `UnitCell.split_in_layers`).
+        # `copy.deepcopy` -- used once per fit by `CTROptimizer.__init__` --
+        # and pickling -- used by multiprocessing-based optimizers -- both
+        # materialize a numpy view as an independent, disconnected array,
+        # silently freezing every layer's atoms at whatever values
+        # `self.unitcell.basis` held at copy time, permanently, for the life
+        # of that copy: later fit-parameter updates to `self.unitcell.basis`
+        # (Debye-Waller factors, Wyckoff `u`, strain, ...) would then have no
+        # effect on the atoms actually summed in `F_uc`. Re-synchronize every
+        # layer's atom rows from the live `self.unitcell.basis` explicitly on
+        # every call instead of relying on aliasing that copying may have
+        # silently broken.
+        for layer_id, uc in zip(self._layer_ids, self._layer_ucs_base):
+            uc.basis[:] = self.unitcell.basis[self.unitcell.basis[:, 7] == layer_id]
+
         n_layers_in_uc = len(self.unitcell.layers)
         scaled_width = self.basis[0] - n_layers_in_uc * (
             (self.below_H - self.below_loc) / self.unitcell.a[2]
@@ -1872,6 +1939,14 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
     def set_ucs(self, unitcell, **kwargs):
         """Set a legacy source cell or explicit termination-cell mapping."""
+        # Replacing the cells invalidates any existing binding to a Film.
+        # `_bind_underlying_component` returns early when it is already bound
+        # to the same Film, so without this a re-stack would keep the layer
+        # positions derived from the *previous* cells -- and those set the
+        # layer-to-height ladder, so consecutive surface layers could end up a
+        # whole unit cell apart instead of one structural layer, leaving W
+        # unable to recede the film by a single layer.
+        self.underlying_film = None
         self._source_unitcell = None
         self.termination_cells = {}
         if isinstance(unitcell, Mapping):
@@ -1987,12 +2062,19 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             view.layer_behavior = "select"
             view._start_layer = float(layer)
             self._termination_views[layer] = view
+        # Keyed by structural layer rather than by `id()` of the termination
+        # view: object identities do not survive `copy.deepcopy` (which
+        # `CTROptimizer.__init__` performs once per fit) or pickling, so an
+        # id-keyed lookup raises `KeyError` on the copy. A legacy source cell
+        # hides this because `_refresh_legacy_terminations` rebuilds these
+        # dicts on every `setFitParameters`; an explicit termination bank
+        # never rebuilds them, so the copy is broken from the first call.
         self._termination_domain_strain = {
-            id(self._termination_views[layer]): cell.coherentDomainMatrix[0][2, 2]
+            float(layer): cell.coherentDomainMatrix[0][2, 2]
             for layer, cell in self.termination_cells.items()
         }
         self._termination_domain_occupancy = {
-            id(self._termination_views[layer]): cell.coherentDomainOccupancy[0]
+            float(layer): cell.coherentDomainOccupancy[0]
             for layer, cell in self.termination_cells.items()
         }
         self._film_termination_ucs = {}
@@ -2033,6 +2115,17 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
         self.underlying_film = component
         self._film_layer_ucs_base = [film_layers[layer] for layer in film_layer_ids]
+        # Constant per-atom z shift the termination rotation applied, so the
+        # reference cells can be re-synced from the live film basis later
+        # without regenerating them (see createLayers).
+        self._film_termination_z_offsets = {
+            layer: (
+                np.copy(ref.basis[:, 3] - film_uc.basis[:, 3])
+                if ref.basis.shape == film_uc.basis.shape
+                else None
+            )
+            for layer, ref in self._film_termination_ucs.items()
+        }
         if self._reference_unitcell is not None:
             self.setReferenceUnitCell(
                 self._reference_unitcell,
@@ -2138,6 +2231,34 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 "PoissonSurface must be stacked immediately above a Film "
                 "before layers can be created"
             )
+        # Every cell here is generated from another cell's basis --
+        # `split_in_layers` returns views, `generate_surface_termination_cells`
+        # returns rotated copies -- and `copy.deepcopy` (which
+        # `CTROptimizer.__init__` performs once per fit) and pickling both
+        # disconnect them from their source. With an explicit termination bank
+        # nothing rebuilds them, so they stay frozen at whatever the cells held
+        # when the surface was bound. That silently made the exposed
+        # terminations scatter like the unfitted template -- ignoring their own
+        # fitted Debye-Waller, occupancy and relaxation -- and made the film
+        # correction subtract atoms carrying the wrong Debye-Waller factor and
+        # the wrong Wyckoff/strain z: the right number of electrons removed in
+        # the wrong shape, leaving a layer-periodic residual density exactly
+        # where the film should be fully dissolved. Re-synchronize explicitly.
+        for layer, cell in self.termination_cells.items():
+            view = self._termination_views.get(layer)
+            if view is not None and view.basis.shape == cell.basis.shape:
+                view.basis[:] = cell.basis
+        film_basis = self.underlying_film.unitcell.basis
+        for layer_id, uc in zip(self._layer_ids, self._film_layer_ucs_base):
+            rows = film_basis[film_basis[:, 7] == layer_id]
+            if uc.basis.shape == rows.shape:
+                uc.basis[:] = rows
+        for layer, ref in self._film_termination_ucs.items():
+            offsets = getattr(self, "_film_termination_z_offsets", {}).get(layer)
+            if offsets is not None and ref.basis.shape == film_basis.shape:
+                ref.basis[:, 1:7] = film_basis[:, 1:7]
+                ref.basis[:, 3] = film_basis[:, 3] + offsets
+
         n_layers_in_uc = len(self._layer_ids)
         tail_probability = (
             self.profile.tail_probability
@@ -2218,7 +2339,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 relative_layer_position * self.underlying_film.unitcell.a[2]
             )
             surface_matrix = np.copy(mat_0)
-            surface_strain = self._termination_domain_strain[id(uc)]
+            surface_strain = self._termination_domain_strain[float(layer_id)]
             surface_origin = uc.layerpos[float(layer_id)]
             surface_matrix[2, 2] = surface_strain
             surface_matrix[2, 3] = (
@@ -2226,7 +2347,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             )
             uc.coherentDomainMatrix.append(surface_matrix)
             uc.coherentDomainOccupancy.append(
-                self._termination_domain_occupancy[id(uc)]
+                self._termination_domain_occupancy[float(layer_id)]
                 * surface_occupancy[layer_index]
             )
 
@@ -2415,16 +2536,21 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
     @property
     def fitparnames(self):
-        cells = self._owned_unitcells()
-        if len(cells) == 1:
-            names = cells[0].fitparnames
-        else:
-            names = [
-                f"{cell.name}:{name}"
-                for cell in cells
-                for name in cell.fitparnames
-            ]
-        return super().fitparnames + names
+        # Report the parameters of every owned termination cell under their
+        # own names, as `Film` and `EpitaxyInterface` do for their internal
+        # cells. Qualifying them with the cell name instead made a parameter
+        # of a termination bank impossible to reach from `SXRDCrystal`'s
+        # coupled parameters, which match strictly on the reported name: a
+        # value that is physically one quantity per exposed depth -- the
+        # Debye-Waller factor of the topmost layer, say -- occupies a
+        # different structural layer in each termination, so it can only be
+        # expressed as one fit parameter shared by all terminations. Repeated
+        # names without a matching coupled parameter stay independent, so
+        # nothing else changes. Serialization is unaffected: it keys on the
+        # cell name, not on this list.
+        return super().fitparnames + [
+            name for cell in self._owned_unitcells() for name in cell.fitparnames
+        ]
 
     @property
     def priors(self):
