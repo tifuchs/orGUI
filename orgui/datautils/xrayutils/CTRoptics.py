@@ -4,25 +4,24 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .CTRutil import atomic_number
+from ._CTRnative import HAS_CPP_ACCEL, _CTRcalc_cpp
 
 
 HC_KEV_ANGSTROM = 12.398419843320026
 
 
 @dataclass(frozen=True)
-class Wavefield:
-    """Unperturbed one-dimensional wavefield in Renaud notation.
+class LayeredElectricField:
+    """Unperturbed one-dimensional electric field in Renaud notation.
 
-    Slabs are ordered from the incident medium towards the substrate.
-    ``A_plus`` and ``A_minus`` are downward- and upward-propagating electric
-    field amplitudes referenced to ``z_reference`` for each slab.
+    Slabs are ordered from the incident medium towards the substrate. The
+    ``s`` and ``p`` polarization vectors use the right-handed Renaud basis
+    ``epsilon_s x epsilon_p = k_hat``. ``A_plus`` and ``A_minus`` are the
+    corresponding downward- and upward-propagating electric-field branch
+    coefficients referenced to ``z_reference`` for each slab. In particular,
+    the tangential component of an upward ``p`` branch has the opposite sign
+    from ``A_minus``.
 
-    :param numpy.ndarray z:
-        Sample positions in Angstrom, ordered from substrate to ambient.
-    :param numpy.ndarray psi:
-        Complex electric field sampled at ``z``. The layer axis is first;
-        remaining axes match a nonscalar incidence-angle input.
     :param numpy.ndarray z_interfaces:
         Interface positions in Angstrom, ordered from ambient to substrate.
     :param numpy.ndarray z_reference:
@@ -36,15 +35,14 @@ class Wavefield:
     :param numpy.ndarray A_minus:
         Upward-propagating slab amplitudes.
     :param complex or numpy.ndarray r_S:
-        Specular reflection amplitude in the incident medium.
+        Specular reflection amplitude in the analyzed Renaud polarization
+        basis. It equals ``A_minus[0]`` for both ``s`` and ``p``.
     :param complex or numpy.ndarray t_S:
         Transmission amplitude at the substrate boundary.
     :param str polarization:
         ``"s"`` or ``"p"``.
     """
 
-    z: np.ndarray
-    psi: np.ndarray
     z_interfaces: np.ndarray
     z_reference: np.ndarray
     n: np.ndarray
@@ -54,6 +52,9 @@ class Wavefield:
     r_S: complex
     t_S: complex
     polarization: str
+    angle_shape: tuple
+    _A_plus_over_kz: np.ndarray
+    _A_minus_over_kz: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -91,7 +92,10 @@ def optical_profile(unit_cell, include_coherent_domains=True):
     The returned C-contiguous ``(N, 3)`` float64 array has columns ``z`` in
     Angstrom, ``delta``, and ``beta``.  Each row is a domain-transformed layer
     contribution; coherent-domain occupancy is already applied to ``delta``
-    and ``beta`` in the convention ``n = 1-delta-i*beta``.
+    and ``beta`` in the convention ``n = 1-delta-i*beta``. The forward
+    scattering amplitude always uses the Waasmaier--Kirfel representation at
+    ``Q = 0`` plus the energy-dependent dispersion correction, matching the
+    structure-factor kernels exactly.
 
     :param UnitCell unit_cell:
         Unit cell with energy-dependent scattering factors populated by
@@ -148,20 +152,9 @@ def optical_profile(unit_cell, include_coherent_domains=True):
     profile = np.empty((len(layer_ids) * len(domain_matrices), 3), dtype=np.float64)
     row = 0
     for layer_index, (layer_id, layer_cell) in enumerate(layers.items()):
-        forward_static_factor = np.asarray(
-            [atomic_number(name) for name in layer_cell.names],
-            dtype=np.float64,
-        )
-        ionic_species = np.asarray(
-            [name.endswith(("+", "-")) for name in layer_cell.names],
-            dtype=bool,
-        )
-        ionic_forward_factor = (
+        forward_static_factor = (
             np.sum(layer_cell.f[:, :5], axis=1) + layer_cell.f[:, 10]
         )
-        forward_static_factor[ionic_species] = ionic_forward_factor[
-            ionic_species
-        ]
         forward_factor = np.sum(
             layer_cell.basis[:, 6]
             * (
@@ -230,6 +223,52 @@ def optical_profile_asbulk(unit_cell, noUC=30):
         profile[:, 0] -= number * unit_cell.a[2]
         profiles.append(profile)
     return np.ascontiguousarray(np.concatenate(profiles, axis=0))
+
+
+def homogeneous_bulk_profile(unit_cell):
+    """Return one homogeneous bulk medium below vacuum.
+
+    The optical constants are evaluated natively from the Waasmaier--Kirfel
+    unit-cell forward scattering amplitude, dispersion correction, and
+    crystallographic volume. The interface is placed at the crystallographic
+    phase origin. This preserves the
+    existing :meth:`UnitCell.F_uc` phase convention for the first bulk cell;
+    deeper cells are translated by negative out-of-plane repeats.
+
+    :param UnitCell unit_cell:
+        Bulk unit cell with energy-dependent scattering factors populated.
+    :returns:
+        Two optical media and their one physical interface.
+    :rtype: StratifiedProfile
+    """
+    period = float(unit_cell.a[2])
+    if not np.isfinite(period) or period <= 0.0:
+        raise ValueError("The bulk out-of-plane repeat must be positive.")
+    _require_native_optics()
+    if not hasattr(_CTRcalc_cpp, "homogeneous_bulk_optical_constants"):
+        raise RuntimeError(
+            "The native CTR extension with bulk optical support is required."
+        )
+    basis, form_factors, _ = unit_cell.build_selected_basis()
+    if len(basis) == 0:
+        raise ValueError("The bulk unit cell must contain at least one atom.")
+    wavelength = HC_KEV_ANGSTROM / (unit_cell._E * 1e-3)
+    scale_over_volume = (
+        2.8179403262e-5 * wavelength**2 / (2.0 * np.pi * unit_cell.volume)
+    )
+    average = _CTRcalc_cpp.homogeneous_bulk_optical_constants(
+        np.ascontiguousarray(basis, dtype=np.float64),
+        np.ascontiguousarray(form_factors, dtype=np.float64),
+        scale_over_volume,
+    )
+    values = np.array(
+        [
+            [-0.5 * period, average[0], average[1]],
+            [0.5 * period, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    return StratifiedProfile(values, np.array([0.0], dtype=np.float64))
 
 
 def water_optical_profile(water_model, noUC=30, z_step=None, z_origin=None):
@@ -519,463 +558,189 @@ def simplify_profile(profile, delta_tolerance=1e-9, beta_tolerance=None):
     ).values
 
 
-def _normal_wavevector(n, k0, alpha_rad):
-    """Return normal propagation constants for incidence from medium zero."""
-    k_parallel_over_k0 = n[0] * np.cos(alpha_rad)
-    argument = n**2 - k_parallel_over_k0**2
-    q = k0 * np.sqrt(argument)
-    q = np.where(q.imag > 0.0, -q, q)
-    q = np.where((q.imag == 0.0) & (q.real < 0.0), -q, q)
-    # Avoid cancellation in n_0**2 - (n_0*cos(alpha))**2 at tiny angles.
-    q[0] = k0 * n[0] * np.sin(alpha_rad)
-    return q
-
-
-def _normal_wavevectors(n, k0, alpha_rad):
-    """Return normal propagation constants for a vector of incidence angles."""
-    k_parallel_over_k0 = n[0] * np.cos(alpha_rad)
-    argument = n[:, np.newaxis] ** 2 - k_parallel_over_k0**2
-    q = k0 * np.sqrt(argument)
-    q = np.where(q.imag > 0.0, -q, q)
-    q = np.where((q.imag == 0.0) & (q.real < 0.0), -q, q)
-    q[0] = k0 * n[0] * np.sin(alpha_rad)
-    return q
-
-
-def _admittance(n, q, polarization):
-    """Return scalar optical admittance for s or p polarization."""
-    if polarization == "s":
-        return q
-    if polarization == "p":
-        return n**2 / q
-    raise ValueError("polarization must be 's' or 'p'.")
-
-
-def _propagation_terms(n, q, thickness, polarization):
-    """Return finite state-propagation terms, including the ``q = 0`` limit."""
-    phase = q * thickness
-    cosine = np.cos(phase)
-    sinc = np.sinc(phase / np.pi)
-    if polarization == "s":
-        sin_over_admittance = thickness * sinc
-        admittance_sin = q**2 * thickness * sinc
-    else:
-        sin_over_admittance = q**2 * thickness * sinc / n**2
-        admittance_sin = n**2 * thickness * sinc
-    return cosine, sin_over_admittance, admittance_sin
-
-
-def _propagate_state(field, derivative, n, q, thickness, polarization):
-    """Propagate the continuous field state downward through one slab."""
-    cosine, sin_over_admittance, admittance_sin = _propagation_terms(
-        n, q, thickness, polarization
-    )
-    return (
-        cosine * field - 1j * sin_over_admittance * derivative,
-        cosine * derivative - 1j * admittance_sin * field,
-    )
-
-
-def _propagate_state_upward(
-    field, derivative, n, q, thickness, polarization
-):
-    """Propagate the continuous field state upward through one slab."""
-    cosine, sin_over_admittance, admittance_sin = _propagation_terms(
-        n, q, thickness, polarization
-    )
-    return (
-        cosine * field + 1j * sin_over_admittance * derivative,
-        cosine * derivative + 1j * admittance_sin * field,
-    )
-
-
-def _solve_regular_wavefield(n, q, z_interfaces, z_ascending, polarization):
-    """Solve angle vectors whose normal wavevectors are all nonzero."""
-    admittance = _admittance(n[:, np.newaxis], q, polarization)
-    interface_r = (admittance[:-1] - admittance[1:]) / (
-        admittance[:-1] + admittance[1:]
-    )
-    reflection = np.empty_like(interface_r)
-    reflection[-1] = interface_r[-1]
-    for interface in range(len(interface_r) - 2, -1, -1):
-        thickness = z_interfaces[interface] - z_interfaces[interface + 1]
-        phase = np.exp(-1j * q[interface + 1] * thickness)
-        reflected_below = reflection[interface + 1] * phase**2
-        reflection[interface] = (
-            interface_r[interface] + reflected_below
-        ) / (1.0 + interface_r[interface] * reflected_below)
-
-    A_plus = np.empty_like(q)
-    A_minus = np.empty_like(q)
-    z_reference = np.empty(len(n), dtype=np.float64)
-    A_plus[0] = 1.0
-    A_minus[0] = reflection[0]
-    z_reference[0] = z_interfaces[0]
-
-    down_at_interface = A_plus[0]
-    up_at_interface = A_minus[0]
-    for interface in range(len(interface_r)):
-        field = down_at_interface + up_at_interface
-        derivative = admittance[interface] * (
-            down_at_interface - up_at_interface
-        )
-        A_plus[interface + 1] = 0.5 * (
-            field + derivative / admittance[interface + 1]
-        )
-        A_minus[interface + 1] = 0.5 * (
-            field - derivative / admittance[interface + 1]
-        )
-        z_reference[interface + 1] = z_interfaces[interface]
-        if interface + 1 < len(interface_r):
-            thickness = z_interfaces[interface] - z_interfaces[interface + 1]
-            phase = np.exp(-1j * q[interface + 1] * thickness)
-            down_at_interface = A_plus[interface + 1] * phase
-            up_at_interface = A_minus[interface + 1] / phase
-
-    psi = np.empty_like(q)
-    for ascending_index, z_value in enumerate(z_ascending):
-        medium = len(n) - 1 - ascending_index
-        depth = z_reference[medium] - z_value
-        psi[ascending_index] = (
-            A_plus[medium] * np.exp(-1j * q[medium] * depth)
-            + A_minus[medium] * np.exp(1j * q[medium] * depth)
-        )
-    return (
-        A_plus,
-        A_minus,
-        z_reference,
-        psi,
-        A_minus[0],
-        A_plus[-1],
-    )
-
-
-def _solve_critical_wavefield(n, q, z_interfaces, z_ascending, polarization):
-    """Solve angle vectors containing an exact ``q = 0`` wavevector."""
-    # Propagate a substrate radiation-condition state upward.  For p
-    # polarization, scaling [F, D] as [q / n**2, 1] avoids the singular
-    # admittance n**2 / q and has the finite critical-angle limit [0, 1].
-    if polarization == "s":
-        field_top = np.ones(q.shape[1], dtype=np.complex128)
-        derivative_top = q[-1].copy()
-    else:
-        field_top = q[-1] / n[-1] ** 2
-        derivative_top = np.ones(q.shape[1], dtype=np.complex128)
-    for medium in range(len(n) - 2, 0, -1):
-        thickness = z_interfaces[medium - 1] - z_interfaces[medium]
-        field_top, derivative_top = _propagate_state_upward(
-            field_top,
-            derivative_top,
-            n[medium],
-            q[medium],
-            thickness,
-            polarization,
-        )
-
-    incident_admittance = _admittance(n[0], q[0], polarization)
-    normalization = 2.0 / (
-        field_top + derivative_top / incident_admittance
-    )
-    field_top *= normalization
-    derivative_top *= normalization
-    r_S = 0.5 * (
-        field_top - derivative_top / incident_admittance
-    )
-
-    field_reference = np.empty_like(q)
-    derivative_reference = np.empty_like(q)
-    z_reference = np.empty(len(n), dtype=np.float64)
-    field_reference[0] = field_top
-    derivative_reference[0] = derivative_top
-    z_reference[0] = z_interfaces[0]
-
-    field_at_interface = field_top
-    derivative_at_interface = derivative_top
-    for interface in range(len(n) - 1):
-        field_reference[interface + 1] = field_at_interface
-        derivative_reference[interface + 1] = derivative_at_interface
-        z_reference[interface + 1] = z_interfaces[interface]
-        if interface + 1 < len(n) - 1:
-            thickness = z_interfaces[interface] - z_interfaces[interface + 1]
-            field_at_interface, derivative_at_interface = _propagate_state(
-                field_at_interface,
-                derivative_at_interface,
-                n[interface + 1],
-                q[interface + 1],
-                thickness,
-                polarization,
-            )
-
-    if polarization == "s":
-        amplitude_difference = np.divide(
-            derivative_reference,
-            q,
-            out=np.zeros_like(derivative_reference),
-            where=q != 0.0,
-        )
-    else:
-        amplitude_difference = (
-            derivative_reference * q / n[:, np.newaxis] ** 2
-        )
-    A_plus = 0.5 * (field_reference + amplitude_difference)
-    A_minus = 0.5 * (field_reference - amplitude_difference)
-    A_plus[0] = 1.0
-    A_minus[0] = r_S
-    A_plus[-1] = field_reference[-1]
-    A_minus[-1] = 0.0
-
-    psi = np.empty_like(q)
-    for ascending_index, z_value in enumerate(z_ascending):
-        medium = len(n) - 1 - ascending_index
-        depth = z_reference[medium] - z_value
-        psi[ascending_index], _ = _propagate_state(
-            field_reference[medium],
-            derivative_reference[medium],
-            n[medium],
-            q[medium],
-            depth,
-            polarization,
-        )
-    return (
-        A_plus,
-        A_minus,
-        z_reference,
-        psi,
-        r_S,
-        field_reference[-1],
-    )
-
-
-def _specular_reflection(
-    profile, energy_eV, alpha, polarization, boundaries=None
-):
-    """Return reflection amplitudes for all angles in one vectorized solve."""
-    profile = np.asarray(profile, dtype=np.float64)
-    alpha = np.asarray(alpha, dtype=np.float64)
-    if profile.ndim != 2 or profile.shape[1] != 3 or len(profile) < 2:
-        raise ValueError("profile must be an (N, 3) array with at least two rows.")
-    if alpha.ndim != 1:
-        raise ValueError("alpha must be one-dimensional.")
-    if not np.all(np.isfinite(alpha)) or np.any(alpha <= 0.0) or np.any(
-        alpha > 90.0
+def _require_native_optics():
+    if not HAS_CPP_ACCEL or not hasattr(
+        _CTRcalc_cpp, "solve_layered_electric_field"
     ):
-        raise ValueError("alpha must contain values in (0, 90] degrees.")
-    if energy_eV <= 0.0:
-        raise ValueError("energy_eV must be positive.")
-    if polarization not in {"s", "p"}:
-        raise ValueError("polarization must be 's' or 'p'.")
+        raise RuntimeError(
+            "The native CTR extension with electric-field support is required."
+        )
 
+
+def _readonly_contiguous(value):
+    array = np.ascontiguousarray(value)
+    array.flags.writeable = False
+    return array
+
+
+def _validated_boundaries(profile, boundaries):
     if boundaries is None:
-        boundaries = profile_boundaries(profile)
-    else:
-        boundaries = np.asarray(boundaries, dtype=np.float64)
-    wavelength = HC_KEV_ANGSTROM / (energy_eV * 1e-3)
-    k0 = 2.0 * np.pi / wavelength
-    n = np.ascontiguousarray(
-        (1.0 - profile[:, 1] - 1j * profile[:, 2])[::-1]
-    )
-    z_interfaces = np.ascontiguousarray(boundaries[::-1])
-    q = _normal_wavevectors(n, k0, np.deg2rad(alpha))
-    reflection = np.empty(len(alpha), dtype=np.complex128)
-    critical = np.any(q == 0.0, axis=0)
-
-    regular = ~critical
-    if np.any(regular):
-        all_regular = np.all(regular)
-        q_regular = q if all_regular else q[:, regular]
-        if polarization == "s":
-            interface_r = (
-                q_regular[:-1] - q_regular[1:]
-            ) / (q_regular[:-1] + q_regular[1:])
-        else:
-            n_squared = n**2
-            interface_r = (
-                n_squared[:-1, np.newaxis] * q_regular[1:]
-                - n_squared[1:, np.newaxis] * q_regular[:-1]
-            ) / (
-                n_squared[:-1, np.newaxis] * q_regular[1:]
-                + n_squared[1:, np.newaxis] * q_regular[:-1]
-            )
-        reflected = interface_r[-1].copy()
-        for interface in range(len(n) - 3, -1, -1):
-            thickness = (
-                z_interfaces[interface] - z_interfaces[interface + 1]
-            )
-            phase = np.exp(
-                -1j * q_regular[interface + 1] * thickness
-            )
-            reflected_below = reflected * phase**2
-            reflected = (
-                interface_r[interface] + reflected_below
-            ) / (1.0 + interface_r[interface] * reflected_below)
-        if all_regular:
-            reflection[:] = reflected
-        else:
-            reflection[regular] = reflected
-
-    if np.any(critical):
-        q_critical = q[:, critical]
-        if polarization == "s":
-            field_top = np.ones(np.count_nonzero(critical), dtype=np.complex128)
-            derivative_top = q_critical[-1].copy()
-        else:
-            field_top = q_critical[-1] / n[-1] ** 2
-            derivative_top = np.ones(
-                np.count_nonzero(critical), dtype=np.complex128
-            )
-        for medium in range(len(n) - 2, 0, -1):
-            thickness = (
-                z_interfaces[medium - 1] - z_interfaces[medium]
-            )
-            field_top, derivative_top = _propagate_state_upward(
-                field_top,
-                derivative_top,
-                n[medium],
-                q_critical[medium],
-                thickness,
-                polarization,
-            )
-        if polarization == "s":
-            incident_admittance = q_critical[0]
-        else:
-            incident_admittance = n[0] ** 2 / q_critical[0]
-        state_sum = field_top + derivative_top / incident_admittance
-        reflection[critical] = (
-            field_top - derivative_top / incident_admittance
-        ) / state_sum
-
-    return reflection
+        return profile_boundaries(profile)
+    boundaries = np.asarray(boundaries, dtype=np.float64)
+    if boundaries.ndim != 1 or len(boundaries) != len(profile) - 1:
+        raise ValueError("boundaries must be a one-dimensional (N - 1) array.")
+    if not np.all(np.isfinite(boundaries)) or not np.all(
+        np.diff(boundaries) > 0.0
+    ):
+        raise ValueError("boundaries must be finite and strictly increasing.")
+    if not np.all(profile[:-1, 0] < boundaries) or not np.all(
+        boundaries < profile[1:, 0]
+    ):
+        raise ValueError("each boundary must lie between adjacent layer centers.")
+    return np.ascontiguousarray(boundaries)
 
 
-def solve_wavefield(
+def solve_electric_field(
     profile, energy_eV, alpha, polarization="s", boundaries=None
 ):
-    """Solve the layered unperturbed wavefield by stable layered propagation.
+    """Solve the layered electric field with Renaud signed wavevectors.
 
-    The profile rows define optical media at layer centers. By default, their
-    interfaces are placed at adjacent-center midpoints. Explicit boundaries
-    preserve the original outer interfaces of a simplified profile. The first
-    and last rows represent the semi-infinite substrate and incident media.
-    Angles are glancing angles measured from the surface inside the incident
-    medium. The conserved tangential wavevector is therefore
-    ``k_x = n_0 k_0 cos(alpha)``, where ``n_0`` is the last profile row.
-    The propagated field and admittance-weighted derivative use their analytic
-    ``q_z = 0`` limits, including the p-polarized critical angle.
+    The profile is ordered from substrate to ambient. Returned optical media
+    are ordered from ambient to substrate. Angles are glancing angles in
+    radians, and ``kz`` is the negative-root Renaud wavevector in
+    ``Angstrom^-1``. Field sampling is deliberately separate; use
+    :func:`sample_electric_field` when values at particular depths are needed.
 
     :param numpy.ndarray profile:
         ``(N, 3)`` optical profile with z in Angstrom, delta, and beta.
     :param float energy_eV:
         X-ray photon energy in eV.
     :param float or numpy.ndarray alpha:
-        Glancing angle or angle array in degrees inside the incident medium.
-        For arrays, wavefield quantities have the layer axis first followed by
-        the original angle-array shape.
+        Glancing angle or broadcastable angle array in radians.
     :param str polarization:
         ``"s"`` or ``"p"``.
     :param numpy.ndarray boundaries:
-        Optional ``N - 1`` interfaces in Angstrom, ordered from substrate to
-        ambient. Defaults to adjacent-center midpoints.
+        Optional ``N - 1`` interfaces in Angstrom, ordered substrate to
+        ambient.
     :returns:
-        Slab amplitudes and sampled electric field.
-    :rtype: Wavefield
-    :raises ValueError:
-        If the profile, energy, angle, or polarization is invalid.
+        Immutable per-medium electric-field amplitudes.
+    :rtype: LayeredElectricField
     """
+    _require_native_optics()
     profile = np.asarray(profile, dtype=np.float64)
     if profile.ndim != 2 or profile.shape[1] != 3 or len(profile) < 2:
         raise ValueError("profile must be an (N, 3) array with at least two rows.")
-    default_boundaries = profile_boundaries(profile)
-    if boundaries is None:
-        boundaries = default_boundaries
-    else:
-        boundaries = np.asarray(boundaries, dtype=np.float64)
-        if boundaries.ndim != 1 or len(boundaries) != len(profile) - 1:
-            raise ValueError("boundaries must be a one-dimensional (N - 1) array.")
-        if not np.all(np.diff(boundaries) > 0.0):
-            raise ValueError("boundaries must be strictly increasing.")
-        if not np.all(profile[:-1, 0] < boundaries) or not np.all(
-            boundaries < profile[1:, 0]
-        ):
-            raise ValueError("each boundary must lie between adjacent layer centers.")
-    if energy_eV <= 0.0:
-        raise ValueError("energy_eV must be positive.")
+    if not np.all(np.isfinite(profile)) or not np.all(np.diff(profile[:, 0]) > 0.0):
+        raise ValueError("profile values must be finite with increasing z.")
+    boundaries = _validated_boundaries(profile, boundaries)
+    if not np.isfinite(energy_eV) or energy_eV <= 0.0:
+        raise ValueError("energy_eV must be finite and positive.")
     alpha_array = np.asarray(alpha, dtype=np.float64)
     scalar = alpha_array.ndim == 0
     if alpha_array.size == 0 or not np.all(np.isfinite(alpha_array)):
         raise ValueError("alpha must contain finite angle values.")
-    if np.any(alpha_array <= 0.0) or np.any(alpha_array > 90.0):
-        raise ValueError("alpha must contain values in (0, 90] degrees.")
+    if np.any(alpha_array <= 0.0) or np.any(alpha_array > 0.5 * np.pi):
+        raise ValueError("alpha must contain values in (0, pi/2] radians.")
     if polarization not in {"s", "p"}:
         raise ValueError("polarization must be 's' or 'p'.")
 
     wavelength = HC_KEV_ANGSTROM / (energy_eV * 1e-3)
     k0 = 2.0 * np.pi / wavelength
     angle_shape = alpha_array.shape
-    alpha_rad = np.deg2rad(np.atleast_1d(alpha_array).ravel())
-
-    z_ascending = profile[:, 0]
-    n_ascending = 1.0 - profile[:, 1] - 1j * profile[:, 2]
-    n = np.ascontiguousarray(n_ascending[::-1])
+    angles = np.ascontiguousarray(np.atleast_1d(alpha_array).ravel())
+    n = np.ascontiguousarray(
+        (1.0 - profile[:, 1] - 1j * profile[:, 2])[::-1]
+    )
     z_interfaces = np.ascontiguousarray(boundaries[::-1])
-    q = _normal_wavevectors(n, k0, alpha_rad)
-    critical = np.any(q == 0.0, axis=0)
-    regular = ~critical
-
-    if np.all(regular):
-        result = _solve_regular_wavefield(
-            n, q, z_interfaces, z_ascending, polarization
-        )
-    elif np.all(critical):
-        result = _solve_critical_wavefield(
-            n, q, z_interfaces, z_ascending, polarization
-        )
-    else:
-        A_plus = np.empty_like(q)
-        A_minus = np.empty_like(q)
-        psi = np.empty_like(q)
-        r_S = np.empty(q.shape[1], dtype=np.complex128)
-        t_S = np.empty(q.shape[1], dtype=np.complex128)
-        regular_result = _solve_regular_wavefield(
-            n, q[:, regular], z_interfaces, z_ascending, polarization
-        )
-        critical_result = _solve_critical_wavefield(
-            n, q[:, critical], z_interfaces, z_ascending, polarization
-        )
-        A_plus[:, regular], A_minus[:, regular], z_reference, psi[
-            :, regular
-        ], r_S[regular], t_S[regular] = regular_result
-        A_plus[:, critical], A_minus[:, critical], _, psi[
-            :, critical
-        ], r_S[critical], t_S[critical] = critical_result
-        result = A_plus, A_minus, z_reference, psi, r_S, t_S
-    A_plus, A_minus, z_reference, psi, r_S, t_S = result
-
+    result = _CTRcalc_cpp.solve_layered_electric_field(
+        n, z_interfaces, k0, angles, polarization
+    )
+    (
+        kz,
+        A_plus,
+        A_minus,
+        A_plus_over_kz,
+        A_minus_over_kz,
+        z_reference,
+        r_S,
+        t_S,
+    ) = result
     if scalar:
-        kz = -q[:, 0]
+        kz = kz[:, 0]
         A_plus = A_plus[:, 0]
         A_minus = A_minus[:, 0]
-        psi = psi[:, 0]
+        A_plus_over_kz = A_plus_over_kz[:, 0]
+        A_minus_over_kz = A_minus_over_kz[:, 0]
         r_S = complex(r_S[0])
         t_S = complex(t_S[0])
     else:
         field_shape = (len(n),) + angle_shape
-        kz = (-q).reshape(field_shape)
+        kz = kz.reshape(field_shape)
         A_plus = A_plus.reshape(field_shape)
         A_minus = A_minus.reshape(field_shape)
-        psi = psi.reshape(field_shape)
-        r_S = r_S.reshape(angle_shape)
-        t_S = t_S.reshape(angle_shape)
-
-    return Wavefield(
-        z=np.ascontiguousarray(z_ascending),
-        psi=psi,
-        z_interfaces=z_interfaces,
-        z_reference=np.ascontiguousarray(z_reference),
-        n=n,
-        kz=np.ascontiguousarray(kz),
-        A_plus=np.ascontiguousarray(A_plus),
-        A_minus=np.ascontiguousarray(A_minus),
+        A_plus_over_kz = A_plus_over_kz.reshape(field_shape)
+        A_minus_over_kz = A_minus_over_kz.reshape(field_shape)
+        r_S = _readonly_contiguous(r_S.reshape(angle_shape))
+        t_S = _readonly_contiguous(t_S.reshape(angle_shape))
+    return LayeredElectricField(
+        z_interfaces=_readonly_contiguous(z_interfaces),
+        z_reference=_readonly_contiguous(z_reference),
+        n=_readonly_contiguous(n),
+        kz=_readonly_contiguous(kz),
+        A_plus=_readonly_contiguous(A_plus),
+        A_minus=_readonly_contiguous(A_minus),
         r_S=r_S,
         t_S=t_S,
         polarization=polarization,
+        angle_shape=angle_shape,
+        _A_plus_over_kz=_readonly_contiguous(A_plus_over_kz),
+        _A_minus_over_kz=_readonly_contiguous(A_minus_over_kz),
     )
+
+
+def sample_electric_field(field, z):
+    """Sample a prepared layered tangential electric field at arbitrary depths.
+
+    :param LayeredElectricField field:
+        Field returned by :func:`solve_electric_field`.
+    :param float or numpy.ndarray z:
+        Positions in Angstrom. The returned shape is ``z.shape`` followed by
+        the field's incidence-angle shape.
+    :returns:
+        Complex tangential electric-field amplitude. For ``s`` this is
+        ``E_s``. For ``p`` it is the tangential component normalized by the
+        incident vacuum factor ``sin(alpha)``; the upward branch sign implied
+        by the right-handed Renaud basis is included.
+    :rtype: complex or numpy.ndarray
+    """
+    _require_native_optics()
+    if not isinstance(field, LayeredElectricField):
+        raise TypeError("field must be a LayeredElectricField.")
+    z_array = np.asarray(z, dtype=np.float64)
+    if z_array.size == 0 or not np.all(np.isfinite(z_array)):
+        raise ValueError("z must contain finite positions.")
+    z_shape = z_array.shape
+    z_flat = np.ascontiguousarray(np.atleast_1d(z_array).ravel())
+    points = int(np.prod(field.angle_shape, dtype=np.intp)) if field.angle_shape else 1
+    kz = np.ascontiguousarray(field.kz.reshape(len(field.n), points))
+    A_plus = np.ascontiguousarray(field.A_plus.reshape(len(field.n), points))
+    A_minus = np.ascontiguousarray(field.A_minus.reshape(len(field.n), points))
+    E, _ = _CTRcalc_cpp.sample_layered_electric_field(
+        kz,
+        A_plus,
+        A_minus,
+        field.z_reference,
+        field.z_interfaces,
+        z_flat,
+        field.polarization,
+    )
+    result = E.reshape(z_shape + field.angle_shape)
+    if result.ndim == 0:
+        return complex(result)
+    return result
+
+
+def _specular_reflection(
+    profile, energy_eV, alpha, polarization, boundaries=None
+):
+    """Return native reflection amplitudes for a one-dimensional angle array."""
+    alpha = np.asarray(alpha, dtype=np.float64)
+    if alpha.ndim != 1:
+        raise ValueError("alpha must be one-dimensional.")
+    return solve_electric_field(
+        profile,
+        energy_eV,
+        alpha,
+        polarization,
+        boundaries=boundaries,
+    ).r_S

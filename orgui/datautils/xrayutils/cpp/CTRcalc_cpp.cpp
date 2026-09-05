@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cstdint>
 #include <list>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -23,6 +24,9 @@ using complex128 = std::complex<double>;
 using Array1D = py::array_t<double, py::array::c_style>;
 using Array2D = py::array_t<double, py::array::c_style>;
 using Array3D = py::array_t<double, py::array::c_style>;
+using ComplexArray1D = py::array_t<complex128, py::array::c_style>;
+using ComplexArray2D = py::array_t<complex128, py::array::c_style>;
+using IntArray1D = py::array_t<std::int64_t, py::array::c_style>;
 
 constexpr std::size_t form_factor_cache_default_budget = 256ULL * 1024 * 1024;
 
@@ -1026,6 +1030,403 @@ std::size_t form_factor_cache_expected_bytes(
     return points * (species + 1) * sizeof(double);
 }
 
+complex128 complex_sinc(const complex128 value) {
+    if (value == complex128(0.0, 0.0)) {
+        return complex128(1.0, 0.0);
+    }
+    return std::sin(value) / value;
+}
+
+complex128 complex_expm1(const complex128 value) {
+    if (std::abs(value) >= 1.0e-5) {
+        return std::exp(value) - complex128(1.0, 0.0);
+    }
+    complex128 sum = value;
+    complex128 term = value;
+    for (int order = 2; order <= 12; ++order) {
+        term *= value / static_cast<double>(order);
+        sum += term;
+    }
+    return sum;
+}
+
+complex128 optical_admittance(
+    const complex128 refractive_index,
+    const complex128 kz,
+    const bool p_polarized
+) {
+    if (p_polarized) {
+        return -refractive_index * refractive_index / kz;
+    }
+    return -kz;
+}
+
+void propagate_optical_state(
+    complex128 &field,
+    complex128 &derivative,
+    const complex128 refractive_index,
+    const complex128 kz,
+    const double thickness,
+    const bool p_polarized,
+    const bool upward
+) {
+    const complex128 phase = kz * thickness;
+    const complex128 cosine = std::cos(phase);
+    const complex128 sinc = complex_sinc(phase);
+    complex128 sin_over_admittance;
+    complex128 admittance_sin;
+    if (p_polarized) {
+        sin_over_admittance = (
+            kz * kz * thickness * sinc
+            / (refractive_index * refractive_index)
+        );
+        admittance_sin = (
+            refractive_index * refractive_index * thickness * sinc
+        );
+    } else {
+        sin_over_admittance = thickness * sinc;
+        admittance_sin = kz * kz * thickness * sinc;
+    }
+    const complex128 direction = upward
+        ? complex128(0.0, 1.0)
+        : complex128(0.0, -1.0);
+    const complex128 next_field = (
+        cosine * field + direction * sin_over_admittance * derivative
+    );
+    const complex128 next_derivative = (
+        cosine * derivative + direction * admittance_sin * field
+    );
+    field = next_field;
+    derivative = next_derivative;
+}
+
+py::tuple solve_layered_electric_field(
+    const ComplexArray1D &refractive_indices,
+    const Array1D &z_interfaces,
+    const double k0,
+    const Array1D &alpha,
+    const std::string &polarization
+) {
+    const auto n_info = refractive_indices.request();
+    const auto interface_info = z_interfaces.request();
+    const auto alpha_info = alpha.request();
+    require_shape(n_info, 1, "refractive_indices");
+    require_shape(interface_info, 1, "z_interfaces");
+    require_shape(alpha_info, 1, "alpha");
+    if (n_info.shape[0] < 2) {
+        throw py::value_error("at least two optical media are required");
+    }
+    if (interface_info.shape[0] != n_info.shape[0] - 1) {
+        throw py::value_error("z_interfaces must have one fewer value than media");
+    }
+    if (!(k0 > 0.0) || !std::isfinite(k0)) {
+        throw py::value_error("k0 must be finite and positive");
+    }
+    if (polarization != "s" && polarization != "p") {
+        throw py::value_error("polarization must be 's' or 'p'");
+    }
+
+    const auto media = n_info.shape[0];
+    const auto points = alpha_info.shape[0];
+    auto kz = py::array_t<complex128>({media, points});
+    auto A_plus = py::array_t<complex128>({media, points});
+    auto A_minus = py::array_t<complex128>({media, points});
+    auto A_plus_over_kz = py::array_t<complex128>({media, points});
+    auto A_minus_over_kz = py::array_t<complex128>({media, points});
+    auto reflection = py::array_t<complex128>(points);
+    auto transmission = py::array_t<complex128>(points);
+    auto z_reference = py::array_t<double>(media);
+
+    const auto *n_data = static_cast<const complex128 *>(n_info.ptr);
+    const auto *interface_data = static_cast<const double *>(interface_info.ptr);
+    const auto *alpha_data = static_cast<const double *>(alpha_info.ptr);
+    constexpr double half_pi = 1.570796326794896619231321691639751442;
+    for (py::ssize_t point = 0; point < points; ++point) {
+        if (!std::isfinite(alpha_data[point])
+            || alpha_data[point] <= 0.0
+            || alpha_data[point] > half_pi) {
+            throw py::value_error(
+                "alpha must contain values in (0, pi/2] radians"
+            );
+        }
+    }
+    auto *kz_data = static_cast<complex128 *>(kz.request().ptr);
+    auto *plus_data = static_cast<complex128 *>(A_plus.request().ptr);
+    auto *minus_data = static_cast<complex128 *>(A_minus.request().ptr);
+    auto *plus_over_data = static_cast<complex128 *>(A_plus_over_kz.request().ptr);
+    auto *minus_over_data = static_cast<complex128 *>(A_minus_over_kz.request().ptr);
+    auto *reflection_data = static_cast<complex128 *>(reflection.request().ptr);
+    auto *transmission_data = static_cast<complex128 *>(transmission.request().ptr);
+    auto *reference_data = static_cast<double *>(z_reference.request().ptr);
+    reference_data[0] = interface_data[0];
+    for (py::ssize_t medium = 1; medium < media; ++medium) {
+        reference_data[medium] = interface_data[medium - 1];
+    }
+
+    const bool p_polarized = polarization == "p";
+    {
+    py::gil_scoped_release release;
+    std::vector<complex128> field_reference(media);
+    std::vector<complex128> derivative_reference(media);
+    for (py::ssize_t point = 0; point < points; ++point) {
+        const double angle = alpha_data[point];
+        const complex128 parallel_over_k0 = n_data[0] * std::cos(angle);
+        for (py::ssize_t medium = 0; medium < media; ++medium) {
+            complex128 value = -k0 * std::sqrt(
+                n_data[medium] * n_data[medium]
+                - parallel_over_k0 * parallel_over_k0
+            );
+            if (value.imag() < 0.0
+                || (value.imag() == 0.0 && value.real() > 0.0)) {
+                value = -value;
+            }
+            kz_data[medium * points + point] = value;
+        }
+        kz_data[point] = -k0 * n_data[0] * std::sin(angle);
+
+        const complex128 terminal_kz = kz_data[(media - 1) * points + point];
+        complex128 field_top;
+        complex128 derivative_top;
+        if (p_polarized) {
+            field_top = -terminal_kz / (n_data[media - 1] * n_data[media - 1]);
+            derivative_top = complex128(1.0, 0.0);
+        } else {
+            field_top = complex128(1.0, 0.0);
+            derivative_top = -terminal_kz;
+        }
+        for (py::ssize_t medium = media - 2; medium > 0; --medium) {
+            const double thickness = (
+                interface_data[medium - 1] - interface_data[medium]
+            );
+            propagate_optical_state(
+                field_top,
+                derivative_top,
+                n_data[medium],
+                kz_data[medium * points + point],
+                thickness,
+                p_polarized,
+                true
+            );
+        }
+
+        const complex128 incident_admittance = optical_admittance(
+            n_data[0], kz_data[point], p_polarized
+        );
+        const complex128 normalization = 2.0 / (
+            field_top + derivative_top / incident_admittance
+        );
+        field_top *= normalization;
+        derivative_top *= normalization;
+        const complex128 tangential_reflection = 0.5 * (
+            field_top - derivative_top / incident_admittance
+        );
+        // The transfer state stores tangential fields.  In the right-handed
+        // Renaud p basis, an upward branch has the opposite tangential sign,
+        // so convert at the public amplitude boundary and keep the stable
+        // transfer propagation itself unchanged.
+        reflection_data[point] = p_polarized
+            ? -tangential_reflection : tangential_reflection;
+
+        field_reference[0] = field_top;
+        derivative_reference[0] = derivative_top;
+        complex128 field_at_interface = field_top;
+        complex128 derivative_at_interface = derivative_top;
+        for (py::ssize_t interface = 0; interface < media - 1; ++interface) {
+            field_reference[interface + 1] = field_at_interface;
+            derivative_reference[interface + 1] = derivative_at_interface;
+            if (interface + 1 < media - 1) {
+                const double thickness = (
+                    interface_data[interface] - interface_data[interface + 1]
+                );
+                propagate_optical_state(
+                    field_at_interface,
+                    derivative_at_interface,
+                    n_data[interface + 1],
+                    kz_data[(interface + 1) * points + point],
+                    thickness,
+                    p_polarized,
+                    false
+                );
+            }
+        }
+
+        for (py::ssize_t medium = 0; medium < media; ++medium) {
+            const complex128 medium_kz = kz_data[medium * points + point];
+            complex128 difference(0.0, 0.0);
+            if (medium_kz != complex128(0.0, 0.0)) {
+                if (p_polarized) {
+                    difference = (
+                        derivative_reference[medium] * (-medium_kz)
+                        / (n_data[medium] * n_data[medium])
+                    );
+                } else {
+                    difference = derivative_reference[medium] / (-medium_kz);
+                }
+            }
+            const complex128 plus = 0.5 * (
+                field_reference[medium] + difference
+            );
+            const complex128 tangential_minus = 0.5 * (
+                field_reference[medium] - difference
+            );
+            const complex128 minus = p_polarized
+                ? -tangential_minus : tangential_minus;
+            plus_data[medium * points + point] = plus;
+            minus_data[medium * points + point] = minus;
+            if (medium_kz != complex128(0.0, 0.0)) {
+                plus_over_data[medium * points + point] = plus / medium_kz;
+                minus_over_data[medium * points + point] = minus / medium_kz;
+            } else {
+                plus_over_data[medium * points + point] = complex128(0.0, 0.0);
+                minus_over_data[medium * points + point] = complex128(0.0, 0.0);
+            }
+        }
+        plus_data[point] = complex128(1.0, 0.0);
+        minus_data[point] = reflection_data[point];
+        plus_data[(media - 1) * points + point] = field_reference[media - 1];
+        minus_data[(media - 1) * points + point] = complex128(0.0, 0.0);
+        if (terminal_kz != complex128(0.0, 0.0)) {
+            plus_over_data[(media - 1) * points + point] = (
+                field_reference[media - 1] / terminal_kz
+            );
+        } else if (p_polarized) {
+            plus_over_data[(media - 1) * points + point] = (
+                -derivative_reference[media - 1]
+                / (n_data[media - 1] * n_data[media - 1])
+            );
+        }
+        minus_over_data[(media - 1) * points + point] = complex128(0.0, 0.0);
+        transmission_data[point] = field_reference[media - 1];
+    }
+    }
+    return py::make_tuple(
+        kz,
+        A_plus,
+        A_minus,
+        A_plus_over_kz,
+        A_minus_over_kz,
+        z_reference,
+        reflection,
+        transmission
+    );
+}
+
+py::tuple sample_layered_electric_field(
+    const ComplexArray2D &kz,
+    const ComplexArray2D &A_plus,
+    const ComplexArray2D &A_minus,
+    const Array1D &z_reference,
+    const Array1D &z_interfaces,
+    const Array1D &z,
+    const std::string &polarization
+) {
+    const auto kz_info = kz.request();
+    const auto plus_info = A_plus.request();
+    const auto minus_info = A_minus.request();
+    const auto reference_info = z_reference.request();
+    const auto interface_info = z_interfaces.request();
+    const auto z_info = z.request();
+    require_shape(kz_info, 2, "kz");
+    require_shape(plus_info, 2, "A_plus");
+    require_shape(minus_info, 2, "A_minus");
+    require_shape(reference_info, 1, "z_reference");
+    require_shape(interface_info, 1, "z_interfaces");
+    require_shape(z_info, 1, "z");
+    if (polarization != "s" && polarization != "p") {
+        throw py::value_error("polarization must be 's' or 'p'");
+    }
+    if (plus_info.shape != kz_info.shape || minus_info.shape != kz_info.shape) {
+        throw py::value_error("kz and amplitude arrays must have matching shapes");
+    }
+    const auto media = kz_info.shape[0];
+    const auto points = kz_info.shape[1];
+    if (reference_info.shape[0] != media || interface_info.shape[0] != media - 1) {
+        throw py::value_error("field reference and interface shapes do not match media");
+    }
+
+    auto E = py::array_t<complex128>({z_info.shape[0], points});
+    auto medium_index = py::array_t<std::int64_t>(z_info.shape[0]);
+    const auto *kz_data = static_cast<const complex128 *>(kz_info.ptr);
+    const auto *plus_data = static_cast<const complex128 *>(plus_info.ptr);
+    const auto *minus_data = static_cast<const complex128 *>(minus_info.ptr);
+    const auto *reference_data = static_cast<const double *>(reference_info.ptr);
+    const auto *interface_data = static_cast<const double *>(interface_info.ptr);
+    const auto *z_data = static_cast<const double *>(z_info.ptr);
+    auto *E_data = static_cast<complex128 *>(E.request().ptr);
+    auto *medium_data = static_cast<std::int64_t *>(medium_index.request().ptr);
+
+    {
+    py::gil_scoped_release release;
+    for (py::ssize_t sample = 0; sample < z_info.shape[0]; ++sample) {
+        py::ssize_t medium = 0;
+        while (medium < media - 1 && z_data[sample] < interface_data[medium]) {
+            ++medium;
+        }
+        medium_data[sample] = medium;
+        const double depth = reference_data[medium] - z_data[sample];
+        for (py::ssize_t point = 0; point < points; ++point) {
+            const auto offset = medium * points + point;
+            const complex128 phase = std::exp(
+                complex128(0.0, 1.0) * kz_data[offset] * depth
+            );
+            E_data[sample * points + point] = plus_data[offset] * phase;
+            if (polarization == "p") {
+                E_data[sample * points + point] -= minus_data[offset] / phase;
+            } else {
+                E_data[sample * points + point] += minus_data[offset] / phase;
+            }
+        }
+    }
+    }
+    return py::make_tuple(E, medium_index);
+}
+
+py::array_t<double> homogeneous_bulk_optical_constants(
+    const Array2D &basis,
+    const Array2D &f_factors,
+    const double scale_over_volume
+) {
+    const auto basis_info = basis.request();
+    const auto factors_info = f_factors.request();
+    require_shape(basis_info, 2, "basis");
+    require_shape(factors_info, 2, "f_factors");
+    if (basis_info.shape[1] < 7
+        || factors_info.shape[0] != basis_info.shape[0]
+        || factors_info.shape[1] < 13) {
+        throw py::value_error("bulk optical atom arrays are inconsistent");
+    }
+    if (!std::isfinite(scale_over_volume) || scale_over_volume <= 0.0) {
+        throw py::value_error("scale_over_volume must be finite and positive");
+    }
+    auto result = py::array_t<double>(2);
+    auto *out = static_cast<double *>(result.request().ptr);
+    const auto *basis_data = static_cast<const double *>(basis_info.ptr);
+    const auto *factor_data = static_cast<const double *>(factors_info.ptr);
+    double real_sum = 0.0;
+    double imaginary_sum = 0.0;
+    {
+    py::gil_scoped_release release;
+    for (py::ssize_t atom = 0; atom < basis_info.shape[0]; ++atom) {
+        double forward = get2(factor_data, factors_info, atom, 10);
+        for (int term = 0; term < 5; ++term) {
+            forward += get2(factor_data, factors_info, atom, term);
+        }
+        const double occupancy = get2(basis_data, basis_info, atom, 6);
+        real_sum += occupancy * (
+            forward + get2(factor_data, factors_info, atom, 11)
+        );
+        imaginary_sum += occupancy * get2(
+            factor_data, factors_info, atom, 12
+        );
+    }
+    }
+    out[0] = scale_over_volume * real_sum;
+    out[1] = scale_over_volume * imaginary_sum;
+    return result;
+}
+
+#include "CTRdwba_cpp.hpp"
+
 PYBIND11_MODULE(_CTRcalc_cpp, module) {
     module.doc() = "CPU C++ acceleration kernels for CTR calculations.";
     module.def("unitcell_F_uc_bulk", &unitcell_F_uc_bulk);
@@ -1038,4 +1439,12 @@ PYBIND11_MODULE(_CTRcalc_cpp, module) {
     module.def("reset_form_factor_cache_stats", &reset_form_factor_cache_stats);
     module.def("set_form_factor_cache_budget", &set_form_factor_cache_budget, py::call_guard<py::gil_scoped_release>());
     module.def("form_factor_cache_expected_bytes", &form_factor_cache_expected_bytes);
+    module.def("solve_layered_electric_field", &solve_layered_electric_field);
+    module.def("sample_layered_electric_field", &sample_layered_electric_field);
+    module.def(
+        "homogeneous_bulk_optical_constants",
+        &homogeneous_bulk_optical_constants
+    );
+    module.def("unitcell_F_DWBA_bulk", &unitcell_F_DWBA_bulk);
+    module.def("unitcell_F_DWBA_records", &unitcell_F_DWBA_records);
 }

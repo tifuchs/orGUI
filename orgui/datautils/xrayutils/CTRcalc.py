@@ -44,8 +44,9 @@ from .CTRoptics import (
     _specular_reflection,
     add_structural_to_sampled_profile,
     combine_profiles,
+    homogeneous_bulk_profile,
     simplify_profile,
-    solve_wavefield,
+    solve_electric_field,
     stratify_profile,
     top_layer_spacing,
 )
@@ -1079,9 +1080,34 @@ class SXRDCrystal:
         return err
 
     def setEnergy(self, E):
+        """Set every component energy and invalidate cached DWBA optics.
+
+        :param float E:
+            Photon energy in eV.
+        """
         for uc in self.uc_surface_list:
             uc.setEnergy(E)
         self.uc_bulk.setEnergy(E)
+        state = getattr(self, "_dwba_state", None)
+        if state is not None:
+            state._energy_changed()
+
+    @property
+    def dwba(self):
+        """Return the lazily created DWBA experiment state.
+
+        The state and its caches are runtime-only and are not serialized with
+        the crystal model.
+
+        :rtype: CTRdwba.DWBAState
+        """
+        state = getattr(self, "_dwba_state", None)
+        if state is None:
+            from .CTRdwba import DWBAState
+
+            state = DWBAState(self)
+            self._dwba_state = state
+        return state
 
     def zDensity_G(self, z, h, k):
         if self.enable_uc_stacking:
@@ -1183,6 +1209,15 @@ class SXRDCrystal:
             self.optical_profile(), delta_tolerance, beta_tolerance
         )
 
+    def _optical_reference_profile(
+        self, delta_tolerance=1e-9, beta_tolerance=None
+    ):
+        if not self.uc_surface_list:
+            return homogeneous_bulk_profile(self.uc_bulk)
+        return self.stratified_optical_profile(
+            delta_tolerance, beta_tolerance
+        )
+
     def wavefield(
         self,
         alpha,
@@ -1197,7 +1232,7 @@ class SXRDCrystal:
         incident medium towards the substrate.
 
         :param float or numpy.ndarray alpha:
-            Glancing incidence angle or angle array in degrees inside the
+            Glancing incidence angle or angle array in radians inside the
             incident medium. For arrays, wavefield quantities have the layer
             axis first followed by the original angle-array shape.
         :param str polarization:
@@ -1209,13 +1244,14 @@ class SXRDCrystal:
             Optional beta simplification tolerance. Defaults to the delta
             tolerance when simplification is requested.
         :returns:
-            Layer amplitudes, normal wavevectors, and sampled electric field.
-        :rtype: CTRoptics.Wavefield
+            Layer amplitudes and normal wavevectors. Use
+            :func:`CTRoptics.sample_electric_field` to sample ``E(z)``.
+        :rtype: CTRoptics.LayeredElectricField
         """
-        profile = self.stratified_optical_profile(
+        profile = self._optical_reference_profile(
             delta_tolerance, beta_tolerance
         )
-        return solve_wavefield(
+        return solve_electric_field(
             profile.values,
             self.uc_bulk._E,
             alpha,
@@ -1233,7 +1269,7 @@ class SXRDCrystal:
         """Return scalar optical specular reflectivity.
 
         :param float or numpy.ndarray alpha:
-            Glancing incidence angle or angles in degrees inside the incident
+            Glancing incidence angle or angles in radians inside the incident
             medium.
         :param str polarization:
             ``"s"``, ``"p"``, or ``"unpolarized"``. Unpolarized intensity
@@ -1255,7 +1291,7 @@ class SXRDCrystal:
         alpha_array = np.asarray(alpha, dtype=np.float64)
         scalar = alpha_array.ndim == 0
         angles = np.atleast_1d(alpha_array).ravel()
-        profile = self.stratified_optical_profile(
+        profile = self._optical_reference_profile(
             delta_tolerance, beta_tolerance
         )
 

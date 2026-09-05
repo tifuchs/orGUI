@@ -516,6 +516,102 @@ def _ensure_contiguous(*arrays, testOnly=False, astype=None):
         return a_c
 
 
+def attenuation_from_dwba(crystal, alpha_i, alpha_f=None):
+    """Return the kinematical attenuation represented by DWBA wavevectors.
+
+    The returned dimensionless exponent follows the ``SXRDCrystal.atten``
+    convention: one reference-cell out-of-plane repeat is attenuated in
+    amplitude by ``exp(-atten)``. Angles are glancing angles in radians.
+
+    With ``alpha_f=None``, only the incident path is included. This is the
+    constant-incidence approximation approached when the exit angle is large.
+    Supplying ``alpha_f`` adds the reciprocal exit-path attenuation and gives
+    the exact ``++``-channel amplitude decay for that angle pair. Inputs are
+    broadcast and may be arrays; this function does not modify ``crystal``.
+
+    :param SXRDCrystal crystal:
+        Crystal supplying the bulk repeat, reference transform, and exact
+        layered electric-field solver.
+    :param float or numpy.ndarray alpha_i:
+        Incident glancing angle in radians.
+    :param float or numpy.ndarray alpha_f:
+        Optional exit glancing angle in radians.
+    :returns:
+        Dimensionless attenuation exponent per reference-cell out-of-plane
+        repeat, with the broadcast input shape.
+    :rtype: float or numpy.ndarray
+    :raises ValueError:
+        If the reference transform has no out-of-plane repeat scale.
+    """
+    alpha_i_array = np.asarray(alpha_i, dtype=np.float64)
+    if alpha_f is None:
+        arrays = (alpha_i_array,)
+    else:
+        arrays = np.broadcast_arrays(
+            alpha_i_array, np.asarray(alpha_f, dtype=np.float64)
+        )
+
+    field_i = crystal.wavefield(arrays[0])
+    decay = np.imag(np.asarray(field_i.kz)[-1])
+    if alpha_f is not None:
+        field_f = crystal.wavefield(arrays[1])
+        decay = decay + np.imag(np.asarray(field_f.kz)[-1])
+
+    bulk_normal_repeat = abs(float(crystal.uc_bulk.R_mat[2, 2]))
+    reference_repeat_scale = abs(
+        float(crystal.uc_bulk.refHKLTransform[2, 2])
+    )
+    if reference_repeat_scale <= np.finfo(np.float64).eps:
+        raise ValueError(
+            "The reference transform has no out-of-plane repeat scale."
+        )
+    attenuation = (
+        bulk_normal_repeat * np.asarray(decay) / reference_repeat_scale
+    )
+    roundoff = 64.0 * np.finfo(np.float64).eps
+    if np.any(attenuation < -roundoff):
+        raise RuntimeError("The terminal DWBA wavevector grows into the bulk.")
+    attenuation = np.maximum(attenuation, 0.0)
+    if attenuation.ndim == 0:
+        return float(attenuation)
+    return attenuation
+
+
+def set_atten_from_dwba(crystal, alpha_i, alpha_f=None):
+    """Populate ``crystal.atten`` from exact terminal DWBA wavevectors.
+
+    Angles are glancing angles in radians. With ``alpha_f=None``, the assigned
+    value contains only the incident-path attenuation and is the appropriate
+    constant-incidence approximation at sufficiently large exit angles.
+    Supplying ``alpha_f`` includes both paths. Scalar angles are required
+    because ``SXRDCrystal.atten`` is one scalar model parameter.
+
+    Use :func:`attenuation_from_dwba` for vectorized diagnostics without
+    modifying the crystal.
+
+    :param SXRDCrystal crystal:
+        Crystal whose scalar ``atten`` attribute is updated.
+    :param float alpha_i:
+        Incident glancing angle in radians.
+    :param float alpha_f:
+        Optional exit glancing angle in radians.
+    :returns:
+        Assigned dimensionless attenuation exponent per reference-cell
+        out-of-plane repeat.
+    :rtype: float
+    :raises ValueError:
+        If either angle is not scalar.
+    """
+    attenuation = attenuation_from_dwba(crystal, alpha_i, alpha_f)
+    if np.ndim(attenuation) != 0:
+        raise ValueError(
+            "set_atten_from_dwba requires scalar angles; use "
+            "attenuation_from_dwba for arrays."
+        )
+    crystal.atten = float(attenuation)
+    return crystal.atten
+
+
 def next_skip_comment(it, comment=("//", "return")):
     while True:
         line = next(it)

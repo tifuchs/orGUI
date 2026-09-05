@@ -43,6 +43,13 @@ geometric series with attenuation:
    = \frac{F_{\mathrm{uc,bulk}}(\mathbf{Q})}
      {1 - \exp\left(-2\pi i\, l_{\mathrm{bulk}} - \mathrm{atten}\right)},
 
+Here ``atten`` is the empirical, dimensionless amplitude-decay exponent per
+reference-cell out-of-plane repeat. The
+:doc:`RuO2/TiO2 kinematical-attenuation tutorial
+<dwba/kinematic_attenuation>` shows how to derive it from the DWBA
+wavevectors at fixed incidence and how to determine the corresponding
+minimum reliable exit angle and :math:`L` range.
+
 where :math:`l_{\mathrm{bulk}}` is the out-of-plane reciprocal index *after*
 conversion from the reference unit cell via ``refHKLTransform``, i.e. the
 third component of ``refHKLTransform @ (h, k, l)``. This is the same index
@@ -64,6 +71,13 @@ being summed.
    differs from the bulk's was affected — including a plain scale difference
    between the reference and bulk out-of-plane axis length, not only a
    rotated or reindexed reference.
+
+Distorted-wave Born approximation
+----------------------------------
+
+The DWBA calculation, observable-amplitude conventions, comparison with the
+kinematical CTR, and worked RuO2/TiO2 tutorial are documented in
+:doc:`dwba`.
 
 Surface structure on a rough Film
 ---------------------------------

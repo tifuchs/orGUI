@@ -7,6 +7,69 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **Added a native four-channel Renaud DWBA state and result API for atomic
+  bulk, UnitCell, Film, EpitaxyInterface, and PoissonSurface models.** Each
+  ``SXRDCrystal`` now owns
+  a lazy, runtime-only ``dwba`` state. ``set_ctr_geometry`` configures fixed
+  incident, fixed exit, or equal-angle rods; specular rods route to equal
+  angles automatically, and ``set_orientation`` supplies the Vlieg
+  orientation. ``prepare``/``evaluate`` resolve hkl, while measured glancing
+  and six-circle Vlieg angles have vectorized counterparts. Immutable
+  ``PreparedCTR`` objects freeze the exact optical reference and remain usable
+  after automatic LRU eviction. Split geometry, optical-reference,
+  unique-angle field, and preparation caches let multiple rods share one
+  ``n_0`` profile and avoid repeated field solves during fitting. The old
+  ``SXRDCrystal.prepare_DWBA*``, ``F_DWBA*``, and ``specular_DWBA*`` methods
+  were removed because the feature was not yet shipped.
+
+  ``DWBAResult`` exposes the coherent atomic, piecewise-constant reference,
+  and contrast structure factors; ordered per-generated-cell
+  ``DWBAContribution`` records; unperturbed Fresnel, scattered, and total
+  amplitudes; squared structure/scattered amplitudes; the non-integrated
+  differential-cross-section kernel; and coherent or formal first-order
+  specular reflectivity. The four channels are summed for every transformed
+  atom in its physical optical medium, while the planar reference is
+  subtracted only at specular points. ``bulk_mode="unit_cell"`` remains a
+  diagnostic one-repeat-plus-finite-record calculation with no reference
+  subtraction or unperturbed reflection. Continuous water models and in-plane
+  strain transforms remain unsupported. Unpolarized
+  reflectivity is the incoherent mean of independently evaluated ``s`` and
+  ``p`` results. The optical API uses immutable ``LayeredElectricField``
+  objects with Renaud-signed ``kz``, ``A_plus``, and ``A_minus`` and radians
+  throughout. Complex channel-specific Waasmaier--Kirfel and anisotropic
+  Debye--Waller factors remain native. Physical absorption comes from complex
+  DWBA wavevectors, so optional empirical ``bulk_attenuation`` defaults to
+  zero and, when requested for kinematical comparison, is continuous within
+  and between cells. ``CTRutil.set_atten_from_dwba`` and its vectorized
+  non-mutating counterpart derive the comparable kinematical attenuation.
+
+- **Documented how a DWBA rod differs from a kinematical rod off specular.**
+  ``ctr_structure_factors.rst`` now separates the four terms that make
+  ``DWBAResult.F_contrast`` and ``SXRDCrystal.F`` differ even in the
+  weak-scattering limit: the polarization contraction that the DWBA matrix
+  element carries and ``SXRDCrystal.F`` does not, the optical field amplitude
+  of the medium holding each record, the empirical ``atten`` against
+  ``Im k_z`` bulk truncation, and the refraction shift of the nominal ``l``.
+  Only the third is a convention mismatch, and it is removed with
+  ``CTRutil.attenuation_from_dwba``. It is also the term that dominates a
+  rough or partly dissolved non-specular rod between its Bragg poles, where
+  the bulk term and the surface correction nearly cancel and a one percent
+  change of the bulk term is the size of the whole remaining amplitude. The
+  new ``examples/CTR/RuO2_TiO2_nonspecular_DWBA.ipynb`` works the
+  decomposition through on the ``(0, 1, L)``, ``(1, 1, L)``, and
+  ``(2, 0, L)`` rods of the RuO2/TiO2 Poisson dissolution family and shows the
+  corrected kinematical rod converging onto the DWBA rod in the Born limit.
+  A dedicated DWBA chapter now collects the calculation, observable, and
+  kinematical-comparison documentation. Its rendered
+  ``doc/source/dwba/dwba_diagnostics.ipynb`` tutorial compares flat and rough
+  RuO2/TiO2 films through the ``n = n_0 + delta_n`` split, logarithmic
+  critical-edge scan, extended specular rod, and fixed-incidence non-specular
+  rods, with kinematical curves alongside each DWBA CTR diagnostic.
+  A second rendered RuO2/TiO2 tutorial derives the fixed-incidence
+  kinematical ``atten`` value from the DWBA wavevectors and converts a
+  configurable exit-path tolerance into minimum reliable ``alpha_f`` and
+  ``L`` cutoffs.
+
 - **Added the geometry and scan support for a moveable detector arm.** The
   calibrated pyFAI geometry now describes the detector at a *home* arm
   position, and the conversions accept the arm position of the frame they are

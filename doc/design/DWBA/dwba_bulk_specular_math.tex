@@ -1,0 +1,66 @@
+\documentclass[11pt]{report}
+
+\usepackage[a4paper,margin=25mm]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{mathtools}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+\hypersetup{
+  pdftitle={Atomistic DWBA for Unit Cells in a Graded Interface},
+  pdfauthor={orGUI design note},
+  pdfsubject={Four-channel unit-cell DWBA and specular optical-reference subtraction}
+}
+
+\newcommand{\dd}{\mathop{}\!\mathrm{d}}
+\newcommand{\ii}{\mathrm{i}}
+\newcommand{\ee}{\mathrm{e}}
+\newcommand{\kzero}{k_0}
+\newcommand{\Qpar}{\bm{Q}_{\parallel}}
+\newcommand{\rpar}{\bm{r}_{\parallel}}
+\newcommand{\Fdelta}{F_{\Delta,\mathrm{DWBA}}}
+\newcommand{\Fatomic}{F_{\mathrm{atomic,DWBA}}}
+\newcommand{\Fref}{F_{\mathrm{ref,DWBA}}}
+\newcommand{\Cchan}{\mathcal C}
+\newcommand{\Phiint}{\Phi}
+
+\title{Atomistic DWBA for Unit Cells in a Graded Interface}
+\author{orGUI design note}
+\date{\today}
+
+\begin{document}
+
+\hypersetup{pageanchor=false}
+\maketitle
+
+\begin{abstract}
+This note specifies the first-order distorted-wave Born approximation needed
+to add finite atomic models to orGUI's graded optical reference.  A generated
+\texttt{UnitCell}, whether it belongs to a \texttt{Film}, an
+\texttt{EpitaxyInterface}, or a surface model, is evaluated in every optical
+medium that contains its atoms.  Its amplitude is the coherent sum of the
+four Renaud incident/exit channels.  For non-specular scattering the planar
+reference has no Fourier component and the atomic sum is the complete
+contrast amplitude.  For specular scattering the constant
+$\delta_m+\ii\beta_m$ density of every prepared optical slab remains in the
+matrix element and must be subtracted analytically.  The subtraction is
+partitioned among unit cells without changing the profile-level result, so
+signed occupancies, strain, lateral-area conversion, and optical-profile
+simplification remain consistent.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+\hypersetup{pageanchor=true}
+\pagenumbering{arabic}
+
+\input{chapters/01_reference_problem}
+\input{chapters/02_unit_cell_channels}
+\input{chapters/03_specular_and_nonspecular}
+\input{chapters/04_model_mapping_and_validation}
+
+\end{document}

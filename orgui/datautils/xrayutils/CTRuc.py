@@ -43,8 +43,6 @@ from scipy.ndimage import gaussian_filter1d
 import os
 import re
 import importlib
-import importlib.util
-from pathlib import Path
 from scipy.special import erf
 
 # random.seed(45)
@@ -72,6 +70,7 @@ from .CTRstacking import (
     LayerTransition,
     resolve_upper_start,
 )
+from ._CTRnative import HAS_CPP_ACCEL, _CTRcalc_cpp
 
 
 _PLOT3D_BACKENDS = ("mayavi", "py3dmol")
@@ -178,33 +177,6 @@ def _rgb_to_hex(color):
     rgb = np.clip(np.rint(rgb * 255), 0, 255).astype(np.uint8)
     return "#" + "".join(f"{channel:02x}" for channel in rgb)
 
-
-def _import_cpp_accel():
-    try:
-        return importlib.import_module("orgui.datautils.xrayutils._CTRcalc_cpp")
-    except ModuleNotFoundError as package_error:
-        repo_root = Path(__file__).resolve().parents[3]
-        candidates = sorted((repo_root / "build").glob("cp*/_CTRcalc_cpp*.so"))
-        if not candidates:
-            raise package_error
-        extension_path = candidates[-1]
-        spec = importlib.util.spec_from_file_location(
-            "_CTRcalc_cpp",
-            extension_path,
-        )
-        if spec is None or spec.loader is None:
-            raise package_error
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-
-try:
-    _CTRcalc_cpp = _import_cpp_accel()
-    HAS_CPP_ACCEL = True
-except Exception:
-    _CTRcalc_cpp = None
-    HAS_CPP_ACCEL = False
 
 _CTRcalc_accel = None
 _ACCEL_BACKEND_ENV_VAR = "ORGUI_ACCEL_BACKEND"
@@ -3746,6 +3718,9 @@ class UnitCell(Lattice):
             calculate the absolute value to get the electron density
 
         """
+        if len(self.coherentDomainOccupancy) == 0:
+            return np.zeros_like(z, dtype=np.complex128)
+
         basis, formf, names = self.build_selected_basis()
 
         hkl = (self.refHKLTransform @ np.array([h, k, 0.0])).flatten()

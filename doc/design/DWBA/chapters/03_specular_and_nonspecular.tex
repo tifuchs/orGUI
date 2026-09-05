@@ -1,0 +1,181 @@
+\chapter{Non-specular and specular contrast amplitudes}
+\label{chap:contrast}
+
+\section{Why the two cases differ}
+
+The reference density is translationally invariant parallel to the surface.
+Its lateral Fourier transform is
+\begin{equation}
+  \int_{\mathbb R^2}
+  \exp(\ii\Qpar\mathbin{\cdot}\rpar)\,\dd^2r_{\parallel}
+  =(2\pi)^2\delta^{(2)}(\Qpar).
+  \label{eq:lateral-delta}
+\end{equation}
+Consequently, the constant $\delta_m,\beta_m$ term is absent at a genuinely
+non-specular point but remains on the specular rod.  This is a statement about
+the laterally infinite optical reference.  Subtracting a rectangular
+``reference patch'' for every unit cell off-specular would replace the Dirac
+distribution by a finite-cell shape transform and create artificial diffuse
+scattering.
+
+The two returned matrix elements must therefore be defined separately:
+\begin{align}
+  F_{\Delta,u}^{\rm nonsp}
+  &=F_{\mathrm{atomic},u},
+  &&\Qpar\neq\bm0,
+  \label{eq:nonspecular-result}\\
+  F_{\Delta,u}^{\rm spec}
+  &=F_{\mathrm{atomic},u}-F_{\mathrm{ref},u},
+  &&\Qpar=\bm0.
+  \label{eq:specular-result}
+\end{align}
+Instrumental resolution may mix diffuse intensity into a detector pixel on the
+specular rod, but it does not change Eqs.~\eqref{eq:nonspecular-result} and
+\eqref{eq:specular-result}.  That mixing belongs to a later resolution
+convolution, not to an interpolation of the reference subtraction near
+$\Qpar=0$.
+
+\section{Integral of one constant optical slab}
+
+Within prepared medium $m$, both $\overline\rho_{f,m}$ and every channel
+coefficient are constant; only the propagation phase varies with $z$.  Define
+the stable depth integral
+\begin{equation}
+  \Phiint(q;a,b)
+  =\int_a^b\ee^{\ii qz}\,\dd z
+  =\begin{cases}
+    \dfrac{\ee^{\ii qb}-\ee^{\ii qa}}{\ii q}, & q\neq0,\\[3mm]
+    b-a, & q=0.
+  \end{cases}
+  \label{eq:phi-finite}
+\end{equation}
+For numerical work, an equivalent midpoint form is preferable:
+\begin{equation}
+  \Phiint(q;a,b)
+  =(b-a)\,
+   \ee^{\ii q(a+b)/2}
+   \operatorname{sinc}\!\left(\frac{q(b-a)}{2}\right),
+  \qquad
+  \operatorname{sinc}x=\frac{\sin x}{x},
+  \label{eq:phi-sinc}
+\end{equation}
+or the numerator of Eq.~\eqref{eq:phi-finite} may be evaluated with a complex
+\texttt{expm1}.  For a lower terminal half-space, with the physical decaying
+branch,
+\begin{equation}
+  \Phiint(q;-\infty,b)=\frac{\ee^{\ii qb}}{\ii q}.
+  \label{eq:phi-half-space}
+\end{equation}
+
+Normalized to one lateral reference cell, the complete reference term of the
+prepared profile is
+\begin{equation}
+  \boxed{
+  \Fref^{\rm spec}
+  =A_{\rm ref}
+   \sum_m\overline\rho_{f,m}
+   \sum_{\nu\in\{++,+-,-+,--\}}
+   \Cchan_{m,\nu}
+   \Phiint\!\left(Q_{z,m}^{\nu};z_m^-,z_m^+\right).
+  }
+  \label{eq:profile-reference-term}
+\end{equation}
+Thus the specular result keeps the integral over the constant
+$\delta_m+\ii\beta_m$ term explicitly.  Finite graded layers generally retain
+all four terms in Eq.~\eqref{eq:profile-reference-term}; only the terminal
+substrate reduces to $++$.
+
+\section{A well-defined per-unit-cell subtraction}
+
+Only the total reference profile is physical.  A decomposition of that profile
+among overlapping model objects is bookkeeping and is not unique unless a
+rule is fixed.  orGUI can make the decomposition deterministic by retaining
+the forward-density contribution of every generated record while building the
+profile.
+
+Let $\overline\rho_{f,u,m}$ denote record $u$'s share of the constant reference
+density in prepared medium $m$.  The required conservation rule is
+\begin{equation}
+  \boxed{
+  \sum_u\overline\rho_{f,u,m}=\overline\rho_{f,m}
+  \quad\text{for every prepared medium }m.
+  }
+  \label{eq:reference-partition}
+\end{equation}
+Before optical-profile simplification, a generated slab of physical thickness
+$t_{ud}$ contributes naturally
+\begin{equation}
+  \overline\rho_{f,ud}
+  =\frac{w_u p_{ud}}{A_u t_{ud}}
+   \sum_{a\in u}o_a f_a(0,E).
+  \label{eq:natural-density-share}
+\end{equation}
+Normal strain changes $t_{ud}$ and hence the volume density, but preserves the
+integrated areal content.  Signed occupancies in interface and etching models
+remain signed in Eq.~\eqref{eq:natural-density-share}.
+
+Coincident profile contributions are added.  If adjacent optical media are
+merged, first determine the merged boundaries from the total profile, then
+thickness-average every record's density over those same boundaries.  This is
+a linear operation once the grouping is fixed and preserves
+Eq.~\eqref{eq:reference-partition}.  Reconstructing shares independently with
+different merge decisions would not preserve the prepared reference.
+
+The per-record reference amplitude is then
+\begin{equation}
+  F_{\mathrm{ref},u}
+  =A_{\rm ref}
+   \sum_m\overline\rho_{f,u,m}
+   \sum_\nu\Cchan_{m,\nu}
+   \Phiint\!\left(Q_{z,m}^{\nu};z_m^-,z_m^+\right),
+  \label{eq:per-cell-reference}
+\end{equation}
+and the requested individual-cell specular contrast is
+\begin{equation}
+  \boxed{
+  F_{\Delta,u}^{\rm spec}
+  =\sum_m\sum_\nu\mathcal A_{u,m}^{\nu}
+   -A_{\rm ref}
+    \sum_m\overline\rho_{f,u,m}
+    \sum_\nu\Cchan_{m,\nu}
+    \Phiint\!\left(Q_{z,m}^{\nu};z_m^-,z_m^+\right).
+  }
+  \label{eq:per-cell-specular}
+\end{equation}
+Summing Eq.~\eqref{eq:per-cell-specular} over $u$ and applying
+Eq.~\eqref{eq:reference-partition} recovers the profile-level identity
+\begin{equation}
+  \boxed{
+  \Fdelta^{\rm spec}
+  =\sum_uF_{\Delta,u}^{\rm spec}
+  =\sum_uF_{\mathrm{atomic},u}-\Fref^{\rm spec}.
+  }
+  \label{eq:total-specular}
+\end{equation}
+If callers do not need an attribution by object, Eq.~\eqref{eq:total-specular}
+is the preferred calculation: accumulate all atomic terms, evaluate the
+prepared reference once, and subtract once.
+
+\section{Reduction to the implemented terminal bulk formula}
+
+Let the top terminal bulk cell occupy $b-c\leq z<b$, with repeat vector
+$-\bm c$ into the substrate and $c=c_z>0$.  Only the $++$ channel survives.
+If $F_{\rm uc}^{\rm atomic}$ includes the global phase of the top cell, its
+semi-infinite atomic sum is
+\begin{equation}
+  F_{\mathrm{atomic,bulk}}
+  =\Cchan_{M,++}
+   \frac{F_{\rm uc}^{\rm atomic}}
+        {1-\exp(-\ii\bm Q_M^{++}\mathbin{\cdot}\bm c)}.
+  \label{eq:bulk-atomic-sum}
+\end{equation}
+For a surface-normal repeat, the mean-density term is
+\begin{equation}
+  F_{\mathrm{ref,bulk}}
+  =\Cchan_{M,++}A_{\rm ref}\overline\rho_{f,M}
+   \frac{\ee^{\ii Q_{z,M}^{++}b}}{\ii Q_{z,M}^{++}}.
+  \label{eq:bulk-reference}
+\end{equation}
+Equations~\eqref{eq:bulk-atomic-sum} and \eqref{eq:bulk-reference} are the
+previous bulk result.  The four-channel finite-layer formula therefore extends
+the existing kernel without changing the terminal half-space convention.

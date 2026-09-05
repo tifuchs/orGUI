@@ -2789,8 +2789,8 @@ class TestLayerStacking(unittest.TestCase):
         np.testing.assert_allclose(
             optical_profile[[0, mid_row, -1]],
             [
-                [-12.0, -7.72508074e-10, -7.18561204e-13],
-                [0.0, 2.94939896e-06, 2.74343239e-09],
+                [-12.0, -7.72147920e-10, -7.18561204e-13],
+                [0.0, 2.94802391e-06, 2.74343239e-09],
                 [10.0, 0.0, 0.0],
             ],
             atol=1e-9,
@@ -3517,6 +3517,20 @@ class TestCTRcalculationCpp(StructureFactorValidationMixin, unittest.TestCase):
         actual = cell.zDensity_G(z, 0.37, -0.22)
 
         np.testing.assert_allclose(actual, expected, rtol=1e-13, atol=1e-13)
+
+    def testZDensityWithNoDomainsIsZero(self):
+        """An empty generated layer has exactly zero electron density."""
+        cell = CTRcalc.UnitCell([3.0, 4.0, 5.0], [90.0, 90.0, 90.0])
+        cell.addAtom("O", [0.2, 0.3, 0.4], 0.12, 0.18, 0.8)
+        cell.setEnergy(10000.0)
+        cell.coherentDomainMatrix = []
+        cell.coherentDomainOccupancy = []
+        z = np.linspace(-2.0, 7.0, 127)
+
+        np.testing.assert_array_equal(
+            cell.zDensity_G(z, 0.37, -0.22),
+            np.zeros_like(z, dtype=np.complex128),
+        )
 
     def testFormFactorCacheReusesMatchingGrid(self):
         """The C++ cache shares Waasmaier vectors across UnitCell calls."""

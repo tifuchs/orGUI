@@ -1,0 +1,132 @@
+\chapter{Reference problem and conventions}
+\label{chap:reference}
+
+\section{Scope}
+
+The unperturbed electric fields and the unperturbed specular reflection
+amplitude are assumed to be available from the layered-field solver.  The
+problem addressed here is the remaining atomistic matrix element for finite
+unit cells in the graded interface region.  The terminal semi-infinite bulk is
+included only to show that the new formula reduces to the already implemented
+bulk result.
+
+The derivation is electromagnetic throughout.  Following Renaud, Lazzari, and
+Leroy, the incident field and the reciprocal field launched from the detector
+are denoted by electric fields $\bm E_0$; no quantum-mechanical wavefunction
+notation is used.  The medium is nonmagnetic, isotropic, linear, and reciprocal.
+Magnetic and tensor-resonant scattering are outside the present scope.
+
+\section{Fourier, surface, and refractive-index conventions}
+
+We use the crystallographic space-time convention
+\begin{equation}
+  \bm E(\bm r,t)\propto
+  \exp\!\left[\ii\left(\omega t-\bm k\mathbin{\cdot}\bm r\right)\right],
+  \qquad
+  \kzero=\frac{2\pi}{\lambda},
+  \qquad
+  \bm Q=\bm k_f-\bm k_i,
+  \label{eq:convention}
+\end{equation}
+and the Fourier transform
+\begin{equation}
+  \widetilde g(\bm Q)
+  =\int g(\bm r)\exp(\ii\bm Q\mathbin{\cdot}\bm r)\,\dd^3r.
+  \label{eq:fourier}
+\end{equation}
+The $z$ axis is the outward surface normal: vacuum is at large positive $z$
+and the bulk extends toward negative $z$.  Momentum transfer is in
+Angstrom$^{-1}$ and all real-space coordinates below are in Angstrom.
+
+The prepared optical reference consists of planar media $m=0,\ldots,M$.  In
+medium $m$,
+\begin{equation}
+  n_m=1-\delta_m-\ii\beta_m,
+  \qquad \delta_m,\beta_m\in\mathbb R,
+  \label{eq:index}
+\end{equation}
+and the medium occupies the interval
+\begin{equation}
+  I_m=(z_m^-,z_m^+).
+\end{equation}
+One or both endpoints may be infinite for a terminal medium.  A fixed
+half-open convention must be used in code when an atom lies exactly on a
+boundary.
+
+orGUI uses the negative-root Renaud normal wavevector
+\begin{equation}
+  k_{z,m}=-\kzero
+  \sqrt{n_m^2-n_0^2\cos^2\alpha},
+  \qquad
+  \operatorname{Re}k_{z,m}\leq0,
+  \quad
+  \operatorname{Im}k_{z,m}\geq0.
+  \label{eq:renaud-kz}
+\end{equation}
+The incident and reciprocal exit solutions are calculated in the same frozen
+array of complex refractive indices and at the same physical boundaries.
+
+\section{Scattering-factor density and the DWBA matrix element}
+
+For atom $a$, orGUI uses
+\begin{equation}
+  f_a(Q^2,E)=f^0_{a,\mathrm{WK}}(Q^2)+f'_a(E)+\ii f''_a(E),
+  \label{eq:atomic-factor}
+\end{equation}
+where the Waasmaier--Kirfel representation is evaluated analytically at the
+generally complex channel value $Q^2$.  Its zero-transfer value, including the
+same anomalous terms, is also used to generate the optical profile.  Replacing
+that value by an independent atomic-number approximation would break the
+reference-density cancellation.
+
+Let $\rho_f(\bm r)$ be the complex scattering-factor density in electrons per
+Angstrom$^3$.  To first order in the X-ray susceptibility,
+\begin{equation}
+  n^2(\bm r)\simeq
+  1-\frac{4\pi r_e}{\kzero^2}\rho_f(\bm r),
+  \label{eq:index-density}
+\end{equation}
+with $r_e$ the classical electron radius.  The piecewise-constant reference
+density represented by Eq.~\eqref{eq:index} is therefore
+\begin{equation}
+  \boxed{
+  \overline\rho_{f,m}
+  =\frac{\kzero^2}{2\pi r_e}
+   \left(\delta_m+\ii\beta_m\right).
+  }
+  \label{eq:reference-density}
+\end{equation}
+Define
+\begin{equation}
+  \Delta\rho_f(\bm r)
+  =\rho_f(\bm r)-
+   \sum_m\overline\rho_{f,m}\,\mathbf 1_{I_m}(z).
+  \label{eq:density-contrast}
+\end{equation}
+The first-order far-field correction for an analyzed exit polarization is
+\begin{equation}
+  \delta\bm E_f(\bm r)
+  =-r_e\frac{\ee^{-\ii\kzero r}}{r}\,
+   \bm\epsilon_f\Fdelta,
+  \label{eq:far-field}
+\end{equation}
+where the electron-unit contrast matrix element is
+\begin{equation}
+  \boxed{
+  \Fdelta=
+  \int
+  \bm E_0(\bm r,-\bm k_f)
+  \mathbin{\cdot}
+  \bm E_0(\bm r,\bm k_i)
+  \Delta\rho_f(\bm r)\,\dd^3r.
+  }
+  \label{eq:dwba-master}
+\end{equation}
+The reciprocal exit field is not complex conjugated.  Complex conjugation
+enters only after the coherent amplitude has been formed, for example in
+$r_e^2|\Fdelta|^2$.
+
+Equation~\eqref{eq:dwba-master} is the only starting point needed for both the
+atomic and constant-profile terms.  Reflection, transmission, refraction, and
+repeated reflection at the planar interfaces are already contained in the two
+reference electric fields.
