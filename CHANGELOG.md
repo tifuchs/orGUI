@@ -22,12 +22,27 @@ Scientific and analysis additions:
   ``SXRDCrystal.prepare_DWBA*``, ``F_DWBA*``, and ``specular_DWBA*`` methods
   were removed because the feature was not yet shipped.
 
-  ``DWBAResult`` exposes the coherent atomic, piecewise-constant reference,
-  and contrast structure factors; ordered per-generated-cell
-  ``DWBAContribution`` records; unperturbed Fresnel, scattered, and total
-  amplitudes; squared structure/scattered amplitudes; the non-integrated
-  differential-cross-section kernel; and coherent or formal first-order
-  specular reflectivity. The four channels are summed for every transformed
+  ``DWBAResult`` exposes a deliberately small set of quantities: the contrast
+  matrix element ``F_h``; its actual-density and planar-reference parts
+  ``F_atomic`` and ``F_reference``; ordered per-generated-cell
+  ``DWBAContribution`` records; the unperturbed Fresnel, scattered, and total
+  amplitudes; ``F_effective``; and the coherent specular ``reflectivity``.
+  ``F_effective`` is the total reflection amplitude with the prefactor
+  inverted, i.e. the structure factor a kinematic analysis would infer from the
+  modelled reflectivity; it is a DWBA output and not the kinematical model's
+  own structure factor, which is ``SXRDCrystal.F``. Every returned amplitude is
+  normalized to one reference lateral cell, and the classical electron radius
+  enters once, inside the prefactor.
+
+  Only ``F_h``, ``unperturbed_amplitude``, and the per-record atomic and
+  reference arrays are stored; the native kernel computes exactly those, and
+  every other quantity is derived on access. Off specular the planar reference
+  has no Fourier component, so all records share one zero array instead of each
+  holding its own, which cuts the retained footprint of a non-specular result
+  by roughly two thirds. Quantities that are a single expression away
+  (``abs(F_h)**2``, ``abs(scattered_amplitude)**2``, the ``r_e**2`` cross-section
+  kernel, and the strictly linearised reflectivity) are not provided as
+  properties; ``dwba.rst`` spells each of them out once. The four channels are summed for every transformed
   atom in its physical optical medium, while the planar reference is
   subtracted only at specular points. ``bulk_mode="unit_cell"`` remains a
   diagnostic one-repeat-plus-finite-record calculation with no reference
@@ -45,7 +60,7 @@ Scientific and analysis additions:
 
 - **Documented how a DWBA rod differs from a kinematical rod off specular.**
   ``ctr_structure_factors.rst`` now separates the four terms that make
-  ``DWBAResult.F_contrast`` and ``SXRDCrystal.F`` differ even in the
+  ``DWBAResult.F_h`` and ``SXRDCrystal.F`` differ even in the
   weak-scattering limit: the polarization contraction that the DWBA matrix
   element carries and ``SXRDCrystal.F`` does not, the optical field amplitude
   of the medium holding each record, the empirical ``atten`` against

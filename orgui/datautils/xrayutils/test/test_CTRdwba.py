@@ -177,7 +177,7 @@ def test_vacuum_born_limit_matches_renaud_contractions(
     cell.basis[0, 6] = 1.0
     actual = crystal.dwba.evaluate_prepared(
         prepared, bulk_mode="unit_cell"
-    ).F_contrast
+    ).F_h
     expected = (
         cell.F_uc(np.array([h]), np.array([0.0]), np.array([l_value]))[0]
         * contraction(alpha_i, alpha_f, azimuth)
@@ -642,7 +642,7 @@ def test_atomic_changes_reuse_fields_but_live_reference_changes_rebuild_them():
     info = crystal.dwba.cache_info()
     cell.basis[0, 4] *= 1.5
     changed_dw = crystal.dwba.evaluate_prepared(prepared)
-    assert np.isfinite(changed_dw.structure_factor_squared)
+    assert np.isfinite(np.abs(changed_dw.F_h) ** 2)
     assert crystal.dwba.cache_info()["field_misses"] == info["field_misses"]
 
     frozen_n = prepared.reference.n.copy()
@@ -651,7 +651,7 @@ def test_atomic_changes_reuse_fields_but_live_reference_changes_rebuild_them():
     assert not np.array_equal(live.reference.n, frozen_n)
     np.testing.assert_array_equal(prepared.reference.n, frozen_n)
     frozen_result = crystal.dwba.evaluate_prepared(prepared)
-    assert np.isfinite(frozen_result.structure_factor_squared)
+    assert np.isfinite(np.abs(frozen_result.F_h) ** 2)
 
 
 def test_dwba_wavefield_and_reflectivity_share_the_exact_bulk_reference():
@@ -677,21 +677,8 @@ def test_result_observables_and_unpolarized_reflectivity():
         result.unperturbed_amplitude + result.scattered_amplitude,
     )
     np.testing.assert_allclose(
-        result.structure_factor_squared, np.abs(result.F_contrast) ** 2
+        result.reflectivity, np.abs(result.total_amplitude) ** 2
     )
-    np.testing.assert_allclose(
-        result.scattered_amplitude_squared,
-        np.abs(result.scattered_amplitude) ** 2,
-    )
-    np.testing.assert_allclose(
-        result.differential_cross_section_kernel,
-        2.8179403262e-5**2 * np.abs(result.F_contrast) ** 2,
-    )
-    np.testing.assert_allclose(result.reflectivity, np.abs(result.total_amplitude) ** 2)
-    expected_first = np.abs(result.unperturbed_amplitude) ** 2 + 2.0 * np.real(
-        np.conj(result.unperturbed_amplitude) * result.scattered_amplitude
-    )
-    np.testing.assert_allclose(result.first_order_reflectivity, expected_first)
 
     s = crystal.dwba.reflectivity(0.0, 0.0, result.prepared.hkl[2], polarization="s")
     p = crystal.dwba.reflectivity(0.0, 0.0, result.prepared.hkl[2], polarization="p")
@@ -701,11 +688,68 @@ def test_result_observables_and_unpolarized_reflectivity():
     np.testing.assert_allclose(unpolarized, 0.5 * (s + p))
 
 
+def test_F_h_is_the_canonical_name_and_splits_into_its_two_parts():
+    crystal = CTRcalc.SXRDCrystal(_one_atom_cell())
+    angles = np.array([0.006, 0.04])
+    result = crystal.dwba.evaluate_from_glancing(0.0, 0.0, angles, angles)
+    np.testing.assert_allclose(result.F_h, result.F_h)
+    # F_reference is stored positive and enters F_h by subtraction.
+    np.testing.assert_allclose(result.F_h, result.F_atomic - result.F_reference)
+
+
+def test_off_specular_contributions_share_one_zero_reference_array():
+    """Off specular every F_reference is zero, so one array is shared."""
+    bulk = _layered_cell("bulk")
+    film = CTRfilm.Film(_layered_cell("film_cell"), name="film")
+    film.basis[0] = 3.0
+    crystal = CTRcalc.SXRDCrystal(bulk, film, stacking=np.array([1]))
+    crystal.dwba.set_ctr_geometry(alpha_i=0.05)
+    result = crystal.dwba.evaluate(1.0, 0.0, [0.7, 0.8])
+    assert not np.any(result.prepared.is_specular)
+    contribs = result.contributions
+    assert len(contribs) > 1
+    for item in contribs:
+        np.testing.assert_array_equal(item.F_reference, 0.0j)
+    # all records must be backed by the very same object, not copies
+    first = contribs[0].F_reference
+    assert all(item.F_reference is first for item in contribs)
+
+
+def test_F_effective_inverts_the_documented_prefactor():
+    crystal = CTRcalc.SXRDCrystal(_one_atom_cell())
+    angles = np.array([0.006, 0.02, 0.04])
+    result = crystal.dwba.evaluate_from_glancing(0.0, 0.0, angles, angles)
+    kappa_f = result.prepared.k0 * np.sin(result.prepared.alpha_f)
+    prefactor = (
+        2j
+        * np.pi
+        * 2.8179403262e-5
+        / (kappa_f * result.prepared.reference_area)
+    )
+    # Applying the prefactor to F_effective must return the total amplitude.
+    np.testing.assert_allclose(
+        prefactor * result.F_effective, result.total_amplitude, rtol=1e-12
+    )
+    # The same prefactor maps F_h onto the scattered amplitude alone.
+    np.testing.assert_allclose(
+        prefactor * result.F_h, result.scattered_amplitude, rtol=1e-12
+    )
+
+
+def test_F_effective_degenerates_to_F_h_off_specular():
+    crystal = CTRcalc.SXRDCrystal(_one_atom_cell())
+    angles = np.array([0.02, 0.05])
+    result = crystal.dwba.evaluate_from_glancing(1.0, 0.0, angles, angles)
+    assert not np.any(result.prepared.is_specular)
+    np.testing.assert_allclose(result.unperturbed_amplitude, 0.0)
+    np.testing.assert_allclose(result.F_effective, result.F_h, rtol=1e-12)
+
+
 def test_scalar_results_and_immutable_preparations():
     crystal = CTRcalc.SXRDCrystal(_one_atom_cell())
     prepared = crystal.dwba.prepare_from_glancing(0.0, 0.0, 0.04, 0.04)
     result = crystal.dwba.evaluate_prepared(prepared)
-    assert isinstance(result.F_contrast, complex)
+    assert isinstance(result.F_h, complex)
     assert isinstance(result.reflectivity, float)
     with pytest.raises(ValueError, match="read-only"):
         prepared.alpha_i[0] = 0.2
@@ -747,7 +791,7 @@ def test_surface_free_packed_kernel_preserves_the_bulk_kernel(
         prepared,
         bulk_mode=bulk_mode,
         bulk_attenuation=attenuation,
-    ).F_contrast
+    ).F_h
     basis, factors, _ = cell.build_selected_basis()
     domains, occupancies = CTRuc._coherent_domain_arrays(
         cell.coherentDomainMatrix,
@@ -877,9 +921,13 @@ def test_contributions_sum_and_reference_is_specular_only():
         result.F_reference,
         sum(item.F_reference for item in result.contributions),
     )
-    np.testing.assert_array_equal(
-        result.F_contrast,
-        sum(item.F_contrast for item in result.contributions),
+    # Mathematical identity, not bit-exact: the result sums the two native
+    # arrays over records, while this sums per-record differences.
+    np.testing.assert_allclose(
+        result.F_h,
+        sum(item.F_h for item in result.contributions),
+        rtol=1e-14,
+        atol=1e-15,
     )
     assert result.F_reference[0] != 0.0j
     assert result.F_reference[1] == 0.0j
@@ -973,7 +1021,7 @@ def test_generated_model_records_preserve_the_prepared_optical_profile(
     roles = {item[5] for item in prepared._atomic_model.descriptors}
     assert expected_roles <= roles
     result = crystal.dwba.evaluate_prepared(prepared)
-    assert np.isfinite(result.structure_factor_squared)
+    assert np.isfinite(np.abs(result.F_h) ** 2)
 
 
 def test_zero_width_epitaxy_bottom_correction_cancels_in_dwba():
@@ -1037,7 +1085,7 @@ def test_zero_width_epitaxy_bottom_correction_cancels_in_dwba():
         # cancellation from concealing a decomposition error.
         np.testing.assert_allclose(contribution.F_atomic, 0.0j, atol=2e-13)
         np.testing.assert_array_equal(contribution.F_reference, 0.0j)
-        np.testing.assert_allclose(contribution.F_contrast, 0.0j, atol=2e-13)
+        np.testing.assert_allclose(contribution.F_h, 0.0j, atol=2e-13)
 
     # Isolate the two signed halves under the same frozen wavefield. This
     # rules out a vacuous zero caused by the native kernel skipping the lower
@@ -1109,7 +1157,7 @@ def test_signed_poisson_records_are_coherent_and_zero_width_cancels(mean_change)
     ]
     assert surface_records
     np.testing.assert_allclose(
-        sum(item.F_contrast for item in surface_records),
+        sum(item.F_h for item in surface_records),
         sum(item.F_atomic for item in surface_records),
     )
     if mean_change == 0.0:
@@ -1129,7 +1177,7 @@ def test_retained_surface_preparation_allows_atomic_changes_but_not_topology():
 
     film.layer_ucs[0].basis[0, 1] += 0.03
     live = crystal.dwba.evaluate_prepared(prepared)
-    assert np.isfinite(live.F_contrast)
+    assert np.isfinite(live.F_h)
     live_film = sum(
         item.F_atomic for item in live.contributions if item.component_index == 0
     )

@@ -345,6 +345,11 @@ class DWBAContribution:
     ``SXRDCrystal.uc_surface_list``. Amplitudes use electrons per configured
     reference lateral cell and have the same scalar or array shape as the
     parent :class:`DWBAResult`.
+
+    Only the two independently computed arrays are stored.  ``F_atomic`` and
+    ``F_reference`` come straight from the native kernel; ``F_h`` is their
+    difference and is derived on access.  Off specular every ``F_reference``
+    is identically zero and all records share one zero array.
     """
 
     component_index: int
@@ -356,24 +361,111 @@ class DWBAContribution:
     layer: float | None
     F_atomic: complex | np.ndarray
     F_reference: complex | np.ndarray
-    F_contrast: complex | np.ndarray
+
+    @property
+    def F_h(self):
+        """Return this record's contrast amplitude, ``F_atomic - F_reference``."""
+        return self.F_atomic - self.F_reference
 
 
 @dataclass(frozen=True)
 class DWBAResult:
-    """DWBA matrix element and precisely normalized derived observables."""
+    """DWBA matrix element and precisely normalized derived observables.
+
+    All amplitudes are complex and normalized to **one reference lateral cell**
+    of area :math:`A_{\\mathrm{ref}}` (``prepared.reference_area``,
+    Angstrom\\ :sup:`2`); matrix elements are in electrons, reflection
+    coefficients are dimensionless.
+
+    **What is stored.**  The native kernel computes exactly two arrays per
+    generated record, the atomic amplitude and the planar-reference amplitude.
+    Those, the summed :attr:`F_h`, and the Fresnel amplitude :math:`r_0` from
+    the field solver are the only independent quantities; every other member
+    below is derived arithmetic and is evaluated on access, which costs
+    microseconds and avoids holding redundant arrays during a fit.
+
+    **The prefactor.**  A matrix element is converted into a reflection
+    coefficient by
+
+    .. math::
+
+        r_{\\mathbf{h}}
+        = \\frac{2\\pi\\mathrm{i}\\,r_e}{A_{\\mathrm{ref}}\\,\\kappa_f}\\,
+          F_{\\mathbf{h}},
+        \\qquad
+        \\kappa_f = k_0\\sin\\alpha_f ,
+
+    with :math:`r_e` the classical electron radius and :math:`\\kappa_f` the
+    **exit** normal wavevector in vacuum (positive; off-specular it differs
+    from the incident one).  The design note
+    ``doc/design/DWBA/dwba_bulk_specular_math.tex`` writes the same relation
+    as its Eq. (1.33) with a minus sign, because it uses the negative-root
+    convention :math:`k_{z,0,f}=-\\kappa_f`.  The two agree.
+
+    The classical electron radius therefore enters **once**, inside this
+    prefactor.  The other convention, in which a bare matrix element becomes a
+    cross-section kernel through :math:`r_e^2|F_{\\mathbf{h}}|^2`, applies to
+    :attr:`F_h` and to no reflection coefficient; the two must never be mixed.
+
+    **How the quantities relate.**
+
+    ===========================  ==============================================
+    Member                       Meaning
+    ===========================  ==============================================
+    ``F_h``                      stored.  :math:`F_{\\mathbf{h}}`, the contrast
+                                 matrix element.  On the specular rod it
+                                 already contains the constant
+                                 :math:`\\delta_m+\\mathrm{i}\\beta_m` slab
+                                 terms; on every other rod it cannot.
+    ``unperturbed_amplitude``    stored.  :math:`r_0`, the Fresnel amplitude of
+                                 the prepared reference.  Zero off specular,
+                                 where no unperturbed beam exists in the exit
+                                 direction.
+    ``contributions``            stored.  Per-record ``F_atomic`` and
+                                 ``F_reference``.
+    ``F_atomic``                 derived.  The actual-density part of ``F_h``.
+    ``F_reference``              derived.  The planar-reference slab term,
+                                 positive, with
+                                 ``F_h == F_atomic - F_reference``.  Zero off
+                                 specular.
+    ``scattered_amplitude``      derived.  :math:`r_{\\mathbf{h}}`.
+    ``total_amplitude``          derived.  :math:`r = r_0 + r_{\\mathbf{h}}`.
+    ``F_effective``              derived.  ``total_amplitude`` with the
+                                 prefactor inverted.
+    ``reflectivity``             derived.  :math:`|r|^2`.
+    ===========================  ==============================================
+
+    So ``F_h`` -> ``scattered_amplitude`` -> ``total_amplitude`` ->
+    ``F_effective`` is one chain; the members are not independent.
+    """
 
     prepared: PreparedCTR
-    F_contrast: complex | np.ndarray
+    F_h: complex | np.ndarray
     unperturbed_amplitude: complex | np.ndarray
-    scattered_amplitude: complex | np.ndarray
-    total_amplitude: complex | np.ndarray
     bulk_mode: str
     contributions: tuple[DWBAContribution, ...]
 
     @property
+    def _prefactor(self):
+        """Return ``2 pi i r_e / (A_ref kappa_f)``, the amplitude conversion."""
+        kappa_f = self.prepared.k0 * np.sin(self.prepared.alpha_f)
+        value = (
+            2j
+            * np.pi
+            * _CLASSICAL_ELECTRON_RADIUS_ANGSTROM
+            / (kappa_f * self.prepared.reference_area)
+        )
+        if self.prepared.scalar:
+            return complex(np.asarray(value).reshape(-1)[0])
+        return np.asarray(value).reshape(self.prepared.shape)
+
+    @property
     def F_atomic(self):
-        """Return the coherent sum of actual-density record amplitudes."""
+        """Return the actual-density part of :attr:`F_h`.
+
+        This is the coherent sum of the generated records' atomic four-channel
+        amplitudes, Eq. (2.13) of the design note.
+        """
         return sum(
             (contribution.F_atomic for contribution in self.contributions),
             start=0j,
@@ -381,33 +473,67 @@ class DWBAResult:
 
     @property
     def F_reference(self):
-        """Return the coherent planar-reference amplitude that was subtracted."""
+        """Return the planar-reference part of :attr:`F_h`.
+
+        This is the constant :math:`\\delta_m+\\mathrm{i}\\beta_m` density of
+        every prepared optical slab, integrated over the slab and summed over
+        channels, Eq. (3.5) of the design note.  The design note writes the
+        same physics as a single Fourier coefficient whose contrast
+        :math:`\\Delta\\rho_f` already carries :math:`-\\overline\\rho_{f,m}`;
+        the split here is that quantity with the sign factored out, not a
+        different convention.
+        """
         return sum(
             (contribution.F_reference for contribution in self.contributions),
             start=0j,
         )
 
     @property
-    def structure_factor_squared(self):
-        """Return ``abs(F_contrast)**2`` in squared-electron units."""
-        return np.abs(self.F_contrast) ** 2
+    def scattered_amplitude(self):
+        """Return the dimensionless scattered amplitude :math:`r_{\\mathbf{h}}`.
 
-    @property
-    def scattered_amplitude_squared(self):
-        """Return the squared modulus of the dimensionless scattered field."""
-        return np.abs(self.scattered_amplitude) ** 2
-
-    @property
-    def differential_cross_section_kernel(self):
-        """Return ``r_e**2 * abs(F_contrast)**2`` per reference cell.
-
-        This is not integrated over footprint, coherence, detector acceptance,
-        or instrumental resolution.
+        This is the prefactor documented on this class applied to :attr:`F_h`.
         """
-        return (
-            _CLASSICAL_ELECTRON_RADIUS_ANGSTROM**2
-            * self.structure_factor_squared
-        )
+        return self._prefactor * self.F_h
+
+    @property
+    def total_amplitude(self):
+        """Return :math:`r = r_0 + r_{\\mathbf{h}}`."""
+        return self.unperturbed_amplitude + self.scattered_amplitude
+
+    @property
+    def F_effective(self):
+        """Return the structure factor a kinematic analysis would infer.
+
+        This inverts the prefactor documented on this class, applying it to the
+        *total* amplitude rather than to the perturbation alone:
+
+        .. math::
+
+            F_{\\mathrm{eff}}
+            = \\frac{A_{\\mathrm{ref}}\\,\\kappa_f}{2\\pi\\mathrm{i}\\,r_e}\\,
+              \\left(r_0 + r_{\\mathbf{h}}\\right).
+
+        Use it to compare a DWBA model against data that were reduced
+        kinematically, i.e. against an experimental ``|F|``.  It is a DWBA
+        output and is **not** the structure factor of a separate kinematical
+        model; that is ``SXRDCrystal.F``.  The two are compared with each
+        other, never substituted for one another.
+
+        Three properties must be kept in mind.
+
+        * It is **not linear** in the model electron density, because
+          :math:`r_0` is the zeroth-order amplitude and is exact in the
+          reference to all orders.  The DWBA structure factor of the sample is
+          :attr:`F_h`.
+        * It is meaningful only **well above the critical angle**, tending to
+          zero as :math:`\\alpha_f\\to0`.
+        * Off specular it **degenerates to** :attr:`F_h`.
+
+        ``doc/source/dwba.rst`` gives the large-:math:`Q_z` limit that
+        justifies it.
+        """
+        return self.total_amplitude / self._prefactor
 
     def _require_specular_reflection(self):
         if self.bulk_mode != "semi_infinite":
@@ -422,18 +548,22 @@ class DWBAResult:
 
     @property
     def reflectivity(self):
-        """Return coherent specular reflectivity ``abs(total_amplitude)**2``."""
+        """Return the coherent specular reflectivity :math:`|r_0+r_{\\mathbf{h}}|^2`.
+
+        On the specular rod at small angles this is *exact* up to the
+        first-order truncation in the contrast: the problem is genuinely
+        one-dimensional there and :math:`r_0` carries the reference's Fresnel
+        and refraction response to all orders, so the only error is second
+        order in the density contrast and shrinks as the angle decreases.
+        Squaring the amplitude rather than expanding it also keeps the result
+        non-negative.  ``doc/source/dwba.rst`` gives the argument, the
+        measured accuracy, and the strictly linearised variant used as a
+        regime diagnostic.
+
+        Requires an entirely specular, same-polarization, semi-infinite result.
+        """
         self._require_specular_reflection()
         return np.abs(self.total_amplitude) ** 2
-
-    @property
-    def first_order_reflectivity(self):
-        """Return reflectivity with ``abs(scattered_amplitude)**2`` omitted."""
-        self._require_specular_reflection()
-        return np.abs(self.unperturbed_amplitude) ** 2 + 2.0 * np.real(
-            np.conj(self.unperturbed_amplitude) * self.scattered_amplitude
-        )
-
 
 @dataclass(frozen=True)
 class _GeometryRule:
@@ -1678,11 +1808,22 @@ class DWBAState:
         )
         atomic = np.asarray(atomic, dtype=np.complex128)
         reference = np.asarray(reference, dtype=np.complex128)
+        # The planar reference is laterally uniform, so it has no Fourier
+        # component off specular and every record's row is then identically
+        # zero.  Share one read-only zero array instead of storing a separate
+        # all-zero row per generated record.
+        shared_zero = None
+        if not reference.any():
+            shared_zero = _readonly_result(
+                np.zeros(reference.shape[1], dtype=np.complex128),
+                prepared.shape,
+                prepared.scalar,
+                np.complex128,
+            )
         contributions = []
         for descriptor, atomic_row, reference_row in zip(
             prepared._atomic_model.descriptors, atomic, reference
         ):
-            contrast_row = atomic_row - reference_row
             contributions.append(
                 DWBAContribution(
                     component_index=descriptor[0],
@@ -1695,35 +1836,23 @@ class DWBAState:
                     F_atomic=_readonly_result(
                         atomic_row, prepared.shape, prepared.scalar, np.complex128
                     ),
-                    F_reference=_readonly_result(
-                        reference_row,
-                        prepared.shape,
-                        prepared.scalar,
-                        np.complex128,
-                    ),
-                    F_contrast=_readonly_result(
-                        contrast_row,
-                        prepared.shape,
-                        prepared.scalar,
-                        np.complex128,
+                    F_reference=(
+                        shared_zero
+                        if shared_zero is not None
+                        else _readonly_result(
+                            reference_row,
+                            prepared.shape,
+                            prepared.scalar,
+                            np.complex128,
+                        )
                     ),
                 )
             )
-        coherent_contrast = sum(
-            (contribution.F_contrast for contribution in contributions),
-            start=0j,
-        )
-        F_contrast = _readonly_result(
-            coherent_contrast, prepared.shape, prepared.scalar, np.complex128
-        )
-        F_flat = np.asarray(F_contrast, dtype=np.complex128).reshape(-1)
-        kappa_f = prepared.k0 * np.sin(prepared.alpha_f)
-        scattered_flat = (
-            2j
-            * np.pi
-            * _CLASSICAL_ELECTRON_RADIUS_ANGSTROM
-            * F_flat
-            / (kappa_f * prepared.reference_area)
+        F_h = _readonly_result(
+            atomic.sum(axis=0) - reference.sum(axis=0),
+            prepared.shape,
+            prepared.scalar,
+            np.complex128,
         )
         reflection = np.asarray(
             prepared.field_i.r_S, dtype=np.complex128
@@ -1736,18 +1865,11 @@ class DWBAState:
         ):
             mask = prepared.is_specular.astype(bool)
             unperturbed_flat[mask] = reflection[mask]
-        total_flat = unperturbed_flat + scattered_flat
         return DWBAResult(
             prepared=prepared,
-            F_contrast=F_contrast,
+            F_h=F_h,
             unperturbed_amplitude=_readonly_result(
                 unperturbed_flat, prepared.shape, prepared.scalar
-            ),
-            scattered_amplitude=_readonly_result(
-                scattered_flat, prepared.shape, prepared.scalar
-            ),
-            total_amplitude=_readonly_result(
-                total_flat, prepared.shape, prepared.scalar
             ),
             bulk_mode=bulk_mode,
             contributions=tuple(contributions),
@@ -1810,16 +1932,14 @@ class DWBAState:
         l,  # noqa: E741
         *,
         polarization="s",
-        first_order=False,
         **kwargs,
     ):
-        """Return specular coherent or formal first-order reflectivity.
+        """Return the coherent specular reflectivity.
 
         hkl coordinates are reference-cell r.l.u. ``"unpolarized"`` averages
         independently evaluated s and p reflectivities incoherently.
 
         :param str polarization: ``"s"``, ``"p"``, or ``"unpolarized"``.
-        :param bool first_order: Omit the squared scattered amplitude if true.
         :returns: Scalar or broadcast reflectivity.
         """
         if polarization not in {"s", "p", "unpolarized"}:
@@ -1834,11 +1954,7 @@ class DWBAState:
                 polarization_f=pol,
                 **kwargs,
             )
-            return (
-                result.first_order_reflectivity
-                if first_order
-                else result.reflectivity
-            )
+            return result.reflectivity
 
         if polarization == "unpolarized":
             value = 0.5 * (one("s") + one("p"))

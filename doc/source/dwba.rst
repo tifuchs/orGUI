@@ -96,46 +96,134 @@ exact Bragg pole is rejected.  ``CTRutil.set_atten_from_dwba`` estimates the
 corresponding scalar kinematical attenuation at a fixed incidence angle;
 ``CTRutil.attenuation_from_dwba`` supplies its broadcast diagnostic form.
 
-``DWBAResult`` separates the matrix element and observable field amplitudes:
+Returned quantities and the prefactor
+-------------------------------------
 
-``F_contrast``
-   The coherent DWBA contrast structure factor :math:`F_{\Delta,\mathrm{DWBA}}`.
+``DWBAResult`` returns one matrix element; every other amplitude is derived
+from it by a single prefactor.  Writing :math:`\mathbf{h}` for the rod, the matrix
+element :math:`F_{\mathbf{h}}` is converted into a dimensionless reflection
+coefficient by
+
+.. math::
+
+   r_{\mathbf{h}}=
+   \frac{2\pi i r_e}{A_{\mathrm{ref}}\,\kappa_f}\,F_{\mathbf{h}},
+   \qquad
+   \kappa_f=k_0\sin\alpha_f,
+
+with :math:`r_e` the classical electron radius and :math:`\kappa_f` the
+**exit** normal wavevector in vacuum, which off specular differs from the
+incident one.  :math:`\kappa_f` is positive, whereas the design note
+``doc/design/DWBA/dwba_bulk_specular_math.tex`` writes the same relation as its
+Eq. (1.33) with a minus sign because it uses the negative-root convention
+:math:`k_{z,0,f}=-\kappa_f`.  The two are identical.
+
+The classical electron radius therefore enters **once**, inside this
+prefactor.  The separate convention, in which a bare matrix element becomes a
+cross-section kernel through :math:`r_e^2|F_{\mathbf{h}}|^2`, applies to
+``F_h`` and not to any reflection coefficient; the two must never be mixed.
+
+Only ``F_h``, ``unperturbed_amplitude``, and the per-record arrays inside
+``contributions`` are stored.  The native kernel computes exactly two arrays
+per generated record — the atomic and the planar-reference amplitude — and
+those, together with the Fresnel :math:`r_0` the field solver already
+produced, are the only independent quantities.  Everything else below is
+derived arithmetic evaluated on access, which costs microseconds and avoids
+retaining redundant arrays during a fit.  The chain ``F_h`` →
+``scattered_amplitude`` → ``total_amplitude`` → ``F_effective`` means these
+members are not independent.
+
+``F_h``
+   *Stored.*  The coherent DWBA contrast matrix element
+   :math:`F_{\mathbf{h}}`.  At the specular rod it already contains the
+   constant :math:`\delta_m+i\beta_m` slab terms; on every genuine CTR it
+   cannot, because the laterally uniform optical reference has no Fourier
+   component there.
 ``F_atomic`` and ``F_reference``
-   The coherent sums of the actual atomic amplitude and the subtracted planar
-   optical-reference amplitude.  Thus
-   ``F_contrast == F_atomic - F_reference``.
+   *Derived.*  The coherent sums of the actual atomic amplitude and the planar
+   optical-reference amplitude.  ``F_reference`` is **positive** and
+   enters by subtraction, ``F_h == F_atomic - F_reference``; the design note
+   writes the same physics as one Fourier coefficient whose contrast
+   :math:`\Delta\rho_f` already carries :math:`-\overline{\rho}_{f,m}`.  It is
+   identically zero on every non-specular point, where all records share one
+   zero array rather than each holding its own.
 ``contributions``
-   An ordered tuple of immutable ``DWBAContribution`` records: bulk first,
-   followed by components in crystal order and their generated cells in model
-   order.  Each record identifies its component, generated-record index and
-   role, optional structural layer, and exposes read-only ``F_atomic``,
-   ``F_reference``, and ``F_contrast`` amplitudes.  Roles are ``bulk``,
+   *Stored.*  An ordered tuple of immutable ``DWBAContribution`` records: bulk
+   first, followed by components in crystal order and their generated cells in
+   model order.  Each record identifies its component, generated-record index
+   and role, optional structural layer, and exposes read-only ``F_atomic`` and
+   ``F_reference`` amplitudes plus the derived ``F_h``.  Roles are ``bulk``,
    ``unit_cell_layer``, ``film_layer``, ``interface_top``,
    ``interface_bottom``, ``surface_termination``, ``covered_film``, and
    ``sharp_film_correction``.
 ``unperturbed_amplitude``
-   The Fresnel reference amplitude :math:`r_0` for specular points and zero
+   *Stored.*  The Fresnel reference amplitude :math:`r_0` for specular points and zero
    for non-specular points.
 ``scattered_amplitude``
-   The dimensionless first-Born scattered far-field amplitude
+   *Derived.*  The dimensionless scattered amplitude :math:`r_{\mathbf{h}}`, i.e. the prefactor
+   above applied to ``F_h``.
+``total_amplitude``
+   *Derived.*  :math:`r=r_0+r_{\mathbf{h}}`, that is
+   ``unperturbed_amplitude + scattered_amplitude``.
+``F_effective``
+   *Derived.*  ``total_amplitude`` with the prefactor inverted,
 
    .. math::
 
-      a_{\mathrm{scattered}}=
-      \frac{2\pi i r_e}{k_0\sin\alpha_f\,A_{\mathrm{ref}}}
-      F_{\Delta,\mathrm{DWBA}}.
-``total_amplitude``
-   ``unperturbed_amplitude + scattered_amplitude``.
-``structure_factor_squared`` and ``scattered_amplitude_squared``
-   The squared moduli of the two corresponding amplitudes.
-``differential_cross_section_kernel``
-   :math:`r_e^2|F_{\Delta,\mathrm{DWBA}}|^2` per reference lateral cell.  It is
-   not an intensity integrated over detector acceptance, footprint,
-   coherence, resolution, flux, exposure, or efficiency.
-``reflectivity`` and ``first_order_reflectivity``
-   The coherent :math:`|r_0+a_{\mathrm{scattered}}|^2` and its formal
-   first-order truncation.  These properties require an entirely specular,
-   same-polarization, semi-infinite result.
+      F_{\mathrm{eff}}=
+      \frac{A_{\mathrm{ref}}\,\kappa_f}{2\pi i r_e}\,\left(r_0+r_{\mathbf{h}}\right),
+
+   i.e. the structure factor a kinematic analysis would infer from this
+   reflectivity.  Use it to compare a DWBA model against kinematically reduced
+   data.  Note it is a *DWBA* output, not the kinematical model's own
+   structure factor; that is ``SXRDCrystal.F``, which the diagnostics notebook
+   writes :math:`F_{\mathrm{kin}}`.  The two are compared with each other, not
+   interchangeable.
+
+   It is **not** linear in the model electron density, because
+   :math:`r_0` is zeroth order and exact in the reference to all orders, so it
+   is not the DWBA structure factor of the sample either; that is ``F_h``.  It
+   vanishes as :math:`\alpha_f\to0` and is meaningful only well above the
+   critical angle, and off specular it degenerates to ``F_h``.  Its
+   justification is the large-:math:`Q_z` limit, where
+   :math:`r_0\to4\pi r_e\overline{\rho}_f/Q_z^2` and it tends to
+   :math:`F_{\mathbf{h}}+A_{\mathrm{ref}}\overline{\rho}_f/(iQ_z)`,
+   the full kinematic structure factor of the actual density.
+``reflectivity``
+   *Derived.*  The coherent specular reflectivity :math:`|r_0+r_{\mathbf{h}}|^2`.  This is the
+   primary intensity observable.  On the specular rod at small angles it is
+   *exact* up to the first-order truncation in the contrast: the problem is
+   genuinely one-dimensional there, so the scalar reduction involves no
+   approximation and the ``s`` and ``p`` channels become degenerate, while
+   :math:`r_0` carries the exact Fresnel and refraction response of the
+   prepared reference to all orders.  The residual error is therefore second
+   order in the density contrast and shrinks as the angle decreases; below the
+   critical angle the exact reflectivity is unity and this expression
+   reproduces it.  A reference whose density is wrong by ten percent gives a
+   relative error near :math:`10^{-4}` at one tenth of the critical angle,
+   rising to a few percent near :math:`\alpha_c`, and falling quadratically as
+   the contrast error is reduced.  Squaring the amplitude rather than expanding
+   it also keeps the result non-negative.  ``reflectivity`` requires an
+   entirely specular, same-polarization, semi-infinite result.
+
+Quantities that are one expression away are deliberately not provided, so that
+there is exactly one way to spell each of them:
+
+.. code-block:: python
+
+   abs(result.F_h) ** 2                      # squared structure factor
+   abs(result.scattered_amplitude) ** 2      # squared scattered amplitude
+   r_e**2 * abs(result.F_h) ** 2             # cross-section kernel per cell,
+                                             # not integrated over acceptance,
+                                             # footprint, coherence, resolution,
+                                             # flux, exposure, or efficiency
+
+   # strictly linearised reflectivity, a regime diagnostic: a large difference
+   # from result.reflectivity means |r_h| is not small against |r_0|, so the
+   # first-order treatment is being pushed.  It can go negative for that reason.
+   (abs(result.unperturbed_amplitude) ** 2
+    + 2.0 * np.real(np.conj(result.unperturbed_amplitude)
+                    * result.scattered_amplitude))
 
 ``crystal.dwba.reflectivity(..., polarization="unpolarized")`` evaluates the
 ``s`` and ``p`` channels independently and averages their reflectivities
@@ -156,9 +244,10 @@ rod, and fixed-incidence non-specular rods for flat and rough film models.
 Its executed plots compare each DWBA observable with the corresponding
 kinematical curve.
 
-``DWBAResult.F_contrast`` and ``SXRDCrystal.F`` are both amplitudes in
+``DWBAResult.F_h`` and ``SXRDCrystal.F`` are both amplitudes in
 electrons per reference lateral cell, and off specular they are directly
-comparable.  They are not identical even in the weak-scattering limit, and
+comparable.  (Use ``F_effective`` instead when comparing on the specular rod,
+where ``F_h`` alone omits the unperturbed Fresnel amplitude.)  They are not identical even in the weak-scattering limit, and
 four separate terms account for the difference.  Three are physics and one is
 a difference of convention, so a comparison that does not separate them can be
 read the wrong way round.
