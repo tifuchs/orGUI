@@ -9,11 +9,11 @@ records have the following meanings.
 
 \begin{longtable}{@{}p{0.23\textwidth}p{0.67\textwidth}@{}}
 \toprule
-Model & Records supplied to the DWBA sum \\
+Model & Records supplied to the $F_{\bm h}$ sum \\
 \midrule
 \endfirsthead
 \toprule
-Model & Records supplied to the DWBA sum \\
+Model & Records supplied to the $F_{\bm h}$ sum \\
 \midrule
 \endhead
 \texttt{UnitCell}
@@ -56,7 +56,8 @@ problem:
         values $\delta_m,\beta_m$;
   \item incident and reciprocal exit $k_z$, $A^\pm$, $A^\pm/k_z$, and reference
         planes for every medium;
-  \item incident and exit polarization, external geometry, and $\Qpar$;
+  \item incident and exit polarization, external geometry, and the rod
+        $\bm h=\Qpar$;
   \item the reference-area convention and the per-record reference shares
         satisfying Eq.~\eqref{eq:reference-partition}.
 \end{itemize}
@@ -69,41 +70,121 @@ optical profile would combine two different reference problems.
 
 For each scattering point, evaluation is naturally ordered as follows:
 \begin{enumerate}
-  \item calculate $\bm Q_m^\nu$, $P_{m,\nu}$, and $\Cchan_{m,\nu}$ for all
+  \item identify the rod from the Laue condition, Eq.~\eqref{eq:laue}, and
+        calculate $\bm Q_m^\nu$, $P_{m,\nu}$, and $\Cchan_{m,\nu}$ for all
         media and all four channels;
   \item assign every transformed atom to its physical optical medium;
   \item accumulate Eq.~\eqref{eq:atomic-channel} coherently over atoms,
-        domains, media, and channels;
-  \item if the point is specular, evaluate the constant-profile integral in
-        Eq.~\eqref{eq:profile-reference-term} and subtract it; otherwise leave
-        the atomic amplitude unchanged;
-  \item only then form an intensity or combine the scattered specular field
-        with the prepared unperturbed reflection amplitude.
+        domains, media, and channels, giving $F_{\bm h,u}^{\rm at}$;
+  \item if $\bm h=\bm 0$, add the constant-profile contribution of
+        Eq.~\eqref{eq:profile-reference-term}, completing $F_{\bm 0}$;
+        otherwise $F_{\bm h}$ is already complete;
+  \item convert to a rod amplitude with Eq.~\eqref{eq:rod-amplitude}, and only
+        then form an intensity or combine with the prepared unperturbed
+        reflection amplitude.
 \end{enumerate}
 
-\section{Specular observable}
+\section{Observables}
 
-For a finite contrast normalized to one reference lateral cell, the scattered
-far-field kernel is $r_e^2|\Fdelta|^2$.  On the ideal specular rod the result is
-instead combined coherently with the prepared plane-wave reflection amplitude.
-Using the same normalization as the existing bulk derivation,
+Equation~\eqref{eq:rod-amplitude} already gives the amplitude of the emergent
+plane wave on rod $\bm h$,
+\[
+  r_{\bm h}=-\frac{2\pi\ii r_e}{A_{\rm ref}k_{z,0,f}}F_{\bm h},
+\]
+normalised to one reference lateral cell, for every rod and every scattering
+geometry.  Nothing further needs to be assumed about the measurement geometry:
+fixed $\alpha_i$, fixed $\alpha_f$, $\alpha_i=\alpha_f$, coplanar or not, the
+scan mode only decides which $(\alpha_i,\alpha_f)$ pair --- and hence which
+$k_{z,m}$ and which $A^\pm$ --- are evaluated at each measured point.
+
+On a genuine crystal truncation rod, $\bm h\neq\bm 0$, there is no unperturbed
+beam in that direction and the observable follows from $r_{\bm h}$ alone.  On
+the specular rod the scattered field is combined coherently with the prepared
+plane-wave reflection amplitude,
 \begin{equation}
-  \delta r_{\rm DWBA}
-  =-\frac{2\pi\ii r_e}{A_{\rm ref}k_{z,0,f}}\,
-   \Fdelta^{\rm spec},
-  \label{eq:specular-amplitude}
-\end{equation}
-and
-\begin{equation}
-  r_{\rm total}=r_0+\delta r_{\rm DWBA},
+  r_{\rm total}=r_0+r_{\bm 0},
   \qquad
   R_{\rm coh}=|r_{\rm total}|^2.
   \label{eq:specular-reflectivity}
 \end{equation}
-The $r_0$ in Eq.~\eqref{eq:specular-reflectivity} must come from the same
-prepared incident field as the $A_{m,i}^{\pm}$ used in the matrix element.
-For unpolarized radiation, calculate $s$ and $p$ independently and average
-their intensities; do not add their amplitudes.
+The $r_0$ in Eq.~\eqref{eq:specular-reflectivity} must be the same $r_0$ that
+appears in Eq.~\eqref{eq:u-minus}, that is, it must come from the same prepared
+incident field as the $A_{m,i}^{\pm}$ used in the matrix element.  For
+unpolarized radiation, calculate $s$ and $p$ independently and average their
+intensities; do not add their amplitudes.
+
+\section{Returned quantities}
+
+The kernel returns one matrix element and everything else is derived from it
+by the prefactor of Eq.~\eqref{eq:rod-amplitude}.  Implementations write that
+prefactor with the positive vacuum exit wavevector
+$\kappa_f=\kzero\sin\alpha_f=-k_{z,0,f}$, so the sign appears reversed relative
+to Eq.~\eqref{eq:rod-amplitude}; the two are identical.
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Quantity & Definition & Units \\
+\midrule
+$F_{\bm h}$
+  & Eq.~\eqref{eq:Fh-definition}
+  & electrons per $A_{\rm ref}$ \\
+$r_{\bm h}$
+  & $2\pi\ii r_e F_{\bm h}/(A_{\rm ref}\kappa_f)$
+  & dimensionless \\
+$r_0$
+  & Fresnel amplitude of the prepared reference, Eq.~\eqref{eq:u-minus}
+  & dimensionless \\
+$r$
+  & $r_0+r_{\bm h}$, with $r_0=0$ for $\bm h\neq\bm 0$
+  & dimensionless \\
+$F_{\rm eff}$
+  & $A_{\rm ref}\kappa_f\,r/(2\pi\ii r_e)$
+  & electrons per $A_{\rm ref}$ \\
+$R$
+  & $|r|^2$
+  & dimensionless \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Three points are worth stating explicitly, because each has caused confusion.
+
+\paragraph{Where $r_e$ belongs.}  The classical electron radius enters once,
+inside the prefactor.  The separate convention, in which a bare matrix element
+is turned into a cross-section kernel by $r_e^2|F_{\bm h}|^2$, applies to
+$F_{\bm h}$ and not to $r$.  The two must never be mixed.
+
+\paragraph{What $F_{\rm eff}$ is.}  Inverting the prefactor on the
+\emph{total} amplitude gives the structure factor that a kinematic analysis
+would infer from this reflectivity.  It is a DWBA output; it is not the
+structure factor of a separate kinematical model, which the tutorial material
+writes $F_{\rm kin}$.  The two are compared against each other, never
+substituted for one another.  It is not linear in the model density,
+because $r_0$ is zeroth order and exact in the reference to all orders, so it
+is not the DWBA structure factor of the sample; that is $F_{\bm h}$.  It
+vanishes as $\alpha_f\to0$ and is meaningful only well above the critical
+angle.  Off-specular, where $r_0=0$, it degenerates to $F_{\bm h}$.  Its value
+is the large-$Q_z$ limit, where $r_0\to4\pi r_e\overline\rho_f/Q_z^2$ and
+$F_{\rm eff}\to F_{\bm h}+A_{\rm ref}\overline\rho_f/(\ii Q_z)$, that is, the
+full kinematic structure factor of the actual density --- exactly the quantity
+a kinematically reduced data set contains.
+
+\paragraph{Why $R=|r|^2$ is the reflectivity to use.}  On the specular rod at
+small angles the problem is genuinely one-dimensional, so the scalar reduction
+of Eq.~\eqref{eq:helmholtz} involves no approximation and the $s$ and $p$
+channels become degenerate; and $r_0$ carries the exact Fresnel and refraction
+response of the prepared reference to all orders.  The only error is therefore
+second order in the density contrast, and it shrinks with decreasing angle:
+below the critical angle the exact reflectivity is unity and $|r_0+r_{\bm h}|^2$
+reproduces it.  A reference whose density is wrong by $10\%$ gives a relative
+error near $10^{-4}$ at one tenth of the critical angle, rising to a few
+percent near $\alpha_c$, and falling quadratically as the contrast error is
+reduced.  Squaring the amplitude rather than expanding it also keeps $R$
+non-negative.  The strictly linearised variant,
+$|r_0|^2+2\operatorname{Re}(r_0^*r_{\bm h})$, is useful only as a diagnostic:
+a large difference between the two means $|r_{\bm h}|$ is not small against
+$|r_0|$ and the first-order treatment is being pushed beyond its regime.
 
 \section{Regression invariants}
 
@@ -113,30 +194,35 @@ scientifically usable.
 \begin{enumerate}
   \item \textbf{Four-channel coherence.}  A finite layer with nonzero
         $A_i^\pm$ and $A_f^\pm$ equals the direct atom-by-atom evaluation of
-        Eq.~\eqref{eq:dwba-master}; changing to a sum of channel intensities
+        Eq.~\eqref{eq:Fh-definition}; changing to a sum of channel intensities
         must fail the test.
   \item \textbf{Born limit.}  Setting $A_i^+=A_f^+=1$ and the other branches to
         zero recovers the conventional UnitCell structure factor and the
         standard polarization contraction.
+  \item \textbf{Born--Fresnel amplitude.}  A uniform half-space against a
+        vacuum reference reproduces Eq.~\eqref{eq:born-fresnel}, including its
+        sign.  This pins the prefactor of Eq.~\eqref{eq:rod-amplitude}
+        independently of any external convention.
   \item \textbf{Terminal limit.}  A finite stack made progressively thicker
         converges to Eqs.~\eqref{eq:bulk-atomic-sum} and
         \eqref{eq:bulk-reference} away from exact Bragg poles.
   \item \textbf{Identical actual and reference density.}  Replacing every
         optical slab by its exactly matching atomic forward density gives
-        $\Fdelta^{\rm spec}=0$ within the atomic-truncation accuracy.
+        $F_{\bm 0}=0$ within the atomic-truncation accuracy.
   \item \textbf{Off-specular invariance.}  Adding the reference-density
-        bookkeeping does not change any result with $\Qpar\neq\bm0$.
+        bookkeeping does not change any $F_{\bm h}$ with $\bm h\neq\bm0$, as
+        required by Eq.~\eqref{eq:coeff-nonspec}.
   \item \textbf{Partition invariance.}  Summing per-record results from
-        Eq.~\eqref{eq:per-cell-specular} equals the single profile-level
-        subtraction in Eq.~\eqref{eq:total-specular}, including after profile
-        coalescing and simplification.
+        Eq.~\eqref{eq:per-cell-specular} equals the profile-level
+        Eq.~\eqref{eq:total-specular}, including after profile coalescing and
+        simplification.
   \item \textbf{Area invariance.}  Two commensurate descriptions with different
         source lateral cells give the same amplitude per $A_{\rm ref}$ after
         Eq.~\eqref{eq:area-scale} is applied to both atomic and continuum
         terms.
   \item \textbf{Signed-model identity.}  At zero width, zero growth, or zero
         etching, the positive and negative interface/surface records cancel in
-        both the atomic and reference-profile sums.
+        both contributions to $F_{\bm h}$.
   \item \textbf{Boundary split.}  Moving an atom across an optical boundary
         changes its channel coefficient and $Q_z$ exactly once; a cell
         straddling a boundary agrees with the same atom list represented as two
@@ -144,7 +230,14 @@ scientifically usable.
   \item \textbf{Low-$Q_z$ stability.}  Equation~\eqref{eq:phi-finite} approaches
         the slab thickness without catastrophic cancellation.
   \item \textbf{Reciprocity.}  Exchanging source and detector geometry obeys
-        the reciprocal-field symmetry without conjugating the exit field.
+        the reciprocal-field symmetry of
+        Eq.~\eqref{eq:u-minus-identification} without conjugating the exit
+        field.
+  \item \textbf{Wronskian normalisation.}  For any prepared stack, the
+        Wronskian of Eq.~\eqref{eq:wronskian-value} evaluates to
+        $2\ii k_{z,0}$ independently of the layer structure.  A solver whose
+        $A^\pm$ violate this has an internal normalisation error that
+        Eq.~\eqref{eq:rod-amplitude} would silently absorb.
   \item \textbf{No duplicate attenuation.}  Absorption carried by complex
         $Q_z$ is not also applied as an empirical depth factor.
 \end{enumerate}
@@ -159,6 +252,18 @@ Sections~5.2--5.4, Eq.~(91), and the four-event finite-layer examples in
 Section~6.2.  The present note retains their electromagnetic derivation but
 does not adopt the scalar wavefunction notation used for the optional quantum-
 mechanical analogy.
+
+Renaud's Eq.~(100) quotes the one-dimensional stratified Green function, with
+its factor $1/k_z$, without derivation, citing P.~M.~Morse and H.~Feshbach,
+\emph{Methods of Theoretical Physics} (McGraw--Hill, 1953) for the general
+construction, together with X.~L.~Zhou and S.~H.~Chen, \emph{Physics Reports}
+\textbf{257} (1995), 223--348; A.~V.~Andreev, A.~G.~Michette and A.~Renwick,
+\emph{Journal of Modern Optics} \textbf{35} (1988), 1667; V.~F.~Sears,
+\emph{Physical Review B} \textbf{48} (1993), 17477; I.~D.~Feranchuk,
+\emph{Physical Review B} \textbf{52} (1995), 9214; and A.~A.~Maradudin and
+D.~L.~Mills, \emph{Physical Review B} \textbf{11} (1975), 1392.
+Section~\ref{sec:green} carries out that construction explicitly in orGUI's
+own conventions, so the present document does not depend on any of them.
 
 The terminal crystal-truncation result and the atomic-density truncation caveat
 are cross-checked against V.~M.~Kaganer, ``Crystal truncation rods in

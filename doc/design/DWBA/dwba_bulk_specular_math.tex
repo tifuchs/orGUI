@@ -22,9 +22,6 @@
 \newcommand{\kzero}{k_0}
 \newcommand{\Qpar}{\bm{Q}_{\parallel}}
 \newcommand{\rpar}{\bm{r}_{\parallel}}
-\newcommand{\Fdelta}{F_{\Delta,\mathrm{DWBA}}}
-\newcommand{\Fatomic}{F_{\mathrm{atomic,DWBA}}}
-\newcommand{\Fref}{F_{\mathrm{ref,DWBA}}}
 \newcommand{\Cchan}{\mathcal C}
 \newcommand{\Phiint}{\Phi}
 
@@ -39,18 +36,30 @@
 
 \begin{abstract}
 This note specifies the first-order distorted-wave Born approximation needed
-to add finite atomic models to orGUI's graded optical reference.  A generated
-\texttt{UnitCell}, whether it belongs to a \texttt{Film}, an
-\texttt{EpitaxyInterface}, or a surface model, is evaluated in every optical
-medium that contains its atoms.  Its amplitude is the coherent sum of the
-four Renaud incident/exit channels.  For non-specular scattering the planar
-reference has no Fourier component and the atomic sum is the complete
-contrast amplitude.  For specular scattering the constant
-$\delta_m+\ii\beta_m$ density of every prepared optical slab remains in the
-matrix element and must be subtracted analytically.  The subtraction is
-partitioned among unit cells without changing the profile-level result, so
-signed occupancies, strain, lateral-area conversion, and optical-profile
-simplification remain consistent.
+to add finite atomic models to orGUI's graded optical reference.  It derives,
+rather than quotes, both the matrix element and the factor that converts it
+into a measurable amplitude: Born expansion, Green function of the stratified
+reference built explicitly from two homogeneous solutions and their Wronskian,
+lattice expansion of the index contrast, and lateral collapse.  The Wronskian
+is shown to equal $2\ii k_{z,0}$ independently of the prepared stack, which is
+the origin of every factor $1/k_z$ in this subject; the reciprocal exit field
+then follows from a boundary-value problem, with no far-field approximation
+over the illuminated footprint --- an approximation that is in fact invalid on
+the specular rod.
+
+The result is a single matrix element $F_{\bm h}$ per crystal truncation rod,
+normalised to one reference lateral cell.  A generated \texttt{UnitCell},
+whether it belongs to a \texttt{Film}, an \texttt{EpitaxyInterface}, or a
+surface model, is evaluated in every optical medium that contains its atoms,
+and contributes to $F_{\bm h}$ as the coherent sum of the four Renaud
+incident/exit channels --- which are simply the two branches of each reference
+field.  Because the prepared optical reference is laterally uniform, its
+constant $\delta_m+\ii\beta_m$ density enters the $\bm h=\bm 0$ Fourier
+coefficient and no other: it is part of $F_{\bm 0}$, not something subtracted
+afterwards from an atomic sum, and it is absent from every genuine rod.  That
+contribution is partitioned among unit cells without changing the
+profile-level result, so signed occupancies, strain, lateral-area conversion,
+and optical-profile simplification remain consistent.
 \end{abstract}
 
 \tableofcontents

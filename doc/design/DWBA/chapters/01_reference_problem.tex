@@ -1,4 +1,4 @@
-\chapter{Reference problem and conventions}
+\chapter{Reference problem, conventions, and the master formula}
 \label{chap:reference}
 
 \section{Scope}
@@ -15,6 +15,14 @@ Leroy, the incident field and the reciprocal field launched from the detector
 are denoted by electric fields $\bm E_0$; no quantum-mechanical wavefunction
 notation is used.  The medium is nonmagnetic, isotropic, linear, and reciprocal.
 Magnetic and tensor-resonant scattering are outside the present scope.
+
+This chapter derives, rather than quotes, both the matrix element and the
+factor that converts it into a measurable rod amplitude.  The chain is: Born
+expansion, Green function of the stratified reference built from two
+homogeneous solutions and their Wronskian, lattice expansion of the index
+contrast, and lateral collapse.  No far-field (Fraunhofer) approximation over
+the illuminated footprint is used at any point; Sec.~\ref{sec:why-not-farfield}
+explains why one must not be.
 
 \section{Fourier, surface, and refractive-index conventions}
 
@@ -66,7 +74,17 @@ orGUI uses the negative-root Renaud normal wavevector
 The incident and reciprocal exit solutions are calculated in the same frozen
 array of complex refractive indices and at the same physical boundaries.
 
-\section{Scattering-factor density and the DWBA matrix element}
+Equation~\eqref{eq:renaud-kz} fixes what ``upward'' means, and every sign in
+this document follows from it.  Because $\operatorname{Re}k_{z,m}\leq0$, a
+wave travelling towards $+z$ --- upward, out of the sample and towards the
+detector --- carries $\exp(+\ii k_{z,m}z)$, while a wave travelling towards
+$-z$, downward onto the sample, carries $\exp(-\ii k_{z,m}z)$.  This is the
+opposite pairing from the one a positive-root convention would give, and it is
+the single most common source of sign errors when comparing with the
+literature.  The whole of Secs.~\ref{sec:born}--\ref{sec:collapse} is carried
+out in Eq.~\eqref{eq:renaud-kz}'s convention, so no conversion is ever needed.
+
+\section{Scattering-factor density and the index contrast}
 
 For atom $a$, orGUI uses
 \begin{equation}
@@ -77,7 +95,8 @@ where the Waasmaier--Kirfel representation is evaluated analytically at the
 generally complex channel value $Q^2$.  Its zero-transfer value, including the
 same anomalous terms, is also used to generate the optical profile.  Replacing
 that value by an independent atomic-number approximation would break the
-reference-density cancellation.
+reference-density cancellation.  Equation~\eqref{eq:atomic-factor} is the only
+quantity in this document called $f$.
 
 Let $\rho_f(\bm r)$ be the complex scattering-factor density in electrons per
 Angstrom$^3$.  To first order in the X-ray susceptibility,
@@ -96,37 +115,369 @@ density represented by Eq.~\eqref{eq:index} is therefore
   }
   \label{eq:reference-density}
 \end{equation}
-Define
+Write $n_0^2(z)=\sum_m n_m^2\,\mathbf 1_{I_m}(z)$ for the prepared, laterally
+uniform reference and
 \begin{equation}
+  \delta n^2(\bm r)=n^2(\bm r)-n_0^2(z)
+  =-\frac{4\pi r_e}{\kzero^2}\,\Delta\rho_f(\bm r),
+  \qquad
   \Delta\rho_f(\bm r)
-  =\rho_f(\bm r)-
-   \sum_m\overline\rho_{f,m}\,\mathbf 1_{I_m}(z).
+  =\rho_f(\bm r)-\sum_m\overline\rho_{f,m}\,\mathbf 1_{I_m}(z),
   \label{eq:density-contrast}
 \end{equation}
-The first-order far-field correction for an analyzed exit polarization is
+for the index contrast that drives all scattering.  Equations~\eqref{eq:index}
+and \eqref{eq:reference-density} enter the problem only through $n_0^2(z)$, and
+Sec.~\ref{sec:collapse} shows exactly where they survive.
+
+\section{The Born expansion}
+\label{sec:born}
+
+At the small scattering angles of interest the vectorial propagation equation
+reduces to a scalar Helmholtz equation for the component of the field along
+the analysed polarization (Renaud \S5.3.6).  Writing $E$ for that component,
 \begin{equation}
-  \delta\bm E_f(\bm r)
-  =-r_e\frac{\ee^{-\ii\kzero r}}{r}\,
-   \bm\epsilon_f\Fdelta,
-  \label{eq:far-field}
+  \left[\nabla^2+\kzero^2n^2(\bm r)\right]E(\bm r)=0,
+  \qquad
+  n^2(\bm r)=n_0^2(z)+\delta n^2(\bm r),
+  \label{eq:helmholtz}
 \end{equation}
-where the electron-unit contrast matrix element is
+so that
+\begin{equation}
+  \left[\nabla^2+\kzero^2n_0^2(z)\right]E(\bm r)
+  =-\kzero^2\,\delta n^2(\bm r)\,E(\bm r).
+  \label{eq:driven}
+\end{equation}
+Defining the Green function of the \emph{reference} problem by
+\begin{equation}
+  \left[\nabla^2+\kzero^2n_0^2(z)\right]G(\bm r,\bm r')=\delta(\bm r-\bm r'),
+  \label{eq:green-def}
+\end{equation}
+Eq.~\eqref{eq:driven} is equivalent to the integral equation
+\begin{equation}
+  E(\bm r)=\bm E_0(\bm r)
+  -\kzero^2\!\int\!\dd^3r'\,G(\bm r,\bm r')\,\delta n^2(\bm r')\,E(\bm r'),
+  \label{eq:lippmann}
+\end{equation}
+whose iteration is the Born series.  Retaining the first order, with $\bm E_0$
+and $G$ both those of the \emph{stratified} reference, gives the distorted-wave
+Born approximation:
 \begin{equation}
   \boxed{
-  \Fdelta=
-  \int
-  \bm E_0(\bm r,-\bm k_f)
-  \mathbin{\cdot}
-  \bm E_0(\bm r,\bm k_i)
-  \Delta\rho_f(\bm r)\,\dd^3r.
+  \delta E(\bm r)
+  =-\kzero^2\!\int\!\dd^3r'\,G(\bm r,\bm r')\,\delta n^2(\bm r')\,
+   \bm E_0(\bm r',\bm k_i).
   }
   \label{eq:dwba-master}
 \end{equation}
-The reciprocal exit field is not complex conjugated.  Complex conjugation
-enters only after the coherent amplitude has been formed, for example in
-$r_e^2|\Fdelta|^2$.
+Reflection, transmission, refraction, and repeated reflection at the planar
+interfaces are already contained in $\bm E_0$ and in $G$; the perturbation is
+scattered exactly once.
 
-Equation~\eqref{eq:dwba-master} is the only starting point needed for both the
-atomic and constant-profile terms.  Reflection, transmission, refraction, and
-repeated reflection at the planar interfaces are already contained in the two
-reference electric fields.
+\paragraph{Sign remark.}  Renaud's Eqs.~(71) and (73) as printed carry
+$+\kzero^2\delta n^2$ on the right-hand side.  With his Eq.~(70)'s definition
+$\delta n^2=n^2-n_0^2$, adopted here in Eq.~\eqref{eq:density-contrast}, the
+sign is as in Eqs.~\eqref{eq:driven} and \eqref{eq:lippmann}.  The overall sign
+of the final result is verified independently against the Born--Fresnel limit
+in Sec.~\ref{sec:born-check}.
+
+\section{The Green function of the stratified reference}
+\label{sec:green}
+
+This section does the work that is usually skipped.  Nothing in it is
+approximate.
+
+\subsection{Separation into a one-dimensional problem}
+
+Because $n_0^2$ depends only on $z$, Eq.~\eqref{eq:green-def} separates under a
+lateral Fourier transform:
+\begin{equation}
+  G(\bm r,\bm r')
+  =\frac{1}{(2\pi)^2}\int\dd^2q\;g_q(z,z')\,
+   \ee^{-\ii\bm q\cdot(\rpar-\rpar')},
+  \qquad
+  \left[\frac{\dd^2}{\dd z^2}+\kzero^2n_0^2(z)-q^2\right]g_q(z,z')
+  =\delta(z-z').
+  \label{eq:separation}
+\end{equation}
+The lateral wavevector $\bm q$ enters the one-dimensional operator only through
+the constant $-q^2$; the normal wavevector belonging to $\bm q$ in medium $m$
+is Eq.~\eqref{eq:renaud-kz}'s $k_{z,m}$.
+
+\subsection{Wronskian construction}
+
+Equation~\eqref{eq:separation} is a one-dimensional Green-function problem for
+an operator with no first-derivative term.  Let $u_-$ and $u_+$ solve the
+homogeneous equation subject to one physical boundary condition each,
+\begin{align}
+  u_-(z):&\quad\text{no wave incoming from below, as }z\to-\infty,
+  \label{eq:bc-minus}\\
+  u_+(z):&\quad\text{no wave incoming from above, as }z\to+\infty,
+  \label{eq:bc-plus}
+\end{align}
+each fixed up to one multiplicative constant.  Then
+\begin{equation}
+  g_q(z,z')=\frac{u_-(z_<)\,u_+(z_>)}{W},
+  \qquad
+  W=u_-u_+'-u_-'u_+,
+  \label{eq:wronskian-construction}
+\end{equation}
+with $z_<=\min(z,z')$ and $z_>=\max(z,z')$.  The Wronskian is independent of
+$z$,
+\begin{equation}
+  \frac{\dd W}{\dd z}
+  =u_-u_+''-u_-''u_+
+  =u_-\!\left(q^2-\kzero^2n_0^2\right)u_+
+   -\left(q^2-\kzero^2n_0^2\right)u_-u_+=0,
+  \label{eq:wronskian-constant}
+\end{equation}
+precisely because the operator has no $\dd/\dd z$ term, so it may be evaluated
+wherever it is easiest.  The normalisation of $u_\pm$ cancels in
+Eq.~\eqref{eq:wronskian-construction}.
+
+\subsection{What the two solutions are physically}
+
+Using the convention established after Eq.~\eqref{eq:renaud-kz}, in vacuum
+($m=0$):
+\begin{itemize}
+  \item $u_+$ is fixed by Eq.~\eqref{eq:bc-plus}: above the whole structure it
+        is purely upward-going,
+        \begin{equation}
+          u_+(z)=\ee^{+\ii k_{z,0}z}.
+          \label{eq:u-plus}
+        \end{equation}
+        How it continues downward through the stack is never needed, because
+        the observation point is always in vacuum.
+  \item $u_-$ is fixed by Eq.~\eqref{eq:bc-minus}: deep in the terminal medium
+        it carries only the transmitted, downward or evanescently decaying
+        wave, which is the physical condition $A_M^-=0$.  That single condition,
+        continued \emph{upward} through the stack, produces in vacuum a
+        superposition of a downward and an upward component; normalising the
+        downward one to unity,
+        \begin{equation}
+          u_-(z)=\ee^{-\ii k_{z,0}z}+r_0\,\ee^{+\ii k_{z,0}z}
+          \qquad\text{(in vacuum)}.
+          \label{eq:u-minus}
+        \end{equation}
+        This is the ordinary Fresnel/Parratt reference field for a plane wave
+        incident from above --- incident plus reflected, with only a
+        transmitted wave below --- and $r_0$ is the unperturbed specular
+        reflection amplitude of Eq.~\eqref{eq:specular-reflectivity}.  The
+        condition that \emph{defines} $u_-$ is imposed at $z\to-\infty$, but
+        the solution it selects is the familiar one driven from above.
+\end{itemize}
+Since the exit wavevector $\bm k_f$ points away from the sample, $-\bm k_f$
+points onto it, and $u_-$ evaluated for that direction is exactly the
+reciprocal exit field,
+\begin{equation}
+  u_-(z')=\bm E_0(z',-\bm k_f).
+  \label{eq:u-minus-identification}
+\end{equation}
+This is the content of the reciprocity theorem, obtained here by solving a
+boundary-value problem rather than by propagating a field to a distant
+detector.  It is why the reciprocal exit field is never complex conjugated:
+it is a solution of the same homogeneous equation as the incident field, not
+its adjoint.
+
+\subsection{The Wronskian, and the Green function}
+
+Evaluate $W$ in vacuum from Eqs.~\eqref{eq:u-plus}--\eqref{eq:u-minus}:
+\begin{align}
+  W&=\left[\ee^{-\ii k_{z,0}z}+r_0\ee^{\ii k_{z,0}z}\right]
+     \left(\ii k_{z,0}\ee^{\ii k_{z,0}z}\right)
+    -\left[-\ii k_{z,0}\ee^{-\ii k_{z,0}z}
+       +\ii k_{z,0}r_0\ee^{\ii k_{z,0}z}\right]\ee^{\ii k_{z,0}z}\nonumber\\
+   &=\ii k_{z,0}+\ii k_{z,0}r_0\ee^{2\ii k_{z,0}z}
+     +\ii k_{z,0}-\ii k_{z,0}r_0\ee^{2\ii k_{z,0}z}
+   \;=\;2\ii k_{z,0}.
+  \label{eq:wronskian-value}
+\end{align}
+The $r_0$ terms cancel identically: \emph{the Wronskian does not depend on the
+stack}, only on the vacuum $k_{z,0}$.  This one fact is the origin of every
+factor $1/k_z$ in this subject, including the one that appears without
+explanation in the reflectivity literature.
+
+With the observation point above all sources, $z>z'$, so $z_<=z'$, $z_>=z$, and
+Eqs.~\eqref{eq:wronskian-construction}, \eqref{eq:u-plus},
+\eqref{eq:u-minus-identification} and \eqref{eq:wronskian-value} give
+\begin{equation}
+  \boxed{
+  g_q(z,z')
+  =\frac{\bm E_0(z',-\bm k_f)\,\ee^{\ii k_{z,0}z}}{2\ii k_{z,0}}
+  =-\frac{\ii}{2k_{z,0}}\,\ee^{\ii k_{z,0}z}\,\bm E_0(z',-\bm k_f).
+  }
+  \label{eq:green-1d}
+\end{equation}
+For a homogeneous reference, $r_0=0$ and $u_-(z')=\ee^{-\ii k_{z,0}z'}$, so
+Eq.~\eqref{eq:green-1d} collapses to
+$g_q=-(\ii/2k_{z,0})\ee^{\ii k_{z,0}|z-z'|}$, whose derivative jump across
+$z=z'$ is unity; substituting that into Eq.~\eqref{eq:separation} reproduces
+the Weyl angular-spectrum representation of an outgoing spherical wave.  The
+Weyl expansion is therefore not an extra ingredient but the vacuum special case
+of Eq.~\eqref{eq:green-1d}.
+
+\subsection{Why the far-field route is not available here}
+\label{sec:why-not-farfield}
+
+The textbook shortcut replaces $G$ by its far-field limit, expanding
+$|\bm r-\bm r'|\simeq r-\bm k_f\cdot\bm r'/\kzero$ and pulling a single
+spherical wave $\ee^{-\ii\kzero r}/r$ out of the integral.  That expansion
+requires the detector distance $R$ to exceed the Fraunhofer distance of the
+\emph{whole illuminated footprint}.  For a grazing-incidence footprint of
+lateral size $L\sim1$~mm to 1~cm at $\lambda\sim1$~\AA, the neglected
+quadratic phase is
+\begin{equation}
+  \delta(\text{phase})\sim\kzero\frac{L^2}{R}\sim10^{4}\text{--}10^{7}\gg1,
+  \label{eq:fraunhofer-failure}
+\end{equation}
+so the far-field form of $G$ is never valid on the specular rod.
+Equation~\eqref{eq:green-1d} avoids the issue entirely: it is exact at any $R$.
+
+The polarization factor is a separate matter.  The same far-field substitution
+is conventionally used to fix the exit polarization vector, but there it enters
+undifferentiated and is \emph{not} multiplied by $\kzero$, so its error is only
+$\sim L/R\sim10^{-2}$ rather than Eq.~\eqref{eq:fraunhofer-failure}.  Fixing the
+polarization basis at the nominal $\bm k_f$, as
+Eq.~\eqref{eq:polarization-contractions} does, therefore remains accurate even
+where the phase treatment above is mandatory.
+
+\section{Lattice expansion and the lateral collapse}
+\label{sec:collapse}
+
+\subsection{The index contrast along the surface lattice}
+
+Parallel to the surface, $n^2(\bm r)$ is periodic on the two-dimensional
+lattice of the reference lateral cell, of area $A_{\rm ref}$, while $n_0^2(z)$
+is laterally uniform.  Their difference $\delta n^2$ is therefore
+two-dimensional-periodic and has the Fourier series
+\begin{equation}
+  \delta n^2(\rpar,z)=\sum_{\bm h}\delta n^2_{\bm h}(z)\,
+  \ee^{-\ii\bm h\cdot\rpar},
+  \qquad
+  \delta n^2_{\bm h}(z)
+  =\frac{1}{A_{\rm ref}}\int_{\rm cell}\dd^2r_\parallel\;
+   \delta n^2(\rpar,z)\,\ee^{\ii\bm h\cdot\rpar},
+  \label{eq:lattice-expansion}
+\end{equation}
+where $\bm h$ runs over the reciprocal lattice of that cell, i.e.\ over the
+crystal truncation rods $(h,k)$.  Because $n_0^2(z)$ is laterally uniform it
+contributes to Eq.~\eqref{eq:lattice-expansion} at $\bm h=\bm 0$ and nowhere
+else:
+\begin{align}
+  \delta n^2_{\bm h}(z)
+  &=\frac{1}{A_{\rm ref}}\int_{\rm cell}\dd^2r_\parallel\;n^2(\rpar,z)\,
+    \ee^{\ii\bm h\cdot\rpar},
+  &&\bm h\neq\bm0,
+  \label{eq:coeff-nonspec}\\
+  \delta n^2_{\bm 0}(z)
+  &=\frac{1}{A_{\rm ref}}\int_{\rm cell}\dd^2r_\parallel\;n^2(\rpar,z)
+    \;-\;n_0^2(z),
+  &&\bm h=\bm 0.
+  \label{eq:coeff-spec}
+\end{align}
+Equations~\eqref{eq:coeff-nonspec}--\eqref{eq:coeff-spec} are the entire
+content of the specular/non-specular distinction, and they are the reason this
+document needs only one matrix element.  The $\delta_m,\beta_m$ of the prepared
+profile are not something subtracted afterwards from an atomic sum: they are
+part of the $\bm h=\bm 0$ Fourier coefficient, and part of nothing else.
+
+\subsection{Collapse}
+
+Insert Eqs.~\eqref{eq:separation}, \eqref{eq:green-1d} and
+\eqref{eq:lattice-expansion} into Eq.~\eqref{eq:dwba-master}.  Stratification
+lets the lateral phase of the incident field be factored out,
+$\bm E_0(\bm r',\bm k_i)
+=\ee^{-\ii\bm k_{i\parallel}\cdot\rpar'}\bm E_0(z',\bm k_i)$, so all
+$\rpar'$ dependence sits in three exponentials and the lateral integral is
+elementary:
+\begin{equation}
+  \int\dd^2r_\parallel'\;
+  \ee^{\ii\bm q\cdot\rpar'}\,
+  \ee^{-\ii\bm h\cdot\rpar'}\,
+  \ee^{-\ii\bm k_{i\parallel}\cdot\rpar'}
+  =(2\pi)^2\,\delta^{(2)}\!\left(\bm q-\bm k_{i\parallel}-\bm h\right).
+  \label{eq:lateral-delta}
+\end{equation}
+The delta function is the Laue condition: for each rod exactly one
+angular-spectrum mode survives,
+\begin{equation}
+  \bm q=\bm k_{i\parallel}+\bm h\equiv\bm k_{f\parallel},
+  \qquad\text{that is}\qquad
+  \Qpar=\bm h,
+  \label{eq:laue}
+\end{equation}
+at any incidence angle, any exit angle, and any azimuth.  The $1/r$ spherical
+falloff has cancelled against the density of angular-spectrum modes: what
+emerges is a genuine, non-decaying plane wave per rod.
+
+\subsection{The matrix element and the rod amplitude}
+
+Collecting the constants of Eqs.~\eqref{eq:dwba-master}, \eqref{eq:separation},
+\eqref{eq:green-1d} and \eqref{eq:lateral-delta},
+\begin{equation}
+  -\kzero^2\cdot\frac{1}{(2\pi)^2}
+  \cdot\left(-\frac{\ii}{2k_{z,0,f}}\right)\cdot(2\pi)^2
+  =+\frac{\ii\kzero^2}{2k_{z,0,f}},
+  \label{eq:constants}
+\end{equation}
+and converting from $\delta n^2$ to $\Delta\rho_f$ with
+Eq.~\eqref{eq:density-contrast}, the $\kzero^2$ cancels exactly.  Defining the
+matrix element of rod $\bm h$, normalised to one reference lateral cell,
+\begin{equation}
+  \boxed{
+  F_{\bm h}
+  =\int\dd z\int_{\rm cell}\dd^2r_\parallel\;
+   \Delta\rho_f(\rpar,z)\,
+   \ee^{\ii\bm h\cdot\rpar}\,
+   \bm E_0(z,-\bm k_f)
+   \mathbin{\cdot}
+   \bm E_0(z,\bm k_i),
+  }
+  \label{eq:Fh-definition}
+\end{equation}
+the scattered field on rod $\bm h$ is the plane wave
+\begin{equation}
+  \boxed{
+  r_{\bm h}
+  =-\frac{2\pi\ii r_e}{A_{\rm ref}\,k_{z,0,f}}\,F_{\bm h}.
+  }
+  \label{eq:rod-amplitude}
+\end{equation}
+
+Equation~\eqref{eq:Fh-definition} is the only matrix element in this document.
+It is used unchanged for every rod:
+\begin{itemize}
+  \item for $\bm h\neq\bm 0$ its integrand contains no reference term, by
+        Eq.~\eqref{eq:coeff-nonspec};
+  \item for $\bm h=\bm 0$ its integrand contains the constant
+        $\delta_m+\ii\beta_m$ density of every prepared slab, by
+        Eq.~\eqref{eq:coeff-spec}, through $\Delta\rho_f$'s
+        $-\sum_m\overline\rho_{f,m}\mathbf 1_{I_m}$ term.
+\end{itemize}
+Chapter~\ref{chap:unit-cells} evaluates Eq.~\eqref{eq:Fh-definition} for atoms,
+producing the four coherent channels.  Chapter~\ref{chap:specular} evaluates
+the reference part of $F_{\bm 0}$ and partitions it among generated records.
+The reciprocal exit field in Eq.~\eqref{eq:Fh-definition} is not complex
+conjugated; conjugation enters only after the coherent amplitude has been
+formed.
+
+\subsection{Born--Fresnel check}
+\label{sec:born-check}
+
+Take a uniform half-space $z<0$ of density $\rho_f$ against a vacuum
+reference, so that only $\bm h=\bm 0$ contributes, the field product reduces
+to $\ee^{\ii Q_zz}$, and
+$\int_{-\infty}^{0}\ee^{\ii Q_zz}\dd z=1/(\ii Q_z)$.  Then
+$F_{\bm 0}=A_{\rm ref}\rho_f/(\ii Q_z)$ and, with $Q_z=-2k_{z,0}>0$ from
+Eq.~\eqref{eq:channel-qz},
+\begin{equation}
+  r_{\bm 0}
+  =-\frac{2\pi\ii r_e}{A_{\rm ref}k_{z,0}}\cdot
+    \frac{A_{\rm ref}\rho_f}{\ii Q_z}
+  =-\frac{2\pi r_e\rho_f}{k_{z,0}Q_z}
+  =+\frac{4\pi r_e\rho_f}{Q_z^{2}}\;>0,
+  \label{eq:born-fresnel}
+\end{equation}
+which is the known kinematic reflectivity amplitude, with the positive sign of
+the exact Fresnel expansion $r=(k_{z,0}-k_{z,1})/(k_{z,0}+k_{z,1})$ for $n<1$.
+Both the sign and the constant in Eq.~\eqref{eq:rod-amplitude} are therefore
+fixed independently of any external sign convention.

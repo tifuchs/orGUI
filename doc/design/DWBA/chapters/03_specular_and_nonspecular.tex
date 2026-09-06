@@ -1,39 +1,36 @@
-\chapter{Non-specular and specular contrast amplitudes}
-\label{chap:contrast}
+\chapter{The specular coefficient \texorpdfstring{$F_{\bm 0}$}{F0}}
+\label{chap:specular}
 
-\section{Why the two cases differ}
+\section{What is different at \texorpdfstring{$\bm h=\bm 0$}{h = 0}}
 
-The reference density is translationally invariant parallel to the surface.
-Its lateral Fourier transform is
+Everything that distinguishes the specular rod was already established in
+Eqs.~\eqref{eq:coeff-nonspec}--\eqref{eq:coeff-spec}: the prepared reference
+$n_0^2(z)$ is laterally uniform, so it appears in the $\bm h=\bm 0$ Fourier
+coefficient of $\delta n^2$ and in no other.  Equivalently, in the language of
+Eq.~\eqref{eq:lateral-delta}, a laterally uniform density has all of its
+lateral Fourier weight at $\bm q-\bm k_{i\parallel}=\bm 0$, and a genuine rod
+$\bm h\neq\bm 0$ never sits there.
+
+Consequently $F_{\bm 0}$, and only $F_{\bm 0}$, receives a second contribution
+besides the atomic sum of Eq.~\eqref{eq:Fh-atomic}:
 \begin{equation}
-  \int_{\mathbb R^2}
-  \exp(\ii\Qpar\mathbin{\cdot}\rpar)\,\dd^2r_{\parallel}
-  =(2\pi)^2\delta^{(2)}(\Qpar).
-  \label{eq:lateral-delta}
+  F_{\bm 0}=\sum_u\left(F_{\bm 0,u}^{\rm at}+F_{\bm 0,u}^{\rm ref}\right),
+  \qquad
+  F_{\bm h}=\sum_uF_{\bm h,u}^{\rm at}\ \ (\bm h\neq\bm 0).
+  \label{eq:Fh-two-parts}
 \end{equation}
-Consequently, the constant $\delta_m,\beta_m$ term is absent at a genuinely
-non-specular point but remains on the specular rod.  This is a statement about
-the laterally infinite optical reference.  Subtracting a rectangular
-``reference patch'' for every unit cell off-specular would replace the Dirac
-distribution by a finite-cell shape transform and create artificial diffuse
-scattering.
+This is one matrix element with two kinds of contribution, not two matrix
+elements.  In particular nothing is ``subtracted afterwards'': the sign is
+already carried by $\Delta\rho_f$ in Eq.~\eqref{eq:density-contrast}.
 
-The two returned matrix elements must therefore be defined separately:
-\begin{align}
-  F_{\Delta,u}^{\rm nonsp}
-  &=F_{\mathrm{atomic},u},
-  &&\Qpar\neq\bm0,
-  \label{eq:nonspecular-result}\\
-  F_{\Delta,u}^{\rm spec}
-  &=F_{\mathrm{atomic},u}-F_{\mathrm{ref},u},
-  &&\Qpar=\bm0.
-  \label{eq:specular-result}
-\end{align}
-Instrumental resolution may mix diffuse intensity into a detector pixel on the
-specular rod, but it does not change Eqs.~\eqref{eq:nonspecular-result} and
-\eqref{eq:specular-result}.  That mixing belongs to a later resolution
-convolution, not to an interpolation of the reference subtraction near
-$\Qpar=0$.
+It is worth stating what would go wrong if the reference contribution were
+instead applied cell by cell off-specular.  Doing so would replace the exact
+lateral delta function of Eq.~\eqref{eq:lateral-delta} by a finite-cell shape
+transform and manufacture diffuse scattering that the reference profile does
+not produce.  Instrumental resolution may mix genuine diffuse intensity into a
+detector pixel on the specular rod, but that belongs to a later resolution
+convolution, not to an interpolation of Eq.~\eqref{eq:Fh-two-parts} near
+$\bm h=\bm 0$.
 
 \section{Integral of one constant optical slab}
 
@@ -67,12 +64,13 @@ branch,
   \label{eq:phi-half-space}
 \end{equation}
 
-Normalized to one lateral reference cell, the complete reference term of the
-prepared profile is
+Carrying the $-\sum_m\overline\rho_{f,m}\mathbf 1_{I_m}$ term of
+Eq.~\eqref{eq:density-contrast} through Eq.~\eqref{eq:Fh-definition}, the
+reference contribution to $F_{\bm 0}$ at profile level is
 \begin{equation}
   \boxed{
-  \Fref^{\rm spec}
-  =A_{\rm ref}
+  \sum_uF_{\bm 0,u}^{\rm ref}
+  =-A_{\rm ref}
    \sum_m\overline\rho_{f,m}
    \sum_{\nu\in\{++,+-,-+,--\}}
    \Cchan_{m,\nu}
@@ -80,12 +78,11 @@ prepared profile is
   }
   \label{eq:profile-reference-term}
 \end{equation}
-Thus the specular result keeps the integral over the constant
-$\delta_m+\ii\beta_m$ term explicitly.  Finite graded layers generally retain
-all four terms in Eq.~\eqref{eq:profile-reference-term}; only the terminal
-substrate reduces to $++$.
+Finite graded layers generally retain all four channels in
+Eq.~\eqref{eq:profile-reference-term}; only the terminal substrate reduces to
+$++$, by Eq.~\eqref{eq:terminal-branches}.
 
-\section{A well-defined per-unit-cell subtraction}
+\section{A well-defined per-record partition}
 
 Only the total reference profile is physical.  A decomposition of that profile
 among overlapping model objects is bookkeeping and is not unique unless a
@@ -121,19 +118,20 @@ a linear operation once the grouping is fixed and preserves
 Eq.~\eqref{eq:reference-partition}.  Reconstructing shares independently with
 different merge decisions would not preserve the prepared reference.
 
-The per-record reference amplitude is then
+With Eq.~\eqref{eq:reference-partition} fixed, record $u$'s reference
+contribution is
 \begin{equation}
-  F_{\mathrm{ref},u}
-  =A_{\rm ref}
+  F_{\bm 0,u}^{\rm ref}
+  =-A_{\rm ref}
    \sum_m\overline\rho_{f,u,m}
    \sum_\nu\Cchan_{m,\nu}
    \Phiint\!\left(Q_{z,m}^{\nu};z_m^-,z_m^+\right),
   \label{eq:per-cell-reference}
 \end{equation}
-and the requested individual-cell specular contrast is
+so that record $u$'s complete share of the specular matrix element is
 \begin{equation}
   \boxed{
-  F_{\Delta,u}^{\rm spec}
+  F_{\bm 0,u}
   =\sum_m\sum_\nu\mathcal A_{u,m}^{\nu}
    -A_{\rm ref}
     \sum_m\overline\rho_{f,u,m}
@@ -143,39 +141,53 @@ and the requested individual-cell specular contrast is
   \label{eq:per-cell-specular}
 \end{equation}
 Summing Eq.~\eqref{eq:per-cell-specular} over $u$ and applying
-Eq.~\eqref{eq:reference-partition} recovers the profile-level identity
+Eq.~\eqref{eq:reference-partition} recovers
+Eq.~\eqref{eq:profile-reference-term} and hence the profile-level
+$F_{\bm 0}$ of Eq.~\eqref{eq:Fh-two-parts}:
 \begin{equation}
   \boxed{
-  \Fdelta^{\rm spec}
-  =\sum_uF_{\Delta,u}^{\rm spec}
-  =\sum_uF_{\mathrm{atomic},u}-\Fref^{\rm spec}.
+  F_{\bm 0}
+  =\sum_uF_{\bm 0,u}
+  =\sum_uF_{\bm 0,u}^{\rm at}
+   -A_{\rm ref}
+    \sum_m\overline\rho_{f,m}
+    \sum_\nu\Cchan_{m,\nu}
+    \Phiint\!\left(Q_{z,m}^{\nu};z_m^-,z_m^+\right).
   }
   \label{eq:total-specular}
 \end{equation}
-If callers do not need an attribution by object, Eq.~\eqref{eq:total-specular}
-is the preferred calculation: accumulate all atomic terms, evaluate the
-prepared reference once, and subtract once.
+If callers do not need an attribution by object,
+Eq.~\eqref{eq:total-specular} is the preferred calculation: accumulate all
+atomic terms, evaluate the prepared reference once, and add once.
 
 \section{Reduction to the implemented terminal bulk formula}
 
 Let the top terminal bulk cell occupy $b-c\leq z<b$, with repeat vector
-$-\bm c$ into the substrate and $c=c_z>0$.  Only the $++$ channel survives.
-If $F_{\rm uc}^{\rm atomic}$ includes the global phase of the top cell, its
-semi-infinite atomic sum is
+$-\bm c$ into the substrate and $c=c_z>0$.  Only the $++$ channel survives, by
+Eq.~\eqref{eq:terminal-branches}.  If $F_{\rm uc}$ denotes the ordinary
+unit-cell structure factor including the global phase of the top cell, the
+semi-infinite atomic contribution to $F_{\bm 0}$ is
 \begin{equation}
-  F_{\mathrm{atomic,bulk}}
+  F_{\bm 0,\rm bulk}^{\rm at}
   =\Cchan_{M,++}
-   \frac{F_{\rm uc}^{\rm atomic}}
-        {1-\exp(-\ii\bm Q_M^{++}\mathbin{\cdot}\bm c)}.
+   \frac{F_{\rm uc}}
+        {1-\exp(-\ii\bm Q_M^{++}\mathbin{\cdot}\bm c)},
   \label{eq:bulk-atomic-sum}
 \end{equation}
-For a surface-normal repeat, the mean-density term is
+and, for a surface-normal repeat, the mean-density contribution is
 \begin{equation}
-  F_{\mathrm{ref,bulk}}
-  =\Cchan_{M,++}A_{\rm ref}\overline\rho_{f,M}
+  F_{\bm 0,\rm bulk}^{\rm ref}
+  =-\Cchan_{M,++}A_{\rm ref}\overline\rho_{f,M}
    \frac{\ee^{\ii Q_{z,M}^{++}b}}{\ii Q_{z,M}^{++}}.
   \label{eq:bulk-reference}
 \end{equation}
-Equations~\eqref{eq:bulk-atomic-sum} and \eqref{eq:bulk-reference} are the
-previous bulk result.  The four-channel finite-layer formula therefore extends
-the existing kernel without changing the terminal half-space convention.
+Their sum is the previously implemented bulk result.  The four-channel
+finite-layer formula therefore extends the existing kernel without changing
+the terminal half-space convention.
+
+Equation~\eqref{eq:bulk-reference} also shows why the reference contribution
+cannot be dropped: it is precisely the $Q_z\to0$ divergence of the kinematic
+lattice sum in Eq.~\eqref{eq:bulk-atomic-sum}, that is, the $\bm h=\bm 0$
+component that the prepared optical profile already describes and that $r_0$
+in Eq.~\eqref{eq:specular-reflectivity} already carries.  Retaining both
+without Eq.~\eqref{eq:total-specular} would count it twice.

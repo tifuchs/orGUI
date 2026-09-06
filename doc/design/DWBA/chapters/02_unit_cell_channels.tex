@@ -1,10 +1,31 @@
-\chapter{Atomic unit cells and the four coherent channels}
+\chapter{Evaluating \texorpdfstring{$F_{\bm h}$}{Fh}: atoms and the four coherent channels}
 \label{chap:unit-cells}
 
-\section{Prepared field channels in one optical medium}
+This chapter evaluates the matrix element $F_{\bm h}$ of
+Eq.~\eqref{eq:Fh-definition} for the atomic part of the contrast.  The
+reference part, which exists only at $\bm h=\bm0$, is evaluated in
+Chapter~\ref{chap:specular}.  Both are contributions to the same
+$F_{\bm h}$; they are never separate matrix elements.
 
-Every finite optical medium contains a downward and an upward branch of both
-the incident and reciprocal exit electric fields.  Let
+\section{Where the four channels come from}
+
+Section~\ref{sec:green} showed that the reciprocal exit field entering
+Eq.~\eqref{eq:Fh-definition} is $u_-$, the solution of the homogeneous
+stratified problem selected by the boundary condition below the stack.  Inside
+prepared medium $m$ that solution has two branches, and so does the incident
+field:
+\begin{equation}
+  \bm E_0(z',-\bm k_f)
+  =A_{m,f}^{+}\ee^{-\ii k_{z,m,f}z'}+A_{m,f}^{-}\ee^{+\ii k_{z,m,f}z'},
+  \qquad
+  \bm E_0(z',\bm k_i)
+  =A_{m,i}^{+}\ee^{-\ii k_{z,m,i}z'}+A_{m,i}^{-}\ee^{+\ii k_{z,m,i}z'}.
+  \label{eq:two-branches}
+\end{equation}
+Their product in Eq.~\eqref{eq:Fh-definition} therefore contains four terms,
+$A_{m,i}^{\sigma_i}A_{m,f}^{\sigma_f}$.  The four channels are not an
+additional model: they are the two branches of each reference field, and
+nothing more needs to be assumed to justify them.  Let
 \begin{equation}
   \sigma_i,\sigma_f\in\{+1,-1\},
   \qquad
@@ -15,6 +36,9 @@ with the fixed channel order
   ++,\quad +-,\quad -+,\quad --.
   \label{eq:channel-order}
 \end{equation}
+
+\section{Channel wavevectors and coefficients}
+
 For medium $m$, channel $\nu$ has
 \begin{equation}
   \bm Q_{m}^{\nu}
@@ -24,19 +48,20 @@ For medium $m$, channel $\nu$ has
   =-\left(\sigma_i k_{z,m,i}+\sigma_f k_{z,m,f}\right),
   \label{eq:channel-qz}
 \end{equation}
-and
+with $\Qpar=\bm h$ by the Laue condition, Eq.~\eqref{eq:laue}, and
 \begin{equation}
   \left(Q_m^\nu\right)^2
-  =|\Qpar|^2+\left(Q_{z,m}^{\nu}\right)^2.
+  =|\bm h|^2+\left(Q_{z,m}^{\nu}\right)^2.
   \label{eq:channel-q2}
 \end{equation}
 Neither $Q_{z,m}^{\nu}$ nor $(Q_m^\nu)^2$ is generally real in an absorbing
-medium.
+medium.  Because Eq.~\eqref{eq:renaud-kz} makes $\operatorname{Re}k_{z,m}\le0$,
+Eq.~\eqref{eq:channel-qz} gives $Q_z>0$ for the $++$ channel, as it must.
 
-Let $A_{m,i}^{\sigma_i}$ and $A_{m,f}^{\sigma_f}$ be the local Renaud electric-
-field amplitudes, referenced by the field solver to $z_{m,i}^{\rm ref}$ and
-$z_{m,f}^{\rm ref}$.  The complete coefficient multiplying a Fourier factor
-$\exp(\ii\bm Q_m^\nu\cdot\bm r)$ is
+Let $A_{m,i}^{\sigma_i}$ and $A_{m,f}^{\sigma_f}$ be the local Renaud
+electric-field amplitudes of Eq.~\eqref{eq:two-branches}, referenced by the
+field solver to $z_{m,i}^{\rm ref}$ and $z_{m,f}^{\rm ref}$.  The complete
+coefficient multiplying a Fourier factor $\exp(\ii\bm Q_m^\nu\cdot\bm r)$ is
 \begin{align}
   \Cchan_{m,\nu}
   ={}&A_{m,i}^{\sigma_i}A_{m,f}^{\sigma_f}
@@ -71,6 +96,10 @@ polarization contractions are
       \right].
   \label{eq:polarization-contractions}
 \end{align}
+These are evaluated at the nominal $\bm k_i$ and $\bm k_f$; by
+Sec.~\ref{sec:why-not-farfield} that remains accurate to $\sim L/R$ even where
+a far-field treatment of the \emph{phase} would fail badly.
+
 The solver's upward internal tangential coefficient for $p$ polarization has
 the opposite sign from the public Renaud amplitude.  Thus
 \begin{equation}
@@ -89,9 +118,9 @@ flattening, every source \texttt{UnitCell} is split into the same ordered
 structural-layer views used to build the optical profile.  A record therefore
 contains one such layer cell, a crystal-model weight $w_u$, its coherent domain
 transforms $d$, and possibly signed domain occupancies $p_{ud}$.  A one-layer
-source cell is already a single record.  Let
-$A_u$ be the source cell's lateral area and $A_{\rm ref}$ the crystal-wide
-reference area.  The required area conversion is
+source cell is already a single record.  Let $A_u$ be the source cell's lateral
+area and $A_{\rm ref}$ the crystal-wide reference area of
+Eq.~\eqref{eq:lattice-expansion}.  The required area conversion is
 \begin{equation}
   s_u=\frac{A_{\rm ref}}{A_u}.
   \label{eq:area-scale}
@@ -127,7 +156,7 @@ Here $o_a$ is the atomic occupancy.  For the currently implemented in-plane
 and out-of-plane Debye--Waller parameters,
 \begin{equation}
   W_a(\bm Q_m^\nu)
-  =\frac{B_{a,\parallel}|\Qpar|^2
+  =\frac{B_{a,\parallel}|\bm h|^2
           +B_{a,\perp}(Q_{z,m}^\nu)^2}{16\pi^2}.
   \label{eq:debye-waller}
 \end{equation}
@@ -135,25 +164,40 @@ Equations~\eqref{eq:atomic-factor}, \eqref{eq:channel-q2}, and
 \eqref{eq:debye-waller} are evaluated at complex arguments without taking an
 absolute value or a real part.
 
-The complete atomic amplitude of record $u$ is
+\section{The atomic contribution to \texorpdfstring{$F_{\bm h}$}{Fh}}
+
+The atomic part of record $u$'s contribution to Eq.~\eqref{eq:Fh-definition} is
 \begin{equation}
   \boxed{
-  F_{\mathrm{atomic},u}
+  F_{\bm h,u}^{\rm at}
   =\sum_m\sum_{\nu\in\{++,+-,-+,--\}}
-   \mathcal A_{u,m}^{\nu}.
+   \mathcal A_{u,m}^{\nu},
   }
-  \label{eq:unit-cell-four-channel}
+  \label{eq:Fh-atomic}
 \end{equation}
-The four terms in Eq.~\eqref{eq:unit-cell-four-channel} are amplitudes and must
-be added before an intensity is formed.  The incorrect expression
+and for $\bm h\neq\bm 0$ this is the whole of it,
+\begin{equation}
+  F_{\bm h}=\sum_u F_{\bm h,u}^{\rm at},
+  \qquad \bm h\neq\bm 0,
+  \label{eq:Fh-nonspecular}
+\end{equation}
+because Eq.~\eqref{eq:coeff-nonspec} carries no reference term.  The specular
+coefficient $F_{\bm 0}$ carries one additional contribution and is completed in
+Chapter~\ref{chap:specular}.
+
+The four terms in Eq.~\eqref{eq:Fh-atomic} are amplitudes and must be added
+before an intensity is formed.  The incorrect expression
 $\sum_\nu|\mathcal A_{u,m}^{\nu}|^2$ discards the standing-wave interference
-between incident and exit branches.
+between incident and exit branches that Eq.~\eqref{eq:two-branches} makes
+explicit.
 
 \section{Useful limits}
 
-In a terminal substrate, physical boundary conditions give
+In a terminal substrate, the boundary condition that defines $u_-$ in
+Eq.~\eqref{eq:bc-minus} gives
 \begin{equation}
   A_{M,i}^{-}=A_{M,f}^{-}=0,
+  \label{eq:terminal-branches}
 \end{equation}
 so only the $++$ channel survives.  In the high-angle Born limit of a finite
 cell in vacuum, $A_i^+=A_f^+=1$ and all reflected branches vanish; the same
@@ -163,5 +207,5 @@ not reasons to omit channels in finite graded layers.
 If the cell is wholly contained in one medium, Eq.~\eqref{eq:atomic-channel}
 reduces to four ordinary structure-factor evaluations at the four complex
 values $Q_{z,m}^\nu$.  If it crosses a boundary, there is no single structure
-factor $F_u(h,k,l)$ that can be multiplied by one set of channel coefficients;
-the atom-medium partition in Eq.~\eqref{eq:atomic-channel} is essential.
+factor that can be multiplied by one set of channel coefficients; the
+atom-medium partition in Eq.~\eqref{eq:atomic-channel} is essential.
