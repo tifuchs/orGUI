@@ -6,7 +6,7 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from .. import CTRcalc, CTRdwba, CTRfilm, CTRuc
+from .. import CTRcalc, CTRdwba, CTRfilm, CTRplotutil, CTRuc
 from ..CTRfilm import PoissonProfile, SkellamProfile
 from ..CTRoptics import HC_KEV_ANGSTROM
 
@@ -593,6 +593,76 @@ def test_glancing_inversion_and_vlieg_round_trip_with_orientation():
         1.0, 0.0, prepared.alpha_i, prepared.alpha_f
     )
     np.testing.assert_allclose(direct.hkl[2], prepared.hkl[2], rtol=1e-13)
+
+
+@pytest.mark.parametrize("transform", [
+    np.diag([2.0, 1.0, 1.0]),
+    np.array([[1.0, 0.2, 0.0], [0.0, 1.5, 0.0], [0.0, 0.0, 1.0]]),
+])
+def test_ctr_angles_reference_transform_matches_dwba_forward_and_inverse(transform):
+    """Reference HKL maps to bulk before solving and back after measurement."""
+    cell = _one_atom_cell()
+    cell.refHKLTransform = transform
+    state = CTRcalc.SXRDCrystal(cell).dwba
+    state.set_ctr_geometry(alpha_i=0.05)
+    theta = 0.17
+    state.set_orientation(np.array([
+        [np.cos(theta), -np.sin(theta), 0.0],
+        [np.sin(theta), np.cos(theta), 0.0],
+        [0.0, 0.0, 1.0],
+    ]))
+    rods = CTRplotutil.CTRCollection([
+        CTRplotutil.CTR((1.0, 0.0), [0.7, 1.0, 1.2], [1.0] * 3),
+        CTRplotutil.CTR((0.0, 1.0), [0.8, 1.1], [1.0] * 2),
+    ])
+    calculator = state._vlieg_angles()
+    records = rods.calcAnglesZmode(
+        calculator, fixedangle=0.05, hkl_transform=cell.refHKLTransform,
+    )
+    for rod, angles in zip(rods, records):
+        columns = [angles[name] for name in angles.dtype.names]
+        reference_hkl = np.vstack((rod.harr, rod.karr, rod.l))
+        np.testing.assert_allclose(
+            np.vstack(calculator.anglesToHkl(*columns)),
+            transform @ reference_hkl, atol=2e-14,
+        )
+        measured = state.prepare_from_vlieg(*columns)
+        np.testing.assert_allclose(measured.hkl, reference_hkl, atol=2e-14)
+        direct = state.prepare(rod.harr, rod.karr, rod.l)
+        np.testing.assert_allclose(measured.vlieg_angles, direct.vlieg_angles)
+        np.testing.assert_allclose(
+            state.evaluate_prepared(measured).F_h,
+            state.evaluate_prepared(direct).F_h, rtol=1e-12,
+        )
+
+
+@pytest.mark.parametrize("chi, phi", [(0.1, 0.0), (0.0, 0.1), (0.1, -0.1)])
+def test_dwba_rejects_tilted_sample_circles_but_kinematic_angles_round_trip(chi, phi):
+    """Inner circles are valid kinematically but not DWBA glancing angles."""
+    state = CTRcalc.SXRDCrystal(_one_atom_cell()).dwba
+    rod = CTRplotutil.CTR((1.0, 0.0), [0.7, 1.0], [1.0, 1.0])
+    calculator = state._vlieg_angles()
+    angles = rod.calcAnglesZmode(calculator, fixedangle=0.05, chi=chi, phi=phi)
+    columns = [angles[name] for name in angles.dtype.names]
+    np.testing.assert_allclose(
+        np.vstack(calculator.anglesToHkl(*columns)),
+        np.vstack((rod.harr, rod.karr, rod.l)), atol=2e-14,
+    )
+    with pytest.raises(ValueError, match="requires chi=phi=0"):
+        state.prepare_from_vlieg(*columns)
+    with pytest.raises(ValueError, match="requires chi=phi=0"):
+        state.evaluate_from_vlieg(*columns)
+
+
+@pytest.mark.parametrize("transform", [
+    np.eye(2), np.zeros((3, 3)), np.full((3, 3), np.nan),
+])
+def test_ctr_angles_reject_invalid_reference_transform(transform):
+    """An invalid transform must fail at the reference/calculator boundary."""
+    state = CTRcalc.SXRDCrystal(_one_atom_cell()).dwba
+    rod = CTRplotutil.CTR((1.0, 0.0), [0.7], [1.0])
+    with pytest.raises(ValueError, match="hkl_transform"):
+        rod.calcAnglesZmode(state._vlieg_angles(), hkl_transform=transform)
 
 
 def test_orientation_validation_and_stale_preparation_rejection():

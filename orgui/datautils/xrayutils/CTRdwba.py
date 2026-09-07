@@ -1472,7 +1472,11 @@ class DWBAState:
         """Prepare from measured six-circle Vlieg angles.
 
         All six angles are radians and broadcast together. The configured
-        orientation converts them to reference-cell hkl.
+        orientation converts them to reference-cell hkl. Only zero chi and phi
+        (within 1e-12 rad of zero) are supported: alpha and gamma are used as
+        glancing angles relative to the configured surface normal. Nonzero
+        inner sample circles rotate that normal and require a frame conversion
+        not implemented by this entry point.
 
         :param alpha: Vlieg incidence circle in radians.
         :param delta: Vlieg detector delta circle in radians.
@@ -1480,6 +1484,7 @@ class DWBAState:
         :param omega: Vlieg sample omega circle in radians.
         :param chi: Vlieg sample chi circle in radians.
         :param phi: Vlieg sample phi circle in radians.
+        :raises ValueError: If chi or phi is nonzero or angles are invalid.
         :returns: Immutable measured-geometry preparation.
         :rtype: PreparedCTR
         """
@@ -1493,6 +1498,12 @@ class DWBAState:
             np.all(np.isfinite(array)) for array in arrays
         ):
             raise ValueError("Vlieg angles must be finite and nonempty.")
+        if any(np.any(np.abs(array) > 1e-12) for array in arrays[4:]):
+            raise ValueError(
+                "DWBA Vlieg geometry requires chi=phi=0 (within 1e-12 rad); "
+                "nonzero inner sample circles rotate the configured surface "
+                "normal and are not supported."
+            )
         shape = arrays[0].shape
         bulk_hkl = np.vstack(
             self._vlieg_angles().anglesToHkl(

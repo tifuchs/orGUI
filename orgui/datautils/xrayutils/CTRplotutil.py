@@ -332,13 +332,15 @@ class CTR:
         self.karr = np.full_like(self.l, k)
 
     def toNXdict(self):
+        """Export CTR data with reference HKL and six-circle angles in rad."""
         nxdict = {
             "@NX_class": "NXdata",
-            "sixc_angles": {"@NX_class": "NXpositioner", "@unit": "deg"},
+            "@orgui_ctr_schema": 2,
+            "sixc_angles": {"@NX_class": "NXpositioner", "@unit": "rad"},
             "hkl": {
                 "@NX_class": "NXcollection",
                 "h": self.harr,
-                "k": self.harr,
+                "k": self.karr,
                 "l": self.l,
                 "@unit": "r.l.u.",
             },
@@ -366,7 +368,32 @@ class CTR:
         return nxdict
 
     @classmethod
-    def fromNXdict(cls, nxdict):
+    def fromNXdict(cls, nxdict, *, angle_units=None):
+        """Load CTR data, storing six-circle angles internally in radians.
+
+        :param dict nxdict: Payload from :meth:`toNXdict` or an external source.
+        :param str angle_units:
+            Explicit input units, ``"rad"`` or ``"deg"``. By default, schema
+            2 and later use the declared ``sixc_angles/@unit``. Unversioned
+            payloads retain their numeric angles as radians: old orGUI writers
+            incorrectly labeled radians as degrees. Use ``"deg"`` explicitly
+            for genuine external degree-valued legacy payloads.
+        :raises ValueError: If angle units or angle-array shapes are invalid.
+
+        H and K are preserved as stored. Historical files with K erroneously
+        copied from H cannot be repaired without independent index information.
+        """
+        angle_group = nxdict.get("sixc_angles", {})
+        if angle_units is None:
+            angle_units = (
+                angle_group.get("@unit", "rad")
+                if int(nxdict.get("@orgui_ctr_schema", 0)) >= 2
+                else "rad"
+            )
+        if isinstance(angle_units, bytes):
+            angle_units = angle_units.decode("ascii")
+        if angle_units not in ("rad", "deg"):
+            raise ValueError('angle_units must be "rad" or "deg".')
         h = nxdict["hkl"]["h"]
         k = nxdict["hkl"]["k"]
         l = nxdict["hkl"]["l"]  # noqa: E741
@@ -383,18 +410,22 @@ class CTR:
             ctr.difference = nxdict["@difference"]
 
         for cnter in CTR.optional_counters:
-            if hasattr(nxdict["counters"], cnter):
+            if cnter in nxdict["counters"]:
                 setattr(ctr, cnter, nxdict["counters"][cnter])
 
         angles = []
         angles_names = []
-        for ang in nxdict["sixc_angles"]:
+        for ang in angle_group:
             if not ang.startswith("@"):
-                angles.append(nxdict["sixc_angles"][ang])
+                values = np.asarray(angle_group[ang], dtype=np.float64)
+                if values.shape != ctr.l.shape:
+                    raise ValueError(
+                        f"Vlieg angle {ang!r} must have the same shape as L."
+                    )
+                angles.append(np.deg2rad(values) if angle_units == "deg" else values)
                 angles_names.append(ang)
         if angles:
             dt = np.dtype([(ang, "f8") for ang in angles_names])
-            angles = np.vstack(angles).T
             angles = np.core.records.fromarrays(angles, dtype=dt)
             ctr.angles = angles
         return ctr
@@ -578,12 +609,14 @@ class CTR:
         fixed="in",
         chi=0.0,
         phi=0.0,
+        *,
+        hkl_transform=None,
         **keyargs,
     ):
         """Calculate and store Vlieg z-mode angles in radians.
 
         :param HKLVlieg.VliegAngles vliegangles:
-            Angle calculator configured for the CTR reference lattice.
+            Angle calculator configured for the target lattice.
         :param float fixedangle:
             Fixed incidence or exit angle in rad.
         :param str fixed:
@@ -592,6 +625,11 @@ class CTR:
             Fixed chi angle in rad.
         :param float phi:
             Fixed phi angle in rad.
+        :param hkl_transform:
+            Optional finite, nonsingular 3-by-3 matrix mapping CTR reference
+            HKL to the calculator's HKL (both in r.l.u.). The default leaves
+            HKL unchanged. For a bulk-lattice calculator, pass the crystal's
+            ``uc_bulk.refHKLTransform``.
         :returns:
             Structured records containing alpha, delta, gamma, omega, chi,
             and phi in rad.
@@ -601,6 +639,13 @@ class CTR:
         h = self.harr
         k = self.karr
         hkl = np.vstack((h, k, l))
+        if hkl_transform is not None:
+            transform = np.asarray(hkl_transform, dtype=np.float64)
+            if transform.shape != (3, 3) or not np.all(np.isfinite(transform)):
+                raise ValueError("hkl_transform must be a finite 3-by-3 matrix.")
+            if np.linalg.matrix_rank(transform) != 3:
+                raise ValueError("hkl_transform must be nonsingular.")
+            hkl = transform @ hkl
 
         pos = vliegangles.anglesZmode(
             hkl, fixedangle, fixed=fixed, chi=chi, phi=phi, **keyargs
@@ -830,6 +875,8 @@ class CTRCollection(list):
         fixed="in",
         chi=0.0,
         phi=0.0,
+        *,
+        hkl_transform=None,
         **keyargs,
     ):
         """Calculate and store Vlieg z-mode angles for every CTR.
@@ -837,7 +884,7 @@ class CTRCollection(list):
         All angle arguments and returned angle records are in rad.
 
         :param HKLVlieg.VliegAngles vliegangles:
-            Angle calculator configured for the CTR reference lattice.
+            Angle calculator configured for the target lattice.
         :param float fixedangle:
             Fixed incidence or exit angle in rad.
         :param str fixed:
@@ -846,6 +893,9 @@ class CTRCollection(list):
             Fixed chi angle in rad.
         :param float phi:
             Fixed phi angle in rad.
+        :param hkl_transform:
+            Optional reference-to-calculator HKL matrix, forwarded to each
+            :meth:`CTR.calcAnglesZmode`. The default leaves HKL unchanged.
         :returns:
             One structured angle-record array per CTR.
         :rtype: list[numpy.recarray]
@@ -857,6 +907,7 @@ class CTRCollection(list):
                 fixed=fixed,
                 chi=chi,
                 phi=phi,
+                hkl_transform=hkl_transform,
                 **keyargs,
             )
             for ctr in self
@@ -994,11 +1045,17 @@ class CTRCollection(list):
         return nxdict
 
     @classmethod
-    def fromNXdict(cls, nxdict):
+    def fromNXdict(cls, nxdict, *, angle_units=None):
+        """Load a collection, forwarding input angle units to every CTR.
+
+        :param str angle_units:
+            ``"rad"``, ``"deg"``, or ``None``; see :meth:`CTR.fromNXdict`
+            for schema-aware defaults and legacy radian compatibility.
+        """
         ctrs = []
         for dt in nxdict:
             if not dt.startswith("@"):
-                ctr = CTR.fromNXdict(nxdict[dt])
+                ctr = CTR.fromNXdict(nxdict[dt], angle_units=angle_units)
                 ctrs.append(ctr)
         name = nxdict["@name"]
 

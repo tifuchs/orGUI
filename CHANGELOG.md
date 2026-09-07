@@ -7,6 +7,18 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **Repaired CTR angle generation and NeXus persistence.**
+  ``CTR.calcAnglesZmode`` and its collection counterpart accept an explicit
+  ``hkl_transform`` from reference HKL to the calculator lattice, allowing
+  generated bulk-lattice angle records to round-trip through DWBA correctly.
+  DWBA measured Vlieg input now clearly rejects unsupported nonzero chi/phi
+  sample circles. NeXus export writes K independently from H and labels angle
+  records as radians; import preserves all six angle columns for any scan
+  length. New payloads carry schema provenance, and an ``angle_units`` override
+  supports genuine external degree data while unversioned historical orGUI
+  angles retain their numeric radian values. Previously corrupted K values
+  require independent source metadata to repair.
+
 - **Added a native four-channel Renaud DWBA state and result API for atomic
   bulk, UnitCell, Film, EpitaxyInterface, and PoissonSurface models.** Each
   ``SXRDCrystal`` now owns

@@ -12,6 +12,28 @@ in electrons.
    experimental scale factors must be migrated by the corresponding constant
    normalization factor. Intensities change by the square of that factor.
 
+CTR NeXus angle and index persistence
+----------------------------------------
+
+``CTR.toNXdict`` writes the independent H, K, and L arrays in reference-cell
+r.l.u. and the six-circle angle arrays in radians. New payloads carry
+``@orgui_ctr_schema=2`` and ``sixc_angles/@unit="rad"``. The loader preserves
+each angle column for any number of scan points.
+
+``CTR.fromNXdict(payload, angle_units=None)`` reads the declared angle unit
+from versioned payloads. For unversioned payloads, the default preserves
+numeric angles as radians, because historical orGUI writers incorrectly
+labeled their radian data as degrees. To load genuine external degree-valued
+data, use ``angle_units="deg"`` explicitly; ``angle_units="rad"`` also provides
+an explicit override. ``CTRCollection.fromNXdict`` forwards this option to
+every rod. Unit overrides take precedence over stored labels, and conversions
+apply only to the six-circle angles, not the structure-factor phase.
+
+Historical writers also copied H into the K array. The loader preserves the
+stored K values: there is no generally reliable way to reconstruct the
+original K without independent index information. Correct those files using
+trustworthy source metadata before scientific analysis.
+
 Unit-cell amplitudes
 --------------------
 

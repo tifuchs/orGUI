@@ -45,6 +45,33 @@ derives hkl using the configured orientation.  Their ``evaluate_...``
 counterparts prepare and evaluate in one call.  Inputs broadcast; scalar input
 produces scalar amplitude properties.
 
+The measured Vlieg entry points currently require ``chi=phi=0`` (within
+``1e-12 rad`` of zero). These inner sample circles rotate the surface normal,
+so nonzero values cannot be interpreted by simply using ``alpha`` and
+``gamma`` as glancing angles in the configured DWBA surface frame. They raise
+``ValueError``; general six-circle frame conversion is not implemented.
+Kinematic ``CTR.calcAnglesZmode`` calculations retain support for nonzero
+sample circles.
+
+When generating angle records with a calculator configured for the bulk cell,
+pass the reference-to-bulk mapping explicitly::
+
+   angles = ctr.calcAnglesZmode(
+       bulk_vlieg_angles,
+       fixedangle=np.deg2rad(0.2),
+       hkl_transform=crystal.uc_bulk.refHKLTransform,
+   )
+   prepared = crystal.dwba.prepare_from_vlieg(
+       *(angles[name] for name in ("alpha", "delta", "gamma", "omega", "chi", "phi"))
+   )
+
+The calculator and DWBA state must use the same bulk lattice, energy, and
+orientation. ``hkl_transform`` maps reference HKL columns into calculator HKL
+columns, both in r.l.u.; omitting it preserves the existing convention that
+the calculator already uses the CTR reference lattice. ``CTRCollection``
+forwards the same transform to each rod. The DWBA measured-angle path applies
+the inverse reference transform when recovering HKL.
+
 The optical solver uses the Renaud-signed normal wavevector
 
 .. math::
