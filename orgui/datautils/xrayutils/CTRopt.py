@@ -678,7 +678,7 @@ class CTROptAngleCorrection(CTROptimizer):
 
         counter = 0
         for cb in self.callbacks:
-            cb.set_errors(self.xtal, xerror[counter : counter + cb.n_pars])
+            cb.set_errors(xerror[counter : counter + cb.n_pars])
             counter += cb.n_pars
         xerror = xerror[counter:]
 
