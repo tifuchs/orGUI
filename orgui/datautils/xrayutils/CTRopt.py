@@ -464,18 +464,21 @@ class FitCallback:
 
         self.current_values = np.copy(self.inital)
 
-        up_bnds = np.asarray(bounds_low)
-        if up_bnds.size != self.n_pars:
-            raise ValueError(
-                "Number of upper bounds does not match number of initial parameters."
-            )
-        low_bnds = np.asarray(bounds_high)
+        low_bnds = np.asarray(bounds_low)
         if low_bnds.size != self.n_pars:
             raise ValueError(
                 "Number of lower bounds does not match number of initial parameters."
             )
+        high_bnds = np.asarray(bounds_high)
+        if high_bnds.size != self.n_pars:
+            raise ValueError(
+                "Number of upper bounds does not match number of initial parameters."
+            )
 
-        self.bounds = (low_bnds, up_bnds)
+        # (lower, upper), matching the optimizer's own bounds convention:
+        # prepareFit prepends bounds[0] to the lower and bounds[1] to the
+        # upper array.
+        self.bounds = (low_bnds, high_bnds)
 
         self.function = function
 

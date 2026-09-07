@@ -191,5 +191,37 @@ class TestCallbackErrors(unittest.TestCase):
         self.assertEqual(len(optimizer.xtal.error_calls), 1)
 
 
+class TestCallbackBounds(unittest.TestCase):
+    """Increment 1: the ``FitCallback`` bounds ordering repair."""
+
+    def test_callback_bounds_keep_the_lower_upper_order(self):
+        """Callback bounds must reach the optimizer as ``(lower, upper)``.
+
+        ``FitCallback.__init__`` used to store ``(bounds_high, bounds_low)``,
+        and ``prepareFit`` prepends ``bounds[0]`` to the lower array, so the
+        assembled problem had a lower bound above its upper bound and a solver
+        rejected it.
+        """
+        optimizer = CTRopt.CTROptAngleCorrection(FitCrystal(), _fixture_ctrs())
+        callback, _ = _register_callback(optimizer, "cb", 2)
+
+        np.testing.assert_allclose(callback.bounds[0], [0.1, 0.1])
+        np.testing.assert_allclose(callback.bounds[1], [5.0, 5.0])
+
+        optimizer.prepareFit()
+        lower, higher = optimizer.get_bounds()
+
+        np.testing.assert_allclose(lower[:2], [0.1, 0.1])
+        np.testing.assert_allclose(higher[:2], [5.0, 5.0])
+        self.assertTrue(np.all(lower <= higher))
+
+    def test_callback_bound_size_errors_name_the_failing_side(self):
+        """A wrong-size bound sequence must name the side that is wrong."""
+        with self.assertRaisesRegex(ValueError, "lower bounds"):
+            CTRopt.FitCallback(lambda xtal, x: None, [0.1, 0.2], [5.0], [1.0])
+        with self.assertRaisesRegex(ValueError, "upper bounds"):
+            CTRopt.FitCallback(lambda xtal, x: None, [0.1], [5.0, 6.0], [1.0])
+
+
 if __name__ == "__main__":
     unittest.main()
