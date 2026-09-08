@@ -1,10 +1,21 @@
-"""Regression coverage for CTR NeXus persistence and angle metadata."""
+"""Regression coverage for CTR persistence and measurement metadata."""
 
+import copy
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 from silx.io.dictdump import dicttonx, nxtodict
 
-from ..CTRplotutil import CTR, CTRCollection
+from ... import util as data_util
+from .. import CTRplotutil
+from ..CTRplotutil import (
+    CTR,
+    CTRCollection,
+    CTRScanGeometry,
+    MeasurementReduction,
+    PolarizationReduction,
+)
 
 
 _ANGLE_NAMES = ("alpha", "delta", "gamma", "omega", "chi", "phi")
@@ -101,3 +112,277 @@ def test_nexus_rejects_bad_units_and_mismatched_angle_lengths():
     payload["sixc_angles"]["alpha"] = [0.1]
     with pytest.raises(ValueError, match="same shape as L"):
         CTR.fromNXdict(payload)
+
+
+def _polarized_reduction(factor=(0.8, 0.9, 1.0)):
+    """Return structure-factor metadata with pointwise conventional P."""
+    return MeasurementReduction(
+        "structure_factor",
+        PolarizationReduction(0.7, "unanalysed", factor),
+    )
+
+
+def test_measurement_metadata_is_validated_immutable_and_value_comparable():
+    """Array metadata is copied, read-only, comparable, and unhashable."""
+    source = np.array([0.8, 0.9, 1.0])
+    polarization = PolarizationReduction(0.7, "unanalysed", source)
+    reduction = MeasurementReduction("structure_factor", polarization)
+    equivalent = _polarized_reduction()
+
+    source[0] = 99.0
+    assert reduction == equivalent
+    assert not reduction.polarization.polarization_factor.flags.writeable
+    assert reduction != MeasurementReduction(
+        "structure_factor", PolarizationReduction(0.6, "unanalysed", [0.8, 0.9, 1.0])
+    )
+    with pytest.raises(TypeError):
+        hash(polarization)
+    with pytest.raises(TypeError):
+        hash(reduction)
+
+    geometry = CTRScanGeometry("in", 0.05, mirrorx=True)
+    assert geometry == CTRScanGeometry("in", 0.05, mirrorx=True)
+    assert isinstance(hash(geometry), int)
+
+
+@pytest.mark.parametrize(
+    "factory, message",
+    [
+        (lambda: PolarizationReduction(-0.1, "s"), "s_fraction"),
+        (lambda: PolarizationReduction(True, "s"), "s_fraction"),
+        (lambda: PolarizationReduction(0.5, "circular"), "outgoing"),
+        (lambda: PolarizationReduction(0.5, "p", [1.0, 0.0]), "strictly positive"),
+        (lambda: MeasurementReduction("intensity"), "quantity"),
+        (lambda: MeasurementReduction("structure_factor", object()), "polarization"),
+        (lambda: CTRScanGeometry("in"), "angle"),
+        (lambda: CTRScanGeometry("out", 0.0), "angle"),
+        (lambda: CTRScanGeometry("out", True), "angle"),
+        (lambda: CTRScanGeometry("eq", 0.1), "None"),
+        (lambda: CTRScanGeometry("bad", None), "fixed"),
+    ],
+)
+def test_metadata_records_reject_invalid_values(factory, message):
+    """Invalid reduction and scan-rule records fail at construction."""
+    with pytest.raises((TypeError, ValueError), match=message):
+        factory()
+
+
+def test_ctr_metadata_properties_validate_shape_quantity_and_reset():
+    """CTR assignment applies shape and quantity checks and names the rod."""
+    rod = _rod(3)
+    assert rod.reduction == MeasurementReduction()
+    assert rod.scan_geometry is None
+    with pytest.raises(TypeError, match="<CTR.*reduction"):
+        rod.reduction = None
+    with pytest.raises(TypeError, match="<CTR.*scan_geometry"):
+        rod.scan_geometry = "fixed-in"
+    with pytest.raises(ValueError, match="<CTR.*same shape"):
+        rod.reduction = _polarized_reduction([0.8, 0.9])
+    with pytest.raises(ValueError, match="<CTR.*already be corrected"):
+        rod.reduction = MeasurementReduction(
+            "reflectivity", PolarizationReduction(1.0, "s", [1.0, 1.0, 1.0])
+        )
+
+    rod.reduction = _polarized_reduction()
+    rod.scan_geometry = CTRScanGeometry("out", 0.04)
+    rod.scan_geometry = None
+    rod.reduction = MeasurementReduction()
+    assert rod.scan_geometry is None
+    assert rod.reduction == MeasurementReduction()
+
+
+def test_nexus_round_trip_preserves_reduction_factor_and_scan_rule():
+    """Schema 2 stores conventional P and the scalar scan rule in radians."""
+    original = CTR(
+        (1.0, -2.0),
+        [0.1, 0.2, 0.3],
+        [1.0, 2.0, 3.0],
+        [0.1, 0.1, 0.1],
+        reduction=_polarized_reduction(),
+        scan_geometry=CTRScanGeometry("in", 0.03, mirrorx=True),
+    )
+    payload = original.toNXdict()
+    stored_factor = payload["measurement_reduction"]["polarization"][
+        "polarization_factor"
+    ]
+    np.testing.assert_array_equal(stored_factor, [0.8, 0.9, 1.0])
+
+    restored = CTR.fromNXdict(payload)
+    assert restored.reduction == original.reduction
+    assert restored.scan_geometry == original.scan_geometry
+
+
+def test_nexus_file_round_trip_preserves_measurement_metadata(tmp_path):
+    """Metadata survives the actual NeXus writer rather than only dictionaries."""
+    original = CTR(
+        (1.0, 0.0),
+        [0.1, 0.2, 0.3],
+        [1.0, 2.0, 3.0],
+        reduction=_polarized_reduction(),
+        scan_geometry=CTRScanGeometry("eq"),
+    )
+    path = str(tmp_path / "ctr_metadata.nxs")
+    dicttonx({"entry": CTRCollection([original], name="test").toNXdict()}, path)
+    restored = CTRCollection.fromNXdict(nxtodict(path)["entry"])[0]
+    assert restored.reduction == original.reduction
+    assert restored.scan_geometry == original.scan_geometry
+
+
+def test_existing_schema_2_without_fitting_metadata_uses_legacy_defaults():
+    """Early schema-2 payloads remain valid without the new metadata groups."""
+    payload = _rod(2).toNXdict()
+    del payload["measurement_reduction"]
+    restored = CTR.fromNXdict(payload)
+    assert restored.reduction == MeasurementReduction()
+    assert restored.scan_geometry is None
+
+
+def test_cut_and_deepcopy_preserve_aligned_metadata_without_aliasing():
+    """Selections slice factors and angle records with the measured points."""
+    original = _rod(3)
+    original.reduction = _polarized_reduction()
+    original.scan_geometry = CTRScanGeometry("in", 0.05)
+    copied = copy.deepcopy(original)
+    copied.cut(1, 3)
+
+    np.testing.assert_array_equal(copied.l, original.l[1:3])
+    np.testing.assert_array_equal(
+        copied.angles["gamma"], original.angles["gamma"][1:3]
+    )
+    np.testing.assert_array_equal(
+        copied.reduction.polarization.polarization_factor, [0.9, 1.0]
+    )
+    assert copied.scan_geometry == original.scan_geometry
+    assert copied.reduction.polarization.polarization_factor is not (
+        original.reduction.polarization.polarization_factor
+    )
+
+
+def test_plain_array_and_anarod_imports_accept_measurement_metadata():
+    """Plain import overrides are propagated and full-table P is split by rod."""
+    geometry = CTRScanGeometry("out", 0.04)
+    one_rod = np.array(
+        [[1.0, 0.0, 0.1, 2.0, 0.2], [1.0, 0.0, 0.2, 3.0, 0.3]]
+    )
+    reduction = MeasurementReduction(
+        "structure_factor", PolarizationReduction(1.0, "s", [0.8, 0.9])
+    )
+    restored = CTR.fromArray(
+        one_rod, reduction=reduction, scan_geometry=geometry
+    )
+    assert restored.reduction == reduction
+    assert restored.scan_geometry == geometry
+
+    two_rods = np.vstack((one_rod, one_rod + [1.0, 1.0, 0.0, 0.0, 0.0]))
+    table_reduction = MeasurementReduction(
+        "structure_factor",
+        PolarizationReduction(1.0, "s", [0.8, 0.9, 1.0, 1.1]),
+    )
+    collection = CTRCollection.fromANAROD(
+        two_rods, reduction=table_reduction, scan_geometry=geometry
+    )
+    assert all(rod.scan_geometry == geometry for rod in collection)
+    np.testing.assert_array_equal(
+        collection[0].reduction.polarization.polarization_factor, [0.8, 0.9]
+    )
+    np.testing.assert_array_equal(
+        collection[1].reduction.polarization.polarization_factor, [1.0, 1.1]
+    )
+
+
+def test_metadata_dependent_binning_and_reflectivity_consumers_reject(tmp_path):
+    """Legacy operations fail instead of inventing reduction semantics."""
+    legacy = CTR((1.0, 0.0), [0.1, 0.2], [1.0, 2.0], [0.1, 0.1])
+    assert legacy.generateAverage(nbins=1).reduction == MeasurementReduction()
+
+    metadata_rod = copy.deepcopy(legacy)
+    metadata_rod.reduction = MeasurementReduction(
+        "structure_factor", PolarizationReduction(1.0, "s")
+    )
+    with pytest.raises(NotImplementedError, match="measurement-reduction"):
+        metadata_rod.generateAverage(nbins=1)
+
+    reflectivity = CTR(
+        (1.0, 0.0),
+        [0.1, 0.2],
+        [1.0, 2.0],
+        [0.1, 0.1],
+        reduction=MeasurementReduction(
+            "reflectivity", PolarizationReduction(1.0, "s")
+        ),
+    )
+    with pytest.raises(ValueError, match="structure-factor data only"):
+        reflectivity.get_scale(None)
+    collection = CTRCollection([reflectivity])
+    with pytest.raises(ValueError, match="collection scaling"):
+        collection *= 2.0
+    with pytest.raises(ValueError, match="CTR differences"):
+        reflectivity.generateDifference(legacy)
+    with pytest.raises(ValueError, match="symmetry averaging"):
+        data_util.averageCTRs([[reflectivity]])
+    with pytest.raises(ValueError, match="ANAROD structure-factor export"):
+        collection.toANAROD(tmp_path / "reflectivity.dat")
+
+
+def test_reflectivity_rejects_phase_and_complex_structure_factor_operations():
+    """A reflectivity tag cannot imply a complex structure factor."""
+    reduction = MeasurementReduction(
+        "reflectivity", PolarizationReduction(1.0, "s")
+    )
+    with pytest.raises(ValueError, match="phase information"):
+        CTR((1.0, 0.0), [0.1], [0.5], phi=[0.0], reduction=reduction)
+
+    reflectivity = CTR((1.0, 0.0), [0.1], [0.5], reduction=reduction)
+    with pytest.raises(ValueError, match="phase assignment"):
+        reflectivity.setPhase([0.0])
+    with pytest.raises(ValueError, match="complex structure factors"):
+        reflectivity.getComplexSF()
+
+
+def test_angle_generation_rejects_a_non_round_tripping_solver():
+    """The shared helper validates every reconstructed reference coordinate."""
+
+    class NonRoundTrippingAngles:
+        @staticmethod
+        def anglesZmode(hkl, fixedangle, **kwargs):
+            return np.zeros((hkl.shape[1], 6))
+
+        @staticmethod
+        def anglesToHkl(alpha, delta, gamma, omega, chi, phi):
+            zeros = np.zeros_like(alpha)
+            return zeros, zeros, zeros
+
+    rod = CTR((1.0, 0.0), [0.1, 0.2], [1.0, 1.0])
+    with pytest.raises(ValueError, match="do not reproduce every requested"):
+        rod.calcAnglesZmode(NonRoundTrippingAngles(), fixedangle=0.05)
+
+
+def test_quantity_aware_plot_labels_and_axis_separation():
+    """Mixed F/R panels use distinct labels and never share their y axis."""
+    structure_factor = CTR((1.0, 0.0), [0.1], [1.0])
+    reflectivity = CTR(
+        (2.0, 0.0),
+        [0.1],
+        [1.0],
+        reduction=MeasurementReduction(
+            "reflectivity", PolarizationReduction(1.0, "s")
+        ),
+    )
+    figure = CTRplotutil.ctrfigure()
+    figure.addCollection(CTRCollection([structure_factor, reflectivity]))
+    figure.generateCTRplot(cols=2)
+    assert figure.axes[0].get_ylabel() == "Structure factor / arb. units"
+    assert figure.axes[1].get_ylabel() == "Reflectivity / dimensionless"
+    assert not figure.axes[0].get_shared_y_axes().joined(
+        figure.axes[0], figure.axes[1]
+    )
+    plt.close(figure)
+
+    structure_factor.setToDefaultID()
+    reflectivity.hk = structure_factor.hk
+    reflectivity.setToDefaultID()
+    figure = CTRplotutil.ctrfigure()
+    figure.addCTR(structure_factor)
+    with pytest.raises(ValueError, match="different quantities"):
+        figure.addCTR(reflectivity)
+    plt.close(figure)

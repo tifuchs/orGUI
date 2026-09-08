@@ -361,6 +361,15 @@ def averageCTRs(equivalent_list, cutoff=2, nosymmetry_factor=3, pclip=0.3):
 
     """
 
+    for equivalent in equivalent_list:
+        for ctr in equivalent:
+            reduction = getattr(ctr, "reduction", None)
+            if reduction is not None and reduction.quantity != "structure_factor":
+                raise ValueError(
+                    f"{ctr!r}: symmetry averaging supports structure-factor "
+                    "data only."
+                )
+
     # temporary fix!!
     from datautils.xrayutils import CTRplotutil
 

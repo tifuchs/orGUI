@@ -57,6 +57,15 @@ class CTROptimizer:
         self.calculated_CTRs = None
         self._resolution_input_ctrs = None
 
+    def _validate_kinematical_input(self):
+        """Reject stored quantities unsupported by the kinematical model."""
+        for ctr in self.CTRs:
+            if ctr.reduction.quantity != "structure_factor":
+                raise ValueError(
+                    f"{ctr!r}: kinematical CTR fitting supports "
+                    "structure-factor data only."
+                )
+
     def set_resolution(self, resolution, calculation=None):
         """Set the L-direction resolution model used for calculated CTRs.
 
@@ -241,6 +250,7 @@ class CTROptimizer:
         cached angle records and calculates the initial ``calculated_CTRs``
         cache before the optimizer begins evaluating trial parameters.
         """
+        self._validate_kinematical_input()
         self.startp, self.lower_bounds, self.higher_bounds = (
             self.xtal.getStartParamAndLimits()
         )
@@ -569,6 +579,7 @@ class CTROptAngleCorrection(CTROptimizer):
         ``calculated_CTRs`` cache. Its three native parameters prefix all
         callback, angle-correction, and crystal parameters.
         """
+        self._validate_kinematical_input()
         self.startp, self.lower_bounds, self.higher_bounds = (
             self.xtal.getStartParamAndLimits()
         )

@@ -534,6 +534,27 @@ class TestParameterNameLayout(unittest.TestCase):
         optimizer.statistics.assert_not_called()
 
 
+class TestStoredQuantityGuards(unittest.TestCase):
+    """Kinematical optimizers must not reinterpret reflectivity as F."""
+
+    def test_both_kinematical_optimizers_reject_reflectivity(self):
+        """Preparation names the unsupported reflectivity dataset."""
+        ctrs = _fixture_ctrs()
+        ctrs[1].reduction = CTRplotutil.MeasurementReduction(
+            "reflectivity", CTRplotutil.PolarizationReduction(1.0, "s")
+        )
+        for optimizer_type in (
+            CTRopt.CTROptimizer,
+            CTRopt.CTROptAngleCorrection,
+        ):
+            with self.subTest(optimizer_type=optimizer_type.__name__):
+                optimizer = optimizer_type(FitCrystal(), ctrs)
+                with self.assertRaisesRegex(
+                    ValueError, "<CTR.*kinematical CTR fitting"
+                ):
+                    optimizer.prepareFit()
+
+
 class TestCrystalParameterLayout(unittest.TestCase):
     """The optimizer's layout against the real ``SXRDCrystal`` parameter API.
 

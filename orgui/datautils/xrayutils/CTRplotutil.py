@@ -39,8 +39,290 @@ import math
 import json
 import warnings
 from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Literal
 from .CTRcalc import SXRDCrystal
 from .. import util
+
+
+@dataclass(frozen=True, eq=False)
+class PolarizationReduction:
+    """Describe polarization already represented by a CTR measurement.
+
+    :param float s_fraction:
+        Incoherent incident s-polarization fraction in the local Renaud basis.
+        One is pure s and zero is pure p.
+    :param str outgoing:
+        Analysed outgoing channel, ``"s"`` or ``"p"``, or ``"unanalysed"``.
+    :param polarization_factor:
+        Optional conventional pointwise intensity factor P. The array is
+        copied, converted to float, and stored read-only.
+    :type polarization_factor: array-like or None
+    :raises ValueError:
+        If the mixture, outgoing channel, or supplied factor is invalid.
+
+    Instances compare by value but are intentionally unhashable because the
+    pointwise factor is an array.
+    """
+
+    s_fraction: float
+    outgoing: Literal["s", "p", "unanalysed"]
+    polarization_factor: np.ndarray | None = None
+    __hash__ = None
+
+    def __post_init__(self):
+        if isinstance(self.s_fraction, bool | np.bool_):
+            raise ValueError("s_fraction must be a finite scalar in [0, 1].")
+        fraction = np.asarray(self.s_fraction)
+        if fraction.ndim != 0:
+            raise ValueError("s_fraction must be a finite scalar in [0, 1].")
+        fraction = float(fraction)
+        if not np.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
+            raise ValueError("s_fraction must be a finite scalar in [0, 1].")
+        if self.outgoing not in {"s", "p", "unanalysed"}:
+            raise ValueError('outgoing must be "s", "p", or "unanalysed".')
+        object.__setattr__(self, "s_fraction", fraction)
+
+        if self.polarization_factor is not None:
+            factor = np.array(
+                self.polarization_factor, dtype=np.float64, copy=True
+            )
+            if not np.all(np.isfinite(factor)) or np.any(factor <= 0.0):
+                raise ValueError(
+                    "polarization_factor must contain finite, strictly positive P."
+                )
+            factor.setflags(write=False)
+            object.__setattr__(self, "polarization_factor", factor)
+
+    def __eq__(self, other):
+        if not isinstance(other, PolarizationReduction):
+            return NotImplemented
+        if (
+            self.s_fraction != other.s_fraction
+            or self.outgoing != other.outgoing
+        ):
+            return False
+        if self.polarization_factor is None or other.polarization_factor is None:
+            return (
+                self.polarization_factor is None
+                and other.polarization_factor is None
+            )
+        return np.array_equal(
+            self.polarization_factor, other.polarization_factor
+        )
+
+
+@dataclass(frozen=True, eq=False)
+class MeasurementReduction:
+    """Describe the stored quantity and its polarization reduction.
+
+    :param str quantity:
+        ``"structure_factor"`` for stored F or ``"reflectivity"`` for
+        corrected field-intensity ratio R.
+    :param PolarizationReduction polarization:
+        Polarization provenance, or ``None`` when it is unknown.
+
+    Instances compare by value but are intentionally unhashable because their
+    polarization metadata may own an array.
+    """
+
+    quantity: Literal["structure_factor", "reflectivity"] = "structure_factor"
+    polarization: PolarizationReduction | None = None
+    __hash__ = None
+
+    def __post_init__(self):
+        if self.quantity not in {"structure_factor", "reflectivity"}:
+            raise ValueError(
+                'quantity must be "structure_factor" or "reflectivity".'
+            )
+        if self.polarization is not None and not isinstance(
+            self.polarization, PolarizationReduction
+        ):
+            raise TypeError(
+                "polarization must be a PolarizationReduction or None."
+            )
+
+    def __eq__(self, other):
+        if not isinstance(other, MeasurementReduction):
+            return NotImplemented
+        return (
+            self.quantity == other.quantity
+            and self.polarization == other.polarization
+        )
+
+
+@dataclass(frozen=True)
+class CTRScanGeometry:
+    """Record the Vlieg z-mode scan rule for one measured CTR.
+
+    :param str fixed:
+        ``"in"`` for fixed incidence, ``"out"`` for fixed exit, or ``"eq"``
+        for equal incident and exit angles.
+    :param float angle:
+        Fixed angle in rad for ``"in"`` and ``"out"``. Equal-angle scans
+        require ``None``.
+    :param bool mirrorx:
+        Select the negative-delta scattering branch.
+    """
+
+    fixed: Literal["in", "out", "eq"]
+    angle: float | None = None
+    mirrorx: bool = False
+
+    def __post_init__(self):
+        if self.fixed not in {"in", "out", "eq"}:
+            raise ValueError('fixed must be "in", "out", or "eq".')
+        if not isinstance(self.mirrorx, bool | np.bool_):
+            raise TypeError("mirrorx must be boolean.")
+        object.__setattr__(self, "mirrorx", bool(self.mirrorx))
+        if self.fixed == "eq":
+            if self.angle is not None:
+                raise ValueError('angle must be None when fixed="eq".')
+            return
+        if self.angle is None:
+            raise ValueError(
+                'angle must be a finite scalar in (0, pi/2] rad for "in"/"out".'
+            )
+        if isinstance(self.angle, bool | np.bool_):
+            raise ValueError(
+                'angle must be a finite scalar in (0, pi/2] rad for "in"/"out".'
+            )
+        angle = np.asarray(self.angle)
+        if angle.ndim != 0:
+            raise ValueError(
+                'angle must be a finite scalar in (0, pi/2] rad for "in"/"out".'
+            )
+        angle = float(angle)
+        if not np.isfinite(angle) or not 0.0 < angle <= np.pi / 2.0:
+            raise ValueError(
+                'angle must be a finite scalar in (0, pi/2] rad for "in"/"out".'
+            )
+        object.__setattr__(self, "angle", angle)
+
+
+_DEFAULT_REDUCTION = object()
+_ANGLE_DTYPE = np.dtype(
+    [
+        ("alpha", "f8"),
+        ("delta", "f8"),
+        ("gamma", "f8"),
+        ("omega", "f8"),
+        ("chi", "f8"),
+        ("phi", "f8"),
+    ]
+)
+_QUANTITY_YLABELS = {
+    "structure_factor": "Structure factor / arb. units",
+    "reflectivity": "Reflectivity / dimensionless",
+}
+
+
+def _nx_text(value):
+    """Return one NeXus scalar attribute as text."""
+    value = np.asarray(value)
+    if value.size != 1:
+        raise ValueError("Expected one scalar NeXus metadata value.")
+    value = value.reshape(-1)[0]
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def _nx_bool(value):
+    """Return one NeXus scalar attribute as bool."""
+    value = _nx_text(value).lower()
+    if value in {"true", "1"}:
+        return True
+    if value in {"false", "0"}:
+        return False
+    raise ValueError("NeXus mirrorx metadata must be boolean.")
+
+
+def _select_reduction(reduction, selection):
+    """Return reduction metadata after applying a point selection."""
+    polarization = reduction.polarization
+    if polarization is None or polarization.polarization_factor is None:
+        return reduction
+    selected = PolarizationReduction(
+        polarization.s_fraction,
+        polarization.outgoing,
+        polarization.polarization_factor[selection],
+    )
+    return MeasurementReduction(reduction.quantity, selected)
+
+
+def _reduction_for_import(reduction, selection):
+    """Select a full-table polarization factor for one imported rod."""
+    if reduction is _DEFAULT_REDUCTION:
+        return reduction
+    polarization = reduction.polarization
+    if polarization is None or polarization.polarization_factor is None:
+        return reduction
+    factor = polarization.polarization_factor
+    if factor.shape == np.asarray(selection).shape:
+        return _select_reduction(reduction, selection)
+    return reduction
+
+
+def _calculate_angles_zmode(
+    h,
+    k,
+    l_values,
+    vliegangles,
+    fixedangle,
+    fixed="in",
+    chi=0.0,
+    phi=0.0,
+    *,
+    hkl_transform=None,
+    **keyargs,
+):
+    """Return round-trip-validated Vlieg z-mode angle records in rad."""
+    h, k, l_values = np.broadcast_arrays(
+        np.asarray(h, dtype=np.float64),
+        np.asarray(k, dtype=np.float64),
+        np.asarray(l_values, dtype=np.float64),
+    )
+    reference_hkl = np.vstack((h.ravel(), k.ravel(), l_values.ravel()))
+    calculator_hkl = reference_hkl
+    if hkl_transform is not None:
+        transform = np.asarray(hkl_transform, dtype=np.float64)
+        if transform.shape != (3, 3) or not np.all(np.isfinite(transform)):
+            raise ValueError("hkl_transform must be a finite 3-by-3 matrix.")
+        if np.linalg.matrix_rank(transform) != 3:
+            raise ValueError("hkl_transform must be nonsingular.")
+        calculator_hkl = transform @ reference_hkl
+
+    positions = np.asarray(
+        vliegangles.anglesZmode(
+            calculator_hkl,
+            fixedangle,
+            fixed=fixed,
+            chi=chi,
+            phi=phi,
+            **keyargs,
+        ),
+        dtype=np.float64,
+    )
+    if positions.ndim == 1:
+        positions = positions.reshape(1, -1)
+    if positions.shape != (reference_hkl.shape[1], 6):
+        raise ValueError("Vlieg angle solver returned an unexpected array shape.")
+    records = np.core.records.fromarrays(positions.T, dtype=_ANGLE_DTYPE)
+    if hasattr(vliegangles, "anglesToHkl"):
+        reconstructed = np.vstack(
+            vliegangles.anglesToHkl(
+                *(records[name] for name in records.dtype.names)
+            )
+        )
+        if not np.allclose(
+            reconstructed, calculator_hkl, rtol=1e-7, atol=1e-8
+        ):
+            raise ValueError(
+                "Calculated Vlieg angles do not reproduce every requested H, K, "
+                "and L."
+            )
+    return records
 
 
 # don't init CTRFigure directly, use ctrfigure instead
@@ -50,16 +332,25 @@ class CTRFigure(mplfig.Figure):
         self.data = OrderedDict()
         self.xlabels = "L / r.l.u."
         self.ylabels = "Structure factor / arb. units"
+        self._ylabels_explicit = False
         self.xlim = None  # [0,5]
         self.ylim = None  # [3e1,2e3]
         self.wspace = 0
         self.hspace = 0.05
 
     def settings(self, **settings):
+        if "ylabels" in settings:
+            self._ylabels_explicit = True
         self.__dict__.update(settings)
 
     def addCTR(self, ctr, *plotargs, **keyargs):
         if ctr.ctr_id in self.data:
+            existing_quantity = self.data[ctr.ctr_id][0][0].reduction.quantity
+            if existing_quantity != ctr.reduction.quantity:
+                raise ValueError(
+                    "Datasets stored as different quantities cannot share one "
+                    "CTR plot axis without explicit conversion."
+                )
             self.data[ctr.ctr_id].append([ctr, plotargs, keyargs])
         else:
             self.data[ctr.ctr_id] = [[ctr, plotargs, keyargs]]
@@ -82,6 +373,7 @@ class CTRFigure(mplfig.Figure):
         else:
             data = self.data
         offset = 0
+        panel_quantities = {}
         for i, ctrkey in enumerate(data):
             i += offset
             while i in keyargs.get("skip_panel", []):
@@ -91,6 +383,7 @@ class CTRFigure(mplfig.Figure):
                 self.axes_ctr_hk.append(i)
             ax = self.axes[i]
             ctrname, ctrid = ctrkey
+            panel_quantities[i] = self.data[ctrkey][0][0].reduction.quantity
             self.axes_ctr_id.append(ctrkey)
             self.axes_ctr_hk.append(ctrname)
 
@@ -199,6 +492,10 @@ class CTRFigure(mplfig.Figure):
             elif self.xlim is not None:
                 ax.set_ylim(self.ylim)
 
+        mixed_quantities = len(set(panel_quantities.values())) > 1
+        if mixed_quantities:
+            self.to_sharey[:] = False
+
         if np.any(self.to_sharey):
             shareyaxes = np.array(self.axes)[self.to_sharey]
             for axy in shareyaxes:
@@ -216,7 +513,15 @@ class CTRFigure(mplfig.Figure):
         axes = np.reshape(self.axes, (rows, cols))
         [a.tick_params(axis="x", labelbottom=False) for a in axes[:-1, :].flat]
         [a.tick_params(axis="y", labelleft=False) for a in axes[:, 1:].flat]
-        if isinstance(self.xlabels, list):
+        if not self._ylabels_explicit and mixed_quantities:
+            for index, quantity in panel_quantities.items():
+                self.axes[index].set_ylabel(_QUANTITY_YLABELS[quantity])
+                self.axes[index].tick_params(axis="y", labelleft=True)
+            if isinstance(self.xlabels, list):
+                [a.set_xlabel(xlbl) for xlbl, a in zip(self.xlabels, axes[-1, :])]
+            else:
+                [a.set_xlabel(self.xlabels) for a in axes[-1, :]]
+        elif isinstance(self.xlabels, list):
             [a.set_ylabel(ylbl) for ylbl, a in zip(self.ylabels, axes[:, 0])]
             [a.set_xlabel(xlbl) for xlbl, a in zip(self.xlabels, axes[-1, :])]
         elif keyargs.get("sharexyLabels", False):
@@ -235,6 +540,9 @@ class CTRFigure(mplfig.Figure):
                 axes[-1, 0].set_xlabel(self.xlabels)
                 xy_lablel = "xy"
         else:
+            if not self._ylabels_explicit and panel_quantities:
+                quantity = next(iter(panel_quantities.values()))
+                self.ylabels = _QUANTITY_YLABELS[quantity]
             [a.set_ylabel(self.ylabels) for a in axes[:, 0]]
             [a.set_xlabel(self.xlabels) for a in axes[-1, :]]
 
@@ -309,7 +617,32 @@ class CTR:
 
     optional_counters = ["bgI", "ctrI", "croi_pix", "bgroi_pix", "weight"]
 
-    def __init__(self, hk, l=None, sfI=None, err=None, phi=None, **keyargs):  # noqa: E741
+    def __init__(  # noqa: E741
+        self,
+        hk,
+        l=None,  # noqa: E741
+        sfI=None,
+        err=None,
+        phi=None,
+        *,
+        reduction=_DEFAULT_REDUCTION,
+        scan_geometry=None,
+        **keyargs,
+    ):
+        """Create one measured CTR dataset.
+
+        :param sequence hk: In-plane reference indices in r.l.u.
+        :param array-like l: Pointwise reference L in r.l.u.
+        :param array-like sfI: Stored F or R values, selected by ``reduction``.
+        :param array-like err: Optional uncertainties in the stored quantity.
+        :param array-like phi: Optional structure-factor phases in deg.
+        :param MeasurementReduction reduction:
+            Measurement reduction metadata. Omission supplies the legacy
+            structure-factor default with unknown polarization provenance.
+            Explicit ``None`` is invalid.
+        :param CTRScanGeometry scan_geometry:
+            Optional z-mode scan rule; fixed angles are in rad.
+        """
         self.hk = tuple(hk)
         h, k = hk
         self.l = np.ascontiguousarray(l)
@@ -330,9 +663,78 @@ class CTR:
             self.name = "default"
         self.harr = np.full_like(self.l, h)
         self.karr = np.full_like(self.l, k)
+        if reduction is _DEFAULT_REDUCTION:
+            reduction = MeasurementReduction()
+        self.reduction = reduction
+        self.scan_geometry = scan_geometry
+
+    @property
+    def reduction(self):
+        """Measurement reduction describing the values stored in ``sfI``."""
+        return self._reduction
+
+    @reduction.setter
+    def reduction(self, reduction):
+        if reduction is None or not isinstance(reduction, MeasurementReduction):
+            raise TypeError(
+                f"{self!r}: reduction must be a MeasurementReduction; "
+                "use MeasurementReduction() to reset it."
+            )
+        polarization = reduction.polarization
+        if reduction.quantity == "reflectivity" and self.phi is not None:
+            raise ValueError(
+                f"{self!r}: reflectivity data cannot carry structure-factor "
+                "phase information."
+            )
+        if polarization is not None:
+            factor = polarization.polarization_factor
+            if factor is not None and factor.shape != self.l.shape:
+                raise ValueError(
+                    f"{self!r}: polarization_factor must have the same shape "
+                    "as the CTR data."
+                )
+            if reduction.quantity == "reflectivity" and factor is not None:
+                raise ValueError(
+                    f"{self!r}: reflectivity data cannot carry a "
+                    "polarization_factor; stored R must already be corrected."
+                )
+        self._reduction = reduction
+
+    @property
+    def scan_geometry(self):
+        """Optional z-mode scan rule for this measured CTR."""
+        return self._scan_geometry
+
+    @scan_geometry.setter
+    def scan_geometry(self, geometry):
+        if geometry is not None and not isinstance(geometry, CTRScanGeometry):
+            raise TypeError(
+                f"{self!r}: scan_geometry must be a CTRScanGeometry or None."
+            )
+        self._scan_geometry = geometry
 
     def toNXdict(self):
         """Export CTR data with reference HKL and six-circle angles in rad."""
+        reduction_group = {
+            "@NX_class": "NXcollection",
+            "@quantity": self.reduction.quantity,
+        }
+        if self.reduction.polarization is not None:
+            polarization = self.reduction.polarization
+            polarization_group = {
+                "@NX_class": "NXcollection",
+                "@s_fraction": polarization.s_fraction,
+                "@outgoing": polarization.outgoing,
+            }
+            if polarization.polarization_factor is not None:
+                polarization_group["polarization_factor"] = (
+                    polarization.polarization_factor
+                )
+                polarization_group["@polarization_factor_unit"] = (
+                    "dimensionless"
+                )
+            reduction_group["polarization"] = polarization_group
+
         nxdict = {
             "@NX_class": "NXdata",
             "@orgui_ctr_schema": 2,
@@ -350,7 +752,18 @@ class CTR:
             "@title": repr(self),
             "@name": self.name,
             "@difference": self.difference,
+            "measurement_reduction": reduction_group,
         }
+        if self.scan_geometry is not None:
+            geometry_group = {
+                "@NX_class": "NXcollection",
+                "@fixed": self.scan_geometry.fixed,
+                "@mirrorx": self.scan_geometry.mirrorx,
+            }
+            if self.scan_geometry.angle is not None:
+                geometry_group["@angle"] = self.scan_geometry.angle
+                geometry_group["@angle_unit"] = "rad"
+            nxdict["scan_geometry"] = geometry_group
         for cnter in CTR.optional_counters:
             if hasattr(self, cnter):
                 nxdict["counters"][cnter] = getattr(self, cnter)
@@ -402,7 +815,59 @@ class CTR:
         phi = nxdict["counters"].get("phase", None)
         name = nxdict.get("@name", "default")
 
-        ctr = cls((h[0], k[0]), l, sfI, err, phi, name=name)
+        reduction_group = nxdict.get("measurement_reduction")
+        if reduction_group is None:
+            reduction = MeasurementReduction()
+        else:
+            quantity = _nx_text(
+                reduction_group.get("@quantity", "structure_factor")
+            )
+            polarization_group = reduction_group.get("polarization")
+            if polarization_group is None:
+                polarization = None
+            else:
+                polarization = PolarizationReduction(
+                    float(
+                        np.asarray(
+                            polarization_group["@s_fraction"]
+                        ).reshape(-1)[0]
+                    ),
+                    _nx_text(polarization_group["@outgoing"]),
+                    polarization_group.get("polarization_factor"),
+                )
+            reduction = MeasurementReduction(quantity, polarization)
+
+        geometry_group = nxdict.get("scan_geometry")
+        if geometry_group is None:
+            scan_geometry = None
+        else:
+            fixed = _nx_text(geometry_group["@fixed"])
+            angle = geometry_group.get("@angle")
+            if angle is not None:
+                angle = float(np.asarray(angle).reshape(-1)[0])
+                units = _nx_text(geometry_group.get("@angle_unit", "rad"))
+                if units == "deg":
+                    angle = float(np.deg2rad(angle))
+                elif units != "rad":
+                    raise ValueError(
+                        'scan_geometry angle units must be "rad" or "deg".'
+                    )
+            scan_geometry = CTRScanGeometry(
+                fixed=fixed,
+                angle=angle,
+                mirrorx=_nx_bool(geometry_group.get("@mirrorx", False)),
+            )
+
+        ctr = cls(
+            (h[0], k[0]),
+            l,
+            sfI,
+            err,
+            phi,
+            name=name,
+            reduction=reduction,
+            scan_geometry=scan_geometry,
+        )
         ctr.harr = h
         ctr.karr = k
 
@@ -436,6 +901,29 @@ class CTR:
         else:
             return self.name
 
+    def _select_points(self, selection):
+        """Apply one point selection to every aligned CTR field."""
+        old_size = self.l.size
+        selected_reduction = _select_reduction(self.reduction, selection)
+        for attribute in (
+            "l",
+            "harr",
+            "karr",
+            "sfI",
+            "err",
+            "phi",
+            "angles",
+            "bgI",
+            "ctrI",
+            "croi_pix",
+            "bgroi_pix",
+        ):
+            value = getattr(self, attribute, None)
+            if isinstance(value, np.ndarray) and value.ndim > 0:
+                if value.shape[0] == old_size:
+                    setattr(self, attribute, value[selection])
+        self.reduction = selected_reduction
+
     def convertToF(self, excludeInvalid=True):
         self.sfI = np.sqrt(self.sfI)
         if excludeInvalid:
@@ -444,20 +932,16 @@ class CTR:
             mask = np.ones_like(self.sfI, dtype=np.bool_)
 
         if self.isWithError:
-            self.err = 0.5 * (self.err / self.sfI)[mask]
+            self.err = 0.5 * (self.err / self.sfI)
         if hasattr(self, "bgI"):
-            self.bgI = np.sqrt(self.bgI)[mask]
+            self.bgI = np.sqrt(self.bgI)
         if hasattr(self, "ctrI"):
-            self.ctrI = np.sqrt(self.ctrI)[mask]
-        self.sfI = self.sfI[mask]
-        self.l = self.l[mask]
-        self.harr = self.harr[mask]
-        self.karr = self.karr[mask]
-        if self.isWithPhase:
-            self.phi = self.phi[mask]
+            self.ctrI = np.sqrt(self.ctrI)
+        self._select_points(mask)
 
     # in degrees
     def setPhase(self, phi):
+        self._require_structure_factor("structure-factor phase assignment")
         self.phi = phi
 
     def setWithError(self, err):
@@ -477,6 +961,7 @@ class CTR:
         return self.withErr
 
     def getComplexSF(self):
+        self._require_structure_factor("complex structure factors")
         if not self.isWithPhase:
             raise Exception(f"{repr(self)}:\nNo phase informaion available.")
         return self.sfI * np.exp(1j * np.deg2rad(self.phi))
@@ -485,10 +970,20 @@ class CTR:
     def ctr_id(self):
         return tuple(np.around(self.hk, 2)), self.ctrtype
 
+    def _require_structure_factor(self, operation):
+        """Reject this CTR when an operation assumes structure factors."""
+        if self.reduction.quantity != "structure_factor":
+            raise ValueError(
+                f"{self!r}: {operation} supports structure-factor data only; "
+                "reflectivity requires an explicit supported workflow."
+            )
+
     def setToDefaultID(self):
         self.ctrtype = 0
 
     def generateDifference(self, other):
+        self._require_structure_factor("CTR differences")
+        other._require_structure_factor("CTR differences")
         otherinter = interp.interp1d(other.l, other.sfI)
         self.sfI -= otherinter(self.l)
         self.difference = True
@@ -533,18 +1028,7 @@ class CTR:
 
         else:
             mask = slice(lower, upper)
-        self.l = self.l[mask]
-        self.harr = self.harr[mask]
-        self.karr = self.karr[mask]
-        self.sfI = self.sfI[mask]
-        if self.isWithError:
-            self.err = self.err[mask]
-        if self.isWithPhase:
-            self.phi = self.phi[mask]
-        if hasattr(self, "bgI"):
-            self.bgI = self.bgI[mask]
-        if hasattr(self, "ctrI"):
-            self.ctrI = self.ctrI[mask]
+        self._select_points(mask)
 
     def cutToL(self, lowerL, upperL, invert=False):
         """Restricts the CTR to the selected lowerL and upperL.
@@ -574,21 +1058,10 @@ class CTR:
             lower = np.nanargmin(np.abs(self.l - fr))
             upper = np.nanargmin(np.abs(self.l - to))
             mask[lower:upper] = 1.0
-        self.l = self.l[mask]
-        self.harr = self.harr[mask]
-        self.karr = self.karr[mask]
-        self.sfI = self.sfI[mask]
-
-        if self.isWithError:
-            self.err = self.err[mask]
-        if self.isWithPhase:
-            self.phi = self.phi[mask]
-        if hasattr(self, "bgI"):
-            self.bgI = self.bgI[mask]
-        if hasattr(self, "ctrI"):
-            self.ctrI = self.ctrI[mask]
+        self._select_points(mask)
 
     def get_scale(self, xtal, omitErrors=False, lognorm=False):
+        self._require_structure_factor("kinematical crystal scaling")
         if not hasattr(self, "err") or omitErrors:
             err = None
         else:
@@ -600,6 +1073,7 @@ class CTR:
             return util.get_scale_chi2(F_cryst, self.sfI, err)
 
     def scaleToXtal(self, xtal, omitErrors=False, lognorm=False):
+        self._require_structure_factor("kinematical crystal scaling")
         self.__imul__(self.get_scale(xtal, omitErrors, lognorm))
 
     def calcAnglesZmode(
@@ -635,32 +1109,21 @@ class CTR:
             and phi in rad.
         :rtype: numpy.recarray
         """
-        l = self.l  # noqa: E741
-        h = self.harr
-        k = self.karr
-        hkl = np.vstack((h, k, l))
-        if hkl_transform is not None:
-            transform = np.asarray(hkl_transform, dtype=np.float64)
-            if transform.shape != (3, 3) or not np.all(np.isfinite(transform)):
-                raise ValueError("hkl_transform must be a finite 3-by-3 matrix.")
-            if np.linalg.matrix_rank(transform) != 3:
-                raise ValueError("hkl_transform must be nonsingular.")
-            hkl = transform @ hkl
-
-        pos = vliegangles.anglesZmode(
-            hkl, fixedangle, fixed=fixed, chi=chi, phi=phi, **keyargs
-        )
-        dt = np.dtype(
-            [
-                ("alpha", "f8"),
-                ("delta", "f8"),
-                ("gamma", "f8"),
-                ("omega", "f8"),
-                ("chi", "f8"),
-                ("phi", "f8"),
-            ]
-        )
-        self.angles = np.core.records.fromarrays(pos.T, dtype=dt)
+        try:
+            self.angles = _calculate_angles_zmode(
+                self.harr,
+                self.karr,
+                self.l,
+                vliegangles,
+                fixedangle,
+                fixed=fixed,
+                chi=chi,
+                phi=phi,
+                hkl_transform=hkl_transform,
+                **keyargs,
+            )
+        except (TypeError, ValueError) as error:
+            raise type(error)(f"{self!r}: {error}") from error
         return self.angles
 
     def toArray(self, mode=None):
@@ -684,13 +1147,23 @@ class CTR:
 
     # returns a list of CTRs!!!
     @staticmethod
-    def fromANAROD(filenameOrArray, RODexport=False):
+    def fromANAROD(
+        filenameOrArray,
+        RODexport=False,
+        *,
+        reduction=_DEFAULT_REDUCTION,
+        scan_geometry=None,
+    ):
         warnings.warn(
             "CTR.fromANAROD is deprecated, use CTRCollection.fromANAROD instead!",
             DeprecationWarning,
         )
         if not isinstance(filenameOrArray, np.ndarray):
-            filenameOrArray = np.loadtxt(filenameOrArray, skiprows=1)
+            filenameOrArray = np.atleast_2d(
+                np.loadtxt(filenameOrArray, skiprows=1)
+            )
+        else:
+            filenameOrArray = np.atleast_2d(filenameOrArray)
         rods = np.unique(filenameOrArray[:, :2], axis=0)
         CTRs = []
         for hk in rods:
@@ -700,18 +1173,41 @@ class CTR:
             rod = filenameOrArray[rodmask]
             l = rod[:, 2]  # noqa: E741
             sfI = rod[:, 3]
+            rod_reduction = _reduction_for_import(reduction, rodmask)
             if RODexport:
-                ctr = CTR(tuple(hk), l, sfI)
+                ctr = CTR(
+                    tuple(hk),
+                    l,
+                    sfI,
+                    reduction=rod_reduction,
+                    scan_geometry=scan_geometry,
+                )
                 ctr.setPhase(rod[:, 4])
                 CTRs.append(ctr)
             else:
                 err = rod[:, 4] if rod.shape[1] > 4 else None
-                CTRs.append(CTR(tuple(hk), l, sfI, err))
+                CTRs.append(
+                    CTR(
+                        tuple(hk),
+                        l,
+                        sfI,
+                        err,
+                        reduction=rod_reduction,
+                        scan_geometry=scan_geometry,
+                    )
+                )
 
         return CTRCollection(CTRs)
 
     @classmethod
-    def fromArray(cls, array, RODexport=False):
+    def fromArray(
+        cls,
+        array,
+        RODexport=False,
+        *,
+        reduction=_DEFAULT_REDUCTION,
+        scan_geometry=None,
+    ):
         h = array[:, 0][0]
         k = array[:, 1][0]
         l = array[:, 2]  # noqa: E741
@@ -722,7 +1218,15 @@ class CTR:
         else:
             err = array[:, 4] if array.shape[1] > 4 else None
             phase = None
-        return cls([h, k], l, sfI, err, phase)
+        return cls(
+            [h, k],
+            l,
+            sfI,
+            err,
+            phase,
+            reduction=reduction,
+            scan_geometry=scan_geometry,
+        )
 
     def millerIdentifier(self):
         h, k = self.hk
@@ -745,6 +1249,15 @@ class CTR:
         provide either step_size or nbins
 
         """  # noqa: E501
+        if (
+            self.reduction != MeasurementReduction()
+            or self.scan_geometry is not None
+            or hasattr(self, "angles")
+        ):
+            raise NotImplementedError(
+                f"{self!r}: averaging CTR geometry or measurement-reduction "
+                "metadata is not supported."
+            )
         overlap = kwargs.get("overlap", 0.25)
 
         lmax = np.amax(self.l)
@@ -850,6 +1363,11 @@ class CTRCollection(list):
         for rod in self:
             rod.setToDefaultID()
 
+    def _require_structure_factors(self, operation):
+        """Reject collections containing reflectivity for legacy operations."""
+        for rod in self:
+            rod._require_structure_factor(operation)
+
     def deleteRod(self, key):
         if isinstance(key, tuple):
             for rod in self:
@@ -930,8 +1448,10 @@ class CTRCollection(list):
         return coll
 
     def generateDifferenceCollection(self, other, sortby="repr"):
+        self._require_structure_factors("CTR differences")
         coll = CTRCollection()
         if isinstance(other, CTRCollection):
+            other._require_structure_factors("CTR differences")
             for rod in self:
                 if sortby == "repr":
                     try:
@@ -996,6 +1516,7 @@ class CTRCollection(list):
             return CTRs
 
     def toANAROD(self, filename, mode=-3):
+        self._require_structure_factors("ANAROD structure-factor export")
         if self.__getitem__(0).isWithError:
             header = "H  K  L  F_HKL  errorF  mode"
         else:
@@ -1007,11 +1528,16 @@ class CTRCollection(list):
 
     @staticmethod
     def fromANAROD(filenameOrArray, RODexport=False, **kwargs):
+        reduction = kwargs.pop("reduction", _DEFAULT_REDUCTION)
+        scan_geometry = kwargs.pop("scan_geometry", None)
         if not isinstance(filenameOrArray, np.ndarray):
             name = kwargs.get("name", os.path.basename(filenameOrArray))
-            filenameOrArray = np.loadtxt(filenameOrArray, skiprows=1)
+            filenameOrArray = np.atleast_2d(
+                np.loadtxt(filenameOrArray, skiprows=1)
+            )
         else:
             name = kwargs.get("name", "Array_CTR_import")
+            filenameOrArray = np.atleast_2d(filenameOrArray)
         rods = np.unique(filenameOrArray[:, :2], axis=0)
         CTRs = []
         for hk in rods:
@@ -1021,13 +1547,29 @@ class CTRCollection(list):
             rod = filenameOrArray[rodmask]
             l = rod[:, 2]  # noqa: E741
             sfI = rod[:, 3]
+            rod_reduction = _reduction_for_import(reduction, rodmask)
             if RODexport:
-                ctr = CTR(tuple(hk), l, sfI)
+                ctr = CTR(
+                    tuple(hk),
+                    l,
+                    sfI,
+                    reduction=rod_reduction,
+                    scan_geometry=scan_geometry,
+                )
                 ctr.setPhase(rod[:, 4])
                 CTRs.append(ctr)
             else:
                 err = rod[:, 4] if rod.shape[1] > 4 else None
-                CTRs.append(CTR(tuple(hk), l, sfI, err))
+                CTRs.append(
+                    CTR(
+                        tuple(hk),
+                        l,
+                        sfI,
+                        err,
+                        reduction=rod_reduction,
+                        scan_geometry=scan_geometry,
+                    )
+                )
 
         return CTRCollection(CTRs, name=name)
 
@@ -1085,6 +1627,7 @@ class CTRCollection(list):
         return np.concatenate(err)
 
     def get_scale(self, xtal, omitErrors=False, lognorm=False):
+        self._require_structure_factors("kinematical crystal scaling")
         hkl, F = self.get_flat()
         F_cryst = np.abs(xtal.F(*hkl))
         if omitErrors:
@@ -1097,6 +1640,7 @@ class CTRCollection(list):
             return util.get_scale_chi2(F_cryst, F, err)
 
     def scaleToXtal(self, xtal, individual=True, omitErrors=False, lognorm=False):
+        self._require_structure_factors("kinematical crystal scaling")
         if individual:
             for ctr in self:
                 ctr.scaleToXtal(xtal, lognorm, omitErrors)
@@ -1104,6 +1648,7 @@ class CTRCollection(list):
             self.__imul__(self.get_scale(xtal, omitErrors, lognorm))
 
     def __imul__(self, valOrArray):
+        self._require_structure_factors("collection scaling")
         for rod in self:
             rod *= valOrArray
         return self

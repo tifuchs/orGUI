@@ -36,7 +36,7 @@ import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from numpy.polynomial.legendre import leggauss
 
-from .CTRplotutil import CTR, CTRCollection
+from .CTRplotutil import CTR, CTRCollection, MeasurementReduction
 
 
 @dataclass(frozen=True)
@@ -248,7 +248,7 @@ def _validate_widths(widths, shape):
     return widths
 
 
-def _new_collection(ctrs, amplitudes):
+def _new_collection(ctrs, amplitudes, *, preserve_measurement_metadata=False):
     result = CTRCollection(name=ctrs.name)
     result.plotsett = copy.deepcopy(ctrs.plotsett)
     result.plotkeyargs = copy.deepcopy(ctrs.plotkeyargs)
@@ -260,6 +260,16 @@ def _new_collection(ctrs, amplitudes):
             err=None,
             phi=None,
             name=source.name,
+            reduction=(
+                copy.deepcopy(source.reduction)
+                if preserve_measurement_metadata
+                else MeasurementReduction()
+            ),
+            scan_geometry=(
+                copy.deepcopy(source.scan_geometry)
+                if preserve_measurement_metadata
+                else None
+            ),
         )
         target.harr = np.copy(source.harr)
         target.karr = np.copy(source.karr)
@@ -290,6 +300,7 @@ def fast_convolve(ctrs, resolution):
         raise TypeError("ctrs must be a CTRCollection")
     if not isinstance(resolution, ResolutionFunction):
         raise TypeError("resolution must be a ResolutionFunction")
+    ctrs._require_structure_factors("structure-factor resolution convolution")
 
     convolved = []
     for ctr in ctrs:
@@ -333,7 +344,9 @@ def fast_convolve(ctrs, resolution):
         convolved_rod[order] = np.sqrt(np.maximum(convolved_sorted, 0.0))
         convolved.append(convolved_rod)
 
-    return _new_collection(ctrs, convolved)
+    return _new_collection(
+        ctrs, convolved, preserve_measurement_metadata=True
+    )
 
 
 def sample_structure_factor(ctrs, crystal, resolution, quadrature_order=25):

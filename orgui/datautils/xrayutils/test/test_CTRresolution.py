@@ -162,6 +162,47 @@ class TestFastConvolution(unittest.TestCase):
         np.testing.assert_array_equal(ctr.err, np.ones(3))
         np.testing.assert_array_equal(ctr.phi, [10.0, 20.0, 30.0])
 
+    def test_fast_convolution_preserves_supported_measurement_metadata(self):
+        reduction = CTRplotutil.MeasurementReduction(
+            "structure_factor",
+            CTRplotutil.PolarizationReduction(1.0, "s", [0.8, 0.9]),
+        )
+        geometry = CTRplotutil.CTRScanGeometry("in", 0.04)
+        ctr = CTRplotutil.CTR(
+            (1.0, 0.0),
+            [0.1, 0.2],
+            [1.0, 2.0],
+            reduction=reduction,
+            scan_geometry=geometry,
+        )
+
+        result = CTRresolution.fast_convolve(
+            CTRplotutil.CTRCollection([ctr]),
+            CTRresolution.GaussianResolution(0.0),
+        )[0]
+
+        self.assertEqual(result.reduction, reduction)
+        self.assertEqual(result.scan_geometry, geometry)
+        self.assertIsNot(
+            result.reduction.polarization.polarization_factor,
+            reduction.polarization.polarization_factor,
+        )
+
+    def test_fast_convolution_rejects_reflectivity(self):
+        ctr = CTRplotutil.CTR(
+            (0.0, 0.0),
+            [0.1],
+            [0.5],
+            reduction=CTRplotutil.MeasurementReduction(
+                "reflectivity", CTRplotutil.PolarizationReduction(1.0, "s")
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "resolution convolution"):
+            CTRresolution.fast_convolve(
+                CTRplotutil.CTRCollection([ctr]),
+                CTRresolution.BoxResolution(0.1),
+            )
+
     def test_gamma_dependent_fast_convolution_requires_angles(self):
         ctr = CTRplotutil.CTR((0.0, 0.0), [0.0, 1.0], [1.0, 2.0])
         with self.assertRaisesRegex(ValueError, "calcAnglesZmode"):
