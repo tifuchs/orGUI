@@ -1,9 +1,10 @@
 """Regression tests for the CTR fitting optimizers.
 
-Increments 1--4 of the CTR optimizer rework cover the callback error path,
+Increments 1--5 of the CTR optimizer rework cover the callback error path,
 parameter-name layout, value-preserving optimizer class split, and legacy
-objective characterization. The fixtures here are shared with later increments
-of ``doc/design/dwba_ctr_fitting_implementation_plan.md``.
+objective characterization plus calculation adapters. The fixtures here are
+shared with later increments of
+``doc/design/dwba_ctr_fitting_implementation_plan.md``.
 """
 
 import unittest
@@ -802,6 +803,92 @@ class TestLegacyOptimizerCharacterization(unittest.TestCase):
             DeprecationWarning, "evaluateStatistics is deprecated"
         ):
             optimizer.evaluateStatistics(optimizer.get_parameters())
+
+
+class TestLegacyCalculationAdapters(unittest.TestCase):
+    """Increment 5: share inputs while legacy public outputs still differ."""
+
+    def test_shared_inputs_apply_the_angle_hook_once(self):
+        """One record owns each model, observation, and uncertainty array."""
+        ctrs = _unit_model_ctrs((((1.0, 0.0), [1.0, 2.0]),))
+        ctrs[0].angles = _angles([0.0, 0.0])
+        ctrs[0].angles["omega"] = [-1.0, 1.0]
+        optimizer = CTRopt.CTROptAngleCorrection(_ConstantFitCrystal(), ctrs)
+        optimizer.useAnglecorr = True
+        optimizer.prepareFit(start=[0.3, 0.4])
+
+        (calculation,) = optimizer._calculation_inputs()
+        correction = optimizer.get_anglecorrection(
+            optimizer.CTRs[0].angles["omega"]
+        )
+
+        np.testing.assert_allclose(calculation.prediction, [1.0, 1.0])
+        np.testing.assert_allclose(calculation.angle_correction, correction)
+        np.testing.assert_allclose(
+            calculation.observation, np.array([1.0, 2.0]) * correction
+        )
+        np.testing.assert_allclose(calculation.uncertainty, correction)
+
+    def test_adapters_preserve_incompatible_legacy_predictions(self):
+        """Individual flattened and shared residual scales stay distinct."""
+        ctrs = _unit_model_ctrs(
+            (
+                ((1.0, 0.0), [1.0, 2.0]),
+                ((2.0, 0.0), [1.0, 4.0]),
+            )
+        )
+        optimizer = CTRopt.CTROptAngleCorrection(_ConstantFitCrystal(), ctrs)
+        optimizer.scaleindividual = False
+        optimizer.prepareFit()
+        parameters = optimizer.get_parameters()
+
+        # The inherited adapter keeps its per-rod m/a values until increment 6.
+        np.testing.assert_allclose(
+            optimizer.flat_Fcalc(parameters),
+            [5.0 / 3.0, 5.0 / 3.0, 17.0 / 5.0, 17.0 / 5.0],
+        )
+
+        # The subclass adapter keeps one shared m/a value until increment 6.
+        calculations = optimizer._legacy_angle_calculations(
+            corrected_scale_errors=False
+        )
+        np.testing.assert_allclose(
+            np.concatenate(
+                [
+                    calculation.values.prediction / calculation.scale
+                    for calculation in calculations
+                ]
+            ),
+            [2.75, 2.75, 2.75, 2.75],
+        )
+
+    def test_apply_corrections_consumes_the_shared_input_records(self):
+        """The temporary adapter preserves individual correction export."""
+        optimizer = _legacy_characterization_optimizer(
+            CTRopt.CTROptAngleCorrection,
+            scaleindividual=True,
+            use_angle_correction=True,
+        )
+        calculations = optimizer._calculation_inputs()
+        expected_values = []
+        expected_errors = []
+        for calculation in calculations:
+            scale = optimizer.scaling(
+                calculation.prediction,
+                calculation.observation,
+                calculation.uncertainty,
+            )
+            expected_values.append(calculation.observation * scale)
+            expected_errors.append(calculation.uncertainty * scale)
+
+        optimizer.applyCorrections()
+
+        for ctr, values, errors in zip(
+            optimizer.CTRs, expected_values, expected_errors
+        ):
+            np.testing.assert_allclose(ctr.sfI, values)
+            np.testing.assert_allclose(ctr.err, errors)
+        self.assertEqual(optimizer.amp, 0.0)
 
 
 class TestOptimizerClassSplit(unittest.TestCase):

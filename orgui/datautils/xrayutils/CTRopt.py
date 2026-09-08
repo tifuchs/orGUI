@@ -28,9 +28,13 @@ __version__ = "1.3.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
-import numpy as np
 import copy
 import warnings
+from collections.abc import Callable
+from dataclasses import dataclass
+
+import numpy as np
+from scipy import stats
 
 # from functools import partial
 from .. import util
@@ -38,9 +42,33 @@ from .. import util
 from .CTRcalc import SXRDCrystal
 from . import CTRresolution
 
-from scipy import stats
+@dataclass(frozen=True)
+class _CTRCalculation:
+    """Unscaled values for one measured CTR in its legacy representation."""
 
-from collections.abc import Callable
+    ctr: object
+    prediction: np.ndarray
+    observation: np.ndarray
+    uncertainty: np.ndarray
+    angle_correction: object
+
+
+@dataclass(frozen=True)
+class _LegacyScaledCalculation:
+    """Temporary observation-scaled view used to preserve legacy outputs."""
+
+    values: _CTRCalculation
+    scale: float
+
+    @property
+    def scaled_observation(self):
+        """Return the legacy scale multiplied by the observation."""
+        return self.values.observation * self.scale
+
+    @property
+    def residual(self):
+        """Return the legacy observation-scaled residual."""
+        return self.scaled_observation - self.values.prediction
 
 
 class CTROptimizer:
@@ -272,6 +300,50 @@ class CTROptimizer:
             self._update_resolution_cache()
         return self.calculated_CTRs[index].sfI
 
+    def _angle_correction(self, ctr):
+        """Return the multiplicative legacy correction for one measured CTR."""
+        return 1.0
+
+    def _calculation_inputs(self, apply_angle_correction=True):
+        """Return shared model, observation, and uncertainty values per CTR.
+
+        ``apply_angle_correction=False`` is a temporary legacy adapter for
+        inherited methods whose historical output ignored the subclass angle
+        correction. It is private migration state and is removed when the
+        common public result contract lands.
+        """
+        calculations = []
+        for index, ctr in enumerate(self.CTRs):
+            if apply_angle_correction:
+                angle_correction = self._angle_correction(ctr)
+            else:
+                angle_correction = 1.0
+            calculations.append(
+                _CTRCalculation(
+                    ctr=ctr,
+                    prediction=self._calculated_amplitude(ctr, index),
+                    observation=ctr.sfI * angle_correction,
+                    uncertainty=ctr.err * angle_correction,
+                    angle_correction=angle_correction,
+                )
+            )
+        return tuple(calculations)
+
+    def _legacy_individual_calculations(self):
+        """Return legacy per-CTR scales without applying angle correction."""
+        calculations = self._calculation_inputs(apply_angle_correction=False)
+        return tuple(
+            _LegacyScaledCalculation(
+                values,
+                self.scaling(
+                    values.prediction,
+                    values.observation,
+                    values.uncertainty,
+                ),
+            )
+            for values in calculations
+        )
+
     def _model_parameters(self):
         """Return the crystal-owned tail of the fit parameter vector."""
         return self.xtal.getInitialParameters()
@@ -391,24 +463,23 @@ class CTROptimizer:
         if x is not None:
             self.set_parameters(x)
         residues = []
-        for i, ctr in enumerate(self.CTRs):
-            F_theo = self._calculated_amplitude(ctr, i)
-            scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
+        for calculation in self._legacy_individual_calculations():
+            ctr = calculation.values.ctr
             residues.append(
-                (ctr.invrelerrsqrd_weight / scale**2)
-                * ((ctr.sfI * scale - F_theo) ** 2)
+                (ctr.invrelerrsqrd_weight / calculation.scale**2)
+                * calculation.residual**2
             )
         return np.concatenate(residues)
 
     def residues(self, x=None):
         if x is not None:
             self.set_parameters(x)
-        residues = []
-        for i, ctr in enumerate(self.CTRs):
-            F_theo = self._calculated_amplitude(ctr, i)
-            scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
-            residues.append(ctr.sfI * scale - F_theo)
-        return np.concatenate(residues)
+        return np.concatenate(
+            [
+                calculation.residual
+                for calculation in self._legacy_individual_calculations()
+            ]
+        )
 
     def flat_data(self, specular=True):
         dat = []
@@ -428,23 +499,21 @@ class CTROptimizer:
     def flat_Fcalc(self, x=None):
         if x is not None:
             self.set_parameters(x)
-        F = []
-        for i, ctr in enumerate(self.CTRs):
-            F_theo = self._calculated_amplitude(ctr, i)
-            scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
-            F.append(F_theo / scale)
-        return np.concatenate(F)
+        return np.concatenate(
+            [
+                calculation.values.prediction / calculation.scale
+                for calculation in self._legacy_individual_calculations()
+            ]
+        )
 
     def Rfactor(self, x=None):
         if x is not None:
             self.set_parameters(x)
         residues = []
         Fobs = []
-        for i, ctr in enumerate(self.CTRs):
-            F_theo = self._calculated_amplitude(ctr, i)
-            scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
-            residues.append(np.abs(ctr.sfI * scale - F_theo))
-            Fobs.append(np.abs(ctr.sfI * scale))
+        for calculation in self._legacy_individual_calculations():
+            residues.append(np.abs(calculation.residual))
+            Fobs.append(np.abs(calculation.scaled_observation))
         residues = np.sum(np.concatenate(residues))
         Fobs = np.sum(np.concatenate(Fobs))
         return residues / Fobs
@@ -453,11 +522,14 @@ class CTROptimizer:
         if x is not None:
             self.set_parameters(x)
         residues = []
-        for i, ctr in enumerate(self.CTRs):
-            F_theo = self._calculated_amplitude(ctr, i)
-            scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
+        for calculation in self._legacy_individual_calculations():
+            ctr = calculation.values.ctr
             residues.append(
-                np.sqrt(ctr.weight) * ((ctr.sfI * scale - F_theo) / (ctr.err * scale))
+                np.sqrt(ctr.weight)
+                * (
+                    calculation.residual
+                    / (calculation.values.uncertainty * calculation.scale)
+                )
             )
         return np.concatenate(residues)
 
@@ -757,25 +829,75 @@ class CTROptAngleCorrection(CTROptimizer):
         """Return the angle optimizer's legacy residual weight."""
         return np.sqrt(ctr.weight) / ctr.err
 
+    def _angle_correction(self, ctr):
+        """Return the legacy empirical correction for one measured CTR."""
+        if hasattr(ctr, "angles"):
+            return self.get_anglecorrection(ctr.angles["omega"])
+        return 1.0
+
+    def _legacy_angle_calculations(self, corrected_scale_errors):
+        """Return temporary angle-aware results with legacy scale grouping.
+
+        :param bool corrected_scale_errors:
+            Use angle-corrected uncertainties to estimate a shared scale.
+            ``False`` preserves the separate legacy residual/likelihood path,
+            which estimated that scale from the original uncertainties.
+        """
+        values = self._calculation_inputs()
+        scales = [None] * len(values)
+        shared_indices = []
+        for index, calculation in enumerate(values):
+            if self.scaleindividual or calculation.ctr.hk == (0, 0):
+                scales[index] = self.scaling(
+                    calculation.prediction,
+                    calculation.observation,
+                    calculation.uncertainty,
+                )
+            else:
+                shared_indices.append(index)
+
+        if not self.scaleindividual:
+            shared = [values[index] for index in shared_indices]
+            if corrected_scale_errors:
+                scale_errors = [calculation.uncertainty for calculation in shared]
+            else:
+                scale_errors = [calculation.ctr.err for calculation in shared]
+            shared_scale = self.scaling(
+                np.concatenate(
+                    [calculation.prediction for calculation in shared]
+                ),
+                np.concatenate(
+                    [calculation.observation for calculation in shared]
+                ),
+                np.concatenate(scale_errors),
+            )
+            for index in shared_indices:
+                scales[index] = shared_scale
+
+        return tuple(
+            _LegacyScaledCalculation(calculation, scale)
+            for calculation, scale in zip(values, scales)
+        )
+
     def applyCorrections(self):
         F_obs = []
         F_t = []
         F_err = []
         if self.useAnglecorr:
-            for i, ctr in enumerate(self.CTRs):
-                F_theo = self._calculated_amplitude(ctr, i)
-                if hasattr(ctr, "angles"):
-                    anglecorr = self.get_anglecorrection(ctr.angles["omega"])
-                else:
-                    anglecorr = 1.0
-                ctr *= anglecorr
+            for calculation in self._calculation_inputs():
+                ctr = calculation.ctr
+                ctr *= calculation.angle_correction
                 if self.scaleindividual or ctr.hk == (0, 0):
-                    scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
+                    scale = self.scaling(
+                        calculation.prediction,
+                        calculation.observation,
+                        calculation.uncertainty,
+                    )
                     ctr *= scale
                 else:
-                    F_obs.append(ctr.sfI)
-                    F_t.append(F_theo)
-                    F_err.append(ctr.err)
+                    F_obs.append(calculation.observation)
+                    F_t.append(calculation.prediction)
+                    F_err.append(calculation.uncertainty)
             if not self.scaleindividual:
                 scale = self.scaling(
                     np.concatenate(F_t), np.concatenate(F_obs), np.concatenate(F_err)
@@ -809,35 +931,14 @@ class CTROptAngleCorrection(CTROptimizer):
 
     def residues(self, x):
         self.set_parameters(x)
-        residues = []
-        F_obs = []
-        F_t = []
-        F_err = []
-        for i, ctr in enumerate(self.CTRs):
-            F_theo = self._calculated_amplitude(ctr, i)
-            if hasattr(ctr, "angles"):
-                anglecorr = self.get_anglecorrection(ctr.angles["omega"])
-            else:
-                anglecorr = 1.0
-            F_obs_corr = ctr.sfI * anglecorr
-            F_err_corr = ctr.err * anglecorr
-            if self.scaleindividual or ctr.hk == (0, 0):
-                scale = self.scaling(F_theo, F_obs_corr, F_err_corr)  # scale CTR
-                residues.append(F_obs_corr * scale - F_theo)
-            else:
-                F_obs.append(F_obs_corr)
-                F_t.append(F_theo)
-                F_err.append(F_err_corr)
-        if self.scaleindividual:
-            return np.concatenate(residues)
-        else:
-            scale = self.scaling(
-                np.concatenate(F_t), np.concatenate(F_obs), np.concatenate(F_err)
-            )
-            for i, ctr in enumerate(filter(lambda x: x.hk != (0, 0), self.CTRs)):
-                residues.append(F_obs[i] * scale - F_t[i])
-            return np.concatenate(residues)
-        return np.concatenate(residues)
+        return np.concatenate(
+            [
+                calculation.residual
+                for calculation in self._legacy_angle_calculations(
+                    corrected_scale_errors=True
+                )
+            ]
+        )
 
     def Rfactor(self, x):
         self.set_parameters(x)
@@ -845,14 +946,11 @@ class CTROptAngleCorrection(CTROptimizer):
         F_obs = []
         F_t = []
         F_err = []
-        for i, ctr in enumerate(self.CTRs):
-            F_theo = self._calculated_amplitude(ctr, i)
-            if hasattr(ctr, "angles"):
-                anglecorr = self.get_anglecorrection(ctr.angles["omega"])
-            else:
-                anglecorr = 1.0
-            F_obs_corr = ctr.sfI * anglecorr
-            F_err_corr = ctr.err * anglecorr
+        for calculation in self._calculation_inputs():
+            ctr = calculation.ctr
+            F_theo = calculation.prediction
+            F_obs_corr = calculation.observation
+            F_err_corr = calculation.uncertainty
             if self.scaleindividual or ctr.hk == (0, 0):
                 scale = self.scaling(F_theo, F_obs_corr, F_err_corr)  # scale CTR
                 residues.append(F_obs_corr * scale - F_theo)
@@ -880,78 +978,37 @@ class CTROptAngleCorrection(CTROptimizer):
 
     def weighted_residues(self, x):
         self.set_parameters(x)
-        residues = []
-        F_obs = []
-        F_t = []
-        F_err = []
-        for i, ctr in enumerate(self.CTRs):
-            F_theo = self._calculated_amplitude(ctr, i)
-            if hasattr(ctr, "angles"):
-                anglecorr = self.get_anglecorrection(ctr.angles["omega"])
-            else:
-                anglecorr = 1.0
-            F_obs_corr = ctr.sfI * anglecorr
-            F_err_corr = ctr.err * anglecorr
-            if self.scaleindividual or ctr.hk == (0, 0):
-                scale = self.scaling(F_theo, F_obs_corr, F_err_corr)  # scale CTR
-                residues.append(
-                    (ctr.weight / (F_err_corr * scale)) * (F_obs_corr * scale - F_theo)
+        return np.concatenate(
+            [
+                (
+                    calculation.values.ctr.weight
+                    / (calculation.values.uncertainty * calculation.scale)
                 )
-            else:
-                F_obs.append(F_obs_corr)
-                F_t.append(F_theo)
-                F_err.append(F_err_corr)
-        if self.scaleindividual:
-            return np.concatenate(residues)
-        else:
-            _, err = self.flat_data(False)
-            scale = self.scaling(
-                np.concatenate(F_t), np.concatenate(F_obs), np.asarray(err)
-            )
-            for i, ctr in enumerate(filter(lambda x: x.hk != (0, 0), self.CTRs)):
-                residues.append(
-                    (ctr.weight / (scale * F_err[i])) * (F_obs[i] * scale - F_t[i])
+                * calculation.residual
+                for calculation in self._legacy_angle_calculations(
+                    corrected_scale_errors=False
                 )
-            return np.concatenate(residues)
+            ]
+        )
 
     def weighted_residues_errors(self, x):
         self.set_parameters(x)
-        residues = []
-        F_obs = []
-        F_t = []
-        F_err = []
-        scaled_errors = []
-        for i, ctr in enumerate(self.CTRs):
-            F_theo = self._calculated_amplitude(ctr, i)
-            if hasattr(ctr, "angles"):
-                anglecorr = self.get_anglecorrection(ctr.angles["omega"])
-            else:
-                anglecorr = 1.0
-            F_obs_corr = ctr.sfI * anglecorr
-            F_err_corr = ctr.err * anglecorr
-            if self.scaleindividual or ctr.hk == (0, 0):
-                scale = self.scaling(F_theo, F_obs_corr, F_err_corr)  # scale CTR
-                residues.append(
-                    (ctr.weight / (F_err_corr * scale)) * (F_obs_corr * scale - F_theo)
-                )
-                scaled_errors.append(F_err_corr * scale)
-            else:
-                F_obs.append(F_obs_corr)
-                F_t.append(F_theo)
-                F_err.append(F_err_corr)
-        if self.scaleindividual:
-            return np.concatenate(residues), np.concatenate(scaled_errors)
-        else:
-            _, err = self.flat_data(False)
-            scale = self.scaling(
-                np.concatenate(F_t), np.concatenate(F_obs), np.asarray(err)
+        calculations = self._legacy_angle_calculations(
+            corrected_scale_errors=False
+        )
+        residues = [
+            (
+                calculation.values.ctr.weight
+                / (calculation.values.uncertainty * calculation.scale)
             )
-            for i, ctr in enumerate(filter(lambda x: x.hk != (0, 0), self.CTRs)):
-                residues.append(
-                    (ctr.weight / (scale * F_err[i])) * (F_obs[i] * scale - F_t[i])
-                )
-                scaled_errors.append(F_err[i] * scale)
-            return np.concatenate(residues), np.concatenate(scaled_errors)
+            * calculation.residual
+            for calculation in calculations
+        ]
+        scaled_errors = [
+            calculation.values.uncertainty * calculation.scale
+            for calculation in calculations
+        ]
+        return np.concatenate(residues), np.concatenate(scaled_errors)
 
     def statistics(self, x=None):
         if x is None:
