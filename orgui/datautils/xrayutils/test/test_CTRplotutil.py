@@ -122,6 +122,109 @@ def _polarized_reduction(factor=(0.8, 0.9, 1.0)):
     )
 
 
+def test_convert_to_f_retains_signed_values_and_transforms_interval_errors():
+    """Signed conversion is reversible and finite through an interval crossing."""
+    intensity = np.array([-9.0, 0.0, 1.0, 9.0])
+    rod = CTR(
+        (1.0, 0.0),
+        [0.1, 0.2, 0.3, 0.4],
+        intensity,
+        [1.0, 4.0, 2.0, 1.0],
+        reduction=_polarized_reduction([0.7, 0.8, 0.9, 1.0]),
+        scan_geometry=CTRScanGeometry("in", 0.04),
+    )
+    rod.bgI = np.array([-4.0, 0.0, 9.0, 16.0])
+    rod.ctrI = np.array([-1.0, 1.0, 4.0, 25.0])
+
+    rod.convertToF()
+
+    np.testing.assert_array_equal(rod.sfI, [-3.0, 0.0, 1.0, 3.0])
+    np.testing.assert_allclose(rod.sfI * np.abs(rod.sfI), intensity)
+    np.testing.assert_allclose(
+        rod.err,
+        [
+            (np.sqrt(10.0) - np.sqrt(8.0)) / 2.0,
+            2.0,
+            (np.sqrt(3.0) + 1.0) / 2.0,
+            (np.sqrt(10.0) - np.sqrt(8.0)) / 2.0,
+        ],
+    )
+    np.testing.assert_array_equal(rod.bgI, [-2.0, 0.0, 3.0, 4.0])
+    np.testing.assert_array_equal(rod.ctrI, [-1.0, 1.0, 2.0, 5.0])
+    assert rod.reduction == _polarized_reduction([0.7, 0.8, 0.9, 1.0])
+    assert rod.scan_geometry == CTRScanGeometry("in", 0.04)
+
+
+def test_convert_to_f_uses_stable_high_signal_uncertainty():
+    """Strong-signal propagation must not subtract nearly equal roots."""
+    maximum = np.finfo(np.float64).max
+    intensity = np.array([-maximum, maximum])
+    sigma = np.array([1e300, 1e300])
+    rod = CTR((1.0, 0.0), [0.1, 0.2], intensity, sigma)
+
+    rod.convertToF()
+
+    expected_linear = sigma / (2.0 * np.sqrt(np.abs(intensity)))
+    np.testing.assert_allclose(rod.err, expected_linear, rtol=1e-15)
+    assert rod.err[0] == rod.err[1]
+    assert np.all(rod.err > 0.0)
+
+
+def test_convert_to_f_excludes_only_nonfinite_points_and_keeps_alignment():
+    """Default filtering retains negative/zero data and selects all metadata."""
+    reduction = _polarized_reduction([0.7, 0.8, 0.9, 1.0])
+    rod = CTR(
+        (1.0, 0.0),
+        [0.1, 0.2, 0.3, 0.4],
+        [-4.0, np.nan, 0.0, np.inf],
+        reduction=reduction,
+    )
+
+    rod.convertToF()
+
+    np.testing.assert_array_equal(rod.l, [0.1, 0.3])
+    np.testing.assert_array_equal(rod.sfI, [-2.0, 0.0])
+    np.testing.assert_array_equal(
+        rod.reduction.polarization.polarization_factor, [0.7, 0.9]
+    )
+
+
+@pytest.mark.parametrize("error", ([1.0, 0.0], [1.0, np.nan], [1.0]))
+def test_convert_to_f_rejects_invalid_uncertainty_without_mutating(error):
+    """Invalid interval inputs fail atomically instead of inventing errors."""
+    rod = CTR((1.0, 0.0), [0.1, 0.2], [-4.0, 9.0], error)
+    original_values = rod.sfI.copy()
+    original_errors = rod.err.copy()
+
+    with pytest.raises(ValueError, match="uncert"):
+        rod.convertToF()
+
+    np.testing.assert_array_equal(rod.sfI, original_values)
+    np.testing.assert_array_equal(rod.err, original_errors)
+
+
+def test_collection_convert_to_f_forwards_filtering_and_rejects_reflectivity():
+    """The collection forwards compatibility options to every member."""
+    retained_nan = CTR((1.0, 0.0), [0.1, 0.2], [-1.0, np.nan])
+    zero = CTR((2.0, 0.0), [0.1], [0.0])
+    collection = CTRCollection([retained_nan, zero])
+
+    collection.convertToF(excludeInvalid=False)
+
+    np.testing.assert_array_equal(retained_nan.sfI[:1], [-1.0])
+    assert np.isnan(retained_nan.sfI[1])
+    np.testing.assert_array_equal(zero.sfI, [0.0])
+
+    reflectivity = CTR(
+        (3.0, 0.0),
+        [0.1],
+        [0.5],
+        reduction=MeasurementReduction("reflectivity"),
+    )
+    with pytest.raises(ValueError, match="structure-factor data only"):
+        reflectivity.convertToF()
+
+
 def test_measurement_metadata_is_validated_immutable_and_value_comparable():
     """Array metadata is copied, read-only, comparable, and unhashable."""
     source = np.array([0.8, 0.9, 1.0])

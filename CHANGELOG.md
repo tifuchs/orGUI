@@ -7,6 +7,15 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **Preserved signed CTR intensities during amplitude conversion.**
+  ``CTR.convertToF`` now maps every finite intensity through
+  ``sign(I) * sqrt(abs(I))`` instead of discarding negative measurements.
+  Its symmetric uncertainty is half the transformed input interval, remains
+  finite at zero, and uses a stable evaluation at high signal-to-noise.
+  Conversion remains in place, preserves aligned metadata, applies the signed
+  mapping to auxiliary intensity counters, and rejects reflectivity-tagged
+  data and invalid uncertainties explicitly.
+
 - **Added measurement-owned CTR reduction and scan metadata.** ``CTR`` datasets
   can now distinguish stored structure factors from corrected reflectivity,
   record incident/outgoing polarization and the conventional pointwise

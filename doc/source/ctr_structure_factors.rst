@@ -121,6 +121,46 @@ ANAROD F export, and symmetry averaging reject reflectivity explicitly. Plot
 panels select labels from the stored quantity and F/R datasets cannot share one
 axis.
 
+Signed intensity-to-amplitude conversion
+----------------------------------------
+
+``CTR.convertToF()`` converts an intensity in arbitrary F-squared units to a
+signed amplitude in place:
+
+.. math::
+
+   g(I) = \operatorname{sign}(I)\sqrt{|I|}.
+
+Negative and zero measurements are retained, and the original intensity is
+recoverable as ``g(I) * abs(g(I))``. This signed representation is not a phase
+or an unbiased physical amplitude estimate. The conversion adds no
+normalization or reflectivity-to-structure-factor physics, and therefore
+rejects reflectivity-tagged datasets. Make a deep copy first if the original
+intensity arrays are also needed.
+
+For a finite input uncertainty :math:`\sigma_I > 0`, the existing ``err``
+array is replaced by the effective symmetric interval half-width
+
+.. math::
+
+   \sigma_{F,\mathrm{eff}}
+   = \frac{g(I + \sigma_I) - g(I - \sigma_I)}{2}.
+
+This convention is finite at zero,
+:math:`\sigma_{F,\mathrm{eff}}(0)=\sqrt{\sigma_I}`, and approaches ordinary
+first-order propagation at high signal-to-noise. It summarizes the transformed
+interval around the unchanged central value ``g(I)``; it does not make the
+near-zero distribution exactly Normal. The implementation avoids subtracting
+nearly equal roots for strong measurements. Invalid uncertainties raise before
+the CTR is modified.
+
+By default, nonfinite central intensities are removed while all finite signed
+points remain aligned with L, polarization factors, angles, and other
+pointwise fields. Pass ``excludeInvalid=False`` to preserve the historical
+choice of retaining nonfinite points. Auxiliary ``bgI`` and ``ctrI`` intensity
+counters receive the same signed-square-root mapping. The collection method
+forwards the option and converts each member in place.
+
 Unit-cell amplitudes
 --------------------
 

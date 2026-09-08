@@ -217,6 +217,45 @@ _QUANTITY_YLABELS = {
 }
 
 
+def _signed_sqrt(values):
+    """Map signed intensity values reversibly to signed amplitudes."""
+    values = np.asarray(values, dtype=np.float64)
+    return np.sign(values) * np.sqrt(np.abs(values))
+
+
+def _signed_sqrt_uncertainty(intensity, uncertainty):
+    """Return the stable transformed interval half-width."""
+    intensity = np.asarray(intensity, dtype=np.float64)
+    uncertainty = np.asarray(uncertainty, dtype=np.float64)
+    if uncertainty.shape != intensity.shape:
+        raise ValueError("Intensity uncertainties must match the CTR data shape.")
+
+    finite_intensity = np.isfinite(intensity)
+    invalid_uncertainty = finite_intensity & (
+        ~np.isfinite(uncertainty) | (uncertainty <= 0.0)
+    )
+    if np.any(invalid_uncertainty):
+        raise ValueError(
+            "Finite intensities require finite, strictly positive uncertainties."
+        )
+
+    transformed = np.full_like(intensity, np.nan, dtype=np.float64)
+    magnitude = np.abs(intensity[finite_intensity])
+    sigma = uncertainty[finite_intensity]
+    strong = magnitude > sigma
+    result = np.empty_like(magnitude)
+    strong_ratio = sigma[strong] / magnitude[strong]
+    result[strong] = (sigma[strong] / np.sqrt(magnitude[strong])) / (
+        np.sqrt(1.0 + strong_ratio) + np.sqrt(1.0 - strong_ratio)
+    )
+    weak_ratio = magnitude[~strong] / sigma[~strong]
+    result[~strong] = 0.5 * np.sqrt(sigma[~strong]) * (
+        np.sqrt(1.0 + weak_ratio) + np.sqrt(1.0 - weak_ratio)
+    )
+    transformed[finite_intensity] = result
+    return transformed
+
+
 def _nx_text(value):
     """Return one NeXus scalar attribute as text."""
     value = np.asarray(value)
@@ -990,18 +1029,44 @@ class CTR:
         self.reduction = selected_reduction
 
     def convertToF(self, excludeInvalid=True):
-        self.sfI = np.sqrt(self.sfI)
-        if excludeInvalid:
-            mask = ~np.isnan(self.sfI)
-        else:
-            mask = np.ones_like(self.sfI, dtype=np.bool_)
+        """Convert corrected signed intensity to signed amplitude in place.
 
+        Input values are intensities in F-squared arbitrary units. The central
+        value becomes ``sign(I) * sqrt(abs(I))`` in structure-factor arbitrary
+        units. If uncertainties are present, each becomes half the interval
+        between the signed-square-root transforms of ``I - sigma_I`` and
+        ``I + sigma_I``. This effective symmetric uncertainty is finite at
+        zero and is not an exact Normal uncertainty near zero.
+
+        :param bool excludeInvalid:
+            Remove points whose central intensity is not finite. Finite
+            negative and zero intensities are always retained.
+        :raises ValueError:
+            If called on reflectivity, or if a retained intensity has a
+            nonfinite, nonpositive, or misaligned uncertainty.
+        """
+        self._require_structure_factor("intensity-to-amplitude conversion")
+        intensity = np.asarray(self.sfI, dtype=np.float64)
+        mask = (
+            np.isfinite(intensity)
+            if excludeInvalid
+            else np.ones_like(intensity, dtype=np.bool_)
+        )
+        amplitude = _signed_sqrt(intensity)
+        uncertainty = None
         if self.isWithError:
-            self.err = 0.5 * (self.err / self.sfI)
-        if hasattr(self, "bgI"):
-            self.bgI = np.sqrt(self.bgI)
-        if hasattr(self, "ctrI"):
-            self.ctrI = np.sqrt(self.ctrI)
+            uncertainty = _signed_sqrt_uncertainty(intensity, self.err)
+
+        auxiliary = {}
+        for name in ("bgI", "ctrI"):
+            if hasattr(self, name):
+                auxiliary[name] = _signed_sqrt(getattr(self, name))
+
+        self.sfI = amplitude
+        if uncertainty is not None:
+            self.err = uncertainty
+        for name, values in auxiliary.items():
+            setattr(self, name, values)
         self._select_points(mask)
 
     # in degrees
@@ -1447,9 +1512,10 @@ class CTRCollection(list):
         # coll._updaterodtypes()
         return coll
 
-    def convertToF(self):
+    def convertToF(self, excludeInvalid=True):
+        """Convert every member's signed intensity to amplitude in place."""
         for ctr in self:
-            ctr.convertToF()
+            ctr.convertToF(excludeInvalid=excludeInvalid)
 
     def calcAnglesZmode(
         self,
