@@ -450,17 +450,42 @@ class FitCallback:
         init: list,
         **kwargs,
     ):
-        """Wrapper for a fit callback
+        """Wrap a callback that contributes parameters to a fit.
 
-        function : [[SXRDCrystal, list[float]], None]
-        The function takes the SXRDCrystal and an array of parameters as arguments
-
+        :param Callable function:
+            Function taking the :class:`SXRDCrystal` and an array of callback
+            parameters.
+        :param sequence bounds_low:
+            Lower bounds for the callback parameters.
+        :param sequence bounds_high:
+            Upper bounds for the callback parameters.
+        :param sequence init:
+            Initial callback parameter values.
+        :param str name:
+            Optional callback name.
+        :param sequence parnames:
+            Optional parameter names. Defaults to the callback name for one
+            parameter and ``<name>_<index>`` for multiple parameters.
+        :raises ValueError:
+            If a bound or parameter-name count does not match ``init``.
         """
         self.name = kwargs.get("name", f"default-{FitCallback.global_counter}")
         FitCallback.global_counter += 1
 
         self.inital = np.asarray(init)
         self.n_pars = self.inital.size
+        parnames = kwargs.get("parnames")
+        if parnames is None:
+            if self.n_pars == 1:
+                parnames = [self.name]
+            else:
+                parnames = [f"{self.name}_{i}" for i in range(self.n_pars)]
+        self.parnames = list(parnames)
+        if len(self.parnames) != self.n_pars:
+            raise ValueError(
+                "Number of parameter names does not match number of initial "
+                "parameters."
+            )
 
         self.current_values = np.copy(self.inital)
 
@@ -568,13 +593,31 @@ class CTROptAngleCorrection(CTROptimizer):
         if self.dw_zconstraints:
             constr = self.get_inequalconstraints()
             self.nic = constr.size
-        self.fitparnames = list(self.xtal.fitparnames)
+        self.fitparnames = []
         if self._fit_resolution:
-            self.fitparnames = [
+            self.fitparnames += [
                 "resolution_delta_l_0",
                 "resolution_delta_l_1",
                 "resolution_delta_l_2",
-            ] + self.fitparnames
+            ]
+        for cb in self.callbacks:
+            self.fitparnames += cb.parnames
+        if self.useAnglecorr:
+            self.fitparnames += [
+                "anglecorrection_phase",
+                "anglecorrection_amplitude",
+            ]
+        self.fitparnames += list(self.xtal.fitparnames)
+        if len(self.fitparnames) != len(set(self.fitparnames)):
+            duplicates = sorted(
+                name
+                for name in set(self.fitparnames)
+                if self.fitparnames.count(name) > 1
+            )
+            raise ValueError(
+                "Duplicate fit parameter names are not allowed: "
+                + ", ".join(duplicates)
+            )
         self.priors = self.xtal.priors
         self._update_resolution_cache()
 
@@ -897,6 +940,11 @@ class CTROptAngleCorrection(CTROptimizer):
         pop_min = minisland.get_population()
 
         res = pop_min.champion_x
+        if len(self.fitparnames) != np.asarray(res).size:
+            raise ValueError(
+                "Fit parameter name count does not match the champion parameter "
+                "vector length."
+            )
 
         stat = self.statistics(res)
 

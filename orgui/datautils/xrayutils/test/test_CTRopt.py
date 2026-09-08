@@ -1,13 +1,15 @@
 """Regression tests for the CTR fitting optimizers.
 
-Increment 1 of the CTR optimizer rework covers the callback ``set_errors``
-arity repair. The fixtures here are shared with the later increments of
-``doc/design/dwba_ctr_fitting_implementation_plan.md``.
+Increments 1 and 2 of the CTR optimizer rework cover the callback error path
+and parameter-name layout. The fixtures here are shared with later increments
+of ``doc/design/dwba_ctr_fitting_implementation_plan.md``.
 """
 
 import unittest
+from unittest import mock
 
 import numpy as np
+import pytest
 
 from .. import CTRcalc, CTRopt, CTRplotutil, CTRresolution, CTRsymmetry
 
@@ -106,7 +108,7 @@ def _fixture_ctrs():
     return CTRplotutil.CTRCollection(ctrs)
 
 
-def _register_callback(optimizer, name, n_pars, inert=False):
+def _register_callback(optimizer, name, n_pars, inert=False, parnames=None):
     """Register a callback and return it with a log of its parameter calls.
 
     :param CTRopt.CTROptimizer optimizer:
@@ -134,9 +136,56 @@ def _register_callback(optimizer, name, n_pars, inert=False):
             xtal.slope = x[1]
 
     optimizer.register_fit_callback(
-        apply, [0.1] * n_pars, [5.0] * n_pars, init, name=name
+        apply,
+        [0.1] * n_pars,
+        [5.0] * n_pars,
+        init,
+        name=name,
+        parnames=parnames,
     )
     return optimizer.callbacks[0], calls
+
+
+class _FakePopulation:
+    """Small pygmo population substitute for trace-layout tests."""
+
+    def __init__(self, parameters, fitness):
+        self._parameters = np.asarray(parameters, dtype=np.float64)
+        self._fitness = np.asarray(fitness, dtype=np.float64).reshape(-1, 1)
+
+    @property
+    def champion_x(self):
+        """Return the parameter vector with the lowest fitness."""
+        return self._parameters[np.argmin(self._fitness[:, 0])]
+
+    def get_x(self):
+        """Return every population parameter vector."""
+        return self._parameters
+
+    def get_f(self):
+        """Return every population fitness value."""
+        return self._fitness
+
+
+class _FakeIsland:
+    """Small pygmo island substitute for trace-layout tests."""
+
+    def __init__(self, population):
+        self._population = population
+
+    def get_population(self):
+        """Return the island's population."""
+        return self._population
+
+
+class _FakeArchipelago(list):
+    """Small pygmo archipelago substitute for trace-layout tests."""
+
+    def get_champions_f(self):
+        """Return the best fitness from every island."""
+        return [
+            [np.min(island.get_population().get_f()[:, 0])] for island in self
+        ]
 
 
 def _wyckoff_surface_cell(name="surface"):
@@ -337,6 +386,152 @@ class TestCallbackBounds(unittest.TestCase):
             CTRopt.FitCallback(lambda xtal, x: None, [0.1, 0.2], [5.0], [1.0])
         with self.assertRaisesRegex(ValueError, "upper bounds"):
             CTRopt.FitCallback(lambda xtal, x: None, [0.1], [5.0, 6.0], [1.0])
+
+
+class TestParameterNameLayout(unittest.TestCase):
+    """Increment 2: fit trace names follow the optimizer vector layout."""
+
+    @staticmethod
+    def _optimizer(callback_count, fit_resolution, use_angle_correction):
+        optimizer = CTRopt.CTROptAngleCorrection(
+            FitCrystal((1.0, 2.0), names=["xtal_a", "xtal_b"]),
+            _fixture_ctrs(),
+        )
+        optimizer.useAnglecorr = use_angle_correction
+        if fit_resolution:
+            optimizer.fit_resolution(
+                CTRresolution.BoxResolution(0.1, 0.0, 0.0),
+                lower_bounds=[0.0, 0.0, 0.0],
+                higher_bounds=[1.0, 1.0, 1.0],
+            )
+        if callback_count >= 1:
+            _register_callback(optimizer, "first", 2)
+        if callback_count == 2:
+            _register_callback(
+                optimizer, "second", 1, parnames=["second_value"]
+            )
+        return optimizer
+
+    def test_fitparnames_match_parameter_vector_position_by_position(self):
+        """Every optional parameter block contributes names in vector order."""
+        for fit_resolution in (False, True):
+            for callback_count in (0, 1, 2):
+                for use_angle_correction in (False, True):
+                    with self.subTest(
+                        fit_resolution=fit_resolution,
+                        callback_count=callback_count,
+                        use_angle_correction=use_angle_correction,
+                    ):
+                        optimizer = self._optimizer(
+                            callback_count,
+                            fit_resolution,
+                            use_angle_correction,
+                        )
+                        optimizer.prepareFit()
+
+                        expected = []
+                        if fit_resolution:
+                            expected += [
+                                "resolution_delta_l_0",
+                                "resolution_delta_l_1",
+                                "resolution_delta_l_2",
+                            ]
+                        if callback_count == 1:
+                            expected += ["first_0", "first_1"]
+                        elif callback_count == 2:
+                            expected += ["second_value", "first_0", "first_1"]
+                        if use_angle_correction:
+                            expected += [
+                                "anglecorrection_phase",
+                                "anglecorrection_amplitude",
+                            ]
+                        expected += ["xtal_a", "xtal_b"]
+
+                        self.assertEqual(optimizer.fitparnames, expected)
+                        self.assertEqual(
+                            len(optimizer.fitparnames),
+                            optimizer.get_parameters().size,
+                        )
+
+    def test_callback_parameter_names_validate_length(self):
+        """An explicit callback name list must cover every callback value."""
+        with self.assertRaisesRegex(ValueError, "Number of parameter names"):
+            CTRopt.FitCallback(
+                lambda xtal, x: None,
+                [0.1, 0.1],
+                [5.0, 5.0],
+                [1.0, 2.0],
+                name="callback",
+                parnames=["only_one"],
+            )
+
+    def test_duplicate_parameter_names_are_rejected(self):
+        """Duplicate callback/crystal names cannot silently drop a trace."""
+        optimizer = CTRopt.CTROptAngleCorrection(
+            FitCrystal(names=["duplicate"]), _fixture_ctrs()
+        )
+        _register_callback(optimizer, "duplicate", 1)
+
+        with self.assertRaisesRegex(ValueError, "Duplicate fit parameter names"):
+            optimizer.prepareFit()
+
+    def test_archi_trace_columns_follow_the_actual_layout(self):
+        """Each exported trace column carries its named parameter values."""
+        az = pytest.importorskip("arviz")
+        optimizer = self._optimizer(2, True, True)
+        optimizer.prepareFit()
+        npars = len(optimizer.fitparnames)
+        first = np.arange(3 * npars, dtype=np.float64).reshape(3, npars)
+        second = first + 1000.0
+        archi = _FakeArchipelago(
+            [
+                _FakeIsland(_FakePopulation(first, [3.0, 1.0, 2.0])),
+                _FakeIsland(_FakePopulation(second, [6.0, 4.0, 5.0])),
+            ]
+        )
+        optimizer.statistics = mock.Mock(
+            return_value={"nodatapoints": 9, "covariance": np.identity(npars)}
+        )
+        captured = {}
+        trace = object()
+
+        def capture_from_dict(params, attrs):
+            captured["params"] = params
+            captured["attrs"] = attrs
+            return trace
+
+        with mock.patch.object(az, "from_dict", side_effect=capture_from_dict):
+            actual = optimizer.set_archi_result(archi)
+
+        self.assertIs(actual, trace)
+        self.assertEqual(
+            list(captured["params"]), optimizer.fitparnames + ["chisqr"]
+        )
+        for column, name in enumerate(optimizer.fitparnames):
+            np.testing.assert_allclose(
+                captured["params"][name],
+                np.stack((first[:, column], second[:, column])),
+            )
+        np.testing.assert_allclose(
+            captured["params"]["chisqr"],
+            [[3.0, 1.0, 2.0], [6.0, 4.0, 5.0]],
+        )
+        self.assertEqual(captured["attrs"], {"nodatapoints": 9})
+
+    def test_archi_result_rejects_a_name_vector_length_mismatch(self):
+        """Trace export fails explicitly when its positional schema is stale."""
+        optimizer = self._optimizer(1, False, False)
+        optimizer.prepareFit()
+        parameters = optimizer.get_parameters()[None, :]
+        archi = _FakeArchipelago(
+            [_FakeIsland(_FakePopulation(parameters, [1.0]))]
+        )
+        optimizer.fitparnames.pop()
+        optimizer.statistics = mock.Mock()
+
+        with self.assertRaisesRegex(ValueError, "name count.*vector length"):
+            optimizer.set_archi_result(archi)
+        optimizer.statistics.assert_not_called()
 
 
 class TestCrystalParameterLayout(unittest.TestCase):
