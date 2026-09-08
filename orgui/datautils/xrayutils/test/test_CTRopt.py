@@ -1,6 +1,6 @@
 """Regression tests for the CTR fitting optimizers.
 
-Increments 1--6 of the CTR optimizer rework cover the callback error path,
+Increments 1--7 of the CTR optimizer rework cover the callback error path,
 parameter-name layout, value-preserving optimizer class split, and legacy
 objective characterization, calculation adapters, prediction-side analytical
 scales, and explicit scale policies. The fixtures here are shared with later
@@ -718,7 +718,7 @@ _BASE_LEGACY_REFERENCE = _increment6_reference(
     [0.3350874215648266],
 )
 
-_ANGLE_LEGACY_REFERENCES = {
+_ANGLE_INCREMENT6_REFERENCES = {
     (False, False): _increment6_reference(
         [
             14.191217342968315,
@@ -842,6 +842,126 @@ _ANGLE_LEGACY_REFERENCES = {
 }
 
 
+def _increment7_reference(
+    settings,
+    weighted_residues,
+    fitness,
+    covariance,
+    fit_errors,
+    log_prob,
+    *,
+    residues=None,
+    rfactor=None,
+    pvalue=0.0,
+):
+    """Update the Increment 6 snapshot for linear angle-optimizer weights."""
+    reference = _ANGLE_INCREMENT6_REFERENCES[settings].copy()
+    reference.update(
+        {
+            "weighted_residues": weighted_residues,
+            "weighted_residues2": np.square(weighted_residues),
+            "fitness": fitness,
+            "chi2_red": fitness / (9 - reference["nparameters"]),
+            "covariance": covariance,
+            "fit_errors": fit_errors,
+            "log_prob": log_prob,
+            "pvalue": pvalue,
+        }
+    )
+    if residues is not None:
+        reference["residues"] = residues
+    if rfactor is not None:
+        reference["Rfactor"] = rfactor
+    return reference
+
+
+_ANGLE_LEGACY_REFERENCES = {
+    (False, False): _increment7_reference(
+        (False, False),
+        [
+            14.191217342968315,
+            3.9216231239577537,
+            0.13896609227348478,
+            5.927276409279118,
+            -1.5250552034484748,
+            -4.517517475507163,
+            -4.107429607225916,
+            -4.298061507656975,
+            -4.61578134170874,
+        ],
+        331.30520041998636,
+        [[0.004369412546133979]],
+        [0.4253835180332156],
+        -158.57505957957298,
+    ),
+    (False, True): _increment7_reference(
+        (False, True),
+        [
+            9.32619684343576,
+            4.752251990923697,
+            3.379195012698496,
+            1.9257652516342938,
+            2.558891224669818,
+            -6.6049793416623865,
+            -6.733342134496628,
+            -2.7391635521660676,
+            -3.642030487150156,
+        ],
+        240.9683530245108,
+        [
+            [0.03412554948754149, -0.013677283319011595, -0.029881054116630553],
+            [-0.013677283319011595, 0.008771974751680327, 0.015515018585677717],
+            [-0.029881054116630553, 0.015515018585677717, 0.033308496359875685],
+        ],
+        [1.1706961928748005, 0.5935442006406657, 1.1565965523582658],
+        -113.40663588183521,
+        residues=[
+            0.7244084456248574,
+            1.0050571801320123,
+            1.1550985598864791,
+            0.11732264879568999,
+            0.42594945057545086,
+            -1.3562031200391829,
+            -0.783271164463607,
+            -0.8789061808247292,
+            -1.645452876094173,
+        ],
+        rfactor=0.1850488189800105,
+    ),
+    (True, False): _increment7_reference(
+        (True, False),
+        _BASE_LEGACY_REFERENCE["weighted_residues"],
+        212.5972762645914,
+        [[0.004225212366316432]],
+        [0.33508742156307925],
+        -99.2210975018755,
+    ),
+    (True, True): _increment7_reference(
+        (True, True),
+        [
+            4.258356416588224,
+            -0.21114807320227363,
+            -3.146454413688498,
+            3.323837391379014,
+            3.923381954907116,
+            -4.254359022878479,
+            -3.1168694452441534,
+            0.7571536249921801,
+            1.6345484611214534,
+        ],
+        85.57865534319242,
+        [
+            [0.03951006763610368, -0.01674102685774627, -0.0361966169600124],
+            [-0.01674102685774627, 0.010369758737461677, 0.019408419295404156],
+            [-0.0361966169600124, 0.019408419295404156, 0.04144650043841291],
+        ],
+        [0.7506906221180976, 0.3845841929897126, 0.7688666742030562],
+        -35.71178704117603,
+        pvalue=2.220446049250313e-16,
+    ),
+}
+
+
 def _legacy_characterization_optimizer(
     optimizer_type, scaleindividual=None, use_angle_correction=None
 ):
@@ -866,7 +986,7 @@ def _legacy_characterization_optimizer(
 
 
 class TestLegacyOptimizerCharacterization(unittest.TestCase):
-    """Increment 4: pin both optimizers before formula centralization."""
+    """Pin intentional numerical changes throughout formula centralization."""
 
     def _assert_legacy_outputs(self, optimizer, expected):
         """Assert the legacy objective, output, and reporting definitions."""
@@ -916,7 +1036,9 @@ class TestLegacyOptimizerCharacterization(unittest.TestCase):
         np.testing.assert_allclose(statistics["Chisqr_red"], expected["chi2_red"])
         self.assertEqual(statistics["noparameters"], parameters.size)
         self.assertEqual(parameters.size, expected["nparameters"])
-        np.testing.assert_allclose(statistics["pvalue"], 0.0)
+        np.testing.assert_allclose(
+            statistics["pvalue"], expected.get("pvalue", 0.0)
+        )
         np.testing.assert_allclose(statistics["Rfactor"], expected["Rfactor"])
         # Increment 8 replaces the unscaled covariance/scaled-error pairing.
         np.testing.assert_allclose(
@@ -944,8 +1066,8 @@ class TestLegacyOptimizerCharacterization(unittest.TestCase):
                 )
                 self._assert_legacy_outputs(optimizer, expected)
 
-    def test_legacy_rod_weight_power_differs_between_classes(self):
-        """Pin linear base and quadratic subclass chi-square weighting."""
+    def test_rod_weight_power_is_linear_in_both_classes(self):
+        """Doubling a rod weight doubles its chi-square influence."""
 
         def rod_chisqr(optimizer_type, weight):
             ctrs = _fixture_ctrs()
@@ -962,9 +1084,24 @@ class TestLegacyOptimizerCharacterization(unittest.TestCase):
         angle_unit = rod_chisqr(CTRopt.CTROptAngleCorrection, 1.0)
         angle_doubled = rod_chisqr(CTRopt.CTROptAngleCorrection, 2.0)
 
-        # Increment 7 unifies both optimizers on the base class's linear rule.
         np.testing.assert_allclose(base_doubled / base_unit, 2.0)
-        np.testing.assert_allclose(angle_doubled / angle_unit, 4.0)
+        np.testing.assert_allclose(angle_doubled / angle_unit, 2.0)
+
+    def test_increment6_angle_weight_response_was_fourfold(self):
+        """Keep the superseded quadratic response explicit in characterization."""
+        legacy_middle = np.sum(
+            _ANGLE_INCREMENT6_REFERENCES[(True, False)][
+                "weighted_residues2"
+            ][3:6]
+        )
+        linear_middle = np.sum(
+            _ANGLE_LEGACY_REFERENCES[(True, False)][
+                "weighted_residues2"
+            ][3:6]
+        )
+        unit_weight_value = linear_middle / 2.0
+
+        np.testing.assert_allclose(legacy_middle / unit_weight_value, 4.0)
 
     def test_scale_estimator_multiplies_the_prediction(self):
         """The analytical scale produces the accepted effective prediction."""
@@ -1421,7 +1558,7 @@ class TestOptimizerClassSplit(unittest.TestCase):
                         for ctr in optimizer.CTRs:
                             np.testing.assert_allclose(
                                 ctr.invrelerrsqrd_weight,
-                                np.sqrt(ctr.weight) / ctr.err,
+                                ctr.weight * ctr.err**-2,
                             )
 
     def test_deleted_members_are_gone(self):

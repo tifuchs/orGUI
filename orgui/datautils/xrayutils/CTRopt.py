@@ -616,10 +616,6 @@ class CTROptimizer:
         """Return names for subclass and crystal model parameters."""
         return list(self.xtal.fitparnames)
 
-    def _residual_weight(self, ctr):
-        """Return the base optimizer's legacy squared-residual weight."""
-        return ctr.weight * ctr.err**-2
-
     def _fit_parameter_names(self):
         """Build names in the same order as the fit parameter vector."""
         names = []
@@ -659,7 +655,7 @@ class CTROptimizer:
             (self.lower_bounds, self.higher_bounds)
         )
         for ctr in self.CTRs:
-            ctr.invrelerrsqrd_weight = self._residual_weight(ctr)
+            ctr.invrelerrsqrd_weight = ctr.weight * ctr.err**-2
         for callback in reversed(self.callbacks):
             self.bounds = (
                 np.concatenate((callback.bounds[0], self.bounds[0])),
@@ -1069,14 +1065,6 @@ class CTROptAngleCorrection(CTROptimizer):
         names.extend(super()._model_parameter_names())
         return names
 
-    def _residual_weight(self, ctr):
-        """Return the angle optimizer's legacy residual weight."""
-        return np.sqrt(ctr.weight) / ctr.err
-
-    def _effective_objective_weight(self, ctr):
-        """Return the subclass's quadratic legacy objective weight."""
-        return ctr.weight**2
-
     def _angle_correction(self, ctr):
         """Return the legacy empirical correction for one measured CTR."""
         if hasattr(ctr, "angles"):
@@ -1098,7 +1086,7 @@ class CTROptAngleCorrection(CTROptimizer):
             for calculation in calculations:
                 ctr = calculation.values.ctr
                 ctr *= calculation.values.angle_correction / calculation.scale
-                ctr.invrelerrsqrd_weight = self._residual_weight(ctr)
+                ctr.invrelerrsqrd_weight = ctr.weight * ctr.err**-2
 
             self.amp = 0.0
         else:
@@ -1171,7 +1159,7 @@ class CTROptAngleCorrection(CTROptimizer):
         return np.concatenate(
             [
                 (
-                    calculation.values.ctr.weight
+                    np.sqrt(calculation.values.ctr.weight)
                     / calculation.values.uncertainty
                 )
                 * calculation.residual
@@ -1188,7 +1176,7 @@ class CTROptAngleCorrection(CTROptimizer):
         )
         residues = [
             (
-                calculation.values.ctr.weight
+                np.sqrt(calculation.values.ctr.weight)
                 / calculation.values.uncertainty
             )
             * calculation.residual
