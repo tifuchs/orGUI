@@ -290,6 +290,65 @@ def test_plain_array_and_anarod_imports_accept_measurement_metadata():
     )
 
 
+def test_ctr_file_loader_reads_metadata_and_splits_pointwise_factor(tmp_path):
+    """The compact CTR format restores reduction metadata in one call."""
+    path = tmp_path / "measurement.ctr"
+    path.write_text(
+        "# orgui_ctr_schema: 2\n"
+        "# quantity: structure_factor\n"
+        "# s_fraction: 0.75\n"
+        "# outgoing: unanalysed\n"
+        "# columns: H K L F_HKL errorF polarization_factor\n"
+        "1 0 0.1 10 1 0.8\n"
+        "1 0 0.2 11 1.1 0.9\n"
+        "2 0 0.1 20 2 1.0\n",
+        encoding="utf-8",
+    )
+
+    collection = CTRCollection.fromCTRFile(path)
+
+    assert collection.name == path.name
+    assert collection.getHKList() == [(1.0, 0.0), (2.0, 0.0)]
+    np.testing.assert_array_equal(collection[0].sfI, [10.0, 11.0])
+    np.testing.assert_array_equal(collection[0].err, [1.0, 1.1])
+    assert collection[0].reduction.quantity == "structure_factor"
+    assert collection[0].reduction.polarization.s_fraction == 0.75
+    assert collection[0].reduction.polarization.outgoing == "unanalysed"
+    np.testing.assert_array_equal(
+        collection[0].reduction.polarization.polarization_factor, [0.8, 0.9]
+    )
+    np.testing.assert_array_equal(
+        collection[1].reduction.polarization.polarization_factor, [1.0]
+    )
+
+
+def test_ctr_file_loader_rejects_legacy_anarod_file(tmp_path):
+    """The new loader must not silently guess metadata for legacy files."""
+    path = tmp_path / "legacy.dat"
+    path.write_text(
+        "# H K L F_HKL errorF mode\n1 0 0.1 10 1 -3\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="fromANAROD"):
+        CTRCollection.fromCTRFile(path)
+
+
+def test_ctr_file_loader_requires_trailing_polarization_factor(tmp_path):
+    """A pointwise extension cannot displace value or uncertainty columns."""
+    path = tmp_path / "reordered.ctr"
+    path.write_text(
+        "# orgui_ctr_schema: 2\n"
+        "# quantity: structure_factor\n"
+        "# columns: H K L F_HKL polarization_factor errorF\n"
+        "1 0 0.1 10 0.8 1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="optional trailing"):
+        CTRCollection.fromCTRFile(path)
+
+
 def test_metadata_dependent_binning_and_reflectivity_consumers_reject(tmp_path):
     """Legacy operations fail instead of inventing reduction semantics."""
     legacy = CTR((1.0, 0.0), [0.1, 0.2], [1.0, 2.0], [0.1, 0.1])

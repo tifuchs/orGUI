@@ -264,6 +264,71 @@ def _reduction_for_import(reduction, selection):
     return reduction
 
 
+def _load_ctr_file(filename, reduction):
+    """Load an orGUI CTR table and its metadata header."""
+    metadata = {}
+    with open(filename, encoding="utf-8") as stream:
+        for raw_line in stream:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if not line.startswith("#"):
+                break
+            comment = line[1:].strip()
+            if ":" in comment:
+                key, value = comment.split(":", 1)
+                metadata[key.strip().lower()] = value.strip()
+
+    if metadata.get("orgui_ctr_schema") != "2":
+        raise ValueError(
+            "orGUI CTR files require '# orgui_ctr_schema: 2'; use "
+            "CTRCollection.fromANAROD for legacy files."
+        )
+    if "columns" not in metadata:
+        raise ValueError("orGUI CTR files require a columns header.")
+
+    table = np.atleast_2d(np.loadtxt(filename))
+    column_names = metadata["columns"].lower().split()
+    if len(column_names) != table.shape[1]:
+        raise ValueError(
+            "orGUI CTR columns metadata must match the numerical table."
+        )
+    if (
+        len(column_names) not in {5, 6}
+        or column_names[:3] != ["h", "k", "l"]
+        or (
+            len(column_names) == 6
+            and column_names[5] != "polarization_factor"
+        )
+    ):
+        raise ValueError(
+            "orGUI CTR files require H, K, L, value, and uncertainty columns "
+            "with an optional trailing polarization_factor."
+        )
+    if reduction is not _DEFAULT_REDUCTION:
+        return table, reduction
+
+    quantity = metadata.get("quantity")
+    s_fraction = metadata.get("s_fraction")
+    outgoing = metadata.get("outgoing")
+    if quantity is None:
+        raise ValueError("orGUI CTR files require quantity metadata.")
+    if (s_fraction is None) != (outgoing is None):
+        raise ValueError(
+            "orGUI CTR metadata must provide both s_fraction and outgoing."
+        )
+
+    polarization = None
+    if s_fraction is not None:
+        factor = table[:, 5] if len(column_names) == 6 else None
+        polarization = PolarizationReduction(
+            float(s_fraction), outgoing, factor
+        )
+    return table, MeasurementReduction(
+        quantity, polarization
+    )
+
+
 def _calculate_angles_zmode(
     h,
     k,
@@ -1525,6 +1590,39 @@ class CTRCollection(list):
         data_combined = np.vstack([ctr.toArray(mode) for ctr in self])
 
         np.savetxt(filename, data_combined, header=header, fmt="%.5f")
+
+    @staticmethod
+    def fromCTRFile(filename, **kwargs):
+        """Load a metadata-aware orGUI CTR file.
+
+        The file uses whitespace-separated H, K, L, value, and uncertainty
+        columns followed by an optional ``polarization_factor``. It deliberately
+        omits ANAROD's unused mode column and adds a schema-2 comment header.
+        Header metadata is applied to every rod, while the pointwise factor is
+        split with the corresponding rod values.
+
+        :param path-like filename: File to load.
+        :param str name: Optional collection name.
+        :param MeasurementReduction reduction:
+            Optional explicit override for the stored reduction metadata.
+        :param CTRScanGeometry scan_geometry:
+            Optional scan geometry applied to every imported rod.
+        :returns: Loaded CTR collection.
+        :rtype: CTRCollection
+        """
+        reduction = kwargs.pop("reduction", _DEFAULT_REDUCTION)
+        scan_geometry = kwargs.pop("scan_geometry", None)
+        name = kwargs.pop("name", os.path.basename(filename))
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unexpected CTR file option(s): {unexpected}")
+        table, reduction = _load_ctr_file(filename, reduction)
+        return CTRCollection.fromANAROD(
+            table,
+            reduction=reduction,
+            scan_geometry=scan_geometry,
+            name=name,
+        )
 
     @staticmethod
     def fromANAROD(filenameOrArray, RODexport=False, **kwargs):
