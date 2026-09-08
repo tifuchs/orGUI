@@ -1,9 +1,9 @@
 """Regression tests for the CTR fitting optimizers.
 
-Increments 1--3 of the CTR optimizer rework cover the callback error path,
-parameter-name layout, and value-preserving optimizer class split. The fixtures
-here are shared with later increments of
-``doc/design/dwba_ctr_fitting_implementation_plan.md``.
+Increments 1--4 of the CTR optimizer rework cover the callback error path,
+parameter-name layout, value-preserving optimizer class split, and legacy
+objective characterization. The fixtures here are shared with later increments
+of ``doc/design/dwba_ctr_fitting_implementation_plan.md``.
 """
 
 import unittest
@@ -84,6 +84,14 @@ class FitCrystal:
         self.error_calls.append(self.errors)
 
 
+class _ConstantFitCrystal(FitCrystal):
+    """Fit double returning a unit structure factor at every coordinate."""
+
+    def F(self, h, k, l):  # noqa: N802,E741
+        """Return unit structure factors matching the supplied L coordinates."""
+        return np.ones_like(np.asarray(l, dtype=np.float64))
+
+
 class _ConstraintFitCrystal(FitCrystal):
     """Fit double exposing the surface displacement constraint interface."""
 
@@ -131,6 +139,22 @@ def _fixture_ctrs():
         ctr = CTRplotutil.CTR(hk, lvalues.copy(), sfI, err)
         ctr.weight = weight
         ctr.angles = _angles(0.1 * np.arange(sfI.size), 0.2 * np.arange(sfI.size))
+        ctrs.append(ctr)
+    return CTRplotutil.CTRCollection(ctrs)
+
+
+def _unit_model_ctrs(specification):
+    """Build unit-error, unit-weight rods for constant-model regressions."""
+    ctrs = []
+    for hk, values in specification:
+        observations = np.asarray(values, dtype=np.float64)
+        ctr = CTRplotutil.CTR(
+            hk,
+            np.arange(observations.size, dtype=np.float64),
+            observations,
+            np.ones_like(observations),
+        )
+        ctr.weight = 1.0
         ctrs.append(ctr)
     return CTRplotutil.CTRCollection(ctrs)
 
@@ -324,6 +348,460 @@ def _parameter_crystal(wyckoff="parameter"):
         {"surface": ("C_1", "u")}, limits=(0.1, 0.4), name="coupled_u"
     )
     return crystal, surface
+
+
+_LEGACY_FLAT_FCALC = np.array(
+    [
+        2.020833333333333,
+        5.3888888888888875,
+        11.451388888888888,
+        1.5572519083969467,
+        4.1526717557251915,
+        8.82442748091603,
+        1.17375,
+        3.1300000000000003,
+        6.65125,
+    ]
+)
+
+_BASE_LEGACY_REFERENCE = {
+    "weighted_residues": [
+        9.791666666666671,
+        -1.9444444444444402,
+        -8.171296296296289,
+        6.261403558598435,
+        -1.0795523376893883,
+        -3.8863884156817914,
+        -1.2285980323116268,
+        -0.45961940777125576,
+        0.8220116331293595,
+    ],
+    "weighted_residues2": [
+        95.87673611111119,
+        3.780864197530847,
+        66.77008316186543,
+        39.205174523629125,
+        1.165433249810623,
+        15.104014917545623,
+        1.5094531250000007,
+        0.21124999999999983,
+        0.6757031249999966,
+    ],
+    "residues": [
+        0.7268041237113407,
+        -0.2886597938144324,
+        -1.8195876288659782,
+        0.42647058823529393,
+        -0.14705882352941213,
+        -0.7941176470588243,
+        -0.22204472843450485,
+        -0.16613418530351431,
+        0.4456869009584654,
+    ],
+    "Rfactor": 0.12540821749218442,
+    "fitness": 224.29871241149283,
+    "chi2_red": 28.037339051436604,
+    "covariance": [[0.003918139665577524]],
+    "fit_errors": [0.33144261985248585],
+    "nparameters": 1,
+}
+
+_ANGLE_LEGACY_REFERENCES = {
+    (False, False): {
+        "weighted_residues": [
+            9.791666666666671,
+            -1.9444444444444402,
+            -8.171296296296289,
+            12.175324675324672,
+            2.900432900432897,
+            0.7756132756132704,
+            -1.956168831168832,
+            -1.7748917748917759,
+            -1.4727633477633482,
+        ],
+        "weighted_residues2": [
+            95.8767361111112,
+            3.780864197530848,
+            66.77008316186544,
+            148.23853094956985,
+            8.412511009913588,
+            0.601575953307547,
+            3.826596496036434,
+            3.1502408125784784,
+            2.1690318785151046,
+        ],
+        "residues": [
+            0.7268041237113407,
+            -0.2886597938144324,
+            -1.8195876288659782,
+            0.6563593932322052,
+            0.3127187864644103,
+            0.12543757292882063,
+            -0.4218203033838974,
+            -0.7654609101516923,
+            -0.9527421236872815,
+        ],
+        "Rfactor": 0.15817348573575216,
+        "fitness": 332.8261705704285,
+        "scaled_errors": [
+            0.07422680412371135,
+            0.1484536082474227,
+            0.2226804123711341,
+            0.10781796966161027,
+            0.21563593932322053,
+            0.32345390898483084,
+            0.10781796966161027,
+            0.21563593932322053,
+            0.32345390898483084,
+        ],
+        "log_prob": -158.8930549945955,
+        "chi2_red": 41.60327132130356,
+        "covariance": [[0.003105474966227227]],
+        "fit_errors": [0.35944111840671117],
+        "nparameters": 1,
+    },
+    (False, True): {
+        "weighted_residues": [
+            3.95681001721084,
+            -0.5064800670980821,
+            -3.534743294629085,
+            6.986951803638445,
+            7.779918531930959,
+            -2.172487624896587,
+            -3.6447549598168343,
+            -0.8575372622484914,
+            -0.946378129577784,
+        ],
+        "weighted_residues2": [
+            15.656345512300046,
+            0.2565220583676778,
+            12.494410158925277,
+            48.81749550636652,
+            60.52713236348277,
+            4.719702480328815,
+            13.284238717109414,
+            0.7353701561446379,
+            0.8956315641431449,
+        ],
+        "residues": [
+            0.2278989259663886,
+            -0.07942766948096658,
+            -0.8959459668551952,
+            0.33584989408253163,
+            1.0160850643985304,
+            -0.25006232738410006,
+            -0.6236448962933355,
+            -0.3741112284119019,
+            -0.5582297053586887,
+        ],
+        "Rfactor": 0.09435610305535341,
+        "fitness": 157.38684851716832,
+        "scaled_errors": [
+            0.05759663086554629,
+            0.15682289322076137,
+            0.25346846777149357,
+            0.090873159671776,
+            0.24829235791747495,
+            0.3062741836174822,
+            0.08675780903984016,
+            0.23930494561288085,
+            0.33695273969576667,
+        ],
+        "log_prob": -70.9472482493825,
+        "chi2_red": 26.231141419528054,
+        "covariance": [
+            [0.033723271892569386, -0.012719795766604647, -0.030032290819859638],
+            [-0.012719795766604645, 0.006727675930074963, 0.013448686123837829],
+            [-0.030032290819859635, 0.013448686123837829, 0.031465060957814026],
+        ],
+        "fit_errors": [
+            0.9405317188394994,
+            0.42008882244895696,
+            0.9084957147716717,
+        ],
+        "nparameters": 3,
+    },
+    (True, False): {
+        "weighted_residues": [
+            9.791666666666671,
+            -1.9444444444444402,
+            -8.171296296296289,
+            8.854961832061067,
+            -1.5267175572519125,
+            -5.496183206106875,
+            -0.8687500000000002,
+            -0.3249999999999999,
+            0.5812499999999986,
+        ],
+        "weighted_residues2": [
+            95.8767361111112,
+            3.780864197530848,
+            66.77008316186544,
+            78.41034904725828,
+            2.330866499621247,
+            30.208029835091246,
+            0.7547265625000005,
+            0.10562499999999994,
+            0.33785156249999837,
+        ],
+        "residues": [
+            0.7268041237113407,
+            -0.2886597938144324,
+            -1.8195876288659782,
+            0.42647058823529393,
+            -0.14705882352941213,
+            -0.7941176470588243,
+            -0.22204472843450485,
+            -0.16613418530351431,
+            0.4456869009584654,
+        ],
+        "Rfactor": 0.12540821749218442,
+        "fitness": 278.5751319774783,
+        "scaled_errors": [
+            0.07422680412371135,
+            0.1484536082474227,
+            0.2226804123711341,
+            0.0963235294117647,
+            0.1926470588235294,
+            0.28897058823529415,
+            0.12779552715654952,
+            0.25559105431309903,
+            0.3833865814696486,
+        ],
+        "log_prob": -131.93930216195574,
+        "chi2_red": 34.82189149718479,
+        "covariance": [[0.0026845497859506883]],
+        "fit_errors": [0.3057467928943254],
+        "nparameters": 1,
+    },
+    (True, True): {
+        "weighted_residues": [
+            3.95681001721084,
+            -0.5064800670980821,
+            -3.534743294629085,
+            4.17260504177382,
+            5.033171809019492,
+            -6.9043326380949885,
+            -2.425322668570648,
+            0.321379995701755,
+            0.8328225750077206,
+        ],
+        "weighted_residues2": [
+            15.656345512300046,
+            0.2565220583676778,
+            12.494410158925277,
+            17.4106328346363,
+            25.33281845910854,
+            47.669809177463705,
+            5.88219004668265,
+            0.10328510163726007,
+            0.6935934414424905,
+        ],
+        "residues": [
+            0.2278989259663886,
+            -0.07942766948096658,
+            -0.8959459668551952,
+            0.17469613880547152,
+            0.5757653261004405,
+            -0.974254670684676,
+            -0.48994288399810015,
+            0.17907619877320524,
+            0.6534145985187099,
+        ],
+        "Rfactor": 0.1027384789514959,
+        "fitness": 125.49960679056394,
+        "scaled_errors": [
+            0.05759663086554629,
+            0.15682289322076137,
+            0.25346846777149357,
+            0.08373480694027359,
+            0.22878826630502203,
+            0.2822154498493247,
+            0.10100571160018999,
+            0.2786050799182137,
+            0.3922891970793734,
+        ],
+        "log_prob": -55.21436746612869,
+        "chi2_red": 20.916601131760657,
+        "covariance": [
+            [0.03573138020249195, -0.013249923383573824, -0.03198400403470676],
+            [-0.013249923383573824, 0.006922791246815929, 0.013894263605147884],
+            [-0.03198400403470676, 0.013894263605147884, 0.03285443965538678],
+        ],
+        "fit_errors": [
+            0.8645108607883628,
+            0.3805276087040722,
+            0.8289771525137394,
+        ],
+        "nparameters": 3,
+    },
+}
+
+
+def _legacy_characterization_optimizer(
+    optimizer_type, scaleindividual=None, use_angle_correction=None
+):
+    """Return a prepared optimizer with identifiable legacy angle inputs."""
+    optimizer = optimizer_type(FitCrystal(), _fixture_ctrs())
+    if scaleindividual is not None:
+        optimizer.scaleindividual = scaleindividual
+    if use_angle_correction is not None:
+        optimizer.useAnglecorr = use_angle_correction
+    omega_values = (
+        (-2.0, 0.0, 2.0),
+        (-1.0, 1.0, 3.0),
+        (-2.5, 0.5, 2.5),
+    )
+    for ctr, omega in zip(optimizer.CTRs, omega_values):
+        ctr.angles["omega"] = omega
+    if isinstance(optimizer, CTRopt.CTROptAngleCorrection):
+        optimizer.prepareFit(start=[0.3, 0.4])
+    else:
+        optimizer.prepareFit()
+    return optimizer
+
+
+class TestLegacyOptimizerCharacterization(unittest.TestCase):
+    """Increment 4: pin both optimizers before formula centralization."""
+
+    def _assert_legacy_outputs(self, optimizer, expected):
+        """Assert the legacy objective, output, and reporting definitions."""
+        parameters = optimizer.get_parameters()
+
+        # Legacy scaling and weight powers; increments 6 and 7 update these.
+        np.testing.assert_allclose(
+            optimizer.weighted_residues(parameters),
+            expected["weighted_residues"],
+        )
+        np.testing.assert_allclose(
+            optimizer.weighted_residues2(parameters),
+            expected["weighted_residues2"],
+        )
+        np.testing.assert_allclose(optimizer.fitness(parameters), [expected["fitness"]])
+
+        # These observation-scaled outputs migrate in increments 6 and 8.
+        np.testing.assert_allclose(optimizer.residues(parameters), expected["residues"])
+        np.testing.assert_allclose(optimizer.flat_Fcalc(parameters), _LEGACY_FLAT_FCALC)
+        np.testing.assert_allclose(optimizer.Rfactor(parameters), expected["Rfactor"])
+
+        if "scaled_errors" in expected:
+            residuals, errors = optimizer.weighted_residues_errors(parameters)
+            np.testing.assert_allclose(residuals, expected["weighted_residues"])
+            # Increment 6 stops inflating likelihood errors by scale/correction.
+            np.testing.assert_allclose(errors, expected["scaled_errors"])
+            np.testing.assert_allclose(
+                optimizer.log_prob(parameters), expected["log_prob"]
+            )
+
+        statistics = optimizer.statistics(parameters)
+        self.assertEqual(
+            set(statistics),
+            {
+                "Chisqr",
+                "nodatapoints",
+                "Chisqr_red",
+                "noparameters",
+                "pvalue",
+                "Rfactor",
+                "covariance",
+            },
+        )
+        np.testing.assert_allclose(statistics["Chisqr"], expected["fitness"])
+        self.assertEqual(statistics["nodatapoints"], 9)
+        np.testing.assert_allclose(statistics["Chisqr_red"], expected["chi2_red"])
+        self.assertEqual(statistics["noparameters"], parameters.size)
+        self.assertEqual(parameters.size, expected["nparameters"])
+        np.testing.assert_allclose(statistics["pvalue"], 0.0)
+        np.testing.assert_allclose(statistics["Rfactor"], expected["Rfactor"])
+        # Increment 8 replaces the unscaled covariance/scaled-error pairing.
+        np.testing.assert_allclose(
+            statistics["covariance"], expected["covariance"], rtol=1e-6
+        )
+        np.testing.assert_allclose(optimizer.errors, expected["fit_errors"], rtol=1e-6)
+
+    def test_base_optimizer_legacy_outputs(self):
+        """Pin every public numerical output of the base optimizer."""
+        optimizer = _legacy_characterization_optimizer(CTRopt.CTROptimizer)
+        self._assert_legacy_outputs(optimizer, _BASE_LEGACY_REFERENCE)
+
+    def test_angle_optimizer_legacy_outputs(self):
+        """Pin shared/individual scaling with angle correction on and off."""
+        for settings, expected in _ANGLE_LEGACY_REFERENCES.items():
+            scaleindividual, use_angle_correction = settings
+            with self.subTest(
+                scaleindividual=scaleindividual,
+                use_angle_correction=use_angle_correction,
+            ):
+                optimizer = _legacy_characterization_optimizer(
+                    CTRopt.CTROptAngleCorrection,
+                    scaleindividual,
+                    use_angle_correction,
+                )
+                self._assert_legacy_outputs(optimizer, expected)
+
+    def test_legacy_rod_weight_power_differs_between_classes(self):
+        """Pin linear base and quadratic subclass chi-square weighting."""
+
+        def rod_chisqr(optimizer_type, weight):
+            ctrs = _fixture_ctrs()
+            ctrs[1].weight = weight
+            optimizer = optimizer_type(FitCrystal(), ctrs)
+            if isinstance(optimizer, CTRopt.CTROptAngleCorrection):
+                optimizer.scaleindividual = True
+            optimizer.prepareFit()
+            parameters = optimizer.get_parameters()
+            return np.sum(optimizer.weighted_residues2(parameters)[3:6])
+
+        base_unit = rod_chisqr(CTRopt.CTROptimizer, 1.0)
+        base_doubled = rod_chisqr(CTRopt.CTROptimizer, 2.0)
+        angle_unit = rod_chisqr(CTRopt.CTROptAngleCorrection, 1.0)
+        angle_doubled = rod_chisqr(CTRopt.CTROptAngleCorrection, 2.0)
+
+        # Increment 7 unifies both optimizers on the base class's linear rule.
+        np.testing.assert_allclose(base_doubled / base_unit, 2.0)
+        np.testing.assert_allclose(angle_doubled / angle_unit, 4.0)
+
+    def test_legacy_scale_estimator_effective_prediction(self):
+        """Pin the current observation-scaling estimator mismatch."""
+        crystal = _ConstantFitCrystal()
+        ctrs = _unit_model_ctrs((((1.0, 0.0), [1.0, 2.0]),))
+        optimizer = CTRopt.CTROptimizer(crystal, ctrs)
+        optimizer.prepareFit()
+
+        # Legacy m/a gives 5/3; increment 6 replaces it with a*m = 3/2.
+        np.testing.assert_allclose(
+            optimizer.flat_Fcalc(optimizer.get_parameters()), [5.0 / 3.0] * 2
+        )
+
+    def test_shared_scale_rfactor_keeps_legacy_index_misalignment(self):
+        """Pin D3 until the subclass R-factor override is removed."""
+        crystal = _ConstantFitCrystal()
+        ctrs = _unit_model_ctrs(
+            (
+                ((0.0, 0.0), [3.0, 3.0]),
+                ((1.0, 0.0), [1.0, 2.0]),
+                ((2.0, 0.0), [1.0, 4.0]),
+            )
+        )
+        optimizer = CTRopt.CTROptAngleCorrection(crystal, ctrs)
+        optimizer.scaleindividual = False
+        optimizer.prepareFit()
+
+        # D3 repeats the specular rod and omits the last non-specular rod.
+        # Increment 8 deletes this override rather than preserving the defect.
+        self.assertAlmostEqual(
+            optimizer.Rfactor(optimizer.get_parameters()),
+            0.27058823529411763,
+        )
+
+    def test_evaluate_statistics_remains_deprecated(self):
+        """The excluded legacy statistics path still emits its warning."""
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), _fixture_ctrs())
+        optimizer.prepareFit()
+        with self.assertWarnsRegex(
+            DeprecationWarning, "evaluateStatistics is deprecated"
+        ):
+            optimizer.evaluateStatistics(optimizer.get_parameters())
 
 
 class TestOptimizerClassSplit(unittest.TestCase):
