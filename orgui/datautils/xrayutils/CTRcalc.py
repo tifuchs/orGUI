@@ -1015,7 +1015,9 @@ class SXRDCrystal:
             par.error = errors[i]
 
         self.werrors = np.full_like(self.weights, np.nan)
-        idx = 0
+        # The weight block follows the coupled block in the reordered vector,
+        # as in setFitParameters and setLimits.
+        idx = self.fit_metadata_cache["number_coupled"]
         for par in self.parameters["weight"]:
             self.werrors[par.indices] = np.nan_to_num(
                 self.werrors[par.indices], nan=0.0
