@@ -1,8 +1,9 @@
 """Regression tests for the CTR fitting optimizers.
 
-Increments 1 and 2 of the CTR optimizer rework cover the callback error path
-and parameter-name layout. The fixtures here are shared with later increments
-of ``doc/design/dwba_ctr_fitting_implementation_plan.md``.
+Increments 1--3 of the CTR optimizer rework cover the callback error path,
+parameter-name layout, and value-preserving optimizer class split. The fixtures
+here are shared with later increments of
+``doc/design/dwba_ctr_fitting_implementation_plan.md``.
 """
 
 import unittest
@@ -81,6 +82,32 @@ class FitCrystal:
         """Store the crystal parameter errors and record the call."""
         self.errors = np.asarray(errors, dtype=np.float64)
         self.error_calls.append(self.errors)
+
+
+class _ConstraintFitCrystal(FitCrystal):
+    """Fit double exposing the surface displacement constraint interface."""
+
+    def __init__(self):
+        super().__init__()
+        self.uc_bulk = mock.Mock()
+        self.uc_bulk.basis = np.array(
+            [[0.0, 0.0, 0.0, 0.0, 0.20, 0.30]], dtype=np.float64
+        )
+        self._surface_basis = np.array(
+            [
+                [0.0, 0.0, 0.0, 2.0, 0.05, 0.08],
+                [0.0, 0.0, 0.0, 1.0, 0.10, 0.12],
+            ],
+            dtype=np.float64,
+        )
+
+    def getSurfaceDWConstraintEnable(self):  # noqa: N802
+        """Enable both surface rows for displacement constraints."""
+        return np.array([True, True])
+
+    def getSurfaceBasis(self):  # noqa: N802
+        """Return the surface basis consumed by constraint calculation."""
+        return self._surface_basis
 
 
 def _fixture_ctrs():
@@ -297,6 +324,149 @@ def _parameter_crystal(wyckoff="parameter"):
         {"surface": ("C_1", "u")}, limits=(0.1, 0.4), name="coupled_u"
     )
     return crystal, surface
+
+
+class TestOptimizerClassSplit(unittest.TestCase):
+    """Increment 3: generic machinery lives on ``CTROptimizer``."""
+
+    def test_base_optimizer_runs_a_callback_fit_end_to_end(self):
+        """Callbacks, statistics, and trace export work without the subclass."""
+        az = pytest.importorskip("arviz")
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), _fixture_ctrs())
+        callback, calls = _register_callback(optimizer, "cb", 1)
+        optimizer.prepareFit()
+        parameters = optimizer.get_parameters()
+
+        self.assertEqual(optimizer.callback_names, ["cb"])
+        self.assertEqual(optimizer.fitparnames, ["cb", "xtal_0"])
+        self.assertEqual(parameters.size, 2)
+        self.assertEqual(len(optimizer.fitness(parameters)), 1)
+        stat = optimizer.statistics(parameters)
+        self.assertEqual(stat["nodatapoints"], 9)
+        self.assertTrue(np.all(np.isfinite(callback.errors)))
+        self.assertTrue(np.all(np.isfinite(optimizer.xtal.errors)))
+        self.assertTrue(calls)
+
+        population = _FakePopulation(
+            np.vstack((parameters, parameters + 0.01)), [1.0, 2.0]
+        )
+        archipelago = _FakeArchipelago([_FakeIsland(population)])
+        trace = object()
+        with mock.patch.object(az, "from_dict", return_value=trace):
+            self.assertIs(optimizer.set_archi_result(archipelago), trace)
+
+        optimizer.unregister_fit_callback("cb")
+        self.assertEqual(optimizer.callback_names, [])
+        with self.assertRaisesRegex(ValueError, "not a registered callback"):
+            optimizer.unregister_fit_callback("cb")
+
+    def test_base_optimizer_exposes_constraint_methods(self):
+        """Disabled constraints return an empty float vector and flat fitness."""
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), _fixture_ctrs())
+        optimizer.prepareFit()
+        parameters = optimizer.get_parameters()
+
+        constraints = optimizer.get_inequalconstraints()
+        self.assertEqual(constraints.dtype, np.dtype(np.float64))
+        self.assertEqual(constraints.size, 0)
+        self.assertEqual(optimizer.get_nic(), 0)
+        np.testing.assert_allclose(
+            optimizer.fitness(parameters),
+            [np.sum(optimizer.weighted_residues2(parameters))],
+        )
+
+    def test_constraints_extend_fitness_on_the_base_class(self):
+        """Enabled displacement constraints follow the scalar objective."""
+        optimizer = CTRopt.CTROptimizer(
+            _ConstraintFitCrystal(), _fixture_ctrs()
+        )
+        optimizer.dw_zconstraints = True
+        optimizer.prepareFit()
+        parameters = optimizer.get_parameters()
+        constraints = optimizer.get_inequalconstraints()
+
+        self.assertEqual(optimizer.get_nic(), constraints.size)
+        self.assertGreater(constraints.size, 0)
+        np.testing.assert_allclose(
+            optimizer.fitness(parameters),
+            np.concatenate(
+                ([np.sum(optimizer.weighted_residues2(parameters))], constraints)
+            ),
+        )
+
+    def test_subclass_bounds_and_parameters_are_unchanged_by_the_split(self):
+        """Every optional block keeps its legacy position and bounds."""
+        for fit_resolution in (False, True):
+            for with_callback in (False, True):
+                for use_angle_correction in (False, True):
+                    with self.subTest(
+                        fit_resolution=fit_resolution,
+                        with_callback=with_callback,
+                        use_angle_correction=use_angle_correction,
+                    ):
+                        optimizer = CTRopt.CTROptAngleCorrection(
+                            FitCrystal(
+                                (1.0, 2.0), names=["xtal_a", "xtal_b"]
+                            ),
+                            _fixture_ctrs(),
+                        )
+                        optimizer.useAnglecorr = use_angle_correction
+                        parameter_blocks = []
+                        lower_blocks = []
+                        upper_blocks = []
+                        if fit_resolution:
+                            optimizer.fit_resolution(
+                                CTRresolution.BoxResolution(0.11, 0.12, 0.13),
+                                lower_bounds=[0.01, 0.02, 0.03],
+                                higher_bounds=[0.5, 0.6, 0.7],
+                            )
+                            parameter_blocks.append([0.11, 0.12, 0.13])
+                            lower_blocks.append([0.01, 0.02, 0.03])
+                            upper_blocks.append([0.5, 0.6, 0.7])
+                        if with_callback:
+                            _register_callback(optimizer, "cb", 2)
+                            parameter_blocks.append([1.0, 0.5])
+                            lower_blocks.append([0.1, 0.1])
+                            upper_blocks.append([5.0, 5.0])
+                        if use_angle_correction:
+                            parameter_blocks.append([0.25, 0.4])
+                            lower_blocks.append([-1.0, 0.0])
+                            upper_blocks.append([1.0, 0.8])
+                        parameter_blocks.append([1.0, 2.0])
+                        lower_blocks.append([0.1, 0.1])
+                        upper_blocks.append([10.0, 10.0])
+
+                        optimizer.prepareFit(
+                            phaselim=[-1.0, 1.0],
+                            amplim=[0.0, 0.8],
+                            start=[0.25, 0.4],
+                        )
+
+                        np.testing.assert_allclose(
+                            optimizer.get_parameters(),
+                            np.concatenate(parameter_blocks),
+                        )
+                        lower, upper = optimizer.get_bounds()
+                        np.testing.assert_allclose(
+                            lower, np.concatenate(lower_blocks)
+                        )
+                        np.testing.assert_allclose(
+                            upper, np.concatenate(upper_blocks)
+                        )
+                        for ctr in optimizer.CTRs:
+                            np.testing.assert_allclose(
+                                ctr.invrelerrsqrd_weight,
+                                np.sqrt(ctr.weight) / ctr.err,
+                            )
+
+    def test_deleted_members_are_gone(self):
+        """The obsolete correction and commented plotting members stay absent."""
+        optimizer = CTRopt.CTROptAngleCorrection(
+            FitCrystal(), _fixture_ctrs()
+        )
+        self.assertFalse(hasattr(optimizer, "get_anglecorrection_"))
+        self.assertFalse(hasattr(optimizer, "defaultCTRplotsettings"))
+        self.assertFalse(hasattr(optimizer, "plotParametersetCTR"))
 
 
 class TestCallbackErrors(unittest.TestCase):

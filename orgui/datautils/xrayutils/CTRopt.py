@@ -56,6 +56,35 @@ class CTROptimizer:
         self.resolution_errors = None
         self.calculated_CTRs = None
         self._resolution_input_ctrs = None
+        self.dw_zconstraints = False
+        self.nic = 0
+        self.callbacks = []
+
+    def register_fit_callback(
+        self,
+        function: Callable,
+        bounds_low: list,
+        bounds_high: list,
+        init: list,
+        **kwargs,
+    ):
+        """Register an additional parameterized crystal callback."""
+        callback = FitCallback(function, bounds_low, bounds_high, init, **kwargs)
+        self.callbacks.insert(0, callback)
+        return callback.name
+
+    @property
+    def callback_names(self):
+        """Names of registered callbacks in parameter-vector order."""
+        return [callback.name for callback in self.callbacks]
+
+    def unregister_fit_callback(self, name: str):
+        """Remove one registered callback by name."""
+        try:
+            idx = self.callback_names.index(name)
+        except ValueError as error:
+            raise ValueError("%s is not a registered callback") from error
+        del self.callbacks[idx]
 
     def _validate_kinematical_input(self):
         """Reject stored quantities unsupported by the kinematical model."""
@@ -243,8 +272,56 @@ class CTROptimizer:
             self._update_resolution_cache()
         return self.calculated_CTRs[index].sfI
 
+    def _model_parameters(self):
+        """Return the crystal-owned tail of the fit parameter vector."""
+        return self.xtal.getInitialParameters()
+
+    def _set_model_parameters(self, parameters):
+        """Set parameters owned by the fitted crystal model."""
+        self.xtal.setParameters(parameters)
+
+    def _prepend_model_bounds(self, bounds):
+        """Add subclass-owned parameters ahead of the crystal bounds."""
+        return bounds
+
+    def _set_model_errors(self, errors):
+        """Forward the model-owned error tail to the crystal."""
+        self.xtal.setFitErrors(errors)
+
+    def _model_parameter_names(self):
+        """Return names for subclass and crystal model parameters."""
+        return list(self.xtal.fitparnames)
+
+    def _residual_weight(self, ctr):
+        """Return the base optimizer's legacy squared-residual weight."""
+        return ctr.weight * ctr.err**-2
+
+    def _fit_parameter_names(self):
+        """Build names in the same order as the fit parameter vector."""
+        names = []
+        if self._fit_resolution:
+            names.extend(
+                (
+                    "resolution_delta_l_0",
+                    "resolution_delta_l_1",
+                    "resolution_delta_l_2",
+                )
+            )
+        for callback in self.callbacks:
+            names.extend(callback.parnames)
+        names.extend(self._model_parameter_names())
+        if len(names) != len(set(names)):
+            duplicates = sorted(
+                name for name in set(names) if names.count(name) > 1
+            )
+            raise ValueError(
+                "Duplicate fit parameter names are not allowed: "
+                + ", ".join(duplicates)
+            )
+        return names
+
     def prepareFit(self):
-        """Prepare crystal and optional resolution parameters for fitting.
+        """Prepare model, callback, constraint, and resolution fit state.
 
         When a resolution model is configured, this validates any required
         cached angle records and calculates the initial ``calculated_CTRs``
@@ -254,27 +331,61 @@ class CTROptimizer:
         self.startp, self.lower_bounds, self.higher_bounds = (
             self.xtal.getStartParamAndLimits()
         )
-        self.bounds = self._append_resolution_bounds(
+        self.bounds = self._prepend_model_bounds(
             (self.lower_bounds, self.higher_bounds)
         )
         for ctr in self.CTRs:
-            ctr.invrelerrsqrd_weight = ctr.weight * ctr.err**-2
+            ctr.invrelerrsqrd_weight = self._residual_weight(ctr)
+        for callback in reversed(self.callbacks):
+            self.bounds = (
+                np.concatenate((callback.bounds[0], self.bounds[0])),
+                np.concatenate((callback.bounds[1], self.bounds[1])),
+            )
+        self.bounds = self._append_resolution_bounds(self.bounds)
+        if self.dw_zconstraints:
+            self.nic = self.get_inequalconstraints().size
+        else:
+            self.nic = 0
+        self.fitparnames = self._fit_parameter_names()
+        self.priors = self.xtal.priors
         self._update_resolution_cache()
 
     def get_bounds(self):
         return self.bounds
 
     def get_parameters(self):
-        parameters = self.xtal.getInitialParameters()
+        parameters = self._model_parameters()
+        for callback in reversed(self.callbacks):
+            parameters = np.concatenate(
+                (callback.get_parameters(self.xtal), parameters)
+            )
         if self._fit_resolution:
             parameters = np.concatenate((self._resolution_parameters(), parameters))
         return parameters
 
     def set_parameters(self, x):
-        """Set crystal and, when enabled, resolution fit parameters."""
+        """Set resolution, callback, and model parameters in layout order."""
         x = self._split_resolution_parameters(x)
-        self.xtal.setParameters(x)
+        counter = 0
+        for callback in self.callbacks:
+            callback.set_parameters(
+                self.xtal, x[counter : counter + callback.n_pars]
+            )
+            counter += callback.n_pars
+        self._set_model_parameters(x[counter:])
         self._update_resolution_cache()
+
+    def set_errors(self, xerror):
+        """Split fitted errors across resolution, callbacks, and model."""
+        self.errors = xerror
+        if self._fit_resolution:
+            self.resolution_errors = xerror[:3]
+            xerror = xerror[3:]
+        counter = 0
+        for callback in self.callbacks:
+            callback.set_errors(xerror[counter : counter + callback.n_pars])
+            counter += callback.n_pars
+        self._set_model_errors(xerror[counter:])
 
     def weighted_residues2(self, x=None):
         if x is not None:
@@ -350,17 +461,32 @@ class CTROptimizer:
             )
         return np.concatenate(residues)
 
+    def get_inequalconstraints(self):
+        """Return crystal displacement constraints for the current model."""
+        if not self.dw_zconstraints:
+            return np.array([], dtype=np.float64)
+        dwc_enable = self.xtal.getSurfaceDWConstraintEnable()
+        sur_basis = self.xtal.getSurfaceBasis()[dwc_enable]
+        sur_basis = sur_basis[np.argsort(sur_basis[:, 3])]
+        iDWconstr = np.diff(
+            self.xtal.uc_bulk.basis[0, 4] - sur_basis[:, 4], prepend=0
+        )
+        oDWconstr = np.diff(
+            self.xtal.uc_bulk.basis[0, 5] - sur_basis[:, 5], prepend=0
+        )
+        return np.concatenate((iDWconstr, oDWconstr))
+
+    def get_nic(self):
+        """Return the number of active inequality constraints."""
+        return self.nic
+
     def fitness(self, x):
-        self.set_parameters(x)
-        sumchi2 = 0.0
-        for i, ctr in enumerate(self.CTRs):
-            F_theo = self._calculated_amplitude(ctr, i)
-            scale = self.scaling(F_theo, ctr.sfI, ctr.err)  # scale CTR
-            sumchi2 += np.sum(
-                (ctr.invrelerrsqrd_weight / scale**2)
-                * ((ctr.sfI * scale - F_theo) ** 2)
+        objective = np.sum(self.weighted_residues2(x))
+        if self.dw_zconstraints:
+            return np.concatenate(
+                ([objective], self.get_inequalconstraints())
             )
-        return [sumchi2]
+        return [objective]
 
     def statistics(self, x):
         self.set_parameters(x)
@@ -380,11 +506,7 @@ class CTROptimizer:
         pcov = util.leastsq_covariance(self.weighted_residues, x)
 
         self.errors = np.sqrt(np.diag(pcov) * chi2_red)
-        if self._fit_resolution:
-            self.resolution_errors = self.errors[:3]
-            self.xtal.setFitErrors(self.errors[3:])
-        else:
-            self.xtal.setFitErrors(self.errors)
+        self.set_errors(self.errors)
         self.set_parameters(x)
 
         stat["Chisqr"] = chi2_result
@@ -396,6 +518,38 @@ class CTROptimizer:
         stat["covariance"] = pcov
 
         return stat
+    def set_archi_result(self, archi):
+        """Convert an archipelago population to an ArviZ fit trace."""
+        islandid = int(np.argmin([f[0] for f in archi.get_champions_f()]))
+        minisland = archi[islandid]
+        pop_min = minisland.get_population()
+
+        res = pop_min.champion_x
+        if len(self.fitparnames) != np.asarray(res).size:
+            raise ValueError(
+                "Fit parameter name count does not match the champion parameter "
+                "vector length."
+            )
+
+        stat = self.statistics(res)
+        popsize = archi[0].get_population().get_f().shape[0]
+        params = {
+            name: np.empty((len(archi), popsize))
+            for name in self.fitparnames
+        }
+        params["chisqr"] = np.empty((len(archi), popsize))
+
+        for i, island in enumerate(archi):
+            population = island.get_population()
+            for j, parameter in enumerate(self.fitparnames):
+                params[parameter][i] = population.get_x()[:, j]
+            params["chisqr"][i] = population.get_f()[:, 0]
+
+        stat.pop("covariance", np.array([]))
+
+        import arviz as az
+
+        return az.from_dict(params, attrs=stat)
 
     def evaluateStatistics(self, x):
         warnings.warn(
@@ -543,34 +697,7 @@ class CTROptAngleCorrection(CTROptimizer):
         super().__init__(*args, **kwargs)
         self.scaleindividual = False
         self.useAnglecorr = False
-        self.dw_zconstraints = False
         self.phasevelocity = 1.0
-        self.nic = 0
-        self.callbacks = []
-
-    def register_fit_callback(
-        self,
-        function: Callable,
-        bounds_low: list,
-        bounds_high: list,
-        init: list,
-        **kwargs,
-    ):
-        callback = FitCallback(function, bounds_low, bounds_high, init, **kwargs)
-        self.callbacks.insert(0, callback)
-        return callback.name
-
-    @property
-    def callback_names(self):
-        names = [n.name for n in self.callbacks]
-        return names
-
-    def unregister_fit_callback(self, name: str):
-        try:
-            idx = self.callback_names.index(name)
-        except ValueError as e:
-            raise ValueError("%s is not a registered callback") from e
-        del self.callbacks[idx]
 
     def prepareFit(self, phaselim=[0, 2 * np.pi], amplim=[0, 0.75], start=[0.0, 0.0]):
         """Prepare angle-correction and optional resolution fit state.
@@ -579,76 +706,56 @@ class CTROptAngleCorrection(CTROptimizer):
         ``calculated_CTRs`` cache. Its three native parameters prefix all
         callback, angle-correction, and crystal parameters.
         """
-        self._validate_kinematical_input()
-        self.startp, self.lower_bounds, self.higher_bounds = (
-            self.xtal.getStartParamAndLimits()
-        )
-        if self.useAnglecorr:
-            self.bounds = (
-                np.concatenate(([phaselim[0], amplim[0]], self.lower_bounds)),
-                np.concatenate(([phaselim[1], amplim[1]], self.higher_bounds)),
-            )
-        else:
-            self.bounds = (self.lower_bounds, self.higher_bounds)
-        for ctr in self.CTRs:
-            ctr.invrelerrsqrd_weight = np.sqrt(ctr.weight) / ctr.err
+        self.phaselim = phaselim
+        self.amplim = amplim
         self.phase, self.amp = start
+        super().prepareFit()
 
-        for cb in reversed(self.callbacks):
-            self.bounds = (
-                np.concatenate((cb.bounds[0], self.bounds[0])),
-                np.concatenate((cb.bounds[1], self.bounds[1])),
-            )
-        self.bounds = self._append_resolution_bounds(self.bounds)
-
-        if self.dw_zconstraints:
-            constr = self.get_inequalconstraints()
-            self.nic = constr.size
-        self.fitparnames = []
-        if self._fit_resolution:
-            self.fitparnames += [
-                "resolution_delta_l_0",
-                "resolution_delta_l_1",
-                "resolution_delta_l_2",
-            ]
-        for cb in self.callbacks:
-            self.fitparnames += cb.parnames
+    def _model_parameters(self):
+        """Prepend active angle-correction values to crystal parameters."""
+        parameters = super()._model_parameters()
         if self.useAnglecorr:
-            self.fitparnames += [
-                "anglecorrection_phase",
-                "anglecorrection_amplitude",
-            ]
-        self.fitparnames += list(self.xtal.fitparnames)
-        if len(self.fitparnames) != len(set(self.fitparnames)):
-            duplicates = sorted(
-                name
-                for name in set(self.fitparnames)
-                if self.fitparnames.count(name) > 1
-            )
-            raise ValueError(
-                "Duplicate fit parameter names are not allowed: "
-                + ", ".join(duplicates)
-            )
-        self.priors = self.xtal.priors
-        self._update_resolution_cache()
+            parameters = np.concatenate(([self.phase, self.amp], parameters))
+        return parameters
 
-    def get_inequalconstraints(self):
-        constraints = []
-        if self.dw_zconstraints:
-            dwc_enable = self.xtal.getSurfaceDWConstraintEnable()
-            sur_basis = self.xtal.getSurfaceBasis()[dwc_enable]
-            sur_basis = sur_basis[np.argsort(sur_basis[:, 3])]  # order in z direction
-            # iDW_bulk = self.xtal.uc_bulk.basis[0,4]
-            # oDW_bulk = self.xtal.uc_bulk.basis[0,5]
-            iDWconstr = np.diff(
-                self.xtal.uc_bulk.basis[0, 4] - sur_basis[:, 4], prepend=0
+    def _set_model_parameters(self, parameters):
+        """Split active angle correction from crystal parameters."""
+        if self.useAnglecorr:
+            self.phase, self.amp = parameters[:2]
+            parameters = parameters[2:]
+        super()._set_model_parameters(parameters)
+
+    def _prepend_model_bounds(self, bounds):
+        """Prepend active angle-correction bounds to crystal bounds."""
+        if not self.useAnglecorr:
+            return bounds
+        return (
+            np.concatenate(([self.phaselim[0], self.amplim[0]], bounds[0])),
+            np.concatenate(([self.phaselim[1], self.amplim[1]], bounds[1])),
+        )
+
+    def _set_model_errors(self, errors):
+        """Drop angle-correction errors before forwarding the crystal tail."""
+        if self.useAnglecorr:
+            errors = errors[2:]
+        super()._set_model_errors(errors)
+
+    def _model_parameter_names(self):
+        """Return active angle-correction and crystal parameter names."""
+        names = []
+        if self.useAnglecorr:
+            names.extend(
+                (
+                    "anglecorrection_phase",
+                    "anglecorrection_amplitude",
+                )
             )
-            oDWconstr = np.diff(
-                self.xtal.uc_bulk.basis[0, 5] - sur_basis[:, 5], prepend=0
-            )
-            dw_constraints = np.concatenate((iDWconstr, oDWconstr))
-            constraints.append(dw_constraints)
-        return np.concatenate(constraints)
+        names.extend(super()._model_parameter_names())
+        return names
+
+    def _residual_weight(self, ctr):
+        """Return the angle optimizer's legacy residual weight."""
+        return np.sqrt(ctr.weight) / ctr.err
 
     def applyCorrections(self):
         F_obs = []
@@ -681,73 +788,9 @@ class CTROptAngleCorrection(CTROptimizer):
         else:
             warnings.warn("Angle correction was not enabled. Skip applyCorrections.")
 
-    def get_nic(self):
-        return self.nic
-
-    def fitness(self, x):
-        if self.dw_zconstraints:
-            return np.concatenate(
-                ([np.sum(self.weighted_residues2(x))], self.get_inequalconstraints())
-            )
-        else:
-            return [np.sum(self.weighted_residues2(x))]
-
     def log_prob(self, x):
         resid, err = self.weighted_residues_errors(x)
         return -0.5 * np.sum(resid**2 + np.log(2 * np.pi * err**2))
-
-    def get_parameters(self):
-        if self.useAnglecorr:
-            pars = np.concatenate(
-                ([self.phase, self.amp], self.xtal.getInitialParameters())
-            )
-        else:
-            pars = self.xtal.getInitialParameters()
-
-        for cb in reversed(self.callbacks):
-            pars = np.concatenate((cb.get_parameters(self.xtal), pars))
-        if self._fit_resolution:
-            pars = np.concatenate((self._resolution_parameters(), pars))
-        return pars
-
-    def set_parameters(self, x):
-        x = self._split_resolution_parameters(x)
-        counter = 0
-        for cb in self.callbacks:
-            cb.set_parameters(self.xtal, x[counter : counter + cb.n_pars])
-            counter += cb.n_pars
-
-        x = x[counter:]
-
-        if self.useAnglecorr:
-            self.phase, self.amp = x[:2]
-            self.xtal.setParameters(x[2:])
-        else:
-            self.xtal.setParameters(x)
-        self._update_resolution_cache()
-
-    def set_errors(self, xerror):
-        self.errors = xerror
-
-        if self._fit_resolution:
-            self.resolution_errors = xerror[:3]
-            xerror = xerror[3:]
-
-        counter = 0
-        for cb in self.callbacks:
-            cb.set_errors(xerror[counter : counter + cb.n_pars])
-            counter += cb.n_pars
-        xerror = xerror[counter:]
-
-        if self.useAnglecorr:
-            self.xtal.setFitErrors(xerror[2:])
-        else:
-            self.xtal.setFitErrors(xerror)
-
-    def get_anglecorrection_(self, omega, x=None):  # old, unused
-        if x is not None:
-            self.phase, self.amp = x[:2]
-        return 1 + self.amp * np.sin(self.phasevelocity * (omega + self.phase))
 
     def get_anglecorrection(
         self, omega, x=None
@@ -944,64 +987,3 @@ class CTROptAngleCorrection(CTROptimizer):
         stat["covariance"] = pcov
 
         return stat
-
-    def set_archi_result(self, archi):
-        islandid = int(np.argmin([f[0] for f in archi.get_champions_f()]))
-        minisland = archi[islandid]
-        pop_min = minisland.get_population()
-
-        res = pop_min.champion_x
-        if len(self.fitparnames) != np.asarray(res).size:
-            raise ValueError(
-                "Fit parameter name count does not match the champion parameter "
-                "vector length."
-            )
-
-        stat = self.statistics(res)
-
-        popsize = archi[0].get_population().get_f().shape[0]
-
-        params = {name: np.empty((len(archi), popsize)) for name in self.fitparnames}
-        params["chisqr"] = np.empty((len(archi), popsize))
-        # params['logpdf'] = np.empty((len(archi), popsize))
-
-        for i, isl in enumerate(archi):
-            pop = isl.get_population()
-            for j, p in enumerate(self.fitparnames):
-                params[p][i] = pop.get_x()[:, j]
-            params["chisqr"][i] = pop.get_f()[:, 0]
-            # params['logpdf'][i] = stats.chi2.logpdf(pop.get_f()[:,0],self._cached_flat_data[0].size - len(self.fitparnames)) # correct???  # noqa: E501
-
-        stat.pop("covariance", np.array([]))  # cannot save it as netcdf!
-
-        import arviz as az
-
-        fittrace = az.from_dict(params, attrs=stat)
-        return fittrace
-
-    """
-    def defaultCTRplotsettings(self):
-        self.lrange = [0.,9.]
-        self.plotsize = (19,12)
-        self.settings = {linestyle='', marker='.',color='black',zorder=2,elinewidth=0.5,capsize=1.,'markersize' : 2.}
-
-    def plotParametersetCTR(self,x,lrange=[0.,9.],plotsize=(19,12)):
-        self.xtal.setParameters(x)
-        fitCTRs = self.CTRs.generateCollectionFromXtal(self.xtal,1000,lrange)
-
-        ctroverviewfig = ctrfigure(figsize=plotsize)
-
-        self.CTRs.setPlotSettings(linestyle='', marker='.',color='black',zorder=2,elinewidth=0.5,capsize=1.,markersize=2.)
-        self.CTRs.setAllToDefaultID()
-        ctroverviewfig.addCollection(self.CTRs)
-        #ideal_rods.setPlotSettings(linestyle='-', marker='',color=(0.7,0.7,0.7,1.),zorder=1,linewidth=4)
-        #ideal_rods.setAllToDefaultID()
-        #ctroverviewfig.addCollection(ideal_rods)
-        fitCTRs.setPlotSettings(linestyle='-', marker='',color='red',zorder=3)
-        fitCTRs.setAllToDefaultID()
-        ctroverviewfig.addCollection(fitCTRs)
-
-        ctroverviewfig.settings(wspace=0.02,hspace=0.05,ylabels='|$F$| / a.u.',ylim=[1e-1,1e1],xlim=[-0.05,8.05],xlabels="$L$ / r.l.u.")
-        ctroverviewfig.generateCTRplot(2)
-
-    """  # noqa: E501
