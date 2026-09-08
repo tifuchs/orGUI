@@ -1,5 +1,6 @@
 """Focused validation of the public DWBA state and native record kernel."""
 
+import copy
 from dataclasses import FrozenInstanceError
 from unittest import mock
 
@@ -566,8 +567,9 @@ def test_global_mixed_geometry_groups_specular_and_offspecular_points():
     result = crystal.dwba.evaluate_prepared(prepared)
     assert result.unperturbed_amplitude[0] != 0.0
     assert result.unperturbed_amplitude[1] == 0.0
-    with pytest.raises(ValueError, match="only for specular"):
-        _ = result.reflectivity
+    np.testing.assert_allclose(
+        result.reflectivity, np.abs(result.total_amplitude) ** 2
+    )
 
 
 def test_glancing_inversion_and_vlieg_round_trip_with_orientation():
@@ -758,6 +760,91 @@ def test_result_observables_and_unpolarized_reflectivity():
     np.testing.assert_allclose(unpolarized, 0.5 * (s + p))
 
 
+@pytest.mark.parametrize(
+    ("s_fraction", "outgoing", "expected_pairs", "expected"),
+    [
+        (1.0, "s", [("s", "s")], 1.0),
+        (0.0, "unanalysed", [("p", "s"), ("p", "p")], 7.0),
+        (0.25, "p", [("s", "p"), ("p", "p")], 3.5),
+        (
+            0.25,
+            "unanalysed",
+            [("s", "s"), ("s", "p"), ("p", "s"), ("p", "p")],
+            6.0,
+        ),
+    ],
+)
+def test_polarization_reduction_evaluates_only_requested_channels(
+    s_fraction, outgoing, expected_pairs, expected
+):
+    state = CTRcalc.SXRDCrystal(_one_atom_cell()).dwba
+    channel_values = {
+        ("s", "s"): 1.0,
+        ("s", "p"): 2.0,
+        ("p", "s"): 3.0,
+        ("p", "p"): 4.0,
+    }
+
+    def channel(*args, polarization_i, polarization_f, **kwargs):
+        return mock.Mock(
+            reflectivity=channel_values[(polarization_i, polarization_f)]
+        )
+
+    with mock.patch.object(state, "evaluate_from_glancing", side_effect=channel) as run:
+        actual = state.polarization_reflectivity_from_glancing(
+            0.0,
+            0.0,
+            0.04,
+            0.04,
+            s_fraction=s_fraction,
+            outgoing=outgoing,
+        )
+
+    assert actual == pytest.approx(expected)
+    assert [
+        (call.kwargs["polarization_i"], call.kwargs["polarization_f"])
+        for call in run.call_args_list
+    ] == expected_pairs
+
+
+def test_polarization_reduction_is_an_incoherent_channel_sum():
+    cell = _one_atom_cell()
+    state = CTRcalc.SXRDCrystal(cell).dwba
+    alpha_i, alpha_f, azimuth = 0.031, 0.071, 0.36
+    h, _ = _kinematics(cell, alpha_i, alpha_f, azimuth)
+    fraction = 0.37
+
+    channels = {
+        (polarization_i, polarization_f): state.evaluate_from_glancing(
+            h,
+            0.0,
+            alpha_i,
+            alpha_f,
+            polarization_i=polarization_i,
+            polarization_f=polarization_f,
+        )
+        for polarization_i in ("s", "p")
+        for polarization_f in ("s", "p")
+    }
+    expected = fraction * (
+        channels[("s", "s")].reflectivity
+        + channels[("s", "p")].reflectivity
+    ) + (1.0 - fraction) * (
+        channels[("p", "s")].reflectivity
+        + channels[("p", "p")].reflectivity
+    )
+    actual = state.polarization_reflectivity_from_glancing(
+        h,
+        0.0,
+        alpha_i,
+        alpha_f,
+        s_fraction=fraction,
+        outgoing="unanalysed",
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=3e-14)
+
+
 def test_F_h_is_the_canonical_name_and_splits_into_its_two_parts():
     crystal = CTRcalc.SXRDCrystal(_one_atom_cell())
     angles = np.array([0.006, 0.04])
@@ -796,6 +883,7 @@ def test_F_effective_inverts_the_documented_prefactor():
         * 2.8179403262e-5
         / (kappa_f * result.prepared.reference_area)
     )
+    np.testing.assert_allclose(result.amplitude_prefactor, prefactor)
     # Applying the prefactor to F_effective must return the total amplitude.
     np.testing.assert_allclose(
         prefactor * result.F_effective, result.total_amplitude, rtol=1e-12
@@ -804,6 +892,33 @@ def test_F_effective_inverts_the_documented_prefactor():
     np.testing.assert_allclose(
         prefactor * result.F_h, result.scattered_amplitude, rtol=1e-12
     )
+
+
+def test_off_specular_cross_polarization_reflectivity_is_field_intensity():
+    cell = _one_atom_cell()
+    crystal = CTRcalc.SXRDCrystal(cell)
+    alpha_i, alpha_f, azimuth = 0.021, 0.067, 0.31
+    h, _ = _kinematics(cell, alpha_i, alpha_f, azimuth)
+    result = crystal.dwba.evaluate_from_glancing(
+        h,
+        0.0,
+        alpha_i,
+        alpha_f,
+        polarization_i="s",
+        polarization_f="p",
+    )
+
+    assert not result.prepared.is_specular
+    assert result.unperturbed_amplitude == 0.0j
+    np.testing.assert_allclose(
+        result.reflectivity,
+        np.abs(result.total_amplitude) ** 2,
+        rtol=0.0,
+        atol=0.0,
+    )
+    # In particular, asymmetric angles do not add a kappa_f / kappa_i factor.
+    flux_weighted = result.reflectivity * np.sin(alpha_f) / np.sin(alpha_i)
+    assert result.reflectivity != pytest.approx(flux_weighted)
 
 
 def test_F_effective_degenerates_to_F_h_off_specular():
@@ -956,6 +1071,126 @@ def test_cache_clear_and_info_contract():
     assert after["prepared_size"] == 0
     assert after["reference_size"] == 0
     assert after["field_size"] == 0
+
+
+def test_batch_reuses_one_snapshot_and_one_compatible_atom_packing():
+    cell = _one_atom_cell()
+    state = CTRcalc.SXRDCrystal(cell).dwba
+    alpha_i = np.array([0.031, 0.044])
+    alpha_f = np.array([0.061, 0.078])
+    h = np.array(
+        [
+            _kinematics(cell, incident, exit_, 0.32)[0]
+            for incident, exit_ in zip(alpha_i, alpha_f)
+        ]
+    )
+    before = state.cache_info()
+
+    results = []
+    with state.batch():
+        for polarization_i in ("s", "p"):
+            for polarization_f in ("s", "p"):
+                results.append(
+                    state.evaluate_from_glancing(
+                        h,
+                        0.0,
+                        alpha_i,
+                        alpha_f,
+                        polarization_i=polarization_i,
+                        polarization_f=polarization_f,
+                    )
+                )
+
+    after = state.cache_info()
+    assert after["snapshot_builds"] - before["snapshot_builds"] == 1
+    assert after["packing_builds"] - before["packing_builds"] == 1
+    assert state._batch_depth == 0
+    assert state._batch_snapshot is None
+    assert state._batch_packings == {}
+    for result in results:
+        repeated = state.evaluate_prepared(result.prepared)
+        np.testing.assert_array_equal(repeated.F_h, result.F_h)
+        np.testing.assert_array_equal(
+            repeated.total_amplitude, result.total_amplitude
+        )
+
+
+def test_nested_batch_exception_clears_transient_state():
+    state = CTRcalc.SXRDCrystal(_one_atom_cell()).dwba
+    with pytest.raises(RuntimeError, match="abort batch"):
+        with state.batch():
+            state.prepare_from_glancing(0.0, 0.0, 0.04, 0.04)
+            with state.batch():
+                raise RuntimeError("abort batch")
+
+    assert state._batch_depth == 0
+    assert state._batch_snapshot is None
+    assert state._batch_packings == {}
+    result = state.evaluate_from_glancing(0.0, 0.0, 0.04, 0.04)
+    assert np.isfinite(result.reflectivity)
+
+
+def test_ordinary_deepcopy_rebinds_preparations_without_custom_copying():
+    crystal = CTRcalc.SXRDCrystal(_one_atom_cell())
+    original_prepared = crystal.dwba.prepare_from_glancing(
+        0.0, 0.0, 0.04, 0.04
+    )
+    crystal.dwba.evaluate_prepared(original_prepared)
+    copied = copy.deepcopy(crystal)
+
+    assert "__deepcopy__" not in CTRdwba.DWBAState.__dict__
+    copied_prepared = copied.dwba.prepare_from_glancing(
+        0.0, 0.0, 0.04, 0.04
+    )
+    copied_result = copied.dwba.evaluate_prepared(copied_prepared)
+    assert copied_prepared.crystal_identity == id(copied)
+    assert copied_prepared.bulk_identity == id(copied.uc_bulk)
+    assert np.isfinite(copied_result.reflectivity)
+
+    with pytest.raises(ValueError, match="another crystal"):
+        copied.dwba.evaluate_prepared(original_prepared)
+    with pytest.raises(ValueError, match="another crystal"):
+        crystal.dwba.evaluate_prepared(copied_prepared)
+
+
+def test_deepcopy_model_and_state_mutations_are_independent():
+    bulk = _layered_cell("bulk")
+    film = CTRfilm.Film(_layered_cell("film"), name="film")
+    film.basis[0] = 4.0
+    surface = CTRfilm.PoissonSurface(
+        _layered_cell("termination"),
+        profile=PoissonProfile(1.5, 0.5),
+        name="surface",
+    )
+    crystal = CTRcalc.SXRDCrystal(
+        bulk, film, surface, stacking=np.array([1, 2])
+    )
+    original_basis = crystal.uc_bulk.basis.copy()
+    original_orientation = crystal.dwba.orientation.copy()
+    copied = copy.deepcopy(crystal)
+
+    copied.uc_bulk.basis[0, 1] += 0.03
+    copied.uc_bulk.basis[0, 4] += 0.04
+    copied.uc_bulk.basis[0, 6] *= 0.8
+    copied.uc_surface_list[1].basis[1] += 0.25
+    copied.setEnergy(11000.0)
+    copied.uc_bulk.setLattice([3.1, 3.0, 4.0], [90.0, 90.0, 90.0])
+    copied.dwba.set_orientation(np.diag([-1.0, -1.0, 1.0]))
+
+    np.testing.assert_array_equal(crystal.uc_bulk.basis, original_basis)
+    np.testing.assert_allclose(crystal.uc_surface_list[1].basis[:2], [1.5, 0.5])
+    assert crystal.uc_bulk._E == pytest.approx(10000.0)
+    np.testing.assert_allclose(crystal.uc_bulk.a, [3.0, 3.0, 4.0])
+    np.testing.assert_array_equal(crystal.dwba.orientation, original_orientation)
+
+    copied_basis = copied.uc_bulk.basis.copy()
+    copied_roughness = copied.uc_surface_list[1].basis.copy()
+    crystal.uc_bulk.basis[0, 2] += 0.07
+    crystal.uc_surface_list[1].basis[1] -= 0.15
+    np.testing.assert_array_equal(copied.uc_bulk.basis, copied_basis)
+    np.testing.assert_array_equal(
+        copied.uc_surface_list[1].basis, copied_roughness
+    )
 
 
 def test_preparation_lru_is_bounded_but_retained_handles_remain_usable():

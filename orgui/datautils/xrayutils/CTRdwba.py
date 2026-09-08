@@ -1,6 +1,7 @@
 """Distorted-wave Born approximation state and observable amplitudes."""
 
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 
@@ -446,7 +447,7 @@ class DWBAResult:
     contributions: tuple[DWBAContribution, ...]
 
     @property
-    def _prefactor(self):
+    def amplitude_prefactor(self):
         """Return ``2 pi i r_e / (A_ref kappa_f)``, the amplitude conversion."""
         kappa_f = self.prepared.k0 * np.sin(self.prepared.alpha_f)
         value = (
@@ -494,7 +495,7 @@ class DWBAResult:
 
         This is the prefactor documented on this class applied to :attr:`F_h`.
         """
-        return self._prefactor * self.F_h
+        return self.amplitude_prefactor * self.F_h
 
     @property
     def total_amplitude(self):
@@ -533,22 +534,15 @@ class DWBAResult:
         ``doc/source/dwba.rst`` gives the large-:math:`Q_z` limit that
         justifies it.
         """
-        return self.total_amplitude / self._prefactor
+        return self.total_amplitude / self.amplitude_prefactor
 
-    def _require_specular_reflection(self):
+    def _require_reflection(self):
         if self.bulk_mode != "semi_infinite":
             raise ValueError("Reflectivity requires a semi-infinite bulk result.")
-        if not np.all(self.prepared.is_specular):
-            raise ValueError("Reflectivity is defined only for specular results.")
-        if self.prepared.polarization_i != self.prepared.polarization_f:
-            raise ValueError(
-                "Reflectivity requires identical incident and analyzed "
-                "polarizations."
-            )
 
     @property
     def reflectivity(self):
-        """Return the coherent specular reflectivity :math:`|r_0+r_{\\mathbf{h}}|^2`.
+        """Return one polarization channel's field intensity :math:`|r|^2`.
 
         On the specular rod at small angles this is *exact* up to the
         first-order truncation in the contrast: the problem is genuinely
@@ -560,9 +554,13 @@ class DWBAResult:
         measured accuracy, and the strictly linearised variant used as a
         regime diagnostic.
 
-        Requires an entirely specular, same-polarization, semi-infinite result.
+        Off specular and for cross-polarization channels, the unperturbed
+        amplitude is zero and this is ``abs(scattered_amplitude) ** 2``. No
+        incident-to-exit normal-flux factor is applied. A physical observable
+        requires a semi-infinite bulk result; ``bulk_mode="unit_cell"`` remains
+        a matrix-element diagnostic.
         """
-        self._require_specular_reflection()
+        self._require_reflection()
         return np.abs(self.total_amplitude) ** 2
 
 @dataclass(frozen=True)
@@ -595,6 +593,9 @@ class DWBAState:
         self._reference_cache = OrderedDict()
         self._field_cache = OrderedDict()
         self._prepared_cache = OrderedDict()
+        self._batch_depth = 0
+        self._batch_snapshot = None
+        self._batch_packings = {}
         self._cache_counters = {
             "geometry_hits": 0,
             "geometry_misses": 0,
@@ -604,6 +605,8 @@ class DWBAState:
             "field_misses": 0,
             "prepared_hits": 0,
             "prepared_misses": 0,
+            "snapshot_builds": 0,
+            "packing_builds": 0,
         }
 
     @property
@@ -700,6 +703,30 @@ class DWBAState:
             "prepared_capacity": _PREPARATION_CACHE_SIZE,
             "field_capacity": _FIELD_CACHE_SIZE,
         }
+
+    @contextmanager
+    def batch(self):
+        """Share rod-independent atomic work across a block of evaluations.
+
+        Nested scopes share the outer scope. The atomic-model snapshot,
+        validated live records, and compatible packed atom tables are retained
+        only until the outermost scope exits, including after an exception.
+        Existing geometry, optical-reference, preparation, and field caches
+        remain the only persistent caches.
+
+        The crystal must not be mutated while a batch is active.
+        """
+        if self._batch_depth == 0:
+            self._batch_snapshot = None
+            self._batch_packings = {}
+        self._batch_depth += 1
+        try:
+            yield self
+        finally:
+            self._batch_depth -= 1
+            if self._batch_depth == 0:
+                self._batch_snapshot = None
+                self._batch_packings = {}
 
     def _require_available(self):
         if not HAS_CPP_ACCEL or not hasattr(
@@ -823,6 +850,10 @@ class DWBAState:
         return values, shares
 
     def _atomic_model_snapshot(self):
+        if self._batch_depth and self._batch_snapshot is not None:
+            return self._batch_snapshot
+
+        self._cache_counters["snapshot_builds"] += 1
         records = self._live_records()
         record_count = len(records)
         if not self._crystal.uc_surface_list:
@@ -889,7 +920,10 @@ class DWBAState:
             geometry_fingerprint=geometry_fingerprint,
             decomposition_fingerprint=digest.digest(),
         )
-        return records, model, stratified
+        snapshot = records, model, stratified
+        if self._batch_depth:
+            self._batch_snapshot = snapshot
+        return snapshot
 
     def _vlieg_angles(self):
         energy_eV = float(self._crystal.uc_bulk._E)
@@ -1317,9 +1351,18 @@ class DWBAState:
             geometry_atol,
         )
         if cache and key in self._prepared_cache:
-            self._cache_counters["prepared_hits"] += 1
-            self._prepared_cache.move_to_end(key)
-            return self._prepared_cache[key]
+            cached = self._prepared_cache[key]
+            if (
+                cached.crystal_identity == id(self._crystal)
+                and cached.bulk_identity == id(self._crystal.uc_bulk)
+            ):
+                self._cache_counters["prepared_hits"] += 1
+                self._prepared_cache.move_to_end(key)
+                return cached
+            # Deepcopy preserves the integer identity tokens stored in a
+            # prepared handle. Discard only that copied owner-bound entry;
+            # immutable value caches remain reusable by the copied state.
+            del self._prepared_cache[key]
         self._cache_counters["prepared_misses"] += 1
         prepared = self._prepare_explicit(
             geometry,
@@ -1596,7 +1639,21 @@ class DWBAState:
                 "DWBA does not yet support in-plane strain transforms."
             )
 
+    @staticmethod
+    def _packing_key(prepared):
+        return _hash_arrays(
+            prepared.orientation,
+            prepared.B_mat,
+            prepared.ref_hkl_transform,
+            np.asarray([prepared.reference_area], dtype=np.float64),
+        )
+
     def _pack_atomic_records(self, prepared, records):
+        key = self._packing_key(prepared)
+        if self._batch_depth and key in self._batch_packings:
+            return self._batch_packings[key]
+
+        self._cache_counters["packing_builds"] += 1
         atom_basis = []
         form_factors = []
         finite_positions = []
@@ -1685,7 +1742,7 @@ class DWBAState:
 
         if bulk_repeat is None:
             raise ValueError("The DWBA bulk must contain at least one domain.")
-        return {
+        packed = {
             "atom_basis": concatenate(atom_basis, (0, 8), np.float64),
             "form_factors": concatenate(form_factors, (0, 13), np.float64),
             "finite_positions": concatenate(
@@ -1706,6 +1763,9 @@ class DWBAState:
             ),
             "bulk_repeat": np.ascontiguousarray(bulk_repeat, dtype=np.float64),
         }
+        if self._batch_depth:
+            self._batch_packings[key] = packed
+        return packed
 
     def _validate_prepared(self, prepared):
         if not isinstance(prepared, PreparedCTR):
@@ -1732,7 +1792,10 @@ class DWBAState:
                 raise ValueError(
                     f"The crystal {name} changed; prepare the CTR again."
                 )
-        records = self._live_records()
+        if self._batch_depth:
+            records, _, _ = self._atomic_model_snapshot()
+        else:
+            records = self._live_records()
         if tuple(_record_descriptor(record) for record in records) != (
             prepared._atomic_model.descriptors
         ) or _hash_record_geometry(records) != (
@@ -1945,10 +2008,13 @@ class DWBAState:
         polarization="s",
         **kwargs,
     ):
-        """Return the coherent specular reflectivity.
+        """Return a same-polarization channel's field intensity.
 
         hkl coordinates are reference-cell r.l.u. ``"unpolarized"`` averages
-        independently evaluated s and p reflectivities incoherently.
+        independently evaluated ``s->s`` and ``p->p`` intensities
+        incoherently. It does not include cross-polarization exit channels;
+        use :meth:`polarization_reflectivity` for measured mixtures and
+        unanalysed detection.
 
         :param str polarization: ``"s"``, ``"p"``, or ``"unpolarized"``.
         :returns: Scalar or broadcast reflectivity.
@@ -1968,9 +2034,143 @@ class DWBAState:
             return result.reflectivity
 
         if polarization == "unpolarized":
-            value = 0.5 * (one("s") + one("p"))
+            with self.batch():
+                value = 0.5 * (one("s") + one("p"))
         else:
             value = one(polarization)
         if np.ndim(value) == 0:
             return float(value)
         return _readonly_array(value, np.float64)
+
+    @staticmethod
+    def _polarization_pairs(s_fraction, outgoing):
+        if isinstance(s_fraction, bool | np.bool_):
+            raise ValueError("s_fraction must be a finite scalar in [0, 1].")
+        fraction = np.asarray(s_fraction)
+        if fraction.ndim != 0:
+            raise ValueError("s_fraction must be a finite scalar in [0, 1].")
+        fraction = float(fraction)
+        if not np.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
+            raise ValueError("s_fraction must be a finite scalar in [0, 1].")
+        if outgoing not in {"s", "p", "unanalysed"}:
+            raise ValueError('outgoing must be "s", "p", or "unanalysed".')
+
+        incident = []
+        if fraction > 0.0:
+            incident.append(("s", fraction))
+        if fraction < 1.0:
+            incident.append(("p", 1.0 - fraction))
+        analysed = ("s", "p") if outgoing == "unanalysed" else (outgoing,)
+        return tuple(
+            (polarization_i, polarization_f, weight)
+            for polarization_i, weight in incident
+            for polarization_f in analysed
+        )
+
+    def _polarization_reflectivity(
+        self,
+        evaluator,
+        args,
+        *,
+        s_fraction,
+        outgoing,
+        kwargs,
+    ):
+        if "polarization_i" in kwargs or "polarization_f" in kwargs:
+            raise TypeError(
+                "Polarization channels are selected by s_fraction and outgoing."
+            )
+        pairs = self._polarization_pairs(s_fraction, outgoing)
+        value = None
+        with self.batch():
+            for polarization_i, polarization_f, weight in pairs:
+                channel = evaluator(
+                    *args,
+                    polarization_i=polarization_i,
+                    polarization_f=polarization_f,
+                    **kwargs,
+                ).reflectivity
+                contribution = weight * channel
+                value = contribution if value is None else value + contribution
+        if np.ndim(value) == 0:
+            return float(value)
+        return _readonly_array(value, np.float64)
+
+    def polarization_reflectivity(
+        self,
+        h,
+        k,
+        l,  # noqa: E741
+        *,
+        s_fraction,
+        outgoing,
+        **kwargs,
+    ):
+        """Return the requested incoherent polarization-channel intensity.
+
+        ``s_fraction`` is the incident s fraction in the local Renaud basis.
+        ``outgoing`` is ``"s"``, ``"p"``, or ``"unanalysed"``. Only
+        nonzero-weight channel pairs are evaluated. The return value is the
+        field-intensity reflectivity before any conventional polarization
+        factor P is applied; P belongs only to later structure-factor
+        reduction.
+        """
+        return self._polarization_reflectivity(
+            self.evaluate,
+            (h, k, l),
+            s_fraction=s_fraction,
+            outgoing=outgoing,
+            kwargs=kwargs,
+        )
+
+    def polarization_reflectivity_from_glancing(
+        self,
+        h,
+        k,
+        alpha_i,
+        alpha_f,
+        *,
+        s_fraction,
+        outgoing,
+        **kwargs,
+    ):
+        """Return polarization-reduced intensity for measured glancing angles.
+
+        Incident and exit glancing angles are radians. See
+        :meth:`polarization_reflectivity` for the incoherent channel and
+        conventional-factor contract.
+        """
+        return self._polarization_reflectivity(
+            self.evaluate_from_glancing,
+            (h, k, alpha_i, alpha_f),
+            s_fraction=s_fraction,
+            outgoing=outgoing,
+            kwargs=kwargs,
+        )
+
+    def polarization_reflectivity_from_vlieg(
+        self,
+        alpha,
+        delta,
+        gamma,
+        omega,
+        chi,
+        phi,
+        *,
+        s_fraction,
+        outgoing,
+        **kwargs,
+    ):
+        """Return polarization-reduced intensity for measured Vlieg angles.
+
+        All six Vlieg angles are radians. See
+        :meth:`polarization_reflectivity` for the incoherent channel and
+        conventional-factor contract.
+        """
+        return self._polarization_reflectivity(
+            self.evaluate_from_vlieg,
+            (alpha, delta, gamma, omega, chi, phi),
+            s_fraction=s_fraction,
+            outgoing=outgoing,
+            kwargs=kwargs,
+        )
