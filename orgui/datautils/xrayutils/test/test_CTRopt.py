@@ -1,10 +1,10 @@
 """Regression tests for the CTR fitting optimizers.
 
-Increments 1--5 of the CTR optimizer rework cover the callback error path,
+Increments 1--6 of the CTR optimizer rework cover the callback error path,
 parameter-name layout, value-preserving optimizer class split, and legacy
-objective characterization plus calculation adapters. The fixtures here are
-shared with later increments of
-``doc/design/dwba_ctr_fitting_implementation_plan.md``.
+objective characterization, calculation adapters, prediction-side analytical
+scales, and explicit scale policies. The fixtures here are shared with later
+increments of ``doc/design/dwba_ctr_fitting_implementation_plan.md``.
 """
 
 import unittest
@@ -91,6 +91,14 @@ class _ConstantFitCrystal(FitCrystal):
     def F(self, h, k, l):  # noqa: N802,E741
         """Return unit structure factors matching the supplied L coordinates."""
         return np.ones_like(np.asarray(l, dtype=np.float64))
+
+
+class _VanishingFitCrystal(FitCrystal):
+    """Fit double whose prediction vanishes only when its parameter is zero."""
+
+    def F(self, h, k, l):  # noqa: N802,E741
+        """Return ``theta * (l + 1)`` at the supplied L coordinates."""
+        return self.parameters[0] * (np.asarray(l, dtype=np.float64) + 1.0)
 
 
 class _ConstraintFitCrystal(FitCrystal):
@@ -365,7 +373,7 @@ _LEGACY_FLAT_FCALC = np.array(
     ]
 )
 
-_BASE_LEGACY_REFERENCE = {
+_BASE_INCREMENT5_REFERENCE = {
     "weighted_residues": [
         9.791666666666671,
         -1.9444444444444402,
@@ -407,7 +415,7 @@ _BASE_LEGACY_REFERENCE = {
     "nparameters": 1,
 }
 
-_ANGLE_LEGACY_REFERENCES = {
+_ANGLE_INCREMENT5_REFERENCES = {
     (False, False): {
         "weighted_residues": [
             9.791666666666671,
@@ -639,6 +647,201 @@ _ANGLE_LEGACY_REFERENCES = {
 }
 
 
+def _increment6_reference(
+    weighted_residues,
+    residues,
+    flat_fcalc,
+    rfactor,
+    fitness,
+    covariance,
+    fit_errors,
+    *,
+    nparameters=1,
+    log_prob=None,
+):
+    """Build a compact numerical characterization after the scale correction."""
+    reference = {
+        "weighted_residues": weighted_residues,
+        "weighted_residues2": np.square(weighted_residues),
+        "residues": residues,
+        "flat_Fcalc": flat_fcalc,
+        "Rfactor": rfactor,
+        "fitness": fitness,
+        "chi2_red": fitness / (9 - nparameters),
+        "covariance": covariance,
+        "fit_errors": fit_errors,
+        "nparameters": nparameters,
+    }
+    if log_prob is not None:
+        reference["likelihood_errors"] = [0.1, 0.2, 0.3] * 3
+        reference["log_prob"] = log_prob
+    return reference
+
+
+_BASE_LEGACY_REFERENCE = _increment6_reference(
+    [
+        11.089494163424124,
+        -0.21400778210116655,
+        -5.71984435797665,
+        6.658359573818854,
+        -0.5502776507288288,
+        -3.1365826091543325,
+        -1.1830969490669867,
+        -0.39895129677840246,
+        0.9079581237025696,
+    ],
+    [
+        1.1089494163424125,
+        -0.04280155642023331,
+        -1.7159533073929953,
+        0.4708171206225682,
+        -0.07782101167315147,
+        -0.6653696498054469,
+        -0.16731517509727634,
+        -0.11284046692607008,
+        0.3852140077821007,
+    ],
+    [
+        1.8910505836575875,
+        5.042801556420233,
+        10.715953307392995,
+        1.5291828793774318,
+        4.0778210116731515,
+        8.665369649805447,
+        1.1673151750972763,
+        3.11284046692607,
+        6.614785992217899,
+    ],
+    0.11302575504910131,
+    212.5972762645914,
+    [[0.004225212366360498]],
+    [0.3350874215648266],
+)
+
+_ANGLE_LEGACY_REFERENCES = {
+    (False, False): _increment6_reference(
+        [
+            14.191217342968315,
+            3.9216231239577537,
+            0.13896609227348478,
+            8.382434685936628,
+            -2.1567537520844926,
+            -6.3887344821196965,
+            -2.904391328515843,
+            -3.039188438021123,
+            -3.2638502871965906,
+        ],
+        [
+            1.4191217342968314,
+            0.7843246247915507,
+            0.04168982768204543,
+            0.4191217342968314,
+            -0.21567537520844926,
+            -0.9583101723179546,
+            -0.5808782657031686,
+            -1.2156753752084493,
+            -1.9583101723179546,
+        ],
+        [1.5808782657031686, 4.215675375208449, 8.958310172317955] * 3,
+        0.18078826861483893,
+        360.84668951886846,
+        [[0.002912941697409698]],
+        [0.3624785111340676],
+        log_prob=-173.34580412901403,
+    ),
+    (False, True): _increment6_reference(
+        [
+            9.506296825308462,
+            4.928640390376935,
+            3.611102342924158,
+            3.048178322842107,
+            3.935753592035627,
+            -8.7948647625582,
+            -4.67615719147934,
+            -1.8546716661215514,
+            -2.4512354229742552,
+        ],
+        [
+            0.7383976365153861,
+            1.042361689173422,
+            1.2343706415994742,
+            0.13131183968621873,
+            0.46325395961686056,
+            -1.2769310383261878,
+            -0.7692819735730783,
+            -0.8416016717833195,
+            -1.5661807943811779,
+        ],
+        [1.5808782657031686, 4.215675375208449, 8.958310172317955] * 3,
+        0.18440897989307575,
+        261.14723734373257,
+        [
+            [0.038710415383091536, -0.01332873676059801, -0.03404602704901221],
+            [-0.01332873676059801, 0.006745271067149528, 0.013600952381716463],
+            [-0.034046027049012204, 0.013600952381716462, 0.03385340332920189],
+        ],
+        [1.2980188772203765, 0.5418346771726456, 1.213859049622607],
+        nparameters=3,
+        log_prob=-123.4960780414461,
+    ),
+    (True, False): _increment6_reference(
+        [
+            11.089494163424124,
+            -0.21400778210116655,
+            -5.71984435797665,
+            9.416342412451364,
+            -0.7782101167315147,
+            -4.435797665369646,
+            -0.8365758754863817,
+            -0.2821011673151752,
+            0.6420233463035011,
+        ],
+        _BASE_LEGACY_REFERENCE["residues"],
+        _BASE_LEGACY_REFERENCE["flat_Fcalc"],
+        0.11302575504910131,
+        265.8803501945525,
+        [[0.002860868542478485]],
+        [0.30835221945341146],
+        log_prob=-125.86263446685605,
+    ),
+    (True, True): _increment6_reference(
+        [
+            4.258356416588224,
+            -0.21114807320227363,
+            -3.146454413688498,
+            4.70061591801101,
+            5.54849997099951,
+            -6.016572229359093,
+            -2.2039595208052933,
+            0.5353884626319467,
+            1.1558003010370153,
+        ],
+        [
+            0.3307660565655486,
+            -0.04465585735947819,
+            -1.0755416447829376,
+            0.20249685499922854,
+            0.6530806671182203,
+            -0.8735492848857973,
+            -0.36257684684545377,
+            0.24294533282367903,
+            0.7384815904086945,
+        ],
+        _BASE_LEGACY_REFERENCE["flat_Fcalc"],
+        0.10346174713399309,
+        123.639094296015,
+        [
+            [0.036781230132263185, -0.01364452181463681, -0.03293541971137809],
+            [-0.01364452181463681, 0.007128572724362648, 0.01431332513038369],
+            [-0.03293541971137808, 0.01431332513038369, 0.033844956383305896],
+        ],
+        [0.8705934738868573, 0.3832688950035545, 0.8351207251769125],
+        nparameters=3,
+        log_prob=-54.74200651758731,
+    ),
+}
+
+
 def _legacy_characterization_optimizer(
     optimizer_type, scaleindividual=None, use_angle_correction=None
 ):
@@ -682,14 +885,15 @@ class TestLegacyOptimizerCharacterization(unittest.TestCase):
 
         # These observation-scaled outputs migrate in increments 6 and 8.
         np.testing.assert_allclose(optimizer.residues(parameters), expected["residues"])
-        np.testing.assert_allclose(optimizer.flat_Fcalc(parameters), _LEGACY_FLAT_FCALC)
+        np.testing.assert_allclose(
+            optimizer.flat_Fcalc(parameters), expected["flat_Fcalc"]
+        )
         np.testing.assert_allclose(optimizer.Rfactor(parameters), expected["Rfactor"])
 
-        if "scaled_errors" in expected:
+        if "likelihood_errors" in expected:
             residuals, errors = optimizer.weighted_residues_errors(parameters)
             np.testing.assert_allclose(residuals, expected["weighted_residues"])
-            # Increment 6 stops inflating likelihood errors by scale/correction.
-            np.testing.assert_allclose(errors, expected["scaled_errors"])
+            np.testing.assert_allclose(errors, expected["likelihood_errors"])
             np.testing.assert_allclose(
                 optimizer.log_prob(parameters), expected["log_prob"]
             )
@@ -762,16 +966,15 @@ class TestLegacyOptimizerCharacterization(unittest.TestCase):
         np.testing.assert_allclose(base_doubled / base_unit, 2.0)
         np.testing.assert_allclose(angle_doubled / angle_unit, 4.0)
 
-    def test_legacy_scale_estimator_effective_prediction(self):
-        """Pin the current observation-scaling estimator mismatch."""
+    def test_scale_estimator_multiplies_the_prediction(self):
+        """The analytical scale produces the accepted effective prediction."""
         crystal = _ConstantFitCrystal()
         ctrs = _unit_model_ctrs((((1.0, 0.0), [1.0, 2.0]),))
         optimizer = CTRopt.CTROptimizer(crystal, ctrs)
         optimizer.prepareFit()
 
-        # Legacy m/a gives 5/3; increment 6 replaces it with a*m = 3/2.
         np.testing.assert_allclose(
-            optimizer.flat_Fcalc(optimizer.get_parameters()), [5.0 / 3.0] * 2
+            optimizer.flat_Fcalc(optimizer.get_parameters()), [3.0 / 2.0] * 2
         )
 
     def test_shared_scale_rfactor_keeps_legacy_index_misalignment(self):
@@ -786,13 +989,14 @@ class TestLegacyOptimizerCharacterization(unittest.TestCase):
         )
         optimizer = CTRopt.CTROptAngleCorrection(crystal, ctrs)
         optimizer.scaleindividual = False
+        optimizer.set_scale_policy((0.0, 0.0), "scaled")
         optimizer.prepareFit()
 
         # D3 repeats the specular rod and omits the last non-specular rod.
         # Increment 8 deletes this override rather than preserving the defect.
         self.assertAlmostEqual(
             optimizer.Rfactor(optimizer.get_parameters()),
-            0.27058823529411763,
+            0.21428571428571427,
         )
 
     def test_evaluate_statistics_remains_deprecated(self):
@@ -842,24 +1046,24 @@ class TestLegacyCalculationAdapters(unittest.TestCase):
         optimizer.prepareFit()
         parameters = optimizer.get_parameters()
 
-        # The inherited adapter keeps its per-rod m/a values until increment 6.
+        # The inherited adapter now follows the explicit global policy.
         np.testing.assert_allclose(
             optimizer.flat_Fcalc(parameters),
-            [5.0 / 3.0, 5.0 / 3.0, 17.0 / 5.0, 17.0 / 5.0],
+            [2.0, 2.0, 2.0, 2.0],
         )
 
-        # The subclass adapter keeps one shared m/a value until increment 6.
+        # The subclass adapter uses the same prediction-side global scale.
         calculations = optimizer._legacy_angle_calculations(
             corrected_scale_errors=False
         )
         np.testing.assert_allclose(
             np.concatenate(
                 [
-                    calculation.values.prediction / calculation.scale
+                    calculation.scaled_prediction
                     for calculation in calculations
                 ]
             ),
-            [2.75, 2.75, 2.75, 2.75],
+            [2.0, 2.0, 2.0, 2.0],
         )
 
     def test_apply_corrections_consumes_the_shared_input_records(self):
@@ -869,17 +1073,16 @@ class TestLegacyCalculationAdapters(unittest.TestCase):
             scaleindividual=True,
             use_angle_correction=True,
         )
-        calculations = optimizer._calculation_inputs()
+        calculations = optimizer._scaled_calculations()
         expected_values = []
         expected_errors = []
         for calculation in calculations:
-            scale = optimizer.scaling(
-                calculation.prediction,
-                calculation.observation,
-                calculation.uncertainty,
+            expected_values.append(
+                calculation.values.observation / calculation.scale
             )
-            expected_values.append(calculation.observation * scale)
-            expected_errors.append(calculation.uncertainty * scale)
+            expected_errors.append(
+                calculation.values.uncertainty / calculation.scale
+            )
 
         optimizer.applyCorrections()
 
@@ -888,6 +1091,203 @@ class TestLegacyCalculationAdapters(unittest.TestCase):
         ):
             np.testing.assert_allclose(ctr.sfI, values)
             np.testing.assert_allclose(ctr.err, errors)
+        self.assertEqual(optimizer.amp, 0.0)
+
+
+class TestScaleEstimation(unittest.TestCase):
+    """Increment 6: analytical scales multiply calculated predictions."""
+
+    def test_prepare_and_direct_evaluation_describe_zero_prediction_norm(self):
+        """A transient zero model fails clearly and a later trial can recover."""
+        ctrs = _unit_model_ctrs((((1.0, 0.0), [1.0, 2.0]),))
+        optimizer = CTRopt.CTROptimizer(_VanishingFitCrystal((0.0,)), ctrs)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"rod .*current parameters.*weighted prediction norm is zero",
+        ):
+            optimizer.prepareFit()
+        with self.assertRaisesRegex(
+            ValueError,
+            r"rod .*current parameters.*weighted prediction norm is zero",
+        ):
+            optimizer.weighted_residues([0.0])
+
+        self.assertTrue(np.isinf(optimizer.fitness([0.0])[0]))
+        self.assertTrue(np.isfinite(optimizer.fitness([1.0])[0]))
+
+    def test_nonpositive_scale_fails_but_fixed_policy_skips_estimation(self):
+        """Zero observations violate fitted scales but remain valid when fixed."""
+        ctrs = _unit_model_ctrs((((1.0, 0.0), [0.0, 0.0]),))
+        fitted = CTRopt.CTROptimizer(_ConstantFitCrystal(), ctrs)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"rod .*current parameters.*analytical scale is nonpositive",
+        ):
+            fitted.prepareFit()
+
+        fixed = CTRopt.CTROptimizer(
+            _ConstantFitCrystal(), ctrs, scale_policy={"F": "fixed"}
+        )
+        fixed.prepareFit()
+        np.testing.assert_allclose(fixed.flat_Fcalc(), [1.0, 1.0])
+
+    def test_global_scale_failure_names_the_group(self):
+        """Shared scale errors identify the affected global group."""
+        ctrs = _unit_model_ctrs(
+            (((1.0, 0.0), [0.0, 0.0]), ((2.0, 0.0), [0.0, 0.0]))
+        )
+        optimizer = CTRopt.CTROptimizer(
+            _ConstantFitCrystal(), ctrs, scale_policy={"F": "global"}
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r"global group .*current parameters.*analytical scale is nonpositive",
+        ):
+            optimizer.prepareFit()
+
+    def test_scalar_angle_objective_rejects_only_scale_failures(self):
+        """Likelihood trials map scale failures to minus infinity."""
+        ctrs = _unit_model_ctrs((((1.0, 0.0), [0.0, 0.0]),))
+        optimizer = CTRopt.CTROptAngleCorrection(_ConstantFitCrystal(), ctrs)
+        self.assertEqual(optimizer.log_prob([1.0]), -np.inf)
+
+        with mock.patch.object(
+            optimizer,
+            "weighted_residues_errors",
+            side_effect=ValueError("unrelated failure"),
+        ):
+            with self.assertRaisesRegex(ValueError, "unrelated failure"):
+                optimizer.log_prob([1.0])
+
+        base = CTRopt.CTROptimizer(_ConstantFitCrystal(), ctrs)
+        with mock.patch.object(
+            base, "weighted_residues2", side_effect=ValueError("input failure")
+        ):
+            with self.assertRaisesRegex(ValueError, "input failure"):
+                base.fitness([1.0])
+
+    def test_likelihood_uses_supplied_uncertainties_unchanged(self):
+        """Fitted scale and empirical correction do not inflate log sigma."""
+        ctrs = _unit_model_ctrs((((1.0, 0.0), [1.0, 2.0]),))
+        ctrs[0].angles = _angles([0.0, 0.0])
+        ctrs[0].angles["omega"] = [-1.0, 1.0]
+        optimizer = CTRopt.CTROptAngleCorrection(_ConstantFitCrystal(), ctrs)
+        optimizer.useAnglecorr = True
+        optimizer.prepareFit(start=[0.3, 0.4])
+
+        _, errors = optimizer.weighted_residues_errors(
+            optimizer.get_parameters()
+        )
+        np.testing.assert_array_equal(errors, optimizer.CTRs[0].err)
+
+
+class TestScalePolicy(unittest.TestCase):
+    """Increment 6: explicit policies are the sole scale-group authority."""
+
+    def test_defaults_overrides_partial_updates_and_restoration(self):
+        """Configuration round-trips and partial updates preserve overrides."""
+        ctrs = _unit_model_ctrs(
+            (((1.0, 0.0), [1.0, 2.0]), ((2.0, 0.0), [1.0, 4.0]))
+        )
+        optimizer = CTRopt.CTROptimizer(_ConstantFitCrystal(), ctrs)
+        first_id = optimizer.CTRs[0].ctr_id
+        second_id = optimizer.CTRs[1].ctr_id
+
+        self.assertEqual(optimizer.get_scale_policy(), {"F": "scaled", "R": "fixed"})
+        optimizer.set_scale_policies(
+            {"F": "global", first_id: "fixed", second_id: "scaled"}
+        )
+        optimizer.set_scale_policies({"R": "scaled"})
+        self.assertEqual(optimizer.get_scale_policy(first_id), "fixed")
+        self.assertEqual(optimizer.get_scale_policy((2.0, 0.0)), "scaled")
+
+        saved = optimizer.get_scale_policy()
+        restored = CTRopt.CTROptimizer(
+            _ConstantFitCrystal(), ctrs, scale_policy=saved
+        )
+        self.assertEqual(restored.get_scale_policy(), saved)
+
+    def test_ambiguous_unknown_and_invalid_selectors_are_rejected(self):
+        """Rod shorthand never silently resolves the first matching dataset."""
+        ctrs = _unit_model_ctrs(
+            (((1.0, 0.0), [1.0]), ((1.0, 0.0), [2.0]))
+        )
+        optimizer = CTRopt.CTROptimizer(_ConstantFitCrystal(), ctrs)
+
+        with self.assertRaisesRegex(ValueError, "Ambiguous CTR shorthand"):
+            optimizer.set_scale_policy((1.0, 0.0), "fixed")
+        optimizer.set_scale_policy(optimizer.CTRs[0].ctr_id, "fixed")
+        with self.assertRaisesRegex(ValueError, "Unknown CTR identifier"):
+            optimizer.get_scale_policy((9.0, 9.0))
+        with self.assertRaisesRegex(ValueError, "scale quantity must"):
+            optimizer.set_scale_policy_default("structure_factor", "fixed")
+        with self.assertRaisesRegex(ValueError, "scale policy must"):
+            optimizer.set_scale_policy_default("F", "fitted")
+
+    def test_global_group_rejects_actual_mixed_quantities_atomically(self):
+        """There is one global scale group, never implicit F/R subgroups."""
+        ctrs = _unit_model_ctrs(
+            (((1.0, 0.0), [1.0]), ((2.0, 0.0), [2.0]))
+        )
+        ctrs[1].reduction = CTRplotutil.MeasurementReduction("reflectivity")
+        optimizer = CTRopt.CTROptimizer(_ConstantFitCrystal(), ctrs)
+        optimizer.set_scale_policy_default("F", "global")
+
+        with self.assertRaisesRegex(ValueError, "cannot mix"):
+            optimizer.set_scale_policy_default("R", "global")
+        self.assertEqual(optimizer.get_scale_policy(), {"F": "global", "R": "fixed"})
+        with self.assertRaisesRegex(ValueError, "cannot mix"):
+            optimizer.scaleindividual = False
+
+    def test_scaleindividual_is_write_only_and_preserves_overrides(self):
+        """Compatibility assignments update defaults without shadow state."""
+        ctrs = _unit_model_ctrs(
+            (((1.0, 0.0), [1.0]), ((2.0, 0.0), [2.0]))
+        )
+        optimizer = CTRopt.CTROptimizer(_ConstantFitCrystal(), ctrs)
+        first_id = optimizer.CTRs[0].ctr_id
+        optimizer.set_scale_policy(first_id, "fixed")
+
+        optimizer.scaleindividual = False
+        self.assertEqual(
+            optimizer.get_scale_policy(),
+            {"F": "global", "R": "global", first_id: "fixed"},
+        )
+        optimizer.scaleindividual = True
+        self.assertEqual(optimizer.get_scale_policy(first_id), "fixed")
+        with self.assertRaisesRegex(AttributeError, "get_scale_policy"):
+            _ = optimizer.scaleindividual
+
+    def test_policy_changes_take_effect_after_preparation(self):
+        """Evaluation resolves current policies instead of cached grouping."""
+        ctrs = _unit_model_ctrs((((1.0, 0.0), [1.0, 2.0]),))
+        optimizer = CTRopt.CTROptimizer(_ConstantFitCrystal(), ctrs)
+        optimizer.prepareFit()
+        np.testing.assert_allclose(optimizer.flat_Fcalc(), [1.5, 1.5])
+
+        optimizer.set_scale_policy_default("F", "fixed")
+        np.testing.assert_allclose(optimizer.flat_Fcalc(), [1.0, 1.0])
+        optimizer.set_scale_policy((1.0, 0.0), "global")
+        np.testing.assert_allclose(optimizer.flat_Fcalc(), [1.5, 1.5])
+
+    def test_angle_adapters_resolve_fixed_scaled_and_global_policies(self):
+        """Retained subclass methods no longer read scaleindividual."""
+        optimizer = _legacy_characterization_optimizer(
+            CTRopt.CTROptAngleCorrection,
+            scaleindividual=True,
+            use_angle_correction=True,
+        )
+        optimizer.set_scale_policy(optimizer.CTRs[0].ctr_id, "fixed")
+        optimizer.set_scale_policy(optimizer.CTRs[1].ctr_id, "global")
+        optimizer.set_scale_policy(optimizer.CTRs[2].ctr_id, "global")
+        parameters = optimizer.get_parameters()
+
+        self.assertEqual(optimizer.residues(parameters).size, 9)
+        self.assertEqual(optimizer.weighted_residues(parameters).size, 9)
+        self.assertEqual(optimizer.weighted_residues_errors(parameters)[0].size, 9)
+        self.assertTrue(np.isfinite(optimizer.Rfactor(parameters)))
+        optimizer.applyCorrections()
         self.assertEqual(optimizer.amp, 0.0)
 
 

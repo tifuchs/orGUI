@@ -55,27 +55,44 @@ class _CTRCalculation:
 
 @dataclass(frozen=True)
 class _LegacyScaledCalculation:
-    """Temporary observation-scaled view used to preserve legacy outputs."""
+    """Temporary scaled-prediction view used by legacy public adapters."""
 
     values: _CTRCalculation
     scale: float
 
     @property
-    def scaled_observation(self):
-        """Return the legacy scale multiplied by the observation."""
-        return self.values.observation * self.scale
+    def scaled_prediction(self):
+        """Return the analytical scale multiplied by the prediction."""
+        return self.values.prediction * self.scale
 
     @property
     def residual(self):
-        """Return the legacy observation-scaled residual."""
-        return self.scaled_observation - self.values.prediction
+        """Return observation minus scaled prediction."""
+        return self.values.observation - self.scaled_prediction
+
+
+class _ScaleEstimationError(ValueError):
+    """Raised when a fitted analytical scale is invalid."""
+
+
+_SCALE_POLICIES = frozenset({"fixed", "scaled", "global"})
+_SCALE_QUANTITIES = {
+    "F": "structure_factor",
+    "R": "reflectivity",
+}
+_SCALE_QUANTITY_KEYS = {value: key for key, value in _SCALE_QUANTITIES.items()}
 
 
 class CTROptimizer:
-    def __init__(self, xtal, CTRs):
+    def __init__(self, xtal, CTRs, *, scale_policy=None):
         self.CTRs = copy.deepcopy(CTRs)
         self.CTRs.sort(key=lambda x: abs(x.hk[0]) + abs(x.hk[1]))
         self.xtal = copy.deepcopy(xtal)
+        self._scale_policy_defaults = {
+            "structure_factor": "scaled",
+            "reflectivity": "fixed",
+        }
+        self._scale_policy_overrides = {}
         self.scaling = util.get_scale_chi2
         self.resolution = None
         self.resolution_calculation = "sample"
@@ -87,6 +104,161 @@ class CTROptimizer:
         self.dw_zconstraints = False
         self.nic = 0
         self.callbacks = []
+        if scale_policy is not None:
+            self.set_scale_policies(scale_policy)
+
+    @staticmethod
+    def _validate_scale_policy_value(policy):
+        """Return a validated scale-policy value."""
+        if not isinstance(policy, str) or policy not in _SCALE_POLICIES:
+            raise ValueError(
+                "scale policy must be 'fixed', 'scaled', or 'global'"
+            )
+        return policy
+
+    @staticmethod
+    def _scale_quantity(quantity):
+        """Translate a public scale quantity selector to stored metadata."""
+        try:
+            return _SCALE_QUANTITIES[quantity]
+        except (KeyError, TypeError) as error:
+            raise ValueError("scale quantity must be 'F' or 'R'") from error
+
+    def _resolve_scale_rod_id(self, rodid):
+        """Resolve one full or unique shorthand rod identifier."""
+        full_matches = [ctr for ctr in self.CTRs if ctr.ctr_id == rodid]
+        if len(full_matches) == 1:
+            return full_matches[0].ctr_id
+        if len(full_matches) > 1:
+            raise ValueError(f"Ambiguous CTR identifier {rodid!r}")
+
+        is_hk = (
+            isinstance(rodid, tuple)
+            and len(rodid) == 2
+            and all(np.isscalar(value) for value in rodid)
+        )
+        if is_hk:
+            hk_matches = [ctr for ctr in self.CTRs if ctr.hk == rodid]
+            if len(hk_matches) == 1:
+                return hk_matches[0].ctr_id
+            if len(hk_matches) > 1:
+                raise ValueError(
+                    f"Ambiguous CTR shorthand {rodid!r}; use the full ctr_id"
+                )
+        raise ValueError(f"Unknown CTR identifier {rodid!r}")
+
+    def _resolved_scale_policy(
+        self, ctr, *, defaults=None, overrides=None
+    ):
+        """Return one CTR's resolved policy from candidate configuration."""
+        if defaults is None:
+            defaults = self._scale_policy_defaults
+        if overrides is None:
+            overrides = self._scale_policy_overrides
+        return overrides.get(ctr.ctr_id, defaults[ctr.reduction.quantity])
+
+    def _validate_scale_configuration(self, defaults, overrides):
+        """Reject a global group containing unlike stored quantities."""
+        global_quantities = {
+            ctr.reduction.quantity
+            for ctr in self.CTRs
+            if self._resolved_scale_policy(
+                ctr, defaults=defaults, overrides=overrides
+            )
+            == "global"
+        }
+        if len(global_quantities) > 1:
+            raise ValueError(
+                "The global scale group cannot mix structure-factor (F) and "
+                "reflectivity (R) CTRs"
+            )
+
+    def set_scale_policies(self, policies):
+        """Partially update quantity defaults and per-rod scale policies.
+
+        :param dict policies:
+            Mapping with optional ``"F"`` and ``"R"`` defaults plus CTR
+            identifiers. Policy values are ``"fixed"``, ``"scaled"``, or
+            ``"global"``.
+        :raises TypeError:
+            If ``policies`` is not a dictionary.
+        :raises ValueError:
+            If a selector, rod identifier, policy, or resulting global group
+            is invalid.
+        """
+        if not isinstance(policies, dict):
+            raise TypeError("scale policies must be provided as a dictionary")
+        defaults = self._scale_policy_defaults.copy()
+        overrides = self._scale_policy_overrides.copy()
+        for key, policy in policies.items():
+            policy = self._validate_scale_policy_value(policy)
+            if key in _SCALE_QUANTITIES:
+                defaults[self._scale_quantity(key)] = policy
+            else:
+                overrides[self._resolve_scale_rod_id(key)] = policy
+        self._validate_scale_configuration(defaults, overrides)
+        self._scale_policy_defaults = defaults
+        self._scale_policy_overrides = overrides
+
+    def set_scale_policy_default(self, quantity, policy):
+        """Set the default scale policy for F or R datasets.
+
+        :param str quantity: ``"F"`` or ``"R"``.
+        :param str policy: ``"fixed"``, ``"scaled"``, or ``"global"``.
+        """
+        self._scale_quantity(quantity)
+        self.set_scale_policies({quantity: policy})
+
+    def set_scale_policy(self, rodid, policy):
+        """Set an explicit scale policy for one CTR.
+
+        :param rodid:
+            A unique ``(h, k)`` shorthand or full ``ctr.ctr_id``.
+        :param str policy: ``"fixed"``, ``"scaled"``, or ``"global"``.
+        """
+        policy = self._validate_scale_policy_value(policy)
+        full_id = self._resolve_scale_rod_id(rodid)
+        overrides = self._scale_policy_overrides.copy()
+        overrides[full_id] = policy
+        self._validate_scale_configuration(
+            self._scale_policy_defaults, overrides
+        )
+        self._scale_policy_overrides = overrides
+
+    def get_scale_policy(self, rodid=None):
+        """Return the scale configuration or one rod's resolved policy.
+
+        :param rodid:
+            Optional unique ``(h, k)`` shorthand or full ``ctr.ctr_id``.
+        :returns:
+            The complete restorable configuration when ``rodid`` is omitted,
+            otherwise the selected rod's resolved policy.
+        """
+        if rodid is not None:
+            full_id = self._resolve_scale_rod_id(rodid)
+            ctr = next(ctr for ctr in self.CTRs if ctr.ctr_id == full_id)
+            return self._resolved_scale_policy(ctr)
+        policies = {
+            _SCALE_QUANTITY_KEYS[quantity]: policy
+            for quantity, policy in self._scale_policy_defaults.items()
+        }
+        policies.update(self._scale_policy_overrides)
+        return policies
+
+    @property
+    def scaleindividual(self):
+        """Reject reads of the write-only compatibility setting."""
+        raise AttributeError(
+            "scaleindividual is write-only; use get_scale_policy()"
+        )
+
+    @scaleindividual.setter
+    def scaleindividual(self, individual):
+        """Redirect legacy grouping assignments to both quantity defaults."""
+        if not isinstance(individual, bool | np.bool_):
+            raise TypeError("scaleindividual must be a boolean")
+        policy = "scaled" if individual else "global"
+        self.set_scale_policies({"F": policy, "R": policy})
 
     def register_fit_callback(
         self,
@@ -329,20 +501,100 @@ class CTROptimizer:
             )
         return tuple(calculations)
 
-    def _legacy_individual_calculations(self):
-        """Return legacy per-CTR scales without applying angle correction."""
-        calculations = self._calculation_inputs(apply_angle_correction=False)
-        return tuple(
-            _LegacyScaledCalculation(
-                values,
-                self.scaling(
-                    values.prediction,
-                    values.observation,
-                    values.uncertainty,
-                ),
+    def _effective_objective_weight(self, ctr):
+        """Return the scale estimator's effective per-point rod weight."""
+        return ctr.weight
+
+    def _scale_group_label(self, calculations, policy):
+        """Describe a fitted scale group for an actionable error message."""
+        if policy == "scaled":
+            return f"rod {calculations[0].ctr.ctr_id!r}"
+        identifiers = [calculation.ctr.ctr_id for calculation in calculations]
+        return f"global group {identifiers!r}"
+
+    def _estimate_scale(self, calculations, policy):
+        """Estimate one positive prediction multiplier for a fitted group."""
+        weighted_prediction_norm = 0.0
+        weighted_overlap = 0.0
+        for calculation in calculations:
+            weight = self._effective_objective_weight(calculation.ctr)
+            inverse_variance = calculation.uncertainty**-2
+            weighted_prediction_norm += np.sum(
+                weight * calculation.prediction**2 * inverse_variance
             )
-            for values in calculations
+            weighted_overlap += np.sum(
+                weight
+                * calculation.prediction
+                * calculation.observation
+                * inverse_variance
+            )
+
+        label = self._scale_group_label(calculations, policy)
+        parameters = np.asarray(self.get_parameters()).tolist()
+        if not np.isfinite(weighted_prediction_norm) or (
+            weighted_prediction_norm <= 0.0
+        ):
+            if weighted_prediction_norm == 0.0:
+                reason = "weighted prediction norm is zero"
+            elif not np.isfinite(weighted_prediction_norm):
+                reason = "weighted prediction norm is non-finite"
+            else:
+                reason = "weighted prediction norm is nonpositive"
+            raise _ScaleEstimationError(
+                f"Scale estimation failed for {label} at the current "
+                f"parameters {parameters}: {reason}. Choose different "
+                "starting parameters or use a fixed scale when appropriate."
+            )
+
+        scale = weighted_overlap / weighted_prediction_norm
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise _ScaleEstimationError(
+                f"Scale estimation failed for {label} at the current "
+                f"parameters {parameters}: analytical scale is nonpositive "
+                f"or non-finite (a={scale!r}). Choose different starting "
+                "parameters or use a fixed scale when appropriate."
+            )
+        return scale
+
+    def _scaled_calculations(self, apply_angle_correction=True):
+        """Return policy-grouped calculations with prediction-side scales."""
+        self._validate_scale_configuration(
+            self._scale_policy_defaults, self._scale_policy_overrides
         )
+        calculations = self._calculation_inputs(
+            apply_angle_correction=apply_angle_correction
+        )
+        scales = [None] * len(calculations)
+        global_indices = []
+        try:
+            for index, calculation in enumerate(calculations):
+                policy = self._resolved_scale_policy(calculation.ctr)
+                if policy == "fixed":
+                    scales[index] = 1.0
+                elif policy == "scaled":
+                    scales[index] = self._estimate_scale(
+                        (calculation,), policy
+                    )
+                else:
+                    global_indices.append(index)
+
+            if global_indices:
+                members = tuple(calculations[index] for index in global_indices)
+                global_scale = self._estimate_scale(members, "global")
+                for index in global_indices:
+                    scales[index] = global_scale
+        except _ScaleEstimationError:
+            self._invalidate_resolution_cache()
+            raise
+
+        return tuple(
+            _LegacyScaledCalculation(calculation, scale)
+            for calculation, scale in zip(calculations, scales)
+        )
+
+    def _legacy_individual_calculations(self):
+        """Return policy-scaled values without the angle-correction hook."""
+        return self._scaled_calculations(apply_angle_correction=False)
 
     def _model_parameters(self):
         """Return the crystal-owned tail of the fit parameter vector."""
@@ -421,6 +673,7 @@ class CTROptimizer:
         self.fitparnames = self._fit_parameter_names()
         self.priors = self.xtal.priors
         self._update_resolution_cache()
+        self._scaled_calculations()
 
     def get_bounds(self):
         return self.bounds
@@ -460,16 +713,7 @@ class CTROptimizer:
         self._set_model_errors(xerror[counter:])
 
     def weighted_residues2(self, x=None):
-        if x is not None:
-            self.set_parameters(x)
-        residues = []
-        for calculation in self._legacy_individual_calculations():
-            ctr = calculation.values.ctr
-            residues.append(
-                (ctr.invrelerrsqrd_weight / calculation.scale**2)
-                * calculation.residual**2
-            )
-        return np.concatenate(residues)
+        return self.weighted_residues(x) ** 2
 
     def residues(self, x=None):
         if x is not None:
@@ -501,7 +745,7 @@ class CTROptimizer:
             self.set_parameters(x)
         return np.concatenate(
             [
-                calculation.values.prediction / calculation.scale
+                calculation.scaled_prediction
                 for calculation in self._legacy_individual_calculations()
             ]
         )
@@ -513,7 +757,7 @@ class CTROptimizer:
         Fobs = []
         for calculation in self._legacy_individual_calculations():
             residues.append(np.abs(calculation.residual))
-            Fobs.append(np.abs(calculation.scaled_observation))
+            Fobs.append(np.abs(calculation.values.observation))
         residues = np.sum(np.concatenate(residues))
         Fobs = np.sum(np.concatenate(Fobs))
         return residues / Fobs
@@ -526,10 +770,8 @@ class CTROptimizer:
             ctr = calculation.values.ctr
             residues.append(
                 np.sqrt(ctr.weight)
-                * (
-                    calculation.residual
-                    / (calculation.values.uncertainty * calculation.scale)
-                )
+                * calculation.residual
+                / calculation.values.uncertainty
             )
         return np.concatenate(residues)
 
@@ -553,7 +795,10 @@ class CTROptimizer:
         return self.nic
 
     def fitness(self, x):
-        objective = np.sum(self.weighted_residues2(x))
+        try:
+            objective = np.sum(self.weighted_residues2(x))
+        except _ScaleEstimationError:
+            objective = np.inf
         if self.dw_zconstraints:
             return np.concatenate(
                 ([objective], self.get_inequalconstraints())
@@ -767,7 +1012,6 @@ class FitCallback:
 class CTROptAngleCorrection(CTROptimizer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.scaleindividual = False
         self.useAnglecorr = False
         self.phasevelocity = 1.0
 
@@ -829,6 +1073,10 @@ class CTROptAngleCorrection(CTROptimizer):
         """Return the angle optimizer's legacy residual weight."""
         return np.sqrt(ctr.weight) / ctr.err
 
+    def _effective_objective_weight(self, ctr):
+        """Return the subclass's quadratic legacy objective weight."""
+        return ctr.weight**2
+
     def _angle_correction(self, ctr):
         """Return the legacy empirical correction for one measured CTR."""
         if hasattr(ctr, "angles"):
@@ -836,82 +1084,31 @@ class CTROptAngleCorrection(CTROptimizer):
         return 1.0
 
     def _legacy_angle_calculations(self, corrected_scale_errors):
-        """Return temporary angle-aware results with legacy scale grouping.
+        """Return policy-scaled, angle-aware temporary calculations.
 
         :param bool corrected_scale_errors:
-            Use angle-corrected uncertainties to estimate a shared scale.
-            ``False`` preserves the separate legacy residual/likelihood path,
-            which estimated that scale from the original uncertainties.
+            Retained only for compatibility with the temporary adapter's
+            increment-5 signature. Scale estimation now follows one path.
         """
-        values = self._calculation_inputs()
-        scales = [None] * len(values)
-        shared_indices = []
-        for index, calculation in enumerate(values):
-            if self.scaleindividual or calculation.ctr.hk == (0, 0):
-                scales[index] = self.scaling(
-                    calculation.prediction,
-                    calculation.observation,
-                    calculation.uncertainty,
-                )
-            else:
-                shared_indices.append(index)
-
-        if not self.scaleindividual:
-            shared = [values[index] for index in shared_indices]
-            if corrected_scale_errors:
-                scale_errors = [calculation.uncertainty for calculation in shared]
-            else:
-                scale_errors = [calculation.ctr.err for calculation in shared]
-            shared_scale = self.scaling(
-                np.concatenate(
-                    [calculation.prediction for calculation in shared]
-                ),
-                np.concatenate(
-                    [calculation.observation for calculation in shared]
-                ),
-                np.concatenate(scale_errors),
-            )
-            for index in shared_indices:
-                scales[index] = shared_scale
-
-        return tuple(
-            _LegacyScaledCalculation(calculation, scale)
-            for calculation, scale in zip(values, scales)
-        )
+        return self._scaled_calculations()
 
     def applyCorrections(self):
-        F_obs = []
-        F_t = []
-        F_err = []
         if self.useAnglecorr:
-            for calculation in self._calculation_inputs():
-                ctr = calculation.ctr
-                ctr *= calculation.angle_correction
-                if self.scaleindividual or ctr.hk == (0, 0):
-                    scale = self.scaling(
-                        calculation.prediction,
-                        calculation.observation,
-                        calculation.uncertainty,
-                    )
-                    ctr *= scale
-                else:
-                    F_obs.append(calculation.observation)
-                    F_t.append(calculation.prediction)
-                    F_err.append(calculation.uncertainty)
-            if not self.scaleindividual:
-                scale = self.scaling(
-                    np.concatenate(F_t), np.concatenate(F_obs), np.concatenate(F_err)
-                )
-                for i, ctr in enumerate(filter(lambda x: x.hk != (0, 0), self.CTRs)):
-                    ctr *= scale
-                    ctr.invrelerrsqrd_weight = np.sqrt(ctr.weight) / ctr.err
+            calculations = self._scaled_calculations()
+            for calculation in calculations:
+                ctr = calculation.values.ctr
+                ctr *= calculation.values.angle_correction / calculation.scale
+                ctr.invrelerrsqrd_weight = self._residual_weight(ctr)
 
             self.amp = 0.0
         else:
             warnings.warn("Angle correction was not enabled. Skip applyCorrections.")
 
     def log_prob(self, x):
-        resid, err = self.weighted_residues_errors(x)
+        try:
+            resid, err = self.weighted_residues_errors(x)
+        except _ScaleEstimationError:
+            return -np.inf
         return -0.5 * np.sum(resid**2 + np.log(2 * np.pi * err**2))
 
     def get_anglecorrection(
@@ -945,32 +1142,25 @@ class CTROptAngleCorrection(CTROptimizer):
         residues = []
         F_obs = []
         F_t = []
-        F_err = []
-        for calculation in self._calculation_inputs():
-            ctr = calculation.ctr
-            F_theo = calculation.prediction
-            F_obs_corr = calculation.observation
-            F_err_corr = calculation.uncertainty
-            if self.scaleindividual or ctr.hk == (0, 0):
-                scale = self.scaling(F_theo, F_obs_corr, F_err_corr)  # scale CTR
-                residues.append(F_obs_corr * scale - F_theo)
-                F_obs.append(F_obs_corr * scale)
-                F_err.append(F_err_corr)
-                F_t.append(F_theo)
+        global_calculations = []
+        for calculation in self._legacy_angle_calculations(
+            corrected_scale_errors=True
+        ):
+            F_obs.append(calculation.values.observation)
+            F_t.append(calculation.values.prediction)
+            if self._resolved_scale_policy(calculation.values.ctr) == "global":
+                global_calculations.append(calculation)
             else:
-                F_obs.append(F_obs_corr)
-                F_t.append(F_theo)
-                F_err.append(F_err_corr)
-        if self.scaleindividual:
+                residues.append(calculation.residual)
+        if not global_calculations:
             residues = np.concatenate(residues)
             F_obs = np.concatenate(F_obs)
         else:
-            scale = self.scaling(
-                np.concatenate(F_t), np.concatenate(F_obs), np.concatenate(F_err)
-            )
-            for i, ctr in enumerate(filter(lambda x: x.hk != (0, 0), self.CTRs)):
-                residues.append(F_obs[i] * scale - F_t[i])
-                F_obs[i] *= scale
+            scale = global_calculations[0].scale
+            for i, calculation in enumerate(global_calculations):
+                # Preserve the temporary legacy adapter's collection-index
+                # behavior until the subclass override is removed in increment 8.
+                residues.append(F_obs[i] - scale * F_t[i])
             residues = np.concatenate(residues)
             F_obs = np.concatenate(F_obs)
         residues = np.sum(np.abs(residues))
@@ -982,7 +1172,7 @@ class CTROptAngleCorrection(CTROptimizer):
             [
                 (
                     calculation.values.ctr.weight
-                    / (calculation.values.uncertainty * calculation.scale)
+                    / calculation.values.uncertainty
                 )
                 * calculation.residual
                 for calculation in self._legacy_angle_calculations(
@@ -999,16 +1189,13 @@ class CTROptAngleCorrection(CTROptimizer):
         residues = [
             (
                 calculation.values.ctr.weight
-                / (calculation.values.uncertainty * calculation.scale)
+                / calculation.values.uncertainty
             )
             * calculation.residual
             for calculation in calculations
         ]
-        scaled_errors = [
-            calculation.values.uncertainty * calculation.scale
-            for calculation in calculations
-        ]
-        return np.concatenate(residues), np.concatenate(scaled_errors)
+        supplied_errors = [calculation.values.ctr.err for calculation in calculations]
+        return np.concatenate(residues), np.concatenate(supplied_errors)
 
     def statistics(self, x=None):
         if x is None:
