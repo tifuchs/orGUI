@@ -7,6 +7,21 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **Added measurement-owned CTR reduction and scan metadata.** ``CTR`` datasets
+  can now distinguish stored structure factors from corrected reflectivity,
+  record incident/outgoing polarization and the conventional pointwise
+  polarization factor P, and carry an optional fixed-incidence, fixed-exit, or
+  equal-angle z-mode scan rule in radians. The immutable metadata survives
+  copying, point selection, plain-array/ANAROD imports, and schema-2 NeXus
+  round trips. Quantity-aware plots keep F and R on distinct axes. Existing
+  kinematical scaling/fitting, difference, symmetry-averaging, and binning paths
+  that depend on reduction metadata now reject unsupported quantities or
+  reduction semantics instead of silently treating them as structure factors.
+  The new one-line ``CTRCollection.fromCTRFile`` loader reads an ANAROD-like
+  whitespace table whose comment header carries the reduction metadata. A new
+  CTR data-workflow tutorial demonstrates this preferred API and explicit
+  migration of legacy ANAROD files.
+
 - **Repaired CTR angle generation and NeXus persistence.**
   ``CTR.calcAnglesZmode`` and its collection counterpart accept an explicit
   ``hkl_transform`` from reference HKL to the calculator lattice, allowing

@@ -34,6 +34,93 @@ stored K values: there is no generally reliable way to reconstruct the
 original K without independent index information. Correct those files using
 trustworthy source metadata before scientific analysis.
 
+Measurement quantity, polarization, and scan metadata
+------------------------------------------------------
+
+The :doc:`ctr_data_workflow` tutorial demonstrates the preferred loading and
+plotting API, NeXus persistence, and explicit migration of legacy ANAROD data.
+
+For new text datasets, use the one-line loader
+``CTRCollection.fromCTRFile(path)``. The ``.ctr`` format keeps the useful
+ANAROD-style whitespace-separated H, K, L, value, and uncertainty columns but
+omits the unused mode column. Leading ``# key: value`` lines declare schema 2,
+the stored quantity, polarization state, and column names. An optional trailing
+``polarization_factor`` column is retained point by point and split with each
+rod. Legacy ANAROD files remain the responsibility of
+``CTRCollection.fromANAROD``; the new loader rejects them rather than guessing
+missing reduction metadata.
+
+Each ``CTR`` owns a frozen ``MeasurementReduction``. Its ``quantity`` is the
+sole definition of what ``CTR.sfI`` and ``CTR.err`` contain:
+
+* ``"structure_factor"`` stores F and its uncertainty in the existing
+  arbitrary structure-factor units;
+* ``"reflectivity"`` stores the corrected dimensionless field-intensity ratio
+  R and its absolute uncertainty.
+
+Legacy constructors and files without this metadata default to structure
+factor with unknown polarization provenance. New measurements can record the
+incident mixture and outgoing analysis explicitly:
+
+.. code-block:: python
+
+   import numpy as np
+   from orgui.datautils.xrayutils.CTRplotutil import (
+       CTR,
+       CTRScanGeometry,
+       MeasurementReduction,
+       PolarizationReduction,
+   )
+
+   reduction = MeasurementReduction(
+       quantity="structure_factor",
+       polarization=PolarizationReduction(
+           s_fraction=0.7,
+           outgoing="unanalysed",
+           polarization_factor=np.asarray([0.98, 0.97, 0.96]),
+       ),
+   )
+   rod = CTR(
+       (1, 0),
+       l,
+       F,
+       sigma_F,
+       reduction=reduction,
+       scan_geometry=CTRScanGeometry(
+           fixed="in", angle=np.deg2rad(0.3), mirrorx=False
+       ),
+   )
+
+``s_fraction`` is the incoherent incident s fraction in the local Renaud
+basis: one is pure s and zero is pure p. ``outgoing`` is ``"s"``, ``"p"``,
+or ``"unanalysed"``. For structure-factor data,
+``polarization_factor`` stores the conventional pointwise intensity factor P,
+not its reciprocal. ``None`` records P=1. A supplied factor must be finite,
+strictly positive, and aligned with the CTR points. Reflectivity cannot carry
+this factor because stored R must already contain the selected experimental
+correction.
+
+``CTRScanGeometry`` records only the z-mode scan rule. Fixed incidence or exit
+uses ``fixed="in"`` or ``"out"`` and an angle in radians in
+``(0, pi/2]``. Equal-angle scans use ``fixed="eq", angle=None``. ``mirrorx``
+selects the negative-delta scattering branch. Stored six-circle angle records
+remain the measured central geometry; the scan rule does not replace them.
+
+Schema-2 NeXus output preserves both metadata records and stores P as a
+pointwise dataset. Existing schema-2 payloads that predate these fields still
+load with the legacy defaults. ``CTR.fromArray`` and both ANAROD import paths
+accept ``reduction=`` and ``scan_geometry=`` overrides.
+
+Copying and point selection preserve the metadata, applying cuts to P and the
+six-circle records together with the values and errors. Geometry- or
+reduction-aware binning is not defined yet and raises instead of independently
+averaging quantities that do not preserve the measurement equation. Existing
+kinematical fitting and crystal scaling, difference calculations, collection
+scaling, structure-factor resolution convolution, phase/complex-F operations,
+ANAROD F export, and symmetry averaging reject reflectivity explicitly. Plot
+panels select labels from the stored quantity and F/R datasets cannot share one
+axis.
+
 Unit-cell amplitudes
 --------------------
 
@@ -504,6 +591,12 @@ included. Calculated intensity is proportional to
 
 API reference
 -------------
+
+.. autoclass:: orgui.datautils.xrayutils.CTRplotutil.PolarizationReduction
+
+.. autoclass:: orgui.datautils.xrayutils.CTRplotutil.MeasurementReduction
+
+.. autoclass:: orgui.datautils.xrayutils.CTRplotutil.CTRScanGeometry
 
 .. autoclass:: orgui.datautils.xrayutils.CTRdistributions.SurfaceProfile
    :members: support, occupancy, correction, surface_occupancy

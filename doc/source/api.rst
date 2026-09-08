@@ -4,6 +4,7 @@ API
 .. toctree::
    :maxdepth: 1
 
+   ctr_data_workflow
    ctr_structure_factors
    dwba
    ctr_resolution
