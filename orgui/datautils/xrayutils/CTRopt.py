@@ -40,11 +40,11 @@ from scipy import stats
 from .. import util
 
 from .CTRcalc import SXRDCrystal
-from . import CTRresolution
+from . import CTRplotutil, CTRresolution
 
 @dataclass(frozen=True)
 class _CTRCalculation:
-    """Unscaled values for one measured CTR in its legacy representation."""
+    """Unscaled values for one measured CTR."""
 
     ctr: object
     prediction: np.ndarray
@@ -54,8 +54,8 @@ class _CTRCalculation:
 
 
 @dataclass(frozen=True)
-class _LegacyScaledCalculation:
-    """Temporary scaled-prediction view used by legacy public adapters."""
+class _ScaledCalculation:
+    """Prediction and fitted analytical scale for one measured CTR."""
 
     values: _CTRCalculation
     scale: float
@@ -100,10 +100,13 @@ class CTROptimizer:
         self._resolution_bounds = None
         self.resolution_errors = None
         self.calculated_CTRs = None
+        self._resolution_calculated_ctrs = None
         self._resolution_input_ctrs = None
-        self.dw_zconstraints = False
+        self._prepared = False
+        self._dw_zconstraints = False
         self.nic = 0
         self.callbacks = []
+        self.errors = None
         if scale_policy is not None:
             self.set_scale_policies(scale_policy)
 
@@ -199,6 +202,7 @@ class CTROptimizer:
         self._validate_scale_configuration(defaults, overrides)
         self._scale_policy_defaults = defaults
         self._scale_policy_overrides = overrides
+        self._invalidate_calculated_results()
 
     def set_scale_policy_default(self, quantity, policy):
         """Set the default scale policy for F or R datasets.
@@ -224,6 +228,7 @@ class CTROptimizer:
             self._scale_policy_defaults, overrides
         )
         self._scale_policy_overrides = overrides
+        self._invalidate_calculated_results()
 
     def get_scale_policy(self, rodid=None):
         """Return the scale configuration or one rod's resolved policy.
@@ -271,6 +276,7 @@ class CTROptimizer:
         """Register an additional parameterized crystal callback."""
         callback = FitCallback(function, bounds_low, bounds_high, init, **kwargs)
         self.callbacks.insert(0, callback)
+        self._require_reprepare()
         return callback.name
 
     @property
@@ -285,6 +291,19 @@ class CTROptimizer:
         except ValueError as error:
             raise ValueError("%s is not a registered callback") from error
         del self.callbacks[idx]
+        self._require_reprepare()
+
+    @property
+    def dw_zconstraints(self):
+        """Whether Debye-Waller displacement constraints are fitted."""
+        return self._dw_zconstraints
+
+    @dw_zconstraints.setter
+    def dw_zconstraints(self, enabled):
+        enabled = bool(enabled)
+        if enabled != self._dw_zconstraints:
+            self._dw_zconstraints = enabled
+            self._require_reprepare()
 
     def _validate_kinematical_input(self):
         """Reject stored quantities unsupported by the kinematical model."""
@@ -312,9 +331,11 @@ class CTROptimizer:
             resolution, CTRresolution.ResolutionFunction
         ):
             raise TypeError("resolution must be a ResolutionFunction or None")
+        if calculation is not None and calculation not in {"sample", "convolve"}:
+            raise ValueError("calculation must be 'sample' or 'convolve'")
         self.resolution = resolution
         if calculation is not None:
-            self.set_resolution_calculation(calculation)
+            self.resolution_calculation = calculation
         self._invalidate_resolution_cache()
 
     def set_resolution_calculation(self, calculation):
@@ -395,6 +416,7 @@ class CTROptimizer:
             raise ValueError("Resolution bounds must be finite and nonnegative")
         self._fit_resolution = True
         self._resolution_bounds = (lower_bounds, higher_bounds)
+        self._require_reprepare()
 
     def _resolution_parameters(self):
         """Return the resolution-width fit parameters in r.l.u."""
@@ -417,7 +439,18 @@ class CTROptimizer:
 
     def _invalidate_resolution_cache(self):
         """Discard calculated amplitudes after geometry or model changes."""
+        self._resolution_calculated_ctrs = None
+        self._invalidate_calculated_results()
+
+    def _invalidate_calculated_results(self):
+        """Discard the last complete public prediction collection."""
         self.calculated_CTRs = None
+
+    def _require_reprepare(self):
+        """Invalidate layout-dependent state after a fit-definition change."""
+        if hasattr(self, "_prepared"):
+            self._prepared = False
+        self._invalidate_resolution_cache()
 
     def _resolution_input_collection(self):
         """Return the reusable unbroadened input for fast convolution."""
@@ -433,10 +466,10 @@ class CTROptimizer:
         remaining collection allocation in future performance work.
         """
         if self.resolution is None:
-            self.calculated_CTRs = None
+            self._resolution_calculated_ctrs = None
             return
         if self.resolution_calculation == "sample":
-            self.calculated_CTRs = CTRresolution.sample_structure_factor(
+            self._resolution_calculated_ctrs = CTRresolution.sample_structure_factor(
                 self.CTRs, self.xtal, self.resolution
             )
             return
@@ -444,7 +477,7 @@ class CTROptimizer:
         input_ctrs = self._resolution_input_collection()
         for source, calculated in zip(self.CTRs, input_ctrs):
             calculated.sfI = np.abs(self.xtal.F(source.harr, source.karr, source.l))
-        self.calculated_CTRs = CTRresolution.fast_convolve(
+        self._resolution_calculated_ctrs = CTRresolution.fast_convolve(
             input_ctrs, self.resolution
         )
 
@@ -468,28 +501,20 @@ class CTROptimizer:
         """Return the calculated amplitude for one CTR, with resolution."""
         if self.resolution is None:
             return np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
-        if self.calculated_CTRs is None:
+        if self._resolution_calculated_ctrs is None:
             self._update_resolution_cache()
-        return self.calculated_CTRs[index].sfI
+        return self._resolution_calculated_ctrs[index].sfI
 
     def _angle_correction(self, ctr):
         """Return the multiplicative legacy correction for one measured CTR."""
         return 1.0
 
-    def _calculation_inputs(self, apply_angle_correction=True):
+    def _calculation_inputs(self):
         """Return shared model, observation, and uncertainty values per CTR.
-
-        ``apply_angle_correction=False`` is a temporary legacy adapter for
-        inherited methods whose historical output ignored the subclass angle
-        correction. It is private migration state and is removed when the
-        common public result contract lands.
         """
         calculations = []
         for index, ctr in enumerate(self.CTRs):
-            if apply_angle_correction:
-                angle_correction = self._angle_correction(ctr)
-            else:
-                angle_correction = 1.0
+            angle_correction = self._angle_correction(ctr)
             calculations.append(
                 _CTRCalculation(
                     ctr=ctr,
@@ -556,14 +581,12 @@ class CTROptimizer:
             )
         return scale
 
-    def _scaled_calculations(self, apply_angle_correction=True):
+    def _scaled_calculations(self):
         """Return policy-grouped calculations with prediction-side scales."""
         self._validate_scale_configuration(
             self._scale_policy_defaults, self._scale_policy_overrides
         )
-        calculations = self._calculation_inputs(
-            apply_angle_correction=apply_angle_correction
-        )
+        calculations = self._calculation_inputs()
         scales = [None] * len(calculations)
         global_indices = []
         try:
@@ -588,13 +611,45 @@ class CTROptimizer:
             raise
 
         return tuple(
-            _LegacyScaledCalculation(calculation, scale)
+            _ScaledCalculation(calculation, scale)
             for calculation, scale in zip(calculations, scales)
         )
 
-    def _legacy_individual_calculations(self):
-        """Return policy-scaled values without the angle-correction hook."""
-        return self._scaled_calculations(apply_angle_correction=False)
+    def _require_prepared(self):
+        """Reject evaluation before the current fit layout is prepared."""
+        if not self._prepared:
+            raise RuntimeError(
+                "CTR fit evaluation requires prepareFit() after constructing "
+                "or changing the fit definition"
+            )
+
+    def _publish_calculated_ctrs(self, calculations):
+        """Publish final scaled predictions without observation errors."""
+        predicted = copy.deepcopy(self.CTRs)
+        for ctr, calculation in zip(predicted, calculations):
+            ctr.sfI = np.ascontiguousarray(calculation.scaled_prediction)
+            ctr.err = None
+            ctr.withErr = False
+        name = getattr(self.CTRs, "name", "calculated CTRs")
+        self.calculated_CTRs = CTRplotutil.CTRCollection(predicted, name=name)
+
+    def _evaluate(self, x=None):
+        """Evaluate and publish the common final-result pipeline."""
+        self._require_prepared()
+        self._invalidate_calculated_results()
+        try:
+            if x is not None:
+                self.set_parameters(x)
+            elif self.resolution is not None and (
+                self._resolution_calculated_ctrs is None
+            ):
+                self._update_resolution_cache()
+            calculations = self._scaled_calculations()
+            self._publish_calculated_ctrs(calculations)
+        except Exception:
+            self._invalidate_calculated_results()
+            raise
+        return calculations
 
     def _model_parameters(self):
         """Return the crystal-owned tail of the fit parameter vector."""
@@ -643,33 +698,46 @@ class CTROptimizer:
     def prepareFit(self):
         """Prepare model, callback, constraint, and resolution fit state.
 
-        When a resolution model is configured, this validates any required
-        cached angle records and calculates the initial ``calculated_CTRs``
-        cache before the optimizer begins evaluating trial parameters.
+        This validates the data and parameter layout and publishes the initial
+        final prediction in :attr:`calculated_CTRs`.
         """
-        self._validate_kinematical_input()
-        self.startp, self.lower_bounds, self.higher_bounds = (
-            self.xtal.getStartParamAndLimits()
-        )
-        self.bounds = self._prepend_model_bounds(
-            (self.lower_bounds, self.higher_bounds)
-        )
+        self._prepared = False
+        self._invalidate_resolution_cache()
+        if not self.CTRs:
+            raise ValueError("Cannot prepare a fit without CTR data")
         for ctr in self.CTRs:
-            ctr.invrelerrsqrd_weight = ctr.weight * ctr.err**-2
-        for callback in reversed(self.callbacks):
-            self.bounds = (
-                np.concatenate((callback.bounds[0], self.bounds[0])),
-                np.concatenate((callback.bounds[1], self.bounds[1])),
+            if ctr.l.size == 0 or ctr.sfI.size == 0:
+                raise ValueError(f"Cannot prepare a fit with empty CTR {ctr!r}")
+            if ctr.err is None:
+                raise ValueError(f"Cannot prepare a fit without errors for {ctr!r}")
+        try:
+            self._validate_kinematical_input()
+            self.startp, self.lower_bounds, self.higher_bounds = (
+                self.xtal.getStartParamAndLimits()
             )
-        self.bounds = self._append_resolution_bounds(self.bounds)
-        if self.dw_zconstraints:
-            self.nic = self.get_inequalconstraints().size
-        else:
-            self.nic = 0
-        self.fitparnames = self._fit_parameter_names()
-        self.priors = self.xtal.priors
-        self._update_resolution_cache()
-        self._scaled_calculations()
+            self.bounds = self._prepend_model_bounds(
+                (self.lower_bounds, self.higher_bounds)
+            )
+            for ctr in self.CTRs:
+                ctr.invrelerrsqrd_weight = ctr.weight * ctr.err**-2
+            for callback in reversed(self.callbacks):
+                self.bounds = (
+                    np.concatenate((callback.bounds[0], self.bounds[0])),
+                    np.concatenate((callback.bounds[1], self.bounds[1])),
+                )
+            self.bounds = self._append_resolution_bounds(self.bounds)
+            if self.dw_zconstraints:
+                self.nic = self.get_inequalconstraints().size
+            else:
+                self.nic = 0
+            self.fitparnames = self._fit_parameter_names()
+            self.priors = self.xtal.priors
+            self._prepared = True
+            self._evaluate()
+        except Exception:
+            self._prepared = False
+            self._invalidate_calculated_results()
+            raise
 
     def get_bounds(self):
         return self.bounds
@@ -686,6 +754,7 @@ class CTROptimizer:
 
     def set_parameters(self, x):
         """Set resolution, callback, and model parameters in layout order."""
+        self._invalidate_calculated_results()
         x = self._split_resolution_parameters(x)
         counter = 0
         for callback in self.callbacks:
@@ -699,6 +768,13 @@ class CTROptimizer:
     def set_errors(self, xerror):
         """Split fitted errors across resolution, callbacks, and model."""
         self.errors = xerror
+        if xerror is None:
+            self.resolution_errors = None
+            for callback in self.callbacks:
+                callback.set_errors(None)
+            self._set_model_errors(None)
+            return
+        xerror = np.asarray(xerror)
         if self._fit_resolution:
             self.resolution_errors = xerror[:3]
             xerror = xerror[3:]
@@ -709,19 +785,17 @@ class CTROptimizer:
         self._set_model_errors(xerror[counter:])
 
     def weighted_residues2(self, x=None):
+        """Return squared weighted residuals in flattened CTR order."""
         return self.weighted_residues(x) ** 2
 
     def residues(self, x=None):
-        if x is not None:
-            self.set_parameters(x)
+        """Return observation-minus-prediction values in flattened CTR order."""
         return np.concatenate(
-            [
-                calculation.residual
-                for calculation in self._legacy_individual_calculations()
-            ]
+            [calculation.residual for calculation in self._evaluate(x)]
         )
 
     def flat_data(self, specular=True):
+        """Return stored observations and uncertainties in flattened CTR order."""
         dat = []
         err = []
         for i, ctr in enumerate(
@@ -733,43 +807,103 @@ class CTROptimizer:
 
     @property
     def nopoints(self):
+        """Number of stored specular and nonspecular data points."""
         F, err = self.flat_data()
         return F.size
 
+    def flat_prediction(self, x=None, *, specular=True):
+        """Return final predictions in flattened CTR order.
+
+        :param array-like x: Optional complete fitted parameter vector.
+        :param bool specular: Include the ``(0, 0)`` rod when true.
+        :returns: Final F or R predictions after analytical scaling.
+        :rtype: numpy.ndarray
+        """
+        calculations = self._evaluate(x)
+        selected = [
+            calculation.scaled_prediction
+            for calculation in calculations
+            if specular or calculation.values.ctr.hk != (0, 0)
+        ]
+        if not selected:
+            return np.empty(0, dtype=np.float64)
+        return np.concatenate(selected)
+
     def flat_Fcalc(self, x=None):
-        if x is not None:
-            self.set_parameters(x)
+        """Return final F predictions, rejecting collections containing R."""
+        if any(
+            ctr.reduction.quantity != "structure_factor" for ctr in self.CTRs
+        ):
+            raise ValueError(
+                "flat_Fcalc only supports structure-factor data; use "
+                "flat_prediction for reflectivity or mixed collections"
+            )
+        return self.flat_prediction(x)
+
+    def _rfactor(self, calculations, quantity, label):
+        """Return an R factor for one stored quantity selection."""
+        selected = [
+            calculation
+            for calculation in calculations
+            if calculation.values.ctr.reduction.quantity == quantity
+        ]
+        if not selected:
+            return None
+        denominator = sum(
+            np.sum(np.abs(calculation.values.observation))
+            for calculation in selected
+        )
+        if denominator == 0.0:
+            warnings.warn(
+                f"Cannot calculate {label}: the observed-value denominator is zero",
+                RuntimeWarning,
+            )
+            return None
+        numerator = sum(
+            np.sum(np.abs(calculation.residual)) for calculation in selected
+        )
+        return numerator / denominator
+
+    def Rfactor(self, x=None):
+        """Return the structure-factor R diagnostic, or ``None`` without F."""
+        return self._rfactor(
+            self._evaluate(x), "structure_factor", "Rfactor"
+        )
+
+    def Rfactor_R(self, x=None):
+        """Return the reflectivity R diagnostic, or ``None`` without R."""
+        return self._rfactor(self._evaluate(x), "reflectivity", "Rfactor_R")
+
+    def weighted_residues(self, x=None):
+        """Return normalized residuals with linear per-rod objective weights."""
         return np.concatenate(
             [
-                calculation.scaled_prediction
-                for calculation in self._legacy_individual_calculations()
+                np.sqrt(calculation.values.ctr.weight)
+                * calculation.residual
+                / calculation.values.uncertainty
+                for calculation in self._evaluate(x)
             ]
         )
 
-    def Rfactor(self, x=None):
-        if x is not None:
-            self.set_parameters(x)
-        residues = []
-        Fobs = []
-        for calculation in self._legacy_individual_calculations():
-            residues.append(np.abs(calculation.residual))
-            Fobs.append(np.abs(calculation.values.observation))
-        residues = np.sum(np.concatenate(residues))
-        Fobs = np.sum(np.concatenate(Fobs))
-        return residues / Fobs
+    def weighted_residues_errors(self, x=None):
+        """Return weighted residuals and raw supplied uncertainties."""
+        calculations = self._evaluate(x)
+        residues = [
+            np.sqrt(calculation.values.ctr.weight)
+            * calculation.residual
+            / calculation.values.uncertainty
+            for calculation in calculations
+        ]
+        errors = [calculation.values.ctr.err for calculation in calculations]
+        return np.concatenate(residues), np.concatenate(errors)
 
-    def weighted_residues(self, x=None):
-        if x is not None:
-            self.set_parameters(x)
-        residues = []
-        for calculation in self._legacy_individual_calculations():
-            ctr = calculation.values.ctr
-            residues.append(
-                np.sqrt(ctr.weight)
-                * calculation.residual
-                / calculation.values.uncertainty
-            )
-        return np.concatenate(residues)
+    def log_prob(self, x):
+        """Return the Gaussian log likelihood for a parameter vector."""
+        try:
+            resid, err = self.weighted_residues_errors(x)
+        except _ScaleEstimationError:
+            return -np.inf
+        return -0.5 * np.sum(resid**2 + np.log(2 * np.pi * err**2))
 
     def get_inequalconstraints(self):
         """Return crystal displacement constraints for the current model."""
@@ -801,36 +935,98 @@ class CTROptimizer:
             )
         return [objective]
 
-    def statistics(self, x):
-        self.set_parameters(x)
-        residues2 = self.weighted_residues2()
+    def _fitted_scale_count(self):
+        """Return the number of independently fitted analytical scales."""
+        scaled = sum(
+            self._resolved_scale_policy(ctr) == "scaled" for ctr in self.CTRs
+        )
+        global_group = any(
+            self._resolved_scale_policy(ctr) == "global" for ctr in self.CTRs
+        )
+        return scaled + int(global_group)
 
-        Rfactor = self.Rfactor()
+    def statistics(self, x=None):
+        """Return fit diagnostics and scaled local covariance.
 
-        stat = dict()
+        Analytical scale parameters count toward the degrees of freedom even
+        though they are eliminated from the numerical optimizer vector.
+        Covariance and parameter errors are reported only when estimable.
+        """
+        if x is None:
+            x = self.get_parameters()
+        x = np.asarray(x, dtype=np.float64)
+        calculations = self._evaluate(x)
+        weighted = np.concatenate(
+            [
+                np.sqrt(calculation.values.ctr.weight)
+                * calculation.residual
+                / calculation.values.uncertainty
+                for calculation in calculations
+            ]
+        )
+        chi2_result = np.sum(weighted**2)
+        noparameters = x.size + self._fitted_scale_count()
+        nu = weighted.size - noparameters
+        result = {
+            "Chisqr": chi2_result,
+            "nodatapoints": weighted.size,
+            "Chisqr_red": None,
+            "noparameters": noparameters,
+            "pvalue": None,
+            "Rfactor": self._rfactor(
+                calculations, "structure_factor", "Rfactor"
+            ),
+            "Rfactor_R": self._rfactor(
+                calculations, "reflectivity", "Rfactor_R"
+            ),
+            "covariance": None,
+        }
+        if nu <= 0:
+            warnings.warn(
+                "Reduced chi-square and covariance are unavailable because "
+                "the fit has no positive degrees of freedom",
+                RuntimeWarning,
+            )
+            self.set_errors(None)
+            return result
 
-        # variance = np.concatenate([ctr.err**2 for ctr in self.CTRs])
-        # varmat_i = np.diag(1/variance)
+        chi2_red = chi2_result / nu
+        result["Chisqr_red"] = chi2_red
+        result["pvalue"] = stats.chi2.sf(chi2_result, nu)
 
-        chi2_result = np.sum(residues2)
-        pvalue = 1 - stats.chi2.cdf(chi2_result, residues2.size - x.size)
-        chi2_red = chi2_result / (residues2.size - x.size)
+        if x.size == 0:
+            result["covariance"] = np.empty((0, 0), dtype=np.float64)
+            self.set_errors(np.empty(0, dtype=np.float64))
+            return result
 
-        pcov = util.leastsq_covariance(self.weighted_residues, x)
+        try:
+            local_covariance = np.asarray(
+                util.leastsq_covariance(self.weighted_residues, x),
+                dtype=np.float64,
+            )
+            if (
+                local_covariance.shape != (x.size, x.size)
+                or not np.all(np.isfinite(local_covariance))
+                or np.linalg.matrix_rank(local_covariance) < x.size
+            ):
+                raise np.linalg.LinAlgError("rank-deficient covariance")
+            reported_covariance = chi2_red * local_covariance
+            diagonal = np.diag(reported_covariance)
+            if np.any(diagonal < 0.0):
+                raise np.linalg.LinAlgError("negative covariance diagonal")
+            result["covariance"] = reported_covariance
+            self.set_errors(np.sqrt(diagonal))
+        except (ValueError, np.linalg.LinAlgError):
+            warnings.warn(
+                "Fit covariance and parameter errors are unavailable because "
+                "the local weighted-residual Jacobian is rank deficient",
+                RuntimeWarning,
+            )
+            self.set_errors(None)
+        finally:
+            self._evaluate(x)
+        return result
 
-        self.errors = np.sqrt(np.diag(pcov) * chi2_red)
-        self.set_errors(self.errors)
-        self.set_parameters(x)
-
-        stat["Chisqr"] = chi2_result
-        stat["nodatapoints"] = residues2.size
-        stat["Chisqr_red"] = chi2_red
-        stat["noparameters"] = x.size
-        stat["pvalue"] = pvalue
-        stat["Rfactor"] = Rfactor
-        stat["covariance"] = pcov
-
-        return stat
     def set_archi_result(self, archi):
         """Convert an archipelago population to an ArviZ fit trace."""
         islandid = int(np.argmin([f[0] for f in archi.get_champions_f()]))
@@ -858,15 +1054,20 @@ class CTROptimizer:
                 params[parameter][i] = population.get_x()[:, j]
             params["chisqr"][i] = population.get_f()[:, 0]
 
-        stat.pop("covariance", np.array([]))
+        attrs = {
+            key: value
+            for key, value in stat.items()
+            if key != "covariance" and value is not None
+        }
 
         import arviz as az
 
-        return az.from_dict(params, attrs=stat)
+        return az.from_dict(params, attrs=attrs)
 
     def evaluateStatistics(self, x):
         warnings.warn(
-            "usage of evaluateStatistics is deprecated, use CTROptimizer.statistics instead!",  # noqa: E501
+            "evaluateStatistics is deprecated and marked for removal; use "
+            "CTROptimizer.statistics instead!",
             DeprecationWarning,
         )
 
@@ -895,16 +1096,20 @@ class CTROptimizer:
         return chi2_result, chi2_red, pvalue, residues2.size
 
     def printStatistics(self, x):
-        # chi2_result, chi2_red , pvalue, nodatapoints = self.evaluateStatistics(x)
+        """Print a compact summary of current fit diagnostics."""
         stat = self.statistics(x)
+        display = {
+            key: "n/a" if value is None else f"{value:.6g}"
+            for key, value in stat.items()
+            if key != "covariance"
+        }
         print(
-            "Chisqr = {:.4f}, Chisqr_red = {:.4f}, R-factor = {:.4f} ,p-value = {:.6f}, n_refl = {}".format(  # noqa: E501
-                stat["Chisqr"],
-                stat["Chisqr_red"],
-                stat["Rfactor"],
-                stat["pvalue"],
-                stat["nodatapoints"],
-            )
+            f"Chisqr = {display['Chisqr']}, "
+            f"Chisqr_red = {display['Chisqr_red']}, "
+            f"R-factor(F) = {display['Rfactor']}, "
+            f"R-factor(R) = {display['Rfactor_R']}, "
+            f"p-value = {display['pvalue']}, "
+            f"n_refl = {display['nodatapoints']}"
         )
 
     def get_name(self):
@@ -1008,8 +1213,22 @@ class FitCallback:
 class CTROptAngleCorrection(CTROptimizer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.useAnglecorr = False
+        self._use_anglecorr = False
         self.phasevelocity = 1.0
+        self.phase_error = None
+        self.amp_error = None
+
+    @property
+    def useAnglecorr(self):
+        """Whether empirical angle-correction parameters are fitted."""
+        return self._use_anglecorr
+
+    @useAnglecorr.setter
+    def useAnglecorr(self, enabled):
+        enabled = bool(enabled)
+        if enabled != self._use_anglecorr:
+            self._use_anglecorr = enabled
+            self._require_reprepare()
 
     def prepareFit(self, phaselim=[0, 2 * np.pi], amplim=[0, 0.75], start=[0.0, 0.0]):
         """Prepare angle-correction and optional resolution fit state.
@@ -1047,9 +1266,18 @@ class CTROptAngleCorrection(CTROptimizer):
         )
 
     def _set_model_errors(self, errors):
-        """Drop angle-correction errors before forwarding the crystal tail."""
+        """Split angle-correction errors from the crystal-owned tail."""
+        if errors is None:
+            self.phase_error = None
+            self.amp_error = None
+            super()._set_model_errors(None)
+            return
         if self.useAnglecorr:
+            self.phase_error, self.amp_error = errors[:2]
             errors = errors[2:]
+        else:
+            self.phase_error = None
+            self.amp_error = None
         super()._set_model_errors(errors)
 
     def _model_parameter_names(self):
@@ -1071,33 +1299,19 @@ class CTROptAngleCorrection(CTROptimizer):
             return self.get_anglecorrection(ctr.angles["omega"])
         return 1.0
 
-    def _legacy_angle_calculations(self, corrected_scale_errors):
-        """Return policy-scaled, angle-aware temporary calculations.
-
-        :param bool corrected_scale_errors:
-            Retained only for compatibility with the temporary adapter's
-            increment-5 signature. Scale estimation now follows one path.
-        """
-        return self._scaled_calculations()
-
     def applyCorrections(self):
+        """Apply the fitted angle correction permanently to stored data."""
         if self.useAnglecorr:
-            calculations = self._scaled_calculations()
+            calculations = self._evaluate()
             for calculation in calculations:
                 ctr = calculation.values.ctr
                 ctr *= calculation.values.angle_correction / calculation.scale
                 ctr.invrelerrsqrd_weight = ctr.weight * ctr.err**-2
 
             self.amp = 0.0
+            self._require_reprepare()
         else:
             warnings.warn("Angle correction was not enabled. Skip applyCorrections.")
-
-    def log_prob(self, x):
-        try:
-            resid, err = self.weighted_residues_errors(x)
-        except _ScaleEstimationError:
-            return -np.inf
-        return -0.5 * np.sum(resid**2 + np.log(2 * np.pi * err**2))
 
     def get_anglecorrection(
         self, omega, x=None
@@ -1110,112 +1324,3 @@ class CTROptAngleCorrection(CTROptimizer):
             )
         else:
             return 1.0
-
-    def weighted_residues2(self, x):
-        return self.weighted_residues(x) ** 2
-
-    def residues(self, x):
-        self.set_parameters(x)
-        return np.concatenate(
-            [
-                calculation.residual
-                for calculation in self._legacy_angle_calculations(
-                    corrected_scale_errors=True
-                )
-            ]
-        )
-
-    def Rfactor(self, x):
-        self.set_parameters(x)
-        residues = []
-        F_obs = []
-        F_t = []
-        global_calculations = []
-        for calculation in self._legacy_angle_calculations(
-            corrected_scale_errors=True
-        ):
-            F_obs.append(calculation.values.observation)
-            F_t.append(calculation.values.prediction)
-            if self._resolved_scale_policy(calculation.values.ctr) == "global":
-                global_calculations.append(calculation)
-            else:
-                residues.append(calculation.residual)
-        if not global_calculations:
-            residues = np.concatenate(residues)
-            F_obs = np.concatenate(F_obs)
-        else:
-            scale = global_calculations[0].scale
-            for i, calculation in enumerate(global_calculations):
-                # Preserve the temporary legacy adapter's collection-index
-                # behavior until the subclass override is removed in increment 8.
-                residues.append(F_obs[i] - scale * F_t[i])
-            residues = np.concatenate(residues)
-            F_obs = np.concatenate(F_obs)
-        residues = np.sum(np.abs(residues))
-        return residues / np.sum(np.asarray(F_obs))
-
-    def weighted_residues(self, x):
-        self.set_parameters(x)
-        return np.concatenate(
-            [
-                (
-                    np.sqrt(calculation.values.ctr.weight)
-                    / calculation.values.uncertainty
-                )
-                * calculation.residual
-                for calculation in self._legacy_angle_calculations(
-                    corrected_scale_errors=False
-                )
-            ]
-        )
-
-    def weighted_residues_errors(self, x):
-        self.set_parameters(x)
-        calculations = self._legacy_angle_calculations(
-            corrected_scale_errors=False
-        )
-        residues = [
-            (
-                np.sqrt(calculation.values.ctr.weight)
-                / calculation.values.uncertainty
-            )
-            * calculation.residual
-            for calculation in calculations
-        ]
-        supplied_errors = [calculation.values.ctr.err for calculation in calculations]
-        return np.concatenate(residues), np.concatenate(supplied_errors)
-
-    def statistics(self, x=None):
-        if x is None:
-            x = self.get_parameters()
-
-        # self.xtal.setParameters(x)
-        residues2 = self.weighted_residues2(x)
-
-        Rfactor = self.Rfactor(x)
-
-        stat = dict()
-
-        # variance = np.concatenate([ctr.err**2 for ctr in self.CTRs])
-        # varmat_i = np.diag(1/variance)
-
-        chi2_result = np.sum(residues2)
-        pvalue = 1 - stats.chi2.cdf(chi2_result, residues2.size - x.size)
-        chi2_red = chi2_result / (residues2.size - x.size)
-
-        pcov = util.leastsq_covariance(self.weighted_residues, x)
-
-        errors = np.sqrt(np.diag(pcov) * chi2_red)
-
-        self.set_errors(errors)
-        self.set_parameters(x)
-
-        stat["Chisqr"] = chi2_result
-        stat["nodatapoints"] = residues2.size
-        stat["Chisqr_red"] = chi2_red
-        stat["noparameters"] = x.size
-        stat["pvalue"] = pvalue
-        stat["Rfactor"] = Rfactor
-        stat["covariance"] = pcov
-
-        return stat

@@ -1,12 +1,13 @@
 """Regression tests for the CTR fitting optimizers.
 
-Increments 1--7 of the CTR optimizer rework cover the callback error path,
+Increments 1--8 of the CTR optimizer rework cover the callback error path,
 parameter-name layout, value-preserving optimizer class split, and legacy
 objective characterization, calculation adapters, prediction-side analytical
 scales, and explicit scale policies. The fixtures here are shared with later
 increments of ``doc/design/dwba_ctr_fitting_implementation_plan.md``.
 """
 
+import tempfile
 import unittest
 from unittest import mock
 
@@ -81,7 +82,10 @@ class FitCrystal:
 
     def setFitErrors(self, errors):  # noqa: N802
         """Store the crystal parameter errors and record the call."""
-        self.errors = np.asarray(errors, dtype=np.float64)
+        if errors is None:
+            self.errors = None
+        else:
+            self.errors = np.asarray(errors, dtype=np.float64)
         self.error_calls.append(self.errors)
 
 
@@ -989,34 +993,39 @@ class TestLegacyOptimizerCharacterization(unittest.TestCase):
     """Pin intentional numerical changes throughout formula centralization."""
 
     def _assert_legacy_outputs(self, optimizer, expected):
-        """Assert the legacy objective, output, and reporting definitions."""
+        """Assert every public output follows the common result path."""
         parameters = optimizer.get_parameters()
-
-        # Legacy scaling and weight powers; increments 6 and 7 update these.
-        np.testing.assert_allclose(
-            optimizer.weighted_residues(parameters),
-            expected["weighted_residues"],
+        calculations = optimizer._evaluate(parameters)
+        prediction = np.concatenate(
+            [calculation.scaled_prediction for calculation in calculations]
         )
-        np.testing.assert_allclose(
-            optimizer.weighted_residues2(parameters),
-            expected["weighted_residues2"],
+        observations = np.concatenate(
+            [calculation.values.observation for calculation in calculations]
         )
-        np.testing.assert_allclose(optimizer.fitness(parameters), [expected["fitness"]])
-
-        # These observation-scaled outputs migrate in increments 6 and 8.
-        np.testing.assert_allclose(optimizer.residues(parameters), expected["residues"])
-        np.testing.assert_allclose(
-            optimizer.flat_Fcalc(parameters), expected["flat_Fcalc"]
+        uncertainties = np.concatenate(
+            [calculation.values.uncertainty for calculation in calculations]
         )
-        np.testing.assert_allclose(optimizer.Rfactor(parameters), expected["Rfactor"])
+        weights = np.concatenate(
+            [
+                np.full(calculation.residual.size, calculation.values.ctr.weight)
+                for calculation in calculations
+            ]
+        )
+        residuals = observations - prediction
+        weighted = np.sqrt(weights) * residuals / uncertainties
 
-        if "likelihood_errors" in expected:
-            residuals, errors = optimizer.weighted_residues_errors(parameters)
-            np.testing.assert_allclose(residuals, expected["weighted_residues"])
-            np.testing.assert_allclose(errors, expected["likelihood_errors"])
-            np.testing.assert_allclose(
-                optimizer.log_prob(parameters), expected["log_prob"]
-            )
+        np.testing.assert_allclose(optimizer.flat_prediction(), prediction)
+        np.testing.assert_allclose(optimizer.flat_Fcalc(), prediction)
+        np.testing.assert_allclose(optimizer.residues(), residuals)
+        np.testing.assert_allclose(optimizer.weighted_residues(), weighted)
+        np.testing.assert_allclose(optimizer.weighted_residues2(), weighted**2)
+        np.testing.assert_allclose(optimizer.fitness(parameters), [np.sum(weighted**2)])
+        np.testing.assert_allclose(
+            optimizer.Rfactor(),
+            np.sum(np.abs(residuals)) / np.sum(np.abs(observations)),
+        )
+        self.assertIsNone(optimizer.Rfactor_R())
+        self.assertTrue(all(ctr.err is None for ctr in optimizer.calculated_CTRs))
 
         statistics = optimizer.statistics(parameters)
         self.assertEqual(
@@ -1028,23 +1037,20 @@ class TestLegacyOptimizerCharacterization(unittest.TestCase):
                 "noparameters",
                 "pvalue",
                 "Rfactor",
+                "Rfactor_R",
                 "covariance",
             },
         )
-        np.testing.assert_allclose(statistics["Chisqr"], expected["fitness"])
+        np.testing.assert_allclose(statistics["Chisqr"], np.sum(weighted**2))
         self.assertEqual(statistics["nodatapoints"], 9)
-        np.testing.assert_allclose(statistics["Chisqr_red"], expected["chi2_red"])
-        self.assertEqual(statistics["noparameters"], parameters.size)
+        nscales = optimizer._fitted_scale_count()
+        self.assertEqual(statistics["noparameters"], parameters.size + nscales)
         self.assertEqual(parameters.size, expected["nparameters"])
         np.testing.assert_allclose(
-            statistics["pvalue"], expected.get("pvalue", 0.0)
+            statistics["Chisqr_red"],
+            statistics["Chisqr"] / (9 - parameters.size - nscales),
         )
-        np.testing.assert_allclose(statistics["Rfactor"], expected["Rfactor"])
-        # Increment 8 replaces the unscaled covariance/scaled-error pairing.
-        np.testing.assert_allclose(
-            statistics["covariance"], expected["covariance"], rtol=1e-6
-        )
-        np.testing.assert_allclose(optimizer.errors, expected["fit_errors"], rtol=1e-6)
+        self.assertIsNone(statistics["Rfactor_R"])
 
     def test_base_optimizer_legacy_outputs(self):
         """Pin every public numerical output of the base optimizer."""
@@ -1114,8 +1120,8 @@ class TestLegacyOptimizerCharacterization(unittest.TestCase):
             optimizer.flat_Fcalc(optimizer.get_parameters()), [3.0 / 2.0] * 2
         )
 
-    def test_shared_scale_rfactor_keeps_legacy_index_misalignment(self):
-        """Pin D3 until the subclass R-factor override is removed."""
+    def test_shared_scale_rfactor_uses_every_selected_rod_once(self):
+        """The common R-factor path has no subclass index misalignment."""
         crystal = _ConstantFitCrystal()
         ctrs = _unit_model_ctrs(
             (
@@ -1129,11 +1135,9 @@ class TestLegacyOptimizerCharacterization(unittest.TestCase):
         optimizer.set_scale_policy((0.0, 0.0), "scaled")
         optimizer.prepareFit()
 
-        # D3 repeats the specular rod and omits the last non-specular rod.
-        # Increment 8 deletes this override rather than preserving the defect.
         self.assertAlmostEqual(
             optimizer.Rfactor(optimizer.get_parameters()),
-            0.21428571428571427,
+            0.2857142857142857,
         )
 
     def test_evaluate_statistics_remains_deprecated(self):
@@ -1146,8 +1150,8 @@ class TestLegacyOptimizerCharacterization(unittest.TestCase):
             optimizer.evaluateStatistics(optimizer.get_parameters())
 
 
-class TestLegacyCalculationAdapters(unittest.TestCase):
-    """Increment 5: share inputs while legacy public outputs still differ."""
+class TestCommonCalculationPath(unittest.TestCase):
+    """Increment 8: all public outputs share final scaled predictions."""
 
     def test_shared_inputs_apply_the_angle_hook_once(self):
         """One record owns each model, observation, and uncertainty array."""
@@ -1170,8 +1174,8 @@ class TestLegacyCalculationAdapters(unittest.TestCase):
         )
         np.testing.assert_allclose(calculation.uncertainty, correction)
 
-    def test_adapters_preserve_incompatible_legacy_predictions(self):
-        """Individual flattened and shared residual scales stay distinct."""
+    def test_global_scale_is_shared_by_all_public_outputs(self):
+        """Flattened and residual outputs use the same global scale."""
         ctrs = _unit_model_ctrs(
             (
                 ((1.0, 0.0), [1.0, 2.0]),
@@ -1183,16 +1187,11 @@ class TestLegacyCalculationAdapters(unittest.TestCase):
         optimizer.prepareFit()
         parameters = optimizer.get_parameters()
 
-        # The inherited adapter now follows the explicit global policy.
         np.testing.assert_allclose(
             optimizer.flat_Fcalc(parameters),
             [2.0, 2.0, 2.0, 2.0],
         )
-
-        # The subclass adapter uses the same prediction-side global scale.
-        calculations = optimizer._legacy_angle_calculations(
-            corrected_scale_errors=False
-        )
+        calculations = optimizer._scaled_calculations()
         np.testing.assert_allclose(
             np.concatenate(
                 [
@@ -1235,7 +1234,7 @@ class TestScaleEstimation(unittest.TestCase):
     """Increment 6: analytical scales multiply calculated predictions."""
 
     def test_prepare_and_direct_evaluation_describe_zero_prediction_norm(self):
-        """A transient zero model fails clearly and a later trial can recover."""
+        """A failed initial prediction leaves the optimizer unprepared."""
         ctrs = _unit_model_ctrs((((1.0, 0.0), [1.0, 2.0]),))
         optimizer = CTRopt.CTROptimizer(_VanishingFitCrystal((0.0,)), ctrs)
 
@@ -1244,13 +1243,12 @@ class TestScaleEstimation(unittest.TestCase):
             r"rod .*current parameters.*weighted prediction norm is zero",
         ):
             optimizer.prepareFit()
-        with self.assertRaisesRegex(
-            ValueError,
-            r"rod .*current parameters.*weighted prediction norm is zero",
-        ):
+        with self.assertRaisesRegex(RuntimeError, "requires prepareFit"):
             optimizer.weighted_residues([0.0])
+        self.assertIsNone(optimizer.calculated_CTRs)
 
-        self.assertTrue(np.isinf(optimizer.fitness([0.0])[0]))
+        optimizer.xtal.setParameters([1.0])
+        optimizer.prepareFit()
         self.assertTrue(np.isfinite(optimizer.fitness([1.0])[0]))
 
     def test_nonpositive_scale_fails_but_fixed_policy_skips_estimation(self):
@@ -1286,7 +1284,11 @@ class TestScaleEstimation(unittest.TestCase):
     def test_scalar_angle_objective_rejects_only_scale_failures(self):
         """Likelihood trials map scale failures to minus infinity."""
         ctrs = _unit_model_ctrs((((1.0, 0.0), [0.0, 0.0]),))
-        optimizer = CTRopt.CTROptAngleCorrection(_ConstantFitCrystal(), ctrs)
+        optimizer = CTRopt.CTROptAngleCorrection(
+            _ConstantFitCrystal(), ctrs, scale_policy={"F": "fixed"}
+        )
+        optimizer.prepareFit()
+        optimizer.set_scale_policy_default("F", "scaled")
         self.assertEqual(optimizer.log_prob([1.0]), -np.inf)
 
         with mock.patch.object(
@@ -1297,7 +1299,10 @@ class TestScaleEstimation(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unrelated failure"):
                 optimizer.log_prob([1.0])
 
-        base = CTRopt.CTROptimizer(_ConstantFitCrystal(), ctrs)
+        base = CTRopt.CTROptimizer(
+            _ConstantFitCrystal(), ctrs, scale_policy={"F": "fixed"}
+        )
+        base.prepareFit()
         with mock.patch.object(
             base, "weighted_residues2", side_effect=ValueError("input failure")
         ):
@@ -1574,8 +1579,8 @@ class TestOptimizerClassSplit(unittest.TestCase):
 class TestCallbackErrors(unittest.TestCase):
     """Increment 1: the callback ``set_errors`` arity repair."""
 
-    def test_statistics_sets_callback_errors(self):
-        """``statistics`` must reach a registered callback without raising.
+    def test_rank_deficient_statistics_clear_callback_errors(self):
+        """Rank-deficient covariance clears every parameter error consumer.
 
         ``CTROptAngleCorrection.set_errors`` used to call
         ``cb.set_errors(self.xtal, slice)`` against the one-argument
@@ -1588,21 +1593,22 @@ class TestCallbackErrors(unittest.TestCase):
         x = optimizer.get_parameters()
         self.assertEqual(x.size, 3)
 
-        stat = optimizer.statistics(x)
+        with self.assertWarnsRegex(RuntimeWarning, "rank deficient"):
+            stat = optimizer.statistics(x)
 
         self.assertEqual(stat["nodatapoints"], 9)
-        self.assertEqual(optimizer.errors.size, 3)
-        self.assertTrue(np.all(np.isfinite(optimizer.errors)))
-        np.testing.assert_allclose(callback.errors, optimizer.errors[:2])
-        np.testing.assert_allclose(optimizer.xtal.errors, optimizer.errors[2:])
+        self.assertIsNone(stat["covariance"])
+        self.assertIsNone(optimizer.errors)
+        self.assertIsNone(callback.errors)
+        self.assertIsNone(optimizer.xtal.errors)
         self.assertTrue(calls)
 
     def test_set_errors_slices_by_parameter_layout(self):
         """Each consumer receives its own segment of the error vector.
 
         The layout is resolution, callbacks in ``self.callbacks`` order, angle
-        correction, then crystal. The two angle-correction entries are dropped:
-        the subclass keeps no angle-correction error state.
+        correction, then crystal. The two angle-correction entries are retained
+        as ``phase_error`` and ``amp_error``.
         """
         optimizer = CTRopt.CTROptAngleCorrection(FitCrystal(), _fixture_ctrs())
         optimizer.useAnglecorr = True
@@ -1624,6 +1630,8 @@ class TestCallbackErrors(unittest.TestCase):
         np.testing.assert_allclose(optimizer.resolution_errors, errors[:3])
         np.testing.assert_allclose(second.errors, errors[3:4])
         np.testing.assert_allclose(first.errors, errors[4:6])
+        self.assertEqual(optimizer.phase_error, errors[6])
+        self.assertEqual(optimizer.amp_error, errors[7])
         np.testing.assert_allclose(optimizer.xtal.errors, errors[8:])
         self.assertEqual(len(optimizer.xtal.error_calls), 1)
 
@@ -1805,6 +1813,38 @@ class TestParameterNameLayout(unittest.TestCase):
             optimizer.set_archi_result(archi)
         optimizer.statistics.assert_not_called()
 
+    def test_f_only_trace_round_trips_without_unavailable_attributes(self):
+        """NetCDF export omits None/covariance without mutating statistics."""
+        az = pytest.importorskip("arviz")
+        pytest.importorskip("h5netcdf")
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), _fixture_ctrs())
+        optimizer.prepareFit()
+        parameters = optimizer.get_parameters()
+        population = _FakePopulation(parameters[None, :], [1.0])
+        archipelago = _FakeArchipelago([_FakeIsland(population)])
+        statistics = optimizer.statistics(parameters)
+        original = statistics.copy()
+
+        with mock.patch.object(
+            optimizer, "statistics", return_value=statistics
+        ):
+            trace = optimizer.set_archi_result(archipelago)
+        self.assertEqual(set(statistics), set(original))
+        for key in statistics:
+            if isinstance(statistics[key], np.ndarray):
+                np.testing.assert_array_equal(statistics[key], original[key])
+            else:
+                self.assertEqual(statistics[key], original[key])
+
+        with tempfile.TemporaryDirectory() as directory:
+            filename = f"{directory}/ctr-trace.nc"
+            trace.to_netcdf(filename, engine="h5netcdf")
+            restored = az.from_netcdf(filename, engine="h5netcdf")
+        attrs = restored.attrs
+        self.assertNotIn("Rfactor_R", attrs)
+        self.assertNotIn("covariance", attrs)
+        self.assertAlmostEqual(attrs["Chisqr"], statistics["Chisqr"])
+
 
 class TestStoredQuantityGuards(unittest.TestCase):
     """Kinematical optimizers must not reinterpret reflectivity as F."""
@@ -1825,6 +1865,178 @@ class TestStoredQuantityGuards(unittest.TestCase):
                     ValueError, "<CTR.*kinematical CTR fitting"
                 ):
                     optimizer.prepareFit()
+
+
+class TestFinalPredictionContract(unittest.TestCase):
+    """Final F/R predictions and diagnostics share one published result."""
+
+    def test_mixed_quantities_have_separate_r_factors(self):
+        """Mixed collections use ``flat_prediction`` and quantity diagnostics."""
+        ctrs = _unit_model_ctrs(
+            (((1.0, 0.0), [1.0, 2.0]), ((2.0, 0.0), [2.0, 4.0]))
+        )
+        ctrs[1].reduction = CTRplotutil.MeasurementReduction("reflectivity")
+        optimizer = CTRopt.CTROptimizer(_ConstantFitCrystal(), ctrs)
+        optimizer._validate_kinematical_input = lambda: None
+        optimizer.prepareFit()
+
+        np.testing.assert_allclose(
+            optimizer.flat_prediction(), [1.5, 1.5, 1.0, 1.0]
+        )
+        with self.assertRaisesRegex(ValueError, "flat_prediction"):
+            optimizer.flat_Fcalc()
+        self.assertAlmostEqual(optimizer.Rfactor(), 1.0 / 3.0)
+        self.assertAlmostEqual(optimizer.Rfactor_R(), 2.0 / 3.0)
+        self.assertEqual(
+            optimizer.calculated_CTRs[1].reduction.quantity, "reflectivity"
+        )
+        self.assertTrue(all(ctr.err is None for ctr in optimizer.calculated_CTRs))
+
+    def test_specular_filter_can_return_an_empty_prediction(self):
+        """Excluding the only specular rod returns an empty flat array."""
+        ctrs = _unit_model_ctrs((((0.0, 0.0), [1.0, 2.0]),))
+        optimizer = CTRopt.CTROptimizer(_ConstantFitCrystal(), ctrs)
+        optimizer.prepareFit()
+        self.assertEqual(optimizer.flat_prediction(specular=False).size, 0)
+
+    def test_zero_rfactor_denominator_warns_without_dividing(self):
+        """A present all-zero quantity has an undefined diagnostic."""
+        ctrs = _unit_model_ctrs((((1.0, 0.0), [0.0, 0.0]),))
+        optimizer = CTRopt.CTROptimizer(
+            _ConstantFitCrystal(), ctrs, scale_policy={"F": "fixed"}
+        )
+        optimizer.prepareFit()
+        with self.assertWarnsRegex(RuntimeWarning, "denominator is zero"):
+            self.assertIsNone(optimizer.Rfactor())
+
+
+class TestOptimizerLifecycle(unittest.TestCase):
+    """Preparation and invalidation protect the public result lifecycle."""
+
+    def test_evaluation_requires_prepare_and_unbroadened_results_are_published(self):
+        """Construction has no result; preparation publishes even without resolution."""
+        optimizer = CTRopt.CTROptimizer(_ConstantFitCrystal(), _fixture_ctrs())
+        self.assertIsNone(optimizer.calculated_CTRs)
+        with self.assertRaisesRegex(RuntimeError, "prepareFit"):
+            optimizer.flat_prediction()
+
+        optimizer.prepareFit()
+        self.assertIsNone(optimizer.resolution)
+        self.assertIsNotNone(optimizer.calculated_CTRs)
+
+    def test_supported_setters_invalidate_then_auto_refresh(self):
+        """Scale and fixed-resolution changes preserve the prepared layout."""
+        ctrs = _unit_model_ctrs((((1.0, 0.0), [1.0, 2.0]),))
+        optimizer = CTRopt.CTROptimizer(_ConstantFitCrystal(), ctrs)
+        optimizer.prepareFit()
+
+        optimizer.set_scale_policy_default("F", "fixed")
+        self.assertIsNone(optimizer.calculated_CTRs)
+        np.testing.assert_allclose(optimizer.flat_prediction(), [1.0, 1.0])
+
+        optimizer.set_resolution(CTRresolution.BoxResolution(0.1, 0.0, 0.0))
+        self.assertIsNone(optimizer.calculated_CTRs)
+        self.assertEqual(optimizer.flat_prediction().size, 2)
+        self.assertIsNotNone(optimizer.calculated_CTRs)
+
+    def test_layout_changes_require_repreparation(self):
+        """Callbacks and constraint membership invalidate the parameter layout."""
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), _fixture_ctrs())
+        optimizer.prepareFit()
+        optimizer.register_fit_callback(
+            lambda xtal, x: None, [0.0], [1.0], [0.5], name="layout"
+        )
+        with self.assertRaisesRegex(RuntimeError, "prepareFit"):
+            optimizer.flat_prediction()
+        optimizer.prepareFit()
+
+        optimizer.dw_zconstraints = True
+        with self.assertRaisesRegex(RuntimeError, "prepareFit"):
+            optimizer.flat_prediction()
+
+        angle_optimizer = CTRopt.CTROptAngleCorrection(
+            FitCrystal(), _fixture_ctrs()
+        )
+        angle_optimizer.prepareFit()
+        angle_optimizer.useAnglecorr = True
+        with self.assertRaisesRegex(RuntimeError, "prepareFit"):
+            angle_optimizer.flat_prediction()
+
+    def test_failed_evaluation_clears_the_previous_public_result(self):
+        """A failed analytical scale never leaves a stale prediction visible."""
+        ctrs = _unit_model_ctrs((((1.0, 0.0), [0.0, 0.0]),))
+        optimizer = CTRopt.CTROptimizer(
+            _ConstantFitCrystal(), ctrs, scale_policy={"F": "fixed"}
+        )
+        optimizer.prepareFit()
+        self.assertIsNotNone(optimizer.calculated_CTRs)
+        optimizer.set_scale_policy_default("F", "scaled")
+        with self.assertRaisesRegex(ValueError, "analytical scale"):
+            optimizer.flat_prediction()
+        self.assertIsNone(optimizer.calculated_CTRs)
+
+
+class TestFitStatisticsContract(unittest.TestCase):
+    """Degrees of freedom, covariance scaling, and clearing follow F7."""
+
+    def test_scaled_covariance_then_rank_failure_clears_all_errors(self):
+        """Unavailable covariance clears a previously successful full layout."""
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), _fixture_ctrs())
+        optimizer.fit_resolution(
+            CTRresolution.BoxResolution(0.1, 0.0, 0.0),
+            lower_bounds=[0.0, 0.0, 0.0],
+            higher_bounds=[1.0, 1.0, 1.0],
+        )
+        callback, _ = _register_callback(optimizer, "stat", 1)
+        optimizer.prepareFit()
+        parameters = optimizer.get_parameters().copy()
+
+        with mock.patch.object(
+            CTRopt.util,
+            "leastsq_covariance",
+            return_value=np.identity(parameters.size),
+        ):
+            successful = optimizer.statistics(parameters)
+        expected = successful["Chisqr_red"] * np.identity(parameters.size)
+        np.testing.assert_allclose(successful["covariance"], expected)
+        np.testing.assert_allclose(
+            optimizer.errors, np.sqrt(np.diag(successful["covariance"]))
+        )
+        self.assertIsNotNone(optimizer.resolution_errors)
+        self.assertIsNotNone(callback.errors)
+        self.assertIsNotNone(optimizer.xtal.errors)
+
+        with mock.patch.object(
+            CTRopt.util,
+            "leastsq_covariance",
+            return_value=np.ones((parameters.size, parameters.size)),
+        ):
+            with self.assertWarnsRegex(RuntimeWarning, "rank deficient"):
+                failed = optimizer.statistics(parameters)
+        self.assertIsNone(failed["covariance"])
+        self.assertIsNone(optimizer.errors)
+        self.assertIsNone(optimizer.resolution_errors)
+        self.assertIsNone(callback.errors)
+        self.assertIsNone(optimizer.xtal.errors)
+        np.testing.assert_allclose(optimizer.get_parameters(), parameters)
+
+    def test_nonpositive_degrees_of_freedom_clear_errors(self):
+        """Analytical scales count toward nu and suppress undefined statistics."""
+        ctrs = _unit_model_ctrs((((1.0, 0.0), [1.0]),))
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), ctrs)
+        optimizer.prepareFit()
+        optimizer.set_errors([0.5])
+        parameters = optimizer.get_parameters().copy()
+
+        with self.assertWarnsRegex(RuntimeWarning, "degrees of freedom"):
+            result = optimizer.statistics(parameters)
+        self.assertEqual(result["noparameters"], 2)
+        self.assertIsNone(result["Chisqr_red"])
+        self.assertIsNone(result["pvalue"])
+        self.assertIsNone(result["covariance"])
+        self.assertIsNone(optimizer.errors)
+        self.assertIsNone(optimizer.xtal.errors)
+        np.testing.assert_allclose(optimizer.get_parameters(), parameters)
 
 
 class TestCrystalParameterLayout(unittest.TestCase):
@@ -1865,6 +2077,29 @@ class TestCrystalParameterLayout(unittest.TestCase):
                     len(optimizer.fitparnames), optimizer.get_parameters().size
                 )
                 self.assertEqual(optimizer.xtal.parameters["domain"], [])
+
+    def test_clearing_errors_reaches_every_real_crystal_parameter_kind(self):
+        """``set_errors(None)`` clears arrays, caches, and parameter errors."""
+        crystal, _ = _parameter_crystal()
+        optimizer = CTRopt.CTROptAngleCorrection(crystal, _fixture_ctrs())
+        optimizer.prepareFit()
+        optimizer.set_errors(np.array([0.11, 0.22, 0.33, 0.44, 0.55]))
+        values = optimizer.get_parameters().copy()
+
+        optimizer.set_errors(None)
+
+        self.assertIsNone(optimizer.errors)
+        self.assertIsNone(optimizer.xtal.werrors)
+        self.assertIsNone(optimizer.xtal._werrors_parvalues)
+        for uc in [optimizer.xtal.uc_bulk] + optimizer.xtal.uc_surface_list:
+            self.assertIsNone(uc.errors)
+            self.assertIsNone(uc._errors_parvalues)
+            for par in uc.parameters["absolute"] + uc.parameters["relative"]:
+                self.assertIsNone(par.error)
+        for parameters in optimizer.xtal.parameters.values():
+            for par in parameters:
+                self.assertIsNone(par.error)
+        np.testing.assert_allclose(optimizer.get_parameters(), values)
 
     def test_error_slices_reach_each_crystal_parameter_kind(self):
         """``set_errors`` routes one error to each parameter object.

@@ -413,6 +413,12 @@ class LinearFitFunctions(ABC):
             par.limits = (val[0], val[1])
 
     def setFitErrors(self, errors):
+        if errors is None:
+            self.errors = None
+            self._errors_parvalues = None
+            for par in self.parameters["absolute"] + self.parameters["relative"]:
+                par.error = None
+            return
         self.errors = np.full_like(self.basis, np.nan)
         err_0 = errors[: len(self.parameters["absolute"])]
         err_r = errors[len(self.parameters["absolute"]) :]

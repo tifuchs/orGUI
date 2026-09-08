@@ -997,6 +997,15 @@ class SXRDCrystal:
             idx += 1
 
     def setFitErrors(self, errors):
+        if errors is None:
+            for uc in [self.uc_bulk] + self.uc_surface_list:
+                uc.setFitErrors(None)
+            for parameters in self.parameters.values():
+                for par in parameters:
+                    par.error = None
+            self.werrors = None
+            self._werrors_parvalues = None
+            return
         if self.fit_metadata_cache is None:
             self.getStartParamAndLimits()  # will generate metadata, if not yet done so.
         errors = np.asarray(errors)

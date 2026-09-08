@@ -1156,6 +1156,11 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         )
 
     def setFitErrors(self, errors):
+        if errors is None:
+            super().setFitErrors(None)
+            self.uc_top.setFitErrors(None)
+            self.uc_bottom.setFitErrors(None)
+            return
         abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         fp_top_no = len(self.uc_top.fitparnames)
         fp_bottom_no = len(self.uc_bottom.fitparnames)
@@ -1742,6 +1747,10 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         self.unitcell.setLimits(lim[abs_rel_no : abs_rel_no + fp_no])
 
     def setFitErrors(self, errors):
+        if errors is None:
+            super().setFitErrors(None)
+            self.unitcell.setFitErrors(None)
+            return
         abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         fp_no = len(self.unitcell.fitparnames)
         super().setFitErrors(errors[:abs_rel_no])
@@ -2519,6 +2528,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             cursor += fp_no
 
     def setFitErrors(self, errors):
+        if errors is None:
+            super().setFitErrors(None)
+            for cell in self._owned_unitcells():
+                cell.setFitErrors(None)
+            return
         abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         super().setFitErrors(errors[:abs_rel_no])
         cursor = abs_rel_no

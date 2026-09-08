@@ -335,6 +335,7 @@ class TestOptimizerResolutionFit(unittest.TestCase):
         np.testing.assert_allclose(
             optimizer.get_parameters(), [0.1, 0.2, 0.3, 1.0]
         )
+        self.assertIsNotNone(optimizer.resolution)
         self.assertIsNotNone(optimizer.calculated_CTRs)
         np.testing.assert_allclose(optimizer.get_bounds()[0], [0.0, 0.0, 0.0, 0.5])
         np.testing.assert_allclose(optimizer.get_bounds()[1], [0.5, 0.6, 0.7, 2.0])
