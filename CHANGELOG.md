@@ -7,6 +7,20 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **Unified CTR fit predictions, lifecycle, and statistics.** CTR optimizer
+  predictions, residuals, likelihoods, and diagnostics now use one final
+  analytically scaled result path. ``flat_prediction`` supports the common
+  F/R result contract, while ``flat_Fcalc``, ``Rfactor``, and the new
+  ``Rfactor_R`` enforce quantity-specific diagnostics. ``calculated_CTRs`` now
+  always exposes the latest successful final predictions, independently of
+  resolution broadening. Evaluation requires ``prepareFit()`` after parameter
+  layout changes, supported fixed-model changes refresh automatically, and a
+  failed evaluation cannot leave a stale public result. Fit statistics count
+  eliminated analytical scales in their degrees of freedom, report covariance
+  on the same reduced-chi-square scale as parameter errors, and clear
+  unavailable errors throughout the fitted crystal instead of retaining an
+  older estimate.
+
 - **Preserved signed CTR intensities during amplitude conversion.**
   ``CTR.convertToF`` now maps every finite intensity through
   ``sign(I) * sqrt(abs(I))`` instead of discarding negative measurements.

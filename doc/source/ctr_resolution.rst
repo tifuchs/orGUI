@@ -135,15 +135,27 @@ experimental setup, not on the fitted widths.
 For ``CTROptAngleCorrection``, fit traces label these leading values as
 ``resolution_delta_l_0``, ``resolution_delta_l_1``, and
 ``resolution_delta_l_2``. Their estimated standard errors are stored in
-``optimizer.resolution_errors`` after statistics are evaluated.
+``optimizer.resolution_errors`` after statistics are evaluated. If the local
+covariance cannot be estimated, this attribute and all other parameter-error
+attributes are cleared to ``None`` rather than retaining values from an older
+fit.
 
 ``fit_resolution(..., calculation="sample")`` is the default and evaluates
 the crystal at quadrature points. Use ``calculation="convolve"`` to convolve
 calculated values on the existing L grid instead; this is typically faster for
 fits but inherits the sampling limitations of :func:`fast_convolve`. In both
-modes, the optimizer retains a separate ``calculated_CTRs`` collection whose
-``sfI`` arrays are updated once per parameter assignment; experimental CTRs
-are not modified.
+modes, resolution-broadened pre-scale arrays are private implementation state.
+The public ``optimizer.calculated_CTRs`` collection always contains the final
+analytically scaled predictions from the most recent successful evaluation,
+whether resolution is enabled or not. Its rods retain identifiers, coordinates,
+and measurement metadata, but do not copy experimental error bars. Inspect
+``optimizer.resolution`` to determine whether broadening is enabled.
+
+Changing a fixed resolution model or its calculation method invalidates the
+published result while keeping the prepared parameter layout. The next
+prediction or residual evaluation refreshes it automatically. Enabling fitted
+resolution widths changes the parameter layout and therefore requires another
+``prepareFit()`` call.
 
 A complete runnable comparison using the bundled CTR reference data is in
 ``examples/CTR/ctr_resolution_example.ipynb``.

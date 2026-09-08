@@ -121,6 +121,52 @@ ANAROD F export, and symmetry averaging reject reflectivity explicitly. Plot
 panels select labels from the stored quantity and F/R datasets cannot share one
 axis.
 
+CTR fit predictions and statistics
+----------------------------------
+
+Constructing a ``CTROptimizer`` does not evaluate the model. Call
+``prepareFit()`` after defining fitted parameters, callbacks, resolution-width
+parameters, or displacement constraints. Prediction, residual, likelihood,
+and statistics methods reject an unprepared layout with a message directing
+the caller back to ``prepareFit()``. Fixed scale-policy and resolution-model
+changes only invalidate the current result; the next evaluation refreshes it.
+
+``flat_prediction(x=None, specular=True)`` is the quantity-neutral flattened
+prediction API. It returns the final model values after analytical scaling, in
+the same rod and point order as the stored data. ``flat_Fcalc`` remains the
+F-only spelling and rejects a collection containing reflectivity. The public
+``calculated_CTRs`` collection carries the same final prediction arrays and no
+copied observation uncertainties. ``Rfactor`` selects only F data and
+``Rfactor_R`` selects only R data; a quantity absent from the collection
+returns ``None`` without warning.
+
+The built-in kinematical optimizer still accepts structure-factor data only.
+These quantity-aware outputs also define the common result contract used by
+models that can predict reflectivity.
+
+Analytical scale policies are configured explicitly:
+
+.. code-block:: python
+
+   optimizer.set_scale_policies({
+       "F": "global",       # one scale shared by the default F group
+       (0, 0): "fixed",      # use full ctr_id when hk is ambiguous
+   })
+   optimizer.prepareFit()
+   prediction = optimizer.flat_prediction()
+   diagnostics = optimizer.statistics()
+
+``"fixed"`` uses a multiplier of one, ``"scaled"`` fits one analytical scale
+per selected rod, and ``"global"`` fits one scale for the nonempty global
+group. Analytical scales count as fitted parameters in the reported degrees
+of freedom. ``statistics()["covariance"]`` is scaled by the reduced
+chi-square, so its diagonal square root equals the reported parameter errors.
+When the degrees of freedom are nonpositive or the local covariance is not
+estimable, the unavailable statistics and parameter errors are ``None`` and a
+warning is emitted. Raw chi-square and the available F/R diagnostics remain
+reported. The p-value retains the existing chi-square interpretation and is
+therefore heuristic when empirical per-rod weights differ from one.
+
 Signed intensity-to-amplitude conversion
 ----------------------------------------
 
