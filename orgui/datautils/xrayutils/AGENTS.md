@@ -22,6 +22,16 @@ This directory contains the highest-risk scientific code:
   and `reconstruction_cluster.py` (outside this directory, no nested
   `AGENTS.md` of their own) build on it and follow the same conventions as
   this file.
+- `corrections/`: every factor between detector counts and a structure factor
+  -- `geometry.py` (z-axis Lorentz/rod-interception/area table),
+  `beamprofile.py`, `activearea.py`, `detector.py` (per-pixel solid angle and
+  polarization), `normalization.py` (counting time and monitor), `roi.py`,
+  and `measurement.py` (which factors each scan mode applies, and the
+  reduction to `|F_hkl|^2` and absolute reflectivity). The rocking
+  integration, the stationary integration and the reconstruction all correct
+  their data through this package, so a factor must be defined here once
+  rather than per caller. `geometrycorrections.py` and `beamprofile.py` at
+  this level are released aliases that re-export it; do not add code to them.
 - `cpp/`: native C++ kernels (`CTRcalc_cpp.cpp`,
   `reciprocal_reconstruction_cpp.cpp`) backing performance-critical CTR and
   reconstruction paths.

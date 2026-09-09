@@ -1,14 +1,14 @@
 """Regression tests for the incident-beam footprint corrections.
 
 These tests pin the two related quantities defined in
-:mod:`orgui.datautils.xrayutils.beamprofile`: ``C_flux_on_sample`` is the
+:mod:`orgui.datautils.xrayutils.corrections.beamprofile`: ``C_flux_on_sample`` is the
 diagnostic beam/sample overlap, and ``C_illum_area`` is the numerical active
 surface-area divisor that already contains that overlap.
 
 The central requirement is that the numerical
-:class:`~orgui.datautils.xrayutils.beamprofile.MeasuredBeamProfile`
+:class:`~orgui.datautils.xrayutils.corrections.beamprofile.MeasuredBeamProfile`
 evaluates the *same* definitions as the closed-form
-:class:`~orgui.datautils.xrayutils.beamprofile.GaussianBeamProfile` orGUI
+:class:`~orgui.datautils.xrayutils.corrections.beamprofile.GaussianBeamProfile` orGUI
 used before it existed: feeding a sampled Gaussian to the numerical path
 must reproduce the analytical corrections, so switching an existing
 Gaussian analysis to the numerical path changes nothing, and any difference
@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from orgui.datautils.xrayutils.beamprofile import (
+from orgui.datautils.xrayutils.corrections.beamprofile import (
     DistributionBeamProfile,
     GaussianBeamProfile,
     MeasuredBeamProfile,

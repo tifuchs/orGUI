@@ -25,6 +25,7 @@ from .app.config_data import ConfigData
 from .app.database import FILTERS, config_data_from_json, config_data_to_json
 from .app.mask_config import create_pixel_repair_plan
 from .backend.scans import ScanReference
+from .datautils.xrayutils.corrections import detector as detector_corrections
 from .datautils.xrayutils.reconstruction import (
     _CHECKPOINT_BYTES_PER_ROW,
     _CheckpointRouter,
@@ -1245,23 +1246,22 @@ def _correction_pipeline(config, scan, assets, provenance):
         if correction.use_mask and "mask" in assets
         else None
     )
-    static_factor = None
-    if correction.use_solid_angle:
-        static_factor = 1.0 / np.asarray(
-            detector.solidAngleArray(), dtype=np.float64
-        )
-        provenance.setdefault("factor_uncertainty", {})[
-            "solid_angle"
-        ] = "deterministic-no-uncertainty"
-    if correction.use_polarization:
-        polarization = np.asarray(detector.polarizationArray(), dtype=np.float64)
-        if static_factor is None:
-            static_factor = 1.0 / polarization
-        else:
-            static_factor /= polarization
-        provenance.setdefault("factor_uncertainty", {})[
-            "polarization"
-        ] = "deterministic-no-uncertainty"
+    # The per-pixel factors are defined once, in the corrections package,
+    # and shared with the direct-space integrations. Only their application
+    # is special here: it is fused into the native pass below.
+    static_factor = detector_corrections.pixel_factors(
+        detector,
+        solid_angle=correction.use_solid_angle,
+        polarization=correction.use_polarization,
+    )
+    for name, enabled in (
+        ("solid_angle", correction.use_solid_angle),
+        ("polarization", correction.use_polarization),
+    ):
+        if enabled:
+            provenance.setdefault("factor_uncertainty", {})[
+                name
+            ] = "deterministic-no-uncertainty"
     if static_factor is not None:
         static_factor = np.ascontiguousarray(static_factor, dtype=np.float64)
         static_factor_squared = np.square(static_factor)

@@ -63,6 +63,7 @@ import traceback
 from . import qutils, ROIutils, autoBraggWorkflow
 from .QScanSelector import QScanSelector
 from . import integration_corrections
+from ..datautils.xrayutils.corrections import detector as detector_corrections
 from .QReflectionSelector import QReflectionSelector, QReflectionAnglesDialog
 from .QUBCalculator import QUBCalculator
 from .peak1Dintegr import RockingPeakIntegrator
@@ -1583,11 +1584,19 @@ ub : gui for UB matrix and angle calculations
             or self.scanSelector.usePolarizationBox.isChecked()
         )
 
-        C_arr = np.ones(dc.detector.shape, dtype=np.float64)
-        if self.scanSelector.useSolidAngleBox.isChecked():
-            C_arr /= dc.solidAngleArray()
-        if self.scanSelector.usePolarizationBox.isChecked():
-            C_arr /= dc.polarizationArray()
+        # One definition of the per-pixel factors, shared with the rocking
+        # integration and the reciprocal-space reconstruction. It returns None
+        # when neither correction is enabled, so that the reconstruction can
+        # skip its multiplication; here the array of ones is required, because
+        # the branch below that rebuilds it runs only under HAS_ACCEL and the
+        # NumPy-only path would otherwise be handed None.
+        C_arr = detector_corrections.pixel_factors(
+            dc,
+            solid_angle=self.scanSelector.useSolidAngleBox.isChecked(),
+            polarization=self.scanSelector.usePolarizationBox.isChecked(),
+        )
+        if C_arr is None:
+            C_arr = np.ones(dc.detector.shape, dtype=np.float64)
 
         def fill_counters(image, pixelavail, key, bkgkey):
             """CLI-safe: sum one center ROI and its background ROIs."""
@@ -5745,11 +5754,19 @@ ub : gui for UB matrix and angle calculations
             or self.scanSelector.usePolarizationBox.isChecked()
         )
 
-        C_arr = np.ones(dc.detector.shape, dtype=np.float64)
-        if self.scanSelector.useSolidAngleBox.isChecked():
-            C_arr /= dc.solidAngleArray()
-        if self.scanSelector.usePolarizationBox.isChecked():
-            C_arr /= dc.polarizationArray()
+        # One definition of the per-pixel factors, shared with the rocking
+        # integration and the reciprocal-space reconstruction. It returns None
+        # when neither correction is enabled, so that the reconstruction can
+        # skip its multiplication; here the array of ones is required, because
+        # the branch below that rebuilds it runs only under HAS_ACCEL and the
+        # NumPy-only path would otherwise be handed None.
+        C_arr = detector_corrections.pixel_factors(
+            dc,
+            solid_angle=self.scanSelector.useSolidAngleBox.isChecked(),
+            polarization=self.scanSelector.usePolarizationBox.isChecked(),
+        )
+        if C_arr is None:
+            C_arr = np.ones(dc.detector.shape, dtype=np.float64)
 
         hkl_del_gam_s1, hkl_del_gam_s2 = self.getROIloc()
 

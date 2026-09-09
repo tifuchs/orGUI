@@ -3,8 +3,9 @@
 :class:`orgui.app.peak1Dintegr.IntegrationCorrectionsDialog` owns the user
 side of the numerical active-area correction: it converts the
 millimeter and micrometer values shown to the user into the meters
-:mod:`orgui.datautils.xrayutils.beamprofile` works in, and decides whether an
-integration runs against an analytical beam shape or a measured profile.
+:mod:`orgui.datautils.xrayutils.corrections.beamprofile` works in, and
+decides whether an integration runs against an analytical beam shape or a
+measured profile.
 
 These tests pin that boundary. They construct the dialog directly, without
 showing it, so no user interaction is involved and no plot widget is built.
@@ -15,7 +16,7 @@ import pytest
 from silx.gui import qt
 
 from orgui.app.peak1Dintegr import BEAM_SHAPES, IntegrationCorrectionsDialog
-from orgui.datautils.xrayutils.beamprofile import (
+from orgui.datautils.xrayutils.corrections.beamprofile import (
     DistributionBeamProfile,
     GaussianBeamProfile,
     MeasuredBeamProfile,

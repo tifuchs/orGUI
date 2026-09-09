@@ -11,8 +11,11 @@ import numpy as np
 import pytest
 
 from orgui.app import integration_corrections as ic
-from orgui.datautils.xrayutils import geometrycorrections as gc
-from orgui.datautils.xrayutils.beamprofile import gaussian_profile, top_hat_profile
+from orgui.datautils.xrayutils.corrections import geometry as gc
+from orgui.datautils.xrayutils.corrections.beamprofile import (
+    gaussian_profile,
+    top_hat_profile,
+)
 
 roi_sum = pytest.importorskip("orgui.app._roi_sum_accel")
 

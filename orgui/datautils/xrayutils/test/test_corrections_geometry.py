@@ -3,14 +3,14 @@
 These pin the entries of the z-axis column of Appendix A of the ANA/ROD
 manual against literal transcriptions of the formulas, and pin the two
 factors that orGUI's rocking-scan integration already applied before
-:mod:`orgui.datautils.xrayutils.geometrycorrections` existed, so that
+:mod:`orgui.datautils.xrayutils.corrections.geometry` existed, so that
 factoring them out did not change any result.
 """
 
 import numpy as np
 import pytest
 
-from orgui.datautils.xrayutils import geometrycorrections as gc
+from orgui.datautils.xrayutils.corrections import geometry as gc
 
 #: Angles in radian, spanning grazing incidence to a normal scattering angle.
 ALPHA = np.deg2rad(np.array([0.2, 0.5, 1.0, 3.0]))

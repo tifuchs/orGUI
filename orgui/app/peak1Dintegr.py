@@ -57,7 +57,7 @@ from . import qutils
 from .config_data import ConfigData
 from .. import resources
 from .. import logger_utils
-from ..datautils.xrayutils import beamprofile, geometrycorrections
+from ..datautils.xrayutils.corrections import beamprofile, geometry
 
 import numpy as np
 from scipy import interpolate as interp
@@ -1337,19 +1337,19 @@ class RockingPeakIntegrator(qt.QMainWindow):
             # The two take different Lorentz factors from the z-axis table,
             # and neither is the stationary-scan factor.
             if curves["axisname"] == "mu":
-                C_Lor = geometrycorrections.lorentz_factor(
-                    geometrycorrections.REFLECTIVITY_ROCKING, alpha=alpha
+                C_Lor = geometry.lorentz_factor(
+                    geometry.REFLECTIVITY_ROCKING, alpha=alpha
                 )
             elif curves["axisname"] == "th":
-                C_Lor = geometrycorrections.lorentz_factor(
-                    geometrycorrections.ROCKING,
+                C_Lor = geometry.lorentz_factor(
+                    geometry.ROCKING,
                     alpha=alpha,
                     delta=delta,
                     gamma=gamma,
                 )
             else:
                 raise NotImplementedError()
-            C_rod = geometrycorrections.rod_interception(gamma)
+            C_rod = geometry.rod_interception(gamma)
         else:
             C_Lor = 1.0
             C_rod = 1.0
@@ -2165,7 +2165,7 @@ def _width(label, default):
 
 #: Analytical beam shapes, in the order they appear in the dialog. The first
 #: is the default and reproduces the Gaussian correction orGUI has always
-#: applied; see :mod:`orgui.datautils.xrayutils.beamprofile`.
+#: applied; see :mod:`orgui.datautils.xrayutils.corrections.beamprofile`.
 BEAM_SHAPES = (
     _BeamShape(
         "Gaussian",
@@ -2214,7 +2214,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
 
     The incident beam is described either by an analytical shape from
     :data:`BEAM_SHAPES` or by a beam profile measured at the beamline. Both
-    are evaluated by :mod:`orgui.datautils.xrayutils.beamprofile`, which
+    are evaluated by :mod:`orgui.datautils.xrayutils.corrections.beamprofile`, which
     evaluates the illuminated surface integral over the projected sample
     footprint. The intercepted-flux fraction is available as a diagnostic
     numerator but is not applied as a second correction. Only a measured
@@ -2573,7 +2573,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
 
         :returns: The tabulated profile, referenced to the sample center
             chosen in the dialog.
-        :rtype: orgui.datautils.xrayutils.beamprofile.MeasuredBeamProfile
+        :rtype: orgui.datautils.xrayutils.corrections.beamprofile.MeasuredBeamProfile
         :raises ValueError: If no profile file has been loaded.
         """
         if self._profile_z is None:
@@ -2592,7 +2592,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
     def analyticalProfile(self):
         """Return the analytical beam profile described by the dialog.
 
-        :rtype: orgui.datautils.xrayutils.beamprofile.BeamProfile
+        :rtype: orgui.datautils.xrayutils.corrections.beamprofile.BeamProfile
         :raises ValueError: If the shape rejects the entered parameters.
         """
         shape = self.currentShape()
@@ -2610,7 +2610,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         """Return the incident-beam profile selected in the dialog.
 
         :returns: An analytical or measured beam profile, in meters.
-        :rtype: orgui.datautils.xrayutils.beamprofile.BeamProfile
+        :rtype: orgui.datautils.xrayutils.corrections.beamprofile.BeamProfile
         :raises ValueError: If the measured profile is selected but no
             profile file has been loaded, or if the analytical parameters
             do not describe a usable profile.
