@@ -43,8 +43,9 @@ The normalization and numerical active-area factor are intensity divisors:
 ``C_illum_area``. It must not be divided out separately: the numerical active
 area already contains the same beam/sample overlap integral. Which angular
 factors a stationary measurement applies -- and that it has no
-rod-interception factor, unlike a rocking scan -- follows the z-axis table of
-:mod:`~orgui.datautils.xrayutils.corrections.geometry`.
+rod-interception factor, unlike a rocking scan -- is decided by
+:func:`~orgui.datautils.xrayutils.corrections.measurement.mode_components`,
+the one place that mapping exists.
 
 The exposure and monitor normalization mirrors the reciprocal-space
 reconstruction (:mod:`orgui.reconstruction_job`), so a stationary integration
@@ -56,7 +57,7 @@ safe in CLI and batch use.
 
 import numpy as np
 
-from ..datautils.xrayutils.corrections import geometry
+from ..datautils.xrayutils.corrections import measurement
 from ..datautils.xrayutils.corrections.normalization import (
     normalization_divisor as _divisor_from_counters,
 )
@@ -161,8 +162,9 @@ def stationary_correction_factors(
     :param delta: In-plane detector angle per image, in radian.
     :param gamma: Out-of-plane detector angle per image, in radian.
     :param bool use_lorentz: Add ``C_Lorentz`` -- the *stationary-mode*
-        factor :math:`1/\sin\gamma`, not the rocking-scan one.
-        Stationary integration has no rod-interception factor.
+        factor :math:`1/\sin\gamma`, not the rocking-scan one, as
+        :func:`~orgui.datautils.xrayutils.corrections.measurement.mode_components`
+        decides. Stationary integration has no rod-interception factor.
     :param bool use_footprint: Add the ``C_illum_area`` divisor and its
         diagnostic numerator ``C_flux_on_sample``.
     :param beam_profile: A
@@ -204,9 +206,11 @@ def stationary_correction_factors(
         applied.append("footprint")
 
     if use_lorentz:
-        factors["C_Lorentz"] = np.broadcast_to(
-            geometry.lorentz_factor(geometry.STATIONARY, gamma=gamma), alpha.shape
-        ).copy()
+        components = measurement.mode_components(
+            measurement.STATIONARY, alpha=alpha, delta=delta, gamma=gamma
+        )
+        for name, value in components.items():
+            factors[name] = np.broadcast_to(value, alpha.shape).copy()
         applied.append("lorentz")
 
     return CorrectionFactors(factors, applied)

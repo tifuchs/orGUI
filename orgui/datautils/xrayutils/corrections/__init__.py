@@ -23,11 +23,20 @@
 # ###########################################################################*/
 r"""Everything that turns detector counts into a structure factor.
 
-One home for the correction factors of E. Vlieg, *J. Appl. Cryst.* **30**
-(1997) 532, in the two-dimensional-detector form of J. Drnec *et al.*,
-*J. Appl. Cryst.* **47** (2014) 365, so that a rocking scan, a stationary
-area-detector measurement and a reciprocal-space reconstruction of the same
-sample are corrected by the same code rather than by three copies of it.
+One home for the correction factors of
+
+.. math::
+
+    I = \Phi_0 \frac{r_e^2 A \lambda^2}{A_u^2}\,
+        |F_{hkl}|^2 \, P \, \eta \, C_\mathrm{det}
+
+so that a rocking scan, a stationary area-detector measurement, a
+reflectivity curve and a reciprocal-space reconstruction of the same sample
+are corrected by the same code and land on the same scale. The measurement
+equation is E. Vlieg, *J. Appl. Cryst.* **30** (1997) 532, in the
+two-dimensional-detector form of J. Drnec *et al.*,
+*J. Appl. Cryst.* **47** (2014) 365; :mod:`~.measurement` documents it in
+full.
 
 The split between the modules is by *what a factor depends on*, which is also
 what makes each of them testable on its own:
@@ -38,12 +47,18 @@ what makes each of them testable on its own:
 :mod:`~.beamprofile`
     The vertical profile of the incident beam and its integrals over a
     finite sample.
+:mod:`~.activearea`
+    The illuminated active surface area :math:`A`, in square meter, in both
+    the slit-limited and the beam-limited case.
 :mod:`~.detector`
     Per-pixel factors of a detector image: solid angle and polarization.
 :mod:`~.normalization`
     Counting time and monitor.
 :mod:`~.roi`
     Reducing per-pixel factors onto a summed region of interest.
+:mod:`~.measurement`
+    Which of the above apply to which kind of scan, and the reduction to
+    :math:`|F_{hkl}|^2` and to absolute reflectivity.
 
 Everything here is physics: arrays and scalars in, arrays out. Nothing in
 this package reads a scan object, a configuration file or a GUI widget.
@@ -57,17 +72,21 @@ and ``orgui.datautils.xrayutils.beamprofile`` remain importable and re-export
 """
 
 from . import (  # noqa: F401
+    activearea,
     beamprofile,
     detector,
     geometry,
+    measurement,
     normalization,
     roi,
 )
 
 __all__ = [
+    "activearea",
     "beamprofile",
     "detector",
     "geometry",
+    "measurement",
     "normalization",
     "roi",
 ]

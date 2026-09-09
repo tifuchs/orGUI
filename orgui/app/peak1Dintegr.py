@@ -57,7 +57,10 @@ from . import qutils
 from .config_data import ConfigData
 from .. import resources
 from .. import logger_utils
-from ..datautils.xrayutils.corrections import beamprofile, geometry
+from ..datautils.xrayutils.corrections import beamprofile
+from ..datautils.xrayutils.corrections import (
+    measurement as measurement_corrections,
+)
 
 import numpy as np
 from scipy import interpolate as interp
@@ -1335,21 +1338,19 @@ class RockingPeakIntegrator(qt.QMainWindow):
             # A mu scan rocks the incidence angle, which is how a
             # reflectivity curve is measured; a th scan rocks the sample.
             # The two take different Lorentz factors from the z-axis table,
-            # and neither is the stationary-scan factor.
+            # and neither is the stationary-scan factor. Which factors each
+            # mode applies is decided in one place, by mode_components.
             if curves["axisname"] == "mu":
-                C_Lor = geometry.lorentz_factor(
-                    geometry.REFLECTIVITY_ROCKING, alpha=alpha
-                )
+                mode = measurement_corrections.REFLECTIVITY_ROCKING
             elif curves["axisname"] == "th":
-                C_Lor = geometry.lorentz_factor(
-                    geometry.ROCKING,
-                    alpha=alpha,
-                    delta=delta,
-                    gamma=gamma,
-                )
+                mode = measurement_corrections.ROCKING
             else:
                 raise NotImplementedError()
-            C_rod = geometry.rod_interception(gamma)
+            components = measurement_corrections.mode_components(
+                mode, alpha=alpha, delta=delta, gamma=gamma
+            )
+            C_Lor = components["C_Lorentz"]
+            C_rod = components["C_rod"]
         else:
             C_Lor = 1.0
             C_rod = 1.0
