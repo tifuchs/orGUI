@@ -24,10 +24,12 @@ This directory contains the highest-risk scientific code:
   this file.
 - `corrections/`: every factor between detector counts and a structure factor
   -- `geometry.py` (z-axis Lorentz/rod-interception/area table),
-  `beamprofile.py`, `activearea.py`, `detector.py` (per-pixel solid angle and
-  polarization), `normalization.py` (counting time and monitor), `roi.py`,
-  and `measurement.py` (which factors each scan mode applies, and the
-  reduction to `|F_hkl|^2` and absolute reflectivity). The rocking
+  `beamprofile.py`, `activearea.py`, `acceptance.py` (the out-of-plane
+  `Delta_gamma` a rocking scan is proportional to), `detector.py` (per-pixel
+  solid angle and polarization), `normalization.py` (counting time and
+  monitor), `roi.py`, and `measurement.py` (which factors each scan mode
+  applies, and the reduction to `|F_hkl|^2` and absolute reflectivity). The
+  rocking
   integration, the stationary integration and the reconstruction all correct
   their data through this package, so a factor must be defined here once
   rather than per caller. `geometrycorrections.py` and `beamprofile.py` at

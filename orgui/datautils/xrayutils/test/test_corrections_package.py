@@ -43,6 +43,7 @@ class _Detector:
 def test_the_package_exposes_every_correction_module():
     """A maintainer looking for a correction factor finds them in one place."""
     assert set(corrections.__all__) == {
+        "acceptance",
         "activearea",
         "beamprofile",
         "detector",

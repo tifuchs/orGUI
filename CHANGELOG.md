@@ -23,6 +23,17 @@ Scientific and analysis additions:
   ``orgui.datautils.xrayutils.beamprofile`` keep working as aliases of the
   moved modules. **No calculated value changes.**
 
+- **Out-of-plane detector acceptance.**
+  ``orgui.datautils.xrayutils.corrections.acceptance`` estimates
+  ``Delta_gamma``, the angular height of a region of interest as seen from the
+  sample, which a rocking-scan integrated intensity is proportional to (Vlieg
+  equations 20 and 42) and which orGUI previously did not compute at all.
+  Measured edge to edge, at the region's centre column where the rod crosses
+  the aperture, and vectorized over a scan because orGUI resizes regions per
+  detector position. ``gamma_range`` reports the span over the whole region as
+  a check on rolled-detector geometries, and ``pixel_acceptance`` the one-row
+  case. **A new API only: the integration paths do not call it yet.**
+
 - **One structure-factor scale for rocking scans, stationary scans, and
   reflectivity.** The new public module
   ``orgui.datautils.xrayutils.corrections.measurement`` reduces an integrated

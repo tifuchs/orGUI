@@ -50,6 +50,9 @@ what makes each of them testable on its own:
 :mod:`~.activearea`
     The illuminated active surface area :math:`A`, in square meter, in both
     the slit-limited and the beam-limited case.
+:mod:`~.acceptance`
+    How much of a rod a region of interest accepts: the out-of-plane
+    :math:`\Delta\gamma` a rocking scan is proportional to.
 :mod:`~.detector`
     Per-pixel factors of a detector image: solid angle and polarization.
 :mod:`~.normalization`
@@ -72,6 +75,7 @@ and ``orgui.datautils.xrayutils.beamprofile`` remain importable and re-export
 """
 
 from . import (  # noqa: F401
+    acceptance,
     activearea,
     beamprofile,
     detector,
@@ -82,6 +86,7 @@ from . import (  # noqa: F401
 )
 
 __all__ = [
+    "acceptance",
     "activearea",
     "beamprofile",
     "detector",

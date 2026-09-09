@@ -121,8 +121,9 @@ so its integrated intensity is *proportional to the vertical angular size of
 the region of interest*. A stationary measurement has no such factor.
 
 Before this branch, `Delta_gamma` appeared nowhere in orGUI: `grep -rn
-"acceptance"` over `orgui/` returned nothing, and the integration paths still
-do not compute it. In the point-detector world it was a fixed slit setting and
+"acceptance"` over `orgui/` returned nothing. It is now estimated by
+`corrections/acceptance.py` (section 4.4), though the integration paths do
+not call it yet. In the point-detector world it was a fixed slit setting and
 disappeared into the overall scale factor. On an area detector with ROIs sized
 per detector position by `orgui/app/ROIutils.py:calc_corrections` (projected
 sample size plus a parallax correction, so it changes with `delta` and
@@ -356,6 +357,47 @@ recover the input `|F|^2` - the stationary path exactly, the rocking one to
 **characterization** test: it asserts today's gap is exactly
 `T * monitor * Delta_gamma_in_degrees`. It must be replaced by a plain equality
 when the GUI paths adopt the reduction. Its docstring says so.
+
+### 4.4 The Delta_gamma estimator
+
+`corrections/acceptance.py` supplies the factor F3 says is missing. It reads
+the exit angle at the top and bottom **edges** of a region of interest with
+`Detector2D_SXRD.surfaceAnglesPoint` and returns the span:
+
+* `out_of_plane_acceptance(detector, row, column, row_size, alpha, ...)` -
+  `Delta_gamma` in radian, evaluated at the region's centre column, which is
+  where the rod crosses the aperture. Vectorized over frames, since orGUI
+  resizes regions along a scan.
+* `gamma_range(...)` - the span over the whole rectangle. It equals the
+  centre-column value when iso-gamma lines run along the detector rows, and
+  exceeds it on a rolled detector, so their ratio is a cheap check on whether
+  the estimate can be trusted.
+* `pixel_acceptance(...)` - the one-row case; the resolution limit, and the
+  natural unit to quote an acceptance in.
+
+Edges, not pixel centres: a region of `n` rows accepts `n` pixels' worth of
+angle, not `n - 1`. Using centres would understate every rocking acceptance
+by one pixel - 1 % on a 100-row region, 10 % on a 10-row one.
+
+Two things fell out of writing the tests that were not obvious beforehand:
+
+* **pyFAI requires both pixel-coordinate arrays to have the same size.** A
+  scalar column with a per-frame `row_size` - exactly what a rocking
+  integration passes - failed inside the extension with
+  `assert pos2.size == size`. The estimator broadcasts the two coordinates
+  before the call.
+* **`Delta_gamma` is nearly invariant under a detector-arm rotation.** Driving
+  the gamma arm shifts the exit angle at the region centre by the full arm
+  angle but leaves the span unchanged to nine digits, because the rotation is
+  about the axis gamma is measured around; a 40-degree delta-arm rotation
+  moves it by one part in `1e5`. This is the opposite of the polarization
+  factor of F5, where ignoring the arm is a 10 % error at 18 degrees. An
+  acceptance computed without arm bookkeeping is still usable.
+
+Measured against a calibrated 172 um detector at 1 m, a 60-row region accepts
+0.5913 degrees, matching `n * pixel / dist` to 2e-3, and shrinks by a few per
+mille towards the detector edge - the obliquity that makes `Delta_gamma` vary
+along a scan in the first place.
 
 ## 5. What is needed to close issue #82
 
