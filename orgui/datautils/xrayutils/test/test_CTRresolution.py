@@ -99,6 +99,118 @@ class TestResolutionFunctions(unittest.TestCase):
             resolution.width([0.0], [0.0], [1.0])
 
 
+class TestIntensityKernels(unittest.TestCase):
+    def test_fast_kernel_matches_amplitude_wrapper_on_irregular_grid(self):
+        l = np.array([3.0, 0.0, 1.0, 1.8])  # noqa: E741
+        intensity = np.array([16.0, 1.0, 9.0, 4.0])
+        resolution = CTRresolution.GaussianResolution(1.2)
+        direct = CTRresolution.fast_convolve_intensity(
+            1.0, 0.0, l, intensity, resolution
+        )
+        ctr = CTRplotutil.CTR((1.0, 0.0), l, np.sqrt(intensity))
+        wrapped = CTRresolution.fast_convolve(
+            CTRplotutil.CTRCollection([ctr]), resolution
+        )[0]
+
+        np.testing.assert_array_equal(wrapped.l, l)
+        np.testing.assert_allclose(direct, wrapped.sfI**2, rtol=2e-15)
+
+    def test_sample_kernel_calls_intensity_once_in_point_major_order(self):
+        h = np.array([1.0, 2.0])
+        k = np.array([0.25, 0.5])
+        l = np.array([2.0, 1.0])  # noqa: E741
+        width = 0.6
+        calls = []
+
+        def intensity(h_samples, k_samples, l_samples):
+            calls.append(
+                (
+                    np.copy(h_samples),
+                    np.copy(k_samples),
+                    np.copy(l_samples),
+                )
+            )
+            return l_samples**2
+
+        actual = CTRresolution.sample_intensity(
+            h,
+            k,
+            l,
+            intensity,
+            CTRresolution.BoxResolution(width),
+            quadrature_order=5,
+        )
+
+        self.assertEqual(len(calls), 1)
+        sampled_h, sampled_k, sampled_l = (
+            array.reshape(2, 5) for array in calls[0]
+        )
+        np.testing.assert_array_equal(
+            sampled_h, np.broadcast_to(h[:, np.newaxis], sampled_h.shape)
+        )
+        np.testing.assert_array_equal(
+            sampled_k, np.broadcast_to(k[:, np.newaxis], sampled_k.shape)
+        )
+        np.testing.assert_allclose(sampled_l.mean(axis=1), l)
+        np.testing.assert_allclose(actual, l**2 + width**2 / 12.0)
+
+    def test_sample_kernel_matches_structure_factor_wrapper(self):
+        l = np.array([0.4, 1.1, 1.9])  # noqa: E741
+        resolution = CTRresolution.GaussianResolution(0.35)
+        direct = CTRresolution.sample_intensity(
+            0.0,
+            0.0,
+            l,
+            lambda h, k, sampled_l: sampled_l**2,
+            resolution,
+        )
+        ctr = CTRplotutil.CTR((0.0, 0.0), l, np.zeros_like(l))
+        wrapped = CTRresolution.sample_structure_factor(
+            CTRplotutil.CTRCollection([ctr]),
+            QuadraticCrystal(),
+            resolution,
+        )[0]
+
+        np.testing.assert_allclose(direct, wrapped.sfI**2, rtol=2e-15)
+
+    def test_intensity_kernels_reject_nonphysical_values(self):
+        resolution = CTRresolution.BoxResolution(0.1)
+        for intensity in ([1.0, -1.0], [1.0, np.nan], [1.0 + 0.0j, 2.0]):
+            with self.subTest(intensity=intensity):
+                with self.assertRaises(ValueError):
+                    CTRresolution.fast_convolve_intensity(
+                        0.0, 0.0, [0.0, 1.0], intensity, resolution
+                    )
+
+        for value in (-1.0, np.nan, 1.0 + 0.0j):
+            with self.subTest(callable_value=value):
+                with self.assertRaises(ValueError):
+                    CTRresolution.sample_intensity(
+                        0.0,
+                        0.0,
+                        [0.5],
+                        lambda h, k, l_value, value=value: value,
+                        resolution,
+                    )
+
+    def test_intensity_widths_use_central_angle_records(self):
+        l = np.array([0.0, 0.5, 1.0])  # noqa: E741
+        angles = _angles([0.0, np.pi / 6.0, np.pi / 2.0])
+        resolution = CTRresolution.GaussianResolution(0.0, 0.4)
+        actual = CTRresolution.fast_convolve_intensity(
+            0.0,
+            0.0,
+            l,
+            [1.0, 4.0, 9.0],
+            resolution,
+            angles,
+        )
+
+        self.assertEqual(actual[0], 1.0)
+        self.assertTrue(np.all(np.isfinite(actual)))
+        self.assertTrue(np.all(actual >= 0.0))
+
+
 class TestFastConvolution(unittest.TestCase):
     def test_constant_intensity_is_preserved_on_unsorted_irregular_grid(self):
         l = np.array([3.0, 0.0, 1.0, 1.8])  # noqa: E741
