@@ -7,6 +7,42 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **All correction factors collected into one package.** Every factor between
+  detector counts and a structure factor now lives in
+  ``orgui.datautils.xrayutils.corrections``, split by what it depends on:
+  ``geometry`` (the z-axis Lorentz, rod-interception and area table),
+  ``beamprofile``, ``activearea``, ``detector`` (per-pixel solid angle and
+  polarization), ``normalization`` (counting time and monitor), ``roi``, and
+  ``measurement``. The rocking integration, the stationary integration and the
+  reciprocal-space reconstruction previously each carried their own copy of
+  several of these; they now share one definition, so they cannot drift onto
+  different scales. The package is physics only -- numbers in, numbers out --
+  and reads no scan object, configuration or widget; ``orgui.app``
+  ``integration_corrections`` is the adapter that supplies those.
+  ``orgui.datautils.xrayutils.geometrycorrections`` and
+  ``orgui.datautils.xrayutils.beamprofile`` keep working as aliases of the
+  moved modules. **No calculated value changes.**
+
+- **One structure-factor scale for rocking scans, stationary scans, and
+  reflectivity.** The new public module
+  ``orgui.datautils.xrayutils.corrections.measurement`` reduces an integrated
+  intensity to ``|F_hkl|^2`` for any scan mode, following E. Vlieg,
+  *J. Appl. Cryst.* 30 (1997) 532 and J. Drnec et al.,
+  *J. Appl. Cryst.* 47 (2014) 365. It normalizes counts by exposure time and
+  monitor, converts a rocking integral from degrees to radians, applies the
+  mode-dependent angular factor (rocking scans additionally require the
+  out-of-plane acceptance of the region of interest, stationary measurements
+  reject it), and, given the incident flux density and the illuminated area,
+  puts the result on the absolute electron-unit scale. It also converts
+  between ``|F_hkl|^2`` and absolute reflectivity, so a reflectivity curve and
+  a set of truncation rods can be brought onto one scale. **This is a new API
+  only: no existing integration result changes.** The integration paths do
+  not use it yet, and rocking and stationary integration remain on different
+  scales, differing by exposure time times monitor times the acceptance in
+  degrees; the image-integration documentation now says so explicitly, and
+  ``doc/design/ctr_structure_factor_scale.md`` records the full analysis with
+  the measured size of every correction.
+
 - **Unified CTR fit predictions, lifecycle, and statistics.** CTR optimizer
   predictions, residuals, likelihoods, and diagnostics now use one final
   analytically scaled result path. ``flat_prediction`` supports the common

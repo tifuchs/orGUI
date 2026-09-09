@@ -161,6 +161,52 @@ footprint and sample size". orGUI does not apply it: the footprint corrections
 below evaluate the beam profile and the finite sample size numerically
 instead, which is the row the manual marks as calculated numerically.
 
+.. _comparing-scan-modes:
+
+Comparing Scan Modes
+~~~~~~~~~~~~~~~~~~~~
+
+``F2_hkl`` is proportional to :math:`|F_{hkl}|^2` **within** one integration
+mode, but a rocking scan and a stationary scan of the same rod are not
+currently on the same scale, and the two must not be plotted or fitted
+together without rescaling.
+
+Vlieg's rocking-scan expression (equation 42) contains three factors that the
+stationary expression (equation 54) does not, and that orGUI's rocking
+integration does not divide out:
+
+* the **counting time and monitor**. ``Normalize integrated intensities``
+  applies to stationary integration only; a rocking integration is not
+  normalized.
+* the **unit of the rocking angle**. The rocking curve is integrated over the
+  motor position in degrees, while the published expressions integrate in
+  radian, a factor :math:`180/\pi`.
+* the **out-of-plane angular acceptance** :math:`\Delta\gamma` of the region
+  of interest. A rocking scan intercepts a slice of rod whose length is
+  proportional to :math:`\Delta\gamma`, so its integrated intensity is too; a
+  stationary measurement intercepts the whole rod cross-section and has no
+  such factor. Because ROIs are sized per detector position, this factor is
+  not even constant along one rocking data set, so it changes the *shape* of
+  a rod and not only its scale.
+
+Together,
+
+.. math::
+
+   \frac{F^2_{hkl,\mathrm{rocking}}}{F^2_{hkl,\mathrm{stationary}}}
+   = T\;M\;\Delta\gamma[^\circ]
+
+with :math:`T` the per-frame counting time, :math:`M` the monitor value and
+:math:`\Delta\gamma` the acceptance in degrees.
+
+:mod:`orgui.datautils.xrayutils.corrections.measurement` implements the full
+reduction, for rocking scans, stationary scans and reflectivity, and is the
+supported way to put integrated intensities from different modes on one
+scale --- and, given the incident flux and the illuminated area, on the
+absolute scale of :math:`|F_{hkl}|^2` in electron units. The integration
+paths do not use it yet.
+
+
 Exposure and Monitor Normalization
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

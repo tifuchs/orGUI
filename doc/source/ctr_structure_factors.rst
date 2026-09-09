@@ -121,6 +121,23 @@ ANAROD F export, and symmetry averaging reject reflectivity explicitly. Plot
 panels select labels from the stored quantity and F/R datasets cannot share one
 axis.
 
+Converting between the two quantities is a question of scale, not of data
+handling: Vlieg (1997) equation (63) relates them by
+
+.. math::
+
+   R = \frac{r_e^2\lambda^2 P_r}
+            {A_u^2\,\sin\alpha\,\sin\beta_\mathrm{out}}\,|F_{hkl}|^2 ,
+
+with :math:`A_u` the surface unit-cell area and
+:math:`\alpha`, :math:`\beta_\mathrm{out}` the incidence and exit angles that
+``CTRScanGeometry`` already records.
+:func:`orgui.datautils.xrayutils.corrections.measurement.structure_factor_from_reflectivity`
+and its inverse implement it, so an absolutely scaled reflectivity curve and a
+set of truncation rods can be brought onto one scale before they are combined.
+The relation is kinematical: it does not hold near a bulk Bragg peak, nor below
+the critical angle, where the distorted-wave treatment of :doc:`dwba` applies.
+
 CTR fit predictions and statistics
 ----------------------------------
 
