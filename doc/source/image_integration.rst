@@ -93,6 +93,17 @@ integration. The current implementation records the applied ROI sizes,
 reciprocal-space coordinates, detector coordinates, and relevant scan metadata
 with the integrated intensities.
 
+The **polarization correction follows the detector arm**. Its per-pixel array
+is built from the calibrated geometry, which is correct only while the arm
+stays there; on a scan that drives the arm the same pixel looks in a different
+direction on every frame, and the calibrated-position value understates the
+correction by 3 % at a scattering angle of 10 degrees, 10 % at 18 and 33 % at
+30. Both integration paths therefore apply a per-frame factor that moves the
+correction onto the arm position each frame was measured at. It is exactly one
+while the arm is at its calibrated position, so a fixed-arm scan is unchanged.
+The reciprocal-space reconstruction applies the polarization per pixel and
+does not carry this correction.
+
 The Corrections Dialog
 ~~~~~~~~~~~~~~~~~~~~~~
 

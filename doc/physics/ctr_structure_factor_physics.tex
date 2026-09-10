@@ -170,10 +170,10 @@ depend on the distinction directly:
 \item $\dgam$ (Section~\ref{sec:acceptance}) is a \emph{difference} of
   Eq.~\eqref{eq:gamma} between two pixel rows, which is only meaningful
   because $\gamma$ varies across the detector face within one frame.
-\item The polarization factor (Section~\ref{sec:notmodelled}) is the one
-  correction still evaluated on the \emph{home} geometry rather than at the
-  frame's arm position, which is why it is wrong for a scan that drives the
-  arm.
+\item The polarization factor (Section~\ref{sec:notmodelled}) is built on the
+  \emph{home} geometry rather than at the frame's arm position, which is why
+  it needs a per-frame correction for a scan that drives the arm --- and why
+  the reconstruction, which cannot use that correction, is still wrong there.
 \end{itemize}
 
 \subsection{Units at the boundaries}
@@ -650,7 +650,9 @@ Three caveats:
   --- which is where much of the interesting part of a reflectivity curve
   lies. Compare against a DWBA treatment there.
 \item A reflectivity scan \textbf{drives the detector arm}, which is where the
-  polarization issue of Section~\ref{sec:notmodelled} bites hardest.
+  polarization issue of Section~\ref{sec:notmodelled} bit hardest. The two
+  direct-space integration paths correct for it; a reflectivity reduced from a
+  reconstructed map does not.
 \item \textbf{Off-specular}, $R$ is well defined for a truncation rod
   integrated across its cross-section, but not for diffuse scattering, where
   only a differential cross-section is meaningful.
@@ -676,18 +678,28 @@ they are not interchangeable.
   than a normalization one. It cannot be validated on simulated data --- it
   needs the overlap region of a rocking and a stationary scan on the same rod.
 
-\item[The polarization at a moving detector arm.] The per-pixel polarization
-  array is built once, outside the frame loop, from the \emph{home} geometry
-  --- step 1 of Section~\ref{sec:pixelangles} is skipped, so it is the array
-  at the calibrated arm position rather than at the frame's. For a fixed arm
-  that is correct: each pixel already carries its own scattering angle, and
-  the apparent $\alpha$ dependence of the z-axis expression is only a change
-  of frame. For a scan that drives the arm it understates the correction:
-  $3\,\%$ at a scattering angle of $10^{\circ}$, $10\,\%$ at $18^{\circ}$ and
-  $33\,\%$ at $30^{\circ}$. A per-pixel evaluation that follows the arm
-  exists and is what such a scan needs. This is the opposite of the acceptance
-  (Section~\ref{sec:acceptance}), whose \emph{span} survives a moving arm
-  unchanged.
+\item[The polarization at a moving detector arm, in the reconstruction.] The
+  per-pixel polarization array is built once, outside the frame loop, from the
+  \emph{home} geometry --- step 1 of Section~\ref{sec:pixelangles} is skipped,
+  so it is the array at the calibrated arm position rather than at the
+  frame's. For a fixed arm that is correct: each pixel already carries its own
+  scattering angle, and the apparent $\alpha$ dependence of the z-axis
+  expression is only a change of frame. For a scan that drives the arm it
+  understates the correction: $3\,\%$ at a scattering angle of $10^{\circ}$,
+  $10\,\%$ at $18^{\circ}$ and $33\,\%$ at $30^{\circ}$. This is the opposite
+  of the acceptance (Section~\ref{sec:acceptance}), whose \emph{span} survives
+  a moving arm unchanged, and of the solid angle, which is invariant under it
+  exactly --- an arm rotation is a rigid rotation about the sample, so every
+  pixel keeps its distance and its obliquity to its own line of sight.
+
+  The two direct-space integration paths \textbf{correct} for this: they
+  reduce the polarization to a region mean anyway, so a per-frame ratio of two
+  region means, $\langle 1/P_{\mathrm{arm}}\rangle /
+  \langle 1/P_{\mathrm{home}}\rangle$, moves it onto the frame's arm position.
+  That ratio is exactly $1$ at the calibrated position, so a fixed-arm scan is
+  untouched. What remains uncorrected is the \textbf{reciprocal-space
+  reconstruction}, which applies the polarization per pixel rather than as a
+  region mean and would need the array itself rebuilt per frame.
 
 \item[Uncertainty of $\dgam$.] Errors follow the same divisors as the
   intensities, but a $\dgam$ estimated from the calibrated geometry has an
@@ -714,6 +726,7 @@ Out-of-plane acceptance     & $\dgam$      & \code{acceptance}    & yes & \textb
 Lorentz                     & $L_\varphi$ / $L_s$ & \code{geometry} & yes & yes \\
 Rod interception            & $\Crod$      & \code{geometry}      & yes & \textbf{no} \\
 Polarization                & $P$          & \code{detector}      & yes & yes \\
+\quad arm correction        & --           & \code{detector}      & yes & yes \\
 Solid angle                 & $\dOm$       & \code{detector}      & \textbf{no} & \textbf{no} \\
 Active area / footprint     & $A$          & \code{activearea}    & yes & yes \\
 Area correction             & $\Carea$     & \code{geometry}      & slits only & slits only \\

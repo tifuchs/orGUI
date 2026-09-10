@@ -924,3 +924,61 @@ def test_display_roi_geometry_maps_clipped_detector_rows_to_plot_sides(
         expected_top,
         expected_bottom,
     )
+
+
+class FakeArmPolarizationDetector:
+    """A detector whose polarization falls off with the arm angle.
+
+    Lets the per-frame arm factor be written in closed form, independently of
+    the real z-axis expression, so a failure points at the plumbing rather
+    than at the physics.
+    """
+
+    def polarizationAtPoints(
+        self, row, column, alpha_i, gamma_arm=None, delta_arm=None
+    ):
+        arm = 0.0 if gamma_arm is None else float(gamma_arm)
+        return np.full(np.shape(row), 1.0 - 0.5 * arm**2, dtype=float)
+
+
+def test_the_polarization_arm_factor_follows_a_moving_arm():
+    """Finding F5: the factor is per frame and one at the calibrated position.
+
+    ``_polarizationArmFactor`` reads the arm from ``getArmAngles``, sharing
+    that convention with every other arm consumer in the application, and
+    returns what an intensity corrected at the calibrated position has to be
+    multiplied by.
+    """
+    arms = np.array([0.0, 0.1, 0.2])
+    stub = SimpleNamespace(getArmAngles=lambda: (arms, np.zeros_like(arms)))
+
+    got = orGUI._polarizationArmFactor(
+        stub, FakeArmPolarizationDetector(), 300.0, 240.0, 20.0, 20.0, 0.01
+    )
+
+    np.testing.assert_allclose(got, 1.0 / (1.0 - 0.5 * arms**2), rtol=1e-12)
+    assert got[0] == 1.0, "no arm rotation must leave the intensity alone"
+
+
+def test_the_polarization_arm_factor_broadcasts_a_constant_arm():
+    """The constant-arm shortcut must agree with the per-frame path.
+
+    A fixed arm is evaluated once and broadcast to keep the cost off the
+    common path, so the two branches have to give the same number.
+    """
+    constant = np.full(4, 0.2)
+    varying = np.array([0.2, 0.2, 0.2, 0.2000001])
+    detector = FakeArmPolarizationDetector()
+
+    fast = orGUI._polarizationArmFactor(
+        SimpleNamespace(getArmAngles=lambda: (constant, np.zeros(4))),
+        detector, 300.0, 240.0, 20.0, 20.0, 0.01,
+    )
+    looped = orGUI._polarizationArmFactor(
+        SimpleNamespace(getArmAngles=lambda: (varying, np.zeros(4))),
+        detector, 300.0, 240.0, 20.0, 20.0, 0.01,
+    )
+
+    assert fast.shape == (4,)
+    np.testing.assert_allclose(fast, 1.0 / (1.0 - 0.5 * 0.2**2), rtol=1e-12)
+    np.testing.assert_allclose(looped[:3], fast[:3], rtol=1e-12)

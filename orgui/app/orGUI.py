@@ -2123,6 +2123,24 @@ ub : gui for UB matrix and angle calculations
                     croibg1_bgimg_a *= Corr1
                     croibg1_bgimg_err_a *= Corr1
 
+            if self.scanSelector.usePolarizationBox.isChecked():
+                # Corr1 carries the polarization of the calibrated geometry;
+                # move it onto the arm position of each frame (finding F5).
+                # Exactly 1 for a detector whose arm does not move.
+                pol_arm1 = self._polarizationArmFactor(
+                    dc,
+                    xylist[d][1],
+                    xylist[d][0],
+                    roi_d[1].stop - roi_d[1].start,
+                    roi_d[0].stop - roi_d[0].start,
+                    mu,
+                )
+                croibg1_a = croibg1_a * pol_arm1
+                croibg1_err_a = croibg1_err_a * pol_arm1
+                if croibg1_bgimg_a is not None:
+                    croibg1_bgimg_a = croibg1_bgimg_a * pol_arm1
+                    croibg1_bgimg_err_a = croibg1_bgimg_err_a * pol_arm1
+
             rod_mask1 = np.isfinite(croibg1_a)
 
             axis_masked = hkl_del_gam_1[:, 5][rod_mask1]
@@ -3463,6 +3481,76 @@ ub : gui for UB matrix and angle calculations
             return rotation @ self.ubcalc.angles.QAlpha(pos[0], pos[1], pos[2])
         except Exception:
             return np.full(3, np.nan)
+
+    def _polarizationArmFactor(self, dc, row, column, row_size, column_size, alpha):
+        """Per-frame factor moving the polarization onto the real arm position.
+
+        The per-pixel polarization array is built once, from the calibrated
+        geometry. That is correct for a detector whose arm does not move, but
+        on a scan that drives the arm the same pixel looks in a different
+        direction on every frame and the correction comes out far too small --
+        10 % at a scattering angle of 18 degrees, 33 % at 30. This returns
+        what the already-corrected intensity has to be multiplied by; see
+        ``doc/design/ctr_structure_factor_scale.md`` finding F5.
+
+        The factor is exactly ``1.0`` wherever the arm sits at its calibrated
+        reference, because both evaluations then use the same geometry, so a
+        fixed-arm scan is untouched without needing to be special-cased. A
+        constant arm is evaluated once and broadcast, which keeps the cost off
+        the common path.
+
+        The arm position comes from :meth:`getArmAngles`, so this shares its
+        convention with every other arm consumer in the application: a scan
+        that knows nothing about an arm reports zero, which is the calibrated
+        reference for the default calibration and therefore leaves the
+        correction at one.
+
+        :param dc: The calibrated
+            :class:`~orgui.datautils.xrayutils.DetectorCalibration.Detector2D_SXRD`.
+        :param row: Region centre row per frame, in pixels (orGUI's ``y``).
+        :param column: Region centre column per frame, in pixels (``x``).
+        :param row_size: Region height per frame, in pixels.
+        :param column_size: Region width per frame, in pixels.
+        :param alpha: Incidence angle per frame, in radian.
+        :returns: The factor per frame.
+        :rtype: numpy.ndarray
+        """
+        gamma_arm, delta_arm = self.getArmAngles()
+        row, column, row_size, column_size, alpha, gamma_arm, delta_arm = (
+            np.broadcast_arrays(
+                np.asarray(row, dtype=np.float64),
+                np.asarray(column, dtype=np.float64),
+                np.maximum(np.asarray(row_size, dtype=np.float64), 1.0),
+                np.maximum(np.asarray(column_size, dtype=np.float64), 1.0),
+                np.asarray(alpha, dtype=np.float64),
+                np.asarray(gamma_arm, dtype=np.float64),
+                np.asarray(delta_arm, dtype=np.float64),
+            )
+        )
+
+        def _at(index):
+            return detector_corrections.polarization_arm_correction(
+                dc,
+                row[index],
+                column[index],
+                row_size[index],
+                column_size[index],
+                alpha[index],
+                float(gamma_arm[index]),
+                float(delta_arm[index]),
+            )
+
+        constant = all(
+            np.all(values == values.flat[0]) if values.size else True
+            for values in (row, column, row_size, column_size, alpha,
+                           gamma_arm, delta_arm)
+        )
+        if constant and row.size:
+            return np.full(row.shape, _at(np.unravel_index(0, row.shape)))
+        factor = np.ones(row.shape, dtype=np.float64)
+        for index in np.ndindex(*row.shape):
+            factor[index] = _at(index)
+        return factor
 
     def getArmAngles(self, imageno=None):
         """Return the detector arm position for an image or the whole scan.
@@ -6382,6 +6470,30 @@ ub : gui for UB matrix and angle calculations
                     nodatapoints,
                 )
             )
+
+        if options["polarization"]:
+            # Corr1/Corr2 carry the polarization of the calibrated geometry;
+            # move it onto the arm position of each frame (finding F5). This is
+            # exactly 1 for a detector whose arm does not move, and it is the
+            # reflectivity case -- where the arm follows 2*alpha -- that needs
+            # it most.
+            pol_arm1 = self._polarizationArmFactor(
+                dc, y_coord1_a, x_coord1_a, roi_vsize1_a, roi_hsize1_a, alpha_all
+            )
+            croibg1_a = croibg1_a * pol_arm1
+            croibg1_err_a = croibg1_err_a * pol_arm1
+            if croibg1_bgimg_a is not None:
+                croibg1_bgimg_a = croibg1_bgimg_a * pol_arm1
+                croibg1_bgimg_err_a = croibg1_bgimg_err_a * pol_arm1
+
+            pol_arm2 = self._polarizationArmFactor(
+                dc, y_coord2_a, x_coord2_a, roi_vsize2_a, roi_hsize2_a, alpha_all
+            )
+            croibg2_a = croibg2_a * pol_arm2
+            croibg2_err_a = croibg2_err_a * pol_arm2
+            if croibg2_bgimg_a is not None:
+                croibg2_bgimg_a = croibg2_bgimg_a * pol_arm2
+                croibg2_bgimg_err_a = croibg2_bgimg_err_a * pol_arm2
 
         # The solid-angle correction is useful on the *intensity* -- for broad,
         # non-rod features a differential cross-section is what is wanted --

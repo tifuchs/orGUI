@@ -7,6 +7,29 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **The polarization correction now follows the detector arm.**
+  *This changes saved numbers for scans that move the detector arm, and only
+  those.* The per-pixel polarization array is built from the calibrated
+  geometry, which is right only while the arm stays there. On a scan that
+  drives the arm -- a reflectivity curve, where it follows twice the incidence
+  angle -- the same pixel looks in a different direction on every frame, and
+  the calibrated-position value understated the correction by 3 % at a
+  scattering angle of 10 degrees, 10 % at 18 and 33 % at 30. Both integration
+  paths now apply a per-frame factor,
+  ``corrections.detector.polarization_arm_correction``, that moves the
+  correction onto the arm position each frame was measured at. It is exactly
+  one while the arm sits at its calibrated position, so a fixed-arm scan is
+  bit-identical and needs no switch. The factor is a ratio of two region
+  means rather than a rebuilt per-pixel array, which keeps the cost to a
+  region-sized evaluation per frame; the polarization is not flat across a
+  region at a large scattering angle, so the means matter. The detector solid
+  angle needs no such correction: an arm rotation is a rigid rotation about
+  the sample, so every pixel keeps its distance and its obliquity to its own
+  line of sight, and the solid angle is invariant under it exactly. The
+  reciprocal-space reconstruction applies the polarization per pixel rather
+  than as a region mean and is unchanged; correcting it there would need the
+  array rebuilt per frame.
+
 - **Rocking and stationary integration now produce the same structure factor.**
   *This changes saved numbers in both modes.* A rocking scan and a stationary
   scan of the same rod previously differed by exactly exposure time times

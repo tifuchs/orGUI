@@ -1,9 +1,11 @@
 """Regression tests for the per-pixel detector correction factors.
 
 :mod:`orgui.datautils.xrayutils.corrections.detector` owns the solid-angle and
-polarization arrays and the region reduction of the solid-angle part that a
-structure factor has to divide back out. See
-``doc/design/ctr_structure_factor_scale.md`` finding F6.
+polarization arrays, the region reduction of the solid-angle part that a
+structure factor has to divide back out (finding F6), and the factor that
+moves a polarization correction from the calibrated arm position onto the arm
+position a frame was actually measured at (finding F5). See
+``doc/design/ctr_structure_factor_scale.md``.
 """
 
 import numpy as np
@@ -134,3 +136,85 @@ def test_a_zero_or_negative_region_is_rejected():
         detector_corrections.roi_mean_inverse_solid_angle(
             det, 300.0, 240.0, 20.0, -5.0
         )
+
+
+def test_the_arm_correction_is_one_at_the_calibrated_position():
+    """A fixed-arm scan must come out bit-identical.
+
+    The whole point of expressing finding F5 as a ratio is that it changes
+    nothing for a detector that does not move: the correction already applied
+    is the right one there.
+    """
+    det = _calibrated_detector()
+
+    got = detector_corrections.polarization_arm_correction(
+        det, 300.0, 240.0, 60.0, 60.0, np.deg2rad(0.6), None, None
+    )
+
+    assert got == 1.0
+
+
+def test_the_arm_correction_recovers_the_documented_errors():
+    """The size of finding F5, written out from the two evaluations.
+
+    The calibrated-position polarization is too small a correction for a
+    moving arm, so the factor is above one and grows with the scattering
+    angle. The reference is the ratio of the polarization at the two arm
+    positions at the region centre, which is what the region means reduce to
+    for a small region.
+    """
+    det = _calibrated_detector()
+    row, column = 310.0, 244.0
+    alpha = np.deg2rad(0.6)
+
+    for two_theta, expected_percent in ((10.0, 3.2), (18.0, 10.7), (30.0, 33.6)):
+        arm = np.deg2rad(two_theta)
+        got = detector_corrections.polarization_arm_correction(
+            det, row, column, 4.0, 4.0, alpha, arm, 0.0
+        )
+
+        p_home = det.polarizationAtPoints(
+            np.array([row]), np.array([column]), alpha
+        )[0]
+        p_arm = det.polarizationAtPoints(
+            np.array([row]), np.array([column]), alpha, arm, 0.0
+        )[0]
+        np.testing.assert_allclose(got, p_home / p_arm, rtol=1e-3)
+        np.testing.assert_allclose(100.0 * (got - 1.0), expected_percent, rtol=5e-2)
+
+
+def test_the_arm_correction_averages_over_the_region():
+    """At a large scattering angle the polarization is not flat over a region.
+
+    Taking the ratio at the region centre instead of between two region means
+    is a fraction of a percent off for a large region at
+    :math:`2\\theta = 30` degrees, which is why the means are used.
+    """
+    det = _calibrated_detector()
+    row, column, alpha = 310.0, 244.0, np.deg2rad(0.6)
+    arm = np.deg2rad(30.0)
+
+    small = detector_corrections.polarization_arm_correction(
+        det, row, column, 2.0, 2.0, alpha, arm, 0.0
+    )
+    large = detector_corrections.polarization_arm_correction(
+        det, row, column, 300.0, 300.0, alpha, arm, 0.0
+    )
+
+    assert not np.isclose(small, large, rtol=1e-4)
+    # Both still describe the same correction, so they stay close.
+    np.testing.assert_allclose(large, small, rtol=2e-2)
+
+
+def test_the_region_mean_polarization_follows_the_arm():
+    """The underlying quantity, which the ratio is built from."""
+    det = _calibrated_detector()
+    args = (det, 310.0, 244.0, 40.0, 40.0, np.deg2rad(0.6))
+
+    home = detector_corrections.roi_mean_inverse_polarization(*args)
+    moved = detector_corrections.roi_mean_inverse_polarization(
+        *args, gamma_arm=np.deg2rad(30.0), delta_arm=0.0
+    )
+
+    assert home < moved, "a larger scattering angle needs a larger correction"
+    np.testing.assert_allclose(home, 1.0, rtol=1e-3)

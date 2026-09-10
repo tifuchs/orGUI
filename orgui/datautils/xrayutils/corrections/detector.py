@@ -55,7 +55,12 @@ they share.
 
 import numpy as np
 
-__all__ = ["pixel_factors", "roi_mean_inverse_solid_angle"]
+__all__ = [
+    "pixel_factors",
+    "polarization_arm_correction",
+    "roi_mean_inverse_polarization",
+    "roi_mean_inverse_solid_angle",
+]
 
 
 def pixel_factors(detector, solid_angle=False, polarization=False, shape=None):
@@ -167,3 +172,149 @@ def roi_mean_inverse_solid_angle(
         if block.size:
             out[index] = np.mean(1.0 / block)
     return out
+
+
+def _roi_sample_grid(row, column, row_size, column_size, samples):
+    """Coordinates spanning one region, at most ``samples`` per direction.
+
+    The polarization varies smoothly across a region, so a coarse sample
+    gives its mean to far better accuracy than the correction itself is
+    known. Capping the count keeps the cost per frame independent of how
+    large the region is.
+
+    Samples sit at the centres of equal sub-intervals, the midpoint rule, so
+    a single sample lands on the region centre rather than on an edge and no
+    sample count is biased towards one side.
+
+    :returns: ``(rows, columns)`` as 1D arrays of pixel coordinates.
+    :rtype: tuple
+    """
+
+    def _centres(centre, size, count):
+        count = int(min(max(int(round(size)), 1), count))
+        return centre + ((np.arange(count) + 0.5) / count - 0.5) * size
+
+    return (
+        _centres(row, row_size, samples),
+        _centres(column, column_size, samples),
+    )
+
+
+def roi_mean_inverse_polarization(
+    detector,
+    row,
+    column,
+    row_size,
+    column_size,
+    alpha,
+    gamma_arm=None,
+    delta_arm=None,
+    samples=17,
+):
+    r"""Mean of :math:`1/P` over a region, at one detector arm position.
+
+    Uses
+    :meth:`~orgui.datautils.xrayutils.DetectorCalibration.Detector2D_SXRD.polarizationAtPoints`,
+    which evaluates the z-axis polarization expression in the surface-frame
+    angles of each pixel **at the arm position given**. That is the difference
+    from :func:`pixel_factors`, whose array comes from pyFAI's detector-frame
+    expression at the *calibrated* position; see
+    :func:`polarization_arm_correction`.
+
+    :param detector: A
+        :class:`~orgui.datautils.xrayutils.DetectorCalibration.Detector2D_SXRD`.
+    :param row: Region centre row, in pixels along pyFAI dimension 1.
+    :param column: Region centre column, in pixels along pyFAI dimension 2.
+    :param row_size: Region height in pixels.
+    :param column_size: Region width in pixels.
+    :param alpha: Incidence angle of the frame, in radian.
+    :param gamma_arm: Detector arm position, in radian; ``None`` is the
+        calibrated position. Give both arm angles or neither.
+    :param delta_arm: Detector arm position, in radian.
+    :param int samples: Upper bound on the sample count per direction.
+    :returns: The mean of :math:`1/P` over the region.
+    :rtype: float
+    """
+    rows, columns = _roi_sample_grid(
+        float(row), float(column), float(row_size), float(column_size), samples
+    )
+    grid_rows, grid_columns = np.meshgrid(rows, columns, indexing="ij")
+    polarization = detector.polarizationAtPoints(
+        np.ascontiguousarray(grid_rows.ravel()),
+        np.ascontiguousarray(grid_columns.ravel()),
+        float(alpha),
+        gamma_arm,
+        delta_arm,
+    )
+    return float(np.mean(1.0 / np.asarray(polarization, dtype=np.float64)))
+
+
+def polarization_arm_correction(
+    detector,
+    row,
+    column,
+    row_size,
+    column_size,
+    alpha,
+    gamma_arm,
+    delta_arm,
+    samples=17,
+):
+    r"""Factor moving a polarization correction onto the frame's arm position.
+
+    :func:`pixel_factors` divides by the polarization of the **calibrated**
+    geometry, evaluated once outside the frame loop. For a detector whose arm
+    does not move that is correct -- every pixel already carries its own
+    scattering angle. For a scan that drives the arm it is not: the same pixel
+    looks in a different direction on every frame, and the correction comes
+    out far too small. Measured at the centre of a detector at one metre, with
+    the arm following a specular scan, the calibrated-position polarization is
+    high by 0.8 % at a scattering angle of 5 degrees, 3.2 % at 10, 10.7 % at
+    18 and 33.6 % at 30.
+
+    This returns
+    :math:`\langle 1/P_\mathrm{arm}\rangle / \langle 1/P_\mathrm{home}\rangle`
+    over the region, the factor an intensity already corrected with the
+    calibrated-position polarization must be multiplied by. It is **exactly
+    one** when the arm sits at its calibrated position, so a fixed-arm scan is
+    untouched.
+
+    The ratio is taken between two region means rather than at the region
+    centre because the polarization is not flat across a region at a large
+    scattering angle: for a 100-pixel region at one metre near
+    :math:`2\theta = 30` degrees it varies by about a percent from edge to
+    edge. What is left out is the covariance with the solid angle over the
+    region, which :func:`pixel_factors` fuses into the same array -- second
+    order in the variation of both across one region.
+
+    See ``doc/design/ctr_structure_factor_scale.md`` finding F5.
+
+    :param detector: A
+        :class:`~orgui.datautils.xrayutils.DetectorCalibration.Detector2D_SXRD`.
+    :param row: Region centre row, in pixels along pyFAI dimension 1.
+    :param column: Region centre column, in pixels along pyFAI dimension 2.
+    :param row_size: Region height in pixels.
+    :param column_size: Region width in pixels.
+    :param alpha: Incidence angle of the frame, in radian.
+    :param gamma_arm: Detector arm position of the frame, in radian.
+    :param delta_arm: Detector arm position of the frame, in radian.
+    :param int samples: Upper bound on the sample count per direction.
+    :returns: The multiplicative correction, ``1.0`` at the calibrated
+        position.
+    :rtype: float
+    """
+    at_home = roi_mean_inverse_polarization(
+        detector, row, column, row_size, column_size, alpha, samples=samples
+    )
+    at_arm = roi_mean_inverse_polarization(
+        detector,
+        row,
+        column,
+        row_size,
+        column_size,
+        alpha,
+        gamma_arm,
+        delta_arm,
+        samples=samples,
+    )
+    return at_arm / at_home

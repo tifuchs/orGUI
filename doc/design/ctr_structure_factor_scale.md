@@ -14,10 +14,10 @@
 > for absolute reflectivity. Everything below was verified numerically against
 > the code, not by inspection alone.
 >
-> F1, F2, F3 and F6 are now **applied**, which changed saved numbers in both
-> modes; the two paths agree to `1e-6` on simulated data, limited by the
-> trapezoidal sampling of the rocking profile. F4, F5 and F7 remain open and
-> are described below as they stand. Findings are written in the present tense
+> F1, F2, F3, F5 and F6 are now **applied**, which changed saved numbers in
+> both modes; the two paths agree to `1e-6` on simulated data, limited by the
+> trapezoidal sampling of the rocking profile. F4 and F7 remain open and are
+> described below as they stand. Findings are written in the present tense
 > of the analysis; section 5 says what each one's status is now, and
 > [`ctr_structure_factor_handover.md`](ctr_structure_factor_handover.md)
 > section 5 says how each was wired.
@@ -206,6 +206,36 @@ For a **fixed** arm the static array is correct - each pixel already carries
 its own scattering angle, and the apparent `alpha` dependence of the ANA
 z-axis expression is only a change of frame. The bug is scoped to scans that
 move the arm, which is exactly the reflectivity case of section 6.
+
+**Fixed**, as a per-frame multiplicative factor rather than by rebuilding the
+array. `detector.polarization_arm_correction` returns
+`<1/P_arm> / <1/P_home>` over the region of interest, which is what an
+intensity already corrected at the calibrated position has to be multiplied
+by, and both integration paths apply it. Three properties made this the
+proportionate fix rather than a per-frame rebuild of the full array:
+
+* It is **exactly 1** when the arm sits at its calibrated reference, because
+  both evaluations then use the same geometry. A fixed-arm scan is therefore
+  bit-identical, and no switch or special case is needed to keep it that way.
+* It costs a region-sized evaluation per frame instead of a detector-sized
+  one, capped at a 17x17 sample of the region because the polarization is
+  smooth across it. A constant arm is evaluated once and broadcast.
+* It leaves the fused per-pixel array, the native ROI accumulation and the
+  stored `Cfactors_croi` untouched.
+
+Re-measured through the shipped factor, along a specular scan whose arm
+follows `gamma = 2 alpha`, it reproduces the table above: `+0.03 %` at
+`2theta = 1`, `+0.49 %` at 4, `+3.11 %` at 10, `+10.57 %` at 18 and
+`+33.35 %` at 30 degrees.
+
+Two things it does **not** cover. The polarization and the solid angle are
+fused into one array by `pixel_factors`, so the ratio of region means leaves
+their covariance over the region - second order in the variation of both
+across it. And the **reciprocal-space reconstruction** applies the
+polarization per pixel rather than as a region mean, so this factor does not
+apply to it; that path would need the array itself rebuilt per frame, which is
+a detector-sized evaluation per frame and belongs with the rest of the
+reconstruction work in section 7.
 
 ### F6 - solid-angle correction applied to an already-summed ROI
 
@@ -492,7 +522,7 @@ along a scan in the first place.
 each is in [`ctr_structure_factor_handover.md`](ctr_structure_factor_handover.md)
 section 5, and the equivalence is asserted by
 `test_scan_mode_equivalence.py::test_rocking_and_stationary_paths_agree`.
-Step 6, the real-data check, is the one that remains, together with F4, F5 and
+Step 6, the real-data check, is the one that remains, together with F4 and
 F7.
 
 Recorded in the order they had to be done, because the ordering was itself a
@@ -585,9 +615,11 @@ Three caveats, all now in the module docstrings:
    the critical angle, where refraction and multiple scattering take over -
    which is where the interesting part of a reflectivity curve usually is.
    Compare against the DWBA machinery already in `CTRdwba.py` there.
-2. **A reflectivity scan moves the detector arm**, so F5 bites hardest here:
-   10 % at `2theta = 18` degrees, 33 % at 30 degrees. Fix F5 before trusting an
-   absolute reflectivity.
+2. **A reflectivity scan moves the detector arm**, which is where F5 bit
+   hardest: 10 % at `2theta = 18` degrees, 33 % at 30. That is now corrected
+   for the two direct-space integration paths, but *not* for the
+   reciprocal-space reconstruction, which applies the polarization per pixel
+   (see F5).
 3. **Off-specular**, `R` is the fraction of the incident flux scattered into
    that rod. That is well defined for a truncation rod integrated across its
    cross-section, but not for diffuse scattering, where only a differential

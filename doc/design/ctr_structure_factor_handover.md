@@ -1,7 +1,7 @@
 # CTR structure-factor scale: implementation status and handover
 
 > **Status as of 2026-09-10.** Branch `claude/ctr-structure-factor-9633bc`,
-> six commits ahead of `master`, nothing pushed.
+> seven commits ahead of `master`, nothing pushed.
 >
 > The physics analysis is complete and quantified, and the reduction is now
 > **wired in**: a rocking scan and a stationary scan of the same rod come out
@@ -32,6 +32,11 @@ four are now handled, and the two modes agree to `1e-6` on simulated data —
 the residual is the trapezoidal sampling of the rocking profile, not a
 correction factor.
 
+F5, the arm-blind polarization, is fixed too, in its own commit. It is
+independent of mode equivalence — it cancels between the modes at the same
+reflection — but it is up to a 33 % error on a scan that drives the detector
+arm, which is exactly the reflectivity case.
+
 ## 2. What is on the branch
 
 | commit | what it did |
@@ -40,6 +45,9 @@ correction factor.
 | `4193c80` | `feat: reduce integrated intensities to \|F_hkl\|^2 on one scale` |
 | `e25b8df` | `docs: record the rocking/stationary structure-factor scale analysis` |
 | `6959191` | `feat: estimate the out-of-plane detector acceptance` |
+| `ecb3bb5` | `docs: settle F6 and add the structure-factor physics reference` |
+| `0af9cb7` | `feat(phys)!: put rocking and stationary integration on one structure-factor scale` |
+| *(this one)* | `fix(phys)!: follow the detector arm in the polarization correction` |
 
 The first three were split out of one working tree at the end, which required
 *staged versions* of four files: `peak1Dintegr.py`, `integration_corrections.py`,
@@ -56,7 +64,8 @@ orgui/datautils/xrayutils/corrections/
   beamprofile.py   1049   beam profile shapes and their integrals
   activearea.py     190   active area in m^2, slit- and beam-limited
   acceptance.py     255   Delta_gamma, gamma_range, pixel_acceptance
-  detector.py        89   per-pixel solid angle and polarization
+  detector.py       319   per-pixel solid angle and polarization, their
+                          region means, and the polarization arm correction
   normalization.py  103   counting time and monitor, from values
   roi.py             93   CorrectionFactors, roi_mean_correction
   measurement.py    605   mode dispatch, master equation, reflectivity
@@ -71,10 +80,10 @@ not merely that they import.
 
 | caller | uses the package for | still does its own thing |
 |---|---|---|
-| `orGUI.integrateROI` (stationary) | `pixel_factors`, `mode_components`, `normalization_divisor`, `C_illum_area`, `roi_mean_inverse_solid_angle` | — |
-| `orGUI.rocking_integrate` | `pixel_factors` | — |
+| `orGUI.integrateROI` (stationary) | `pixel_factors`, `mode_components`, `normalization_divisor`, `C_illum_area`, `roi_mean_inverse_solid_angle`, `polarization_arm_correction` | — |
+| `orGUI.rocking_integrate` | `pixel_factors`, `polarization_arm_correction` | — |
 | `peak1Dintegr.integrate` (rocking) | `mode_components`, `normalization_divisor`, `normalized_intensity`, `out_of_plane_acceptance`, `roi_mean_inverse_solid_angle` | — |
-| `reconstruction_job` | `pixel_factors` (solid angle applied, **not** compensated) | own native-fused application, own normalization loop |
+| `reconstruction_job` | `pixel_factors` (solid angle applied and **not** compensated; polarization **not** arm-corrected) | own native-fused application, own normalization loop |
 
 Still uncalled outside the tests: `measurement.structure_factor_squared`,
 `measurement.angular_factor` and `activearea.*`. That is deliberate rather
@@ -233,10 +242,12 @@ be left behind cannot come back unnoticed.
   sample size and the beam profile. Everything else — `lambda`, `A_u`, `r_e` —
   is available.
 * **Reflectivity comes for free** once `|F|^2` is absolute;
-  `measurement.reflectivity_from_structure_factor` is the conversion. But fix
-  **F5** first: a reflectivity scan drives the detector arm, and the
-  polarization is still evaluated at the calibrated position, which is a 10 %
-  error at `2theta = 18` degrees and 33 % at 30.
+  `measurement.reflectivity_from_structure_factor` is the conversion. **F5 is
+  now fixed**, which mattered most here: a reflectivity scan drives the arm,
+  and the arm-blind polarization was a 10 % error at `2theta = 18` degrees and
+  33 % at 30. The correction applies to the two direct-space integration
+  paths; the reciprocal-space reconstruction still evaluates the polarization
+  per pixel at the calibrated position.
 * **`C_det` (F7)** is the only mechanism that can still break mode equivalence
   after the wiring, and it cannot be validated on simulated data. It needs the
   real-data overlap comparison.
@@ -277,8 +288,13 @@ Recorded because each cost time and none was obvious in advance.
   variance propagation. It shares the *definition* (`pixel_factors`) but keeps
   its own streaming application; that was the right boundary.
 * **F5 was not fixed while moving the code.** `pixel_factors` reproduces the
-  historical arm-blind behaviour exactly. Changing it is a numerical fix that
-  belongs in its own `phys` commit, not smuggled into a refactor.
+  historical arm-blind behaviour exactly. Changing it was a numerical fix that
+  belonged in its own `phys` commit, not smuggled into a refactor -- and it
+  landed as one. Note what it did *not* need: rebuilding the per-pixel array
+  per frame. Because the integration paths reduce the polarization to a region
+  mean anyway, the fix is a per-frame ratio of two region means, which is
+  exactly 1 at the calibrated arm position and so leaves every fixed-arm scan
+  bit-identical. `pixel_factors` itself is unchanged.
 * **`meson.build` was not changed.** Its `exclude_directories: ['__pycache__']`
   only excludes the top-level directory, so 72 stale `cpython-312.pyc` files
   are sitting in the installed copy. Inert under 3.14, and the repository owner
