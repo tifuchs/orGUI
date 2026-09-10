@@ -261,6 +261,97 @@ one bulk repeat plus every finite generated record, sets every
 ``F_reference`` to zero, and omits the unperturbed reflection.  Experimental
 acceptance integration remains a separate operation.
 
+.. _dwba-fitting:
+
+Fitting measured CTRs with DWBA
+-------------------------------
+
+``CTROptimizer`` can evaluate the live DWBA model instead of the default
+kinematical structure factor. The switch is explicit and runtime-only:
+
+.. code-block:: python
+
+   from orgui.datautils.xrayutils import CTRopt
+
+   fit = CTRopt.CTROptimizer(
+       crystal,
+       measured_ctrs,
+       scale_policy={"F": "scaled", "R": "fixed"},
+   )
+   fit.set_dwba()
+   fit.prepareFit()
+
+   prediction = fit.flat_prediction()
+   normalized_residual = fit.weighted_residues()
+
+Configure the crystal's energy, lattice, reference transform, and DWBA
+orientation before constructing the optimizer: the optimizer owns deep copies
+of both the crystal and the measurements. Each measured CTR must carry a
+:class:`~orgui.datautils.xrayutils.CTRplotutil.MeasurementReduction` with a
+non-``None``
+:class:`~orgui.datautils.xrayutils.CTRplotutil.PolarizationReduction`.
+The incident ``s_fraction`` and outgoing analyser setting select only the
+required one, two, or four polarization channels; their field intensities are
+summed incoherently.
+
+The prediction remains in each dataset's stored quantity. If
+:math:`R_{\mathrm{res}}` is the direct or resolution-broadened field intensity,
+:math:`c` is ``DWBAResult.amplitude_prefactor`` at the central geometry, and
+:math:`P` is the conventional polarization factor stored for F data, then
+
+.. math::
+
+   \widehat R = R_{\mathrm{res}}, \qquad
+   \widehat F = \frac{\sqrt{R_{\mathrm{res}}/P}}{|c|}.
+
+``P=None`` means :math:`P=1`. Corrected reflectivity data cannot carry P:
+stored R is compared directly with :math:`\widehat R`. The optimizer never
+converts measured values or uncertainties between F and R. Signed and zero
+observations are therefore retained, while uncertainties must be finite and
+strictly positive. Analytical ``fixed``, ``scaled``, and ``global`` policies
+are applied to the prediction only; see :doc:`ctr_structure_factors` for the
+common fitting-result and grouping contract.
+
+Geometry is measurement-owned. Without resolution, and for convolution on the
+measured L grid, point-aligned six-circle records in radians are sufficient.
+Alternatively attach a z-mode scan rule before constructing the optimizer:
+
+.. code-block:: python
+
+   from orgui.datautils.xrayutils.CTRplotutil import CTRScanGeometry
+
+   for rod in measured_ctrs:
+       rod.scan_geometry = CTRScanGeometry(
+           fixed="in", angle=np.deg2rad(0.3), mirrorx=False
+       )
+
+Fixed-width quadrature sampling requires this rule because displaced L points
+need new physical angles. If both records and a rule are present, the rule must
+reproduce the measured central physical geometry and scattering branch.
+Every record is checked against its H, K, and L coordinates; periodic rotations
+such as an omega shift by :math:`2\pi` remain equivalent. The existing
+``chi=phi=0`` limitation of the measured-angle DWBA path still applies.
+
+Resolution always averages field intensity before the F/R representation is
+formed. Measured-grid ``calculation="convolve"`` and fixed-width
+``calculation="sample"`` are supported. Fitting widths with regenerated
+sampling grids is not; use fitted-width convolution instead. Details and code
+are in :doc:`ctr_resolution`.
+
+Fitting uses physical ``bulk_mode="semi_infinite"``. A fixed nonnegative
+empirical exponent can be supplied with
+``fit.set_dwba(bulk_attenuation=value)`` for controlled kinematical
+comparisons. ``get_dwba()`` returns both current settings. One outer
+``DWBAState.batch()`` is used for every objective evaluation, sharing the live
+atomic snapshot and atom packing across rods and requested polarization
+channels. Persistent preparation and field reuse remains owned by
+``DWBAState``.
+
+``CTROptAngleCorrection`` deliberately rejects ``set_dwba`` because the
+meaning of its empirical angle correction for mixed F/R DWBA predictions is
+not defined. Continuous-density ``WaterModel`` components, nonzero chi/phi,
+and the other core limitations listed above also remain unsupported.
+
 Comparing a DWBA rod with a kinematical rod
 --------------------------------------------
 
@@ -362,3 +453,7 @@ API reference
 .. autoclass:: orgui.datautils.xrayutils.CTRdwba.DWBAState
    :members: set_orientation, set_ctr_geometry, prepare, prepare_from_glancing, prepare_from_vlieg, evaluate, evaluate_prepared, evaluate_from_glancing, evaluate_from_vlieg, reflectivity, cache_info, clear_cache
    :member-order: bysource
+
+.. automethod:: orgui.datautils.xrayutils.CTRopt.CTROptimizer.set_dwba
+
+.. automethod:: orgui.datautils.xrayutils.CTRopt.CTROptimizer.get_dwba

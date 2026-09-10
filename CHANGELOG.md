@@ -7,6 +7,20 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **Added live DWBA predictions to CTR fitting.** ``CTROptimizer.set_dwba``
+  now evaluates the optimizer-owned crystal through the semi-infinite DWBA
+  model, forms predictions independently in each dataset's stored F or
+  corrected-R representation, and passes them through the common analytical
+  scaling and residual pipeline without converting observations or
+  uncertainties. Measurement polarization selects only the required field
+  channels, while measured Vlieg records or per-dataset z-mode rules provide
+  validated geometry. Resolution broadens the incoherent field intensity
+  before conversion to F/R; measured-grid convolution and fixed-width sampling
+  are supported. One outer DWBA batch shares live atomic work across rods and
+  channels. ``CTROptAngleCorrection`` and fitted-width DWBA sampling remain
+  explicitly unsupported. The CTR acceleration benchmark reports the complete
+  uncached DWBA cost and slowdown relative to kinematical evaluation.
+
 - **Unified CTR fit predictions, lifecycle, and statistics.** CTR optimizer
   predictions, residuals, likelihoods, and diagnostics now use one final
   analytically scaled result path. ``flat_prediction`` supports the common
