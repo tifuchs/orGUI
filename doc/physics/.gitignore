@@ -1,0 +1,10 @@
+# LaTeX build artifacts. Drop the *.pdf line if the built document should be
+# shipped in the repository for readers without a TeX installation.
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.pdf

@@ -217,10 +217,77 @@ needed. orGUI multiplies the sum by the ROI-mean of `1/solidAngleArray`
 percent for a detector at 1 m, several percent for a close-in detector.
 
 The solid-angle array and an angle-derived `Delta_gamma` describe the same
-geometry. Applying one without the other double-counts. When F3 is implemented,
-decide the pair together: the clean choice is **raw ROI sum plus `Delta_gamma`
-from `surfaceAnglesPoint` at the ROI edges**, with the solid-angle array
-reserved for the per-pixel reconstruction path where it is genuinely required.
+geometry. Applying one without the other double-counts, so the pair has to be
+decided together with F3.
+
+**Resolved: ROI-summed integration does not apply a solid-angle correction at
+all, in either mode.** The array stays where it is genuinely required, the
+per-pixel reconstruction path, which forms a differential cross-section rather
+than a sum over an aperture - and which has its own independent switch
+(`reconstruction_job.py:1254`), so this does not touch it.
+
+Three steps to that conclusion:
+
+1. **A stationary ROI sum is a complete integral.** With the reflection inside
+   the region - open post-sample slits and a region sized from the projected
+   sample, orGUI's usual configuration - every photon is counted once, already
+   weighted by the solid angle of the pixel that caught it. There is nothing
+   to correct.
+2. **Closing the slits would not make it the right correction either.** A
+   truncated integral is Vlieg's `C_det` (F7), an aperture-against-profile
+   model. A per-pixel obliquity weight does not repair a cut-off tail, so the
+   conclusion does not rest on the open-slit assumption holding.
+3. **A rocking sum is a complete integral too**, over a `Delta_gamma` slice of
+   the rod. The slice is what `Delta_gamma` accounts for; there is still no
+   per-pixel weighting to undo.
+
+Leaving the correction in and compensating for it in the reduction was
+considered and rejected. It gives the identical `|F|^2` - what is divided out
+is exactly the scalar that was multiplied in - but it needs one more argument
+on the reduction, and it puts the stored intensity column and `F2_hkl` on
+different scales. What it cannot do is stay in *uncompensated*, because the
+two modes do not carry it symmetrically: for a rocking scan the
+omega-integrated counts in pixel row *j* go as that row's gamma height
+`dgamma_j`, so a corrected sum pairs with `Sum_j dgamma_j / Omega~_j` and the
+factor cancels against the acceptance, while a stationary sum has no
+`Delta_gamma` to cancel against and the factor survives into the saved number.
+The two modes would still disagree by `<1/Omega~>` - 0.7 % at 1 m, 7 % for a
+detector at 0.3 m - after F1-F3 were fixed.
+
+Measured on a calibrated 172 um detector with a 60-row region, where
+`Omega~ = solidAngleArray` is `cos^3` of the incidence angle on the detector
+face to `1e-9`, and `nominal = n * pixel / dist`:
+
+| dist | theta | `Delta_gamma_edge`/nominal | exact/nominal | exact/`Delta_gamma_edge` | `1/<Omega~>` |
+|---|---|---|---|---|---|
+| 1.0 m | 2.7 deg | 0.99774 | 1.00112 | 1.003383 | 1.003383 |
+| 0.3 m | 5.6 deg | 0.99039 | 1.00476 | 1.014512 | 1.014509 |
+| 0.3 m | 9.0 deg | 0.97549 | 1.01236 | 1.037795 | 1.037788 |
+
+The last two columns agreeing to `5e-6` is the cancellation. In closed form
+`Delta_gamma_edge = nominal cos^2(theta)` and `Omega~ = cos^3(theta)`, so the
+partner of a corrected sum is `nominal / cos(theta)`.
+
+Two consequences that survive the decision, because they are what would have
+gone wrong under the other one:
+
+* **`Delta_gamma` does not go away.** It is a *size* factor - how many rows of
+  rod the region accepted - while the solid angle is an *obliquity* factor.
+  They overlap only in the obliquity. `acceptance.out_of_plane_acceptance` is
+  still what the rocking path divides by.
+* **A constant nominal `n * pixel / dist` is not the "pixel-derived"
+  acceptance.** It is wrong by `1/cos(theta)`: 0.1 % at 1 m, 1.2 % at 9
+  degrees. `pixel_acceptance` times the row count is the same angle-derived
+  quantity as `out_of_plane_acceptance`, not a cheaper alternative to it.
+
+On the user-facing side, `useSolidAngleBox` (`QScanSelector.py:748`) drives
+nothing else: its only consumers are the two direct-space integration paths
+(`orGUI.py:1595` in `rocking_integrate`, `:5765` in `integrateROI`). Dropping
+the widget, the `solidAngle` key from `get_integration_options` and the `SOLA`
+badge is therefore the whole change. Old configuration files stay loadable
+without a shim - `set_integration_options` is an `if`/`elif` chain over the
+keys that are present, with no `else`, so a stored `solidAngle` entry is
+ignored rather than an error.
 
 ### F7 - `C_det` is assumed to be 1 in both modes
 
@@ -408,24 +475,31 @@ In order:
    time, not the sum over the scan: the rocking angle is the integration
    variable, the time is not. (F1)
 2. **Integrate in radian**, or divide by `180/pi` at the end. (F2)
-3. **Divide by `Delta_gamma`.** (F3) The input does not exist yet. The
-   estimator needs care and is the one piece of real design work left:
-   * The natural definition is the `gamma` span of the region of interest,
-     from `DetectorCalibration.surfaceAnglesPoint` at its edges, evaluated with
-     the per-frame arm angles from `scan_arm_angles`.
-   * A rectangular ROI in pixel coordinates is in general *rotated* with
-     respect to the `(gamma, delta)` axes. The corner-to-corner `gamma` span
-     then overestimates the acceptance at the `delta` of the rod. Decide
-     whether to take the span at fixed `delta` through the ROI centre or to
-     integrate the accepted `gamma` range over the in-plane profile.
-   * Settle F6 at the same time: raw ROI sum plus an angle-derived
-     `Delta_gamma`, or solid-angle-corrected sum plus a pixel-derived one, but
-     not a mix.
-4. **Record the mode and its inputs in the saved data**, next to `F2_hkl`: the
+3. **Divide by `Delta_gamma`.** (F3) The estimator now exists — section 4.4,
+   `corrections/acceptance.py` — so this is a wiring step rather than a design
+   one:
+   * `out_of_plane_acceptance` takes the span at the ROI centre column, which
+     is the resolution of the rotated-ROI question raised when this section was
+     written: the corner-to-corner span overestimates the acceptance at the
+     `delta` of the rod, so it is reported separately by `gamma_range` as a
+     diagnostic rather than used.
+   * Pass the per-frame arm angles from `scan_arm_angles` where they are known.
+     They turn out to matter far less than expected (section 4.4), but they
+     cost nothing.
+   * Stop applying the solid-angle correction first (step 4): `Delta_gamma`
+     and the solid-angle correction each carry the same obliquity, and
+     leaving both in double-counts it.
+4. **Stop applying the solid-angle correction to ROI sums, in both modes.**
+   (F6) A ROI sum is already a complete angular integral. This also touches
+   `orGUI.integrateROI`, and it changes stationary saved numbers by
+   `<1/Omega~>` - 0.7 % at 1 m, 7 % at 0.3 m - so it belongs in the same
+   breaking commit as the rocking wiring, not a later one. The reconstruction
+   path keeps its own solid-angle switch and is unaffected.
+5. **Record the mode and its inputs in the saved data**, next to `F2_hkl`: the
    acceptance, the normalization that was applied, and the active-area
    assumption of F4. Without them a saved rod cannot be put on a common scale
    after the fact.
-5. **Then verify on real data.** The overlap region of a rocking scan and a
+6. **Then verify on real data.** The overlap region of a rocking scan and a
    stationary scan on the same rod (Drnec Fig. 8, right) is the acceptance
    test. Simulation cannot catch F7, an incorrect `Delta_gamma` definition, or
    a beamline that reports counting time in the wrong place.
@@ -441,11 +515,13 @@ constants:
   `Lattice.uc_area`, `measurement.CLASSICAL_ELECTRON_RADIUS`).
 * `Phi_0` and `T` - user input. `T` is in the scan; `Phi_0` needs a flux
   measurement and a field to put it in.
-* `A` - `active_area_footprint` needs the beam width, beam height and sample
-  length. The footprint dialog already asks for the sample size and the beam
-  profile; it does not ask for the horizontal beam width, and `C_illum_area` is
-  a fraction rather than an area (F4). Multiplying the fraction by
-  `w * min(L, h/sin(alpha))` gives the absolute area.
+* `A` - `activearea.beam_limited_area(alpha, beam_width, sample_length,
+  profile)` returns it in square meter, as `w * L * C_illum_area(alpha, L)`
+  (section 4.3; `C_illum_area` alone is a fraction, not an area - F4). Of its
+  inputs only the **horizontal beam width** is missing: the footprint dialog
+  already asks for the sample size and the beam profile, and the profile
+  carries the vertical direction. `activearea.slit_limited_area` covers the
+  narrow-slit case instead.
 * `C_det` - F7, unmodelled.
 
 **Reflectivity comes for free.**
@@ -490,8 +566,18 @@ stationary one is what `reflectivity_from_structure_factor` reduces.
 
 ## 7. Open questions
 
-* **`Delta_gamma` for a rotated ROI** (section 5.3). The single piece of
-  physics not settled here.
+Nothing here now blocks the wiring. The two that used to head this list are
+settled: `Delta_gamma` for a rotated ROI in section 4.4 (the centre-column
+span, with the corner-to-corner span kept as a diagnostic), and the F6
+solid-angle double count in F6 itself (ROI-summed integration stops applying
+it, in both modes).
+
+* **The stored intensity column changes too, not only `F2_hkl`.** Dropping
+  the solid-angle correction moves it by `<1/Omega~>`, so external
+  post-processing scripts reading the intensity column - not just those
+  reading `F2_hkl` - see the break. It is the same factor either way; there
+  is no variant of F6 that leaves the intensity column alone and still puts
+  the modes on one scale.
 * **The reciprocal-space reconstruction as a third route.** Drnec section 4
   shows that voxel binning absorbs the Lorentz factor, so a reconstructed map
   needs `C_area`, `C_beam`, `P` and `Delta_l` but no Lorentz factor - which is
@@ -500,7 +586,7 @@ stationary one is what `reflectivity_from_structure_factor` reduces.
   piece of work and was not analysed here.
 * **`C_det` (F7)** is the only remaining mechanism that can break the mode
   equivalence after F1-F3, and it is the one that cannot be validated on
-  simulated data. It needs the real-data comparison of section 5.5.
+  simulated data. It needs the real-data comparison of section 5, step 6.
 * **Error propagation through the new factors.** `measurement` reduces
   intensities; the errors follow the same divisors, but a `Delta_gamma`
   estimated from the geometry has an uncertainty of its own that nothing
@@ -510,9 +596,22 @@ stationary one is what `reflectivity_from_structure_factor` reduces.
 
 ```powershell
 pytest orgui/datautils/xrayutils/test/test_corrections_measurement.py
+pytest orgui/datautils/xrayutils/test/test_corrections_acceptance.py
 pytest orgui/app/test/test_scan_mode_equivalence.py
 ```
 
-Note that `orgui/app/test/test_roi_sum_accel.py` fails in a checkout where the
-native ROI extension has not been built ("ROI acceleration is disabled"); that
-is unrelated to anything here.
+The F6 cancellation and the table in it are
+`test_corrections_acceptance.py::test_the_solid_angle_correction_and_the_acceptance_carry_one_obliquity`.
+
+None of these needs the native extension. Much of the rest of the suite does,
+and a checkout without it reports around 80 failures that have nothing to do
+with this work — `ctr_structure_factor_handover.md` section 3 has the
+out-of-tree build recipe that turns those into a clean
+1120 passed / 3 skipped run.
+
+## 9. Where the implementation stands
+
+This document is the physics. For the state of the branch — what is wired and
+what is not, the next commit in detail, the build recipe, and the predictions
+made here that turned out wrong — see
+[`ctr_structure_factor_handover.md`](ctr_structure_factor_handover.md).

@@ -265,6 +265,59 @@ def test_one_arm_angle_alone_is_rejected():
         )
 
 
+def test_the_solid_angle_correction_and_the_acceptance_carry_one_obliquity():
+    """Which acceptance goes with which sum, and why F6 keeps the raw one.
+
+    A rocking scan's omega-integrated counts in pixel row ``j`` go as that
+    row's gamma height ``dgamma_j``. A raw region sum -- which is what a
+    region-of-interest integration produces once F6 stops applying the
+    solid-angle correction -- therefore pairs with ``sum_j dgamma_j``, which
+    is what :func:`out_of_plane_acceptance` returns. A solid-angle corrected
+    sum would instead pair with ``sum_j dgamma_j / Omega~_j``, larger by the
+    region-mean correction that was applied to the counts.
+
+    The two are pinned together because the second is the trap that made F6
+    look optional: the correction cancels against the acceptance in a rocking
+    scan, so leaving it in *looks* harmless there. It is not, because a
+    stationary sum has no acceptance for it to cancel against.
+
+    The third assertion is the other trap: a *constant* nominal ``n * pixel /
+    dist`` is neither partner. On a flat detector
+    ``dgamma = nominal cos^2(theta)`` while ``Omega~ = cos^3(theta)``, so the
+    corrected-sum partner is ``nominal / cos(theta)`` -- above the nominal,
+    where the acceptance itself is below it.
+    """
+    det = _calibrated_detector()
+    alpha = np.deg2rad(0.6)
+    column, rows = SHAPE[1] // 2, 60
+    solid_angle = np.asarray(det.solidAngleArray(SHAPE), dtype=np.float64)
+
+    # Off the beam centre, where the detector is oblique enough to separate
+    # the three candidates.
+    for row in (480, 560):
+        edges = np.arange(row - rows / 2.0, row + rows / 2.0 + 1.0)
+        gamma = np.concatenate(
+            [acceptance._surface_gamma(det, e, column, alpha).ravel() for e in edges]
+        )
+        per_row = np.abs(np.diff(gamma))
+        omega = solid_angle[row - rows // 2:row + rows // 2, column]
+
+        edge_to_edge = acceptance.out_of_plane_acceptance(
+            det, float(row), float(column), float(rows), alpha
+        )
+        corrected_partner = np.sum(per_row / omega)
+
+        # The raw-sum partner is the edge-to-edge span.
+        np.testing.assert_allclose(np.sum(per_row), edge_to_edge, rtol=1e-9)
+        # The corrected-sum partner is that, divided by the mean correction.
+        np.testing.assert_allclose(
+            corrected_partner, edge_to_edge / omega.mean(), rtol=1e-4
+        )
+        # Neither equals the nominal, and they straddle it.
+        nominal = rows * PIXEL / DIST
+        assert edge_to_edge < nominal < corrected_partner
+
+
 def test_the_acceptance_is_what_the_reduction_asks_for():
     """It plugs straight into the rocking angular factor.
 
