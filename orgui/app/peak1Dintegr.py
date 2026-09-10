@@ -31,6 +31,7 @@ __license__ = "MIT License"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
+import json
 import logging
 import sys
 import os
@@ -59,7 +60,10 @@ from .. import resources
 from .. import logger_utils
 from ..datautils.xrayutils.corrections import beamprofile
 from ..datautils.xrayutils.corrections import (
+    acceptance as acceptance_corrections,
+    detector as detector_corrections,
     measurement as measurement_corrections,
+    normalization as normalization_corrections,
 )
 
 import numpy as np
@@ -113,6 +117,10 @@ def _compute_rocking_integration(
     C_rod=1.0,
     C_flux_on_sample=1.0,
     C_illum_area=1.0,
+    C_norm=1.0,
+    detector_acceptance=None,
+    solid_angle_mean=None,
+    angle_unit="deg",
     progress_callback=None,
     should_cancel=None,
 ):
@@ -158,6 +166,32 @@ def _compute_rocking_integration(
     :param C_illum_area:
         Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, illuminated-area
         factor.
+    :param C_norm:
+        Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, the per-frame
+        exposure-time and monitor divisor. It is applied **inside** the
+        rocking integral, not to the result: with a varying counting time or a
+        drifting monitor the quantity Vlieg's expression integrates is
+        :math:`\\int N(\\omega)/(T M)\\,d\\omega`, and dividing the finished
+        integral by a mean would only be equivalent for constant counters.
+    :param detector_acceptance:
+        Out-of-plane acceptance :math:`\\Delta\\gamma` of the region of
+        interest per ``s`` point, in **radian**, shape ``(n_s,)``. A rocking
+        scan intercepts a slice of rod proportional to it, so it divides
+        ``F2_hkl``. ``None`` leaves it out, which reproduces the historical,
+        acceptance-blind scale.
+    :param solid_angle_mean:
+        Region mean of :math:`1/\\widetilde{\\Omega}` per ``s`` point, shape
+        ``(n_s,)``, when the solid-angle correction is already inside the
+        curves. It divides ``F2_hkl``, removing it again: a region sum is the
+        complete angular integral already, so the correction double-counts the
+        detector obliquity in a structure factor even though it is what a
+        broad, non-rod feature wants on its intensity. ``None`` when the
+        correction was not applied.
+    :param str angle_unit:
+        Unit of ``axis``, ``'deg'`` or ``'rad'``. The published expressions
+        integrate the rocking angle in radian; ``'deg'`` converts the integral
+        when ``F2_hkl`` is formed, leaving the stored intensities and interval
+        widths in the unit they were measured in.
     :param progress_callback:
         Optional callable invoked with the current ``s`` index after each
         point is processed.
@@ -182,6 +216,7 @@ def _compute_rocking_integration(
                 "raw_cnts": [],
                 "raw_cnts_errors": [],
                 "int_interval": [],
+                "C_norm": [],
                 "C_Lor": [],
                 "C_rod": [],
                 "C_flux_on_sample": [],
@@ -216,6 +251,17 @@ def _compute_rocking_integration(
             cnts_errors = croibg_errors[roi_slice]
 
             C_corr = np.ones(cnts.size, dtype=float)
+            if not np.isscalar(C_norm) or C_norm != 1.0:
+                # Per-frame, so it belongs under the integral sign; see the
+                # C_norm parameter documentation.
+                C_norm_roi = np.broadcast_to(
+                    np.asarray(C_norm, dtype=float), croibg_curves.shape
+                )[i][roi_slice]
+                int_data[roikey]["C_norm"].append(np.mean(C_norm_roi))
+                C_corr = C_corr * C_norm_roi
+            else:
+                int_data[roikey]["C_norm"].append(1.0)
+
             if use_lorentz:
                 int_data[roikey]["C_Lor"].append(np.mean(C_Lor[i][roi_slice]))
                 int_data[roikey]["C_rod"].append(np.mean(C_rod[i][roi_slice]))
@@ -404,8 +450,26 @@ def _compute_rocking_integration(
     result["auxil"] = auxil
 
     if use_lorentz:
-        result["F2_hkl"] = croibg / (C_Lorentz * C_rod_intersect)
-        result["F2_hkl_errors"] = croibg_errors / (C_Lorentz * C_rod_intersect)
+        # The rocking angle is the integration variable and must be in radian
+        # (Vlieg eq. 42, Drnec eq. 2). The exposure and monitor divisor is
+        # already inside croibg, applied per frame above, so only the angle
+        # conversion is left for normalized_intensity to do here.
+        intensity = measurement_corrections.normalized_intensity(
+            croibg, angle_unit=angle_unit
+        )
+        intensity_errors = measurement_corrections.normalized_intensity(
+            croibg_errors, angle_unit=angle_unit
+        )
+        # The mode components are interval-weighted means over the rocking
+        # interval, which is why they are multiplied here rather than asking
+        # measurement.angular_factor to rebuild eta from point angles.
+        denominator = C_Lorentz * C_rod_intersect
+        if detector_acceptance is not None:
+            denominator = denominator * np.asarray(detector_acceptance, dtype=float)
+        if solid_angle_mean is not None:
+            denominator = denominator * np.asarray(solid_angle_mean, dtype=float)
+        result["F2_hkl"] = intensity / denominator
+        result["F2_hkl_errors"] = intensity_errors / denominator
 
     return result
 
@@ -1304,6 +1368,184 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     roih5grp[roikey]["to"][:] = to_ar
             self.plotRoCurve(self._idx)
 
+    def _rocking_normalization(self, aux, size):
+        """Per-frame exposure and monitor divisor of the rocking scan.
+
+        Unlike the stationary path this cannot ask a live scan object: a
+        rocking integration runs off the database, so the counters are read
+        from the ``auxillary`` group that
+        :meth:`orgui.app.orGUI.orGUI.rocking_integrate` copied there. Which
+        counters count as a monitor is the same setting the stationary
+        integration and the reconstruction use, so all three normalize
+        identically.
+
+        A counter that is simply not there is not an error -- a backend that
+        does not declare ``exposure_time`` in ``auxillary_counters`` never
+        stored one. The names of the factors that did apply are returned so
+        they can be saved beside ``F2_hkl``; without them a rod cannot be put
+        on a common scale after the fact.
+
+        :param dict aux: Auxiliary counters, each of shape ``(n_pts,)``.
+        :param int size: Number of frames of the rocking scan.
+        :returns: ``(divisor, applied)`` with the divisor of shape
+            ``(size,)``.
+        :rtype: tuple
+        """
+        config_target = self.database.config_target
+        monitor_names = tuple(
+            getattr(config_target, "reconstruction_monitor_corrections", ()) or ()
+        )
+
+        exposure = aux.get("exposure_time")
+        if exposure is None:
+            logger.warning(
+                "The rocking scan stores no exposure_time counter, so the "
+                "integrated intensities are not normalized to counting time. "
+                "They are then only comparable to other scans of the same "
+                "duration. The scan backend decides this by declaring "
+                "'exposure_time' in auxillary_counters."
+            )
+
+        monitors = {}
+        for name in monitor_names:
+            if name in aux:
+                monitors[name] = aux[name]
+            else:
+                logger.warning(
+                    "Monitor counter %r is configured but was not stored with "
+                    "this rocking scan; skipping it.",
+                    name,
+                )
+
+        return normalization_corrections.normalization_divisor(
+            size, exposure_time=exposure, monitors=monitors
+        )
+
+    def _rocking_solid_angle_mean(self, scangroup, cnters, x, y):
+        """Region mean of the solid-angle correction that was applied, or None.
+
+        The solid-angle correction is applied to the *intensity* when the
+        rocking curves are extracted, which is useful there: for a broad,
+        non-rod feature a differential cross-section is what is wanted. It
+        must not reach a structure factor, though, because a region sum is
+        already the complete angular integral with every pixel weighted by the
+        solid angle it subtends. So it is measured over the same regions here
+        and divided back out of ``F2_hkl``. See
+        ``doc/design/ctr_structure_factor_scale.md`` finding F6.
+
+        Whether it was applied is a property of the *extraction*, not of the
+        switches in this dialog, so it is read from the configuration snapshot
+        stored with the scan rather than from the current GUI state.
+
+        :param scangroup: The scan group holding the ``configuration`` written
+            when the rocking curves were extracted.
+        :param cnters: The ``rois`` group of the rocking scan.
+        :param x: Region centre column per ``s`` point, in pixels.
+        :param y: Region centre row per ``s`` point, in pixels.
+        :returns: ``(mean, applied)`` -- the per-``s`` mean of
+            :math:`1/\\widetilde{\\Omega}` and whether it will be divided out,
+            or ``(None, False)`` when the correction was not applied or cannot
+            be established.
+        :rtype: tuple
+        """
+        try:
+            raw = scangroup["configuration/orgui/integration_corrections/json"][()]
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            was_applied = bool(json.loads(str(raw)).get("use_solid_angle", False))
+        except Exception:
+            logger.warning(
+                "Cannot tell from this scan's stored configuration whether the "
+                "solid angle correction was applied when the rocking curves "
+                "were extracted, so it is not divided out of F2_hkl. If it was "
+                "applied, F2_hkl carries the detector obliquity and will not "
+                "agree with a stationary integration of the same rod."
+            )
+            return None, False
+
+        if not was_applied:
+            return None, False
+
+        config_target = self.database.config_target
+        detector = getattr(getattr(config_target, "ubcalc", None), "detectorCal", None)
+        if detector is None:
+            logger.warning(
+                "The solid angle correction was applied to these rocking "
+                "curves, but no calibrated detector is available to measure it "
+                "over the regions of interest, so it is not divided out of "
+                "F2_hkl."
+            )
+            return None, False
+
+        hsize = np.asarray(cnters["hsize"][()], dtype=float)
+        vsize = np.asarray(cnters["vsize"][()], dtype=float)
+        if hsize.ndim > 1:
+            hsize = hsize[:, 0]
+        if vsize.ndim > 1:
+            vsize = vsize[:, 0]
+
+        mean = detector_corrections.roi_mean_inverse_solid_angle(
+            detector,
+            np.asarray(y, dtype=float),
+            np.asarray(x, dtype=float),
+            np.maximum(vsize, 1.0),
+            np.maximum(hsize, 1.0),
+        )
+        return np.asarray(mean, dtype=float), True
+
+    def _rocking_acceptance(self, cnters, x, y):
+        """Out-of-plane acceptance of every region of interest, in radian.
+
+        A rocking scan intercepts a slice of rod proportional to
+        :math:`\\Delta\\gamma` (Vlieg equation 20), so ``F2_hkl`` is only on
+        the same scale as a stationary measurement once it is divided by it.
+
+        The region centre and its vertical size are stored per ``s`` point.
+        Note the coordinate order: ``surfaceAnglesPoint`` takes pyFAI
+        dimension 1 first, which is the detector *row*, and orGUI's ``y`` is
+        the row while ``x`` is the column -- every call site in the
+        application passes them in that swapped order.
+
+        The acceptance is evaluated at the **calibrated** arm position. The
+        span a region subtends is invariant under an arm rotation to nine
+        digits, because that rotation is about the very axis
+        :math:`\\gamma` is measured around, so this costs nothing measurable;
+        see ``doc/design/ctr_structure_factor_scale.md`` section 4.4.
+
+        :param cnters: The ``rois`` group of the rocking scan.
+        :param x: Region centre column per ``s`` point, in pixels.
+        :param y: Region centre row per ``s`` point, in pixels.
+        :returns: ``(acceptance, applied)`` -- the acceptance in radian of
+            shape ``(n_s,)``, or ``(None, False)`` when no calibrated
+            detector is reachable.
+        :rtype: tuple
+        """
+        config_target = self.database.config_target
+        detector = getattr(getattr(config_target, "ubcalc", None), "detectorCal", None)
+        if detector is None:
+            logger.warning(
+                "No calibrated detector is available, so the out-of-plane "
+                "acceptance of the regions of interest cannot be calculated. "
+                "F2_hkl is left on the acceptance-blind scale and will not "
+                "agree with a stationary integration of the same rod."
+            )
+            return None, False
+
+        vsize = cnters["vsize"][()]
+        vsize = np.asarray(vsize, dtype=float)
+        if vsize.ndim > 1:
+            vsize = vsize[:, 0]
+        alpha_pk = np.deg2rad(np.asarray(cnters["alpha_pk"][()], dtype=float))
+
+        acceptance = acceptance_corrections.out_of_plane_acceptance(
+            detector,
+            np.asarray(y, dtype=float),
+            np.asarray(x, dtype=float),
+            vsize,
+            alpha_pk,
+        )
+        return np.asarray(acceptance, dtype=float), True
+
     def integrate(self):
         """Integrate rocking-scan ROIs.
 
@@ -1367,6 +1609,36 @@ class RockingPeakIntegrator(qt.QMainWindow):
             C_flux_on_sample = 1.0
             C_illum_area = 1.0
 
+        if cnters["x"].ndim > 1:
+            warnings.warn(
+                "You are using an old data base orGUI v1.3.0-alpha"
+                "X and Y pixel coordinates of rocking scans will be incorrect"
+            )
+            x = cnters["x"][:, 0][
+                ()
+            ]  # may provide fix of database here, if anyone asks
+            y = cnters["y"][:, 0][
+                ()
+            ]  # may provide fix of database here, if anyone asks
+        else:
+            x = cnters["x"][()]
+            y = cnters["y"][()]
+
+        C_norm, normalization_applied = self._rocking_normalization(aux, axis.size)
+        C_norm = np.broadcast_to(C_norm, np.shape(curves["croibg"])).copy()
+
+        # Only F2_hkl is divided by these, so asking for them with the
+        # Lorentz switch off would warn about a detector nothing needs.
+        detector_acceptance, acceptance_applied = None, False
+        solid_angle_mean, solid_angle_compensated = None, False
+        if self.lorentzButton.isChecked():
+            detector_acceptance, acceptance_applied = self._rocking_acceptance(
+                cnters, x, y
+            )
+            solid_angle_mean, solid_angle_compensated = (
+                self._rocking_solid_angle_mean(scangroup, cnters, x, y)
+            )
+
         self.database.nxfile[self._currentRoInfo["name"] + "/integration/"]
         roi_info = h5todict(
             self.database.nxfile, self._currentRoInfo["name"] + "/integration/"
@@ -1389,6 +1661,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
             C_rod=C_rod,
             C_flux_on_sample=C_flux_on_sample,
             C_illum_area=C_illum_area,
+            C_norm=C_norm,
+            detector_acceptance=detector_acceptance,
+            solid_angle_mean=solid_angle_mean,
+            angle_unit="deg",
             progress_callback=progress.update,
             should_cancel=progress.wasCanceled,
         )
@@ -1447,21 +1723,6 @@ class RockingPeakIntegrator(qt.QMainWindow):
             suffix = f"_{i}"
             i += 1
         availname1 = name1 + suffix
-
-        if cnters["x"].ndim > 1:
-            warnings.warn(
-                "You are using an old data base orGUI v1.3.0-alpha"
-                "X and Y pixel coordinates of rocking scans will be incorrect"
-            )
-            x = cnters["x"][:, 0][
-                ()
-            ]  # may provide fix of database here, if anyone asks
-            y = cnters["y"][:, 0][
-                ()
-            ]  # may provide fix of database here, if anyone asks
-        else:
-            x = cnters["x"][()]
-            y = cnters["y"][()]
 
         datas1 = {
             "@NX_class": "NXdata",
@@ -1522,6 +1783,25 @@ class RockingPeakIntegrator(qt.QMainWindow):
             measurement[availname1]["counters"]["F2_hkl"] = F2_hkl
             measurement[availname1]["counters"]["F2_hkl_errors"] = F2_hkl_errors
             measurement[availname1]["@signal"] = "counters/F2_hkl"
+            # What the reduction actually divided out. A saved rod cannot be
+            # put on a common scale with another scan after the fact without
+            # this, and which factors were available depends on the scan.
+            reduction = {
+                "@NX_class": "NXcollection",
+                "@mode": mode,
+                "@angle_unit": "rad",
+                "@normalization_applied": ",".join(normalization_applied) or "none",
+                "@acceptance_applied": bool(acceptance_applied),
+                "@solid_angle_compensated": bool(solid_angle_compensated),
+                "@active_area_applied": bool(self.footprintButton.isChecked()),
+            }
+            if detector_acceptance is not None:
+                reduction["detector_acceptance"] = detector_acceptance
+                reduction["@detector_acceptance_unit"] = "rad"
+            if self.footprintButton.isChecked():
+                reduction["sample_size"] = L
+                reduction["@sample_size_unit"] = "m"
+            measurement[availname1]["reduction"] = reduction
 
         self.database.add_nxdict(
             measurement,

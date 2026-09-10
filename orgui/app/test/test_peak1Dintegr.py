@@ -13,9 +13,15 @@ The tests pin the corrections described in the design record and protect the
 saved rocking intensities and uncertainties from regression.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 
-from orgui.app.peak1Dintegr import _compute_rocking_integration, _trapz_impl
+from orgui.app.peak1Dintegr import (
+    RockingPeakIntegrator,
+    _compute_rocking_integration,
+    _trapz_impl,
+)
 
 
 def _piecewise_curve(axis, regions, background=0.0):
@@ -291,3 +297,209 @@ def test_integrated_error_is_finite_when_raw_signal_integral_is_zero():
     )
 
     assert np.all(np.isfinite(result["croibg_errors"])), result["croibg_errors"]
+
+
+def test_normalization_is_applied_inside_the_rocking_integral():
+    """A varying counting time must be divided out per frame.
+
+    Vlieg's rocking expression integrates ``N(omega)/(T M)`` over the rocking
+    angle, so the divisor belongs under the integral sign. Dividing the
+    finished integral by a mean counting time is only the same thing when the
+    counting time is constant, and a scan whose exposure drifts is exactly the
+    case the normalization exists for.
+
+    The curve is flat at ``10`` and the exposure ramps as ``T = 2 + omega``,
+    which makes both readings closed forms rather than a re-implementation of
+    the code:
+
+    * per frame, as required:
+      ``Int 10/(2+omega) domega = 10 ln(2.4/1.6)`` over ``[-0.4, 0.4]``
+    * divided afterwards by the mean exposure, which must not be what comes
+      out: ``10 * 0.8 / 2 = 4`` exactly, since the mean of ``T`` over a
+      symmetric interval is 2.
+
+    They differ by 1.4 %, so the wrong one cannot pass.
+    """
+    axis = np.linspace(-1.0, 1.0, 401)
+    curve = _piecewise_curve(axis, [(-0.5, 0.5, 10.0)])
+    exposure = 2.0 + axis
+
+    result = _compute_rocking_integration(
+        np.array([0.0]),
+        axis,
+        curve[None, :],
+        np.sqrt(curve)[None, :],
+        _roi_info(0.0, {"sig_1": (-0.4, 0.4)}),
+        {},
+        False,
+        False,
+        C_norm=exposure[None, :],
+        angle_unit="rad",
+    )
+
+    per_frame = 10.0 * np.log(2.4 / 1.6)
+    np.testing.assert_allclose(result["croibg"], per_frame, rtol=1e-5)
+    assert not np.isclose(per_frame, 4.0, rtol=1e-3)
+
+
+def test_the_rocking_integral_is_converted_to_radian_for_f2():
+    """``F2_hkl`` carries the radian integral; the stored intensity does not.
+
+    The published expressions integrate the rocking angle in radian, but the
+    motor axis is in degrees and ``croibg`` is kept in the unit it was
+    measured in, so the ``180/pi`` shows up as the ratio between them.
+    """
+    axis = np.linspace(-1.0, 1.0, 401)
+    curve = _piecewise_curve(axis, [(-0.5, 0.5, 10.0)])
+    ones = np.ones((1, axis.size))
+
+    result = _compute_rocking_integration(
+        np.array([0.0]),
+        axis,
+        curve[None, :],
+        np.sqrt(curve)[None, :],
+        _roi_info(0.0, {"sig_1": (-0.4, 0.4)}),
+        {},
+        True,
+        False,
+        C_Lor=ones,
+        C_rod=ones,
+        angle_unit="deg",
+    )
+
+    np.testing.assert_allclose(
+        result["F2_hkl"] / result["croibg"], np.deg2rad(1.0), rtol=1e-12
+    )
+
+
+def test_the_acceptance_divides_f2_and_only_f2():
+    """``Delta_gamma`` scales the structure factor, not the intensity.
+
+    The intensity column stays the measured integral; the acceptance is part
+    of forming ``F2_hkl``, because it is the rod slice the region intercepted
+    rather than anything about the counts.
+    """
+    axis = np.linspace(-1.0, 1.0, 401)
+    curve = _piecewise_curve(axis, [(-0.5, 0.5, 10.0)])
+    ones = np.ones((1, axis.size))
+    acceptance = np.array([np.deg2rad(0.4)])
+
+    common = dict(
+        C_Lor=ones,
+        C_rod=ones,
+        angle_unit="rad",
+    )
+    args = (
+        np.array([0.0]),
+        axis,
+        curve[None, :],
+        np.sqrt(curve)[None, :],
+        _roi_info(0.0, {"sig_1": (-0.4, 0.4)}),
+        {},
+        True,
+        False,
+    )
+    without = _compute_rocking_integration(*args, **common)
+    with_it = _compute_rocking_integration(
+        *args, detector_acceptance=acceptance, **common
+    )
+
+    np.testing.assert_allclose(with_it["croibg"], without["croibg"], rtol=1e-12)
+    np.testing.assert_allclose(
+        with_it["F2_hkl"] * acceptance, without["F2_hkl"], rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        with_it["F2_hkl_errors"] * acceptance, without["F2_hkl_errors"], rtol=1e-12
+    )
+
+
+class _RowOnlyDetector:
+    """A detector whose exit angle depends only on pyFAI dimension 1.
+
+    ``surfaceAnglesPoint`` takes the *row* first, so a gamma built from its
+    first argument alone is a direct probe of whether the caller got the
+    coordinate order right.
+    """
+
+    PER_ROW = 1e-4
+
+    def surfaceAnglesPoint(self, x, y, alpha_i, gamma_arm=None, delta_arm=None):
+        gamma = self.PER_ROW * np.asarray(x, dtype=float)
+        return gamma, np.zeros_like(gamma)
+
+
+def _stub(detector=None, monitors=()):
+    """Minimal stand-in for the parts of the integrator the helpers touch."""
+    ubcalc = None if detector is None else SimpleNamespace(detectorCal=detector)
+    config_target = SimpleNamespace(
+        ubcalc=ubcalc, reconstruction_monitor_corrections=tuple(monitors)
+    )
+    return SimpleNamespace(database=SimpleNamespace(config_target=config_target))
+
+
+def test_the_acceptance_reads_the_row_from_y_and_the_column_from_x():
+    """orGUI's ``y`` is the detector row, and pyFAI takes the row first.
+
+    ``detvsize, dethsize = detector.shape`` at ``orGUI.py:1096`` fixes ``y``
+    as the row and ``vsize`` as its extent, and every ``surfaceAnglesPoint``
+    call in the application passes the two coordinates swapped. Getting this
+    backwards yields a plausible but wrong acceptance, so it is pinned here:
+    the result must follow ``vsize`` and ``y`` and ignore ``x``.
+    """
+    detector = _RowOnlyDetector()
+    vsize = np.array([10.0, 40.0, 80.0])
+    cnters = {
+        "vsize": vsize,
+        "alpha_pk": np.zeros(3),
+    }
+
+    acceptance, applied = RockingPeakIntegrator._rocking_acceptance(
+        _stub(detector), cnters, x=np.array([5.0, 300.0, 470.0]), y=np.full(3, 250.0)
+    )
+
+    assert applied is True
+    np.testing.assert_allclose(acceptance, vsize * detector.PER_ROW, rtol=1e-12)
+
+
+def test_a_missing_detector_leaves_the_acceptance_out_rather_than_failing():
+    """CLI use without a calibration must not lose the integration."""
+    cnters = {"vsize": np.array([40.0]), "alpha_pk": np.zeros(1)}
+
+    acceptance, applied = RockingPeakIntegrator._rocking_acceptance(
+        _stub(None), cnters, x=np.array([100.0]), y=np.array([200.0])
+    )
+
+    assert acceptance is None
+    assert applied is False
+
+
+def test_the_rocking_normalization_uses_the_stored_counters():
+    """Exposure and the configured monitors multiply into one divisor."""
+    aux = {
+        "exposure_time": np.array([2.0, 4.0]),
+        "mondio": np.array([10.0, 5.0]),
+        "unused": np.array([7.0, 7.0]),
+    }
+
+    divisor, applied = RockingPeakIntegrator._rocking_normalization(
+        _stub(monitors=("mondio",)), aux, 2
+    )
+
+    np.testing.assert_allclose(divisor, [20.0, 20.0], rtol=1e-12)
+    assert applied == ["exposure", "monitor:mondio"]
+
+
+def test_a_missing_exposure_counter_is_skipped_and_recorded():
+    """A backend that declares no exposure_time still integrates.
+
+    ``P212_tools`` and the base ``Scan`` return an empty
+    ``auxillary_counters``, so nothing was stored to normalize by. That is a
+    scale the user has to know about, not a reason to fail the job, and
+    ``applied`` is what records it.
+    """
+    divisor, applied = RockingPeakIntegrator._rocking_normalization(
+        _stub(monitors=("mondio",)), {}, 3
+    )
+
+    np.testing.assert_allclose(divisor, np.ones(3), rtol=1e-12)
+    assert applied == []

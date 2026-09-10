@@ -145,15 +145,39 @@ def _roi_info(size):
     }
 
 
-def _orgui_rocking_f2(rod, acceptance):
-    """``F2_hkl`` as :mod:`orgui.app.peak1Dintegr` computes it today."""
+def _orgui_rocking_f2(rod, acceptance, reduce=True, solid_angle_mean=None):
+    """``F2_hkl`` as :mod:`orgui.app.peak1Dintegr` computes it.
+
+    :param rod: The ``rod`` fixture.
+    :param acceptance: Out-of-plane acceptance per rod point, in radian. It
+        both shapes the simulated measurement and, when ``reduce`` is set, is
+        divided back out.
+    :param bool reduce: Pass the exposure/monitor divisor, the acceptance and
+        the radian conversion, as :meth:`RockingPeakIntegrator.integrate`
+        does. ``False`` reproduces the historical scale, which is what the
+        distortion test below needs to compare against.
+    """
     ell, alpha, delta, gamma, _, _, _ = rod
     axis, curves = _simulate_rocking(rod, acceptance)
+    if solid_angle_mean is not None:
+        # As the per-pixel correction does when the switch is on: it scales
+        # the counts, region by region.
+        curves = curves * np.asarray(solid_angle_mean)[:, None]
     shape = curves.shape
     lorentz = np.broadcast_to(
         (1.0 / (np.sin(delta) * np.cos(alpha) * np.cos(gamma)))[:, None], shape
     )
     rod_interception = np.broadcast_to(np.cos(gamma)[:, None], shape)
+    extra = {}
+    if reduce:
+        extra = dict(
+            C_norm=np.full(shape, ROCKING_EXPOSURE * ROCKING_MONITOR),
+            detector_acceptance=acceptance,
+            solid_angle_mean=solid_angle_mean,
+            angle_unit="deg",
+        )
+    else:
+        extra = dict(angle_unit="rad")  # no conversion: integrate as measured
     result = _compute_rocking_integration(
         ell,
         axis,
@@ -165,14 +189,23 @@ def _orgui_rocking_f2(rod, acceptance):
         False,
         C_Lor=lorentz,
         C_rod=rod_interception,
+        **extra,
     )
     return result["F2_hkl"]
 
 
-def _orgui_stationary_f2(rod):
-    """``F2_hkl`` as :mod:`orgui.app.integration_corrections` computes it."""
+def _orgui_stationary_f2(rod, solid_angle_mean=None):
+    """``F2_hkl`` as :mod:`orgui.app.integration_corrections` computes it.
+
+    :param solid_angle_mean: When given, the region-mean solid-angle
+        correction is applied to the counts, as the per-pixel array does when
+        the switch is on, and handed to the reduction so that it comes back
+        out of the structure factor.
+    """
     ell, alpha, delta, gamma, _, _, _ = rod
     counts = _simulate_stationary(rod)
+    if solid_angle_mean is not None:
+        counts = counts * np.asarray(solid_angle_mean)
     factors = ic.stationary_correction_factors(
         alpha,
         delta,
@@ -181,6 +214,7 @@ def _orgui_stationary_f2(rod):
         normalization=np.full(
             ell.size, STATIONARY_EXPOSURE * STATIONARY_MONITOR
         ),
+        solid_angle_mean=solid_angle_mean,
     )
     intensity, errors = ic.apply_stationary_corrections(
         counts, np.sqrt(counts), factors
@@ -260,46 +294,64 @@ def test_the_stationary_path_recovers_the_rod_up_to_one_constant(rod):
     np.testing.assert_allclose(ratio, ratio[0], rtol=1e-12)
 
 
-def test_rocking_and_stationary_paths_differ_by_the_missing_normalizations(rod):
-    """The gap between the two paths, pinned to the factor it is.
+def test_rocking_and_stationary_paths_agree(rod):
+    """The two integration paths of orGUI now land on one scale.
 
-    With the acceptance held constant the two paths differ by exactly
-    ``exposure * monitor * Delta_gamma_in_degrees``: the rocking path applies
-    neither the exposure/monitor normalization nor the out-of-plane
-    acceptance, and integrates the rocking angle in degrees rather than
-    radian. The degree-to-radian factor and the acceptance combine into the
-    acceptance expressed in degrees.
+    This is issue #82. The same rod, simulated as a rocking scan and as a
+    stationary scan with *different* counting times and monitors, goes through
+    the two real integration paths and comes out with the same ``F2_hkl``.
 
-    This test characterizes today's behavior. It must be updated -- to a
-    plain equality -- when the rocking path adopts the unified reduction.
+    This test used to characterize the gap between the paths, which was
+    exactly ``exposure * monitor * Delta_gamma_in_degrees`` -- the rocking
+    path applied neither the exposure/monitor normalization nor the
+    out-of-plane acceptance, and integrated the rocking angle in degrees.
+    Those three are the wiring this asserts is in place; the factor they used
+    to leave behind is kept below as the thing that must not come back.
     """
     ell = rod[0]
     acceptance = np.full(ell.size, np.deg2rad(0.35))
 
-    ratio = _orgui_rocking_f2(rod, acceptance) / _orgui_stationary_f2(rod)
-    expected = ROCKING_EXPOSURE * ROCKING_MONITOR * np.rad2deg(acceptance)
+    rocking = _orgui_rocking_f2(rod, acceptance)
+    stationary = _orgui_stationary_f2(rod)
 
-    np.testing.assert_allclose(ratio, expected, rtol=1e-6)
+    np.testing.assert_allclose(rocking / stationary, 1.0, rtol=1e-6)
+
+    # The historical scale, for contrast: without the reduction the rocking
+    # path overshoots by the acceptance expressed in degrees times the
+    # counting time and monitor it never divided out.
+    historical = _orgui_rocking_f2(rod, acceptance, reduce=False)
+    gap = ROCKING_EXPOSURE * ROCKING_MONITOR * np.rad2deg(acceptance)
+    np.testing.assert_allclose(historical / stationary, gap, rtol=1e-6)
 
 
-def test_a_resized_region_of_interest_distorts_the_rocking_rod(rod):
-    """The missing acceptance is not merely an overall scale factor.
+def test_a_resized_region_of_interest_no_longer_distorts_the_rocking_rod(rod):
+    """The acceptance divisor removes a *shape* error, not just a scale one.
 
     :func:`orgui.app.ROIutils.calc_corrections` sizes regions of interest
     from the projected sample size and the parallax at each detector
     position, so their out-of-plane acceptance changes along a scan. Without
     the ``1/Delta_gamma`` divisor that change is carried straight into
-    ``F2_hkl``, so the same rod measured with a resized region of interest
-    comes out with a different *shape*, not just a different scale.
+    ``F2_hkl`` and the same rod comes out with a different shape; with it the
+    rod is independent of how the regions were sized.
+
+    Both halves are asserted, because the second is what makes the first
+    worth having: a factor 2.3 of distortion across this rod, cured.
     """
     ell = rod[0]
     fixed = np.full(ell.size, np.deg2rad(0.35))
     resized = np.deg2rad(0.35) * np.linspace(0.7, 1.6, ell.size)
 
-    with_fixed = _orgui_rocking_f2(rod, fixed)
-    with_resized = _orgui_rocking_f2(rod, resized)
+    # With the reduction: the resized regions give the same rod.
+    np.testing.assert_allclose(
+        _orgui_rocking_f2(rod, resized) / _orgui_rocking_f2(rod, fixed),
+        1.0,
+        rtol=1e-6,
+    )
 
-    carried = with_resized / with_fixed
+    # Without it: the region sizing leaks into the rod shape.
+    carried = _orgui_rocking_f2(rod, resized, reduce=False) / _orgui_rocking_f2(
+        rod, fixed, reduce=False
+    )
     shape_change = carried / carried[0]
     np.testing.assert_allclose(
         shape_change, np.linspace(0.7, 1.6, ell.size) / 0.7, rtol=1e-6
@@ -326,3 +378,41 @@ def test_the_stationary_path_assumes_a_slit_independent_active_area(rod):
 
     spread = ratio.max() / ratio.min() - 1.0
     assert spread > 1e-3, "delta must vary enough along the rod to see this"
+
+
+def test_the_solid_angle_correction_does_not_reach_the_structure_factor(rod):
+    """Switching it on changes the intensity but not ``F2_hkl``, in both modes.
+
+    The detector solid-angle correction stays available because it is the
+    right thing for a broad, non-rod feature, where a differential cross
+    section is what is wanted. For a rod it is not: a region sum is already
+    the complete angular integral, each pixel weighted by the solid angle it
+    subtends. So the reduction divides it back out, and a structure factor is
+    the same number whether or not the switch was on.
+
+    The factor here varies along the rod, as a real one does -- the obliquity
+    grows as the reflection moves up the detector -- so a leftover would show
+    up as a shape error and not merely a scale.
+    """
+    ell = rod[0]
+    acceptance = np.full(ell.size, np.deg2rad(0.35))
+    solid_angle = 1.0 + 0.07 * np.linspace(0.0, 1.0, ell.size)
+
+    np.testing.assert_allclose(
+        _orgui_stationary_f2(rod, solid_angle_mean=solid_angle),
+        _orgui_stationary_f2(rod),
+        rtol=1e-12,
+    )
+    np.testing.assert_allclose(
+        _orgui_rocking_f2(rod, acceptance, solid_angle_mean=solid_angle),
+        _orgui_rocking_f2(rod, acceptance),
+        rtol=1e-12,
+    )
+
+    # And the modes still agree with the correction enabled.
+    np.testing.assert_allclose(
+        _orgui_rocking_f2(rod, acceptance, solid_angle_mean=solid_angle)
+        / _orgui_stationary_f2(rod, solid_angle_mean=solid_angle),
+        1.0,
+        rtol=1e-6,
+    )

@@ -924,7 +924,12 @@ class QScanSelector(qt.QMainWindow):
     #: corrections button shows.
     CORRECTION_BADGES = (
         ("useMaskBox", "MASK", "#b58900", "Pixel mask applied"),
-        ("useSolidAngleBox", "SOLA", "#268bd2", "Solid angle correction"),
+        (
+            "useSolidAngleBox",
+            "SOLA",
+            "#268bd2",
+            "Solid angle correction (intensity only; divided back out of F2_hkl)",
+        ),
         ("usePolarizationBox", "POL", "#6c71c4", "Polarization correction"),
         (
             "useLorentzBox",
@@ -1903,6 +1908,20 @@ class IntegrationOptionsDialog(qt.QDialog):
         )
         self.maskToolBtn.clicked.connect(self._openMaskTool)
         detectorLayout.addWidget(self.maskToolBtn)
+        selector.useSolidAngleBox.setToolTip(
+            "Divide each pixel by the solid angle it subtends, giving an "
+            "intensity proportional to the differential cross section. This "
+            "is what a broad or diffuse feature needs.\n\n"
+            "It does not affect structure factors. A rod is integrated by "
+            "summing a region, which already gives the complete angular "
+            "integral with every pixel weighted by its own solid angle, so "
+            "the correction is measured over the region and divided back out "
+            "when F2_hkl is formed. Leaving it in would double-count the "
+            "detector obliquity: 0.7 % for a detector at 1 m and 7 % at "
+            "0.3 m, varying across the detector.\n\n"
+            "The reciprocal-space reconstruction has its own switch, and does "
+            "need this correction."
+        )
         detectorLayout.addWidget(selector.useSolidAngleBox)
         detectorLayout.addWidget(selector.usePolarizationBox)
         detector.setLayout(detectorLayout)

@@ -6383,8 +6383,38 @@ ub : gui for UB matrix and angle calculations
                 )
             )
 
+        # The solid-angle correction is useful on the *intensity* -- for broad,
+        # non-rod features a differential cross-section is what is wanted --
+        # but it must not reach a structure factor: a region sum is already the
+        # complete angular integral, each pixel weighted by the solid angle it
+        # subtends. So it is measured here over the same regions and divided
+        # back out when F2_hkl is formed. Finding F6 of
+        # doc/design/ctr_structure_factor_scale.md; the per-pixel
+        # reconstruction keeps it, because that path does form a differential
+        # cross-section.
+        solid_angle_means = (None, None)
+        if self.scanSelector.useSolidAngleBox.isChecked():
+            solid_angle_means = tuple(
+                detector_corrections.roi_mean_inverse_solid_angle(
+                    dc,
+                    row,
+                    column,
+                    # A frame whose region fell off the detector can leave a
+                    # degenerate size behind; it carries no counts either, so
+                    # one pixel keeps the factor defined and harmless.
+                    np.maximum(row_size, 1),
+                    np.maximum(column_size, 1),
+                )
+                for row, column, row_size, column_size in (
+                    (y_coord1_a, x_coord1_a, roi_vsize1_a, roi_hsize1_a),
+                    (y_coord2_a, x_coord2_a, roi_vsize2_a, roi_hsize2_a),
+                )
+            )
+
         correction_factors = []
-        for hkl_del_gam in (hkl_del_gam_1, hkl_del_gam_2):
+        for hkl_del_gam, solid_angle_mean in zip(
+            (hkl_del_gam_1, hkl_del_gam_2), solid_angle_means
+        ):
             correction_factors.append(
                 integration_corrections.stationary_correction_factors(
                     alpha_all,
@@ -6395,6 +6425,7 @@ ub : gui for UB matrix and angle calculations
                     beam_profile=beam_profile,
                     sample_size=sample_size,
                     normalization=normalization,
+                    solid_angle_mean=solid_angle_mean,
                 )
             )
         factors1, factors2 = correction_factors

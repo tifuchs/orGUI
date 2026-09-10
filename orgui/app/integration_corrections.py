@@ -154,6 +154,7 @@ def stationary_correction_factors(
     beam_profile=None,
     sample_size=None,
     normalization=None,
+    solid_angle_mean=None,
 ):
     r"""Correction divisors for one stationary-scan trajectory.
 
@@ -174,6 +175,13 @@ def stationary_correction_factors(
         when ``use_footprint`` is set.
     :param normalization: Optional per-image exposure and monitor divisor
         from :func:`normalization_divisor`, stored as ``C_norm``.
+    :param solid_angle_mean: Optional per-image region mean of
+        :math:`1/\widetilde{\Omega}` from
+        :func:`~orgui.datautils.xrayutils.corrections.detector.roi_mean_inverse_solid_angle`,
+        stored as ``C_solid_angle``. Pass it when the solid-angle correction
+        was applied to the intensity, so that :func:`structure_factor` can
+        divide it back out; a region sum is already a complete angular
+        integral and must not carry it (finding F6).
     :returns: The factors, each broadcast to the shape of ``alpha``.
     :rtype: CorrectionFactors
     :raises ValueError: If the footprint correction is requested without a
@@ -188,6 +196,12 @@ def stationary_correction_factors(
             np.asarray(normalization, dtype=np.float64), alpha.shape
         ).copy()
         applied.append("normalization")
+
+    if solid_angle_mean is not None:
+        factors["C_solid_angle"] = np.broadcast_to(
+            np.asarray(solid_angle_mean, dtype=np.float64), alpha.shape
+        ).copy()
+        applied.append("solid_angle")
 
     if use_footprint:
         if beam_profile is None:
@@ -236,16 +250,27 @@ def apply_stationary_corrections(intensity, errors, factors):
 def structure_factor(intensity, errors, factors):
     r"""Form :math:`F^2_{hkl}` from an already corrected intensity.
 
-    :math:`F^2 = I_\mathrm{corr} / L_\mathrm{stationary}`. Unlike a rocking
+    :math:`F^2 = I_\mathrm{corr} /
+    (L_\mathrm{stationary}\,C_\mathrm{solid\,angle})`. Unlike a rocking
     scan, stationary area-detector integration has no rod-interception
     factor.
 
+    ``C_solid_angle`` is present only when the solid-angle correction was
+    applied to the intensity, and dividing by it removes that correction
+    again. A region-summed intensity is already the complete angular
+    integral, with every pixel weighted by the solid angle it subtends, so
+    the correction double-counts the detector obliquity in a structure
+    factor -- while remaining useful on the intensity itself for broad,
+    non-rod features, where a differential cross-section is the goal. See
+    ``doc/design/ctr_structure_factor_scale.md`` finding F6.
+
     :param intensity: Corrected intensity per image.
     :param errors: 1-sigma errors of ``intensity``.
-    :param CorrectionFactors factors: Must contain ``C_Lorentz``.
+    :param CorrectionFactors factors: Must contain ``C_Lorentz``; divides by
+        ``C_solid_angle`` as well when it is present.
     :returns: ``(F2_hkl, F2_hkl_errors)``.
     :rtype: tuple of numpy.ndarray
     :raises KeyError: If the Lorentz factors are absent.
     """
-    divisor = factors["C_Lorentz"]
+    divisor = factors["C_Lorentz"] * factors.divisor("C_solid_angle")
     return np.asarray(intensity) / divisor, np.asarray(errors) / divisor

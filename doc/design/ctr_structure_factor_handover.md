@@ -1,15 +1,17 @@
 # CTR structure-factor scale: implementation status and handover
 
-> **Status as of 2026-09-09.** Branch `claude/ctr-structure-factor-9633bc`,
-> four commits ahead of `master`, nothing pushed.
+> **Status as of 2026-09-10.** Branch `claude/ctr-structure-factor-9633bc`,
+> six commits ahead of `master`, nothing pushed.
 >
-> The physics analysis is complete and quantified, the reduction and the
-> acceptance estimator exist and are tested, and the correction factors have
-> one home. **No saved number has changed yet**: the GUI integration paths do
-> not call any of the new reduction. Issues
-> [#82](https://github.com/tifuchs/orGUI/issues/82) and
-> [#15](https://github.com/tifuchs/orGUI/issues/15) are therefore *analysed and
-> equipped* but not closed.
+> The physics analysis is complete and quantified, and the reduction is now
+> **wired in**: a rocking scan and a stationary scan of the same rod come out
+> with the same `F2_hkl`, asserted by
+> `test_scan_mode_equivalence.py::test_rocking_and_stationary_paths_agree`.
+> This **changed saved numbers in both modes**.
+> [#82](https://github.com/tifuchs/orGUI/issues/82) is closed up to the
+> real-data check of section 6 and `C_det` (F7), the one mechanism simulation
+> cannot test. [#15](https://github.com/tifuchs/orGUI/issues/15) still needs
+> the two absolute-scale inputs of section 6.
 >
 > This document is the handover: what exists, how to run it, what to do next,
 > and which of my predictions turned out wrong. The physics itself is in
@@ -18,16 +20,17 @@
 
 ## 1. The one-paragraph summary
 
-A rocking scan and a stationary scan of the same rod do not currently produce
-the same `F2_hkl` in orGUI. The ratio is exactly
+A rocking scan and a stationary scan of the same rod used to differ by exactly
 `T_omega * monitor_omega * Delta_gamma_in_degrees`, measured to seven digits on
-simulated data. Three things are missing from the rocking path: exposure/monitor
-normalization, integration in radian rather than degrees, and division by the
-out-of-plane detector acceptance. All three now have working implementations in
-`orgui/datautils/xrayutils/corrections/`; none of them is wired in. A fourth,
-F6, affects **both** modes: a ROI sum is already a complete angular integral,
-so the solid-angle correction has to stop being applied to it, or the two
-modes stay apart by `<1/Omega~>` even after the rocking path is fixed.
+simulated data. Three things were missing from the rocking path:
+exposure/monitor normalization, integration in radian rather than degrees, and
+division by the out-of-plane detector acceptance. A fourth, F6, affected
+**both** modes: a ROI sum is already a complete angular integral, so the
+solid-angle correction had to be divided back out of `F2_hkl`. It stays
+applied to the *intensity*, where a broad or diffuse feature needs it. All
+four are now handled, and the two modes agree to `1e-6` on simulated data —
+the residual is the trapezoidal sampling of the rocking profile, not a
+correction factor.
 
 ## 2. What is on the branch
 
@@ -64,18 +67,32 @@ as re-export aliases because both were released under those names.
 `test_corrections_package.py` asserts the aliases hand out the *same objects*,
 not merely that they import.
 
-### 2.2 What is wired, and what is not
+### 2.2 What is wired
 
 | caller | uses the package for | still does its own thing |
 |---|---|---|
-| `orGUI.integrateROI` (stationary) | `pixel_factors`, `mode_components`, `normalization_divisor`, `C_illum_area` | — |
+| `orGUI.integrateROI` (stationary) | `pixel_factors`, `mode_components`, `normalization_divisor`, `C_illum_area`, `roi_mean_inverse_solid_angle` | — |
 | `orGUI.rocking_integrate` | `pixel_factors` | — |
-| `peak1Dintegr.integrate` (rocking) | `mode_components` | **no normalization, degrees, no `Delta_gamma`** |
-| `reconstruction_job` | `pixel_factors` | own native-fused application, own normalization loop |
+| `peak1Dintegr.integrate` (rocking) | `mode_components`, `normalization_divisor`, `normalized_intensity`, `out_of_plane_acceptance`, `roi_mean_inverse_solid_angle` | — |
+| `reconstruction_job` | `pixel_factors` (solid angle applied, **not** compensated) | own native-fused application, own normalization loop |
 
-Nothing calls `measurement.structure_factor_squared`,
-`measurement.normalized_intensity`, `measurement.angular_factor`,
-`activearea.*` or `acceptance.*` outside the tests. That is the gap to close.
+Still uncalled outside the tests: `measurement.structure_factor_squared`,
+`measurement.angular_factor` and `activearea.*`. That is deliberate rather
+than a gap — the two integration paths form `F2_hkl` on a *relative* scale by
+dividing out the mode-dependent factors they already hold as
+interval-weighted means, and `structure_factor_squared` additionally divides
+by the absolute prefactor, which needs the issue #15 inputs. `angular_factor`
+rebuilds `eta` from point angles, which is the wrong thing for a path that
+has ROI-weighted means of each component.
+
+The rocking path could not use `normalization_divisor(scan, ...)` as the
+stationary path does: it runs off the database and has no scan object. It
+builds the divisor from the stored `auxillary` counters instead, via
+`_rocking_normalization`, using the same monitor-name setting
+(`reconstruction_monitor_corrections`) the other two paths use. Exposure time
+is only there if the backend declares `exposure_time` in
+`auxillary_counters` — ID31 does, `P212_tools` and the base `Scan` do not, and
+a missing counter is skipped and recorded rather than failing the job.
 
 ## 3. Getting a green test run
 
@@ -147,55 +164,66 @@ also in the `AGENTS.md` files. They are the constraints a follow-up must keep.
   not by inspection.** The refactor was checked at 80 failed / 782 passed
   before and after.
 
-## 5. The next commit, in detail
+## 5. The wiring commit, as landed
 
-Wiring the rocking path, plus the F6 solid-angle removal, which also touches
-the stationary path. This **changes saved numbers in both modes**, so it is
-`feat(phys)!` with a `BREAKING CHANGE:` footer per the repository's commit
-convention.
+`feat(phys)!` — it changed saved numbers in **both** modes. What it did:
 
-Steps 1-3 are `peak1Dintegr.RockingPeakIntegrator.integrate`; step 4 is that
-plus `orGUI.integrateROI`:
+1. **Normalization.** `peak1Dintegr.RockingPeakIntegrator._rocking_normalization`
+   builds the per-frame exposure/monitor divisor from the stored `auxillary`
+   counters (see section 2.2 for why not from a scan object) and it is applied
+   **inside** the rocking integral, not to the finished integral: with a
+   varying counting time or a drifting monitor the quantity Vlieg integrates is
+   `Int N(omega)/(T M) d omega`, and dividing the result by a mean is only
+   equivalent for constant counters. It rides the existing `C_corr` machinery,
+   which already carried `C_illum_area` per `(s, omega)` point, so the error
+   propagation followed for free.
+2. **Radian.** `measurement.normalized_intensity(..., angle_unit="deg")`
+   converts when `F2_hkl` is formed. The stored `croibg` and `int_interval`
+   stay in the unit they were measured in — changing those would change the
+   meaning of two saved columns for no gain.
+3. **Acceptance.** `_rocking_acceptance` calls `out_of_plane_acceptance` with
+   the region centre and vertical size stored per `s` point. Two traps here:
+   the coordinate order (`surfaceAnglesPoint` takes pyFAI dimension 1 first,
+   which is the *row*, and orGUI's `y` is the row while `x` is the column —
+   every call site in the application passes them swapped), and `vsize` being
+   the row extent, which follows from `detvsize, dethsize = detector.shape`
+   at `orGUI.py:1096`. It is evaluated at the calibrated arm position, which
+   costs nothing measurable because the span is arm-invariant to nine digits.
+   With no calibrated detector reachable it warns and leaves `F2_hkl` on the
+   acceptance-blind scale rather than failing the integration.
+4. **Solid angle compensated, not removed.** The switch, its config key and
+   its badge are untouched, and it still scales the intensity — a broad or
+   diffuse feature wants a differential cross-section, and that capability was
+   worth keeping. What changed is that `F2_hkl` divides it back out, via the
+   new `detector.roi_mean_inverse_solid_angle`, measured over the same regions
+   from the calibrated geometry alone (no image, so it runs outside the
+   integration loop). Two things to know: the compensation is approximate at
+   the `1e-6` level, because `pixel_factors` fuses the solid angle with the
+   polarization so the applied mean is `<1/(Omega~ P)>` rather than a product
+   of means; and for a rocking scan the correction was applied at *extraction*
+   time, so whether to compensate is read from the configuration stored with
+   the scan (`configuration/orgui/integration_corrections/json`) rather than
+   from the current switch. An older database where that cannot be read warns
+   and is left uncompensated rather than guessed at.
 
-1. Build the exposure/monitor divisor the way the stationary path does, via
-   `integration_corrections.normalization_divisor(scan, ...)`. Use the
-   **per-frame** counting time, not the sum over the scan: the rocking angle is
-   the integration variable, the time is not.
-2. Convert the trapezoid integral from degrees to radian —
-   `measurement.normalized_intensity(..., angle_unit="deg")` does both this and
-   step 1.
-3. Divide by `acceptance.out_of_plane_acceptance(detector, row, column,
-   row_size, alpha, gamma_arm, delta_arm)`. The ROI centre and size per `s`
-   point are already in the database group `integration/`; the arm angles come
-   from `orgui.backend.scans.scan_arm_angles`.
-4. Stop applying the solid-angle correction to ROI sums — **in both modes**,
-   so this touches `orGUI.integrateROI` as well. F6 is resolved this way (see
-   the physics doc): a ROI sum is already a complete angular integral, and
-   leaving the correction in means the modes still differ by `<1/Omega~>` —
-   0.7 % at 1 m, 7 % at 0.3 m — because a rocking scan's solid-angle factor
-   cancels against its acceptance and a stationary scan's has nothing to
-   cancel against. In practice: drop the `solid_angle=` argument at
-   `orGUI.py:1595` and `:5765`, then the `useSolidAngleBox` widget, the
-   `solidAngle` key in `get_integration_options` and the `SOLA` badge.
-   `set_integration_options` ignores keys it has no branch for, so old
-   configuration files still load. The reconstruction path has its own switch
-   (`reconstruction_job.py:1254`) and must keep it.
-5. Store the acceptance, the applied normalization and the active-area
-   assumption next to `F2_hkl`. Without them a saved rod cannot be put on a
-   common scale after the fact.
+   A related trap, found by breaking it first: `useSolidAngleBox` is *also*
+   the store the reconstruction persists its own solid-angle setting through
+   (`config_data.py:383`/`:467` map the `solidAngle` integration option onto
+   `CorrectionState.use_solid_angle`, and `ReconstructionDialog` mirrors its
+   checkbox via `scanSelector.get/set_integration_options`). Removing the key
+   would have silently disabled the correction in the one path that must keep
+   it, and that is invisible from either file alone.
+5. **Provenance.** A `reduction` group beside `F2_hkl` records the mode, the
+   angle unit, which normalizations applied, whether the acceptance was
+   applied, whether the solid-angle correction was compensated, the
+   active-area assumption, and the acceptance array itself.
 
-Then `orgui/app/test/test_scan_mode_equivalence.py::test_rocking_and_stationary_paths_differ_by_the_missing_normalizations`
-**must flip** from a characterization test to a plain equality. Its docstring
-says so. It currently asserts the gap *is* `T * monitor * Delta_gamma_deg`; if
-it starts failing after a wiring change, that is the change working.
-
-**F6 is settled** (physics doc, F6): ROI-summed integration stops applying the
-solid-angle correction, in both modes. Two things fell out of measuring it
-that matter for step 3: `Delta_gamma` does **not** become unnecessary — it is a
-size factor, the solid angle an obliquity factor, and they overlap only in the
-obliquity — and a constant nominal `n * pixel / dist` is **not** a valid
-"pixel-derived" acceptance, being wrong by `1/cos(theta)` (1.2 % at 9 degrees).
-`out_of_plane_acceptance` is still what the rocking path divides by.
+`test_rocking_and_stationary_paths_differ_by_the_missing_normalizations`
+became `test_rocking_and_stationary_paths_agree`, and
+`test_a_resized_region_of_interest_distorts_the_rocking_rod` became
+`..._no_longer_distorts_...`. Both keep the *old* behaviour as a contrast
+assertion via a `reduce=False` switch on the helper, so the factor that used to
+be left behind cannot come back unnoticed.
 
 ## 6. After that
 

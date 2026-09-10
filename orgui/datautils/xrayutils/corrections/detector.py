@@ -55,7 +55,7 @@ they share.
 
 import numpy as np
 
-__all__ = ["pixel_factors"]
+__all__ = ["pixel_factors", "roi_mean_inverse_solid_angle"]
 
 
 def pixel_factors(detector, solid_angle=False, polarization=False, shape=None):
@@ -87,3 +87,83 @@ def pixel_factors(detector, solid_angle=False, polarization=False, shape=None):
         )
         factor = 1.0 / values if factor is None else factor / values
     return factor
+
+
+def roi_mean_inverse_solid_angle(
+    detector, row, column, row_size, column_size, shape=None
+):
+    r"""Mean of :math:`1/\widetilde{\Omega}` over a rectangular region.
+
+    The solid-angle content of the per-pixel correction of
+    :func:`pixel_factors`, reduced onto one region of interest. A
+    region-summed intensity that has been divided by the solid angle needs
+    this factor divided back out before it becomes a structure factor: the
+    sum over a region is already the complete angular integral, each pixel
+    weighted by the solid angle it subtends, so the correction double-counts
+    the detector obliquity there. See
+    ``doc/design/ctr_structure_factor_scale.md`` finding F6.
+
+    Evaluated over the **nominal** region rectangle, from the calibrated
+    geometry alone, so it needs no image and can be computed per frame outside
+    an integration loop. That is deliberately not identical to the mean over
+    the *valid* pixels that the integration accumulates: the two differ only
+    where masked pixels correlate with the detector obliquity, and
+    :math:`\widetilde{\Omega}` varies by well under a percent across one
+    region.
+
+    .. note::
+
+        Because :func:`pixel_factors` returns the solid angle and the
+        polarization as one fused array, the applied region mean is
+        :math:`\langle 1/(\widetilde{\Omega}P)\rangle` rather than
+        :math:`\langle 1/\widetilde{\Omega}\rangle\,\langle 1/P\rangle`.
+        Dividing this factor out therefore leaves the covariance of the two
+        over the region, which is second order in their variation across it --
+        of order :math:`10^{-6}` for a region of a hundred pixels at a metre.
+
+    :param detector: A
+        :class:`~orgui.datautils.xrayutils.DetectorCalibration.Detector2D_SXRD`.
+    :param row: Region centre row, in pixels along pyFAI dimension 1. Scalar
+        or one value per frame.
+    :param column: Region centre column, in pixels along pyFAI dimension 2.
+    :param row_size: Region height in pixels.
+    :param column_size: Region width in pixels.
+    :param shape: Detector shape; taken from the detector when omitted.
+    :returns: The mean of the reciprocal normalized solid angle, broadcast
+        over the inputs. A region entirely off the detector contains no pixels
+        and no counts, and yields ``1.0`` so that it neither rescales nor
+        invalidates the zero intensity there.
+    :rtype: numpy.ndarray
+    :raises ValueError: If a region size is not positive.
+    """
+    solid_angle = np.asarray(
+        detector.solidAngleArray(shape) if shape is not None
+        else detector.solidAngleArray(),
+        dtype=np.float64,
+    )
+    row, column, row_size, column_size = np.broadcast_arrays(
+        np.asarray(row, dtype=np.float64),
+        np.asarray(column, dtype=np.float64),
+        np.asarray(row_size, dtype=np.float64),
+        np.asarray(column_size, dtype=np.float64),
+    )
+    for name, value in (("height", row_size), ("width", column_size)):
+        if np.any(value <= 0) or not np.all(np.isfinite(value)):
+            raise ValueError(
+                f"the region of interest must have a positive {name} in "
+                f"pixels; got {value!r}"
+            )
+
+    n_rows, n_columns = solid_angle.shape[0], solid_angle.shape[1]
+    out = np.ones(row.shape, dtype=np.float64)
+    for index in np.ndindex(*row.shape):
+        r0 = int(np.floor(row[index] - row_size[index] / 2.0))
+        r1 = int(np.ceil(row[index] + row_size[index] / 2.0))
+        c0 = int(np.floor(column[index] - column_size[index] / 2.0))
+        c1 = int(np.ceil(column[index] + column_size[index] / 2.0))
+        block = solid_angle[
+            max(r0, 0):min(r1, n_rows), max(c0, 0):min(c1, n_columns)
+        ]
+        if block.size:
+            out[index] = np.mean(1.0 / block)
+    return out

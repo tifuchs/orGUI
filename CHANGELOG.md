@@ -7,6 +7,45 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **Rocking and stationary integration now produce the same structure factor.**
+  *This changes saved numbers in both modes.* A rocking scan and a stationary
+  scan of the same rod previously differed by exactly exposure time times
+  monitor times the out-of-plane acceptance in degrees; they now agree. Four
+  corrections changed. The rocking path gained the per-frame exposure and
+  monitor normalization, applied inside the rocking integral so that a varying
+  counting time or a drifting monitor is handled correctly rather than only on
+  average; it now integrates the rocking angle in radian as the published
+  expressions require, rather than in degrees; and it divides by the
+  out-of-plane acceptance of its region of interest, without which a rod
+  measured with regions resized along the scan came out with a distorted
+  *shape* -- a factor 2.3 across a simulated Pt(111) rod -- and not merely a
+  wrong scale. Separately, the detector **solid-angle correction no longer
+  reaches a structure factor** in either mode: summing a region of interest
+  already yields the complete angular integral, with every pixel weighted by
+  the solid angle it subtends, so dividing by that solid angle again
+  double-counted the detector obliquity (0.7 % for a detector at 1 m, 7 % at
+  0.3 m, varying across the detector and therefore a rod shape error). The
+  switch stays, because that correction is the right one for a broad or
+  diffuse feature where a differential cross section is wanted: it still
+  scales the intensity counters, and is now measured over the same regions of
+  interest and divided back out when ``F2_hkl`` is formed, so a structure
+  factor is the same number whether or not it was enabled. Its tooltip and the
+  ``SOLA`` status badge say so. The reciprocal-space reconstruction keeps
+  applying it uncompensated, since that path does form a differential cross
+  section per pixel. For rocking scans the correction is applied when the
+  curves are extracted, so whether to remove it again is read from the
+  configuration stored with the scan; an older database where that cannot be
+  established warns and is left uncompensated. Integrated rocking scans now
+  store a
+  ``reduction`` group beside ``F2_hkl`` recording the mode, the angle unit,
+  which normalizations were applied, the acceptance used, whether the
+  solid-angle correction was compensated, and the active-area assumption, so
+  that a saved rod can be placed on a common scale afterwards.
+  Rocking normalization uses the counters stored with the scan, so it requires
+  a backend that declares ``exposure_time`` in ``auxillary_counters``; a
+  missing counter is skipped and recorded rather than failing the integration.
+  Existing configuration files load unchanged.
+
 - **All correction factors collected into one package.** Every factor between
   detector counts and a structure factor now lives in
   ``orgui.datautils.xrayutils.corrections``, split by what it depends on:
@@ -32,7 +71,8 @@ Scientific and analysis additions:
   the aperture, and vectorized over a scan because orGUI resizes regions per
   detector position. ``gamma_range`` reports the span over the whole region as
   a check on rolled-detector geometries, and ``pixel_acceptance`` the one-row
-  case. **A new API only: the integration paths do not call it yet.**
+  case. The rocking integration now divides by it -- see the mode-equivalence
+  entry below.
 
 - **One structure-factor scale for rocking scans, stationary scans, and
   reflectivity.** The new public module
@@ -46,13 +86,11 @@ Scientific and analysis additions:
   reject it), and, given the incident flux density and the illuminated area,
   puts the result on the absolute electron-unit scale. It also converts
   between ``|F_hkl|^2`` and absolute reflectivity, so a reflectivity curve and
-  a set of truncation rods can be brought onto one scale. **This is a new API
-  only: no existing integration result changes.** The integration paths do
-  not use it yet, and rocking and stationary integration remain on different
-  scales, differing by exposure time times monitor times the acceptance in
-  degrees; the image-integration documentation now says so explicitly, and
+  a set of truncation rods can be brought onto one scale.
   ``doc/design/ctr_structure_factor_scale.md`` records the full analysis with
-  the measured size of every correction.
+  the measured size of every correction, and
+  ``doc/physics/ctr_structure_factor_physics.tex`` is a typeset reference for
+  the normalizations and integration intervals.
 
 - **Unified CTR fit predictions, lifecycle, and statistics.** CTR optimizer
   predictions, residuals, likelihoods, and diagnostics now use one final

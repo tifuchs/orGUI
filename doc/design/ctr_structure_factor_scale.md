@@ -1,26 +1,26 @@
 # One structure-factor scale for rocking scans, stationary scans and reflectivity
 
-> **Status: analysis complete, reduction core and regression tests landed, GUI
-> paths not yet switched over.** This is the review document for
+> **Status: analysis complete, reduction landed and wired into both
+> integration paths.** This is the review document for
 > [issue #82](https://github.com/tifuchs/orGUI/issues/82) ("Regression tests
 > and validation of equivalence of rocking and stationary scan integration")
 > and for the physics half of
 > [issue #15](https://github.com/tifuchs/orGUI/issues/15) ("Calculate
 > quantitatively exact structure factors").
 >
-> It records why a rocking scan and a stationary scan of the same rod do
-> **not** currently produce the same `F2_hkl` in orGUI, quantifies each reason
-> on simulated data, and states what is still needed for an absolute scale and
+> It records why a rocking scan and a stationary scan of the same rod did
+> **not** produce the same `F2_hkl` in orGUI, quantifies each reason on
+> simulated data, and states what is still needed for an absolute scale and
 > for absolute reflectivity. Everything below was verified numerically against
-> the code as of this branch, not by inspection alone.
+> the code, not by inspection alone.
 >
-> Landed with this document:
-> `orgui/datautils/xrayutils/corrections/measurement.py` (the reduction, pure
-> functions, additive - no existing number changes),
-> `orgui/datautils/xrayutils/test/test_corrections_measurement.py` (18 tests
-> against the published equations) and
-> `orgui/app/test/test_scan_mode_equivalence.py` (5 tests that simulate one
-> rod measured both ways and push it through both of orGUI's current paths).
+> F1, F2, F3 and F6 are now **applied**, which changed saved numbers in both
+> modes; the two paths agree to `1e-6` on simulated data, limited by the
+> trapezoidal sampling of the rocking profile. F4, F5 and F7 remain open and
+> are described below as they stand. Findings are written in the present tense
+> of the analysis; section 5 says what each one's status is now, and
+> [`ctr_structure_factor_handover.md`](ctr_structure_factor_handover.md)
+> section 5 says how each was wired.
 
 ## 1. What the two papers require
 
@@ -70,7 +70,7 @@ Their ratio (Vlieg eq. 64/65) is the identity issue #82 is really about:
 I_s / I_omega = T omega_0 sin(delta) cos(beta_in) / (Delta_gamma sin(gamma))
 ```
 
-## 2. What orGUI does today
+## 2. What orGUI did before this work
 
 | | rocking (`peak1Dintegr`) | stationary (`orGUI.integrateROI` + `integration_corrections`) | reconstruction (`reconstruction_job`) |
 |---|---|---|---|
@@ -220,11 +220,19 @@ The solid-angle array and an angle-derived `Delta_gamma` describe the same
 geometry. Applying one without the other double-counts, so the pair has to be
 decided together with F3.
 
-**Resolved: ROI-summed integration does not apply a solid-angle correction at
-all, in either mode.** The array stays where it is genuinely required, the
-per-pixel reconstruction path, which forms a differential cross-section rather
-than a sum over an aperture - and which has its own independent switch
-(`reconstruction_job.py:1254`), so this does not touch it.
+**Resolved: the solid-angle correction stays available as a switch, scales the
+intensity, and is divided back out when `F2_hkl` is formed.** It is kept
+because it is the right correction for a *broad or diffuse* feature, where a
+differential cross-section rather than an integrated rod intensity is wanted;
+it is removed from the structure factor because a rod is integrated by summing
+a region, which is already the complete angular integral. The per-pixel
+reconstruction keeps applying it without compensation, under its own switch
+(`reconstruction_job.py:1254`).
+
+An earlier revision of this document had the correction dropped from ROI
+integration altogether. That was reversed: it discarded a capability that has
+a real use, and the compensation costs one geometric factor. The physics below
+is unchanged - what changed is where the factor is removed, not whether.
 
 Three steps to that conclusion:
 
@@ -241,11 +249,18 @@ Three steps to that conclusion:
    the rod. The slice is what `Delta_gamma` accounts for; there is still no
    per-pixel weighting to undo.
 
-Leaving the correction in and compensating for it in the reduction was
-considered and rejected. It gives the identical `|F|^2` - what is divided out
-is exactly the scalar that was multiplied in - but it needs one more argument
-on the reduction, and it puts the stored intensity column and `F2_hkl` on
-different scales. What it cannot do is stay in *uncompensated*, because the
+The compensation is
+`detector.roi_mean_inverse_solid_angle`, the mean of `1/Omega~` over the
+nominal region rectangle, evaluated from the calibrated geometry alone so it
+needs no image and can be computed per frame outside the integration loop.
+Two approximations come with that, both far below the effect being removed:
+it is the mean over the *nominal* region rather than over the valid pixels the
+integration accumulated, and because `pixel_factors` fuses the solid angle
+with the polarization into one array, the applied mean is
+`<1/(Omega~ P)>` rather than `<1/Omega~><1/P>`, leaving their covariance over
+the region - second order in the variation across it, of order `1e-6`.
+
+What the correction cannot do is stay in *uncompensated*, because the
 two modes do not carry it symmetrically: for a rocking scan the
 omega-integrated counts in pixel row *j* go as that row's gamma height
 `dgamma_j`, so a corrected sum pairs with `Sum_j dgamma_j / Omega~_j` and the
@@ -280,14 +295,19 @@ gone wrong under the other one:
   degrees. `pixel_acceptance` times the row count is the same angle-derived
   quantity as `out_of_plane_acceptance`, not a cheaper alternative to it.
 
-On the user-facing side, `useSolidAngleBox` (`QScanSelector.py:748`) drives
-nothing else: its only consumers are the two direct-space integration paths
-(`orGUI.py:1595` in `rocking_integrate`, `:5765` in `integrateROI`). Dropping
-the widget, the `solidAngle` key from `get_integration_options` and the `SOLA`
-badge is therefore the whole change. Old configuration files stay loadable
-without a shim - `set_integration_options` is an `if`/`elif` chain over the
-keys that are present, with no `else`, so a stored `solidAngle` entry is
-ignored rather than an error.
+On the user-facing side the switch and its config key are untouched, so
+nothing about existing configurations changes. Note that `useSolidAngleBox`
+is *also* the store the reciprocal-space reconstruction persists its own
+solid-angle setting through: `config_data.py:383`/`:467` map the `solidAngle`
+integration option onto `CorrectionState.use_solid_angle`, and
+`ReconstructionDialog` mirrors its checkbox via
+`scanSelector.get/set_integration_options`. Removing the key would therefore
+have silently disabled the correction in the one path that must keep it - a
+trap worth recording, because it is invisible from either file alone.
+
+What the switch means is now stated in its tooltip and in the `SOLA` badge,
+since "applied to the intensity but not to `F2_hkl`" is not something a user
+can infer from a checkbox.
 
 ### F7 - `C_det` is assumed to be 1 in both modes
 
@@ -466,9 +486,17 @@ Measured against a calibrated 172 um detector at 1 m, a 60-row region accepts
 mille towards the detector edge - the obliquity that makes `Delta_gamma` vary
 along a scan in the first place.
 
-## 5. What is needed to close issue #82
+## 5. Status of each finding
 
-In order:
+**F1, F2, F3 and F6 are applied.** Steps 1-5 below are done; the wiring of
+each is in [`ctr_structure_factor_handover.md`](ctr_structure_factor_handover.md)
+section 5, and the equivalence is asserted by
+`test_scan_mode_equivalence.py::test_rocking_and_stationary_paths_agree`.
+Step 6, the real-data check, is the one that remains, together with F4, F5 and
+F7.
+
+Recorded in the order they had to be done, because the ordering was itself a
+result -- F6 had to be settled before F3 could be wired:
 
 1. **Normalize rocking scans.** Give `RockingPeakIntegrator.integrate` the same
    `normalization_divisor` the stationary path uses. The per-frame counting
@@ -486,23 +514,31 @@ In order:
    * Pass the per-frame arm angles from `scan_arm_angles` where they are known.
      They turn out to matter far less than expected (section 4.4), but they
      cost nothing.
-   * Stop applying the solid-angle correction first (step 4): `Delta_gamma`
-     and the solid-angle correction each carry the same obliquity, and
-     leaving both in double-counts it.
-4. **Stop applying the solid-angle correction to ROI sums, in both modes.**
-   (F6) A ROI sum is already a complete angular integral. This also touches
-   `orGUI.integrateROI`, and it changes stationary saved numbers by
-   `<1/Omega~>` - 0.7 % at 1 m, 7 % at 0.3 m - so it belongs in the same
-   breaking commit as the rocking wiring, not a later one. The reconstruction
-   path keeps its own solid-angle switch and is unaffected.
+   * Settle the solid-angle compensation first (step 4): `Delta_gamma` and
+     the solid-angle correction each carry the same obliquity, and leaving
+     both in double-counts it.
+4. **Divide the solid-angle correction back out of `F2_hkl`, in both modes.**
+   (F6) A ROI sum is already a complete angular integral, so the correction
+   must not reach a structure factor - but it stays on the intensity, where a
+   broad or diffuse feature needs it. This also touches `orGUI.integrateROI`,
+   and it changes stationary `F2_hkl` by `<1/Omega~>` whenever the switch was
+   on - 0.7 % at 1 m, 7 % at 0.3 m - so it belongs in the same breaking commit
+   as the rocking wiring, not a later one. The reconstruction path keeps
+   applying it uncompensated and is unaffected.
 5. **Record the mode and its inputs in the saved data**, next to `F2_hkl`: the
    acceptance, the normalization that was applied, and the active-area
    assumption of F4. Without them a saved rod cannot be put on a common scale
    after the fact.
-6. **Then verify on real data.** The overlap region of a rocking scan and a
-   stationary scan on the same rod (Drnec Fig. 8, right) is the acceptance
-   test. Simulation cannot catch F7, an incorrect `Delta_gamma` definition, or
-   a beamline that reports counting time in the wrong place.
+6. **Then verify on real data. Not done — this is the remaining step.** The
+   overlap region of a rocking scan and a stationary scan on the same rod
+   (Drnec Fig. 8, right) is the acceptance test. Simulation cannot catch F7,
+   an incorrect `Delta_gamma` definition, or a beamline that reports counting
+   time in the wrong place. The simulated equivalence test does cover the F6
+   compensation
+   (`test_the_solid_angle_correction_does_not_reach_the_structure_factor`),
+   but it supplies the region mean itself rather than reading a detector, so
+   the geometry evaluation is pinned separately in
+   `test_corrections_detector.py`.
 
 ## 6. What is needed to close issue #15, and reflectivity
 

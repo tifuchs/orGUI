@@ -166,45 +166,69 @@ instead, which is the row the manual marks as calculated numerically.
 Comparing Scan Modes
 ~~~~~~~~~~~~~~~~~~~~
 
-``F2_hkl`` is proportional to :math:`|F_{hkl}|^2` **within** one integration
-mode, but a rocking scan and a stationary scan of the same rod are not
-currently on the same scale, and the two must not be plotted or fitted
-together without rescaling.
+A rocking scan and a stationary scan of the same rod are reduced to the same
+``F2_hkl`` and may be plotted and fitted together. Verified on simulated data
+to a relative :math:`10^{-6}`, the residual being the trapezoidal sampling of
+the rocking profile.
 
 Vlieg's rocking-scan expression (equation 42) contains three factors that the
-stationary expression (equation 54) does not, and that orGUI's rocking
-integration does not divide out:
+stationary expression (equation 54) does not, and all three are applied:
 
-* the **counting time and monitor**. ``Normalize integrated intensities``
-  applies to stationary integration only; a rocking integration is not
-  normalized.
-* the **unit of the rocking angle**. The rocking curve is integrated over the
-  motor position in degrees, while the published expressions integrate in
-  radian, a factor :math:`180/\pi`.
+* the **counting time and monitor**, divided out per frame *inside* the
+  rocking integral, so that a varying counting time or a drifting monitor is
+  handled correctly and not merely on average. A rocking integration takes
+  these from the counters stored with the scan, so it needs a beamline backend
+  that lists ``exposure_time`` among its auxiliary counters; a counter that is
+  not there is skipped, and what was applied is recorded with the result.
+* the **unit of the rocking angle**. The published expressions integrate in
+  radian; the motor axis is in degrees, and the factor :math:`180/\pi` is
+  applied when ``F2_hkl`` is formed. The stored ``croibg`` and the integration
+  interval stay in degrees, the unit they were measured in.
 * the **out-of-plane angular acceptance** :math:`\Delta\gamma` of the region
   of interest. A rocking scan intercepts a slice of rod whose length is
   proportional to :math:`\Delta\gamma`, so its integrated intensity is too; a
   stationary measurement intercepts the whole rod cross-section and has no
   such factor. Because ROIs are sized per detector position, this factor is
-  not even constant along one rocking data set, so it changes the *shape* of
-  a rod and not only its scale.
+  not constant along one rocking data set, so leaving it out changed the
+  *shape* of a rod and not only its scale.
 
-Together,
+The **detector solid-angle correction** is treated separately, and does not
+reach a structure factor. Summing a region of interest already produces the
+complete angular integral, each pixel weighted by the solid angle it subtends,
+so dividing by that solid angle again would double-count the detector
+obliquity -- 0.7 % for a detector at 1 m and 7 % at 0.3 m, varying across the
+detector face, and therefore a rod *shape* error.
 
-.. math::
+The switch remains, because the correction is the right one for a **broad or
+diffuse feature**, where a differential cross section rather than an
+integrated rod intensity is what is wanted. What it does is scoped:
 
-   \frac{F^2_{hkl,\mathrm{rocking}}}{F^2_{hkl,\mathrm{stationary}}}
-   = T\;M\;\Delta\gamma[^\circ]
+* it scales the **intensity** counters, as before;
+* it is measured over the same regions of interest and **divided back out**
+  when ``F2_hkl`` is formed, so a structure factor is the same number whether
+  or not the switch was on;
+* the **reciprocal-space reconstruction** keeps applying it and does not
+  divide it out, since that path forms a differential cross section per pixel.
 
-with :math:`T` the per-frame counting time, :math:`M` the monitor value and
-:math:`\Delta\gamma` the acceptance in degrees.
+For a rocking scan the correction is applied when the curves are extracted, so
+whether to remove it again is read from the configuration stored with the
+scan rather than from the current state of the switch. If that cannot be
+established -- an older database -- the integration warns and leaves it in
+rather than guessing.
 
-:mod:`orgui.datautils.xrayutils.corrections.measurement` implements the full
-reduction, for rocking scans, stationary scans and reflectivity, and is the
-supported way to put integrated intensities from different modes on one
-scale --- and, given the incident flux and the illuminated area, on the
-absolute scale of :math:`|F_{hkl}|^2` in electron units. The integration
-paths do not use it yet.
+Each integrated rocking scan stores a ``reduction`` group beside ``F2_hkl``
+recording the mode, the angle unit, which normalizations were applied, the
+acceptance that was divided out, whether the solid-angle correction was
+compensated and the active-area assumption, so that a saved rod can be placed
+on a common scale after the fact.
+
+What is still **not** on this scale is the absolute one: ``F2_hkl`` is
+proportional to :math:`|F_{hkl}|^2` with one common, arbitrary constant.
+:mod:`orgui.datautils.xrayutils.corrections.measurement` supplies the absolute
+prefactor given the incident flux density and the illuminated area, and
+converts between :math:`|F_{hkl}|^2` and absolute reflectivity.
+``doc/physics/ctr_structure_factor_physics.tex`` is a typeset reference for
+every normalization and integration interval described here.
 
 
 Exposure and Monitor Normalization
