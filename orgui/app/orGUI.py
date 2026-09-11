@@ -6711,6 +6711,10 @@ ub : gui for UB matrix and angle calculations
                 "C_flux_on_sample": factors1.get("C_flux_on_sample"),
                 "C_illum_area": factors1.get("C_illum_area"),
                 "C_norm": factors1.get("C_norm"),
+                # Divided back out of F2_hkl rather than applied to it
+                # (finding F6); recorded so a saved rod can be put
+                # back on the intensity scale.
+                "C_solid_angle": factors1.get("C_solid_angle"),
             },
             "pixelcoord": {
                 "@NX_class": "NXdetector",
@@ -6771,6 +6775,10 @@ ub : gui for UB matrix and angle calculations
                 "C_flux_on_sample": factors2.get("C_flux_on_sample"),
                 "C_illum_area": factors2.get("C_illum_area"),
                 "C_norm": factors2.get("C_norm"),
+                # Divided back out of F2_hkl rather than applied to it
+                # (finding F6); recorded so a saved rod can be put
+                # back on the intensity scale.
+                "C_solid_angle": factors2.get("C_solid_angle"),
             },
             "pixelcoord": {
                 "@NX_class": "NXdetector",
