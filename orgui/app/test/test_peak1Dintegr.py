@@ -581,3 +581,94 @@ def test_a_scan_without_a_stored_detector_gives_none():
             assert RockingPeakIntegrator._stored_detector(
                 integrator, handle["/61.1"]
             ) is None
+
+
+def _scan_with_corrections(folder, corrections_group):
+    """Write one scan whose stored configuration holds ``corrections_group``."""
+    from silx.io.dictdump import dicttonx
+
+    path = os.path.join(folder, "scan.h5")
+    dicttonx(
+        {"configuration": {"orgui": {
+            "integration_corrections": corrections_group}}},
+        path,
+        h5path="/61.1",
+        update_mode="add",
+    )
+    return path
+
+
+def _solid_angle_detector():
+    """A calibrated geometry the solid-angle correction can be measured on."""
+    pyFAI = pytest.importorskip("pyFAI")
+    from orgui.datautils.xrayutils import DetectorCalibration
+
+    detector = DetectorCalibration.Detector2D_SXRD()
+    detector.detector = pyFAI.detectors.Detector(
+        pixel1=172e-6, pixel2=172e-6, max_shape=(619, 487)
+    )
+    detector.dist = 0.5
+    detector.poni1, detector.poni2 = 0.05, 0.04
+    detector.rot1 = detector.rot2 = detector.rot3 = 0.0
+    detector.set_energy(15.0)
+    return detector
+
+
+@pytest.mark.parametrize("applied_at_extraction", [True, False])
+def test_the_typed_corrections_group_is_read_back(applied_at_extraction):
+    """The F6 compensation must survive the layout it is stored in.
+
+    Whether the solid-angle correction was applied to the intensity is read
+    from the configuration written at extraction time. When that group
+    changed from a single JSON string to typed datasets, this reader kept
+    parsing the JSON and silently stopped compensating -- the unit tests
+    passed because the layout and the reduction were only ever tested apart.
+    So this writes the group with the *current* writer and reads it back
+    through the reducer.
+    """
+    from orgui.app.config_data import CorrectionState, corrections_to_nxdict
+
+    detector = _solid_angle_detector()
+    state = CorrectionState(use_solid_angle=applied_at_extraction)
+    cnters = {"hsize": np.full(3, 20.0), "vsize": np.full(3, 5.0)}
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = _scan_with_corrections(folder, corrections_to_nxdict(state))
+        with h5py.File(path, "r") as handle:
+            integrator = SimpleNamespace(
+                database=SimpleNamespace(nxfile=handle, config_target=None)
+            )
+            mean, compensated = RockingPeakIntegrator._rocking_solid_angle_mean(
+                integrator, detector, handle["/61.1"], cnters,
+                x=np.full(3, 240.0), y=np.full(3, 300.0),
+            )
+
+    assert compensated is applied_at_extraction
+    if applied_at_extraction:
+        assert mean is not None
+        assert np.all(np.isfinite(mean)) and np.all(mean > 0.0)
+    else:
+        assert mean is None
+
+
+def test_a_legacy_json_corrections_group_is_still_read():
+    """Databases written before the typed layout must keep reducing."""
+    import json
+
+    detector = _solid_angle_detector()
+    cnters = {"hsize": np.full(2, 20.0), "vsize": np.full(2, 5.0)}
+    legacy = {"json": json.dumps({"use_solid_angle": True})}
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = _scan_with_corrections(folder, legacy)
+        with h5py.File(path, "r") as handle:
+            integrator = SimpleNamespace(
+                database=SimpleNamespace(nxfile=handle, config_target=None)
+            )
+            mean, compensated = RockingPeakIntegrator._rocking_solid_angle_mean(
+                integrator, detector, handle["/61.1"], cnters,
+                x=np.full(2, 240.0), y=np.full(2, 300.0),
+            )
+
+    assert compensated is True
+    assert mean is not None and np.all(mean > 0.0)

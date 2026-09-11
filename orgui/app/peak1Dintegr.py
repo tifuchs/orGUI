@@ -55,7 +55,12 @@ from silx.utils.weakref import WeakMethodProxy
 import traceback
 
 from . import qutils
-from .config_data import ConfigData, detector_from_nxdict
+from .config_data import (
+    ConfigData,
+    CorrectionState,
+    corrections_from_nxdict,
+    detector_from_nxdict,
+)
 from .. import resources
 from .. import logger_utils
 from ..datautils.xrayutils.corrections import beamprofile
@@ -1489,11 +1494,18 @@ class RockingPeakIntegrator(qt.QMainWindow):
             be established.
         :rtype: tuple
         """
+        path = scangroup.name + "/configuration/orgui/integration_corrections"
         try:
-            raw = scangroup["configuration/orgui/integration_corrections/json"][()]
-            if isinstance(raw, bytes):
-                raw = raw.decode()
-            was_applied = bool(json.loads(str(raw)).get("use_solid_angle", False))
+            group = h5todict(self.database.nxfile, path)
+            if "json" in group:
+                # Configurations written before the typed layout.
+                raw = group["json"]
+                if isinstance(raw, bytes):
+                    raw = raw.decode()
+                state = CorrectionState.from_dict(json.loads(str(raw)))
+            else:
+                state = corrections_from_nxdict(group)
+            was_applied = bool(state.use_solid_angle)
         except Exception:
             logger.warning(
                 "Cannot tell from this scan's stored configuration whether the "

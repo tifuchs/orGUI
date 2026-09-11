@@ -31,6 +31,13 @@ from ..datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
 
 SCHEMA_VERSION = 1
 
+#: Layout version of the integration_corrections group. Version 2 is the
+#: typed layout that replaced a single JSON string.
+CORRECTIONS_SCHEMA_VERSION = 2
+
+#: Layout version of the roi_integration group.
+ROI_SCHEMA_VERSION = 1
+
 
 def _json_value(value):
     if isinstance(value, dict):
@@ -58,6 +65,12 @@ class CorrectionState:
     use_background: bool = False
     use_solid_angle: bool = False
     use_polarization: bool = False
+    # Tri-state on purpose: ``None`` is "this configuration predates the
+    # switch being stored", which must leave the GUI as it is rather than
+    # silently turning the correction off.
+    use_lorentz: bool | None = None
+    use_footprint: bool | None = None
+    use_normalization: bool | None = None
     repair_masked_pixels: bool = False
     repair_max_component_pixels: int | None = None
     repair_max_span: int | None = None
@@ -260,6 +273,228 @@ def reflections_from_nxdict(nxdict):
     ]
 
 
+#: Region-of-interest option group -> the unit attributes written beside its
+#: values. Anything absent here is dimensionless.
+_ROI_UNITS = {
+    "region": {"@unit": "px"},
+    "advanced": {"@sample_size_unit": "m", "@offset_unit": "px"},
+    "rocking_scan": {"@unit": "rlu"},
+}
+
+
+def _nx_group(mapping, units=None):
+    """A NeXus subgroup from a flat mapping, skipping ``None`` values."""
+    group = {"@NX_class": "NXcollection"}
+    group.update(units or {})
+    for key, value in mapping.items():
+        if value is None:
+            continue
+        group[key] = value
+    return group
+
+
+def _plain(value):
+    """Strip the numpy and bytes wrappers that HDF5 hands back."""
+    if isinstance(value, bytes):
+        return value.decode()
+    if isinstance(value, np.ndarray):
+        if value.shape == ():
+            return _plain(value[()])
+        return [_plain(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _read_group(nxdict, name):
+    """Values of one subgroup, without its NeXus bookkeeping keys."""
+    group = nxdict.get(name) or {}
+    return {
+        key: _plain(value)
+        for key, value in group.items()
+        if not key.startswith("@")
+    }
+
+
+def corrections_to_nxdict(state):
+    """Serialize a :class:`CorrectionState` as a typed NeXus group.
+
+    Replaces the single opaque JSON string this used to be written as. Every
+    value is its own dataset, so a stored configuration can be read in an
+    HDF5 browser and units can sit beside the numbers that have them.
+
+    ``None`` and empty sequences are written by *omission*: HDF5 has no null,
+    and absence already means "not recorded" to the reader.
+
+    :param CorrectionState state: The state to serialize.
+    :rtype: dict
+    :raises ValueError: If ``uncertainty_provenance`` is not flat.
+    """
+    if any(
+        isinstance(value, (dict, list, tuple))
+        for value in state.uncertainty_provenance.values()
+    ):
+        raise ValueError(
+            "uncertainty_provenance must be a flat mapping of scalars; a "
+            "nested value cannot be written as a NeXus group"
+        )
+    nxdict = {
+        "@NX_class": "NXcollection",
+        "@orgui_schema_version": CORRECTIONS_SCHEMA_VERSION,
+        "switches": _nx_group({
+            "use_mask": state.use_mask,
+            "use_background": state.use_background,
+            "use_solid_angle": state.use_solid_angle,
+            "use_polarization": state.use_polarization,
+            "use_lorentz": state.use_lorentz,
+            "use_footprint": state.use_footprint,
+            "use_normalization": state.use_normalization,
+        }),
+        "normalization": _nx_group(
+            {"normalize_exposure": state.normalize_exposure}
+        ),
+        "pixel_repair": _nx_group({
+            "enabled": state.repair_masked_pixels,
+            "max_component_pixels": state.repair_max_component_pixels,
+            "max_span": state.repair_max_span,
+            "radius": state.repair_radius,
+            "min_valid_neighbors": state.repair_min_valid_neighbors,
+            "use_pyfai_gaps": state.repair_use_pyfai_gaps,
+            "gap_size_px": state.repair_gap_size_px,
+        }),
+        "assets": _nx_group({
+            "mask": state.mask_asset,
+            "background": state.background_asset,
+            "background_variance": state.background_variance_asset,
+        }),
+    }
+    if state.monitor_corrections:
+        nxdict["normalization"]["monitor_corrections"] = _string_array(
+            list(state.monitor_corrections)
+        )
+    if state.excluded_frames:
+        nxdict["excluded_frames"] = np.asarray(
+            state.excluded_frames, dtype=np.int64
+        )
+    if state.uncertainty_provenance:
+        nxdict["uncertainty_provenance"] = _nx_group(
+            dict(state.uncertainty_provenance)
+        )
+    return nxdict
+
+
+def corrections_from_nxdict(nxdict):
+    """Rebuild a :class:`CorrectionState` from its NeXus group.
+
+    Datasets this version does not know are ignored, so a configuration
+    written by a newer orGUI still loads.
+
+    :param dict nxdict: The ``integration_corrections`` group.
+    :rtype: CorrectionState
+    """
+    switches = _read_group(nxdict, "switches")
+    normalization = _read_group(nxdict, "normalization")
+    repair = _read_group(nxdict, "pixel_repair")
+    assets = _read_group(nxdict, "assets")
+    excluded = _plain(nxdict.get("excluded_frames"))
+    values = {
+        "use_mask": bool(switches.get("use_mask", False)),
+        "use_background": bool(switches.get("use_background", False)),
+        "use_solid_angle": bool(switches.get("use_solid_angle", False)),
+        "use_polarization": bool(switches.get("use_polarization", False)),
+        "repair_masked_pixels": bool(repair.get("enabled", False)),
+        "repair_use_pyfai_gaps": bool(repair.get("use_pyfai_gaps", True)),
+        "repair_gap_size_px": int(repair.get("gap_size_px", 1)),
+        "normalize_exposure": bool(
+            normalization.get("normalize_exposure", True)
+        ),
+        # Written with _string_array, i.e. a uint8 matrix, so it needs the
+        # matching reader rather than a plain tuple().
+        "monitor_corrections": tuple(
+            _read_string_array(normalization.get("monitor_corrections", []))
+        ),
+        "excluded_frames": tuple(int(v) for v in (excluded or ())),
+        "uncertainty_provenance": _read_group(nxdict, "uncertainty_provenance"),
+    }
+    for name in ("use_lorentz", "use_footprint", "use_normalization"):
+        if name in switches:
+            values[name] = bool(switches[name])
+    for name, key in (
+        ("repair_max_component_pixels", "max_component_pixels"),
+        ("repair_max_span", "max_span"),
+        ("repair_radius", "radius"),
+        ("repair_min_valid_neighbors", "min_valid_neighbors"),
+    ):
+        if key in repair:
+            values[name] = int(repair[key])
+    for name, key in (
+        ("mask_asset", "mask"),
+        ("background_asset", "background"),
+        ("background_variance_asset", "background_variance"),
+    ):
+        if key in assets:
+            values[name] = str(assets[key])
+    return CorrectionState(**values)
+
+
+def roi_to_nxdict(state):
+    """Serialize a :class:`ROIState` as a typed NeXus group.
+
+    :param ROIState state: The settings to serialize.
+    :rtype: dict
+    """
+    nxdict = {
+        "@NX_class": "NXcollection",
+        "@orgui_schema_version": ROI_SCHEMA_VERSION,
+    }
+    for name in ("region", "advanced", "rocking_scan"):
+        values = getattr(state, name)
+        if values:
+            nxdict[name] = _nx_group(dict(values), _ROI_UNITS[name])
+    return nxdict
+
+
+def roi_from_nxdict(nxdict):
+    """Rebuild a :class:`ROIState` from its NeXus group.
+
+    :param dict nxdict: The ``roi_integration`` group, or ``None`` for a
+        configuration written before these settings were stored.
+    :rtype: ROIState
+    """
+    nxdict = nxdict or {}
+    return ROIState(
+        region=_read_group(nxdict, "region"),
+        advanced=_read_group(nxdict, "advanced"),
+        rocking_scan=_read_group(nxdict, "rocking_scan"),
+    )
+
+
+@dataclass
+class ROIState:
+    """Region-of-interest settings that decide what a scan integrates.
+
+    Held as the same dictionaries :class:`~orgui.app.QScanSelector.QScanSelector`
+    already speaks, so a new control in the options dialog reaches the file
+    without a change here. The NeXus layout below is typed and carries units;
+    this is only the carrier.
+
+    An empty dictionary means "not recorded", which is what every
+    configuration written before these settings were stored looks like.
+    """
+
+    #: Nominal sizes and the automatic-sizing switches, pixels.
+    region: dict = field(default_factory=dict)
+    #: The advanced options dialog: sample size in meter, offsets in pixels.
+    advanced: dict = field(default_factory=dict)
+    #: Rocking-scan ``s`` sampling, r.l.u. ``delta_s`` is the effective value
+    #: after the resolution clipping of ``onRoSChanged``, not what was typed.
+    rocking_scan: dict = field(default_factory=dict)
+
+    def is_empty(self):
+        """True when nothing was recorded, so nothing should be restored."""
+        return not (self.region or self.advanced or self.rocking_scan)
+
+
 @dataclass
 class ConfigData:
     """Physical application state persisted with scans and integrations."""
@@ -281,6 +516,7 @@ class ConfigData:
     refraction_index: float = 1.0
     reference_reflections: list = field(default_factory=list)
     corrections: CorrectionState = field(default_factory=CorrectionState)
+    roi: ROIState = field(default_factory=ROIState)
     orgui: dict = field(default_factory=dict)
 
     @classmethod
@@ -369,6 +605,7 @@ class ConfigData:
         ub_calculator = HKLVlieg.UBCalculator(cell, ub_widget.ubCal.getEnergy())
         ub_calculator.setU(ub_widget.ubCal.getU())
         corrections = CorrectionState()
+        roi = ROIState()
         if hasattr(gui, "scanSelector"):
             options = gui.scanSelector.get_integration_options()
             repair = getattr(getattr(gui, "maskManager", None), "settings", None)
@@ -380,8 +617,11 @@ class ConfigData:
                 use_mask=bool(options.get("mask", False)) or repair_enabled,
                 use_background=getattr(gui, "background_image", None)
                 is not None,
-                use_solid_angle=bool(options.get("solidAngle", False)),
+                use_solid_angle=bool(options.get("solid_angle", False)),
                 use_polarization=bool(options.get("polarization", False)),
+                use_lorentz=bool(options.get("lorentz", False)),
+                use_footprint=bool(options.get("footprint", False)),
+                use_normalization=bool(options.get("normalization", False)),
                 repair_masked_pixels=repair_enabled,
                 repair_max_component_pixels=getattr(
                     repair, "max_component_pixels", None
@@ -411,6 +651,11 @@ class ConfigData:
                     )
                 ),
             )
+            roi = ROIState(
+                region=dict(options.get("region", {})),
+                advanced=dict(options.get("advanced", {})),
+                rocking_scan=dict(options.get("rocking_scan", {})),
+            )
         return cls(
             detector=ub_widget.detectorCal,
             unit_cell=cell,
@@ -424,6 +669,7 @@ class ConfigData:
             refraction_index=getattr(ub_widget, "n", 1.0),
             reference_reflections=reflections,
             corrections=corrections,
+            roi=roi,
         )
 
     def apply_to_gui(self, gui):
@@ -461,13 +707,26 @@ class ConfigData:
         if hasattr(gui, "reflectionSel"):
             gui.reflectionSel.setReflections(self.reference_reflections)
         if hasattr(gui, "scanSelector"):
-            gui.scanSelector.set_integration_options(
-                {
-                    "mask": self.corrections.use_mask,
-                    "solidAngle": self.corrections.use_solid_angle,
-                    "polarization": self.corrections.use_polarization,
-                }
-            )
+            options = {
+                "mask": self.corrections.use_mask,
+                "solid_angle": self.corrections.use_solid_angle,
+                "polarization": self.corrections.use_polarization,
+            }
+            # Only switches this configuration actually recorded. A file
+            # written before they were stored leaves them as the user has
+            # them, rather than silently turning a correction off.
+            for name, value in (
+                ("lorentz", self.corrections.use_lorentz),
+                ("footprint", self.corrections.use_footprint),
+                ("normalization", self.corrections.use_normalization),
+            ):
+                if value is not None:
+                    options[name] = value
+            for name in ("region", "advanced", "rocking_scan"):
+                values = getattr(self.roi, name)
+                if values:
+                    options[name] = dict(values)
+            gui.scanSelector.set_integration_options(options)
         gui.reconstruction_normalize_exposure = self.corrections.normalize_exposure
         gui.reconstruction_monitor_corrections = self.corrections.monitor_corrections
         if (
@@ -541,12 +800,10 @@ class ConfigData:
                     "@wavelength_unit": "Angstrom",
                 },
                 "refraction_index": self.refraction_index,
-                "integration_corrections": {
-                    "@NX_class": "NXcollection",
-                    "json": json.dumps(
-                        self.corrections.to_dict(), sort_keys=True
-                    ),
-                },
+                "integration_corrections": corrections_to_nxdict(
+                    self.corrections
+                ),
+                "roi_integration": roi_to_nxdict(self.roi),
                 **self.orgui,
             },
         }
@@ -566,16 +823,18 @@ class ConfigData:
         ub_calculator = HKLVlieg.UBCalculator(unit_cell, energy)
         ub_calculator.setU(np.asarray(nxdict["sample"]["orientation_matrix"]))
         diffrac = nxdict.get("orgui", {}).get("diffractometer", {})
-        correction_json = (
-            nxdict.get("orgui", {})
-            .get("integration_corrections", {})
-            .get("json", "{}")
-        )
-        correction_json = np.asarray(correction_json)
-        if correction_json.shape == ():
-            correction_json = correction_json.item()
-        if isinstance(correction_json, bytes):
-            correction_json = correction_json.decode()
+        corrections_group = nxdict.get("orgui", {}).get(
+            "integration_corrections", {}
+        ) or {}
+        if "json" in corrections_group:
+            # Configurations written before the typed layout. Still read, so
+            # that existing databases keep loading; never written any more.
+            corrections = CorrectionState.from_dict(
+                json.loads(_as_text(_plain(corrections_group["json"])) or "{}")
+            )
+        else:
+            corrections = corrections_from_nxdict(corrections_group)
+        roi = roi_from_nxdict(nxdict.get("orgui", {}).get("roi_integration"))
         return cls(
             detector=detector,
             unit_cell=unit_cell,
@@ -590,7 +849,8 @@ class ConfigData:
                 nxdict.get("orgui", {}).get("refraction_index", 1.0)
             ),
             reference_reflections=reflections_from_nxdict(nxdict),
-            corrections=CorrectionState.from_dict(json.loads(correction_json)),
+            corrections=corrections,
+            roi=roi,
         )
 
     def to_json_dict(self) -> dict[str, Any]:
