@@ -13,9 +13,13 @@ The tests pin the corrections described in the design record and protect the
 saved rocking intensities and uncertainties from regression.
 """
 
+import os
+import tempfile
 from types import SimpleNamespace
 
+import h5py
 import numpy as np
+import pytest
 
 from orgui.app.peak1Dintegr import (
     RockingPeakIntegrator,
@@ -454,7 +458,8 @@ def test_the_acceptance_reads_the_row_from_y_and_the_column_from_x():
     }
 
     acceptance, applied = RockingPeakIntegrator._rocking_acceptance(
-        _stub(detector), cnters, x=np.array([5.0, 300.0, 470.0]), y=np.full(3, 250.0)
+        _stub(), detector, cnters,
+        x=np.array([5.0, 300.0, 470.0]), y=np.full(3, 250.0)
     )
 
     assert applied is True
@@ -462,11 +467,11 @@ def test_the_acceptance_reads_the_row_from_y_and_the_column_from_x():
 
 
 def test_a_missing_detector_leaves_the_acceptance_out_rather_than_failing():
-    """CLI use without a calibration must not lose the integration."""
+    """A scan storing no detector geometry must not lose the integration."""
     cnters = {"vsize": np.array([40.0]), "alpha_pk": np.zeros(1)}
 
     acceptance, applied = RockingPeakIntegrator._rocking_acceptance(
-        _stub(None), cnters, x=np.array([100.0]), y=np.array([200.0])
+        _stub(), None, cnters, x=np.array([100.0]), y=np.array([200.0])
     )
 
     assert acceptance is None
@@ -503,3 +508,76 @@ def test_a_missing_exposure_counter_is_skipped_and_recorded():
 
     np.testing.assert_allclose(divisor, np.ones(3), rtol=1e-12)
     assert applied == []
+
+
+def test_the_detector_comes_from_the_scan_not_from_the_application():
+    """The acceptance must use the geometry the data was measured with.
+
+    ``Delta_gamma`` is a property of the detector the rocking curves were
+    recorded on. Reading it from whatever calibration the application happens
+    to hold makes a reduction run later -- from a batch script, or after a
+    different calibration was loaded -- silently wrong: on a real LaNiO3 scan
+    that scaled every acceptance by 2.3 with nothing in the output to show
+    for it.
+    """
+    pyFAI = pytest.importorskip("pyFAI")
+    from silx.io.dictdump import dicttonx
+
+    from orgui.app.config_data import detector_to_nxdict
+    from orgui.datautils.xrayutils import DetectorCalibration
+
+    stored = DetectorCalibration.Detector2D_SXRD()
+    stored.detector = pyFAI.detectors.Detector(
+        pixel1=172e-6, pixel2=172e-6, max_shape=(619, 487)
+    )
+    stored.dist = 0.5
+    stored.poni1, stored.poni2 = 0.05, 0.04
+    stored.rot1 = stored.rot2 = stored.rot3 = 0.0
+    stored.set_energy(15.0)
+    stored.setAzimuthalReference(np.deg2rad(90.0))
+    stored.setPolarization(0.0, 1.0)
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "scan.h5")
+        dicttonx(
+            {"configuration": {"instrument": {
+                "detector_SXRD": detector_to_nxdict(stored)}}},
+            path,
+            h5path="/61.1",
+            update_mode="add",
+        )
+        with h5py.File(path, "r") as handle:
+            integrator = SimpleNamespace(
+                database=SimpleNamespace(
+                    nxfile=handle,
+                    # A *different* geometry in the application, which must
+                    # not be the one that gets used.
+                    config_target=SimpleNamespace(
+                        ubcalc=SimpleNamespace(detectorCal="wrong detector")
+                    ),
+                )
+            )
+            got = RockingPeakIntegrator._stored_detector(
+                integrator, handle["/61.1"]
+            )
+
+    assert got is not None
+    assert got != "wrong detector"
+    assert got.dist == pytest.approx(0.5)
+    assert got.poni1 == pytest.approx(0.05)
+    assert got.poni2 == pytest.approx(0.04)
+
+
+def test_a_scan_without_a_stored_detector_gives_none():
+    """An older database has no geometry to read; that is not a crash."""
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "scan.h5")
+        with h5py.File(path, "w") as handle:
+            handle.create_group("/61.1")
+        with h5py.File(path, "r") as handle:
+            integrator = SimpleNamespace(
+                database=SimpleNamespace(nxfile=handle, config_target=None)
+            )
+            assert RockingPeakIntegrator._stored_detector(
+                integrator, handle["/61.1"]
+            ) is None

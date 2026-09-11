@@ -55,7 +55,7 @@ from silx.utils.weakref import WeakMethodProxy
 import traceback
 
 from . import qutils
-from .config_data import ConfigData
+from .config_data import ConfigData, detector_from_nxdict
 from .. import resources
 from .. import logger_utils
 from ..datautils.xrayutils.corrections import beamprofile
@@ -1421,7 +1421,45 @@ class RockingPeakIntegrator(qt.QMainWindow):
             size, exposure_time=exposure, monitors=monitors
         )
 
-    def _rocking_solid_angle_mean(self, scangroup, cnters, x, y):
+    def _stored_detector(self, scangroup):
+        """The detector geometry the rocking curves were measured with.
+
+        Read from the configuration stored beside the scan, never from the
+        current application state. The acceptance and the solid-angle factor
+        are properties of the geometry the data was *taken* with, and a
+        reduction run later -- from a batch script, or after another
+        calibration has been loaded -- would otherwise silently use whatever
+        detector happens to be loaded. Measured on a LaNiO3 rocking scan, that
+        mistake scaled every ``Delta_gamma`` by 2.3 and left no trace in the
+        output.
+
+        :param scangroup: The scan group holding ``configuration``.
+        :returns: A
+            :class:`~orgui.datautils.xrayutils.DetectorCalibration.Detector2D_SXRD`,
+            or ``None`` when the scan stores no detector configuration.
+        :rtype: object or None
+        """
+        path = scangroup.name + "/configuration/instrument/detector_SXRD"
+        if path not in self.database.nxfile:
+            logger.warning(
+                "This scan stores no detector configuration, so the "
+                "out-of-plane acceptance cannot be calculated from the "
+                "geometry the data was measured with. F2_hkl is left on the "
+                "acceptance-blind scale."
+            )
+            return None
+        try:
+            return detector_from_nxdict(h5todict(self.database.nxfile, path))
+        except Exception:
+            logger.exception(
+                "Cannot rebuild the detector geometry stored with this scan, "
+                "so the out-of-plane acceptance cannot be calculated. F2_hkl "
+                "is left on the acceptance-blind scale.",
+                extra={"title": "Cannot read the stored detector geometry"},
+            )
+            return None
+
+    def _rocking_solid_angle_mean(self, detector, scangroup, cnters, x, y):
         """Region mean of the solid-angle correction that was applied, or None.
 
         The solid-angle correction is applied to the *intensity* when the
@@ -1435,8 +1473,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
         Whether it was applied is a property of the *extraction*, not of the
         switches in this dialog, so it is read from the configuration snapshot
-        stored with the scan rather than from the current GUI state.
+        stored with the scan rather than from the current GUI state -- as is
+        the detector geometry it is measured over.
 
+        :param detector: The geometry the scan was measured with, from
+            :meth:`_stored_detector`.
         :param scangroup: The scan group holding the ``configuration`` written
             when the rocking curves were extracted.
         :param cnters: The ``rois`` group of the rocking scan.
@@ -1466,14 +1507,12 @@ class RockingPeakIntegrator(qt.QMainWindow):
         if not was_applied:
             return None, False
 
-        config_target = self.database.config_target
-        detector = getattr(getattr(config_target, "ubcalc", None), "detectorCal", None)
         if detector is None:
             logger.warning(
                 "The solid angle correction was applied to these rocking "
-                "curves, but no calibrated detector is available to measure it "
-                "over the regions of interest, so it is not divided out of "
-                "F2_hkl."
+                "curves, but the detector geometry stored with the scan is "
+                "not available to measure it over the regions of interest, so "
+                "it is not divided out of F2_hkl."
             )
             return None, False
 
@@ -1493,7 +1532,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         )
         return np.asarray(mean, dtype=float), True
 
-    def _rocking_acceptance(self, cnters, x, y):
+    def _rocking_acceptance(self, detector, cnters, x, y):
         """Out-of-plane acceptance of every region of interest, in radian.
 
         A rocking scan intercepts a slice of rod proportional to
@@ -1512,23 +1551,17 @@ class RockingPeakIntegrator(qt.QMainWindow):
         :math:`\\gamma` is measured around, so this costs nothing measurable;
         see ``doc/design/ctr_structure_factor_scale.md`` section 4.4.
 
+        :param detector: The geometry the scan was measured with, from
+            :meth:`_stored_detector`; ``None`` leaves the acceptance out.
         :param cnters: The ``rois`` group of the rocking scan.
         :param x: Region centre column per ``s`` point, in pixels.
         :param y: Region centre row per ``s`` point, in pixels.
         :returns: ``(acceptance, applied)`` -- the acceptance in radian of
-            shape ``(n_s,)``, or ``(None, False)`` when no calibrated
-            detector is reachable.
+            shape ``(n_s,)``, or ``(None, False)`` when the stored geometry
+            is unavailable.
         :rtype: tuple
         """
-        config_target = self.database.config_target
-        detector = getattr(getattr(config_target, "ubcalc", None), "detectorCal", None)
         if detector is None:
-            logger.warning(
-                "No calibrated detector is available, so the out-of-plane "
-                "acceptance of the regions of interest cannot be calculated. "
-                "F2_hkl is left on the acceptance-blind scale and will not "
-                "agree with a stationary integration of the same rod."
-            )
             return None, False
 
         vsize = cnters["vsize"][()]
@@ -1632,11 +1665,12 @@ class RockingPeakIntegrator(qt.QMainWindow):
         detector_acceptance, acceptance_applied = None, False
         solid_angle_mean, solid_angle_compensated = None, False
         if self.lorentzButton.isChecked():
+            detector = self._stored_detector(scangroup)
             detector_acceptance, acceptance_applied = self._rocking_acceptance(
-                cnters, x, y
+                detector, cnters, x, y
             )
             solid_angle_mean, solid_angle_compensated = (
-                self._rocking_solid_angle_mean(scangroup, cnters, x, y)
+                self._rocking_solid_angle_mean(detector, scangroup, cnters, x, y)
             )
 
         self.database.nxfile[self._currentRoInfo["name"] + "/integration/"]
