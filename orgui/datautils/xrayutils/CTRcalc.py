@@ -450,13 +450,28 @@ class SXRDCrystal:
             electrons per the component's own lateral cell.
         """
         uc = self.uc_surface_list[index]
+        for matrix, scale in self._component_domain_factors(index):
+            hkl_n = np.dot(matrix, hkl)
+            yield scale * evaluator(uc, hkl_n[0], hkl_n[1], hkl_n[2])
+
+    def _component_domain_factors(self, index):
+        """Yield the transform and combined scale of each outer domain.
+
+        The scale is ``reference_area / component_area * occupancy * weight``.
+        This is the single definition of that product: an incoherent model
+        combining its own per-state amplitudes must use it rather than
+        rebuild it, or the two paths can drift apart.
+
+        :param int index:
+            Position in :attr:`uc_surface_list`.
+        :returns:
+            Generator of ``(matrix, scale)`` pairs in domain order.
+        """
+        uc = self.uc_surface_list[index]
         area_scale = self.reference_area / uc.uc_area
         weight = self.weights[index]
         for matrix, occup in self.domains[index]:
-            hkl_n = np.dot(matrix, hkl)
-            yield area_scale * occup * weight * evaluator(
-                uc, hkl_n[0], hkl_n[1], hkl_n[2]
-            )
+            yield matrix, area_scale * occup * weight
 
     def evaluate_kinematic(self, harray, karray, Larray):
         """Return the decomposed kinematical evaluation behind :meth:`F`.
