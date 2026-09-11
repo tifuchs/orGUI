@@ -44,6 +44,7 @@ from ... import util
 from .. import CTRcalc, CTRfilm, CTRplotutil, CTRsymmetry, CTRuc
 from ..CTRdistributions import PoissonProfile, SkellamProfile, SurfaceProfile
 from ..CTRutil import generate_surface_termination_cells
+from . import _poisson_oracle
 
 
 HAS_ASE = importlib.util.find_spec("ase") is not None
@@ -1038,6 +1039,318 @@ class TestPoissonSurface(unittest.TestCase):
             np.concatenate([layer.basis[:, 6] for layer in surface.film_layer_ucs]),
             0.5,
         )
+
+
+class TestPoissonFlatHeightCharacterization(unittest.TestCase):
+    """Characterize the coherent Poisson surface against flat-height crystals.
+
+    The reference in every test is an independently stacked ``Film`` of the
+    matching thickness, built by ``_poisson_oracle`` without touching
+    ``PoissonSurface``. These record the behavior the incoherent models of
+    ``doc/design/incoherent_ctr_models.md`` are defined against; they are
+    characterization tests, so a deliberate change to the coherent model is
+    expected to update them.
+    """
+
+    H = np.zeros(5)
+    K = np.zeros(5)
+    L = np.array([0.35, 0.8, 1.3, 1.85, 2.4])
+
+    def relative_error(self, value, reference):
+        """Return the max deviation relative to the reference amplitude."""
+        return float(
+            np.max(np.abs(value - reference)) / np.max(np.abs(reference))
+        )
+
+    def test_layered_cell_fixture_sets_every_layer_position(self):
+        """``addAtom`` defaults ``layerpos`` to zero for each new layer.
+
+        A cell left that way collapses its whole cycle onto one stacking
+        position, which places consecutive Film layers a full unit cell apart.
+        Every comparison in this class then disagrees with the Poisson surface
+        for reasons that have nothing to do with the surface, so the fixture
+        pins the positions explicitly.
+        """
+        collapsed = CTRcalc.UnitCell([3.0, 3.0, 6.0], [90.0, 90.0, 90.0])
+        for index, z in enumerate((0.0, 0.5)):
+            collapsed.addAtom("C", [0.0, 0.0, z], 0.1, 0.1, 1.0, layer=index)
+        self.assertEqual(collapsed.layerpos, {0.0: 0.0, 1.0: 0.0})
+
+        self.assertEqual(
+            _poisson_oracle.layered_cell(2).layerpos,
+            {0.0: 0.0, 1.0: 0.5},
+        )
+
+    def test_deterministic_states_match_independent_films(self):
+        """One flat height equals a plain Film of the matching thickness.
+
+        Covers positive growth and negative etching, layer cycles which do and
+        do not divide the base width, and cycles of one, two, and three
+        structural layers.
+        """
+        for n_layers in (1, 2, 3):
+            for w_base in (3.0, 4.0, 5.0):
+                for height_change in (2, 1, 0, -1, -2):
+                    with self.subTest(
+                        n_layers=n_layers,
+                        w_base=w_base,
+                        height_change=height_change,
+                    ):
+                        profile = PoissonProfile(
+                            float(height_change),
+                            alpha=0.0,
+                            offset=0.0,
+                            tail_probability=1e-14,
+                        )
+                        crystal, _ = _poisson_oracle.poisson_crystal(
+                            profile, w_base=w_base, n_layers=n_layers
+                        )
+                        reference = _poisson_oracle.flat_height_crystal(
+                            height_change - 1,
+                            w_base=w_base,
+                            n_layers=n_layers,
+                        )
+                        self.assertLess(
+                            self.relative_error(
+                                crystal.F(self.H, self.K, self.L),
+                                reference.F(self.H, self.K, self.L),
+                            ),
+                            1e-12,
+                        )
+
+    def test_coherent_amplitude_is_the_flat_height_average(self):
+        """``F`` equals ``sum_n q_n A_n`` over independent flat crystals.
+
+        This is the characteristic-function form the design record calls the
+        coherent limit. It is recorded for growth and etching, for a
+        fractional deterministic step, for a nonzero offset, and for mixtures
+        of a step with a Poisson tail.
+        """
+        cases = {
+            "integer growth": PoissonProfile(2.0, alpha=0.0),
+            "fractional step": PoissonProfile(1.5, alpha=0.0),
+            "nonzero offset": PoissonProfile(1.0, alpha=0.0, offset=0.25),
+            "negative offset": PoissonProfile(0.0, alpha=0.0, offset=-2.25),
+            "poisson growth": PoissonProfile(1.5, alpha=0.6),
+            "poisson etching": PoissonProfile(-1.5, alpha=0.6),
+            "step and poisson": PoissonProfile(2.3, alpha=0.4, offset=0.4),
+            "deep etching": PoissonProfile(-4.0, alpha=1.0),
+        }
+        for label, profile in cases.items():
+            with self.subTest(case=label):
+                profile.tail_probability = 1e-14
+                w_base = _poisson_oracle.minimum_base_width(profile)
+                crystal, _ = _poisson_oracle.poisson_crystal(
+                    profile, w_base=w_base
+                )
+                reference = _poisson_oracle.coherent_reference(
+                    profile, self.H, self.K, self.L, w_base=w_base
+                )
+                self.assertLess(
+                    self.relative_error(
+                        crystal.F(self.H, self.K, self.L), reference
+                    ),
+                    1e-12,
+                )
+
+    def test_incoherent_average_departs_from_the_coherent_limit(self):
+        """Two equally populated heights cancel coherently but not squared.
+
+        ``PoissonProfile(0.5, alpha=0.0)`` has zero Poisson rate and a
+        one-half deterministic step fraction, so it populates structural
+        layers ``-1`` and ``0`` at exactly one half each. The coherent square
+        of the averaged amplitude and the averaged square of the two state
+        amplitudes are the two endpoints the incoherent model interpolates,
+        and they must differ here.
+        """
+        profile = PoissonProfile(0.5, alpha=0.0, tail_probability=1e-14)
+        layers, exposed = _poisson_oracle.height_states(profile)
+        np.testing.assert_array_equal(layers, [-1, 0])
+        np.testing.assert_allclose(exposed, [0.5, 0.5])
+
+        # The contrast between the two endpoints varies strongly along the
+        # rod, so it is scanned rather than sampled at a few points: the
+        # bulk dominates near the Bragg conditions and suppresses it there.
+        scan = np.linspace(0.05, 3.0, 296)
+        zeros = np.zeros_like(scan)
+        _, exposed, amplitudes = _poisson_oracle.flat_height_amplitudes(
+            profile, zeros, zeros, scan, w_base=4.0
+        )
+        coherent = sum(
+            probability * amplitude
+            for probability, amplitude in zip(exposed, amplitudes)
+        )
+        incoherent = sum(
+            probability * np.abs(amplitude) ** 2
+            for probability, amplitude in zip(exposed, amplitudes)
+        )
+
+        crystal, _ = _poisson_oracle.poisson_crystal(profile, w_base=4.0)
+        np.testing.assert_allclose(
+            crystal.F(zeros, zeros, scan), coherent, rtol=1e-12
+        )
+
+        # The incoherent endpoint is never below the coherent one: it drops
+        # the cross term rather than adding anything, so their difference is
+        # the state variance.
+        variance = incoherent - np.abs(coherent) ** 2
+        self.assertTrue(np.all(variance >= -1e-9))
+        self.assertGreater(np.max(variance / incoherent), 0.15)
+
+        # A distribution with one populated height has no variance to expose,
+        # which is the invariance the partial model must preserve for every
+        # mixing fraction.
+        single = PoissonProfile(1.0, alpha=0.0, tail_probability=1e-14)
+        _, single_exposed, single_amplitudes = (
+            _poisson_oracle.flat_height_amplitudes(
+                single, zeros, zeros, scan, w_base=4.0
+            )
+        )
+        self.assertEqual(len(single_amplitudes), 1)
+        np.testing.assert_allclose(
+            single_exposed[0] * np.abs(single_amplitudes[0]) ** 2,
+            np.abs(single_exposed[0] * single_amplitudes[0]) ** 2,
+            rtol=1e-12,
+        )
+
+    def test_state_squares_keep_the_bulk_inside_each_state(self):
+        """Averaging only the surface correction is a different quantity.
+
+        A fixture with a nonzero bulk amplitude separates the correct
+        ``sum_n q_n abs(A_n) ** 2`` from the incorrect
+        ``abs(A_common) ** 2 + sum_n q_n abs(dA_n) ** 2``, which drops the
+        bulk-surface and Film-surface interference inside each domain.
+        """
+        profile = PoissonProfile(0.5, alpha=0.0, tail_probability=1e-14)
+        w_base = 4.0
+        _, exposed, amplitudes = _poisson_oracle.flat_height_amplitudes(
+            profile, self.H, self.K, self.L, w_base=w_base
+        )
+        common = _poisson_oracle.flat_height_crystal(
+            -1, w_base=w_base
+        ).F(self.H, self.K, self.L)
+
+        correct = sum(
+            probability * np.abs(amplitude) ** 2
+            for probability, amplitude in zip(exposed, amplitudes)
+        )
+        incorrect = np.abs(common) ** 2 + sum(
+            probability * np.abs(amplitude - common) ** 2
+            for probability, amplitude in zip(exposed, amplitudes)
+        )
+
+        self.assertGreater(np.max(np.abs(common)), 1.0)
+        self.assertGreater(
+            np.max(np.abs(correct - incorrect)) / np.max(correct), 0.1
+        )
+
+    def test_crystal_level_scaling_preserves_the_flat_height_average(self):
+        """Area scaling, weights, and domain transforms stay outside the sum.
+
+        The design record requires each state amplitude to carry the crystal's
+        reference-area scaling, component weight, and outer coherent-domain
+        transforms. Each is applied to both sides here, so the flat-height
+        average must survive all three and their combination.
+        """
+        profile = PoissonProfile(1.5, alpha=0.5, tail_probability=1e-14)
+        w_base = _poisson_oracle.minimum_base_width(profile)
+        wide_reference = _poisson_oracle.layered_cell(2, "reference", a=6.0)
+        transforms = [
+            (np.identity(3), 0.65),
+            (np.diag([1.0, 1.0, 0.5]), 0.35),
+        ]
+        cases = {
+            "reference area": {"reference_uc": wide_reference},
+            "component weight": {"weights": 0.4},
+            "domain transform": {"domains": transforms},
+            "combined": {
+                "reference_uc": wide_reference,
+                "weights": 0.4,
+                "domains": transforms,
+            },
+        }
+        plain, _ = _poisson_oracle.poisson_crystal(profile, w_base=w_base)
+        unscaled = plain.F(self.H, self.K, self.L)
+        for label, keyargs in cases.items():
+            with self.subTest(case=label):
+                weight = keyargs.pop("weights", None)
+                crystal, _ = _poisson_oracle.poisson_crystal(
+                    profile,
+                    w_base=w_base,
+                    # One weight per component: the Film and the surface
+                    # correction together make up one flat-height Film.
+                    weights=None if weight is None else [weight, weight],
+                    **keyargs,
+                )
+                reference = _poisson_oracle.coherent_reference(
+                    profile,
+                    self.H,
+                    self.K,
+                    self.L,
+                    w_base=w_base,
+                    weights=None if weight is None else [weight],
+                    **keyargs,
+                )
+                if weight is not None:
+                    keyargs["weights"] = weight
+                scaled = crystal.F(self.H, self.K, self.L)
+                self.assertLess(
+                    self.relative_error(scaled, reference), 1e-12
+                )
+                # Each factor must actually move the amplitude, or the
+                # agreement above would hold for a crystal ignoring it.
+                self.assertGreater(
+                    self.relative_error(scaled, unscaled), 0.1
+                )
+
+    def test_distinct_terminations_stay_linear_in_the_mixture(self):
+        """A termination bank does not break linearity in the height states.
+
+        The flat-height Film oracle cannot represent a termination which
+        differs from the Film's own cell, so this compares the mixture against
+        single-state Poisson surfaces instead. It therefore characterizes
+        linearity rather than absolute placement, which is what the state-sum
+        decomposition of the incoherent model relies on.
+        """
+        bank = _poisson_oracle.termination_bank(
+            2, scale=0.75, displacement=0.05
+        )
+        mixed = PoissonProfile(0.5, alpha=0.0, tail_probability=1e-14)
+        layers, exposed = _poisson_oracle.height_states(mixed)
+        np.testing.assert_array_equal(layers, [-1, 0])
+
+        blended = np.zeros_like(self.L, dtype=np.complex128)
+        for layer, probability in zip(layers, exposed):
+            single = PoissonProfile(
+                float(layer) + 1.0, alpha=0.0, tail_probability=1e-14
+            )
+            crystal, _ = _poisson_oracle.poisson_crystal(
+                single,
+                w_base=4.0,
+                termination_cells=_poisson_oracle.deep_copy_cells(bank),
+            )
+            blended = blended + probability * crystal.F(
+                self.H, self.K, self.L
+            )
+
+        crystal, surface = _poisson_oracle.poisson_crystal(
+            mixed,
+            w_base=4.0,
+            termination_cells=_poisson_oracle.deep_copy_cells(bank),
+        )
+        mixture = crystal.F(self.H, self.K, self.L)
+        self.assertLess(self.relative_error(mixture, blended), 1e-12)
+
+        # The bank must actually change the result, or the comparison above
+        # would pass against a surface which ignored it entirely.
+        plain, _ = _poisson_oracle.poisson_crystal(mixed, w_base=4.0)
+        self.assertGreater(
+            self.relative_error(
+                mixture, plain.F(self.H, self.K, self.L)
+            ),
+            1e-3,
+        )
+
 
 class TestLayerStacking(unittest.TestCase):
     @staticmethod
