@@ -1,6 +1,11 @@
 # Incoherent CTR models: design and implementation plan
 
-Status: draft, updated 2026-09-11.
+Status: draft, updated 2026-09-11. Revised the same day after an
+implementation-readiness review against the code: the height-state index
+convention, the split between coherent and incoherent retention policies, and
+the treatment of `CTROptimizer.startp` were all corrected before any code was
+written. Each correction is stated where it applies rather than collected in a
+separate errata section.
 
 This record defines an extensible, opt-in API for incoherent CTR calculations.
 The first implementation is a surface whose local height follows the existing
@@ -69,12 +74,30 @@ that they place outside the measured CTR acceptance are outside its scope.
     support is evaluated; it does not claim evaluation of an infinite Poisson
     tail.
 
+12. Height states are indexed by the structural layer `n` of the top filled
+    layer, and the mass of that state is `PoissonProfile.probability(n + 1)`.
+    The `+ 1` follows from `occupancy(n) = P(H > n)`: layer `n` is the top
+    filled layer exactly when the signed height change equals `n + 1`.
+13. `CTROptimizer.startp` keeps its existing meaning as the model-block
+    preparation snapshot. This feature does not redefine it into a full
+    optimizer vector, because that would silently change its length for every
+    existing fit which uses callbacks or fitted resolution.
+
 ## Existing coherent behavior
 
 `PoissonProfile.occupancy` describes cumulative material occupancy at each
-structural-layer offset. `surface_occupancy` takes the difference between
-successive cumulative occupancies and therefore supplies the exposed fraction
-of each height state.
+structural-layer offset, `occupancy(n) = P(H > n)` for the signed height
+change `H`. `surface_occupancy` takes the difference between successive
+cumulative occupancies and therefore supplies the exposed fraction of each
+height state.
+
+Two consequences fix the index convention used throughout this record. Layer
+`n` is the top filled layer exactly when `H == n + 1`, so the exposed mass of
+state `n` is `probability(n + 1)`, not `probability(n)`. And
+`surface_occupancy` is not merely a stylistic alternative to that expression:
+the two agree to floating-point roundoff on every interior bin, but
+`surface_occupancy` sets its terminal bin to `occupancy[-1]` and therefore
+folds the complete upper tail into the highest represented height.
 
 `PoissonSurface.createLayers` currently assigns these fractions to coherent
 domain occupancies. It also assigns the cumulative rough-Film correction and
@@ -590,12 +613,18 @@ get_bounds()[1]              = [1.0,  <crystal upper 0>, <crystal upper 1>]
 
 `CTROptimizer.n_parameters` is the length of this frozen vector and is valid
 after `prepareFit`. `get_parameters()` is the authoritative live parameter
-vector and reflects changes made to the model after preparation. At the end
-of `prepareFit`, legacy `startp` is set once from `get_parameters()` so it has
-the same full-vector order and length at that moment. It remains the
-preparation-time snapshot and is not kept synchronized with later value
-updates; callers should use `get_parameters()` instead. `startp` may be
-deprecated separately in the future. Before preparation, callers can use
+vector and reflects changes made to the model after preparation.
+
+`startp` is deliberately left alone. It stays the preparation-time snapshot of
+the **model block only**, exactly as `prepareFit` sets it today, and
+`lower_bounds`/`higher_bounds` likewise stay the unprefixed model bounds while
+`self.bounds` carries the full prefixed pair. Redefining `startp` as the full
+vector would silently change its length for every existing fit which registers
+a callback or fits resolution, which is a breaking change this feature has no
+reason to make. For a wrapper, `startp` therefore has the wrapper's
+local-plus-coherent length. Its docstring gains a note that
+`get_parameters()` is the authoritative full vector; deprecating `startp`
+outright is a separate API change. Before preparation, callers can use
 `len(model.getInitialParameters())` for the wrapper's total, but should not
 infer the optimizer total because callbacks, subclass blocks, and resolution
 settings can add prefixes.
@@ -655,7 +684,10 @@ surface = PoissonSurface(
     profile=PoissonProfile(mean_change=1.5, alpha=0.6, offset=0.0),
     name="rough_surface",
 )
-crystal = SXRDCrystal(bulk_uc, film, surface, stacking=[0, 1])
+# Stacking levels are ordering keys and must be a numpy array; a plain list
+# fails when the constructor reorders them. The values match the convention
+# used by the existing tests for a Film plus surface pair.
+crystal = SXRDCrystal(bulk_uc, film, surface, stacking=np.array([1, 2]))
 
 F_coherent = crystal.F(h, k, l)
 F2_coherent = crystal.F2(h, k, l)
@@ -895,10 +927,24 @@ the represented layers and height states.
 The first implementation should reuse the current layer-cycle,
 growth/etching, offset, strain, termination-bank, and profile support logic. It
 must not rederive layer numbering independently. It must, however, obtain the
-height-state masses from `PoissonProfile.probability` rather than relying on
-the final-bin convention of `surface_occupancy`; otherwise a finite-support
-tail could be folded into one flat-height state before the incoherent model
-applies its own cutoff policy.
+height-state masses as `PoissonProfile.probability(layer_numbers + 1)` rather
+than from `surface_occupancy`; otherwise the finite-support tail is folded
+into the highest flat-height state before the incoherent model applies its own
+cutoff policy. At `kappa = 1` that folded bin would become a single spurious
+flat state carrying the whole tail mass, which is a physically wrong result
+that still looks plausible. Because the interior bins of the two expressions
+agree to roundoff, a regression test must assert both halves of the relation:
+interior agreement, and deliberate disagreement at the terminal bin.
+
+The retained coherent component set and the retained height-state ensemble are
+different objects and must not be conflated. `createLayers` retains the union
+of exposed-surface and Film-correction layers and never renormalizes; the
+incoherent ensemble retains exposed-height states only, and renormalizes. A
+third range is independent of both: the Film correction of flat state `n`
+covers every structural layer between the sharp boundary and `n`, so the
+cumulative Film prefix must span
+`[min(0, lowest_retained_state), highest_retained_state]` taken from the full
+candidate support rather than from either retained mask.
 
 `PoissonHeightDomains.exact_layer_count` defaults to 10 and is a positive
 integer, non-fit setting. If the candidate support contains at most this many
@@ -1030,12 +1076,49 @@ Implement this as a sequence of reviewable increments. Each increment has a
 test gate; do not start optimizer integration until the coherent decomposition
 and deterministic-height oracle agree.
 
+### Preparatory fix -- error routing in `evaluateStatistics`
+
+Files:
+
+- `orgui/datautils/xrayutils/CTRopt.py`
+- `orgui/datautils/xrayutils/test/test_CTRopt.py`
+
+Work:
+
+1. `CTROptimizer.evaluateStatistics` calls `self.xtal.setFitErrors(errors[3:])`
+   or `self.xtal.setFitErrors(errors)` directly. That hardcodes the resolution
+   prefix width and skips registered callbacks entirely, so with a callback
+   present the crystal receives the callback's error slice. Replace both
+   branches with `self.set_errors(errors)`, which is the existing splitter for
+   resolution, callbacks, subclass blocks, and the model.
+2. This is a pre-existing defect independent of incoherent models, so it lands
+   as its own commit ahead of increment 1: bisectable on its own, and the
+   wrapper work does not carry an unrelated behavior change.
+3. It also composes with increment 5 at no extra cost. Once `_set_model_errors`
+   forwards to `self.model`, a wrapper's combined local-plus-coherent error
+   block reaches the wrapper through the same splitter, with no second site to
+   update.
+4. The repository AGENTS.md places error propagation under the `phys` scope, so
+   the commit is `fix(phys)`. The method is already `DeprecationWarning`-marked
+   and stays that way.
+
+Gate:
+
+- A fit with a registered callback and fitted resolution routes each error
+  slice to its owner, asserted per block.
+- With no callbacks and no fitted resolution, `evaluateStatistics` behavior is
+  numerically unchanged.
+
 ### Increment 0 -- characterize the existing coherent model
 
 Files:
 
 - `orgui/datautils/xrayutils/test/test_CTRcalc.py`
-- optional shared fixtures in the existing xrayutils test package
+- new `orgui/datautils/xrayutils/test/_poisson_oracle.py` for the shared
+  deterministic flat-height fixtures. The repository has no `conftest.py` and
+  its CTR tests are `unittest`-style classes run under pytest, so the shared
+  fixtures are a plain importable module in the test package, not pytest
+  fixtures.
 
 Work:
 
@@ -1089,18 +1172,30 @@ Gate:
 
 ### Increment 2 -- factor Poisson height-state construction
 
-File:
+Files:
 
 - `orgui/datautils/xrayutils/CTRfilm.py`
+- new `orgui/datautils/xrayutils/test/test_CTRfilm.py`, importing the
+  deterministic oracle from `test/_poisson_oracle.py`
 
 Work:
 
 1. Extract the profile-support calculations currently embedded in
-   `PoissonSurface.createLayers` into one private helper used by both coherent
-   layer creation and flat-state evaluation. The helper owns support bounds,
-   cumulative material occupancy, exposed-height probabilities, Film
-   correction occupancy, retained masks, and tail probability metadata. Keep
-   the coherent `createLayers` behavior unchanged.
+   `PoissonSurface.createLayers` into one private helper which applies **no**
+   retention mask. It returns a frozen candidate record: support bounds,
+   layer numbers, cumulative material occupancy, exposed-height probabilities
+   (`probability(layer_numbers + 1)`), Film correction occupancy, and the tail
+   probability. Selection is then two separate callers of that record:
+
+   - the coherent selector reproduces today's union mask
+     `(exposed > tail_probability) | (abs(film_correction) > tail_probability)`
+     with no renormalization, so `createLayers` behavior is unchanged; and
+   - the incoherent selector applies the `exact_layer_count` policy below to
+     the exposed-height states alone and renormalizes.
+
+   Do not give the helper a single "retained mask" output. The two policies
+   retain different sets for different reasons, and merging them is what would
+   silently make the coherent path adopt the incoherent cutoff or the reverse.
 2. Add an immutable flat-height result containing layer numbers,
    normalized probabilities, raw retained mass, excluded lower/upper mass,
    `iter_states()`, and an explicit diagnostic `as_array()`. Returned arrays
@@ -1116,7 +1211,11 @@ Work:
    termination. Reuse the current generated cells, strain, translation,
    growth/etching, and termination-cycle conventions.
 5. Use cumulative Film-layer amplitudes so all state corrections are produced
-   in one pass. Do not construct or deep-copy an `SXRDCrystal` per height.
+   in one pass. Do not construct or deep-copy an `SXRDCrystal` per height. The
+   prefix range is taken from the candidate support, not from either retained
+   mask: it must cover every structural layer between the sharp Film boundary
+   and the highest retained state, including layers whose own exposed
+   probability is negligible.
 6. Keep the calculation side-effect free with respect to persistent coherent
    domain matrices. Parameter changes must be picked up through the same
    synchronization path as `createLayers`.
@@ -1124,8 +1223,11 @@ Work:
    more than that many candidate states, retain all states. For wider support,
    choose a contiguous, mode-containing interval from exact
    `PoissonProfile.probability` masses and expand it until the profile's
-   cumulative tail target is met. Never use measured CTR data to choose the
-   support.
+   cumulative tail target is met. The mode is `argmax` of that calculated
+   probability array with ties resolved to the lower index, never
+   `floor(rate)`: for `alpha < 1` the distribution is a two-point step mixture
+   convolved with the Poisson and its maximum need not sit at the Poisson
+   mode. Never use measured CTR data to choose the support.
 8. Renormalize retained probabilities exactly once, after selection. Report
    raw retained and excluded tail masses, but do not use a dimensionless
    probability by itself as an amplitude tolerance. Do not accidentally fold
@@ -1136,6 +1238,11 @@ Gate:
 
 - Every returned state correction agrees with the independent deterministic
   crystal oracle from increment 0 after crystal-level scaling is applied.
+- Interior bins of `surface_occupancy(n)` equal `probability(n + 1)` to
+  roundoff, and the terminal bin deliberately does not. Both halves are
+  asserted so a later refactor cannot silently exchange the two expressions.
+- The coherent and incoherent selectors retain their own sets from one shared
+  candidate record, and `createLayers` output is unchanged by the refactor.
 - The probability-weighted coherent state sum reconstructs the current
   `PoissonSurface` amplitude within a Q-dependent tolerance established by an
   extended-support convergence fixture or an amplitude-weighted tail bound.
@@ -1156,10 +1263,25 @@ Work:
 1. Implement quantity-neutral `IncoherentModel(LinearFitFunctions, ABC)` with
    one primary `coherent_model` and a validation hook. Add
    `IncoherentF2Model` with the `F2` boundary and abstract `_evaluate_F2` hook.
-2. Compose the existing fit API in local-then-coherent order:
-   `getInitialParameters`, `getStartParamAndLimits`, `setParameters`,
-   `setFitErrors`, `getFitErrors`, `fitparnames`, `priors`, and
-   `parameter_list`.
+2. Compose the existing fit API in local-then-coherent order. Call
+   `super().__init__()` so the inherited empty `basis`, `basis_0` and
+   `parameters` exist even for a wrapper with no local parameters. Note that
+   `LinearFitFunctions` already implements `getInitialParameters`,
+   `getStartParamAndLimits`, `setFitErrors`, `getFitErrors`, `fitparnames`,
+   `priors` and `parameter_list` as **local-only** methods. They must
+   therefore all be overridden as composites which take the local block from
+   an explicit `LinearFitFunctions.<name>(self, ...)` call and append the
+   coherent tail. Inheriting one of them by accident does not raise; it
+   returns a silently short vector, which is the failure this contract exists
+   to prevent. Only `setParameters` and `validate` are genuinely new:
+   `setParameters` exists on `SXRDCrystal`, which is not a
+   `LinearFitFunctions` subclass, and has no base implementation to reuse.
+   Override the inherited `setFitParameters` to raise `NotImplementedError`
+   naming `setParameters` as the composite entry point. Nothing calls it on a
+   wrapper -- `SXRDCrystal.setParameters` only calls `setFitParameters` on its
+   own component unit cells, and a wrapper is never a component -- so raising
+   costs nothing and converts a silent wrong-length write into an immediate
+   error.
 3. Validate complete vector lengths before mutating either block. Preserve the
    wrapped crystal as the tail so existing optimizer parameter assumptions
    remain valid.
@@ -1191,7 +1313,12 @@ Work:
 Gate:
 
 - Synthetic zero-, one-, and multi-local-parameter wrapper classes satisfy the
-  complete fit contract.
+  complete fit contract. One conformance test catches every forgotten
+  composite override at once: `fitparnames`, `getInitialParameters()`,
+  `parameter_list()`, `priors` and `getStartParamAndLimits()[0]` all have the
+  same length, and the tail of each equals the wrapped crystal's own entries
+  in order.
+- `setFitParameters` raises on a wrapper instead of writing the local block.
 - Copying and serialization retain local parameters and the wrapped coherent
   tail without identity-based component references.
 - A synthetic two-state ensemble verifies coherent, incoherent, and partial
@@ -1209,8 +1336,13 @@ Work:
 1. Register `PoissonHeightDomains` under `poisson_height_domains` and give it a
    one-value local basis with `parameterLookup = {"incoherent_fraction": 0}`.
    Initialize both `basis` and `basis_0` from the constructor value and expose
-   `incoherent_fraction` as a view of `basis[0]`; do not keep a second scalar
-   which can drift away from fitted state.
+   `incoherent_fraction` as a property whose getter returns
+   `float(self.basis[0])` and whose setter validates a finite value in
+   `[0, 1]` before writing `self.basis[0]`. A numpy scalar view is not
+   available for this; the point is that there is no second stored scalar
+   which can drift away from fitted state. Seeding `basis_0` as well is what
+   makes `updateFromParameters` restore the configured fraction when it is not
+   a fit parameter.
    Add the positive-integer non-fit setting `exact_layer_count`, default 10.
 2. Accept the coherent crystal as the first positional argument and a stable
    target surface name. Validate exactly one matching `PoissonSurface`, a
@@ -1275,8 +1407,13 @@ Work:
    crystal-like objects and test doubles which implement only `F`. Route the
    no-resolution prediction through `sqrt(helper(...))`.
 3. For sampled resolution, evaluate `F2` at every quadrature point before
-   integration. For fast convolution, convolve central-grid `F2` directly and
-   take one square root afterward.
+   integration. For fast convolution, fill the cached input collection with
+   `sqrt(F2)` and keep calling `CTRresolution.fast_convolve`, which squares
+   its input, convolves, and takes one square root. That is exactly
+   "resolution applied to `F2` before the square root" and it introduces no
+   second collection-building path, so `_require_structure_factors` and
+   `preserve_measurement_metadata` keep working unchanged. The cost is one
+   redundant square-root/square round trip per point, at roundoff level.
 4. Continue accepting ordinary coherent crystals as the first optimizer
    argument. Accept an `IncoherentF2Model` through the same argument; do not
    add an `incoherent_model=` keyword or a Poisson-specific branch.
@@ -1294,14 +1431,13 @@ Work:
    [incoherent local] [coherent crystal]
    ```
 
-7. Add `CTROptimizer.n_parameters`, derived from the prepared full vector.
-   After every parameter block has been prepared, set legacy `startp` once
-   from `get_parameters()`. Require `startp`, bounds, and `fitparnames` to have
-   exactly `n_parameters` entries at that point. Thereafter
-   `get_parameters()` is the authoritative current vector; `startp` remains a
-   preparation-time snapshot and may be deprecated in a later API change.
-   Record the prepared model name/count/bounds signature and reject later
-   structural parameter mutations until `prepareFit()` is called again.
+7. Add `CTROptimizer.n_parameters`, derived from the prepared full vector, so
+   that `n_parameters == len(get_parameters()) == len(fitparnames) ==
+   len(bounds[0])`. Leave `startp`, `lower_bounds` and `higher_bounds` with
+   their existing model-block scope and length; only their docstrings change,
+   to point at `get_parameters()` as the authoritative full vector. Record the
+   prepared model name/count/bounds signature and reject later structural
+   parameter mutations until `prepareFit()` is called again.
 8. Keep `CTROptimizer.priors` model-scoped, matching current behavior. Require
    the wrapper's local-plus-coherent priors to match only its combined model
    block and document that optional optimizer prefixes have no prior API.
@@ -1316,10 +1452,11 @@ Gate:
   numerically unchanged.
 - Existing third-party/test crystal-like objects providing only `F` continue
   to work in direct and resolution-sampled fits.
-- At `prepareFit`, `startp`, bounds, `fitparnames`, `get_parameters()`, and
+- At `prepareFit`, `bounds`, `fitparnames`, `get_parameters()` and
   `n_parameters` describe the same full vector with every optional prefix
-  combination. Later value changes appear in `get_parameters()` without a
-  requirement to mutate the legacy `startp` snapshot.
+  combination. `startp` is explicitly excluded from that equality and instead
+  satisfies `len(startp) == len(model.getInitialParameters())`, unchanged for
+  an ordinary coherent fit with callbacks or fitted resolution.
 - `priors` remains explicitly model-scoped and the wrapper's prior length
   matches its local-plus-coherent model block.
 - With a wrapper, no-resolution, sampled-resolution, and fast-convolution
@@ -1392,6 +1529,7 @@ suite:
 
 ```text
 pytest orgui/datautils/xrayutils/test/test_CTRcalc.py
+pytest orgui/datautils/xrayutils/test/test_CTRfilm.py
 pytest orgui/datautils/xrayutils/test/test_CTRincoherent.py
 pytest orgui/datautils/xrayutils/test/test_CTRresolution.py
 pytest orgui/datautils/xrayutils/test/test_CTRopt.py
