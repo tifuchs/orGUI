@@ -105,13 +105,24 @@ the termination-specific replacement of exposed Film material. `F_uc` sums all
 of those contributions as one complex amplitude. `SXRDCrystal.F` then adds the
 bulk and every top-level component before the caller takes an absolute value.
 
-For flat-height amplitudes `A_n(Q)` and exposed fractions `p_n`, the current
-calculation is equivalent, up to the configured Poisson tail truncation, to
+For flat-height amplitudes `A_n(Q)` and the coherent path's exposed fractions
+`q_n`, the current calculation is equivalent, up to the configured Poisson
+tail truncation, to
 
 ```text
-A_coherent(Q)  = sum_n p_n A_n(Q)
+A_coherent(Q)  = sum_n q_n A_n(Q)
 F2_coherent(Q) = abs(A_coherent(Q)) ** 2.
 ```
+
+`q_n` is written separately from the ensemble probability `p_n` used from the
+next section onwards, and the two are not interchangeable. `q_n` is what
+`createLayers` assigns today: `surface_occupancy` masses, upper tail folded
+into the terminal bin, left unnormalized after thresholding. `p_n` is the
+incoherent ensemble's `probability(n + 1)` mass over the retained interval,
+renormalized to one. They agree on every interior retained bin and differ at
+the boundary. That difference is exactly why the live coherent evaluation, and
+not the finite state-sum reconstruction, is the authoritative `kappa = 0`
+endpoint.
 
 This is the characteristic-function form used by the classical coherent CTR
 roughness treatments. Harada writes the damping factor as the squared modulus
@@ -371,6 +382,8 @@ class IncoherentModel(LinearFitFunctions, ABC):
         force_recalculate=False,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
     def setParameters(self, values: ArrayLike) -> None: ...
+    def setFitParameters(self, values):  # raises; use setParameters
+        ...
     def getFitErrors(self) -> np.ndarray: ...
     def setFitErrors(self, errors: ArrayLike | None) -> None: ...
     def parameter_list(self) -> list[Parameter]: ...
@@ -396,6 +409,13 @@ model.addFitParameter(
     name="rough_surface incoherent_fraction",
 )
 ```
+
+`addFitParameter` itself is the inherited `LinearFitFunctions` implementation,
+which already resolves a string through `parameterLookup` and rejects a name
+already present in `self.fitparnames`. Because `fitparnames` is a composite
+here, that inherited check spans the wrapped crystal's names too, so the
+invariant that local and coherent names stay unique after concatenation is
+enforced at the point of registration rather than at `prepareFit`.
 
 `PoissonHeightDomains` defines `parameterLookup` and `parameterLookup_inv` for
 its local numerical basis, just as the existing classes do. Its initial basis
@@ -732,7 +752,8 @@ fit = CTROptimizer(
 fit.prepareFit()
 assert fit.xtal is fit.model.coherent_model
 assert fit.n_parameters == len(fit.get_parameters())
-prepared_start = fit.startp.copy()  # legacy preparation-time snapshot
+prepared_start = fit.startp.copy()  # legacy model-block snapshot; the full
+                                    # vector is get_parameters()
 assert fit.fitparnames[-(len(crystal.fitparnames) + 1)] == (
     "rough_surface incoherent_fraction"
 )
@@ -914,8 +935,10 @@ not contain `p_n`; probability is applied only by
 For sorted height states, calculate the Film part cumulatively:
 
 1. Evaluate every distinct generated Film layer amplitude once.
-2. Use a prefix sum from the lowest represented height to construct the flat
-   Film correction for every state.
+2. Use a prefix sum starting at `min(0, lowest retained state)` -- the sharp
+   Film boundary, or below it when the surface is etched -- to construct the
+   flat Film correction for every state. Starting at the lowest retained state
+   instead would drop the Film layers between the boundary and that state.
 3. Evaluate each termination replacement once per termination-cycle state and
    translated height.
 4. Add the appropriate termination replacement to each Film prefix.
@@ -949,9 +972,11 @@ candidate support rather than from either retained mask.
 `PoissonHeightDomains.exact_layer_count` defaults to 10 and is a positive
 integer, non-fit setting. If the candidate support contains at most this many
 nonzero states, retain them all. For a wider support, retain a contiguous
-interval containing the Poisson mode and at least `exact_layer_count` states,
-then expand it using the adjacent calculated probability masses until the
-profile's cumulative `tail_probability` target is met. This is a
+interval containing the mode of the calculated masses -- `argmax` of
+`probability(layer_numbers + 1)`, ties resolved to the lower index, never
+`floor(rate)` -- and at least `exact_layer_count` states, then expand it using
+the adjacent calculated probability masses until the profile's cumulative
+`tail_probability` target is met. This is a
 probability-data cutoff, not a dependency on observed CTR values. It does not
 impose a ten-state cap.
 
@@ -1012,7 +1037,11 @@ scope.
 5. **Two-height anti-Bragg case:** equal populations of two height states whose
    amplitudes differ by a sign cancel coherently; the fully incoherent result
    remains the single-flat-state `F2`, and the partial model fills the
-   minimum linearly with `kappa`.
+   minimum linearly with `kappa`. This is reachable with a real profile rather
+   than a synthetic ensemble: `PoissonProfile(mean_change=0.5, alpha=0.0)` has
+   `rate == 0` and a one-half deterministic step fraction, so it populates
+   structural layers `-1` and `0` at exactly `0.5` each, and there
+   `probability(n + 1)` and `surface_occupancy(n)` coincide exactly.
 6. **Nonnegative `F2`:** random valid amplitudes, probabilities, and `kappa`
    values never produce negative `F2` beyond roundoff.
 7. **Complete-state interference:** a fixture with a nonzero bulk amplitude
@@ -1196,11 +1225,12 @@ Work:
    Do not give the helper a single "retained mask" output. The two policies
    retain different sets for different reasons, and merging them is what would
    silently make the coherent path adopt the incoherent cutoff or the reverse.
-2. Add an immutable flat-height result containing layer numbers,
-   normalized probabilities, raw retained mass, excluded lower/upper mass,
-   `iter_states()`, and an explicit diagnostic `as_array()`. Returned arrays
-   must be caller-owned or read-only; the production path must not require
-   full amplitude materialization.
+2. Add an immutable flat-height result containing layer numbers, normalized
+   probabilities, raw retained mass, excluded lower and upper mass, their sum
+   as `excluded_probability`, `iter_states()`, and an explicit diagnostic
+   `as_array()` -- the complete attribute set sketched under "Flat-height
+   surface evaluation". Returned arrays must be caller-owned or read-only; the
+   production path must not require full amplitude materialization.
 3. Add
    `PoissonSurface.flat_domain_corrections(h, k, l, *, exact_layer_count=10)`.
    For state `n`, the result is the occupancy-one component correction
