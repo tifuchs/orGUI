@@ -218,3 +218,57 @@ def test_the_region_mean_polarization_follows_the_arm():
 
     assert home < moved, "a larger scattering angle needs a larger correction"
     np.testing.assert_allclose(home, 1.0, rtol=1e-3)
+
+
+def test_a_non_finite_region_position_is_neutral_not_fatal():
+    """Real scans have frames on which the rod never reaches the detector.
+
+    Those arrive with ``inf`` or ``nan`` region centres -- and with no counts,
+    since no pixel was valid. Found on FeReO4 scan 39, where it aborted a
+    stationary integration with ``OverflowError: cannot convert float
+    infinity to integer`` after the frame loop had already finished.
+    """
+    det = _calibrated_detector()
+    row = np.array([300.0, np.inf, np.nan, 400.0])
+    column = np.array([240.0, 240.0, np.nan, np.inf])
+
+    got = detector_corrections.roi_mean_inverse_solid_angle(
+        det, row, column, 20.0, 20.0
+    )
+
+    assert np.all(np.isfinite(got))
+    np.testing.assert_allclose(got[[1, 2, 3]], 1.0, rtol=0.0)
+    assert got[0] > 1.0, "the finite frame must still be corrected"
+
+
+def test_a_non_finite_region_size_is_neutral_too():
+    """The size can be degenerate on an off-detector frame as well."""
+    det = _calibrated_detector()
+
+    got = detector_corrections.roi_mean_inverse_solid_angle(
+        det, 300.0, 240.0, np.array([20.0, np.nan]), 20.0
+    )
+
+    assert np.all(np.isfinite(got))
+    np.testing.assert_allclose(got[1], 1.0, rtol=0.0)
+
+
+def test_a_finite_but_empty_region_is_still_rejected():
+    """Guarding non-finite sizes must not swallow a genuinely bad one."""
+    det = _calibrated_detector()
+
+    with pytest.raises(ValueError, match="positive height"):
+        detector_corrections.roi_mean_inverse_solid_angle(
+            det, 300.0, 240.0, np.array([20.0, 0.0]), 20.0
+        )
+
+
+def test_the_arm_correction_is_neutral_for_a_non_finite_region():
+    """Same guard on the F5 factor, which is fed the same coordinates."""
+    det = _calibrated_detector()
+
+    got = detector_corrections.polarization_arm_correction(
+        det, np.inf, 240.0, 20.0, 20.0, np.deg2rad(0.6), np.deg2rad(30.0), 0.0
+    )
+
+    assert got == 1.0

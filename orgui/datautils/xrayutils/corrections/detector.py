@@ -137,9 +137,12 @@ def roi_mean_inverse_solid_angle(
     :returns: The mean of the reciprocal normalized solid angle, broadcast
         over the inputs. A region entirely off the detector contains no pixels
         and no counts, and yields ``1.0`` so that it neither rescales nor
-        invalidates the zero intensity there.
+        invalidates the zero intensity there. So does a region whose position
+        is not finite: a real scan has frames where the rod never reaches the
+        detector, and those arrive here as ``inf`` or ``nan`` centres while
+        carrying no counts either.
     :rtype: numpy.ndarray
-    :raises ValueError: If a region size is not positive.
+    :raises ValueError: If a finite region size is not positive.
     """
     solid_angle = np.asarray(
         detector.solidAngleArray(shape) if shape is not None
@@ -152,8 +155,17 @@ def roi_mean_inverse_solid_angle(
         np.asarray(row_size, dtype=np.float64),
         np.asarray(column_size, dtype=np.float64),
     )
+    # A non-finite position or size is a frame on which the rod never reached
+    # the detector. Those carry no counts, so they are skipped rather than
+    # rejected; only a *finite* size that is not positive is a real error.
+    defined = (
+        np.isfinite(row)
+        & np.isfinite(column)
+        & np.isfinite(row_size)
+        & np.isfinite(column_size)
+    )
     for name, value in (("height", row_size), ("width", column_size)):
-        if np.any(value <= 0) or not np.all(np.isfinite(value)):
+        if np.any(value[defined] <= 0):
             raise ValueError(
                 f"the region of interest must have a positive {name} in "
                 f"pixels; got {value!r}"
@@ -162,6 +174,8 @@ def roi_mean_inverse_solid_angle(
     n_rows, n_columns = solid_angle.shape[0], solid_angle.shape[1]
     out = np.ones(row.shape, dtype=np.float64)
     for index in np.ndindex(*row.shape):
+        if not defined[index]:
+            continue
         r0 = int(np.floor(row[index] - row_size[index] / 2.0))
         r1 = int(np.ceil(row[index] + row_size[index] / 2.0))
         c0 = int(np.floor(column[index] - column_size[index] / 2.0))
@@ -300,9 +314,16 @@ def polarization_arm_correction(
     :param delta_arm: Detector arm position of the frame, in radian.
     :param int samples: Upper bound on the sample count per direction.
     :returns: The multiplicative correction, ``1.0`` at the calibrated
-        position.
+        position and ``1.0`` where the region position is not finite -- a
+        frame on which the rod never reached the detector, which carries no
+        counts to correct.
     :rtype: float
     """
+    if not all(
+        np.isfinite(float(value))
+        for value in (row, column, row_size, column_size, alpha)
+    ):
+        return 1.0
     at_home = roi_mean_inverse_polarization(
         detector, row, column, row_size, column_size, alpha, samples=samples
     )
