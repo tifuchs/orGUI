@@ -1412,11 +1412,11 @@ class CTROptimizer:
         pcov = util.leastsq_covariance(self.residues, x)
 
         errors = np.sqrt(np.diag(pcov) * chi2_red)
-        if self._fit_resolution:
-            self.resolution_errors = errors[:3]
-            self.xtal.setFitErrors(errors[3:])
-        else:
-            self.xtal.setFitErrors(errors)
+        # Splitting the vector here by hand hardcoded the three-entry
+        # resolution prefix and skipped every registered callback, so with a
+        # callback present the crystal was handed the callback's error slice.
+        # `set_errors` is the same splitter `statistics` uses.
+        self.set_errors(errors)
         self.set_parameters(x)
 
         return chi2_result, chi2_red, pvalue, residues2.size

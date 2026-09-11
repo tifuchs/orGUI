@@ -1636,6 +1636,78 @@ class TestCallbackErrors(unittest.TestCase):
         self.assertEqual(len(optimizer.xtal.error_calls), 1)
 
 
+class TestDeprecatedStatisticsErrorRouting(unittest.TestCase):
+    """The legacy statistics path splits errors like ``set_errors``.
+
+    ``evaluateStatistics`` used to call ``self.xtal.setFitErrors`` directly on
+    a hand-sliced vector. That hardcoded the three-entry resolution prefix and
+    ignored registered callbacks entirely, so the crystal was handed the
+    callbacks' error slice as if it were its own.
+    """
+
+    def test_callback_errors_do_not_reach_the_crystal(self):
+        """Each callback keeps its own slice and the crystal keeps the tail."""
+        optimizer = CTRopt.CTROptimizer(FitCrystal((1.0, 2.0)), _fixture_ctrs())
+        first, _ = _register_callback(optimizer, "cb_first", 2)
+        second, _ = _register_callback(optimizer, "cb_second", 1)
+        optimizer.prepareFit()
+
+        self.assertEqual(optimizer.callbacks, [second, first])
+        self.assertEqual(optimizer.get_parameters().size, 5)
+
+        with self.assertWarnsRegex(
+            DeprecationWarning, "evaluateStatistics is deprecated"
+        ):
+            optimizer.evaluateStatistics(optimizer.get_parameters())
+
+        # The crystal tail is checked first: before the repair it received all
+        # five entries, so this is the assertion which names the defect.
+        self.assertEqual(np.size(optimizer.xtal.errors), 2)
+        self.assertEqual(len(optimizer.xtal.error_calls), 1)
+        self.assertEqual(np.size(second.errors), 1)
+        self.assertEqual(np.size(first.errors), 2)
+
+    def test_resolution_prefix_is_not_hardcoded(self):
+        """The resolution block is split by the shared layout, not by ``[:3]``."""
+        optimizer = CTRopt.CTROptimizer(FitCrystal((1.0, 2.0)), _fixture_ctrs())
+        # All three widths start strictly positive. The covariance estimate
+        # differentiates numerically, and a width starting at zero is driven
+        # slightly negative by that step, which the resolution model rejects.
+        optimizer.fit_resolution(
+            CTRresolution.BoxResolution(0.1, 0.1, 0.1),
+            lower_bounds=[0.0, 0.0, 0.0],
+            higher_bounds=[1.0, 1.0, 1.0],
+        )
+        callback, _ = _register_callback(optimizer, "cb", 2)
+        optimizer.prepareFit()
+
+        self.assertEqual(optimizer.get_parameters().size, 7)
+
+        with self.assertWarnsRegex(
+            DeprecationWarning, "evaluateStatistics is deprecated"
+        ):
+            optimizer.evaluateStatistics(optimizer.get_parameters())
+
+        # Before the repair the crystal received everything after the three
+        # resolution entries, the callback block included.
+        self.assertEqual(np.size(optimizer.xtal.errors), 2)
+        self.assertEqual(np.size(optimizer.resolution_errors), 3)
+        self.assertEqual(np.size(callback.errors), 2)
+
+    def test_unprefixed_layout_is_unchanged(self):
+        """With no callbacks and no fitted resolution the crystal gets it all."""
+        optimizer = CTRopt.CTROptimizer(FitCrystal((1.0, 2.0)), _fixture_ctrs())
+        optimizer.prepareFit()
+
+        with self.assertWarnsRegex(
+            DeprecationWarning, "evaluateStatistics is deprecated"
+        ):
+            optimizer.evaluateStatistics(optimizer.get_parameters())
+
+        self.assertEqual(np.size(optimizer.xtal.errors), 2)
+        self.assertEqual(len(optimizer.xtal.error_calls), 1)
+
+
 class TestCallbackBounds(unittest.TestCase):
     """Increment 1: the ``FitCallback`` bounds ordering repair."""
 
