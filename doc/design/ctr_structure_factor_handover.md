@@ -1,7 +1,8 @@
 # CTR structure-factor scale: implementation status and handover
 
 > **Status as of 2026-09-11.** Branch `claude/ctr-structure-factor-9633bc`,
-> thirteen commits ahead of `master`, nothing pushed.
+> nothing pushed. `git log --oneline master..HEAD` is the commit list; a
+> count written here goes stale on the commit that writes it.
 >
 > The physics analysis is complete and quantified, and the reduction is now
 > **wired in**: a rocking scan and a stationary scan of the same rod come out
