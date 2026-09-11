@@ -1352,6 +1352,127 @@ class TestPoissonFlatHeightCharacterization(unittest.TestCase):
         )
 
 
+class TestKinematicDecomposition(unittest.TestCase):
+    """``evaluate_kinematic`` exposes the pieces ``F`` already summed."""
+
+    H = np.zeros(5)
+    K = np.zeros(5)
+    L = np.array([0.35, 0.8, 1.3, 1.85, 2.4])
+
+    def crystal(self, **keyargs):
+        """Return a two-component crystal with a rough surface."""
+        profile = PoissonProfile(1.5, alpha=0.5, tail_probability=1e-14)
+        crystal, _ = _poisson_oracle.poisson_crystal(
+            profile, w_base=4.0, **keyargs
+        )
+        return crystal
+
+    def test_total_reproduces_F_exactly(self):
+        """``total`` is the same accumulation ``F`` performed before."""
+        crystal = self.crystal()
+        result = crystal.evaluate_kinematic(self.H, self.K, self.L)
+        np.testing.assert_array_equal(
+            result.total, crystal.F(self.H, self.K, self.L)
+        )
+
+    def test_parts_sum_to_the_total(self):
+        """No contribution is missing from the decomposition."""
+        crystal = self.crystal()
+        result = crystal.evaluate_kinematic(self.H, self.K, self.L)
+        rebuilt = result.bulk + sum(
+            part.amplitude for part in result.components
+        )
+        # Equal to rounding, not bitwise: `total` keeps the historical
+        # accumulation order, which interleaves the components differently.
+        np.testing.assert_allclose(result.total, rebuilt, rtol=1e-14)
+
+    def test_bulk_matches_a_crystal_without_components(self):
+        """The bulk term carries its reference-area scaling and attenuation."""
+        crystal = self.crystal()
+        result = crystal.evaluate_kinematic(self.H, self.K, self.L)
+        bulk_only = CTRcalc.SXRDCrystal(_poisson_oracle.layered_cell(2, "bulk"))
+        np.testing.assert_allclose(
+            result.bulk,
+            bulk_only.F(self.H, self.K, self.L),
+            rtol=1e-14,
+        )
+
+    def test_components_keep_crystal_order_and_names(self):
+        """Components are reported in ``uc_surface_list`` order."""
+        crystal = self.crystal()
+        result = crystal.evaluate_kinematic(self.H, self.K, self.L)
+        self.assertEqual(
+            [(part.index, part.name) for part in result.components],
+            [(0, "film"), (1, "surface")],
+        )
+        self.assertIs(result.component("surface"), result.components[1])
+
+    def test_component_lookup_rejects_unknown_and_ambiguous_names(self):
+        """Selection is by stable name, so the name must identify one part."""
+        crystal = self.crystal()
+        result = crystal.evaluate_kinematic(self.H, self.K, self.L)
+        with self.assertRaisesRegex(KeyError, "No component named"):
+            result.component("missing")
+
+        crystal.uc_surface_list[1].name = "film"
+        clashing = crystal.evaluate_kinematic(self.H, self.K, self.L)
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            clashing.component("film")
+
+    def test_component_amplitudes_carry_weight_and_domains(self):
+        """Weights and outer domain transforms are inside each component."""
+        plain = self.crystal().evaluate_kinematic(self.H, self.K, self.L)
+        weighted = self.crystal(
+            weights=[1.0, 0.25]
+        ).evaluate_kinematic(self.H, self.K, self.L)
+
+        np.testing.assert_allclose(
+            weighted.component("surface").amplitude,
+            0.25 * plain.component("surface").amplitude,
+            rtol=1e-14,
+        )
+        np.testing.assert_allclose(
+            weighted.component("film").amplitude,
+            plain.component("film").amplitude,
+            rtol=1e-14,
+        )
+
+        halved = self.crystal(
+            domains=[(np.identity(3), 0.5)]
+        ).evaluate_kinematic(self.H, self.K, self.L)
+        np.testing.assert_allclose(
+            halved.component("surface").amplitude,
+            0.5 * plain.component("surface").amplitude,
+            rtol=1e-14,
+        )
+
+    def test_F2_is_the_squared_modulus_of_F(self):
+        """``F2`` adds a squared boundary without changing the quantity."""
+        crystal = self.crystal()
+        amplitude = crystal.F(self.H, self.K, self.L)
+        squared = crystal.F2(self.H, self.K, self.L)
+        np.testing.assert_allclose(
+            squared, np.abs(amplitude) ** 2, rtol=1e-14
+        )
+        self.assertTrue(np.all(np.isreal(squared)))
+        self.assertTrue(np.all(squared >= 0.0))
+
+        # Scalar coordinates are rejected inside `F_bulk`, which predates this
+        # boundary; `F2` must inherit that rather than diverge from `F`.
+        with self.assertRaises(AttributeError):
+            crystal.F(0.0, 0.0, 1.3)
+        with self.assertRaises(AttributeError):
+            crystal.F2(0.0, 0.0, 1.3)
+
+        one_point = np.array([1.3])
+        np.testing.assert_allclose(
+            crystal.F2(one_point * 0.0, one_point * 0.0, one_point),
+            np.abs(crystal.F(one_point * 0.0, one_point * 0.0, one_point))
+            ** 2,
+            rtol=1e-14,
+        )
+
+
 class TestLayerStacking(unittest.TestCase):
     @staticmethod
     def make_layered_unitcell(name="layered"):
