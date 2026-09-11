@@ -1,17 +1,20 @@
 # CTR structure-factor scale: implementation status and handover
 
-> **Status as of 2026-09-10.** Branch `claude/ctr-structure-factor-9633bc`,
-> seven commits ahead of `master`, nothing pushed.
+> **Status as of 2026-09-11.** Branch `claude/ctr-structure-factor-9633bc`,
+> thirteen commits ahead of `master`, nothing pushed.
 >
 > The physics analysis is complete and quantified, and the reduction is now
 > **wired in**: a rocking scan and a stationary scan of the same rod come out
 > with the same `F2_hkl`, asserted by
 > `test_scan_mode_equivalence.py::test_rocking_and_stationary_paths_agree`.
-> This **changed saved numbers in both modes**.
-> [#82](https://github.com/tifuchs/orGUI/issues/82) is closed up to the
-> real-data check of section 6 and `C_det` (F7), the one mechanism simulation
-> cannot test. [#15](https://github.com/tifuchs/orGUI/issues/15) still needs
-> the two absolute-scale inputs of section 6.
+> This **changed saved numbers in both modes**. The **real-data check has now
+> been done** — LaNiO3 scan 61, both modes run from the raw images, agreeing
+> to a median 1.033 along the CTR; see
+> [`ctr_structure_factor_scale.md`](ctr_structure_factor_scale.md) section
+> 5.1. [#82](https://github.com/tifuchs/orGUI/issues/82) is closed up to
+> `C_det` (F7), which that check bounds but does not model.
+> [#15](https://github.com/tifuchs/orGUI/issues/15) still needs the two
+> absolute-scale inputs of section 6.
 >
 > This document is the handover: what exists, how to run it, what to do next,
 > and which of my predictions turned out wrong. The physics itself is in
@@ -249,8 +252,12 @@ be left behind cannot come back unnoticed.
   paths; the reciprocal-space reconstruction still evaluates the polarization
   per pixel at the calibrated position.
 * **`C_det` (F7)** is the only mechanism that can still break mode equivalence
-  after the wiring, and it cannot be validated on simulated data. It needs the
-  real-data overlap comparison.
+  after the wiring, and it cannot be validated on simulated data. The
+  real-data overlap comparison has now been run and **bounds** it: not
+  detectable against 3 % scatter along a CTR whose regions cover the peak, a
+  factor of 5 at the Bragg peak on the same rod. Modelling it is still open,
+  and the bound is an upper limit for one rod on one sample, not a general
+  result.
 
 ## 7. Predictions that turned out wrong
 
@@ -313,3 +320,26 @@ pytest orgui/app/test/test_scan_mode_equivalence.py
 
 These five do not need the native extension. Everything else in the suite may,
 so use section 3 before concluding anything from a failure.
+
+The real-data check of `ctr_structure_factor_scale.md` section 5.1 needs data
+that is not in the repository (LaNiO3 scan 61). To repeat it on another pair
+of scans, run orGUI with `--nogui -i <script>` and, in that script: read the
+configuration, load the scan, set the mask, load the reference reflections,
+`fitExperiment`, then integrate the same rod twice — once stationary, once
+rocking — before reducing the rocking curves. Four settings decide whether the
+comparison means anything, and all four are now stored with the integration,
+so on a database written after this branch they can be read back out of
+`configuration/orgui/roi_integration` rather than guessed:
+
+* the background margins, which dominate everything else (section 5.1);
+* `auto_hsize`/`auto_vsize` — the reference used the *projected* horizontal
+  size for the rocking pass, not the automatic one-pixel rule;
+* the projected sample size, in meter;
+* the reduction windows, which must be the same for both modes; a signal
+  window several times wider than the peak shifts the ratio by tens of per
+  cent on its own.
+
+Compare on `F2_hkl`, not on the raw curves: match each rocking point to the
+stationary points within a few thousandths of `s`, require signal-to-noise of
+at least 5 on both sides, and drop regions whose `croi_pix` falls below the
+nominal `vsize * hsize`, which is how a detector gap shows up.

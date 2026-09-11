@@ -68,6 +68,32 @@ Scientific and analysis additions:
   a backend that declares ``exposure_time`` in ``auxillary_counters``; a
   missing counter is skipped and recorded rather than failing the integration.
   Existing configuration files load unchanged.
+  This equivalence has now been checked on real data as well as in simulation:
+  on a LaNiO3 rod measured both ways, the two modes agree to a median 1.03
+  along the rod, with the remaining spread explained by the resolution
+  difference between them rather than by a normalization. At a Bragg peak on
+  the same rod they differ by a factor of five, which is expected — a
+  stationary region cannot collect a peak much wider than itself.
+
+- **The settings that decide what was integrated are now stored with every
+  integration.** A reduction could previously not be reproduced from its own
+  output: the background ROI margins, the automatic-sizing switches, the
+  projected sample size, and the effective ``delta_s`` of a rocking scan were
+  not written anywhere. They are now saved under
+  ``configuration/orgui/roi_integration`` as typed groups carrying their
+  units — ``region`` (sizes, margins, automatic sizing), ``advanced`` (sample
+  size in meter, offsets, the inclination and projection switches) and
+  ``rocking_scan`` (``delta_s`` and ``max_s``, with ``delta_s`` stored as the
+  value actually used after the resolution clipping, not as typed). The
+  correction switches move the same way: ``integration_corrections`` is now a
+  group of typed datasets instead of one opaque JSON string, so a stored
+  configuration can be read in any HDF5 browser. Databases written with the
+  JSON layout are still read. The Lorentz, footprint and normalization
+  switches are recorded alongside the others, and a configuration that predates
+  them leaves those controls as the user has them rather than silently
+  switching a correction off. ``C_solid_angle`` is now saved beside
+  ``F2_hkl``, because the structure factor divides it back out and a saved rod
+  cannot otherwise be returned to the intensity scale.
 
 - **All correction factors collected into one package.** Every factor between
   detector counts and a structure factor now lives in
@@ -741,6 +767,30 @@ A ***critical bug*** was fixed that affects bulk CTR calculations:
   conventions. Reciprocal-space reconstruction was never affected: its
   exposure bounds already read each segment's own arm, and they now agree with
   the arm the rest of the program sees.
+
+- **Reducing a rocking scan now uses the detector geometry stored with that
+  scan**, instead of whatever calibration the application happens to hold.
+  *This changes saved numbers for any reduction run against a different
+  calibration than the one the curves were extracted with.* The out-of-plane
+  acceptance and the solid-angle compensation are properties of the geometry
+  the data was taken with, so reducing from a script that has not loaded the
+  matching configuration, or after another calibration was opened, silently
+  produced a wrongly scaled ``F2_hkl``: on a real scan it scaled every
+  acceptance by 2.3, with nothing in the output to show for it. A scan that
+  stores no detector geometry warns and is left on the acceptance-blind scale
+  rather than using the wrong one.
+
+- **Integrating a scan whose rod leaves the detector no longer fails.** Frames
+  where the rod never reaches the detector carry region positions that are not
+  finite; the solid-angle and polarization corrections rejected those with
+  ``OverflowError`` or ``ValueError`` and aborted the integration. They now
+  yield a neutral factor for such frames, which carry no counts anyway. A
+  region size that is finite but not positive is still an error.
+
+- **The command-line interface starts again.** ``--cli`` selected the Qt
+  ``minimal`` platform plugin, which has no font database, so loading the
+  icon font raised ``FontError`` before any batch script could run. It now
+  uses ``offscreen``, and an explicitly set ``QT_QPA_PLATFORM`` is respected.
 
 GUI changes:
 

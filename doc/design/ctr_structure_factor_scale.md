@@ -16,7 +16,8 @@
 >
 > F1, F2, F3, F5 and F6 are now **applied**, which changed saved numbers in
 > both modes; the two paths agree to `1e-6` on simulated data, limited by the
-> trapezoidal sampling of the rocking profile. F4 and F7 remain open and are
+> trapezoidal sampling of the rocking profile, and to a median **1.033** on a
+> real rod (section 5.1). F4 and F7 remain open and are
 > described below as they stand. Findings are written in the present tense
 > of the analysis; section 5 says what each one's status is now, and
 > [`ctr_structure_factor_handover.md`](ctr_structure_factor_handover.md)
@@ -350,6 +351,13 @@ This is the one remaining mechanism that can make the two modes disagree
 *after* F1-F3 are fixed, and it is a modelling problem, not a normalization
 one.
 
+The real-data check (section 5.1) bounds it without modelling it: along a CTR
+whose regions were sized to cover the peak, truncation is not detectable
+against 3 % scatter, while at the Bragg peak on the same rod the two modes
+differ by a factor of 5. So the assumption `C_det = 1` is defensible where the
+region covers the profile and fails where it does not, which is what Vlieg's
+derivation already says.
+
 ## 4. What landed
 
 ### 4.1 One home for the corrections
@@ -518,12 +526,12 @@ along a scan in the first place.
 
 ## 5. Status of each finding
 
-**F1, F2, F3 and F6 are applied.** Steps 1-5 below are done; the wiring of
-each is in [`ctr_structure_factor_handover.md`](ctr_structure_factor_handover.md)
-section 5, and the equivalence is asserted by
-`test_scan_mode_equivalence.py::test_rocking_and_stationary_paths_agree`.
-Step 6, the real-data check, is the one that remains, together with F4 and
-F7.
+**F1, F2, F3, F5 and F6 are applied, and step 6 has been carried out.** All
+six steps below are done; the wiring of each is in
+[`ctr_structure_factor_handover.md`](ctr_structure_factor_handover.md)
+section 5, the simulated equivalence is asserted by
+`test_scan_mode_equivalence.py::test_rocking_and_stationary_paths_agree`, and
+the real-data check is section 5.1. **F4 and F7 remain open.**
 
 Recorded in the order they had to be done, because the ordering was itself a
 result -- F6 had to be settled before F3 could be wired:
@@ -559,16 +567,107 @@ result -- F6 had to be settled before F3 could be wired:
    acceptance, the normalization that was applied, and the active-area
    assumption of F4. Without them a saved rod cannot be put on a common scale
    after the fact.
-6. **Then verify on real data. Not done — this is the remaining step.** The
-   overlap region of a rocking scan and a stationary scan on the same rod
-   (Drnec Fig. 8, right) is the acceptance test. Simulation cannot catch F7,
-   an incorrect `Delta_gamma` definition, or a beamline that reports counting
-   time in the wrong place. The simulated equivalence test does cover the F6
-   compensation
+6. **Then verify on real data. Done — section 5.1.** The overlap region of a
+   rocking scan and a stationary scan on the same rod (Drnec Fig. 8, right) is
+   the acceptance test. Simulation cannot catch F7, an incorrect `Delta_gamma`
+   definition, or a beamline that reports counting time in the wrong place.
+   The simulated equivalence test does cover the F6 compensation
    (`test_the_solid_angle_correction_does_not_reach_the_structure_factor`),
    but it supplies the region mean itself rather than reading a detector, so
    the geometry evaluation is pinned separately in
    `test_corrections_detector.py`.
+
+### 5.1 The real-data check
+
+Run on LaNiO3 scan 61, rod `(-1, 0, L)`, a 10 mm sample about 0.4 m from the
+detector. The whole pipeline was re-run from the raw images — `fitExperiment`
+on the stored Bragg reflections, both integrations, then the rocking reduction
+— rather than reduced from an existing database, so that the ROI machinery and
+the geometry were exercised too, not only the arithmetic on stored sums.
+
+The extraction reproduces the reference data set: the fit returns the stored
+calibration to about six significant figures, `delta_s` auto-pins to the same
+0.0019 and yields the same 1651-point `s` grid, and the rocking regions come
+out identical (`vsize` 1, `hsize` 16-27, centres to 0.001 px). Stationary
+`F2_hkl` agrees with the reference to a median 1.032.
+
+**Mode agreement.** Rocking against stationary, weighted mean of the
+stationary points within 0.004 r.l.u., signal-to-noise at least 5 in both, and
+regions free of detector gaps:
+
+| region | points | median ratio | quartiles |
+|---|---|---|---|
+| CTR, `s < 2.75` | 738 | **1.033** | 0.91 - 1.22 |
+| whole rod | 980 | 1.064 | 0.90 - 1.43 |
+
+Reducing the *reference* rocking curves with the same code gives 1.0245
+independently, so the result does not depend on whose extraction it is. The
+residual drift is about -16 % over 2 r.l.u., which is the resolution
+difference the two modes genuinely have rather than a normalization error: at
+low `L` the mosaic spread dominates and the rocking scan recovers it because
+`L` is still well defined, while at high `L` the sample size projected on the
+detector broadens the peak, which is a harmless area average for the
+stationary mode but reads as `Q` dependence to the rocking one.
+
+**The `s ~ 3` outlier is the (-1 0 3) Bragg peak**, not a scale error.
+Stationary `F2_hkl` rises 260-fold into `s = 3.06` and falls away again, and
+the ratio there reaches 5. A stationary ROI cannot collect a peak much wider
+than itself; a rocking scan can. This is `C_det` truncation (F7) made visible,
+and it is the one place on this rod where the two modes must not agree.
+
+**What this does not establish.** F7 is bounded, not measured: with the ROI
+chosen to cover the peak, truncation is not detectable against the 3 % scatter
+along the CTR, which is an upper limit rather than a model. F4 is untouched -
+both modes carry the same active-area assumption, so it cancels here and the
+comparison is blind to it.
+
+**Background margins dominate any such comparison**, which is worth recording
+because it cost a full diagnostic cycle. With the same regions, the same
+detector and the same `s` grid, only the background margins differing:
+
+| margins l/r/t/b, px | rocking `F2_hkl` | drift across the rod |
+|---|---|---|
+| 20/20/20/20 | 1.00 | -67 % |
+| 6/6/0/0 | 1.87 | -20 % |
+| 15/15/0/0 (as measured) | - | -4 % |
+
+A rocking region is one pixel tall, so a non-zero `top`/`bottom` margin puts
+the background regions on the rod itself, which is extended vertically. That
+over-subtracts, progressively worse with `L`. None of these margins were
+recoverable from the reference file, which is what prompted storing them; see
+section 5.2.
+
+### 5.2 What a reduction needs to be reproducible
+
+The check above could not be set up from the stored data alone. The margins,
+the automatic-sizing switches, the projected sample size and the effective
+`delta_s` were not written anywhere, so they had to be guessed, and two of the
+guesses were wrong in ways that changed the answer by more than the effect
+being measured.
+
+Those settings are now stored with every integration, as typed NeXus groups
+under `configuration/orgui`: `roi_integration/region` (sizes, margins,
+automatic sizing), `roi_integration/advanced` (sample size in meter, offsets,
+the inclination and projection switches), `roi_integration/rocking_scan`
+(`delta_s`, `max_s`), and `integration_corrections` (the correction switches,
+which replaced an opaque JSON string). `C_solid_angle` is saved beside
+`F2_hkl` for the same reason: F6 divides it back out, so a saved rod cannot be
+returned to the intensity scale without it.
+
+Two mistakes this run exposed are worth keeping:
+
+* **The reduction must read the detector stored with the scan**, not whatever
+  calibration the application holds. Reducing from a batch script that had not
+  loaded the configuration silently scaled every `Delta_gamma` by 2.3, and the
+  only symptom was a mode ratio of 2.19 instead of 1.02 — an error that looks
+  exactly like a missing physical factor. Pinned by
+  `test_peak1Dintegr.py::test_the_detector_comes_from_the_scan_not_from_the_application`.
+* **Layout changes and reduction must be tested together.** When
+  `integration_corrections` became a typed group, the reducer kept parsing the
+  JSON string that was no longer written, so the F6 compensation stopped being
+  applied to newly written databases. Every unit test passed, because the
+  layout and the reduction were only ever tested apart. Pinned by
+  `test_peak1Dintegr.py::test_the_typed_corrections_group_is_read_back`.
 
 ## 6. What is needed to close issue #15, and reflectivity
 
@@ -654,7 +753,8 @@ it, in both modes).
   piece of work and was not analysed here.
 * **`C_det` (F7)** is the only remaining mechanism that can break the mode
   equivalence after F1-F3, and it is the one that cannot be validated on
-  simulated data. It needs the real-data comparison of section 5, step 6.
+  simulated data. The real-data comparison of section 5.1 has been run and
+  bounds it on one rod; modelling it is still open.
 * **Error propagation through the new factors.** `measurement` reduces
   intensities; the errors follow the same divisors, but a `Delta_gamma`
   estimated from the geometry has an uncertainty of its own that nothing

@@ -486,8 +486,12 @@ class ROIState:
     region: dict = field(default_factory=dict)
     #: The advanced options dialog: sample size in meter, offsets in pixels.
     advanced: dict = field(default_factory=dict)
-    #: Rocking-scan ``s`` sampling, r.l.u. ``delta_s`` is the effective value
-    #: after the resolution clipping of ``onRoSChanged``, not what was typed.
+    #: Rocking-scan ``s`` sampling, r.l.u. Saved with a *rocking* scan,
+    #: ``delta_s`` is the effective value after the resolution clipping of
+    #: ``onRoSChanged`` rather than what was typed. Saved with a stationary
+    #: one it is whatever the control held, since nothing there clips it and
+    #: the value is unused -- so do not read it as an effective sampling
+    #: without checking which mode wrote it.
     rocking_scan: dict = field(default_factory=dict)
 
     def is_empty(self):
