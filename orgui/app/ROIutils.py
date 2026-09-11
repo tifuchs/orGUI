@@ -30,6 +30,8 @@ __email__ = "tfuchs@cornell.edu"
 
 import numpy as np
 
+from ._option_keys import canonical_options
+
 
 def cos_incidence_12(xy, sxrddetector):
     xy = np.asarray(xy)
@@ -120,16 +122,25 @@ def calc_corrections(
     parallax=True,
     factor=1.0,
 ):
-    """samplesize must be a dict, sizes in m"""
+    """Region sizes projected from the sample onto the detector.
+
+    :param samplesize: Mapping with ``sample_size_x``, ``sample_size_y`` and
+        ``sample_size_z`` **in meter**, as
+        :meth:`~orgui.app.QScanSelector.ROIAdvancedOptions.get_parameters`
+        returns. The legacy ``sizeX``/``sizeY``/``sizeZ`` spellings are
+        accepted with a deprecation warning. ``None`` uses ``roisize0``
+        alone.
+    """
     if np.all(roisize0 == np.array([0, 0])) and samplesize is None:
         raise ValueError("You must either provide the sample size or a minimum roisize")
 
     roisize_X_real = roisize0[0] * sxrddetector.detector.pixel2
     roisize_Y_real = roisize0[1] * sxrddetector.detector.pixel1
     if samplesize is not None:
-        sizeX = samplesize["sizeX"]
-        sizeY = samplesize["sizeY"]
-        sizeZ = samplesize["sizeZ"]
+        samplesize = canonical_options(samplesize)
+        sizeX = samplesize["sample_size_x"]
+        sizeY = samplesize["sample_size_y"]
+        sizeZ = samplesize["sample_size_z"]
 
         beamX, beamY = projected_beamsize(xy, sxrddetector, sizeX, sizeY, sizeZ)
 

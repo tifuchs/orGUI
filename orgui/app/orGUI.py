@@ -1048,14 +1048,14 @@ ub : gui for UB matrix and angle calculations
 
         if size_exact is None:
             roioptions = self.scanSelector.roioptions.get_parameters()
-            if roioptions["DetectorInclination"] or roioptions["ProjectSampleSize"]:
-                if roioptions["ProjectSampleSize"]:
+            if roioptions["detector_inclination"] or roioptions["project_sample_size"]:
+                if roioptions["project_sample_size"]:
                     size_exact = ROIutils.calc_corrections(
                         xy,
                         self.ubcalc.detectorCal,
                         np.array([hsize, vsize]),
                         roioptions,
-                        roioptions["DetectorInclination"],
+                        roioptions["detector_inclination"],
                         roioptions["factor"],
                     )
                 else:
@@ -1064,7 +1064,7 @@ ub : gui for UB matrix and angle calculations
                         self.ubcalc.detectorCal,
                         np.array([hsize, vsize]),
                         None,
-                        roioptions["DetectorInclination"],
+                        roioptions["detector_inclination"],
                         roioptions["factor"],
                     )
 
@@ -1669,8 +1669,8 @@ ub : gui for UB matrix and angle calculations
         background_image = self.background_image
         has_bg_img = False
         roioptions = self.scanSelector.roioptions.get_parameters()
-        use_fitted_background = bool(roioptions.get("FittedBackground", False))
-        fitted_background_order = int(roioptions.get("FittedBackgroundOrder", 1))
+        use_fitted_background = bool(roioptions.get("fitted_background", False))
+        fitted_background_order = int(roioptions.get("fitted_background_order", 1))
         if use_fitted_background and not HAS_ACCEL:
             logger.warning(
                 "Fitted local background requires the compiled ROI accelerator; "
@@ -4971,7 +4971,7 @@ ub : gui for UB matrix and angle calculations
     def _apply_interpolated_bg_patch(self, image, mask, ckey, bgkeys):
         """Overwrite one center ROI in ``image`` with fitted background."""
         roioptions = self.scanSelector.roioptions.get_parameters()
-        fit_order = int(roioptions.get("FittedBackgroundOrder", 1))
+        fit_order = int(roioptions.get("fitted_background_order", 1))
         patch, stats = _roi_sum_accel.interpolate_polybg_croi(
             image,
             mask,
@@ -5920,8 +5920,8 @@ ub : gui for UB matrix and angle calculations
 
         has_bg_img = False
         roioptions = self.scanSelector.roioptions.get_parameters()
-        use_fitted_background = bool(roioptions.get("FittedBackground", False))
-        fitted_background_order = int(roioptions.get("FittedBackgroundOrder", 1))
+        use_fitted_background = bool(roioptions.get("fitted_background", False))
+        fitted_background_order = int(roioptions.get("fitted_background_order", 1))
         if use_fitted_background and not HAS_ACCEL:
             logger.warning(
                 "Fitted local background requires the compiled ROI accelerator; "
@@ -6915,15 +6915,15 @@ ub : gui for UB matrix and angle calculations
         roioptions = self.scanSelector.roioptions.get_parameters()
         current_mode = self.scanSelector.scanstab.currentIndex()
         if (
-            roioptions["DetectorInclination"] or roioptions["ProjectSampleSize"]
+            roioptions["detector_inclination"] or roioptions["project_sample_size"]
         ) and current_mode != 1:
-            if roioptions["ProjectSampleSize"]:
+            if roioptions["project_sample_size"]:
                 size_exact = ROIutils.calc_corrections(
                     coord_restr,
                     self.ubcalc.detectorCal,
                     np.array([hsize, vsize]),
                     roioptions,
-                    roioptions["DetectorInclination"],
+                    roioptions["detector_inclination"],
                     roioptions["factor"],
                 )
             else:
@@ -6932,7 +6932,7 @@ ub : gui for UB matrix and angle calculations
                     self.ubcalc.detectorCal,
                     np.array([hsize, vsize]),
                     None,
-                    roioptions["DetectorInclination"],
+                    roioptions["detector_inclination"],
                     roioptions["factor"],
                 )
             hsize = size_exact[0][0]

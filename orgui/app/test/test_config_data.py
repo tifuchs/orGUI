@@ -158,7 +158,7 @@ def test_enabled_pixel_repair_implies_mask_correction():
         scanSelector=SimpleNamespace(
             get_integration_options=lambda: {
                 "mask": False,
-                "solidAngle": False,
+                "solid_angle": False,
                 "polarization": False,
             }
         ),

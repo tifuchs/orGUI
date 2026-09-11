@@ -490,7 +490,7 @@ class ReconstructionDialog(qt.QDialog):
         self.use_polarization.setToolTip(shared_tooltip)
         for control, key, row, column in (
             (self.use_pixel_mask, "mask", 0, 0),
-            (self.use_solid_angle, "solidAngle", 0, 1),
+            (self.use_solid_angle, "solid_angle", 0, 1),
             (self.use_polarization, "polarization", 1, 0),
         ):
             control.toggled.connect(
@@ -619,7 +619,7 @@ class ReconstructionDialog(qt.QDialog):
         options = selector.get_integration_options()
         for control, key in (
             (self.use_pixel_mask, "mask"),
-            (self.use_solid_angle, "solidAngle"),
+            (self.use_solid_angle, "solid_angle"),
             (self.use_polarization, "polarization"),
         ):
             with qt.QSignalBlocker(control):

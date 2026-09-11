@@ -49,6 +49,7 @@ from .. import resources
 from ..backend import backends, scans
 from . import qutils
 from . import integration_corrections
+from ._option_keys import LegacyKeyDict, canonical_options
 from .QReflectionSelector import QReflectionAnglesDialog
 from .QHKLDialog import HKLDialog
 
@@ -891,32 +892,115 @@ class QScanSelector(qt.QMainWindow):
 
         self.sigROIChanged.emit()
 
+    #: Integration switch name -> the checkbox holding it.
+    @property
+    def _switch_boxes(self):
+        return {
+            "mask": self.useMaskBox,
+            "solid_angle": self.useSolidAngleBox,
+            "polarization": self.usePolarizationBox,
+            "lorentz": self.useLorentzBox,
+            "footprint": self.useFootprintBox,
+            "normalization": self.useNormalizationBox,
+        }
+
+    #: Region control name -> the spin box or check box holding it.
+    @property
+    def _region_controls(self):
+        return {
+            "hsize": self.hsize,
+            "vsize": self.vsize,
+            "left": self.left,
+            "right": self.right,
+            "top": self.top,
+            "bottom": self.bottom,
+            "auto_hsize": self.autoROIHsize,
+            "auto_vsize": self.autoROIVsize,
+        }
+
+    #: Rocking-scan sampling control name -> the spin box holding it.
+    @property
+    def _rocking_controls(self):
+        return {"delta_s": self.roscanDeltaS, "max_s": self.roscanMaxS}
+
     def set_integration_options(self, ddict):
-        for key in ddict:
-            if key == "mask":
-                self.useMaskBox.setChecked(ddict[key])
-            elif key == "solidAngle":
-                self.useSolidAngleBox.setChecked(ddict[key])
-            elif key == "polarization":
-                self.usePolarizationBox.setChecked(ddict[key])
-            elif key == "lorentz":
-                self.useLorentzBox.setChecked(ddict[key])
-            elif key == "footprint":
-                self.useFootprintBox.setChecked(ddict[key])
-            elif key == "normalization":
-                self.useNormalizationBox.setChecked(ddict[key])
+        """Restore integration options from a mapping.
+
+        A key this version does not know is ignored rather than rejected,
+        which is what lets an older orGUI read a newer configuration. Legacy
+        key spellings are accepted with a deprecation warning; see
+        :mod:`orgui.app._option_keys`.
+
+        :param dict ddict: Any subset of the keys
+            :meth:`get_integration_options` returns.
+        """
+        ddict = canonical_options(ddict)
+        boxes = self._switch_boxes
+        for key, value in ddict.items():
+            if key in boxes:
+                boxes[key].setChecked(bool(value))
             elif key == "advanced":
-                self.roioptions.set_parameters(ddict[key])
+                self.roioptions.set_parameters(value)
+            elif key == "region":
+                self._set_region_options(value)
+            elif key == "rocking_scan":
+                self._set_rocking_options(value)
+
+    def _set_region_options(self, ddict):
+        """Restore the region sizes and the automatic-sizing switches."""
+        controls = self._region_controls
+        ddict = canonical_options(ddict)
+        for key, value in ddict.items():
+            control = controls.get(key)
+            if control is None:
+                continue
+            with blockSignals(control):
+                if key.startswith("auto_"):
+                    control.setChecked(bool(value))
+                else:
+                    control.setValue(float(value))
+        self.sigROIChanged.emit()
+
+    def _set_rocking_options(self, ddict):
+        """Restore the rocking-scan sampling.
+
+        Signals are blocked deliberately: assigning ``delta_s`` normally runs
+        :meth:`onRoSChanged`, which clips it to the detector resolution and
+        writes the clipped value back. The stored value is already the
+        clipped one, and re-clipping it against whatever scan happens to be
+        loaded would not restore what was saved.
+        """
+        controls = self._rocking_controls
+        ddict = canonical_options(ddict)
+        for key, value in ddict.items():
+            control = controls.get(key)
+            if control is not None:
+                with blockSignals(control):
+                    control.setValue(float(value))
 
     def get_integration_options(self):
-        ddict = {}
-        ddict["mask"] = self.useMaskBox.isChecked()
-        ddict["solidAngle"] = self.useSolidAngleBox.isChecked()
-        ddict["polarization"] = self.usePolarizationBox.isChecked()
-        ddict["lorentz"] = self.useLorentzBox.isChecked()
-        ddict["footprint"] = self.useFootprintBox.isChecked()
-        ddict["normalization"] = self.useNormalizationBox.isChecked()
+        """Every integration option, under its current key spelling.
+
+        :returns: The switches as flat booleans, plus ``advanced`` (the
+            region-of-interest options dialog), ``region`` (sizes and
+            automatic sizing) and ``rocking_scan`` (the ``s`` sampling).
+            Reading a legacy key off the result still works, with a
+            deprecation warning.
+        :rtype: LegacyKeyDict
+        """
+        ddict = LegacyKeyDict(
+            (name, box.isChecked()) for name, box in self._switch_boxes.items()
+        )
         ddict["advanced"] = self.roioptions.get_parameters()
+        ddict["region"] = LegacyKeyDict(
+            (name, control.isChecked() if name.startswith("auto_")
+             else control.value())
+            for name, control in self._region_controls.items()
+        )
+        ddict["rocking_scan"] = LegacyKeyDict(
+            (name, control.value())
+            for name, control in self._rocking_controls.items()
+        )
         return ddict
 
     #: Enabled corrections, as ``(checkbox attribute, abbreviation, color,
@@ -1763,36 +1847,56 @@ class ROIAdvancedOptions(qt.QWidget):
         self._onAnyValueChanged()
 
     def get_parameters(self):
+        """Advanced region-of-interest options, under current key spellings.
+
+        Sample sizes are in **meter** and offsets in **pixels**, which is the
+        unit the consumers of this dictionary expect; the widgets show
+        micrometer. Reading a legacy key off the result still works, with a
+        deprecation warning.
+
+        :rtype: LegacyKeyDict
+        """
         sizes = self.get_sample_size()
-        offX, offY = self._offsetx.value(), self._offsety.value()
-
-        ddict = {
-            "DetectorInclination": self.hasDetectorInclination(),
-            "ProjectSampleSize": self.hasProjectSampleSize(),
-            "xoffset": offX,
-            "yoffset": offY,
-            "sizeX": sizes[0],
-            "sizeY": sizes[1],
-            "sizeZ": sizes[2],
+        return LegacyKeyDict({
+            "detector_inclination": self.hasDetectorInclination(),
+            "project_sample_size": self.hasProjectSampleSize(),
+            "offset_x": self._offsetx.value(),
+            "offset_y": self._offsety.value(),
+            "sample_size_x": sizes[0],
+            "sample_size_y": sizes[1],
+            "sample_size_z": sizes[2],
             "factor": self.get_apply_factor(),
-            "FittedBackground": self.hasFittedBackground(),
-            "FittedBackgroundOrder": self.get_background_fit_order(),
-        }
-
-        return ddict
+            "fitted_background": self.hasFittedBackground(),
+            "fitted_background_order": self.get_background_fit_order(),
+        })
 
     def set_parameters(self, ddict):
+        """Restore the advanced options from a mapping.
+
+        Legacy key spellings are accepted with a deprecation warning; see
+        :mod:`orgui.app._option_keys`. Sample sizes are in meter, offsets in
+        pixels.
+
+        :param dict ddict: As returned by :meth:`get_parameters`.
+        """
+        ddict = canonical_options(ddict)
         self._updating_parameters = True
         try:
-            self.inclinationBox.setChecked(ddict["DetectorInclination"])
-            self.sizeGroup.setChecked(ddict["ProjectSampleSize"])
-            self.set_sample_size(ddict["sizeX"], ddict["sizeY"], ddict["sizeZ"])
-            self.set_offsets(ddict["xoffset"], ddict["yoffset"])
+            self.inclinationBox.setChecked(ddict["detector_inclination"])
+            self.sizeGroup.setChecked(ddict["project_sample_size"])
+            self.set_sample_size(
+                ddict["sample_size_x"],
+                ddict["sample_size_y"],
+                ddict["sample_size_z"],
+            )
+            self.set_offsets(ddict["offset_x"], ddict["offset_y"])
             self.set_apply_factor(ddict["factor"])
-            self.backgroundFitGroup.setChecked(ddict.get("FittedBackground", False))
-            self._backgroundFitOrder.setValue(ddict.get("FittedBackgroundOrder", 1))
-        except Exception:
-            raise
+            self.backgroundFitGroup.setChecked(
+                ddict.get("fitted_background", False)
+            )
+            self._backgroundFitOrder.setValue(
+                ddict.get("fitted_background_order", 1)
+            )
         finally:
             self._updating_parameters = False
         self._onAnyValueChanged()
