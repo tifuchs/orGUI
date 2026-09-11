@@ -1536,6 +1536,43 @@ Gate:
 - Old sessions and `.xtal` files remain untouched and load unchanged because
   this increment does not integrate the new dictionary contract with them.
 
+### Increment 7 -- normalize the commit history
+
+Do this last, after increment 6 and before the branch is integrated or
+pushed. The commits written during increments 0--6 carry multi-paragraph
+bodies which restate their own diffs. They are too long.
+
+The convention for this repository, on top of the Conventional Commits rule
+in the root `AGENTS.md`:
+
+- a subject line;
+- optionally a body of **zero to three lines**, separated from the subject by
+  one blank line;
+- optionally footers, separated from the body by one blank line, with tokens
+  using `-` in place of whitespace (`Reviewed-by:`, `Refs:`) and
+  `BREAKING CHANGE` as the one permitted exception;
+- everything wrapped at 72 columns.
+
+The body says what changed and why, not how. Omit it when the change is
+simple: a body which restates the subject is a sign that there should not be
+one.
+
+Work:
+
+1. Reword the branch's own commits to that shape. They are unpushed, so this
+   is a local rebase and rewrites no published history. Check that first with
+   `git log origin/poisson-incoh..HEAD`; if any commit has been published,
+   leave it and note the exception here instead.
+2. Keep every subject's existing Conventional Commits type and scope. This is
+   a length and layout change, not a reclassification.
+3. Preserve the `BREAKING CHANGE:` footer on any commit which carries one.
+
+Gate:
+
+- No commit body exceeds three lines and no line exceeds 72 columns.
+- `git log origin/poisson-incoh..HEAD` contains the same set of changes as
+  before the rewording, verified by comparing the tree at the branch tip.
+
 ### Deferred increment -- physical coherence kernel
 
 Do not include this in the first implementation. A later change may add a
