@@ -55,6 +55,7 @@ from types import MappingProxyType
 import numpy as np
 
 from .CTRcalc import SXRDCrystal
+from .CTRfilm import PoissonSurface
 from .CTRutil import LinearFitFunctions
 
 __all__ = [
@@ -64,6 +65,7 @@ __all__ = [
     "IncoherentModelInfo",
     "IncoherentState",
     "KinematicIncoherentContext",
+    "PoissonHeightDomains",
     "available_incoherent_models",
     "create_incoherent_model",
     "create_incoherent_model_from_config",
@@ -834,3 +836,173 @@ def create_incoherent_model_from_config(crystal, config):
     if parameters:
         model._local_parameters_from_dict(parameters)
     return model
+
+
+@register_incoherent_model(builtin=True)
+class PoissonHeightDomains(CoherentStateEnsembleModel):
+    """Laterally large height domains on a Poisson-roughened surface.
+
+    Each coherence patch sees one flat height drawn from the surface's
+    ``PoissonProfile``. The states are the complete coherent amplitudes of the
+    crystal at those heights, so bulk-surface and Film-surface interference
+    stays inside each domain, and ``incoherent_fraction`` interpolates between
+    the coherent limit and their squared average.
+
+    Constructing this wrapper is the opt-in: the ``PoissonSurface`` it targets
+    stays an ordinary coherent structural model on its own.
+
+    :param CTRcalc.SXRDCrystal crystal:
+        Coherent crystal to wrap.
+    :param str surface:
+        Stable name of the target ``PoissonSurface`` component.
+    :param float incoherent_fraction:
+        Dimensionless mixing fraction ``kappa`` in ``[0, 1]``. Zero is fully
+        coherent, one is the large-domain limit.
+    :param int exact_layer_count:
+        Retain every height state when the profile populates no more than
+        this many. A policy switch, not a cap.
+    :param str name:
+        Wrapper name, the default prefix for its local parameter.
+    :raises ValueError:
+        If the target is missing, duplicated, not a ``PoissonSurface``, not
+        the topmost component, or the fraction is out of range.
+    """
+
+    model_type = "poisson_height_domains"
+    parameterLookup = {"incoherent_fraction": 0}
+    parameterLookup_inv = {0: "incoherent_fraction"}
+
+    def __init__(
+        self,
+        crystal,
+        *,
+        surface,
+        incoherent_fraction=0.0,
+        exact_layer_count=10,
+        name="incoherent",
+    ):
+        super().__init__(crystal, name=name)
+        self.surface = str(surface)
+        if (
+            int(exact_layer_count) != exact_layer_count
+            or exact_layer_count < 1
+        ):
+            raise ValueError("exact_layer_count must be a positive integer")
+        self.exact_layer_count = int(exact_layer_count)
+        # One local basis entry, so a fixed fraction and a fitted one are the
+        # same stored value. `basis_0` is seeded too, because
+        # `updateFromParameters` rebuilds `basis` from it whenever the
+        # fraction is not itself a fit parameter.
+        self.basis = np.array([0.0])
+        self.basis_0 = np.array([0.0])
+        self.errors = None
+        self.incoherent_fraction = incoherent_fraction
+        self._validate_target()
+
+    @property
+    def incoherent_fraction(self):
+        """Return the dimensionless mixing fraction held in the basis."""
+        return float(self.basis[0])
+
+    @incoherent_fraction.setter
+    def incoherent_fraction(self, value):
+        """Set the mixing fraction, which must be finite and in ``[0, 1]``."""
+        value = float(value)
+        if not np.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError(
+                f"incoherent_fraction must be finite and within [0, 1], "
+                f"got {value}"
+            )
+        self.basis[0] = value
+        self.basis_0[0] = value
+
+    def target_surface(self):
+        """Return the targeted ``PoissonSurface`` component.
+
+        Selection is by stable name: component identities do not survive the
+        deep copy the optimizer performs once per fit.
+
+        :rtype: CTRfilm.PoissonSurface
+        :raises ValueError:
+            If no component, or more than one, carries the name.
+        """
+        components = self._coherent_model.uc_surface_list
+        matches = [
+            component
+            for component in components
+            if getattr(component, "name", None) == self.surface
+        ]
+        if not matches:
+            available = ", ".join(
+                str(getattr(component, "name", "?"))
+                for component in components
+            )
+            raise ValueError(
+                f"No component named {self.surface!r} on the crystal. "
+                f"Available: {available}"
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                f"{len(matches)} components are named {self.surface!r}; "
+                "the target must be identified by a unique name"
+            )
+        return matches[0]
+
+    def _validate_target(self):
+        """Check the target type and the supported stacking topology."""
+        target = self.target_surface()
+        if not isinstance(target, PoissonSurface):
+            raise ValueError(
+                f"Component {self.surface!r} is a "
+                f"{type(target).__name__}, not a PoissonSurface"
+            )
+
+        crystal = self._coherent_model
+        ordered = list(crystal.uc_surface_list_ordered)
+        if not ordered or ordered[-1] is not target:
+            raise ValueError(
+                f"{self.surface!r} must be the topmost component in stacking "
+                "order. A component above it could have a position which "
+                "depends on the selected height, so it cannot be treated as "
+                "part of the common amplitude"
+            )
+        levels = np.asarray(crystal.uc_stacking_ordered)
+        if levels.size and int(np.sum(levels == levels[-1])) != 1:
+            raise ValueError(
+                f"{self.surface!r} shares its stacking level with another "
+                "component, whose position could depend on the selected "
+                "height"
+            )
+
+    def _validate_model(self, forward_model):
+        """Check that the target is bound to the Film it corrects."""
+        target = self._bound_target()
+        if target.underlying_film is None:
+            raise ValueError(
+                f"{self.surface!r} is not stacked immediately above a Film, "
+                "so it has no sharp boundary to correct"
+            )
+
+    def _bound_target(self):
+        """Return the target after applying any pending stacking."""
+        crystal = self._coherent_model
+        if crystal.enable_uc_stacking:
+            crystal.apply_stacking()
+        return self.target_surface()
+
+    def _iter_states(self, context):
+        """Stream complete crystal amplitudes, one flat height at a time."""
+
+        def state_evaluator(component, h, k, l):  # noqa: E741
+            return component.flat_domain_corrections(
+                h, k, l, exact_layer_count=self.exact_layer_count
+            )
+
+        return context.iter_component_states(self.surface, state_evaluator)
+
+    def _config_settings(self):
+        """Return the non-basis settings. The fraction is not among them."""
+        return {
+            "surface": self.surface,
+            "exact_layer_count": self.exact_layer_count,
+        }

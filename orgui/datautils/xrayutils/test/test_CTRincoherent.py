@@ -1,9 +1,11 @@
-"""Contract tests for the incoherent CTR wrapper.
+"""Tests for the incoherent CTR wrapper and the Poisson height-domain model.
 
-Every model here is synthetic. Increment 3 of
+The contract tests use synthetic models only. Increment 3 of
 ``doc/design/incoherent_ctr_models.md`` requires the contract to hold without
-the Poisson implementation, so nothing in this file constructs or imports a
-``PoissonSurface``.
+the Poisson implementation, so nothing above ``TestPoissonHeightDomains``
+constructs a ``PoissonSurface``. The increment-4 classes at the end of the
+file do, and check the model against the independently stacked flat-height
+crystals of ``_poisson_oracle``.
 """
 
 import copy
@@ -22,6 +24,7 @@ from ..CTRincoherent import (
     register_incoherent_model,
     unregister_incoherent_model,
 )
+from ..CTRdistributions import PoissonProfile
 from . import _poisson_oracle
 
 
@@ -661,6 +664,361 @@ class TestEvaluationContext(ContractMixin):
 
         with self.assertRaisesRegex(ValueError, "disagree on state"):
             list(context.iter_component_states("film", evaluator))
+
+
+class PoissonModelMixin(ContractMixin):
+    """Builders for the Poisson height-domain model."""
+
+    def model(self, profile, kappa=0.0, n_layers=2, **keyargs):
+        """Return the model, its crystal, its surface, and the base width."""
+        w_base = _poisson_oracle.minimum_base_width(profile)
+        crystal, surface = _poisson_oracle.poisson_crystal(
+            profile, w_base=w_base, n_layers=n_layers, **keyargs
+        )
+        crystal.apply_stacking()
+        model = CTRincoherent.PoissonHeightDomains(
+            crystal, surface="surface", incoherent_fraction=kappa
+        )
+        return model, crystal, surface, w_base
+
+    def oracle_incoherent(self, surface, w_base, n_layers=2, **keyargs):
+        """Return the state average of independently stacked crystals."""
+        states = surface.flat_domain_corrections(self.H, self.K, self.L)
+        total = None
+        for layer, probability in zip(
+            states.layer_numbers, states.probabilities
+        ):
+            amplitude = _poisson_oracle.flat_height_crystal(
+                int(layer), w_base=w_base, n_layers=n_layers, **keyargs
+            ).F(self.H, self.K, self.L)
+            squared = probability * np.abs(amplitude) ** 2
+            total = squared if total is None else total + squared
+        return total
+
+
+class TestPoissonHeightDomains(PoissonModelMixin):
+    """Endpoints and interpolation against independent flat-height crystals."""
+
+    PROFILES = {
+        "poisson growth": PoissonProfile(
+            1.5, alpha=0.6, tail_probability=1e-14
+        ),
+        "poisson etching": PoissonProfile(
+            -1.5, alpha=0.6, tail_probability=1e-14
+        ),
+        "fractional step": PoissonProfile(
+            1.5, alpha=0.0, tail_probability=1e-14
+        ),
+        "step and poisson": PoissonProfile(
+            2.3, alpha=0.4, offset=0.4, tail_probability=1e-14
+        ),
+    }
+
+    def test_coherent_endpoint_is_the_wrapped_crystal(self):
+        """``kappa = 0`` must not be perturbed by the finite state support.
+
+        It comes from the coherent result already cached in the context, so
+        it is the crystal's own ``F2`` rather than a state-sum
+        reconstruction.
+        """
+        for label, profile in self.PROFILES.items():
+            with self.subTest(case=label):
+                model, crystal, _, _ = self.model(profile, kappa=0.0)
+                np.testing.assert_array_equal(
+                    model.F2(self.H, self.K, self.L),
+                    crystal.F2(self.H, self.K, self.L),
+                )
+
+    def test_incoherent_endpoint_matches_deterministic_crystals(self):
+        """``kappa = 1`` is the weighted ``F2`` average of flat crystals."""
+        for label, profile in self.PROFILES.items():
+            with self.subTest(case=label):
+                model, _, surface, w_base = self.model(profile, kappa=1.0)
+                np.testing.assert_allclose(
+                    model.F2(self.H, self.K, self.L),
+                    self.oracle_incoherent(surface, w_base),
+                    rtol=1e-12,
+                )
+
+    def test_partial_mixing_is_the_convex_interpolation(self):
+        """Intermediate fractions fill in linearly between the endpoints."""
+        profile = self.PROFILES["poisson growth"]
+        coherent = self.model(profile, kappa=0.0)[0].F2(self.H, self.K, self.L)
+        incoherent = self.model(profile, kappa=1.0)[0].F2(
+            self.H, self.K, self.L
+        )
+        self.assertGreater(
+            np.max(np.abs(incoherent - coherent)) / np.max(incoherent), 0.05
+        )
+        for kappa in (0.2, 0.35, 0.8):
+            with self.subTest(kappa=kappa):
+                model, _, _, _ = self.model(profile, kappa=kappa)
+                np.testing.assert_allclose(
+                    model.F2(self.H, self.K, self.L),
+                    (1.0 - kappa) * coherent + kappa * incoherent,
+                    rtol=1e-12,
+                )
+
+    def test_the_anti_bragg_minimum_fills_in_with_kappa(self):
+        """Two equally populated heights cancel coherently, not squared.
+
+        ``PoissonProfile(0.5, alpha=0.0)`` populates layers -1 and 0 at
+        exactly one half each, so the coherent minimum along the rod is the
+        deepest the interpolation has to fill.
+        """
+        profile = PoissonProfile(0.5, alpha=0.0, tail_probability=1e-14)
+        scan = np.linspace(0.05, 3.0, 200)
+        zeros = np.zeros_like(scan)
+
+        w_base = 4.0
+        crystal, surface = _poisson_oracle.poisson_crystal(
+            profile, w_base=w_base
+        )
+        crystal.apply_stacking()
+        values = {}
+        for kappa in (0.0, 0.5, 1.0):
+            model = CTRincoherent.PoissonHeightDomains(
+                crystal, surface="surface", incoherent_fraction=kappa
+            )
+            values[kappa] = model.F2(zeros, zeros, scan)
+
+        # The minimum is filled in, and half way there it is exactly half way.
+        deepest = int(np.argmin(values[0.0]))
+        self.assertGreater(values[1.0][deepest], values[0.0][deepest])
+        np.testing.assert_allclose(
+            values[0.5], 0.5 * values[0.0] + 0.5 * values[1.0], rtol=1e-12
+        )
+
+    def test_a_deterministic_height_is_independent_of_kappa(self):
+        """One populated state leaves no variance for the mixture to expose."""
+        profile = PoissonProfile(2.0, alpha=0.0, tail_probability=1e-14)
+        reference = None
+        for kappa in (0.0, 0.4, 1.0):
+            with self.subTest(kappa=kappa):
+                model, _, surface, _ = self.model(profile, kappa=kappa)
+                states = surface.flat_domain_corrections(
+                    self.H, self.K, self.L
+                )
+                self.assertEqual(states.layer_numbers.size, 1)
+                value = model.F2(self.H, self.K, self.L)
+                if reference is None:
+                    reference = value
+                np.testing.assert_allclose(value, reference, rtol=1e-12)
+
+    def test_bulk_interference_stays_inside_each_state(self):
+        """Averaging only the surface correction is a different quantity."""
+        profile = PoissonProfile(0.5, alpha=0.0, tail_probability=1e-14)
+        model, _, surface, w_base = self.model(profile, kappa=1.0)
+        states = surface.flat_domain_corrections(self.H, self.K, self.L)
+        common = _poisson_oracle.flat_height_crystal(-1, w_base=w_base).F(
+            self.H, self.K, self.L
+        )
+
+        wrong = np.abs(common) ** 2
+        for layer, probability in zip(
+            states.layer_numbers, states.probabilities
+        ):
+            amplitude = _poisson_oracle.flat_height_crystal(
+                int(layer), w_base=w_base
+            ).F(self.H, self.K, self.L)
+            wrong = wrong + probability * np.abs(amplitude - common) ** 2
+
+        correct = model.F2(self.H, self.K, self.L)
+        self.assertGreater(
+            np.max(np.abs(correct - wrong)) / np.max(correct), 0.1
+        )
+
+    def test_outer_domain_transforms_reach_each_state(self):
+        """Every state carries the crystal's area, weight, and domains."""
+        profile = self.PROFILES["fractional step"]
+        transforms = [
+            (np.identity(3), 0.65),
+            (np.diag([1.0, 1.0, 0.5]), 0.35),
+        ]
+        reference_uc = _poisson_oracle.layered_cell(2, "reference", a=6.0)
+        keyargs = {"reference_uc": reference_uc, "domains": transforms}
+
+        model, _, surface, w_base = self.model(
+            profile, kappa=1.0, weights=[0.4, 0.4], **keyargs
+        )
+        expected = self.oracle_incoherent(
+            surface, w_base, weights=[0.4], **keyargs
+        )
+        scaled = model.F2(self.H, self.K, self.L)
+        np.testing.assert_allclose(scaled, expected, rtol=1e-12)
+
+        plain, _, _, _ = self.model(profile, kappa=1.0)
+        unscaled = plain.F2(self.H, self.K, self.L)
+        self.assertGreater(
+            np.max(np.abs(scaled - unscaled)) / np.max(unscaled), 0.1
+        )
+
+    def test_multi_layer_cycles(self):
+        """The model follows the surface through its layer cycle."""
+        profile = self.PROFILES["poisson growth"]
+        for n_layers in (1, 3):
+            with self.subTest(n_layers=n_layers):
+                model, _, surface, w_base = self.model(
+                    profile, kappa=1.0, n_layers=n_layers
+                )
+                np.testing.assert_allclose(
+                    model.F2(self.H, self.K, self.L),
+                    self.oracle_incoherent(
+                        surface, w_base, n_layers=n_layers
+                    ),
+                    rtol=1e-12,
+                )
+
+
+class TestPoissonHeightDomainsContract(PoissonModelMixin):
+    """Construction, validation, and configuration of the Poisson model."""
+
+    PROFILE = PoissonProfile(1.5, alpha=0.5, tail_probability=1e-14)
+
+    def test_no_F_method_is_defined(self):
+        """Requesting an amplitude from a mixed state is a category error."""
+        model, _, _, _ = self.model(self.PROFILE)
+        self.assertFalse(hasattr(model, "F"))
+
+    def test_the_fraction_is_a_view_on_the_local_basis(self):
+        """A fixed and a fitted fraction are the same stored value."""
+        model, _, _, _ = self.model(self.PROFILE, kappa=0.35)
+        self.assertAlmostEqual(model.incoherent_fraction, 0.35)
+        self.assertAlmostEqual(model.basis[0], 0.35)
+
+        model.incoherent_fraction = 0.6
+        self.assertAlmostEqual(model.basis[0], 0.6)
+
+        model.basis[0] = 0.2
+        self.assertAlmostEqual(model.incoherent_fraction, 0.2)
+
+        for bad in (-0.1, 1.2, np.nan):
+            with self.subTest(value=bad):
+                with self.assertRaisesRegex(
+                    ValueError, "incoherent_fraction"
+                ):
+                    model.incoherent_fraction = bad
+
+    def test_the_fraction_becomes_a_fit_parameter_on_request(self):
+        """A setting stays fixed unless it is added as a fit parameter."""
+        model, _, _, _ = self.model(self.PROFILE, kappa=0.35)
+        self.assertEqual(model.n_local_parameters, 0)
+
+        model.addFitParameter(
+            "incoherent_fraction",
+            limits=(0.0, 1.0),
+            name="surface incoherent_fraction",
+        )
+        self.assertEqual(model.fitparnames[0], "surface incoherent_fraction")
+        np.testing.assert_allclose(model.getInitialParameters()[0], 0.35)
+
+    def test_registered_under_its_stable_key(self):
+        """The registry resolves a saved type name to this class."""
+        models = available_incoherent_models()
+        self.assertIn("poisson_height_domains", models)
+        info = models["poisson_height_domains"]
+        self.assertIs(info.model_class, CTRincoherent.PoissonHeightDomains)
+        self.assertEqual(info.output_quantity, "F2")
+
+    def test_builtin_registration_cannot_be_replaced(self):
+        """A built-in key is not available to a third-party model."""
+        with self.assertRaisesRegex(ValueError, "built-in"):
+
+            @register_incoherent_model
+            class _Impostor(CTRincoherent.PoissonHeightDomains):
+                """Attempts to take over a built-in key."""
+
+    def test_config_round_trip_keeps_settings_and_fraction(self):
+        """Settings and the local basis survive a dictionary round-trip."""
+        model, crystal, _, _ = self.model(self.PROFILE, kappa=0.35)
+        model.exact_layer_count = 7
+        config = model.to_config()
+        self.assertEqual(config["type"], "poisson_height_domains")
+        self.assertEqual(
+            config["settings"],
+            {"surface": "surface", "exact_layer_count": 7},
+        )
+
+        restored = create_incoherent_model_from_config(crystal, config)
+        self.assertEqual(restored.surface, "surface")
+        self.assertEqual(restored.exact_layer_count, 7)
+        self.assertAlmostEqual(restored.incoherent_fraction, 0.35)
+        np.testing.assert_allclose(
+            restored.F2(self.H, self.K, self.L),
+            model.F2(self.H, self.K, self.L),
+            rtol=1e-14,
+        )
+
+    def test_rejects_a_missing_or_ambiguous_target(self):
+        """Selection is by stable name, which must identify one component."""
+        w_base = _poisson_oracle.minimum_base_width(self.PROFILE)
+        crystal, _ = _poisson_oracle.poisson_crystal(
+            self.PROFILE, w_base=w_base
+        )
+        with self.assertRaisesRegex(ValueError, "No component named"):
+            CTRincoherent.PoissonHeightDomains(crystal, surface="absent")
+
+        crystal.uc_surface_list[0].name = "surface"
+        with self.assertRaisesRegex(ValueError, "are named"):
+            CTRincoherent.PoissonHeightDomains(crystal, surface="surface")
+
+    def test_rejects_a_target_which_is_not_a_poisson_surface(self):
+        """The model only knows how to enumerate Poisson heights."""
+        w_base = _poisson_oracle.minimum_base_width(self.PROFILE)
+        crystal, _ = _poisson_oracle.poisson_crystal(
+            self.PROFILE, w_base=w_base
+        )
+        with self.assertRaisesRegex(ValueError, "not a PoissonSurface"):
+            CTRincoherent.PoissonHeightDomains(crystal, surface="film")
+
+    def test_rejects_a_component_stacked_above_the_target(self):
+        """A component above the surface may move with the chosen height."""
+        w_base = _poisson_oracle.minimum_base_width(self.PROFILE)
+        crystal, surface = _poisson_oracle.poisson_crystal(
+            self.PROFILE, w_base=w_base
+        )
+        cap = CTRcalc.UnitCell([3.0, 3.0, 6.0], [90.0, 90.0, 90.0], name="cap")
+        cap.addAtom("O", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0, layer=0)
+        stacked = CTRcalc.SXRDCrystal(
+            _poisson_oracle.layered_cell(2, "bulk"),
+            crystal.uc_surface_list[0],
+            surface,
+            cap,
+            stacking=np.array([1, 2, 3]),
+        )
+        with self.assertRaisesRegex(ValueError, "topmost component"):
+            CTRincoherent.PoissonHeightDomains(stacked, surface="surface")
+
+    def test_rejects_an_invalid_state_count(self):
+        """``exact_layer_count`` is a positive integer policy setting."""
+        w_base = _poisson_oracle.minimum_base_width(self.PROFILE)
+        crystal, _ = _poisson_oracle.poisson_crystal(
+            self.PROFILE, w_base=w_base
+        )
+        for bad in (0, -3, 1.5):
+            with self.subTest(exact_layer_count=bad):
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    CTRincoherent.PoissonHeightDomains(
+                        crystal, surface="surface", exact_layer_count=bad
+                    )
+
+    def test_dwba_is_refused_before_any_prediction(self):
+        """An F2 wrapper must never be reinterpreted as a reflectivity."""
+        model, _, _, _ = self.model(self.PROFILE)
+        model.validate(forward_model="kinematical")
+        with self.assertRaisesRegex(ValueError, "does not support"):
+            model.validate(forward_model="dwba")
+
+    def test_survives_the_deep_copy_the_optimizer_performs(self):
+        """Component selection by name must outlive a copy."""
+        model, _, _, _ = self.model(self.PROFILE, kappa=0.4)
+        copied = copy.deepcopy(model)
+        self.assertIsNot(copied.coherent_model, model.coherent_model)
+        np.testing.assert_allclose(
+            copied.F2(self.H, self.K, self.L),
+            model.F2(self.H, self.K, self.L),
+            rtol=1e-14,
+        )
 
 
 if __name__ == "__main__":
