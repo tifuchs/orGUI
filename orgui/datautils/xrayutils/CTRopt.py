@@ -40,6 +40,7 @@ from scipy import stats
 from .. import util
 
 from .CTRcalc import SXRDCrystal
+from .CTRincoherent import IncoherentModel
 from . import CTRplotutil, CTRresolution
 
 @dataclass(frozen=True)
@@ -86,9 +87,30 @@ _DWBA_ANGLE_NAMES = ("alpha", "delta", "gamma", "omega", "chi", "phi")
 
 class CTROptimizer:
     def __init__(self, xtal, CTRs, *, scale_policy=None):
+        """Fit one forward model against a CTR collection.
+
+        :param xtal:
+            Forward model. Either a coherent ``SXRDCrystal`` or an
+            ``IncoherentF2Model`` wrapping one. The model is deep-copied once,
+            so later changes to the caller's object do not reach the fit.
+        :param CTRplotutil.CTRCollection CTRs:
+            Measured CTRs.
+        :param scale_policy:
+            Optional initial scale policy mapping.
+        """
         self.CTRs = copy.deepcopy(CTRs)
         self.CTRs.sort(key=lambda x: abs(x.hk[0]) + abs(x.hk[1]))
-        self.xtal = copy.deepcopy(xtal)
+        # `self.model` is the fitted forward model and `self.xtal` stays the
+        # primary coherent crystal, so registered callbacks, displacement
+        # constraints, and public `optimizer.xtal` access keep receiving an
+        # SXRDCrystal whether or not the fit is wrapped.
+        self.model = copy.deepcopy(xtal)
+        if isinstance(self.model, IncoherentModel):
+            self.xtal = self.model.coherent_model
+        else:
+            self.xtal = self.model
+        self.n_parameters = None
+        self._prepared_signature = None
         self._scale_policy_defaults = {
             "structure_factor": "scaled",
             "reflectivity": "fixed",
@@ -357,6 +379,28 @@ class CTROptimizer:
                     f"{ctr!r}: kinematical CTR fitting supports "
                     "structure-factor data only."
                 )
+        if isinstance(self.model, IncoherentModel):
+            if self.model.output_quantity != "F2":
+                raise ValueError(
+                    f"{self.model.model_type} returns "
+                    f"{self.model.output_quantity!r}, which the kinematical "
+                    "path cannot consume as a squared structure factor"
+                )
+            self.model.validate(forward_model="kinematical")
+
+    def _kinematic_F2(self, h, k, l):  # noqa: N802,E741
+        """Return the forward model's squared structure factor.
+
+        Prefers ``F2``. Crystal-like objects and test doubles which implement
+        only ``F`` keep working through the squared-modulus fallback.
+
+        :returns:
+            Real squared structure factor in the squared units of ``F``.
+        """
+        squared = getattr(self.model, "F2", None)
+        if callable(squared):
+            return np.asarray(squared(h, k, l), dtype=np.float64)
+        return np.abs(self.model.F(h, k, l)) ** 2
 
     def _validate_measurement_input(self):
         """Require aligned finite real data and positive uncertainties."""
@@ -392,6 +436,16 @@ class CTROptimizer:
 
     def _validate_dwba_input(self):
         """Validate measurement metadata required by live DWBA prediction."""
+        if isinstance(self.model, IncoherentModel):
+            # Rejected before any DWBA code runs. Changing the flat surface
+            # height changes the optical reference profile and its internal
+            # fields, so a kinematical F2 mixture is not a reflectivity and
+            # must never be reinterpreted as one.
+            raise ValueError(
+                f"{self.model.model_type} does not support the DWBA forward "
+                f"model: it returns {self.model.output_quantity}, not a "
+                "reflectivity"
+            )
         if not isinstance(self.xtal, SXRDCrystal):
             raise TypeError("DWBA fitting requires an SXRDCrystal model")
         if self._fit_resolution and self.resolution_calculation == "sample":
@@ -578,13 +632,18 @@ class CTROptimizer:
             return
         if self.resolution_calculation == "sample":
             self._resolution_calculated_ctrs = CTRresolution.sample_structure_factor(
-                self.CTRs, self.xtal, self.resolution
+                self.CTRs, self.model, self.resolution
             )
             return
 
         input_ctrs = self._resolution_input_collection()
+        # `fast_convolve` squares its input, convolves, and takes one square
+        # root, so feeding it sqrt(F2) applies the resolution to F2 before the
+        # square root without a second collection-building path.
         for source, calculated in zip(self.CTRs, input_ctrs):
-            calculated.sfI = np.abs(self.xtal.F(source.harr, source.karr, source.l))
+            calculated.sfI = np.sqrt(
+                self._kinematic_F2(source.harr, source.karr, source.l)
+            )
         self._resolution_calculated_ctrs = CTRresolution.fast_convolve(
             input_ctrs, self.resolution
         )
@@ -810,7 +869,7 @@ class CTROptimizer:
         if self._dwba_enabled:
             return self._dwba_prediction(ctr)
         if self.resolution is None:
-            return np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
+            return np.sqrt(self._kinematic_F2(ctr.harr, ctr.karr, ctr.l))
         if self._resolution_calculated_ctrs is None:
             self._update_resolution_cache()
         return self._resolution_calculated_ctrs[index].sfI
@@ -973,24 +1032,28 @@ class CTROptimizer:
         return calculations
 
     def _model_parameters(self):
-        """Return the crystal-owned tail of the fit parameter vector."""
-        return self.xtal.getInitialParameters()
+        """Return the model-owned tail of the fit parameter vector.
+
+        For a wrapper this is its local block followed by the wrapped
+        crystal's, which the wrapper splits internally.
+        """
+        return self.model.getInitialParameters()
 
     def _set_model_parameters(self, parameters):
-        """Set parameters owned by the fitted crystal model."""
-        self.xtal.setParameters(parameters)
+        """Set parameters owned by the fitted forward model."""
+        self.model.setParameters(parameters)
 
     def _prepend_model_bounds(self, bounds):
-        """Add subclass-owned parameters ahead of the crystal bounds."""
+        """Add subclass-owned parameters ahead of the model bounds."""
         return bounds
 
     def _set_model_errors(self, errors):
-        """Forward the model-owned error tail to the crystal."""
-        self.xtal.setFitErrors(errors)
+        """Forward the model-owned error tail to the forward model."""
+        self.model.setFitErrors(errors)
 
     def _model_parameter_names(self):
-        """Return names for subclass and crystal model parameters."""
-        return list(self.xtal.fitparnames)
+        """Return names for subclass and forward-model parameters."""
+        return list(self.model.fitparnames)
 
     def _fit_parameter_names(self):
         """Build names in the same order as the fit parameter vector."""
@@ -1037,8 +1100,11 @@ class CTROptimizer:
                 self._validate_dwba_input()
             else:
                 self._validate_kinematical_input()
+            # `startp`, `lower_bounds` and `higher_bounds` keep their existing
+            # model-block scope. `self.bounds`, `fitparnames`,
+            # `get_parameters()` and `n_parameters` describe the full vector.
             self.startp, self.lower_bounds, self.higher_bounds = (
-                self.xtal.getStartParamAndLimits()
+                self.model.getStartParamAndLimits()
             )
             self.bounds = self._prepend_model_bounds(
                 (self.lower_bounds, self.higher_bounds)
@@ -1056,13 +1122,52 @@ class CTROptimizer:
             else:
                 self.nic = 0
             self.fitparnames = self._fit_parameter_names()
-            self.priors = self.xtal.priors
+            # Model-scoped, matching current behavior: resolution, callback
+            # and angle-correction prefixes expose no prior API.
+            self.priors = self.model.priors
             self._prepared = True
+            self.n_parameters = len(self.get_parameters())
+            if len(self.fitparnames) != self.n_parameters or len(
+                self.bounds[0]
+            ) != self.n_parameters:
+                raise ValueError(
+                    "Prepared fit vector is inconsistent: "
+                    f"{self.n_parameters} values, {len(self.fitparnames)} "
+                    f"names, {len(self.bounds[0])} bounds"
+                )
+            self._prepared_signature = self._model_signature()
             self._evaluate()
         except Exception:
             self._prepared = False
             self._invalidate_calculated_results()
             raise
+
+    def _model_signature(self):
+        """Return the structural layout of the model parameter block.
+
+        Names, count, and bounds. A change to any of them means the prepared
+        vector no longer describes the model, so slicing it would silently
+        address the wrong parameters.
+        """
+        start, lower, upper = self.model.getStartParamAndLimits()
+        return (
+            tuple(self.model.fitparnames),
+            len(start),
+            tuple(np.asarray(lower, dtype=np.float64).tolist()),
+            tuple(np.asarray(upper, dtype=np.float64).tolist()),
+        )
+
+    def _require_current_signature(self):
+        """Reject a stale layout after structural parameter changes."""
+        if self._prepared_signature is None:
+            return
+        if self._model_signature() != self._prepared_signature:
+            self._prepared = False
+            raise ValueError(
+                "Fit parameters were added, removed, renamed, or re-bounded "
+                "on optimizer.model after prepareFit(). Call prepareFit() "
+                "again before evaluating or setting parameters."
+            )
 
     def get_bounds(self):
         return self.bounds
@@ -1079,6 +1184,7 @@ class CTROptimizer:
 
     def set_parameters(self, x):
         """Set resolution, callback, and model parameters in layout order."""
+        self._require_current_signature()
         self._invalidate_calculated_results()
         x = self._split_resolution_parameters(x)
         counter = 0

@@ -14,7 +14,16 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from .. import CTRcalc, CTRopt, CTRplotutil, CTRresolution, CTRsymmetry
+from .. import (
+    CTRcalc,
+    CTRdistributions,
+    CTRincoherent,
+    CTRopt,
+    CTRplotutil,
+    CTRresolution,
+    CTRsymmetry,
+)
+from . import _poisson_oracle
 
 
 def _angles(gamma, delta=None):
@@ -1706,6 +1715,396 @@ class TestDeprecatedStatisticsErrorRouting(unittest.TestCase):
 
         self.assertEqual(np.size(optimizer.xtal.errors), 2)
         self.assertEqual(len(optimizer.xtal.error_calls), 1)
+
+
+class _F2OnlyModel:
+    """Forward model exposing only ``F2``, like an incoherent wrapper.
+
+    Kept distinct from ``FitCrystal`` so the optimizer's preference for
+    ``F2`` is visible: this deliberately has no ``F`` at all.
+    """
+
+    def __init__(self, parameters=(1.0,)):
+        self.parameters = np.asarray(parameters, dtype=np.float64)
+        self.fitparnames = [f"xtal_{i}" for i in range(self.parameters.size)]
+        self.priors = []
+        self.errors = None
+        self.error_calls = []
+        self.offset = 1.0
+        self.slope = 0.5
+
+    def F2(self, h, k, l):  # noqa: N802,E741
+        """Return the squared structure factor directly."""
+        lvalues = np.asarray(l, dtype=np.float64)
+        value = self.offset + self.slope * lvalues
+        for i, parameter in enumerate(self.parameters):
+            value = value + parameter * lvalues ** (i + 2)
+        return value**2
+
+    def getStartParamAndLimits(self):  # noqa: N802
+        """Return the start parameters and their lower and upper limits."""
+        return (
+            self.parameters.copy(),
+            np.full(self.parameters.size, 0.1),
+            np.full(self.parameters.size, 10.0),
+        )
+
+    def getInitialParameters(self):  # noqa: N802
+        """Return the current fit parameters."""
+        return self.parameters.copy()
+
+    def setParameters(self, parameters):  # noqa: N802
+        """Set the fit parameters."""
+        self.parameters = np.asarray(parameters, dtype=np.float64)
+
+    def setFitErrors(self, errors):  # noqa: N802
+        """Store the parameter errors and record the call."""
+        self.errors = None if errors is None else np.asarray(errors)
+        self.error_calls.append(self.errors)
+
+
+class TestForwardModelQuantity(unittest.TestCase):
+    """The optimizer consumes ``F2`` and falls back to ``abs(F) ** 2``."""
+
+    def test_an_F_only_model_still_works(self):
+        """Existing crystal-like objects implement only ``F``."""
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), _fixture_ctrs())
+        optimizer.prepareFit()
+        crystal = optimizer.model
+        expected = np.abs(
+            crystal.F(
+                optimizer.CTRs[0].harr,
+                optimizer.CTRs[0].karr,
+                optimizer.CTRs[0].l,
+            )
+        )
+        np.testing.assert_allclose(
+            optimizer._calculated_value(optimizer.CTRs[0], 0), expected
+        )
+
+    def test_an_F2_model_is_preferred(self):
+        """A model exposing ``F2`` is used without ever calling ``F``."""
+        optimizer = CTRopt.CTROptimizer(_F2OnlyModel(), _fixture_ctrs())
+        optimizer.prepareFit()
+        ctr = optimizer.CTRs[0]
+        np.testing.assert_allclose(
+            optimizer._calculated_value(ctr, 0),
+            np.sqrt(optimizer.model.F2(ctr.harr, ctr.karr, ctr.l)),
+        )
+
+    def test_the_model_and_the_crystal_coincide_without_a_wrapper(self):
+        """``optimizer.xtal`` keeps its meaning for a coherent fit."""
+        optimizer = CTRopt.CTROptimizer(FitCrystal(), _fixture_ctrs())
+        self.assertIs(optimizer.model, optimizer.xtal)
+
+
+class TestPreparedVectorLayout(unittest.TestCase):
+    """``n_parameters`` describes the full vector; ``startp`` does not."""
+
+    @staticmethod
+    def _optimizer(callbacks, fit_resolution, angle_correction):
+        """Build one optimizer with the requested optional prefixes."""
+        factory = (
+            CTRopt.CTROptAngleCorrection
+            if angle_correction
+            else CTRopt.CTROptimizer
+        )
+        optimizer = factory(FitCrystal((1.0, 2.0)), _fixture_ctrs())
+        if angle_correction:
+            optimizer.useAnglecorr = True
+        if fit_resolution:
+            optimizer.fit_resolution(
+                CTRresolution.BoxResolution(0.1, 0.1, 0.1),
+                lower_bounds=[0.0, 0.0, 0.0],
+                higher_bounds=[1.0, 1.0, 1.0],
+            )
+        for index in range(callbacks):
+            _register_callback(optimizer, f"cb_{index}", 1)
+        return optimizer
+
+    def test_full_vector_agrees_with_n_parameters(self):
+        """Values, names, and bounds all describe the same prepared vector."""
+        for callbacks in (0, 2):
+            for fit_resolution in (False, True):
+                for angle_correction in (False, True):
+                    with self.subTest(
+                        callbacks=callbacks,
+                        fit_resolution=fit_resolution,
+                        angle_correction=angle_correction,
+                    ):
+                        optimizer = self._optimizer(
+                            callbacks, fit_resolution, angle_correction
+                        )
+                        optimizer.prepareFit()
+                        total = optimizer.n_parameters
+                        self.assertEqual(len(optimizer.get_parameters()), total)
+                        self.assertEqual(len(optimizer.fitparnames), total)
+                        self.assertEqual(len(optimizer.get_bounds()[0]), total)
+                        self.assertEqual(len(optimizer.get_bounds()[1]), total)
+
+                        expected = (
+                            2
+                            + callbacks
+                            + (3 if fit_resolution else 0)
+                            + (2 if angle_correction else 0)
+                        )
+                        self.assertEqual(total, expected)
+
+    def test_startp_keeps_its_model_block_scope(self):
+        """``startp`` is the preparation snapshot of the model block only.
+
+        Redefining it as the full vector would silently change its length for
+        every existing fit using callbacks or fitted resolution.
+        """
+        optimizer = self._optimizer(2, True, True)
+        optimizer.prepareFit()
+        self.assertEqual(
+            len(optimizer.startp),
+            len(optimizer.model.getInitialParameters()),
+        )
+        self.assertLess(len(optimizer.startp), optimizer.n_parameters)
+        self.assertEqual(len(optimizer.lower_bounds), len(optimizer.startp))
+        self.assertEqual(len(optimizer.higher_bounds), len(optimizer.startp))
+
+    def test_get_parameters_is_the_live_vector(self):
+        """Later value changes appear without re-preparing."""
+        optimizer = self._optimizer(0, False, False)
+        optimizer.prepareFit()
+        snapshot = optimizer.startp.copy()
+        optimizer.set_parameters([3.0, 4.0])
+        np.testing.assert_allclose(optimizer.get_parameters(), [3.0, 4.0])
+        np.testing.assert_allclose(optimizer.startp, snapshot)
+
+    def test_structural_changes_after_preparation_are_rejected(self):
+        """A stale layout must not be sliced silently."""
+        optimizer = CTRopt.CTROptimizer(FitCrystal((1.0, 2.0)), _fixture_ctrs())
+        optimizer.prepareFit()
+        optimizer.model.fitparnames = ["xtal_0", "renamed"]
+        with self.assertRaisesRegex(ValueError, "prepareFit"):
+            optimizer.set_parameters([1.0, 2.0])
+
+
+class TestIncoherentWrapperIntegration(unittest.TestCase):
+    """An incoherent wrapper fits through the existing model argument."""
+
+    def build(self, kappa=0.35, fit_fraction=True):
+        """Return a wrapped model and its coherent crystal."""
+        profile = CTRdistributions.PoissonProfile(
+            1.5, alpha=0.5, tail_probability=1e-12
+        )
+        w_base = _poisson_oracle.minimum_base_width(profile)
+        crystal, _ = _poisson_oracle.poisson_crystal(profile, w_base=w_base)
+        crystal.apply_stacking()
+        crystal["film"].addFitParameter("W", limits=(1.0, 10.0))
+        model = CTRincoherent.PoissonHeightDomains(
+            crystal, surface="surface", incoherent_fraction=kappa
+        )
+        if fit_fraction:
+            model.addFitParameter(
+                "incoherent_fraction",
+                limits=(0.0, 1.0),
+                name="surface incoherent_fraction",
+            )
+        return model
+
+    def optimizer(self, model, **keyargs):
+        """Return a prepared optimizer over the shared CTR fixture."""
+        fit = CTRopt.CTROptimizer(
+            model, _fixture_ctrs(), scale_policy={"F": "fixed"}, **keyargs
+        )
+        return fit
+
+    def test_xtal_stays_the_coherent_crystal(self):
+        """Callbacks and constraints must keep receiving an SXRDCrystal."""
+        fit = self.optimizer(self.build())
+        self.assertIsInstance(fit.model, CTRincoherent.PoissonHeightDomains)
+        self.assertIs(fit.xtal, fit.model.coherent_model)
+        self.assertIsInstance(fit.xtal, CTRcalc.SXRDCrystal)
+
+    def test_the_model_is_deep_copied(self):
+        """Mutating the caller's model must not reach the fit."""
+        model = self.build()
+        fit = self.optimizer(model)
+        self.assertIsNot(fit.model, model)
+        model.incoherent_fraction = 0.9
+        self.assertAlmostEqual(fit.model.incoherent_fraction, 0.35)
+
+    def test_parameter_layout_is_local_then_crystal(self):
+        """The wrapper's block sits ahead of the crystal's, after prefixes."""
+        fit = self.optimizer(self.build())
+        _register_callback(fit, "cb", 1)
+        fit.fit_resolution(
+            CTRresolution.BoxResolution(0.1, 0.1, 0.1),
+            lower_bounds=[0.0, 0.0, 0.0],
+            higher_bounds=[1.0, 1.0, 1.0],
+        )
+        fit.prepareFit()
+
+        names = list(fit.fitparnames)
+        self.assertEqual(names[:3], [
+            "resolution_delta_l_0",
+            "resolution_delta_l_1",
+            "resolution_delta_l_2",
+        ])
+        self.assertEqual(names[4], "surface incoherent_fraction")
+        self.assertEqual(names[5:], list(fit.xtal.fitparnames))
+        self.assertEqual(fit.n_parameters, len(names))
+
+    def test_priors_stay_model_scoped(self):
+        """Priors cover the wrapper's local and coherent block only."""
+        model = self.build()
+        fit = self.optimizer(model)
+        fit.fit_resolution(
+            CTRresolution.BoxResolution(0.1, 0.1, 0.1),
+            lower_bounds=[0.0, 0.0, 0.0],
+            higher_bounds=[1.0, 1.0, 1.0],
+        )
+        fit.prepareFit()
+        self.assertEqual(len(fit.priors), len(fit.model.priors))
+        self.assertLess(len(fit.priors), fit.n_parameters)
+
+    def test_direct_prediction_is_the_square_root_of_F2(self):
+        """Without resolution the stored prediction is ``sqrt(F2)``."""
+        fit = self.optimizer(self.build())
+        fit.prepareFit()
+        for index, ctr in enumerate(fit.CTRs):
+            np.testing.assert_allclose(
+                fit._calculated_value(ctr, index),
+                np.sqrt(fit.model.F2(ctr.harr, ctr.karr, ctr.l)),
+                rtol=1e-12,
+            )
+
+    def test_sampled_resolution_integrates_F2(self):
+        """Quadrature evaluates ``F2`` at every sampled coordinate."""
+        fit = self.optimizer(self.build())
+        resolution = CTRresolution.BoxResolution(0.05, 0.0, 0.0)
+        fit.set_resolution(resolution, calculation="sample")
+        fit.prepareFit()
+
+        expected = CTRresolution.sample_structure_factor(
+            fit.CTRs, fit.model, resolution
+        )
+        for index, ctr in enumerate(fit.CTRs):
+            np.testing.assert_allclose(
+                fit._calculated_value(ctr, index), expected[index].sfI,
+                rtol=1e-12,
+            )
+
+    def test_fast_convolution_broadens_F2_before_the_square_root(self):
+        """The broadened prediction is ``sqrt(convolved(F2))``.
+
+        The dense rod matters: with only a few L points the kernel has almost
+        nothing to act on, and broadening before or after the square root
+        would be indistinguishable.
+        """
+        lvalues = np.linspace(0.3, 2.7, 25)
+        dense = CTRplotutil.CTRCollection(
+            [
+                CTRplotutil.CTR(
+                    (0.0, 0.0),
+                    lvalues.copy(),
+                    np.ones_like(lvalues),
+                    np.full_like(lvalues, 0.1),
+                )
+            ]
+        )
+        fit = CTRopt.CTROptimizer(
+            self.build(), dense, scale_policy={"F": "fixed"}
+        )
+        resolution = CTRresolution.BoxResolution(0.3, 0.0, 0.0)
+        fit.set_resolution(resolution, calculation="convolve")
+        fit.prepareFit()
+
+        ctr = fit.CTRs[0]
+        squared = fit.model.F2(ctr.harr, ctr.karr, ctr.l)
+        correct = np.sqrt(
+            CTRresolution.fast_convolve_intensity(
+                ctr.harr, ctr.karr, ctr.l, squared, resolution
+            )
+        )
+        # The wrong order: broaden the amplitude and square afterwards.
+        wrong = CTRresolution.fast_convolve_intensity(
+            ctr.harr, ctr.karr, ctr.l, np.sqrt(squared), resolution
+        )
+
+        np.testing.assert_allclose(
+            fit._calculated_value(ctr, 0), correct, rtol=1e-12
+        )
+        self.assertGreater(
+            np.max(np.abs(correct - wrong)) / np.max(correct), 1e-4
+        )
+        self.assertGreater(
+            np.max(np.abs(correct - np.sqrt(squared))) / np.max(correct), 1e-4
+        )
+
+    def test_predictions_track_the_mixing_fraction(self):
+        """A coherent wrapper predicts what the bare crystal predicts."""
+        model = self.build(kappa=0.0)
+        fit = self.optimizer(model)
+        fit.prepareFit()
+        coherent = np.copy(fit.flat_prediction())
+
+        # Same crystal, no wrapper, same scale policy: identical predictions.
+        bare = CTRopt.CTROptimizer(
+            model.coherent_model,
+            _fixture_ctrs(),
+            scale_policy={"F": "fixed"},
+        )
+        bare.prepareFit()
+        np.testing.assert_allclose(
+            coherent, bare.flat_prediction(), rtol=1e-10
+        )
+
+        values = fit.get_parameters()
+        values[0] = 1.0
+        fit.set_parameters(values)
+        incoherent = np.copy(fit.flat_prediction())
+        self.assertGreater(
+            np.max(np.abs(incoherent - coherent)) / np.max(coherent), 1e-3
+        )
+
+    def test_error_slices_reach_their_owners(self):
+        """Resolution, callback, wrapper-local, and crystal errors split."""
+        fit = self.optimizer(self.build())
+        callback, _ = _register_callback(fit, "cb", 2)
+        fit.fit_resolution(
+            CTRresolution.BoxResolution(0.1, 0.1, 0.1),
+            lower_bounds=[0.0, 0.0, 0.0],
+            higher_bounds=[1.0, 1.0, 1.0],
+        )
+        fit.prepareFit()
+
+        errors = 0.01 * (1.0 + np.arange(fit.n_parameters))
+        fit.set_errors(errors)
+
+        np.testing.assert_allclose(fit.resolution_errors, errors[:3])
+        np.testing.assert_allclose(callback.errors, errors[3:5])
+        np.testing.assert_allclose(fit.model.getFitErrors(), errors[5:])
+
+    def test_callbacks_receive_the_crystal(self):
+        """A callback signature takes an SXRDCrystal, not the wrapper."""
+        fit = self.optimizer(self.build())
+        seen = []
+
+        def apply(xtal, x):
+            seen.append(xtal)
+
+        fit.register_fit_callback(apply, [0.1], [5.0], [1.0], name="cb")
+        fit.prepareFit()
+        # Callbacks run when parameters are applied, not during preparation.
+        fit.set_parameters(fit.get_parameters())
+        self.assertTrue(seen)
+        for received in seen:
+            self.assertIs(received, fit.xtal)
+
+    def test_dwba_is_rejected_during_preparation(self):
+        """An F2 wrapper must fail before any DWBA code runs."""
+        fit = self.optimizer(self.build())
+        fit.set_dwba(True)
+        with self.assertRaisesRegex(
+            ValueError, "does not support the DWBA forward model"
+        ):
+            fit.prepareFit()
 
 
 class TestCallbackBounds(unittest.TestCase):

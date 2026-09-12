@@ -497,7 +497,9 @@ def sample_structure_factor(ctrs, crystal, resolution, quadrature_order=25):
     :param CTRCollection ctrs:
         Collection supplying the requested HKL points and optional angles.
     :param crystal:
-        Crystal-like object providing ``F(h, k, l)``.
+        Forward model providing ``F2(h, k, l)``, or a crystal-like object
+        providing only ``F(h, k, l)``. ``F2`` is preferred, because a mixed
+        state has a squared structure factor but no unique complex amplitude.
     :param ResolutionFunction resolution:
         Box or Gaussian L-resolution function.
     :param int quadrature_order:
@@ -505,15 +507,20 @@ def sample_structure_factor(ctrs, crystal, resolution, quadrature_order=25):
         25.
     :returns:
         A new collection containing effective amplitudes
-        ``sqrt(integrated(abs(F)**2))``.
+        ``sqrt(integrated(F2))``.
     :rtype: CTRCollection
     """
     if not isinstance(ctrs, CTRCollection):
         raise TypeError("ctrs must be a CTRCollection")
     if not isinstance(resolution, ResolutionFunction):
         raise TypeError("resolution must be a ResolutionFunction")
-    if not hasattr(crystal, "F") or not callable(crystal.F):
-        raise TypeError("crystal must provide a callable F(h, k, l) method")
+    squared = getattr(crystal, "F2", None)
+    if not callable(squared) and not (
+        hasattr(crystal, "F") and callable(crystal.F)
+    ):
+        raise TypeError(
+            "crystal must provide a callable F2(h, k, l) or F(h, k, l) method"
+        )
     quadrature_order = _validate_quadrature_order(quadrature_order)
 
     sampled = []
@@ -524,21 +531,28 @@ def sample_structure_factor(ctrs, crystal, resolution, quadrature_order=25):
         angles = getattr(ctr, "angles", None)
 
         def structure_factor_intensity(h_samples, k_samples, l_samples):
-            structure_factor = np.asarray(
-                crystal.F(h_samples, k_samples, l_samples)
-            )
-            try:
-                structure_factor = np.broadcast_to(
-                    structure_factor, h_samples.shape
+            if callable(squared):
+                values = np.asarray(squared(h_samples, k_samples, l_samples))
+                source = "crystal.F2"
+            else:
+                values = (
+                    np.abs(
+                        np.asarray(
+                            crystal.F(h_samples, k_samples, l_samples)
+                        )
+                    )
+                    ** 2
                 )
+                source = "crystal.F"
+            try:
+                intensity = np.broadcast_to(values, h_samples.shape)
             except ValueError as exc:
                 raise ValueError(
-                    "crystal.F returned an incompatible array shape"
+                    f"{source} returned an incompatible array shape"
                 ) from exc
-            intensity = np.abs(structure_factor) ** 2
             if not np.all(np.isfinite(intensity)):
                 raise ValueError(
-                    "crystal.F returned non-finite structure factors"
+                    f"{source} returned non-finite structure factors"
                 )
             return intensity
 

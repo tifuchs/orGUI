@@ -573,5 +573,72 @@ class TestCollectionAngleAPI(unittest.TestCase):
         np.testing.assert_allclose(ctrs[1].angles["gamma"], [0.25])
 
 
+class _AmplitudeOnly:
+    """Crystal-like object exposing only ``F``."""
+
+    def F(self, h, k, l):  # noqa: N802,E741
+        """Return a simple complex amplitude."""
+        return np.asarray(l, dtype=np.float64) + 2.0j
+
+
+class _SquaredAndAmplitude(_AmplitudeOnly):
+    """Model whose ``F2`` deliberately disagrees with ``abs(F) ** 2``.
+
+    Only a model which prefers ``F2`` can tell the two apart, which is what
+    makes the preference observable rather than assumed.
+    """
+
+    def F2(self, h, k, l):  # noqa: N802,E741
+        """Return a squared structure factor unrelated to ``abs(F) ** 2``."""
+        return 7.0 * np.ones_like(np.asarray(l, dtype=np.float64))
+
+
+class TestSampleStructureFactorQuantity(unittest.TestCase):
+    """``sample_structure_factor`` prefers ``F2`` over ``abs(F) ** 2``."""
+
+    def collection(self):
+        """Return a single rod with room for the kernel to act."""
+        lvalues = np.linspace(0.5, 2.5, 9)
+        ctr = CTRplotutil.CTR(
+            (0.0, 0.0),
+            lvalues,
+            np.ones_like(lvalues),
+            np.full_like(lvalues, 0.1),
+        )
+        return CTRplotutil.CTRCollection([ctr])
+
+    def test_F2_is_used_when_available(self):
+        """A constant ``F2`` broadens to its own square root."""
+        ctrs = self.collection()
+        resolution = CTRresolution.BoxResolution(0.2, 0.0, 0.0)
+        result = CTRresolution.sample_structure_factor(
+            ctrs, _SquaredAndAmplitude(), resolution
+        )
+        np.testing.assert_allclose(
+            result[0].sfI, np.sqrt(7.0), rtol=1e-9
+        )
+
+    def test_amplitude_only_models_still_work(self):
+        """Objects implementing only ``F`` keep the squared-modulus path."""
+        ctrs = self.collection()
+        resolution = CTRresolution.BoxResolution(0.2, 0.0, 0.0)
+        amplitude = CTRresolution.sample_structure_factor(
+            ctrs, _AmplitudeOnly(), resolution
+        )
+        self.assertTrue(np.all(np.isfinite(amplitude[0].sfI)))
+        self.assertFalse(
+            np.allclose(amplitude[0].sfI, np.sqrt(7.0), rtol=1e-9)
+        )
+
+    def test_a_model_with_neither_method_is_rejected(self):
+        """The quantity boundary must be explicit."""
+        with self.assertRaisesRegex(TypeError, "F2.*or F"):
+            CTRresolution.sample_structure_factor(
+                self.collection(),
+                object(),
+                CTRresolution.BoxResolution(0.2, 0.0, 0.0),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
