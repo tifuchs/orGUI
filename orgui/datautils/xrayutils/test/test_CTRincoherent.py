@@ -13,7 +13,7 @@ import unittest
 
 import numpy as np
 
-from .. import CTRcalc, CTRincoherent
+from .. import CTRcalc, CTRfilm, CTRincoherent
 from ..CTRincoherent import (
     CoherentStateEnsembleModel,
     IncoherentF2Model,
@@ -971,14 +971,14 @@ class TestPoissonHeightDomainsContract(PoissonModelMixin):
         with self.assertRaisesRegex(ValueError, "not a PoissonSurface"):
             CTRincoherent.PoissonHeightDomains(crystal, surface="film")
 
-    def test_rejects_a_component_stacked_above_the_target(self):
-        """A component above the surface may move with the chosen height."""
+    def capped_crystal(self):
+        """Return a crystal with an overlayer stacked above the surface."""
         w_base = _poisson_oracle.minimum_base_width(self.PROFILE)
         crystal, surface = _poisson_oracle.poisson_crystal(
             self.PROFILE, w_base=w_base
         )
-        cap = CTRcalc.UnitCell([3.0, 3.0, 6.0], [90.0, 90.0, 90.0], name="cap")
-        cap.addAtom("O", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0, layer=0)
+        cap = CTRfilm.Film(_poisson_oracle.layered_cell(2, "cap"), name="cap")
+        cap.basis[0] = 2.0
         stacked = CTRcalc.SXRDCrystal(
             _poisson_oracle.layered_cell(2, "bulk"),
             crystal.uc_surface_list[0],
@@ -986,8 +986,70 @@ class TestPoissonHeightDomainsContract(PoissonModelMixin):
             cap,
             stacking=np.array([1, 2, 3]),
         )
-        with self.assertRaisesRegex(ValueError, "topmost component"):
-            CTRincoherent.PoissonHeightDomains(stacked, surface="surface")
+        stacked.apply_stacking()
+        return stacked, surface, cap
+
+    def test_accepts_a_component_stacked_above_the_target(self):
+        """An overlayer does not have to be refused.
+
+        Anything above the surface is placed once by ``apply_stacking`` at
+        the surface's mean height, and nothing re-stacks while the states are
+        streamed. Such a component therefore holds one position for every
+        domain and belongs in the common amplitude, which is exactly how the
+        coherent model already treats it.
+        """
+        stacked, _, _ = self.capped_crystal()
+        self.assertIsNot(stacked.uc_surface_list_ordered[-1].name, "surface")
+
+        model = CTRincoherent.PoissonHeightDomains(
+            stacked, surface="surface", incoherent_fraction=0.0
+        )
+        # The coherent endpoint still reproduces the crystal exactly.
+        np.testing.assert_array_equal(
+            model.F2(self.H, self.K, self.L),
+            stacked.F2(self.H, self.K, self.L),
+        )
+
+        mixed = CTRincoherent.PoissonHeightDomains(
+            stacked, surface="surface", incoherent_fraction=1.0
+        )
+        self.assertGreater(
+            np.max(
+                np.abs(
+                    mixed.F2(self.H, self.K, self.L)
+                    - model.F2(self.H, self.K, self.L)
+                )
+            ),
+            0.0,
+        )
+
+    def test_an_overlayer_is_common_to_every_state(self):
+        """The overlayer contributes identically to each height state."""
+        stacked, _, cap = self.capped_crystal()
+        context = CTRincoherent.KinematicIncoherentContext(
+            stacked, self.H, self.K, self.L
+        )
+        cap_amplitude = context.component("cap").amplitude
+
+        # It sits inside the common amplitude, not inside any state.
+        common = context.common_amplitude("surface")
+        np.testing.assert_allclose(
+            common,
+            context.coherent.bulk
+            + context.component("film").amplitude
+            + cap_amplitude,
+            rtol=1e-12,
+        )
+
+        # And its own placement does not move while the states stream.
+        model = CTRincoherent.PoissonHeightDomains(
+            stacked, surface="surface", incoherent_fraction=1.0
+        )
+        positions = {
+            round(float(cap.below_H), 9)
+            for _ in model._iter_states(context)
+        }
+        self.assertEqual(len(positions), 1)
 
     def test_rejects_an_invalid_state_count(self):
         """``exact_layer_count`` is a positive integer policy setting."""

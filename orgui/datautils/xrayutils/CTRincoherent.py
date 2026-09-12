@@ -907,8 +907,8 @@ class PoissonHeightDomains(CoherentStateEnsembleModel):
     :param str name:
         Wrapper name, the default prefix for its local parameter.
     :raises ValueError:
-        If the target is missing, duplicated, not a ``PoissonSurface``, not
-        the topmost component, or the fraction is out of range.
+        If the target is missing, duplicated, not a ``PoissonSurface``, or
+        the fraction is out of range.
     """
 
     model_type = "poisson_height_domains"
@@ -992,29 +992,22 @@ class PoissonHeightDomains(CoherentStateEnsembleModel):
         return matches[0]
 
     def _validate_target(self):
-        """Check the target type and the supported stacking topology."""
+        """Check that the named component is a Poisson surface.
+
+        The target does not have to be the topmost component. Anything
+        stacked above it is placed by ``apply_stacking`` at the surface's
+        ``stacking_height_absolute``, which is the *mean* surface height: a
+        function of the fit parameters, not of the height state being
+        evaluated. Nothing re-stacks while the states are streamed, so an
+        overlayer holds one position for every domain and belongs in the
+        common amplitude, exactly as the coherent model already treats it.
+        See :meth:`_iter_states` for what that approximation costs.
+        """
         target = self.target_surface()
         if not isinstance(target, PoissonSurface):
             raise ValueError(
                 f"Component {self.surface!r} is a "
                 f"{type(target).__name__}, not a PoissonSurface"
-            )
-
-        crystal = self._coherent_model
-        ordered = list(crystal.uc_surface_list_ordered)
-        if not ordered or ordered[-1] is not target:
-            raise ValueError(
-                f"{self.surface!r} must be the topmost component in stacking "
-                "order. A component above it could have a position which "
-                "depends on the selected height, so it cannot be treated as "
-                "part of the common amplitude"
-            )
-        levels = np.asarray(crystal.uc_stacking_ordered)
-        if levels.size and int(np.sum(levels == levels[-1])) != 1:
-            raise ValueError(
-                f"{self.surface!r} shares its stacking level with another "
-                "component, whose position could depend on the selected "
-                "height"
             )
 
     def _validate_model(self, forward_model):
@@ -1034,7 +1027,17 @@ class PoissonHeightDomains(CoherentStateEnsembleModel):
         return self.target_surface()
 
     def _iter_states(self, context):
-        """Stream complete crystal amplitudes, one flat height at a time."""
+        """Stream complete crystal amplitudes, one flat height at a time.
+
+        Every component other than the target is common to all states,
+        including any stacked above the surface. Such an overlayer therefore
+        sits at the mean surface height in every domain rather than following
+        each domain's own height. That is the same approximation the coherent
+        model makes, so the ``kappa = 0`` endpoint still reproduces
+        ``SXRDCrystal.F2`` exactly; it is not the large-domain limit an
+        overlayer would strictly have, which would require re-stacking and
+        re-evaluating the suffix for each height.
+        """
 
         def state_evaluator(component, h, k, l):  # noqa: E741
             return component.flat_domain_corrections(

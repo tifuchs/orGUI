@@ -798,9 +798,15 @@ The first implementation is kinematical only.  Combining an incoherent
 ``F2`` model with DWBA raises during ``prepareFit``: changing the flat
 surface height changes the optical reference profile and its internal fields,
 so a correct DWBA ensemble would have to prepare and evaluate each height
-separately and mix ``abs(r) ** 2``.  The target surface must also be the
-topmost component, since a component above it could have a position which
-depends on the selected height.
+separately and mix ``abs(r) ** 2``.
+
+The target surface does not have to be the topmost component: a water layer
+or a cap may be stacked above it.  Anything above the surface is placed once
+at the surface's *mean* height and is common to every domain, which is how
+the coherent model already treats it, so the :math:`\kappa = 0` endpoint is
+unchanged.  Note the approximation this carries: in a strict large-domain
+limit an overlayer would follow each domain's own height rather than the
+mean.
 
 Height states are indexed by the structural layer :math:`n` of the top filled
 layer, and the mass of that state is ``probability(n + 1)``: layer :math:`n`

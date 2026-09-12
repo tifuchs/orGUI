@@ -25,8 +25,10 @@ Scientific and analysis additions:
   `SXRDCrystal` gains `F2` and `evaluate_kinematic`, resolution now acts on
   `F2` before the conversion back to a stored amplitude, and `CTROptimizer`
   gains `n_parameters` for the full prepared vector. The first implementation
-  is kinematical: combining it with DWBA, or targeting a surface which is not
-  the topmost component, fails explicitly during `prepareFit`.
+  is kinematical: combining it with DWBA fails explicitly during
+  `prepareFit`. A component such as a water layer may be stacked above the
+  target surface, where it is common to every domain at the mean surface
+  height, as in the coherent model.
 
 - **Added live DWBA predictions to CTR fitting.** ``CTROptimizer.set_dwba``
   now evaluates the optimizer-owned crystal through the semi-infinite DWBA

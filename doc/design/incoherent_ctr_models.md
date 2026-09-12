@@ -1003,14 +1003,28 @@ Object identity or only `_basis_created` is not an adequate cache key.
 
 ### Stacking boundary
 
-The first implementation targets one `PoissonSurface` which is the highest
-material component in stacking order. This is the case in which all material
-below the surface is common and only the surface correction varies.
+The target `PoissonSurface` does not have to be the highest material
+component. This record originally required it to be, reasoning that a
+component stacked above it "may" depend on the selected height and so could
+not join `A_common`. Checking the implementation showed that dependence does
+not exist: `apply_stacking` places an overlayer at the surface's
+`stacking_height_absolute`, which is `mean_height_absolute`, a function of
+the fit parameters `W` and `offset` and not of any height state. Nothing
+re-stacks while the states are streamed, so an overlayer holds one position
+for every domain. Measured directly, a Film stacked on a rough surface keeps
+one `below_H` and one `F_uc` across all streamed states.
 
-If a component is stacked above the target surface, its absolute position or
-structure may depend on the selected height. Treating it as part of
-`A_common` would be wrong. Initially reject that topology with an actionable
-error. A later extension can split the evaluation into:
+An overlayer therefore belongs in `A_common`, and putting it there reproduces
+exactly what the coherent model already does with it. The `kappa = 0`
+endpoint stays bitwise equal to `SXRDCrystal.F2`.
+
+What that costs is a physical approximation worth stating: the overlayer sits
+at the *mean* surface height in every domain rather than following each
+domain's own height. In a strict large-domain limit, water or a cap would
+ride each terrace. Reproducing that is the deferred extension, and it is a
+change of physics rather than a lifted restriction, because it would make the
+incoherent model more correct than the coherent baseline and so break the
+`kappa = 0` identity. It would split the evaluation into:
 
 - a cached common prefix below the target surface;
 - the target flat-height correction;
@@ -1376,11 +1390,10 @@ Work:
    Add the positive-integer non-fit setting `exact_layer_count`, default 10.
 2. Accept the coherent crystal as the first positional argument and a stable
    target surface name. Validate exactly one matching `PoissonSurface`, a
-   finite fraction in `[0, 1]`, and the supported stacking topology. For the
-   first implementation, the target must be the final component in resolved
-   stacking order, must already be bound immediately above its Film, and may
-   have no same-level or later component whose position could depend on the
-   selected height.
+   finite fraction in `[0, 1]`, and that the target is bound immediately
+   above its Film. The target need not be the final component in resolved
+   stacking order: see "Stacking boundary" for why an overlayer is common to
+   every domain rather than state-dependent.
 3. Use the context to evaluate the common crystal amplitude once and to turn
    raw flat-height corrections into complete state amplitudes with all area,
    weight, and outer-domain factors applied.
@@ -1614,7 +1627,7 @@ The first implementation is complete only when:
 - the optimizer consumes the wrapper through its existing model/parameter
   contract;
 - resolution acts on `F2` before conversion to `|F|`;
-- unsupported DWBA and stacking cases fail explicitly;
+- unsupported DWBA and non-Poisson targets fail explicitly;
 - bulk and common Film amplitudes are evaluated once per HKL batch, verified by
   call-count instrumentation as well as timing; and
 - no long-lived cache with incomplete invalidation is introduced.
