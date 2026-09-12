@@ -423,8 +423,30 @@ class IncoherentModel(LinearFitFunctions, ABC):
 
     # -- composite serialization ----------------------------------------
 
+    def _sync_local_parameter_values(self):
+        """Fill in local parameter values which were never set.
+
+        ``addFitParameter`` records limits and a prior but leaves ``value``
+        at ``None`` until the first ``setParameters`` call. Serializing that
+        state would store a parameter with no value, and restoring it raises
+        while rebuilding the basis. Reading the current values out of the
+        basis keeps the local subtree the single source for them.
+        """
+        records = LinearFitFunctions.parameter_list(self)
+        if not records or all(
+            record.value is not None for record in records
+        ):
+            return
+        values = LinearFitFunctions.getStartParamAndLimits(
+            self, force_recalculate=True
+        )[0]
+        for record, value in zip(records, values):
+            if record.value is None:
+                record.value = float(value)
+
     def _local_parameters_to_dict(self):
         """Return only the wrapper-local parameter subtree."""
+        self._sync_local_parameter_values()
         return LinearFitFunctions.parametersToDict(self)
 
     def _local_parameters_from_dict(self, data, override_values=True):
@@ -483,6 +505,15 @@ class IncoherentModel(LinearFitFunctions, ABC):
         values, whether they are fitted or fixed; settings never duplicate
         them. The wrapped crystal is not included: the factory receives it
         separately, so the coherent structure keeps its own canonical file.
+
+        This dictionary is deliberately not part of any session or ``.xtal``
+        format. A session layer may store it later and read an absent
+        dictionary as ordinary coherent behavior.
+
+        What survives a round-trip is what the existing ``Parameter``
+        serialization supports: names, limits, current values, errors, and
+        numeric priors. A prior held as a distribution object is dropped to
+        ``None`` by ``Parameter.asdict``; this feature does not widen that.
 
         :rtype: dict
         """
@@ -831,10 +862,22 @@ def create_incoherent_model_from_config(crystal, config):
 
     record = _registered(config["type"])
     settings = config.get("settings") or {}
-    model = record.model_class(crystal, **dict(settings))
+    if not isinstance(settings, dict):
+        raise ValueError("Incoherent model settings must be a dict")
+    try:
+        model = record.model_class(crystal, **dict(settings))
+    except TypeError as error:
+        raise ValueError(
+            f"Settings {sorted(settings)} do not construct "
+            f"{config['type']!r}: {error}"
+        ) from error
+
     parameters = config.get("parameters")
-    if parameters:
-        model._local_parameters_from_dict(parameters)
+    if parameters is None:
+        return model
+    if not isinstance(parameters, dict):
+        raise ValueError("Incoherent model parameters must be a dict")
+    model._local_parameters_from_dict(parameters)
     return model
 
 

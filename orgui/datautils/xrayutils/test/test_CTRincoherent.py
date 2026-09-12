@@ -1021,5 +1021,116 @@ class TestPoissonHeightDomainsContract(PoissonModelMixin):
         )
 
 
+class TestConfigurationRoundTrip(PoissonModelMixin):
+    """What a dictionary round-trip preserves, and what it rejects."""
+
+    PROFILE = PoissonProfile(1.5, alpha=0.5, tail_probability=1e-14)
+
+    def fitted_model(self):
+        """Return a model whose fraction is fitted, bounded, and errored."""
+        model, crystal, _, _ = self.model(self.PROFILE, kappa=0.35)
+        model.addFitParameter(
+            "incoherent_fraction",
+            limits=(0.1, 0.9),
+            name="surface incoherent_fraction",
+            prior=(0.2, 0.8),
+        )
+        model.setFitErrors(
+            np.concatenate(
+                ([0.05], np.zeros(model.n_coherent_parameters))
+            )
+        )
+        return model, crystal
+
+    def test_round_trip_preserves_the_local_block(self):
+        """Type, settings, value, limits, errors, and priors all survive."""
+        model, crystal = self.fitted_model()
+        config = model.to_config()
+
+        restored = create_incoherent_model_from_config(crystal, config)
+        self.assertEqual(restored.model_type, model.model_type)
+        self.assertEqual(restored.surface, model.surface)
+        self.assertEqual(
+            restored.exact_layer_count, model.exact_layer_count
+        )
+        self.assertEqual(restored.fitparnames, model.fitparnames)
+        np.testing.assert_allclose(
+            restored.getInitialParameters(), model.getInitialParameters()
+        )
+
+        _, lower, upper = restored.getStartParamAndLimits()
+        self.assertAlmostEqual(lower[0], 0.1)
+        self.assertAlmostEqual(upper[0], 0.9)
+        np.testing.assert_allclose(restored.priors[0], (0.2, 0.8))
+        np.testing.assert_allclose(restored.getFitErrors()[0], 0.05)
+        np.testing.assert_allclose(
+            restored.F2(self.H, self.K, self.L),
+            model.F2(self.H, self.K, self.L),
+            rtol=1e-14,
+        )
+
+    def test_the_fraction_is_stored_once(self):
+        """Settings must not duplicate the local basis value."""
+        model, _ = self.fitted_model()
+        config = model.to_config()
+        self.assertNotIn("incoherent_fraction", config["settings"])
+        np.testing.assert_allclose(
+            config["parameters"]["basis_0"], [0.35]
+        )
+
+    def test_a_fixed_fraction_round_trips_without_a_fit_parameter(self):
+        """A setting stays fixed and still survives the round-trip."""
+        model, crystal, _, _ = self.model(self.PROFILE, kappa=0.6)
+        self.assertEqual(model.n_local_parameters, 0)
+        restored = create_incoherent_model_from_config(
+            crystal, model.to_config()
+        )
+        self.assertAlmostEqual(restored.incoherent_fraction, 0.6)
+        self.assertEqual(restored.n_local_parameters, 0)
+
+    def test_missing_settings_fail_with_the_offending_keys(self):
+        """A configuration which cannot construct its model says so."""
+        model, crystal, _, _ = self.model(self.PROFILE)
+        config = model.to_config()
+        del config["settings"]["surface"]
+        with self.assertRaisesRegex(ValueError, "do not construct"):
+            create_incoherent_model_from_config(crystal, config)
+
+        config = model.to_config()
+        config["settings"]["nonsense"] = 1
+        with self.assertRaisesRegex(ValueError, "do not construct"):
+            create_incoherent_model_from_config(crystal, config)
+
+    def test_malformed_configurations_are_rejected(self):
+        """Deserialization never guesses at a broken dictionary."""
+        model, crystal, _, _ = self.model(self.PROFILE)
+        for bad, pattern in (
+            ("not a dict", "must be a dict"),
+            ({}, "needs a type"),
+            ({"type": "poisson_height_domains", "settings": 5}, "must be a dict"),
+        ):
+            with self.subTest(config=bad):
+                with self.assertRaisesRegex(ValueError, pattern):
+                    create_incoherent_model_from_config(crystal, bad)
+
+        config = model.to_config()
+        config["parameters"] = ["not", "a", "dict"]
+        with self.assertRaisesRegex(ValueError, "must be a dict"):
+            create_incoherent_model_from_config(crystal, config)
+
+    def test_the_wrapped_crystal_is_supplied_not_stored(self):
+        """The coherent structure keeps its own canonical file."""
+        model, _, _, _ = self.model(self.PROFILE, kappa=0.4)
+        config = model.to_config()
+        self.assertEqual(set(config), {"type", "settings", "parameters"})
+        self.assertNotIn("coherent", config["parameters"])
+
+        _, other_crystal, _, _ = self.model(self.PROFILE)
+        restored = create_incoherent_model_from_config(
+            other_crystal, config
+        )
+        self.assertIs(restored.coherent_model, other_crystal)
+
+
 if __name__ == "__main__":
     unittest.main()
