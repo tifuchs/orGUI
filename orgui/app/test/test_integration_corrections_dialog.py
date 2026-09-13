@@ -263,14 +263,16 @@ def test_offset_spin_box_is_micrometers(dialog, tmp_path):
 
 
 def test_mode_switch_enables_the_matching_widgets(dialog):
-    """Only the widgets of the selected beam model are editable."""
-    assert dialog.shapeGroup.isEnabled()
-    assert not dialog.profileGroup.isEnabled()
+    """Only the widgets of the selected beam model are shown.
+
+    The inactive group is a hidden page of ``beamModelStack`` rather than a
+    merely disabled widget, so it stops reserving layout space.
+    """
+    assert dialog.beamModelStack.currentWidget() is dialog.shapeGroup
 
     dialog.measuredButton.setChecked(True)
 
-    assert not dialog.shapeGroup.isEnabled()
-    assert dialog.profileGroup.isEnabled()
+    assert dialog.beamModelStack.currentWidget() is dialog.profileGroup
 
 
 def test_preview_summary_reports_width_and_centroid(dialog, tmp_path):
@@ -350,6 +352,8 @@ def test_settings_round_trip(dialog, tmp_path):
     path = tmp_path / "gauss.dat"
     _write_gaussian_profile(path, 100e-6)
     dialog.L.setValue(2.25)
+    dialog.W.setValue(7.5)
+    dialog.beamFlux.setValue(4.2)
     dialog.measuredButton.setChecked(True)
     dialog.profileFileEdit.setText(str(path))
     dialog.loadProfile()
@@ -402,3 +406,100 @@ def test_an_unreadable_profile_does_not_switch_the_beam(dialog, tmp_path):
 
     assert dialog.analyticalButton.isChecked()
     assert isinstance(dialog.beamProfile(), DistributionBeamProfile)
+
+
+def test_sample_sizes_are_millimeters(dialog):
+    """Both sample sizes are shown in millimeter and handed over in meter."""
+    dialog.L.setValue(2.5)
+    dialog.W.setValue(7.5)
+
+    assert dialog.L.suffix().strip() == "mm"
+    assert dialog.W.suffix().strip() == "mm"
+    assert dialog.sampleLength() == pytest.approx(2.5e-3)
+    assert dialog.sampleWidth() == pytest.approx(7.5e-3)
+
+
+def test_sample_size_setters_are_the_getters_inverse(dialog):
+    """``setSampleLength``/``setSampleWidth`` round-trip through meter."""
+    dialog.setSampleLength(4e-3)
+    dialog.setSampleWidth(9e-3)
+
+    assert dialog.sampleLength() == pytest.approx(4e-3)
+    assert dialog.sampleWidth() == pytest.approx(9e-3)
+
+
+def test_beam_flux_is_photons_per_second_per_square_millimeter(dialog):
+    """The beam-flux field is shown per mm^2 and handed over per m^2.
+
+    Named 'beam flux' rather than Phi_0 or phi in the UI, to avoid confusion
+    with the diffractometer's sample-circle phi.
+    """
+    assert dialog.beamFlux.value() == 0.0
+    assert dialog.beamFluxDensity() == 0.0
+
+    dialog.beamFlux.setValue(2.5)
+
+    assert dialog.beamFluxDensity() == pytest.approx(2.5e6)
+
+    dialog.setBeamFluxDensity(3e12)
+
+    assert dialog.beamFlux.value() == pytest.approx(3e6)
+    assert dialog.beamFluxDensity() == pytest.approx(3e12)
+
+
+def test_active_area_carries_the_width_the_fraction_does_not(dialog):
+    """``activeArea`` is the applied correction with its area put back.
+
+    ``illuminated_area_fraction`` is the active-area correction for open
+    post-sample slits, but it is normalized to a uniform beam and is
+    therefore dimensionless. The absolute scale of issue #15 needs square
+    meters, which is the same quantity times the illuminated width -- taken
+    to be the sample width, on the assumption that the beam is at least as
+    wide as the sample.
+    """
+    dialog.L.setValue(5.0)
+    dialog.W.setValue(3.0)
+    profile = dialog.beamProfile()
+
+    area = dialog.activeArea(ALPHAS)
+    fraction = profile.illuminated_area_fraction(ALPHAS, 5e-3)
+
+    np.testing.assert_allclose(area, 3e-3 * 5e-3 * fraction, rtol=1e-12)
+    # The width scales the area and nothing else: doubling it doubles the
+    # area at every angle, and leaves the dimensionless factor alone.
+    dialog.W.setValue(6.0)
+    np.testing.assert_allclose(dialog.activeArea(ALPHAS), 2.0 * area, rtol=1e-12)
+    np.testing.assert_allclose(
+        profile.illuminated_area_fraction(ALPHAS, 5e-3), fraction, rtol=1e-12
+    )
+
+
+def test_the_area_fraction_is_the_open_slit_area_correction(dialog):
+    """The applied factor carries a ``1/sin(alpha)`` active-area dependence.
+
+    This is what makes skipping ``geometrycorrections.area_correction``'s
+    ``1/sin(delta)`` right rather than a missing correction: the open-slit
+    active area is set by the footprint, and the beam-profile factor already
+    is it. Once the footprint exceeds the beam the factor goes as
+    ``1/sin(alpha)``; below that it rolls over towards one as the beam
+    overfills the sample, which a bare ``1/sin(alpha)`` would not do.
+    """
+    dialog.L.setValue(10.0)
+    (fwhm,) = _select_shape(dialog, "Gaussian")
+    fwhm.setValue(100.0)
+    profile = dialog.beamProfile()
+
+    # sqrt(2 pi) sigma / L, the limit the product approaches once the
+    # footprint exceeds the beam. At 2 degrees the footprint is 3.5 times
+    # the FWHM and the erf is saturated to a few parts in 1e5; by 5 degrees
+    # it holds to seven digits.
+    sigma = 100e-6 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    limit = np.sqrt(2.0 * np.pi) * sigma / 10e-3
+
+    wide = np.deg2rad(np.array([2.0, 5.0, 10.0]))
+    product = profile.illuminated_area_fraction(wide, 10e-3) * np.sin(wide)
+    np.testing.assert_allclose(product, limit, rtol=1e-4)
+    np.testing.assert_allclose(product[1:], limit, rtol=1e-7)
+
+    grazing = profile.illuminated_area_fraction(np.deg2rad(0.02), 10e-3)
+    assert 0.99 < float(grazing) <= 1.0

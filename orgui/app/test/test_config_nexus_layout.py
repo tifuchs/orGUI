@@ -62,6 +62,9 @@ def _populated_corrections():
         background_asset="assets/bg",
         background_variance_asset="assets/bgvar",
         uncertainty_provenance={"background": "measured"},
+        sample_length_m=5e-3,
+        sample_width_m=3e-3,
+        beam_flux_density=1.2e16,
     )
 
 

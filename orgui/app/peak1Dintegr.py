@@ -66,6 +66,7 @@ from .. import logger_utils
 from ..datautils.xrayutils.corrections import beamprofile
 from ..datautils.xrayutils.corrections import (
     acceptance as acceptance_corrections,
+    activearea as activearea_corrections,
     detector as detector_corrections,
     measurement as measurement_corrections,
     normalization as normalization_corrections,
@@ -1643,7 +1644,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             C_rod = 1.0
 
         if self.footprintButton.isChecked():
-            L = self.integrationCorrection.L.value() * 1e-3  # sample size (mm -> m)
+            L = self.integrationCorrection.sampleLength()  # sample size, m
             # Gaussian or measured beam profile, depending on the dialog.
             # C_flux_on_sample is saved as the diagnostic numerator of the
             # single applied active-area factor.
@@ -2563,6 +2564,9 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         img = qutils.AspectRatioPixmapLabel(self)
         pixmp = qt.QPixmap(resources.getPath("incident_corrections.png"))
         img.setPixmap(pixmp)
+        # A schematic, not the main content: capped so a wide-aspect image
+        # cannot by itself push the dialog past a normal screen's height.
+        img.setMaximumHeight(110)
 
         verticalLayout.addWidget(img)
 
@@ -2575,15 +2579,53 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             shape.name: [p.default for p in shape.parameters] for shape in BEAM_SHAPES
         }
 
-        layout = qt.QGridLayout()
-        layout.addWidget(qt.QLabel("Sample size L:"), 0, 0)
+        sizesLayout = qt.QGridLayout()
+        sizesLayout.addWidget(qt.QLabel("Sample size L:"), 0, 0)
         self.L = qt.QDoubleSpinBox()
         self.L.setRange(0.00001, 1000000)
         self.L.setDecimals(4)
         self.L.setSuffix(" mm")
         self.L.setValue(5)
-        layout.addWidget(self.L, 0, 1)
+        self.L.setToolTip(
+            "Sample size along the beam. With the beam profile, this sets the "
+            "illuminated fraction of the projected footprint, which is the "
+            "active-area correction for open post-sample slits."
+        )
+        sizesLayout.addWidget(self.L, 0, 1)
 
+        sizesLayout.addWidget(qt.QLabel("Sample size W:"), 1, 0)
+        self.W = qt.QDoubleSpinBox()
+        self.W.setRange(0.00001, 1000000)
+        self.W.setDecimals(4)
+        self.W.setSuffix(" mm")
+        self.W.setValue(5)
+        self.W.setToolTip(
+            "Sample size perpendicular to the beam, in the surface plane.\n"
+            "The horizontal extent of the active area is taken to be this "
+            "value, i.e. the beam is assumed at least as wide as the sample, "
+            "so the sample bounds the illuminated width.\n"
+            "Only the absolute active area in square meter uses it; a "
+            "structure factor on a relative scale is unaffected."
+        )
+        sizesLayout.addWidget(self.W, 1, 1)
+
+        sizesLayout.addWidget(qt.QLabel("Beam flux:"), 2, 0)
+        self.beamFlux = qt.QDoubleSpinBox()
+        self.beamFlux.setRange(0.0, 1e30)
+        self.beamFlux.setDecimals(3)
+        self.beamFlux.setSuffix(" ph/(s·mm²)")
+        self.beamFlux.setValue(0.0)
+        self.beamFlux.setToolTip(
+            "Incident photon flux density (Phi_0) at the sample position.\n"
+            "Called 'beam flux' here rather than Phi_0 or phi, to avoid "
+            "confusion with the sample-circle phi of the diffractometer.\n"
+            "Only needed for an absolutely scaled structure factor "
+            "(issue #15); leave at 0 if it has not been measured -- a "
+            "structure factor on a relative scale does not use it."
+        )
+        sizesLayout.addWidget(self.beamFlux, 2, 1)
+
+        modeLayout = qt.QHBoxLayout()
         self.analyticalButton = qt.QRadioButton("analytical beam shape")
         self.analyticalButton.setChecked(True)
         self.analyticalButton.setToolTip(
@@ -2594,14 +2636,33 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             "Use a beam profile measured at the beamline. Required for a "
             "beam that is asymmetric or has more than one maximum."
         )
-        layout.addWidget(self.analyticalButton, 1, 0)
-        layout.addWidget(self.measuredButton, 1, 1)
-        verticalLayout.addLayout(layout)
+        modeLayout.addWidget(self.analyticalButton)
+        modeLayout.addWidget(self.measuredButton)
 
-        verticalLayout.addWidget(self._createShapeGroup())
-        verticalLayout.addWidget(self._createProfileGroup())
-        verticalLayout.addWidget(self._createCenteringGroup())
-        verticalLayout.addWidget(self._createPreviewGroup())
+        # Left column: the beam and sample. Right column: where the sample
+        # sits in the beam, and the resulting preview. Side by side rather
+        # than one long stack, so the dialog fits a normal screen instead of
+        # running off the bottom of it.
+        leftColumn = qt.QVBoxLayout()
+        leftColumn.addLayout(sizesLayout)
+        leftColumn.addLayout(modeLayout)
+        # Only the active beam model's settings take up space; the other is
+        # hidden rather than merely disabled, which used to reserve room for
+        # both at once.
+        self.beamModelStack = qt.QStackedWidget()
+        self.beamModelStack.addWidget(self._createShapeGroup())
+        self.beamModelStack.addWidget(self._createProfileGroup())
+        leftColumn.addWidget(self.beamModelStack)
+        leftColumn.addStretch(1)
+
+        rightColumn = qt.QVBoxLayout()
+        rightColumn.addWidget(self._createCenteringGroup())
+        rightColumn.addWidget(self._createPreviewGroup())
+
+        columns = qt.QHBoxLayout()
+        columns.addLayout(leftColumn, 1)
+        columns.addLayout(rightColumn, 1)
+        verticalLayout.addLayout(columns)
 
         buttons = qt.QDialogButtonBox(
             qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
@@ -2731,10 +2792,15 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         return group
 
     def _onModeChanged(self):
-        """Enable the widgets belonging to the selected beam model."""
+        """Show only the settings of the selected beam model.
+
+        The other group is hidden by switching the stacked page rather than
+        merely disabled, so it stops reserving layout space it is not using.
+        """
         analytical = self.analyticalButton.isChecked()
-        self.shapeGroup.setEnabled(analytical)
-        self.profileGroup.setEnabled(not analytical)
+        self.beamModelStack.setCurrentWidget(
+            self.shapeGroup if analytical else self.profileGroup
+        )
         self._updatePreview()
 
     def _onShapeChanged(self):
@@ -2786,7 +2852,9 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             self.profilePlot = silx.gui.plot.Plot1D(self)
             self.profilePlot.setGraphXLabel("position rel. to sample center / microns")
             self.profilePlot.setGraphYLabel("normalized profile / mm$^{-1}$")
-            self.profilePlot.setMinimumHeight(220)
+            # Small enough that the two-column dialog still fits a normal
+            # screen; still tall enough to read the profile shape.
+            self.profilePlot.setMinimumHeight(160)
             self._previewLayout.insertWidget(0, self.profilePlot)
             self._updatePreview()
         qt.QDialog.showEvent(self, event)
@@ -2946,6 +3014,76 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             return self.analyticalProfile()
         return self.measuredProfile()
 
+    def sampleLength(self):
+        """Sample size along the beam, converted from millimeter to **meter**.
+
+        :rtype: float
+        """
+        return self.L.value() * 1e-3
+
+    def setSampleLength(self, value):
+        """Set the sample size along the beam, from **meter**.
+
+        :param float value: Sample size in meter.
+        """
+        self.L.setValue(value * 1e3)
+
+    def sampleWidth(self):
+        """Sample size perpendicular to the beam, in **meter**.
+
+        The dialog shows millimeter. This is the horizontal extent the active
+        area is taken to have: the beam is assumed at least as wide as the
+        sample, so the sample bounds the illuminated width rather than the
+        beam. Only :meth:`activeArea` uses it.
+
+        :rtype: float
+        """
+        return self.W.value() * 1e-3
+
+    def setSampleWidth(self, value):
+        """Set the sample size perpendicular to the beam, from **meter**.
+
+        :param float value: Sample size in meter.
+        """
+        self.W.setValue(value * 1e3)
+
+    def activeArea(self, alpha):
+        """Illuminated sample area at incidence angle ``alpha``, in m^2.
+
+        The dimensionless active-area correction applied to an integrated
+        intensity is
+        :meth:`~.beamprofile.BeamProfile.illuminated_area_fraction`; this is
+        the same quantity carrying its area, which is what an *absolute*
+        structure factor needs (issue #15). It assumes open post-sample
+        slits, and the horizontal extent of :meth:`sampleWidth`.
+
+        :param alpha: Incidence angle(s) in radian, any array shape.
+        :returns: The active area in square meter, broadcast over ``alpha``.
+        :rtype: numpy.ndarray
+        """
+        return activearea_corrections.beam_limited_area(
+            alpha, self.sampleWidth(), self.sampleLength(), self.beamProfile()
+        )
+
+    def beamFluxDensity(self):
+        """Incident flux density, converted to **photons/(s m^2)**.
+
+        The dialog shows photons/(s mm^2). ``0`` means unmeasured; pass it as
+        ``flux_density`` to :func:`~.measurement.scale_factor` only once it
+        is nonzero, since ``0`` there would zero the absolute scale rather
+        than fall back to the relative one.
+
+        :rtype: float
+        """
+        return self.beamFlux.value() * 1e6
+
+    def setBeamFluxDensity(self, value):
+        """Set the incident flux density from **photons/(s m^2)**.
+
+        :param float value: Flux density in photons/(s m^2).
+        """
+        self.beamFlux.setValue(value * 1e-6)
+
     def settings(self):
         """Return the dialog state as a plain dict.
 
@@ -2954,6 +3092,8 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         shape = self.currentShape()
         return {
             "L": self.L.value(),
+            "W": self.W.value(),
+            "beam_flux": self.beamFlux.value(),
             "analytical": self.analyticalButton.isChecked(),
             "shape": shape.name,
             "shape_values": list(self._shape_values[shape.name]),
@@ -2981,6 +3121,10 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         with blockSignals(widgets):
             if "L" in settings:
                 self.L.setValue(settings["L"])
+            if "W" in settings:
+                self.W.setValue(settings["W"])
+            if "beam_flux" in settings:
+                self.beamFlux.setValue(settings["beam_flux"])
             if "analytical" in settings:
                 self.analyticalButton.setChecked(bool(settings["analytical"]))
                 self.measuredButton.setChecked(not settings["analytical"])

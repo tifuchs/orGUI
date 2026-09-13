@@ -95,6 +95,35 @@ Scientific and analysis additions:
   ``F2_hkl``, because the structure factor divides it back out and a saved rod
   cannot otherwise be returned to the intensity scale.
 
+- **The corrections dialog now asks for the sample size across the beam.** A
+  second size ``W`` sits beside the existing sample size ``L``, in millimeter.
+  It is the sample extent perpendicular to the beam in the surface plane, and
+  it is taken to be the width of the illuminated area, on the assumption that
+  the beam is at least as wide as the sample -- so the sample bounds the lit
+  area rather than the beam. Nothing in a *relative* structure factor uses it:
+  the active-area correction that is applied to an integrated intensity is
+  ``illuminated_area_fraction``, which is dimensionless and unchanged, so no
+  saved number moves. ``W`` supplies the missing input for the *absolute*
+  active area in square meter, ``IntegrationCorrectionsDialog.activeArea``,
+  which an absolutely scaled structure factor needs. The measurement is
+  assumed throughout to be made with open post-sample slits and an area
+  detector, which is what makes the footprint the active area; the
+  slit-limited case, where ``1/(sin(delta) cos(alpha - beta_in))`` would apply
+  instead, is not supported. Both size controls now say so in their tooltips.
+
+- **A beam flux input, and every footprint-dialog input, is now stored with
+  the configuration.** The corrections dialog gains a beam flux field, the
+  incident photon flux density needed together with the active area for an
+  absolutely scaled structure factor (issue #15); called "beam flux" rather
+  than ``Phi_0`` or ``phi`` to avoid confusion with the diffractometer's own
+  sample-circle ``phi``. It, and the existing ``L`` and ``W`` sample sizes,
+  are now recorded in a typed ``integration_corrections/footprint`` NeXus
+  group beside the correction switches -- previously none of the three
+  reached the saved configuration at all, so a stored active-area calculation
+  could not be reproduced from its own output. A configuration written before
+  they existed, or a dialog that was never opened, leaves the running dialog
+  exactly as it is rather than resetting it to defaults.
+
 - **All correction factors collected into one package.** Every factor between
   detector counts and a structure factor now lives in
   ``orgui.datautils.xrayutils.corrections``, split by what it depends on:
@@ -859,6 +888,15 @@ GUI fixes:
   opened. Both dialogs apply every edit immediately, so restoring the widgets
   alone left the edited values active, and the discarded configuration stayed
   in use until it was overwritten or a config file was loaded.
+- The footprint correction dialog now fits a normal screen. Both the
+  analytical-shape and the measured-profile groups used to be given layout
+  space at once, only one of them disabled, and everything was stacked in a
+  single column below a full-width schematic image and a 220-pixel preview
+  plot -- together taller than most displays. It is now two columns, the
+  beam and sample inputs on the left and the sample position and preview on
+  the right; the inactive beam-model group is hidden rather than merely
+  disabled, so it stops reserving space it is not using; the schematic image
+  is capped; and the preview plot is a little shorter.
 
 ESRF ID31 beamline support and reciprocal-space display:
 

@@ -1,5 +1,6 @@
 import h5py
 import numpy as np
+from silx.gui import qt
 from silx.io.dictdump import dicttonx, nxtodict
 import pytest
 from types import SimpleNamespace
@@ -7,8 +8,22 @@ from types import SimpleNamespace
 from orgui.app.QReflectionSelector import HKLReflection
 from orgui.app.config_data import CorrectionState, ConfigData, ConfigHandler
 from orgui.app.database import config_data_from_json, config_data_to_json
+from orgui.app.peak1Dintegr import IntegrationCorrectionsDialog
 from orgui.datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
 from orgui.reconstruction_job import _snapshot_assets
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """The Qt application, kept referenced for the whole test session.
+
+    A ``QApplication`` that is not held on to is garbage-collected, and
+    creating a widget afterwards aborts the interpreter.
+    """
+    application = qt.QApplication.instance()
+    if application is None:
+        application = qt.QApplication([])
+    return application
 
 
 def _make_config():
@@ -178,6 +193,100 @@ def test_enabled_pixel_repair_implies_mask_correction():
     assert captured.corrections.use_mask is True
     assert captured.corrections.normalize_exposure is False
     assert captured.corrections.monitor_corrections == ("mondio",)
+
+
+def test_from_gui_captures_the_footprint_dialogs_inputs(qapp):
+    """L, W and the beam flux are captured only if the dialog was opened.
+
+    An unopened footprint dialog has nothing to record, which must be the
+    same "not recorded" state as a config written before these fields
+    existed -- not a silent zero.
+    """
+    config = _make_config()
+    unopened_gui = SimpleNamespace(
+        ubcalc=SimpleNamespace(
+            detectorCal=config.detector,
+            crystal=config.unit_cell,
+            ubCal=config.ub_calculator,
+            mu=config.mu,
+            chi=config.chi,
+            phi=config.phi,
+            n=config.refraction_index,
+        ),
+        scanSelector=SimpleNamespace(
+            get_integration_options=lambda: {
+                "mask": False,
+                "solid_angle": False,
+                "polarization": False,
+            },
+            correctionsDialog=SimpleNamespace(footprintOptions=None),
+        ),
+        excludedImagesDialog=SimpleNamespace(
+            getData=lambda: np.empty(0, dtype=np.int64)
+        ),
+    )
+    unopened = ConfigData.from_gui(unopened_gui)
+    assert unopened.corrections.sample_length_m is None
+    assert unopened.corrections.sample_width_m is None
+    assert unopened.corrections.beam_flux_density is None
+
+    footprint_dialog = IntegrationCorrectionsDialog()
+    try:
+        footprint_dialog.L.setValue(2.5)
+        footprint_dialog.W.setValue(7.5)
+        footprint_dialog.beamFlux.setValue(4.2)
+        gui = SimpleNamespace(**unopened_gui.__dict__)
+        gui.scanSelector = SimpleNamespace(
+            get_integration_options=unopened_gui.scanSelector.get_integration_options,
+            correctionsDialog=SimpleNamespace(footprintOptions=footprint_dialog),
+        )
+
+        captured = ConfigData.from_gui(gui)
+
+        assert captured.corrections.sample_length_m == pytest.approx(2.5e-3)
+        assert captured.corrections.sample_width_m == pytest.approx(7.5e-3)
+        assert captured.corrections.beam_flux_density == pytest.approx(4.2e6)
+    finally:
+        footprint_dialog.deleteLater()
+
+
+def test_apply_to_gui_restores_the_footprint_dialogs_inputs(qapp):
+    """Restoring a config sets L, W and the beam flux on the shared dialog."""
+    config = _make_config()
+    config.corrections = CorrectionState(
+        sample_length_m=4e-3,
+        sample_width_m=9e-3,
+        beam_flux_density=3e12,
+    )
+    footprint_dialog = IntegrationCorrectionsDialog()
+    try:
+        corrections_dialog = SimpleNamespace(
+            footprintOptions_shared=lambda: footprint_dialog
+        )
+        gui = SimpleNamespace(
+            ubcalc=SimpleNamespace(
+                detectorCal=config.detector,
+                crystal=config.unit_cell,
+                ubCal=config.ub_calculator,
+                mu=config.mu,
+                chi=config.chi,
+                phi=config.phi,
+                n=config.refraction_index,
+            ),
+            scanSelector=SimpleNamespace(
+                get_integration_options=lambda: {},
+                set_integration_options=lambda options: None,
+                correctionsDialog=corrections_dialog,
+            ),
+        )
+
+        config.apply_to_gui(gui)
+
+        assert footprint_dialog.sampleLength() == pytest.approx(4e-3)
+        assert footprint_dialog.sampleWidth() == pytest.approx(9e-3)
+        assert footprint_dialog.beamFluxDensity() == pytest.approx(3e12)
+    finally:
+        footprint_dialog.deleteLater()
 
 
 def test_apply_to_gui_sets_reconstruction_normalization_attributes():

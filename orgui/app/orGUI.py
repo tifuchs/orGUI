@@ -6458,7 +6458,7 @@ ub : gui for UB matrix and angle calculations
                 self.scanSelector.correctionsDialog.footprintOptions_shared()
             )  # noqa: E501
             beam_profile = footprint_dialog.beamProfile()
-            sample_size = footprint_dialog.L.value() * 1e-3  # mm -> m
+            sample_size = footprint_dialog.sampleLength()  # m
         normalization = None
         normalization_applied = []
         if options["normalization"]:

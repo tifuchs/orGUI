@@ -17,8 +17,8 @@
 > F1, F2, F3, F5 and F6 are now **applied**, which changed saved numbers in
 > both modes; the two paths agree to `1e-6` on simulated data, limited by the
 > trapezoidal sampling of the rocking profile, and to a median **1.033** on a
-> real rod (section 5.1). F4 and F7 remain open and are
-> described below as they stand. Findings are written in the present tense
+> real rod (section 5.1). F4 is closed; F7 remains open. Both are described
+> below as they stand. Findings are written in the present tense
 > of the analysis; section 5 says what each one's status is now, and
 > [`ctr_structure_factor_handover.md`](ctr_structure_factor_handover.md)
 > section 5 says how each was wired.
@@ -154,33 +154,60 @@ a per-frame time of a few tenths of a second - the two modes land within a
 factor of a few of each other, which is exactly the regime in which the
 discrepancy looks like a plausible scale factor rather than a bug.
 
-### F4 - the active area is a dimensionless fraction, and `C_area` is skipped
+### F4 - the active area is a dimensionless fraction
 
-`geometrycorrections.area_correction` (`1/sin(delta)`) exists but is
-deliberately not applied; the numerical `beamprofile` factors are used instead.
+**`C_area` is applied**, in the form the open-slit case calls for.
 `BeamProfile.illuminated_area_fraction` returns
 `C_flux_on_sample / (p_max * L sin(alpha))` - the beam profile integrated over
-the projected sample, normalized to a uniform beam. It is a *fraction*, not an
-area.
+the projected sample, normalized to a uniform beam - and that *is* the active
+area correction for an area detector with open post-sample slits, evaluated at
+the incidence angle. Once the footprint exceeds the beam it carries exactly a
+`1/sin(alpha)` dependence: for a 100 um FWHM beam on a 10 mm sample,
+`C_illum_area * sin(alpha)` approaches `sqrt(2 pi) sigma / L`, holding to four
+parts in `1e5` at `alpha = 2` degrees - where the footprint is 3.5 times the
+FWHM - and to seven digits by 5 degrees. Below that it rolls over towards 1 as
+the beam overfills the sample (0.97 at 0.2 degrees), which a bare
+`1/sin(alpha)` would get wrong.
+
+What is *not* applied is `geometrycorrections.area_correction`'s
+`1/sin(delta)`, the **slit-limited** form. That is deliberate and correct: it
+describes a different regime, not a missing factor.
+
+The finding is therefore about one narrow thing: the factor is a dimensionless
+*fraction* rather than an area in square meter, which is what issue #15 needs.
+That is closed by the sample width `W` in the corrections dialog -
+`activeArea(alpha)` returns `W * L * C_illum_area` in square meter via
+`activearea.beam_limited_area`. **`W` is the sample size perpendicular to the
+beam, and it is used as the illuminated width on the assumption that the beam
+is at least as wide as the sample**, so the sample bounds the lit area rather
+than the beam. A narrower beam would make this an overestimate; there is no
+horizontal beam-width input, by decision.
+
+**The slit-limited regime is out of scope** and is not planned in the
+mid-term. `activearea.slit_limited_area` stays available for a script that
+needs it, but nothing selects it, no dialog offers it, and the output does not
+record the choice, because there is only one choice.
 
 This is **not** a mode-equivalence problem: the active area enters both
 expressions identically and cancels from their ratio
-(`test_footprint_area_cancels_between_the_modes`). It is a problem for
-issue #15, and it hides an undocumented assumption:
+(`test_footprint_area_cancels_between_the_modes`), which is also why the
+real-data check of section 5.1 is blind to it. The two regimes, for the
+record:
 
 * With **open post-sample slits and an area detector** - orGUI's usual
   configuration - the illuminated footprint defines the active area, it has no
-  `delta` dependence, and skipping `C_area` is right.
+  `delta` dependence, and `illuminated_area_fraction` is the right factor.
   `test_the_stationary_path_recovers_the_rod_up_to_one_constant` confirms the
   stationary path then recovers the rod shape to machine precision.
 * With **slits narrower than the footprint**,
   `C_area = 1/(sin(delta) cos(alpha - beta_in))` applies and varies along the
   rod. On the simulated rod above, `delta` moves from 16.77 to 16.95 degrees
   between `l = 0.4` and `l = 3.0`, a 1.1 % shape error - small here, much
-  larger between rods at different in-plane momentum transfer.
+  larger between rods at different in-plane momentum transfer. Out of scope,
+  as above.
 
-Neither the assumption nor which case a given data set is in is recorded
-anywhere in the output.
+orGUI assumes the first case throughout. That assumption is now stated in the
+dialog rather than only here, on the tooltips of `L` and `W`.
 
 ### F5 - the polarization correction is evaluated at the calibrated arm position
 
@@ -531,7 +558,9 @@ six steps below are done; the wiring of each is in
 [`ctr_structure_factor_handover.md`](ctr_structure_factor_handover.md)
 section 5, the simulated equivalence is asserted by
 `test_scan_mode_equivalence.py::test_rocking_and_stationary_paths_agree`, and
-the real-data check is section 5.1. **F4 and F7 remain open.**
+the real-data check is section 5.1. **F4 is closed** - the active area is
+available in square meter and the slit-limited regime is out of scope.
+**F7 remains open.**
 
 Recorded in the order they had to be done, because the ordering was itself a
 result -- F6 had to be settled before F3 could be wired:
@@ -617,7 +646,7 @@ and it is the one place on this rod where the two modes must not agree.
 
 **What this does not establish.** F7 is bounded, not measured: with the ROI
 chosen to cover the peak, truncation is not detectable against the 3 % scatter
-along the CTR, which is an upper limit rather than a model. F4 is untouched -
+along the CTR, which is an upper limit rather than a model. F4 does not enter -
 both modes carry the same active-area assumption, so it cancels here and the
 comparison is blind to it.
 
@@ -680,13 +709,12 @@ constants:
   `Lattice.uc_area`, `measurement.CLASSICAL_ELECTRON_RADIUS`).
 * `Phi_0` and `T` - user input. `T` is in the scan; `Phi_0` needs a flux
   measurement and a field to put it in.
-* `A` - `activearea.beam_limited_area(alpha, beam_width, sample_length,
-  profile)` returns it in square meter, as `w * L * C_illum_area(alpha, L)`
-  (section 4.3; `C_illum_area` alone is a fraction, not an area - F4). Of its
-  inputs only the **horizontal beam width** is missing: the footprint dialog
-  already asks for the sample size and the beam profile, and the profile
-  carries the vertical direction. `activearea.slit_limited_area` covers the
-  narrow-slit case instead.
+* `A` - **available**, as
+  `IntegrationCorrectionsDialog.activeArea(alpha)`, which is
+  `activearea.beam_limited_area(alpha, W, L, profile)` in square meter
+  (section 4.3; `C_illum_area` alone is a fraction, not an area - F4). The
+  dialog supplies both sizes and the profile; the illuminated width is taken
+  to be the sample width `W`, assuming a beam at least that wide.
 * `C_det` - F7, unmodelled.
 
 **Reflectivity comes for free.**

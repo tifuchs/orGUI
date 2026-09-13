@@ -85,6 +85,17 @@ class CorrectionState:
     background_asset: str | None = None
     background_variance_asset: str | None = None
     uncertainty_provenance: dict[str, Any] = field(default_factory=dict)
+    # Sample size, in meter, along and across the beam: inputs to the beam
+    # footprint dialog, not the footprint itself. ``None`` means "this
+    # configuration predates them, or the dialog was never opened", which
+    # must leave the dialog at its own defaults rather than zeroing it out.
+    sample_length_m: float | None = None
+    sample_width_m: float | None = None
+    # Incident flux density Phi_0, in photons per second per square meter
+    # (see corrections.measurement.scale_factor). Optional: only needed for
+    # an absolutely scaled structure factor (issue #15); a relative one does
+    # not use it.
+    beam_flux_density: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible correction-state dictionary."""
@@ -367,6 +378,17 @@ def corrections_to_nxdict(state):
             "background": state.background_asset,
             "background_variance": state.background_variance_asset,
         }),
+        "footprint": _nx_group(
+            {
+                "sample_length": state.sample_length_m,
+                "sample_width": state.sample_width_m,
+                "beam_flux_density": state.beam_flux_density,
+            },
+            units={
+                "@sample_size_unit": "m",
+                "@beam_flux_density_unit": "1/(s m^2)",
+            },
+        ),
     }
     if state.monitor_corrections:
         nxdict["normalization"]["monitor_corrections"] = _string_array(
@@ -434,6 +456,14 @@ def corrections_from_nxdict(nxdict):
     ):
         if key in assets:
             values[name] = str(assets[key])
+    footprint = _read_group(nxdict, "footprint")
+    for name, key in (
+        ("sample_length_m", "sample_length"),
+        ("sample_width_m", "sample_width"),
+        ("beam_flux_density", "beam_flux_density"),
+    ):
+        if key in footprint:
+            values[name] = float(footprint[key])
     return CorrectionState(**values)
 
 
@@ -617,6 +647,22 @@ class ConfigData:
             repair_enabled = bool(getattr(repair, "enabled", False))
             excluded = getattr(gui, "excludedImagesDialog", None)
             excluded = () if excluded is None else excluded.getData()
+            # Read only if the dialog was already created (i.e. opened at
+            # least once); a config capture must not build GUI it does not
+            # otherwise need. An unopened dialog has nothing to record, which
+            # is the same "not recorded" state as a config predating it.
+            footprint_dialog = getattr(
+                getattr(gui.scanSelector, "correctionsDialog", None),
+                "footprintOptions",
+                None,
+            )
+            sample_length_m = None
+            sample_width_m = None
+            beam_flux_density = None
+            if footprint_dialog is not None:
+                sample_length_m = footprint_dialog.sampleLength()
+                sample_width_m = footprint_dialog.sampleWidth()
+                beam_flux_density = footprint_dialog.beamFluxDensity()
             corrections = CorrectionState(
                 use_mask=bool(options.get("mask", False)) or repair_enabled,
                 use_background=getattr(gui, "background_image", None)
@@ -654,6 +700,9 @@ class ConfigData:
                         if int(value) >= 0
                     )
                 ),
+                sample_length_m=sample_length_m,
+                sample_width_m=sample_width_m,
+                beam_flux_density=beam_flux_density,
             )
             roi = ROIState(
                 region=dict(options.get("region", {})),
@@ -731,6 +780,31 @@ class ConfigData:
                 if values:
                     options[name] = dict(values)
             gui.scanSelector.set_integration_options(options)
+            # Only if this configuration actually recorded them: a file
+            # written before these existed must leave the dialog at whatever
+            # the user already has, not reset it to its own defaults.
+            if (
+                self.corrections.sample_length_m is not None
+                or self.corrections.sample_width_m is not None
+                or self.corrections.beam_flux_density is not None
+            ):
+                corrections_dialog = getattr(
+                    gui.scanSelector, "correctionsDialog", None
+                )
+                if corrections_dialog is not None:
+                    footprint_dialog = corrections_dialog.footprintOptions_shared()
+                    if self.corrections.sample_length_m is not None:
+                        footprint_dialog.setSampleLength(
+                            self.corrections.sample_length_m
+                        )
+                    if self.corrections.sample_width_m is not None:
+                        footprint_dialog.setSampleWidth(
+                            self.corrections.sample_width_m
+                        )
+                    if self.corrections.beam_flux_density is not None:
+                        footprint_dialog.setBeamFluxDensity(
+                            self.corrections.beam_flux_density
+                        )
         gui.reconstruction_normalize_exposure = self.corrections.normalize_exposure
         gui.reconstruction_monitor_corrections = self.corrections.monitor_corrections
         if (
