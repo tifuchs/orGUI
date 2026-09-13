@@ -28,6 +28,7 @@ __version__ = "1.2.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
+import copy
 import numpy as np
 from .. import util
 import re
@@ -2124,17 +2125,31 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
         self.underlying_film = component
         self._film_layer_ucs_base = [film_layers[layer] for layer in film_layer_ids]
-        # Constant per-atom z shift the termination rotation applied, so the
-        # reference cells can be re-synced from the live film basis later
-        # without regenerating them (see createLayers).
-        self._film_termination_z_offsets = {
-            layer: (
-                np.copy(ref.basis[:, 3] - film_uc.basis[:, 3])
-                if ref.basis.shape == film_uc.basis.shape
-                else None
+        # Film row feeding each reference-cell row, so the reference cells can
+        # be re-synced from the live film basis later without regenerating
+        # them (see createLayers). `UnitCell.supercell` and
+        # `UnitCell.affine_layer_transform` both reorder rows, so reference
+        # rows are not in Film row order: replay the generation on a copy whose
+        # iDW column holds the Film row index, which both transforms carry
+        # through unchanged.
+        self._film_termination_sources = {}
+        for layer, ref in self._film_termination_ucs.items():
+            repeats_z = int(np.rint(ref.a[2] / film_uc.a[2]))
+            probe = copy.deepcopy(film_uc)
+            probe.basis[:, 4] = np.arange(probe.basis.shape[0])
+            tagged = generate_surface_termination_cells(
+                probe.supercell((1, 1, repeats_z)),
+                film_layer_ids,
+            )[layer]
+            source_rows = np.rint(tagged.basis[:, 4]).astype(np.intp)
+            # Fractional z: z_ref = z_film / repeats_z + (iz / repeats_z +
+            # termination layer shift).
+            z_offsets = ref.basis[:, 3] - film_uc.basis[source_rows, 3] / repeats_z
+            self._film_termination_sources[layer] = (
+                source_rows,
+                repeats_z,
+                z_offsets,
             )
-            for layer, ref in self._film_termination_ucs.items()
-        }
         if self._reference_unitcell is not None:
             self.setReferenceUnitCell(
                 self._reference_unitcell,
@@ -2262,11 +2277,19 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             rows = film_basis[film_basis[:, 7] == layer_id]
             if uc.basis.shape == rows.shape:
                 uc.basis[:] = rows
+        sources = getattr(self, "_film_termination_sources", {})
         for layer, ref in self._film_termination_ucs.items():
-            offsets = getattr(self, "_film_termination_z_offsets", {}).get(layer)
-            if offsets is not None and ref.basis.shape == film_basis.shape:
-                ref.basis[:, 1:7] = film_basis[:, 1:7]
-                ref.basis[:, 3] = film_basis[:, 3] + offsets
+            source = sources.get(layer)
+            if source is None:
+                continue
+            source_rows, repeats_z, z_offsets = source
+            if (
+                source_rows.shape[0] != ref.basis.shape[0]
+                or source_rows.max(initial=-1) >= film_basis.shape[0]
+            ):
+                continue
+            ref.basis[:, 1:7] = film_basis[source_rows, 1:7]
+            ref.basis[:, 3] = film_basis[source_rows, 3] / repeats_z + z_offsets
 
         n_layers_in_uc = len(self._layer_ids)
         tail_probability = (
