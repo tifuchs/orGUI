@@ -30,6 +30,24 @@ Scientific and analysis additions:
   than as a region mean and is unchanged; correcting it there would need the
   array rebuilt per frame.
 
+- **The arm-following polarization correction no longer makes a mu-scan
+  rocking reduction unusably slow.** It evaluates once and broadcasts when
+  the incidence angle and the arm are constant across a curve, which covers
+  every fixed-arm scan and every th-scan rocking curve; a mu scan rocks the
+  incidence angle itself, and a reflectivity rocking curve additionally
+  tracks the arm at twice it, so nothing was constant and it fell back to a
+  Python loop calling the per-frame correction once per point -- about 20
+  seconds for a thousand-point mu scan, a minute or more for several
+  thousand, with no error, just a reduction that looked stuck. It is now one
+  batched call per rocking curve instead of one per frame
+  (``corrections.detector.polarization_arm_correction_frames``, backed by
+  ``DetectorCalibration.Detector2D_SXRD._tthAzimuthAtArms``), verified
+  against the per-frame loop to floating-point precision and measured about
+  7-8x faster end to end. A stationary integration tracking a rod across the
+  detector has no single region to batch on and keeps the per-frame loop,
+  unchanged. **No saved value changes** -- this is the same correction,
+  computed the same way, just not one frame at a time.
+
 - **Rocking and stationary integration now produce the same structure factor.**
   *This changes saved numbers in both modes.* A rocking scan and a stationary
   scan of the same rod previously differed by exactly exposure time times

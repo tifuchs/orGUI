@@ -940,6 +940,15 @@ class FakeArmPolarizationDetector:
         arm = 0.0 if gamma_arm is None else float(gamma_arm)
         return np.full(np.shape(row), 1.0 - 0.5 * arm**2, dtype=float)
 
+    def polarizationAtPointsFrames(self, row, column, alpha_i, gamma_arm, delta_arm):
+        """The batched counterpart, same closed form, one arm per frame."""
+        gamma_arm = np.asarray(gamma_arm, dtype=float)
+        factor = 1.0 - 0.5 * gamma_arm**2
+        return np.broadcast_to(
+            factor.reshape(factor.shape + (1,) * np.ndim(row)),
+            factor.shape + np.shape(row),
+        ).astype(float)
+
 
 def test_the_polarization_arm_factor_follows_a_moving_arm():
     """Finding F5: the factor is per frame and one at the calibrated position.
@@ -982,3 +991,57 @@ def test_the_polarization_arm_factor_broadcasts_a_constant_arm():
     assert fast.shape == (4,)
     np.testing.assert_allclose(fast, 1.0 / (1.0 - 0.5 * 0.2**2), rtol=1e-12)
     np.testing.assert_allclose(looped[:3], fast[:3], rtol=1e-12)
+
+
+def test_the_polarization_arm_factor_batches_a_varying_arm_on_one_region():
+    """A moving arm on one fixed region must take one batched call, not N.
+
+    This is the mu-scan performance fix: a rocking or reflectivity scan
+    tracks one region across a curve with the arm different every frame,
+    which used to force a Python loop calling ``polarizationAtPoints`` once
+    per frame -- slow enough that a scan with thousands of points made the
+    reduction take minutes. The routing in ``_polarizationArmFactor`` must
+    recognise "one region, many frames" and call the batched
+    ``polarizationAtPointsFrames`` exactly once, not fall back to the loop.
+    """
+    calls = SimpleNamespace(points=0, frames=0)
+
+    class CountingDetector(FakeArmPolarizationDetector):
+        def polarizationAtPoints(self, *args, **kwargs):
+            calls.points += 1
+            return super().polarizationAtPoints(*args, **kwargs)
+
+        def polarizationAtPointsFrames(self, *args, **kwargs):
+            calls.frames += 1
+            return super().polarizationAtPointsFrames(*args, **kwargs)
+
+    arms = np.linspace(0.0, 0.3, 50)
+    stub = SimpleNamespace(getArmAngles=lambda: (arms, np.zeros_like(arms)))
+
+    got = orGUI._polarizationArmFactor(
+        stub, CountingDetector(), 300.0, 240.0, 20.0, 20.0, 0.01
+    )
+
+    np.testing.assert_allclose(got, 1.0 / (1.0 - 0.5 * arms**2), rtol=1e-12)
+    assert calls.frames == 1, "one region and 50 frames must be one batched call"
+    assert calls.points == 1, "only the shared 'at home' evaluation, also batched"
+
+
+def test_the_polarization_arm_factor_still_loops_when_the_region_also_moves():
+    """A stationary scan tracking a rod has no single shared region to batch.
+
+    There, the per-frame region position is itself an array -- the ROI
+    follows the reflection across the detector -- so batching on "one
+    region" does not apply and the per-frame loop, unchanged, is still the
+    correct fallback.
+    """
+    row = np.array([300.0, 310.0, 320.0])
+    column = np.array([240.0, 242.0, 244.0])
+    arm = np.array([0.0, 0.1, 0.2])
+    stub = SimpleNamespace(getArmAngles=lambda: (arm, np.zeros_like(arm)))
+
+    got = orGUI._polarizationArmFactor(
+        stub, FakeArmPolarizationDetector(), row, column, 20.0, 20.0, 0.01
+    )
+
+    np.testing.assert_allclose(got, 1.0 / (1.0 - 0.5 * arm**2), rtol=1e-12)

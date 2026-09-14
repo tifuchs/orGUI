@@ -272,3 +272,97 @@ def test_the_arm_correction_is_neutral_for_a_non_finite_region():
     )
 
     assert got == 1.0
+
+
+def test_the_batched_arm_correction_matches_the_per_frame_one():
+    """The whole point: one region, many frames, same numbers.
+
+    A rocking or reflectivity scan tracks one region across a curve, with
+    the incidence angle and the arm different on every frame -- exactly
+    what previously forced ``orGUI._polarizationArmFactor`` into a Python
+    loop calling :func:`polarization_arm_correction` once per frame, slow
+    enough to make a mu scan with thousands of points unusable. This must
+    reproduce that loop exactly, just batched.
+    """
+    det = _calibrated_detector()
+    row, column, row_size, column_size = 310.0, 244.0, 40.0, 40.0
+    alpha = np.deg2rad(np.linspace(0.3, 3.0, 9))
+    gamma_arm = 2.0 * alpha
+    delta_arm = np.deg2rad(np.linspace(-1.0, 1.0, 9))
+
+    got = detector_corrections.polarization_arm_correction_frames(
+        det, row, column, row_size, column_size, alpha, gamma_arm, delta_arm
+    )
+    expected = np.array([
+        detector_corrections.polarization_arm_correction(
+            det, row, column, row_size, column_size,
+            float(alpha[i]), float(gamma_arm[i]), float(delta_arm[i]),
+        )
+        for i in range(alpha.size)
+    ])
+
+    np.testing.assert_allclose(got, expected, rtol=1e-10)
+    assert got[0] != 1.0, "the arm does move here, or the test proves nothing"
+
+
+def test_the_batched_arm_correction_is_one_at_the_calibrated_position():
+    """A frame whose arm sits at the calibrated reference stays untouched."""
+    det = _calibrated_detector()
+    alpha = np.deg2rad([0.6, 0.6, 0.6])
+    gamma_arm = np.array([0.0, np.deg2rad(10.0), 0.0])
+    delta_arm = np.zeros(3)
+
+    got = detector_corrections.polarization_arm_correction_frames(
+        det, 300.0, 240.0, 60.0, 60.0, alpha, gamma_arm, delta_arm
+    )
+
+    assert got[0] == 1.0
+    assert got[2] == 1.0
+    assert got[1] != 1.0
+
+
+def test_the_batched_arm_correction_is_neutral_for_a_non_finite_region():
+    """The whole-region guard: a region with no finite position corrects nothing."""
+    det = _calibrated_detector()
+    alpha = np.deg2rad([0.6, 0.6])
+    gamma_arm = np.deg2rad([10.0, 20.0])
+    delta_arm = np.zeros(2)
+
+    got = detector_corrections.polarization_arm_correction_frames(
+        det, np.inf, 240.0, 20.0, 20.0, alpha, gamma_arm, delta_arm
+    )
+
+    np.testing.assert_array_equal(got, [1.0, 1.0])
+
+
+def test_the_batched_arm_correction_skips_non_finite_frames_only(recwarn):
+    """A frame on which the rod never reached the detector must not corrupt
+    or warn about the others -- it is skipped, not computed and masked.
+
+    Found by profiling the mu-scan slowdown: a naive fix that computed
+    every frame and masked afterwards emitted a ``RuntimeWarning`` for
+    every off-detector frame, since NaN/inf angles were fed to trigonometry
+    regardless. ``recwarn`` catches that regression directly.
+    """
+    det = _calibrated_detector()
+    alpha = np.deg2rad(np.linspace(0.3, 3.0, 6))
+    gamma_arm = 2.0 * alpha
+    delta_arm = np.zeros(6)
+
+    bad_alpha = alpha.copy()
+    bad_alpha[2] = np.nan
+    bad_gamma_arm = gamma_arm.copy()
+    bad_gamma_arm[4] = np.inf
+
+    got = detector_corrections.polarization_arm_correction_frames(
+        det, 310.0, 244.0, 40.0, 40.0, bad_alpha, bad_gamma_arm, delta_arm
+    )
+    expected = detector_corrections.polarization_arm_correction_frames(
+        det, 310.0, 244.0, 40.0, 40.0, alpha, gamma_arm, delta_arm
+    )
+
+    assert got[2] == 1.0
+    assert got[4] == 1.0
+    other = [0, 1, 3, 5]
+    np.testing.assert_allclose(got[other], expected[other], rtol=1e-10)
+    assert not [w for w in recwarn.list if issubclass(w.category, RuntimeWarning)]

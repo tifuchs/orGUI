@@ -265,6 +265,45 @@ apply to it; that path would need the array itself rebuilt per frame, which is
 a detector-sized evaluation per frame and belongs with the rest of the
 reconstruction work in section 7.
 
+**A mu scan made this factor's cost visible in a way a th scan never does.**
+`_polarizationArmFactor` evaluates once and broadcasts when its inputs are
+uniform, which is every fixed-arm scan and every th-scan rocking curve, where
+alpha does not move. A mu scan rocks alpha itself, and a reflectivity rocking
+curve additionally tracks `gamma_arm = 2 alpha`, so nothing is uniform and it
+fell back to a plain Python loop calling `polarization_arm_correction` once
+per frame - about 0.2 ms each, dominated by the pyFAI geometry evaluation
+inside it, not by anything Python-level. `rocking_integrate` calls it once per
+`s` point, so the real cost is `O(n_s * n_pts)` individual calls: about 20 s
+for a thousand-point mu scan, a minute or more for several thousand - a
+reduction that used to finish in a blink became "stuck," with no error, just
+one warning every processing pass repeating slowly enough to look like it had
+died.
+
+Threading the loop does not help - the workload is GIL-bound, measured
+*slower* than serial at every worker count tried. The fix is
+`polarization_arm_correction_frames`: one region, many frames, batched into
+one call instead of `n_pts` of them.
+`Detector2D_SXRD._tthAzimuthAtArms` is what makes that possible - the
+position-only half of the geometry (`calc_cartesian_positions`, independent
+of the arm) is computed once and shared, and every frame's rotation is
+composed as a batched `(n_frames, 3, 3)` matrix stack via `armRotation`'s
+existing array support, applied as one `einsum` rather than pyFAI's
+single-geometry `calc_pos_zyx`/`rotation_matrix`. It deliberately bypasses the
+`(rot1, rot2, rot3)` round trip `paramAtArm` normally takes: that
+parameterization exists so a *single* geometry can be handed back to pyFAI,
+and reconstructing it from a rotation matrix costs a `scipy.Rotation` Euler
+decomposition - exactly what batching needs not to pay for the position-only
+half, and exactly the step this skips for the arm-varying half too, since the
+batched matrix is applied directly instead of decomposed and reconstructed.
+Verified against the per-frame loop to floating-point precision across
+several detector tilts, azimuthal references and a non-identity arm
+reference; measured about 7-8x faster end to end, turning a several-minute
+reduction into single-digit seconds. Parallax is not implemented in the
+batched path - orGUI never configures one, so this raises rather than
+silently diverging if that ever changes. A stationary integration tracking a
+rod across the detector has no single shared region to batch on and keeps the
+per-frame loop, unchanged.
+
 ### F6 - solid-angle correction applied to an already-summed ROI
 
 For a ROI-summed intensity, the raw sum over pixels *is* the angular integral

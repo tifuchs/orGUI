@@ -3499,6 +3499,17 @@ ub : gui for UB matrix and angle calculations
         constant arm is evaluated once and broadcast, which keeps the cost off
         the common path.
 
+        A rocking or reflectivity scan tracks one region across many frames
+        with the arm (and, for a mu scan, alpha itself) different on every
+        one -- so nothing is constant, only the region is. That is the case
+        :func:`~.corrections.detector.polarization_arm_correction_frames`
+        batches into one call instead of one per frame; evaluating the
+        per-frame geometry separately for every frame of a mu scan with
+        thousands of s points used to make the reduction take minutes. Only
+        when the region also changes frame to frame -- a stationary
+        integration tracking a rod across the detector -- is there no shared
+        region left to batch on, and this falls back to the per-frame loop.
+
         The arm position comes from :meth:`getArmAngles`, so this shares its
         convention with every other arm consumer in the application: a scan
         that knows nothing about an arm reports zero, which is the calibrated
@@ -3527,29 +3538,44 @@ ub : gui for UB matrix and angle calculations
                 np.asarray(delta_arm, dtype=np.float64),
             )
         )
+        if not row.size:
+            return np.ones(row.shape, dtype=np.float64)
 
-        def _at(index):
-            return detector_corrections.polarization_arm_correction(
-                dc,
-                row[index],
-                column[index],
-                row_size[index],
-                column_size[index],
-                alpha[index],
-                float(gamma_arm[index]),
-                float(delta_arm[index]),
+        def _is_constant(values):
+            return np.all(values == values.flat[0])
+
+        if _is_constant(alpha) and _is_constant(gamma_arm) and _is_constant(delta_arm):
+            constant = _is_constant(row) and _is_constant(column) and (
+                _is_constant(row_size) and _is_constant(column_size)
             )
+            if constant:
+                index = np.unravel_index(0, row.shape)
+                factor = detector_corrections.polarization_arm_correction(
+                    dc, row[index], column[index], row_size[index],
+                    column_size[index], alpha[index], float(gamma_arm[index]),
+                    float(delta_arm[index]),
+                )
+                return np.full(row.shape, factor)
 
-        constant = all(
-            np.all(values == values.flat[0]) if values.size else True
-            for values in (row, column, row_size, column_size, alpha,
-                           gamma_arm, delta_arm)
+        region_constant = (
+            _is_constant(row) and _is_constant(column)
+            and _is_constant(row_size) and _is_constant(column_size)
         )
-        if constant and row.size:
-            return np.full(row.shape, _at(np.unravel_index(0, row.shape)))
+        if region_constant:
+            index = np.unravel_index(0, row.shape)
+            return detector_corrections.polarization_arm_correction_frames(
+                dc, row[index], column[index], row_size[index],
+                column_size[index], alpha.ravel(), gamma_arm.ravel(),
+                delta_arm.ravel(),
+            ).reshape(row.shape)
+
         factor = np.ones(row.shape, dtype=np.float64)
         for index in np.ndindex(*row.shape):
-            factor[index] = _at(index)
+            factor[index] = detector_corrections.polarization_arm_correction(
+                dc, row[index], column[index], row_size[index],
+                column_size[index], alpha[index], float(gamma_arm[index]),
+                float(delta_arm[index]),
+            )
         return factor
 
     def getArmAngles(self, imageno=None):

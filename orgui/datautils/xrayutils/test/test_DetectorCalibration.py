@@ -710,6 +710,112 @@ class TestDetectorArm(unittest.TestCase):
         with self.assertRaises(ValueError):
             det.setArmReference()  # neither
 
+    def test_batched_arm_matches_the_per_frame_geometry(self):
+        """``_tthAzimuthAtArms`` must reproduce ``_tthAzimuthAtArm`` in a loop.
+
+        A rocking or reflectivity scan tracks one region across many frames,
+        each at its own arm position -- what ``_tthAzimuthAtArms`` batches
+        into one call instead of one per frame, to keep a mu scan with
+        thousands of points from taking minutes (see
+        ``doc/design/ctr_structure_factor_scale.md`` finding F5). There is
+        no independent closed form for this: :meth:`_tthAzimuthAtArm` is the
+        closed form, verified elsewhere in this class, so correctness here
+        means reproducing it exactly for every arm position and detector
+        configuration those tests already cover.
+        """
+        rows = np.linspace(3.0, 900.0, 11)
+        columns = np.linspace(9.0, 950.0, 11)
+        grid_rows, grid_columns = np.meshgrid(rows, columns, indexing="ij")
+        grid_rows = grid_rows.ravel()
+        grid_columns = grid_columns.ravel()
+
+        gamma_arm = np.deg2rad([g for g, _ in self.ARM_POSITIONS_DEG])
+        delta_arm = np.deg2rad([d for _, d in self.ARM_POSITIONS_DEG])
+
+        for det, label in (
+            (self.build(), "home reference"),
+            (self.build(rot3=0.22), "rotated about the beam"),
+            (self.build(dist=0.3, poni1=-0.05), "closer, offset PONI"),
+        ):
+            with self.subTest(detector=label):
+                tth_batch, az_batch = det._tthAzimuthAtArms(
+                    grid_rows, grid_columns, gamma_arm, delta_arm
+                )
+                for i, (g, d) in enumerate(zip(gamma_arm, delta_arm)):
+                    with self.subTest(gamma_arm=g, delta_arm=d):
+                        tth_ref, az_ref = det._tthAzimuthAtArm(
+                            grid_rows, grid_columns, float(g), float(d)
+                        )
+                        np.testing.assert_allclose(
+                            tth_batch[i], tth_ref, atol=1e-12
+                        )
+                        np.testing.assert_allclose(
+                            np.mod(az_batch[i] - az_ref + np.pi, 2 * np.pi) - np.pi,
+                            0.0,
+                            atol=1e-10,
+                        )
+
+    def test_batched_arm_respects_a_non_identity_reference(self):
+        """The reference rotation must apply per frame, not just at rest."""
+        det = self.build()
+        det.setArmReference(gamma_arm=np.deg2rad(3.0), delta_arm=np.deg2rad(-2.0))
+        rows = np.array([100.0, 400.0, 700.0])
+        columns = np.array([150.0, 450.0, 800.0])
+        gamma_arm = np.deg2rad([0.0, 12.0, -7.0])
+        delta_arm = np.deg2rad([0.0, 30.0, 55.0])
+
+        tth_batch, az_batch = det._tthAzimuthAtArms(
+            rows, columns, gamma_arm, delta_arm
+        )
+        for i in range(gamma_arm.size):
+            tth_ref, az_ref = det._tthAzimuthAtArm(
+                rows, columns, float(gamma_arm[i]), float(delta_arm[i])
+            )
+            np.testing.assert_allclose(tth_batch[i], tth_ref, atol=1e-12)
+            np.testing.assert_allclose(
+                np.mod(az_batch[i] - az_ref + np.pi, 2 * np.pi) - np.pi,
+                0.0,
+                atol=1e-10,
+            )
+
+    def test_batched_arm_refuses_a_configured_parallax_correction(self):
+        """Silently wrong is worse than refusing: this path skips parallax.
+
+        orGUI never configures one, but if that ever changes, a silent
+        divergence from the per-frame path -- which does apply it -- would
+        be a scientific correctness bug, not a performance one.
+        """
+        det = self.build()
+        det._parallax = object()  # stand-in: only its not-None-ness matters
+        with self.assertRaises(NotImplementedError):
+            det._tthAzimuthAtArms(
+                np.array([1.0]), np.array([1.0]), np.array([0.1]), np.array([0.0])
+            )
+
+    def test_batched_polarization_matches_the_per_frame_geometry(self):
+        """``polarizationAtPointsFrames`` end to end, against the per-frame call."""
+        det = self.build()
+        rows = np.linspace(3.0, 900.0, 7)
+        columns = np.linspace(9.0, 950.0, 7)
+        grid_rows, grid_columns = np.meshgrid(rows, columns, indexing="ij")
+        grid_rows = grid_rows.ravel()
+        grid_columns = grid_columns.ravel()
+        alpha = np.deg2rad(np.linspace(0.3, 3.0, 6))
+        gamma_arm = 2.0 * alpha
+        delta_arm = np.deg2rad(np.linspace(-1.0, 1.0, 6))
+
+        got = det.polarizationAtPointsFrames(
+            grid_rows, grid_columns, alpha, gamma_arm, delta_arm
+        )
+        expected = np.stack([
+            det.polarizationAtPoints(
+                grid_rows, grid_columns, float(alpha[i]),
+                float(gamma_arm[i]), float(delta_arm[i]),
+            )
+            for i in range(alpha.size)
+        ])
+        np.testing.assert_allclose(got, expected, rtol=1e-12)
+
 
 """
 def test_del_gam_range():
