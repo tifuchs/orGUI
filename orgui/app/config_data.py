@@ -927,6 +927,18 @@ class ConfigData:
             gui.excludedImagesDialog.updateArrayData(excluded)
         if hasattr(ub_widget, "updateReflectionMismatch"):
             ub_widget.updateReflectionMismatch()
+        # Every interactive path that changes mu/chi/phi, the UB matrix or
+        # the detector geometry (_onMachineParamsChanged, _onCrystalParamsChanged,
+        # _onAlignU) emits these right after updateReflectionMismatch(), which
+        # documents exactly that contract; skipping it here left the ROI and
+        # reflection overlays, and the Q-plot, showing the geometry from
+        # before the config was loaded; the angle readout in the caller
+        # (`orgui.mu`, etc.) was already correct -- only the cached HKL and
+        # its dependent plot elements were stale.
+        if hasattr(ub_widget, "sigPlottableMachineParamsChanged"):
+            ub_widget.sigPlottableMachineParamsChanged.emit()
+        if hasattr(ub_widget, "sigReplotRequest"):
+            ub_widget.sigReplotRequest.emit(True)
 
     def to_nxdict(self, role="scan", source=None):
         """Convert this config to a NeXus-compatible nested dictionary."""

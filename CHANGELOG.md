@@ -935,6 +935,16 @@ GUI fixes:
   the right; the inactive beam-model group is hidden rather than merely
   disabled, so it stops reserving space it is not using; the schematic image
   is capped; and the preview plot is a little shorter.
+- Loading a stored configuration from the database now refreshes the ROI and
+  reflection overlays and the Q-plot. ``mu``/``chi``/``phi``, the UB matrix
+  and the detector geometry were already updated correctly and immediately --
+  every live angle and HKL readout reads them fresh rather than from a cache
+  -- but nothing told the plot to redraw, so it kept showing reflection
+  markers, ROI positions and the reciprocal-space conversion computed from
+  the geometry active *before* the load, which looked like the angle-to-HKL
+  conversion itself had not updated. Loading a configuration now emits the
+  same replot request every interactive machine-parameter, crystal-parameter
+  or U-alignment change already does.
 
 ESRF ID31 beamline support and reciprocal-space display:
 

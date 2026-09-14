@@ -340,6 +340,55 @@ def test_apply_to_gui_sets_reconstruction_normalization_attributes():
     assert gui.reconstruction_monitor_corrections == ("mondio",)
 
 
+def test_apply_to_gui_requests_a_replot(qapp):
+    """Loading a config must refresh HKL-dependent plot elements too.
+
+    Every interactive path that changes mu/chi/phi, the UB matrix or the
+    detector geometry (``_onMachineParamsChanged``, ``_onCrystalParamsChanged``,
+    ``_onAlignU``) emits ``sigReplotRequest`` right after
+    ``updateReflectionMismatch()`` -- that method's own docstring documents
+    the contract. Without it here, ``mu``/``chi``/``phi`` and the UB matrix
+    were already correct immediately after loading (they are read fresh, not
+    cached), but the ROI and reflection overlays and the Q-plot kept showing
+    the geometry from before the config was loaded -- what looked like
+    "loading a config does not update the angles to hkl conversion."
+    """
+    config = _make_config()
+
+    class _UBStub(qt.QObject):
+        sigPlottableMachineParamsChanged = qt.pyqtSignal()
+        sigReplotRequest = qt.pyqtSignal(bool)
+
+        def __init__(self):
+            super().__init__()
+            self.detectorCal = config.detector
+            self.crystal = config.unit_cell
+            self.ubCal = config.ub_calculator
+            self.mu = 0.0
+            self.chi = 0.0
+            self.phi = 0.0
+            self.n = 1.0
+
+        def updateReflectionMismatch(self):
+            pass
+
+    ub_widget = _UBStub()
+    gui = SimpleNamespace(ubcalc=ub_widget)
+
+    replot_calls = []
+    ub_widget.sigReplotRequest.connect(replot_calls.append)
+    plottable_calls = []
+    ub_widget.sigPlottableMachineParamsChanged.connect(
+        lambda: plottable_calls.append(True)
+    )
+
+    config.apply_to_gui(gui)
+
+    assert replot_calls == [True]
+    assert plottable_calls == [True]
+    assert ub_widget.mu == config.mu, "the angle itself must also be updated"
+
+
 def test_snapshot_assets_serializes_active_mask(tmp_path):
     config = _make_config()
     config.corrections = CorrectionState(use_mask=True)
