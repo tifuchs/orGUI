@@ -23,9 +23,10 @@
 # ###########################################################################*/
 """Optional one-dimensional resolution modeling for calculated CTRs.
 
-Resolution functions in this module act on intensity, ``abs(F)**2``, along
-the CTR L direction. Results are converted back to effective amplitudes so
-they remain compatible with :class:`~.CTRplotutil.CTRCollection`.
+Resolution functions in this module act on field intensity, ``abs(F)**2``,
+along the CTR L direction. The low-level kernels return intensity directly;
+the collection compatibility wrappers convert their results back to effective
+amplitudes for :class:`~.CTRplotutil.CTRCollection`.
 """
 
 from abc import ABC, abstractmethod
@@ -248,6 +249,169 @@ def _validate_widths(widths, shape):
     return widths
 
 
+def _validate_intensity_coordinates(h, k, l):  # noqa: E741
+    try:
+        h_array, k_array, l_array = np.broadcast_arrays(
+            np.asarray(h, dtype=np.float64),
+            np.asarray(k, dtype=np.float64),
+            np.asarray(l, dtype=np.float64),
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "H, K, and L coordinates must be broadcast-compatible"
+        ) from exc
+    if l_array.ndim == 0:
+        h_array = h_array.reshape(1)
+        k_array = k_array.reshape(1)
+        l_array = l_array.reshape(1)
+    if l_array.ndim != 1 or l_array.size == 0:
+        raise ValueError(
+            "Resolution coordinates must be nonempty one-dimensional arrays"
+        )
+    if not all(np.all(np.isfinite(array)) for array in (h_array, k_array, l_array)):
+        raise ValueError("Resolution coordinates must be finite")
+    if np.unique(l_array).size != l_array.size:
+        raise ValueError("Resolution coordinates must not contain duplicate L values")
+    return h_array, k_array, l_array
+
+
+def _validate_intensity(intensity, shape, source="intensity"):
+    if not np.isrealobj(intensity):
+        raise ValueError(f"{source} must be real")
+    intensity = np.asarray(intensity, dtype=np.float64)
+    try:
+        intensity = np.broadcast_to(intensity, shape)
+    except ValueError as exc:
+        raise ValueError(f"{source} returned an incompatible array shape") from exc
+    if not np.all(np.isfinite(intensity)) or np.any(intensity < 0.0):
+        raise ValueError(f"{source} must be finite and nonnegative")
+    return intensity
+
+
+def _validate_quadrature_order(quadrature_order):
+    if (
+        not isinstance(quadrature_order, int | np.integer)
+        or isinstance(quadrature_order, bool | np.bool_)
+        or quadrature_order <= 0
+        or quadrature_order % 2 == 0
+    ):
+        raise ValueError("quadrature_order must be a positive odd integer")
+    return int(quadrature_order)
+
+
+def fast_convolve_intensity(h, k, l, intensity, resolution, angles=None):  # noqa: E741
+    """Convolve field intensity on an existing irregular L grid.
+
+    No interpolation or equidistant resampling is performed. Local composite
+    trapezoidal weights account for unequal L spacing, and each kernel is
+    normalized over the samples available at the rod boundaries. H and K are
+    reference-frame coordinates in r.l.u.; ``angles`` contains optional
+    central diffractometer records in rad.
+
+    :param h: H coordinates in r.l.u., scalar or one-dimensional.
+    :param k: K coordinates in r.l.u., scalar or one-dimensional.
+    :param l: Unique L coordinates in r.l.u., scalar or one-dimensional.
+    :param intensity: Finite, nonnegative field intensity at the central grid.
+    :param ResolutionFunction resolution: L-resolution model.
+    :param angles: Optional central structured angle records in rad.
+    :returns: Convolved field intensity in the original point order.
+    :rtype: numpy.ndarray
+    """
+    if not isinstance(resolution, ResolutionFunction):
+        raise TypeError("resolution must be a ResolutionFunction")
+    h_array, k_array, l_array = _validate_intensity_coordinates(h, k, l)
+    intensity = _validate_intensity(intensity, l_array.shape)
+    widths = _validate_widths(
+        resolution.width(h_array, k_array, l_array, angles), l_array.shape
+    )
+
+    if l_array.size < 2:
+        return np.ascontiguousarray(intensity)
+
+    order = np.argsort(l_array)
+    l_sorted = l_array[order]
+    intensity_sorted = intensity[order]
+    widths_sorted = widths[order]
+
+    integration_weights = np.empty_like(l_sorted)
+    integration_weights[0] = (l_sorted[1] - l_sorted[0]) / 2.0
+    integration_weights[-1] = (l_sorted[-1] - l_sorted[-2]) / 2.0
+    integration_weights[1:-1] = (l_sorted[2:] - l_sorted[:-2]) / 2.0
+
+    convolved_sorted = np.empty_like(intensity_sorted)
+    for index, (center, width) in enumerate(zip(l_sorted, widths_sorted)):
+        if width == 0.0:
+            convolved_sorted[index] = intensity_sorted[index]
+            continue
+        kernel_weights = resolution.weights(l_sorted - center, width)
+        combined_weights = kernel_weights * integration_weights
+        normalization = np.sum(combined_weights)
+        if not np.isfinite(normalization) or normalization <= 0.0:
+            raise ValueError(
+                f"Resolution kernel has no support at L={center:g} r.l.u."
+            )
+        convolved_sorted[index] = (
+            np.sum(combined_weights * intensity_sorted) / normalization
+        )
+
+    convolved = np.empty_like(convolved_sorted)
+    convolved[order] = np.maximum(convolved_sorted, 0.0)
+    return np.ascontiguousarray(convolved)
+
+
+def sample_intensity(
+    h,
+    k,
+    l,  # noqa: E741
+    intensity,
+    resolution,
+    angles=None,
+    quadrature_order=25,
+):
+    """Integrate a field-intensity callable around central CTR points.
+
+    H and K remain fixed while L is displaced by the resolution quadrature.
+    The callable receives flattened H, K, and L arrays in central-point-major,
+    quadrature-point-minor order and must return broadcast-compatible finite,
+    nonnegative field intensity. Coordinates are in r.l.u.; optional central
+    diffractometer angle records are in rad.
+
+    :param h: H coordinates in r.l.u., scalar or one-dimensional.
+    :param k: K coordinates in r.l.u., scalar or one-dimensional.
+    :param l: Unique L coordinates in r.l.u., scalar or one-dimensional.
+    :param callable intensity: Callable ``intensity(h, k, l)``.
+    :param ResolutionFunction resolution: L-resolution model.
+    :param angles: Optional central structured angle records in rad.
+    :param int quadrature_order: Positive odd quadrature order.
+    :returns: Integrated field intensity in central-point order.
+    :rtype: numpy.ndarray
+    """
+    if not callable(intensity):
+        raise TypeError("intensity must be callable")
+    if not isinstance(resolution, ResolutionFunction):
+        raise TypeError("resolution must be a ResolutionFunction")
+    quadrature_order = _validate_quadrature_order(quadrature_order)
+    h_array, k_array, l_array = _validate_intensity_coordinates(h, k, l)
+    widths = _validate_widths(
+        resolution.width(h_array, k_array, l_array, angles), l_array.shape
+    )
+    offsets, integration_weights = resolution.quadrature(
+        widths, quadrature_order
+    )
+    sample_shape = offsets.shape
+    h_samples = np.broadcast_to(h_array[..., np.newaxis], sample_shape)
+    k_samples = np.broadcast_to(k_array[..., np.newaxis], sample_shape)
+    l_samples = l_array[..., np.newaxis] + offsets
+    sampled = intensity(
+        h_samples.ravel(), k_samples.ravel(), l_samples.ravel()
+    )
+    sampled = _validate_intensity(
+        sampled, (l_samples.size,), "intensity callable"
+    ).reshape(sample_shape)
+    integrated = np.sum(sampled * integration_weights, axis=-1)
+    return np.ascontiguousarray(np.maximum(integrated, 0.0))
+
+
 def _new_collection(ctrs, amplitudes, *, preserve_measurement_metadata=False):
     result = CTRCollection(name=ctrs.name)
     result.plotsett = copy.deepcopy(ctrs.plotsett)
@@ -308,41 +472,15 @@ def fast_convolve(ctrs, resolution):
             ctr, require_amplitudes=True
         )
         angles = getattr(ctr, "angles", None)
-        widths = _validate_widths(
-            resolution.width(h_array, k_array, l_array, angles), l_array.shape
+        convolved_intensity = fast_convolve_intensity(
+            h_array,
+            k_array,
+            l_array,
+            amplitude**2,
+            resolution,
+            angles,
         )
-
-        if l_array.size < 2:
-            convolved.append(np.copy(amplitude))
-            continue
-
-        order = np.argsort(l_array)
-        l_sorted = l_array[order]
-        intensity = amplitude[order] ** 2
-        widths_sorted = widths[order]
-
-        integration_weights = np.empty_like(l_sorted)
-        integration_weights[0] = (l_sorted[1] - l_sorted[0]) / 2.0
-        integration_weights[-1] = (l_sorted[-1] - l_sorted[-2]) / 2.0
-        integration_weights[1:-1] = (l_sorted[2:] - l_sorted[:-2]) / 2.0
-
-        convolved_sorted = np.empty_like(intensity)
-        for index, (center, width) in enumerate(zip(l_sorted, widths_sorted)):
-            if width == 0.0:
-                convolved_sorted[index] = intensity[index]
-                continue
-            kernel_weights = resolution.weights(l_sorted - center, width)
-            combined_weights = kernel_weights * integration_weights
-            normalization = np.sum(combined_weights)
-            if not np.isfinite(normalization) or normalization <= 0.0:
-                raise ValueError(f"Resolution kernel has no support for {ctr!r}")
-            convolved_sorted[index] = (
-                np.sum(combined_weights * intensity) / normalization
-            )
-
-        convolved_rod = np.empty_like(convolved_sorted)
-        convolved_rod[order] = np.sqrt(np.maximum(convolved_sorted, 0.0))
-        convolved.append(convolved_rod)
+        convolved.append(np.sqrt(convolved_intensity))
 
     return _new_collection(
         ctrs, convolved, preserve_measurement_metadata=True
@@ -376,13 +514,7 @@ def sample_structure_factor(ctrs, crystal, resolution, quadrature_order=25):
         raise TypeError("resolution must be a ResolutionFunction")
     if not hasattr(crystal, "F") or not callable(crystal.F):
         raise TypeError("crystal must provide a callable F(h, k, l) method")
-    if (
-        not isinstance(quadrature_order, int | np.integer)
-        or isinstance(quadrature_order, bool | np.bool_)
-        or quadrature_order <= 0
-        or quadrature_order % 2 == 0
-    ):
-        raise ValueError("quadrature_order must be a positive odd integer")
+    quadrature_order = _validate_quadrature_order(quadrature_order)
 
     sampled = []
     for ctr in ctrs:
@@ -390,29 +522,35 @@ def sample_structure_factor(ctrs, crystal, resolution, quadrature_order=25):
             ctr, require_amplitudes=False
         )
         angles = getattr(ctr, "angles", None)
-        widths = _validate_widths(
-            resolution.width(h_array, k_array, l_array, angles), l_array.shape
+
+        def structure_factor_intensity(h_samples, k_samples, l_samples):
+            structure_factor = np.asarray(
+                crystal.F(h_samples, k_samples, l_samples)
+            )
+            try:
+                structure_factor = np.broadcast_to(
+                    structure_factor, h_samples.shape
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "crystal.F returned an incompatible array shape"
+                ) from exc
+            intensity = np.abs(structure_factor) ** 2
+            if not np.all(np.isfinite(intensity)):
+                raise ValueError(
+                    "crystal.F returned non-finite structure factors"
+                )
+            return intensity
+
+        integrated = sample_intensity(
+            h_array,
+            k_array,
+            l_array,
+            structure_factor_intensity,
+            resolution,
+            angles,
+            quadrature_order,
         )
-        offsets, integration_weights = resolution.quadrature(
-            widths, int(quadrature_order)
-        )
-        sample_shape = offsets.shape
-        h_samples = np.broadcast_to(h_array[..., np.newaxis], sample_shape)
-        k_samples = np.broadcast_to(k_array[..., np.newaxis], sample_shape)
-        l_samples = l_array[..., np.newaxis] + offsets
-        structure_factor = np.asarray(
-            crystal.F(h_samples.ravel(), k_samples.ravel(), l_samples.ravel())
-        )
-        try:
-            structure_factor = np.broadcast_to(
-                structure_factor, (l_samples.size,)
-            ).reshape(sample_shape)
-        except ValueError as exc:
-            raise ValueError("crystal.F returned an incompatible array shape") from exc
-        intensity = np.abs(structure_factor) ** 2
-        if not np.all(np.isfinite(intensity)):
-            raise ValueError("crystal.F returned non-finite structure factors")
-        integrated = np.sum(intensity * integration_weights, axis=-1)
-        sampled.append(np.sqrt(np.maximum(integrated, 0.0)))
+        sampled.append(np.sqrt(integrated))
 
     return _new_collection(ctrs, sampled)

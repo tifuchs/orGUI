@@ -161,6 +161,15 @@ The built-in kinematical optimizer still accepts structure-factor data only.
 These quantity-aware outputs also define the common result contract used by
 models that can predict reflectivity.
 
+Call ``optimizer.set_dwba()`` to opt into live DWBA predictions. In that mode,
+each rod's polarization reduction and measured six-circle records or z-mode
+scan rule determine the field-intensity calculation. Structure-factor rods
+receive an effective F prediction using their conventional pointwise P;
+corrected-reflectivity rods receive direct R. Stored observations and errors
+are never converted between these representations. The complete geometry,
+polarization, bulk, and limitation contract is documented in
+:ref:`the DWBA fitting section <dwba-fitting>`.
+
 Analytical scale policies are configured explicitly:
 
 .. code-block:: python

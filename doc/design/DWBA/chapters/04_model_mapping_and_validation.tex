@@ -113,6 +113,23 @@ incident field as the $A_{m,i}^{\pm}$ used in the matrix element.  For
 unpolarized radiation, calculate $s$ and $p$ independently and average their
 intensities; do not add their amplitudes.
 
+\paragraph{Field intensity and the experimental input.}
+The fitting design uses $R=|r|^2$ as a dimensionless field-intensity ratio,
+including off-specular rod amplitudes.  Experimental data must already be
+corrected to this convention and absolutely normalized when the fitted scale
+is fixed to one.  For plane waves in vacuum, the ratio of normal powers
+through a surface parallel to the sample is instead
+$(\kappa_f/\kappa_i)|r|^2$, where
+$\kappa_{i,f}=\kzero\sin\alpha_{i,f}>0$.  These two observables coincide in
+specular reflection.  The normal-power ratio is not a universal conversion
+from detector counts: illuminated area, footprint, and detector acceptance
+belong to experimental reduction.  The fitter therefore adds no such ratio
+and does not redefine $r$.  This follows the distinction between field
+intensity, flux conservation, and differential scattering cross sections in
+Renaud et al., Secs.~5.2.6 and 5.3.3--5.3.6.  Within each polarization pair,
+the four DWBA propagation branches remain a coherent amplitude sum;
+incoherent polarization mixtures are combined only after squaring.
+
 \section{Returned quantities}
 
 The kernel returns one matrix element and everything else is derived from it
@@ -169,6 +186,26 @@ is the large-$Q_z$ limit, where $r_0\to4\pi r_e\overline\rho_f/Q_z^2$ and
 $F_{\rm eff}\to F_{\bm h}+A_{\rm ref}\overline\rho_f/(\ii Q_z)$, that is, the
 full kinematic structure factor of the actual density --- exactly the quantity
 a kinematically reduced data set contains.
+
+\paragraph{Polarization-reduced fitting magnitudes.}
+Reserve $P$ for the conventional dimensionless polarization intensity factor,
+and denote the amplitude prefactor by
+$c=2\pi\ii r_e/(A_{\rm ref}\kappa_f)$.  If experimental structure-factor
+data were polarization corrected, intensity was multiplied by $1/P$ and
+amplitude magnitude by $1/\sqrt{P}$.  Public fitting metadata stores $P$;
+an absent factor means no correction, equivalently $P=1$.  Let $\overline R$
+be the resolution-broadened field intensity, with any incident mixture and
+unanalysed outgoing states summed incoherently.  The predicted magnitude is
+\[
+  F_{\rm pred}=\frac{\sqrt{\overline R/P}}{|c|},
+\]
+using central-geometry $P$ and $c$.  There is no extra $\kappa_i$ in this
+conversion, although the incident geometry still enters the wavefields.
+For a narrow integrated region where $P$ changes little, a central factor
+also approximates pixelwise polarization correction.  This is not an exact
+identity for general integration weights; it must be adequate for the
+experimental uncertainty.  It does not replace the polarization-dependent
+DWBA fields or imply a unique complex $F_{\rm eff}$ for a mixed measurement.
 
 \paragraph{Why $R=|r|^2$ is the reflectivity to use.}  On the specular rod at
 small angles the problem is genuinely one-dimensional, so the scalar reduction

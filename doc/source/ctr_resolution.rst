@@ -108,6 +108,36 @@ that point; the same applies to delta when ``delta_l_2`` is nonzero. H and K
 remain fixed. This implementation therefore models only out-of-plane L
 resolution.
 
+DWBA resolution during fitting
+------------------------------
+
+DWBA fitting broadens the polarization-reduced field intensity, not an
+effective structure-factor amplitude. For direct values or either supported
+resolution mode, representation conversion happens afterwards:
+
+.. math::
+
+   \widehat R = R_{\mathrm{res}}, \qquad
+   \widehat F = \frac{\sqrt{R_{\mathrm{res}}/P}}{|c|},
+
+where P is the central conventional polarization factor for F data and
+:math:`c` is the central DWBA amplitude prefactor. Observed F/R values and
+their uncertainties are not broadened or converted.
+
+``calculation="convolve"`` evaluates field intensity at the existing measured
+points and applies :func:`fast_convolve_intensity`. Point-aligned six-circle
+records in radians are sufficient, so no scan rule is required. Like
+``fast_convolve``, this mode cannot recover unresolved detail between measured
+L points.
+
+``calculation="sample"`` applies :func:`sample_intensity` to a live DWBA
+callable. H and K remain fixed while the measurement's ``CTRScanGeometry``
+generates physical angles for each displaced L sample. If central measured
+records also exist, the scan rule must reproduce their physical geometry and
+scattering branch. Fixed widths are supported. Fitted widths would regenerate
+the quadrature grid on every iteration and are rejected; use
+``fit_resolution(..., calculation="convolve")`` for fitted DWBA resolution.
+
 Fitting resolution widths
 -------------------------
 
@@ -178,3 +208,7 @@ API reference
 .. autofunction:: orgui.datautils.xrayutils.CTRresolution.fast_convolve
 
 .. autofunction:: orgui.datautils.xrayutils.CTRresolution.sample_structure_factor
+
+.. autofunction:: orgui.datautils.xrayutils.CTRresolution.fast_convolve_intensity
+
+.. autofunction:: orgui.datautils.xrayutils.CTRresolution.sample_intensity

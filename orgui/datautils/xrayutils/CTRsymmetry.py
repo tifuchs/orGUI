@@ -34,6 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import itertools
 import math
+import warnings
 
 import numpy as np
 
@@ -559,6 +560,54 @@ class SurfaceSymmetryModel:
         unitcell.symmetry_metadata = self
         return unitcell
 
+    def variable_changes_for_representative_shift(self, site_id, parent_delta):
+        """Return Wyckoff variable changes for a representative displacement.
+
+        The variable-to-representative derivative is recovered from the
+        stored atom couplings, so it also works for metadata read from files.
+        Displacement components that leave the Wyckoff position are projected
+        out in the least-squares sense.
+
+        :param str site_id:
+            Site identifier.
+        :param parent_delta:
+            Representative displacement in parent fractional coordinates.
+        :returns:
+            Mapping from variable name to change. Empty if the site has no
+            variables or the couplings do not determine the derivative.
+        :rtype:
+            dict
+        """
+        names = tuple(self._site(site_id).variables)
+        if not names:
+            return {}
+        axis = {name: index for index, name in enumerate(COORDINATE_NAMES)}
+        for atom in self.atoms:
+            if atom.site_id != site_id or not atom.site_couplings:
+                continue
+            site_matrix = np.zeros((3, 3), dtype=np.float64)
+            for coupling in atom.site_couplings:
+                site_matrix[axis[coupling.coordinate], axis[coupling.axis]] = (
+                    coupling.factor
+                )
+            if abs(np.linalg.det(site_matrix)) < 1e-12:
+                continue
+            variable_matrix = np.zeros((3, len(names)), dtype=np.float64)
+            for coupling in atom.couplings:
+                if coupling.variable in names:
+                    variable_matrix[
+                        axis[coupling.coordinate],
+                        names.index(coupling.variable),
+                    ] = coupling.factor
+            jacobian = np.linalg.solve(site_matrix, variable_matrix)
+            changes = np.linalg.lstsq(
+                jacobian,
+                np.asarray(parent_delta, dtype=np.float64),
+                rcond=None,
+            )[0]
+            return {name: float(change) for name, change in zip(names, changes)}
+        return {}
+
     def _site(self, site_id):
         for site in self.sites:
             if site.site_id == site_id:
@@ -615,6 +664,14 @@ def sites_from_seed(
     accepted by ``pyxtal.pyxtal().from_seed()``, including a CIF path,
     pymatgen ``Structure``, or ASE ``Atoms``.
 
+    PyXtal works in the spglib standardized setting, which can differ from the
+    seed cell by an equivalent choice of basis vectors or origin. Site
+    coordinates, operation matrices, representatives, and variables are
+    mapped back to the seed cell, so the generated atoms reproduce the seed
+    structure. Each site representative is the symmetrized position of the
+    first matching seed atom, and the Wyckoff variables are the free
+    coordinates of that representative.
+
     :param seed:
         Structure seed accepted by PyXtal.
     :param float tol:
@@ -642,7 +699,16 @@ def sites_from_seed(
     """
     pyxtal = _import_pyxtal_class()
     crystal = pyxtal()
-    crystal.from_seed(seed, tol=tol, a_tol=a_tol, backend=backend, style=style)
+    structure = _seed_structure(seed, backend)
+    if structure is None:
+        crystal.from_seed(seed, tol=tol, a_tol=a_tol, backend=backend, style=style)
+        standard_to_seed = np.identity(4)
+    else:
+        # ``from_seed`` drops ``a_tol`` for pymatgen input and reduces CIF
+        # files to a primitive cell; load the seed cell itself instead so the
+        # standardization below matches the one PyXtal used.
+        crystal._from_pymatgen(structure, tol, a_tol, style=style)
+        standard_to_seed = _standard_to_seed_matrix(structure, tol, a_tol, style)
     sites = _with_unique_site_ids(
         _site_from_pyxtal_site(
             atom_site,
@@ -650,9 +716,13 @@ def sites_from_seed(
             iDW=iDW,
             oDW=oDW,
             occ=occ,
+            standard_to_seed=standard_to_seed,
+            seed_structure=structure,
         )
         for atom_site in crystal.atom_sites
     )
+    if structure is not None:
+        _warn_if_sites_differ_from_seed(sites, structure, max(2.0 * tol, 1e-6))
     return sites, int(crystal.group.number), crystal.group.symbol
 
 
@@ -1290,39 +1360,149 @@ def _import_pyxtal_group():
     return Group
 
 
-def _site_from_pyxtal_site(atom_site, variable_names, iDW, oDW, occ):
+def _seed_structure(seed, backend):
+    """Return ``seed`` as a pymatgen ``Structure`` in its own cell, if possible."""
+    try:
+        from pymatgen.core import Structure
+    except ImportError:
+        return None
+    if isinstance(seed, Structure):
+        return seed
+    if isinstance(seed, str):
+        return Structure.from_file(seed) if backend == "pymatgen" else None
+    try:
+        from ase import Atoms
+    except ImportError:
+        return None
+    if isinstance(seed, Atoms):
+        from pyxtal.util import ase2pymatgen
+
+        return ase2pymatgen(seed)
+    return None
+
+
+def _standard_to_seed_matrix(structure, tol, a_tol, style):
+    """Return the affine map from PyXtal standardized to seed coordinates.
+
+    PyXtal symmetrizes seeds with spglib in the setting selected by the Hall
+    number of ``style``. spglib defines ``x_std = P x_seed + p``; the inverse
+    of that affine map is returned as a 4-by-4 matrix.
+    """
+    from pyxtal.symmetry import Hall
+    from spglib import get_symmetry_dataset
+
+    cell = (
+        structure.lattice.matrix,
+        structure.frac_coords,
+        [site.species.elements[0].Z for site in structure],
+    )
+    dataset = get_symmetry_dataset(cell, tol, angle_tolerance=a_tol)
+    hall_number = Hall(_dataset_value(dataset, "number"), style=style).hall_default
+    if hall_number != _dataset_value(dataset, "hall_number"):
+        dataset = get_symmetry_dataset(
+            cell,
+            tol,
+            angle_tolerance=a_tol,
+            hall_number=hall_number,
+        )
+    seed_to_standard = np.identity(4)
+    # spglib returns rational matrices with float noise (e.g. 1e-17 entries).
+    seed_to_standard[:3, :3] = _snap_rational(
+        np.asarray(_dataset_value(dataset, "transformation_matrix"), dtype=np.float64)
+    )
+    seed_to_standard[:3, 3] = _dataset_value(dataset, "origin_shift")
+    return np.linalg.inv(seed_to_standard)
+
+
+def _dataset_value(dataset, key):
+    # spglib >= 2.5 returns an object, older versions a dict.
+    return dataset[key] if isinstance(dataset, dict) else getattr(dataset, key)
+
+
+def _snap_rational(values, denominator=48, tolerance=1e-8):
+    values = np.asarray(values, dtype=np.float64)
+    snapped = np.round(values * denominator) / denominator
+    return np.where(np.abs(values - snapped) < tolerance, snapped, values)
+
+
+def _site_from_pyxtal_site(
+    atom_site,
+    variable_names,
+    iDW,
+    oDW,
+    occ,
+    standard_to_seed=None,
+    seed_structure=None,
+):
     wp = atom_site.wp
-    representative = _wrap_fractional(atom_site.position)
+    element = str(atom_site.specie)
+    if standard_to_seed is None:
+        standard_to_seed = np.identity(4)
+    standard_to_seed = np.asarray(standard_to_seed, dtype=np.float64)
+    seed_to_standard = np.linalg.inv(standard_to_seed)
+
+    # Internal names for PyXtal's free coordinates in the standardized setting.
+    standard_names = tuple(f"_free{index}" for index in range(3))
     free_values = list(wp.get_free_xyzs(atom_site.position))
     if len(free_values) > len(variable_names):
         raise ValueError(
             f"Not enough Wyckoff variable names for {wp.get_label()}: "
             f"{len(free_values)} required."
         )
-    variables = {
-        variable_names[index]: float(value)
-        for index, value in enumerate(free_values)
-    }
-    base_position, coefficients = _primary_position_affine(
+    standard_variables = dict(zip(standard_names, map(float, free_values)))
+    primary = _primary_position_affine(
         wp,
-        free_values,
-        tuple(variables),
+        standard_names[: len(free_values)],
     )
-    primary = tuple(
-        AffineExpression(base_position[axis], dict(coefficients[axis]))
-        for axis in range(3)
-    )
-    coordinates = tuple(
-        _apply_operation_to_expressions(operation.affine_matrix, primary)
+    coordinates = [
+        _apply_operation_to_expressions(
+            standard_to_seed,
+            _apply_operation_to_expressions(operation.affine_matrix, primary),
+        )
         for operation in wp.ops
+    ]
+
+    representative_index, shift, seed_position = _representative_image(
+        coordinates,
+        standard_variables,
+        element,
+        seed_structure,
+    )
+    representative_expressions = tuple(
+        expression.shifted(float(shift[axis]))
+        for axis, expression in enumerate(coordinates[representative_index])
+    )
+    del coordinates[representative_index]
+    coordinates.insert(0, representative_expressions)
+    if seed_position is None:
+        seed_position = [
+            expression.evaluate(standard_variables)
+            for expression in representative_expressions
+        ]
+
+    coordinates, variables = _parameterize_by_representative(
+        coordinates,
+        np.asarray(seed_position, dtype=np.float64),
+        standard_names[: len(free_values)],
+        variable_names,
+    )
+    representative = np.asarray(
+        [expression.evaluate(variables) for expression in coordinates[0]],
+        dtype=np.float64,
+    )
+    general_operations = tuple(
+        standard_to_seed
+        @ np.asarray(operation.affine_matrix, dtype=np.float64)
+        @ seed_to_standard
+        for operation in _import_pyxtal_group()(wp.number)[0].ops
     )
     operation_matrices = _site_operation_matrices(
         wp,
         representative,
         coordinates,
         variables,
+        general_operations,
     )
-    element = str(atom_site.specie)
     return WyckoffSiteSpec(
         site_id=f"{element}_{wp.get_label()}",
         element=element,
@@ -1359,16 +1539,159 @@ def _with_unique_site_ids(sites):
     return tuple(unique_sites)
 
 
-def _site_operation_matrices(wp, representative, coordinates, variables):
-    group = _import_pyxtal_group()(wp.number)
-    general_operations = group[0].ops
+def _representative_image(coordinates, variables, element, seed_structure):
+    """Select the orbit image and lattice shift matching a seed atom.
+
+    The first seed atom of ``element`` that lies on the orbit selects the
+    representative, so it carries the coordinates given in the seed. Without a
+    seed structure the first orbit image wrapped into the unit cell is used.
+
+    :returns:
+        Tuple ``(image_index, lattice_shift, seed_position)``;
+        ``seed_position`` is ``None`` without a matching seed atom.
+    """
+    values = np.asarray(
+        [
+            [expression.evaluate(variables) for expression in coordinate]
+            for coordinate in coordinates
+        ],
+        dtype=np.float64,
+    )
+    if seed_structure is not None:
+        seed_positions = np.asarray(
+            [
+                site.frac_coords
+                for site in seed_structure
+                if site.species.elements[0].symbol == element
+            ],
+            dtype=np.float64,
+        )
+        if len(seed_positions):
+            difference = seed_positions[:, None, :] - values[None, :, :]
+            shifts = np.round(difference)
+            distances = np.linalg.norm(
+                (difference - shifts) @ seed_structure.lattice.matrix,
+                axis=-1,
+            )
+            closest = distances.min(axis=1)
+            # Symmetrization moves atoms by up to the tolerance; prefer seed
+            # order among atoms on this orbit, and fall back to the nearest.
+            on_orbit = np.flatnonzero(closest <= closest.min() + 1e-2)
+            atom = on_orbit[0]
+            image = int(np.argmin(distances[atom]))
+            return image, shifts[atom, image], seed_positions[atom]
+    return 0, -np.floor(values[0] + 1e-12), None
+
+
+def _parameterize_by_representative(
+    coordinates,
+    representative,
+    free_names,
+    variable_names,
+):
+    """Re-express orbit coordinates in free representative coordinates.
+
+    ``coordinates[0]`` must be the representative. Its independent axes, in
+    ``x, y, z`` order, become the Wyckoff variables, so a general position
+    has ``u, v, w = x, y, z`` and ``(x, x, 0)`` has ``u = x``. The variable
+    values are taken from ``representative`` on those axes.
+    """
+    dof = len(free_names)
+    if not dof:
+        return tuple(coordinates), {}
+    linear = np.asarray(
+        [
+            [expression.coefficients.get(name, 0.0) for name in free_names]
+            for expression in coordinates[0]
+        ],
+        dtype=np.float64,
+    )
+    candidates = []
+    for axes in itertools.combinations(range(3), dof):
+        determinant = abs(np.linalg.det(linear[list(axes)]))
+        if determinant > 1e-8:
+            # Prefer unit determinants, which keep integer coefficients.
+            candidates.append((not math.isclose(determinant, 1.0), axes))
+    if not candidates:
+        raise ValueError("Wyckoff position free coordinates are not independent.")
+    axes = list(min(candidates)[1])
+    to_free = np.linalg.inv(linear[axes])
+    names = tuple(variable_names[:dof])
+    axis_constants = np.asarray(
+        [coordinates[0][axis].constant for axis in axes],
+        dtype=np.float64,
+    )
+
+    def substitute(expression):
+        row = np.asarray(
+            [expression.coefficients.get(name, 0.0) for name in free_names],
+            dtype=np.float64,
+        )
+        factors = _snap_rational(row @ to_free)
+        coefficients = {
+            name: float(factor)
+            for name, factor in zip(names, factors)
+            if not math.isclose(factor, 0.0, abs_tol=1e-12)
+        }
+        return AffineExpression(
+            float(expression.constant - factors @ axis_constants),
+            coefficients,
+        )
+
+    parameterized = tuple(
+        tuple(substitute(expression) for expression in coordinate)
+        for coordinate in coordinates
+    )
+    variables = {
+        name: float(representative[axis]) for name, axis in zip(names, axes)
+    }
+    return parameterized, variables
+
+
+def _warn_if_sites_differ_from_seed(sites, structure, tolerance):
+    """Warn when generated parent orbits do not reproduce the seed atoms."""
+    lattice = structure.lattice.matrix
+    by_element = {}
+    for site in sites:
+        by_element.setdefault(site.element, []).extend(site.parent_positions())
+    worst = 0.0
+    for seed_site in structure:
+        element = seed_site.species.elements[0].symbol
+        positions = np.asarray(by_element.get(element, []), dtype=np.float64)
+        if not len(positions):
+            worst = np.inf
+            break
+        difference = seed_site.frac_coords - positions
+        difference -= np.round(difference)
+        worst = max(worst, np.linalg.norm(difference @ lattice, axis=1).min())
+    if worst > tolerance:
+        warnings.warn(
+            "Wyckoff sites assigned by PyXtal do not reproduce the seed "
+            f"structure: largest seed-atom deviation is {worst:.3g} Angstrom.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
+def _site_operation_matrices(
+    wp,
+    representative,
+    coordinates,
+    variables,
+    general_operations=None,
+):
+    if general_operations is None:
+        general_operations = tuple(
+            np.asarray(operation.affine_matrix, dtype=np.float64)
+            for operation in _import_pyxtal_group()(wp.number)[0].ops
+        )
     operation_matrices = []
     for coordinate in coordinates:
         target = _wrap_fractional(
             [expression.evaluate(variables) for expression in coordinate]
         )
         for operation in general_operations:
-            matrix = np.asarray(operation.affine_matrix, dtype=np.float64)
+            matrix = np.asarray(operation, dtype=np.float64)
             generated = _wrap_fractional(
                 matrix[:3, :3] @ representative + matrix[:3, 3]
             )
@@ -1383,28 +1706,30 @@ def _site_operation_matrices(wp, representative, coordinates, variables):
     return tuple(operation_matrices)
 
 
-def _primary_position_affine(wp, free_values, variable_names):
-    if not free_values:
-        return np.asarray(wp.get_position_from_free_xyzs([]), dtype=np.float64), (
-            {},
-            {},
-            {},
+def _primary_position_affine(wp, variable_names):
+    """Return the first Wyckoff coordinate as exact affine expressions.
+
+    PyXtal fills the free coordinates into the non-frozen axes and applies the
+    first Wyckoff operation (``get_position_from_free_xyzs`` without its
+    wrapping into the unit cell, which would break the affine form).
+    """
+    matrix = np.asarray(wp.ops[0].affine_matrix, dtype=np.float64)
+    frozen = set(int(axis) for axis in wp.get_frozen_axis())
+    free_axes = [axis for axis in range(3) if axis not in frozen]
+    if len(free_axes) != len(variable_names):
+        raise ValueError(
+            f"Wyckoff position {wp.get_label()} has {len(free_axes)} free "
+            f"coordinates, but {len(variable_names)} variable names were given."
         )
-    zeros = np.zeros(len(free_values), dtype=np.float64)
-    base_position = np.asarray(wp.get_position_from_free_xyzs(zeros), dtype=np.float64)
-    coefficients = []
+    expressions = []
     for axis in range(3):
-        coefficients.append({})
-    step = 1e-5
-    for index, variable in enumerate(variable_names):
-        probe = np.zeros(len(free_values), dtype=np.float64)
-        probe[index] = step
-        position = np.asarray(wp.get_position_from_free_xyzs(probe), dtype=np.float64)
-        delta = (position - base_position) / step
-        for axis, factor in enumerate(delta):
-            if not math.isclose(factor, 0.0, abs_tol=1e-12):
-                coefficients[axis][variable] = float(factor)
-    return base_position, tuple(coefficients)
+        coefficients = {
+            variable: float(matrix[axis, free_axis])
+            for variable, free_axis in zip(variable_names, free_axes)
+            if not math.isclose(matrix[axis, free_axis], 0.0, abs_tol=1e-12)
+        }
+        expressions.append(AffineExpression(float(matrix[axis, 3]), coefficients))
+    return tuple(expressions)
 
 
 def _apply_operation_to_expressions(matrix, expressions):

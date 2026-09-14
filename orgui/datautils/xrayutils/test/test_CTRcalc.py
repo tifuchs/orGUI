@@ -525,6 +525,134 @@ class TestPoissonSurface(unittest.TestCase):
             np.testing.assert_allclose(ref.basis[:, 4], 0.42)
         self.assertIsNotNone(film)
 
+    @staticmethod
+    def make_perovskite_cell(name):
+        """Return an ABO3(001)-like cell stored top layer first.
+
+        Layer 1 (AO) sits at z = 0 and layer 2 (BO2) at z = 0.5, but the
+        layer-2 rows come first (like the rutile(110) ``group_103.xtal``
+        model), and every atom has its own Debye-Waller factor and occupancy.
+        Any row permutation in the generated reference terminations then shows
+        up as a wrong in-plane registry or DW/occupancy.
+        """
+        cell = CTRcalc.UnitCell([3.905, 3.905, 3.905], [90.0, 90.0, 90.0], name=name)
+        atoms = (
+            ("Ti", [0.5, 0.5, 0.5], 0.20, 0.25, 0.90, 2),
+            ("O", [0.5, 0.0, 0.5], 0.45, 0.50, 1.00, 2),
+            ("O", [0.0, 0.5, 0.5], 0.75, 0.80, 0.80, 2),
+            ("Sr", [0.0, 0.0, 0.0], 0.30, 0.35, 0.95, 1),
+            ("O", [0.5, 0.5, 0.0], 0.60, 0.65, 0.85, 1),
+        )
+        for element, xyz, idw, odw, occ, layer in atoms:
+            cell.addAtom(element, xyz, idw, odw, occ, layer=layer)
+        cell.layerpos = {1.0: 0.0, 2.0: 0.5}
+        return cell
+
+    def make_perovskite_crystal(self, surface_form, film_layers):
+        film = CTRcalc.Film(self.make_perovskite_cell("film"), name="film")
+        film.basis[0] = film.basis_0[0] = film_layers
+        components = [film]
+        if surface_form is not None:
+            source = self.make_perovskite_cell("surface")
+            if surface_form == "bank":
+                source = generate_surface_termination_cells(
+                    source, source.layer_cycle.layers
+                )
+            components.append(
+                CTRfilm.PoissonSurface(
+                    source,
+                    profile=PoissonProfile(mean_change=0.0, alpha=1.0),
+                    name="surface",
+                )
+            )
+        bulk = self.make_perovskite_cell("bulk").translate_layered((0, 0, -2))
+        crystal = CTRcalc.SXRDCrystal(
+            bulk,
+            *components,
+            stacking=np.arange(1, len(components) + 1),
+            atten=0.005,
+        )
+        crystal.setEnergy(20000.0)
+        return crystal
+
+    def test_zero_roughness_surface_reproduces_film_rods(self):
+        """A same-material zero-roughness PoissonSurface must be a no-op.
+
+        The Film reference terminations are re-synced from the live Film basis
+        in ``createLayers``. ``UnitCell.supercell`` and
+        ``UnitCell.affine_layer_transform`` reorder rows, so a row-wise copy
+        gave atoms another atom's x, y, DW and occupancy: 00L stayed correct
+        but off-specular rods were off by up to a factor ~30.
+        """
+        L = np.linspace(0.05, 4.5, 200)
+        zeros = np.zeros_like(L)
+        for film_layers in (7.0, 8.0):  # exposes termination 1 and 2
+            reference = self.make_perovskite_crystal(None, film_layers)
+            for surface_form in ("source", "bank"):
+                crystal = self.make_perovskite_crystal(surface_form, film_layers)
+                for h, k in ((0, 0), (1, 0), (1, 1)):
+                    with self.subTest(
+                        film_layers=film_layers, form=surface_form, rod=(h, k)
+                    ):
+                        np.testing.assert_allclose(
+                            np.abs(crystal.F(zeros + h, zeros + k, L)) ** 2,
+                            np.abs(reference.F(zeros + h, zeros + k, L)) ** 2,
+                            rtol=1e-10,
+                        )
+
+    def test_film_reference_terminations_track_permuted_film_rows(self):
+        """Reference terminations must equal freshly generated ones.
+
+        Covers a Film whose rows are not grouped by layer, per-atom DW and
+        occupancy changed after binding, a surface slab two Film cells thick
+        (previously never re-synced), ``copy.deepcopy`` and a ``toStr`` /
+        ``fromStr`` round trip.
+        """
+        for repeats_z in (1, 2):
+            source = self.make_perovskite_cell("surface").supercell(
+                (1, 1, repeats_z)
+            )
+            bank = generate_surface_termination_cells(source, (1.0, 2.0))
+            surfaces = {
+                "bank": CTRfilm.PoissonSurface(
+                    bank, profile=PoissonProfile(mean_change=0.5, alpha=0.5)
+                ),
+            }
+            surfaces["round_trip"] = CTRfilm.PoissonSurface.fromStr(
+                surfaces["bank"].toStr()
+            )
+            for label, surface in surfaces.items():
+                with self.subTest(repeats_z=repeats_z, surface=label):
+                    film = CTRfilm.Film(
+                        self.make_perovskite_cell("film"), name="film"
+                    )
+                    film.basis[0] = 4.0
+                    film.createLayers()
+                    surface.stack_on(
+                        0.0,
+                        film.height_absolute,
+                        film.end_layer_number,
+                        below_state=film.layer_state,
+                        below_component=film,
+                    )
+                    copied = copy.deepcopy(surface)
+                    film_uc = copied.underlying_film.unitcell
+                    film_uc.basis[:, 4] = [0.9, 0.1, 1.3, 0.4, 0.7]
+                    film_uc.basis[:, 6] = [0.5, 0.6, 0.7, 0.8, 0.9]
+                    film_uc.basis[1, 3] += 0.01
+                    film_uc.basis[2, 3] -= 0.02
+                    copied.createLayers()
+
+                    fresh = generate_surface_termination_cells(
+                        film_uc.supercell((1, 1, repeats_z)), (1.0, 2.0)
+                    )
+                    for layer, ref in copied._film_termination_ucs.items():
+                        np.testing.assert_allclose(
+                            ref.basis[:, :7],
+                            fresh[layer].basis[:, :7],
+                            atol=1e-12,
+                        )
+
     def test_create_layers_assigns_convolved_occupancies(self):
         surface = CTRfilm.PoissonSurface(
             self.unitcell,

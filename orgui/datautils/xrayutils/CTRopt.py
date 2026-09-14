@@ -81,6 +81,7 @@ _SCALE_QUANTITIES = {
     "R": "reflectivity",
 }
 _SCALE_QUANTITY_KEYS = {value: key for key, value in _SCALE_QUANTITIES.items()}
+_DWBA_ANGLE_NAMES = ("alpha", "delta", "gamma", "omega", "chi", "phi")
 
 
 class CTROptimizer:
@@ -102,6 +103,8 @@ class CTROptimizer:
         self.calculated_CTRs = None
         self._resolution_calculated_ctrs = None
         self._resolution_input_ctrs = None
+        self._dwba_enabled = False
+        self._dwba_bulk_attenuation = 0.0
         self._prepared = False
         self._dw_zconstraints = False
         self.nic = 0
@@ -265,6 +268,47 @@ class CTROptimizer:
         policy = "scaled" if individual else "global"
         self.set_scale_policies({"F": policy, "R": policy})
 
+    def set_dwba(self, enabled=True, *, bulk_attenuation=0.0):
+        """Configure live semi-infinite DWBA predictions for fitting.
+
+        The optimizer uses the copied crystal's existing DWBA orientation,
+        energy, lattice, and reference transform. Experimental observations
+        and uncertainties remain in each CTR's stored representation.
+
+        :param bool enabled: Enable or disable DWBA prediction.
+        :param float bulk_attenuation:
+            Optional nonnegative empirical exponent per bulk repeat.
+        :raises TypeError: If ``enabled`` is not boolean.
+        :raises ValueError: If ``bulk_attenuation`` is invalid.
+        """
+        if not isinstance(enabled, bool | np.bool_):
+            raise TypeError("enabled must be boolean")
+        attenuation = np.asarray(bulk_attenuation)
+        if attenuation.ndim != 0 or not np.isrealobj(attenuation):
+            raise ValueError(
+                "bulk_attenuation must be a finite nonnegative scalar"
+            )
+        attenuation = float(attenuation)
+        if not np.isfinite(attenuation) or attenuation < 0.0:
+            raise ValueError(
+                "bulk_attenuation must be a finite nonnegative scalar"
+            )
+        enabled = bool(enabled)
+        if (
+            enabled != self._dwba_enabled
+            or attenuation != self._dwba_bulk_attenuation
+        ):
+            self._dwba_enabled = enabled
+            self._dwba_bulk_attenuation = attenuation
+            self._require_reprepare()
+
+    def get_dwba(self):
+        """Return the current DWBA fitting configuration."""
+        return {
+            "enabled": self._dwba_enabled,
+            "bulk_attenuation": self._dwba_bulk_attenuation,
+        }
+
     def register_fit_callback(
         self,
         function: Callable,
@@ -312,6 +356,70 @@ class CTROptimizer:
                 raise ValueError(
                     f"{ctr!r}: kinematical CTR fitting supports "
                     "structure-factor data only."
+                )
+
+    def _validate_measurement_input(self):
+        """Require aligned finite real data and positive uncertainties."""
+        for ctr in self.CTRs:
+            arrays = {
+                "H": np.asarray(ctr.harr),
+                "K": np.asarray(ctr.karr),
+                "L": np.asarray(ctr.l),
+                "observations": np.asarray(ctr.sfI),
+                "uncertainties": np.asarray(ctr.err),
+            }
+            shape = arrays["L"].shape
+            if len(shape) != 1 or any(
+                values.shape != shape for values in arrays.values()
+            ):
+                raise ValueError(
+                    f"{ctr!r}: H, K, L, observations, and uncertainties "
+                    "must be one-dimensional and point-aligned"
+                )
+            for name in ("H", "K", "L", "observations"):
+                values = arrays[name]
+                if not np.isrealobj(values) or not np.all(np.isfinite(values)):
+                    raise ValueError(f"{ctr!r}: {name} must be finite real values")
+            uncertainty = arrays["uncertainties"]
+            if (
+                not np.isrealobj(uncertainty)
+                or not np.all(np.isfinite(uncertainty))
+                or np.any(uncertainty <= 0.0)
+            ):
+                raise ValueError(
+                    f"{ctr!r}: uncertainties must be finite and strictly positive"
+                )
+
+    def _validate_dwba_input(self):
+        """Validate measurement metadata required by live DWBA prediction."""
+        if not isinstance(self.xtal, SXRDCrystal):
+            raise TypeError("DWBA fitting requires an SXRDCrystal model")
+        if self._fit_resolution and self.resolution_calculation == "sample":
+            raise ValueError(
+                "DWBA fitting does not support fitted-width resolution sampling; "
+                "use calculation='convolve' or fixed sampling widths"
+            )
+        for ctr in self.CTRs:
+            if ctr.reduction.polarization is None:
+                raise ValueError(
+                    f"{ctr!r}: DWBA fitting requires polarization-reduction "
+                    "metadata"
+                )
+            angles = getattr(ctr, "angles", None)
+            if angles is None and ctr.scan_geometry is None:
+                raise ValueError(
+                    f"{ctr!r}: DWBA fitting requires central angle records "
+                    "or CTRScanGeometry"
+                )
+            if (
+                self.resolution is not None
+                and self.resolution_calculation == "sample"
+                and ctr.scan_geometry is None
+            ):
+                raise ValueError(
+                    f"{ctr!r}: DWBA resolution sampling requires "
+                    "CTRScanGeometry; use calculation='convolve' with central "
+                    "angle records"
                 )
 
     def set_resolution(self, resolution, calculation=None):
@@ -497,8 +605,210 @@ class CTROptimizer:
         self._set_resolution_parameters(parameters[:3])
         return parameters[3:]
 
-    def _calculated_amplitude(self, ctr, index):
-        """Return the calculated amplitude for one CTR, with resolution."""
+    def _dwba_measured_angles(self, ctr):
+        """Return validated point-aligned measured Vlieg records in rad."""
+        angles = getattr(ctr, "angles", None)
+        if angles is None:
+            return None
+        angles = np.asarray(angles)
+        if angles.dtype.names != _DWBA_ANGLE_NAMES or angles.shape != ctr.l.shape:
+            raise ValueError(
+                f"{ctr!r}: central angle records must be point-aligned Vlieg "
+                "records with alpha, delta, gamma, omega, chi, and phi"
+            )
+        if not all(np.all(np.isfinite(angles[name])) for name in _DWBA_ANGLE_NAMES):
+            raise ValueError(f"{ctr!r}: central angle records must be finite")
+        return angles
+
+    def _dwba_generated_angles(self, ctr, h, k, l):  # noqa: E741
+        """Generate point-aligned Vlieg records from one CTR scan rule."""
+        geometry = ctr.scan_geometry
+        if geometry is None:
+            raise ValueError(f"{ctr!r}: CTRScanGeometry is required")
+        fixed_angle = 0.0 if geometry.fixed == "eq" else geometry.angle
+        try:
+            return CTRplotutil._calculate_angles_zmode(
+                h,
+                k,
+                l,
+                self.xtal.dwba._vlieg_angles(),
+                fixed_angle,
+                fixed=geometry.fixed,
+                chi=0.0,
+                phi=0.0,
+                hkl_transform=self.xtal.uc_bulk.refHKLTransform,
+                mirrorx=geometry.mirrorx,
+            )
+        except (TypeError, ValueError) as error:
+            raise type(error)(f"{ctr!r}: {error}") from error
+
+    def _dwba_central_angles(self, ctr):
+        """Return authoritative measured or generated central angle records."""
+        measured = self._dwba_measured_angles(ctr)
+        if measured is not None:
+            return measured
+        return self._dwba_generated_angles(ctr, ctr.harr, ctr.karr, ctr.l)
+
+    def _validate_dwba_central_coordinates(self, ctr, angles):
+        """Require every central Vlieg record to reconstruct the measured HKL."""
+        polarization = ctr.reduction.polarization
+        polarization_i, polarization_f, _ = self.xtal.dwba._polarization_pairs(
+            polarization.s_fraction, polarization.outgoing
+        )[0]
+        prepared = self.xtal.dwba.prepare_from_vlieg(
+            *(angles[name] for name in _DWBA_ANGLE_NAMES),
+            polarization_i=polarization_i,
+            polarization_f=polarization_f,
+        )
+        expected_hkl = np.vstack((ctr.harr, ctr.karr, ctr.l))
+        if not np.allclose(
+            prepared.hkl.reshape(3, -1), expected_hkl, rtol=1e-7, atol=1e-8
+        ):
+            raise ValueError(
+                f"{ctr!r}: central angle records do not reproduce every "
+                "measured H, K, and L"
+            )
+
+    @staticmethod
+    def _dwba_beam_directions(angles):
+        """Return incident and outgoing unit directions in the sample frame."""
+        alpha = angles["alpha"]
+        delta = angles["delta"]
+        gamma = angles["gamma"]
+        omega = angles["omega"]
+        cos_omega = np.cos(omega)
+        sin_omega = np.sin(omega)
+
+        incident_alpha = np.stack(
+            (np.zeros_like(alpha), np.cos(alpha), -np.sin(alpha)), axis=-1
+        )
+        outgoing_alpha = np.stack(
+            (
+                np.sin(delta) * np.cos(gamma),
+                np.cos(delta) * np.cos(gamma),
+                np.sin(gamma),
+            ),
+            axis=-1,
+        )
+
+        def rotate_to_sample(vectors):
+            rotated = np.empty_like(vectors)
+            rotated[..., 0] = (
+                cos_omega * vectors[..., 0] - sin_omega * vectors[..., 1]
+            )
+            rotated[..., 1] = (
+                sin_omega * vectors[..., 0] + cos_omega * vectors[..., 1]
+            )
+            rotated[..., 2] = vectors[..., 2]
+            return rotated
+
+        return rotate_to_sample(incident_alpha), rotate_to_sample(outgoing_alpha)
+
+    def _validate_dwba_sampling_geometry(self, ctr, central_angles):
+        """Require a scan rule reproducing the central measured geometry."""
+        generated = self._dwba_generated_angles(
+            ctr, ctr.harr, ctr.karr, ctr.l
+        )
+        if getattr(ctr, "angles", None) is None:
+            return
+        central_directions = self._dwba_beam_directions(central_angles)
+        generated_directions = self._dwba_beam_directions(generated)
+        equivalent = all(
+            np.allclose(central, solved, rtol=1e-7, atol=1e-8)
+            for central, solved in zip(central_directions, generated_directions)
+        )
+        if not equivalent:
+            raise ValueError(
+                f"{ctr!r}: CTRScanGeometry does not reproduce the central "
+                "measured geometry or scattering branch"
+            )
+
+    def _dwba_intensity_and_prefactor(self, ctr, angles):
+        """Evaluate requested polarization pairs and return R and c."""
+        reduction = ctr.reduction.polarization
+        state = self.xtal.dwba
+        intensity = None
+        prefactor = None
+        for polarization_i, polarization_f, weight in state._polarization_pairs(
+            reduction.s_fraction, reduction.outgoing
+        ):
+            result = state.evaluate_from_vlieg(
+                *(angles[name] for name in _DWBA_ANGLE_NAMES),
+                polarization_i=polarization_i,
+                polarization_f=polarization_f,
+                bulk_mode="semi_infinite",
+                bulk_attenuation=self._dwba_bulk_attenuation,
+            )
+            contribution = weight * np.asarray(result.reflectivity)
+            intensity = (
+                contribution if intensity is None else intensity + contribution
+            )
+            if prefactor is None:
+                prefactor = np.asarray(result.amplitude_prefactor)
+        intensity = np.asarray(intensity, dtype=np.float64)
+        if not np.all(np.isfinite(intensity)) or np.any(intensity < 0.0):
+            raise ValueError(
+                f"{ctr!r}: DWBA field intensity is not nonnegative finite"
+            )
+        return intensity, prefactor
+
+    def _dwba_prediction(self, ctr):
+        """Return one live DWBA prediction in the CTR's stored quantity."""
+        central_angles = self._dwba_central_angles(ctr)
+        self._validate_dwba_central_coordinates(ctr, central_angles)
+        if self.resolution is None:
+            intensity, prefactor = self._dwba_intensity_and_prefactor(
+                ctr, central_angles
+            )
+            broadened = intensity
+        elif self.resolution_calculation == "convolve":
+            intensity, prefactor = self._dwba_intensity_and_prefactor(
+                ctr, central_angles
+            )
+            broadened = CTRresolution.fast_convolve_intensity(
+                ctr.harr,
+                ctr.karr,
+                ctr.l,
+                intensity,
+                self.resolution,
+                central_angles,
+            )
+        else:
+            self._validate_dwba_sampling_geometry(ctr, central_angles)
+            sampled_prefactor = {}
+
+            def intensity_at(h, k, l):  # noqa: E741
+                angles = self._dwba_generated_angles(ctr, h, k, l)
+                values, prefactors = self._dwba_intensity_and_prefactor(ctr, angles)
+                points = ctr.l.size
+                order = values.size // points
+                sampled_prefactor["central"] = np.asarray(prefactors).reshape(
+                    points, order
+                )[:, order // 2]
+                return values
+
+            broadened = CTRresolution.sample_intensity(
+                ctr.harr,
+                ctr.karr,
+                ctr.l,
+                intensity_at,
+                self.resolution,
+                central_angles,
+            )
+            prefactor = sampled_prefactor["central"]
+
+        if ctr.reduction.quantity == "reflectivity":
+            return np.ascontiguousarray(broadened)
+        polarization_factor = ctr.reduction.polarization.polarization_factor
+        if polarization_factor is None:
+            polarization_factor = 1.0
+        prediction = np.sqrt(broadened / polarization_factor) / np.abs(prefactor)
+        return np.ascontiguousarray(prediction)
+
+    def _calculated_value(self, ctr, index):
+        """Return the calculated value for one CTR in its stored quantity."""
+        if self._dwba_enabled:
+            return self._dwba_prediction(ctr)
         if self.resolution is None:
             return np.abs(self.xtal.F(ctr.harr, ctr.karr, ctr.l))
         if self._resolution_calculated_ctrs is None:
@@ -512,13 +822,24 @@ class CTROptimizer:
     def _calculation_inputs(self):
         """Return shared model, observation, and uncertainty values per CTR.
         """
+        if self._dwba_enabled:
+            with self.xtal.dwba.batch():
+                predictions = [
+                    self._calculated_value(ctr, index)
+                    for index, ctr in enumerate(self.CTRs)
+                ]
+        else:
+            predictions = [
+                self._calculated_value(ctr, index)
+                for index, ctr in enumerate(self.CTRs)
+            ]
         calculations = []
-        for index, ctr in enumerate(self.CTRs):
+        for ctr, prediction in zip(self.CTRs, predictions):
             angle_correction = self._angle_correction(ctr)
             calculations.append(
                 _CTRCalculation(
                     ctr=ctr,
-                    prediction=self._calculated_amplitude(ctr, index),
+                    prediction=prediction,
                     observation=ctr.sfI * angle_correction,
                     uncertainty=ctr.err * angle_correction,
                     angle_correction=angle_correction,
@@ -640,7 +961,7 @@ class CTROptimizer:
         try:
             if x is not None:
                 self.set_parameters(x)
-            elif self.resolution is not None and (
+            elif not self._dwba_enabled and self.resolution is not None and (
                 self._resolution_calculated_ctrs is None
             ):
                 self._update_resolution_cache()
@@ -711,7 +1032,11 @@ class CTROptimizer:
             if ctr.err is None:
                 raise ValueError(f"Cannot prepare a fit without errors for {ctr!r}")
         try:
-            self._validate_kinematical_input()
+            self._validate_measurement_input()
+            if self._dwba_enabled:
+                self._validate_dwba_input()
+            else:
+                self._validate_kinematical_input()
             self.startp, self.lower_bounds, self.higher_bounds = (
                 self.xtal.getStartParamAndLimits()
             )
@@ -763,7 +1088,8 @@ class CTROptimizer:
             )
             counter += callback.n_pars
         self._set_model_parameters(x[counter:])
-        self._update_resolution_cache()
+        if not self._dwba_enabled:
+            self._update_resolution_cache()
 
     def set_errors(self, xerror):
         """Split fitted errors across resolution, callbacks, and model."""
@@ -1217,6 +1543,13 @@ class CTROptAngleCorrection(CTROptimizer):
         self.phasevelocity = 1.0
         self.phase_error = None
         self.amp_error = None
+
+    def set_dwba(self, enabled=True, *, bulk_attenuation=0.0):
+        """Reject the unsupported combination of DWBA and angle correction."""
+        raise ValueError(
+            "DWBA fitting is not supported by CTROptAngleCorrection; use "
+            "CTROptimizer"
+        )
 
     @property
     def useAnglecorr(self):

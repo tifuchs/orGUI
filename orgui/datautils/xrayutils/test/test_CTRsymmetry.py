@@ -704,6 +704,197 @@ class TestPyxtalRutileSurfaceSymmetry(unittest.TestCase):
         np.testing.assert_allclose(rebuilt.alpha, unitcell.alpha, atol=1e-8)
 
 
+@unittest.skipUnless(
+    HAS_PYXTAL and HAS_PYMATGEN,
+    "PyXtal symmetry tests require PyXtal",
+)
+class TestPyxtalSeedSetting(unittest.TestCase):
+    """Seeds whose cell differs from the spglib standardized setting."""
+
+    # Columns: C2/c cell vectors of a tilted perovskite -> 2x2x2 pseudocubic.
+    C2C_TO_SURFACE = np.asarray([[0, 1, 1], [0, -1, 1], [1, 0, 1]], float).T
+    ATOL_ANGSTROM = 1e-10
+
+    @staticmethod
+    def make_c2c_seed(o_general=(0.282, 0.001, 0.283)):
+        """Tilted LaNiO3 in C2/c; spglib standardizes it as (x, -y, 2x - z)."""
+        from pymatgen.core import Lattice, Structure
+
+        a_ip, c_pc = 3.905, 3.807
+        b = c = np.sqrt(2.0) * a_ip
+        a = np.hypot(2.0 * c_pc, c)
+        beta = 180.0 - np.degrees(np.arctan2(2.0 * c_pc, c))
+        return Structure.from_spacegroup(
+            15,
+            Lattice.monoclinic(a, b, c, beta),
+            ["La", "Ni", "O", "O"],
+            [
+                [0.0, 0.25, 0.25],
+                [0.25, 0.25, 0.0],
+                [0.0, 0.810, 0.25],
+                list(o_general),
+            ],
+        )
+
+    def assert_positions_match(self, elements, fractional, structure):
+        """Assert both atom sets coincide modulo lattice translations."""
+        lattice = structure.lattice.matrix
+        self.assertEqual(len(fractional), len(structure))
+        for element, position in zip(elements, fractional):
+            difference = structure.frac_coords - np.asarray(position)
+            difference -= np.round(difference)
+            distances = np.linalg.norm(difference @ lattice, axis=1)
+            same_element = np.asarray(
+                [site.species.elements[0].symbol == element for site in structure]
+            )
+            self.assertLess(distances[same_element].min(), self.ATOL_ANGSTROM)
+
+    def assert_sites_reproduce_seed(self, sites, seed):
+        elements = []
+        positions = []
+        for site in sites:
+            for position in site.parent_positions():
+                elements.append(site.element)
+                positions.append(position)
+        self.assert_positions_match(elements, positions, seed)
+        for site in sites:
+            representative = np.asarray(site.representative_parent_fractional)
+            np.testing.assert_allclose(
+                site.parent_positions()[0],
+                representative,
+                atol=1e-12,
+            )
+
+    def make_c2c_surface_unitcell(self, seed, tol=1e-3):
+        spec = CTRsymmetry.SurfaceCellSpec(
+            seed.lattice.abc,
+            seed.lattice.angles,
+            self.C2C_TO_SURFACE,
+            translation_range=2,
+        )
+        return CTRsymmetry.surface_unitcell_from_seed(seed, spec, "LNO", tol=tol)
+
+    def assert_unitcell_matches_supercell(self, unitcell, seed):
+        supercell = seed.copy()
+        supercell.make_supercell(self.C2C_TO_SURFACE.T)
+        self.assert_positions_match(
+            unitcell.names,
+            unitcell.basis[:, 1:4],
+            supercell,
+        )
+
+    def test_c2c_sites_are_mapped_back_to_seed_setting(self):
+        seed = self.make_c2c_seed()
+
+        for tol in (1e-3, 1e-4, 1e-5):
+            with self.subTest(tol=tol):
+                sites, number, _ = CTRsymmetry.sites_from_seed(seed, tol=tol)
+
+                self.assertEqual(number, 15)
+                self.assertEqual(
+                    [site.site_id for site in sites],
+                    ["La_4e", "Ni_4c", "O_4e", "O_8f"],
+                )
+                self.assert_sites_reproduce_seed(sites, seed)
+                general = sites[3]
+                self.assertEqual(general.variables.keys(), {"u", "v", "w"})
+                np.testing.assert_allclose(
+                    [general.variables[name] for name in ("u", "v", "w")],
+                    general.representative_parent_fractional,
+                    atol=1e-12,
+                )
+
+    def test_c2c_surface_cell_matches_pymatgen_supercell(self):
+        seed = self.make_c2c_seed()
+
+        unitcell = self.make_c2c_surface_unitcell(seed)
+
+        self.assertEqual(len(unitcell.basis), 40)
+        self.assert_unitcell_matches_supercell(unitcell, seed)
+
+    def test_origin_shifted_seed_is_reproduced(self):
+        from pymatgen.core import Lattice, Structure
+
+        u = 0.30569
+        shift = np.asarray([0.1, 0.2, 0.3])
+        seed = Structure(
+            Lattice.tetragonal(4.653255, 2.9692),
+            ["Ru", "Ru", "O", "O", "O", "O"],
+            np.asarray(
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.5, 0.5, 0.5],
+                    [u, u, 0.0],
+                    [1.0 - u, 1.0 - u, 0.0],
+                    [0.5 - u, 0.5 + u, 0.5],
+                    [0.5 + u, 0.5 - u, 0.5],
+                ]
+            )
+            + shift,
+        )
+
+        sites, number, _ = CTRsymmetry.sites_from_seed(seed, tol=1e-3)
+
+        self.assertEqual(number, 136)
+        self.assert_sites_reproduce_seed(sites, seed)
+        np.testing.assert_allclose(
+            sites[1].representative_parent_fractional,
+            [u + 0.1, u + 0.2, 0.3],
+            atol=1e-12,
+        )
+
+    def test_set_wyckoff_site_parameter_updates_variables(self):
+        seed = self.make_c2c_seed()
+        unitcell = self.make_c2c_surface_unitcell(seed)
+        site = unitcell.wyckoff("O_8f")
+        new_representative = np.asarray(site["representative_parent_fractional"])
+        new_representative += (0.004, -0.002, 0.003)
+
+        for axis, value in zip("xyz", new_representative):
+            unitcell.set_wyckoff_site_parameter("O_8f", axis, value)
+
+        site = unitcell.wyckoff("O_8f")
+        np.testing.assert_allclose(
+            [site["variables"][name] for name in ("u", "v", "w")],
+            new_representative,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            site["representative_parent_fractional"],
+            new_representative,
+            atol=1e-12,
+        )
+        # The moved cell equals a cell built from the moved seed.
+        moved_seed = self.make_c2c_seed(new_representative)
+        self.assert_unitcell_matches_supercell(unitcell, moved_seed)
+
+        # Absolute Wyckoff parameters start from the updated reference values.
+        basis = unitcell.basis.copy()
+        unitcell.addWyckoffParameters("O_8f")
+        np.testing.assert_allclose(
+            unitcell.getInitialParameters(),
+            new_representative,
+            atol=1e-12,
+        )
+        unitcell.setFitParameters(new_representative)
+        np.testing.assert_allclose(unitcell.basis, basis, atol=1e-12)
+
+    def test_set_wyckoff_site_parameter_updates_special_site_variable(self):
+        seed = self.make_c2c_seed()
+        unitcell = self.make_c2c_surface_unitcell(seed)
+        site = unitcell.wyckoff("O_4e")
+        (variable,) = site["variables"]
+        free_axis = "y"
+        value = site["representative_parent_fractional"][1] + 0.01
+
+        unitcell.set_wyckoff_site_parameter("O_4e", free_axis, value)
+
+        self.assertAlmostEqual(unitcell.wyckoff("O_4e")["variables"][variable], value)
+        # A displacement off the Wyckoff position leaves the variable unchanged.
+        unitcell.set_wyckoff_site_parameter("O_4e", "x", 0.01)
+        self.assertAlmostEqual(unitcell.wyckoff("O_4e")["variables"][variable], value)
+
+
 class TestOptionalSymmetryImports(unittest.TestCase):
     def test_missing_pyxtal_reports_optional_dependency(self):
         real_import = __import__
