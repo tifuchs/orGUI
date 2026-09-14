@@ -2791,19 +2791,33 @@ class UnitCell(Lattice):
         surface_deltas,
     ):
         model = self.symmetry_metadata
+        site = model._site(site_id)
+        parent_delta = np.zeros(3, dtype=np.float64)
+        parent_delta[axis_index] = (
+            value - site.representative_parent_fractional[axis_index]
+        )
+        # Keep the Wyckoff variables (reference values of absolute Wyckoff
+        # parameters) consistent with the moved representative.
+        variable_changes = model.variable_changes_for_representative_shift(
+            site_id,
+            parent_delta,
+        )
+        updated_site = dataclasses.replace(
+            site,
+            representative_parent_fractional=tuple(
+                value if index == axis_index else coordinate
+                for index, coordinate in enumerate(
+                    site.representative_parent_fractional
+                )
+            ),
+            variables={
+                name: variable + variable_changes.get(name, 0.0)
+                for name, variable in site.variables.items()
+            },
+        )
         model.sites = tuple(
-            dataclasses.replace(
-                site,
-                representative_parent_fractional=tuple(
-                    value if index == axis_index else coordinate
-                    for index, coordinate in enumerate(
-                        site.representative_parent_fractional
-                    )
-                ),
-            )
-            if site.site_id == site_id
-            else site
-            for site in model.sites
+            updated_site if other.site_id == site_id else other
+            for other in model.sites
         )
         transform = model.surface_spec.transform
         model.atoms = [
