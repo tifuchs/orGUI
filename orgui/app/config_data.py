@@ -96,6 +96,22 @@ class CorrectionState:
     # an absolutely scaled structure factor (issue #15); a relative one does
     # not use it.
     beam_flux_density: float | None = None
+    # The beam shape the footprint dialog describes the incident beam with --
+    # analytical or measured, and every input either needs. Kept in the same
+    # units the dialog itself shows them in (IntegrationCorrectionsDialog.
+    # settings()), not converted to SI: an analytical shape's numeric values
+    # are only meaningful together with its name (a width in micrometer for
+    # one shape, a dimensionless flatness or skew for another), so there is
+    # no single physical unit to convert them to. ``None``/empty means "this
+    # configuration predates them, or the dialog was never opened".
+    beam_shape_analytical: bool | None = None
+    beam_shape_name: str | None = None
+    beam_shape_values: tuple[float, ...] = ()
+    beam_profile_file: str | None = None
+    beam_profile_content: str | None = None
+    beam_profile_unit: str | None = None
+    beam_profile_center: str | None = None
+    beam_profile_offset_um: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible correction-state dictionary."""
@@ -113,6 +129,9 @@ class CorrectionState:
         )
         values["excluded_frames"] = tuple(
             int(value) for value in values.get("excluded_frames", ())
+        )
+        values["beam_shape_values"] = tuple(
+            float(value) for value in values.get("beam_shape_values", ())
         )
         return cls(**values)
 
@@ -389,6 +408,19 @@ def corrections_to_nxdict(state):
                 "@beam_flux_density_unit": "1/(s m^2)",
             },
         ),
+        # The dialog's own display units, not SI: see CorrectionState.
+        "beam_shape": _nx_group(
+            {
+                "analytical": state.beam_shape_analytical,
+                "shape": state.beam_shape_name,
+                "profile_file": state.beam_profile_file,
+                "profile_content": state.beam_profile_content,
+                "profile_unit": state.beam_profile_unit,
+                "profile_center": state.beam_profile_center,
+                "profile_offset": state.beam_profile_offset_um,
+            },
+            units={"@profile_offset_unit": "micron"},
+        ),
     }
     if state.monitor_corrections:
         nxdict["normalization"]["monitor_corrections"] = _string_array(
@@ -397,6 +429,10 @@ def corrections_to_nxdict(state):
     if state.excluded_frames:
         nxdict["excluded_frames"] = np.asarray(
             state.excluded_frames, dtype=np.int64
+        )
+    if state.beam_shape_values:
+        nxdict["beam_shape"]["shape_values"] = np.asarray(
+            state.beam_shape_values, dtype=np.float64
         )
     if state.uncertainty_provenance:
         nxdict["uncertainty_provenance"] = _nx_group(
@@ -464,6 +500,24 @@ def corrections_from_nxdict(nxdict):
     ):
         if key in footprint:
             values[name] = float(footprint[key])
+    beam_shape = _read_group(nxdict, "beam_shape")
+    if "analytical" in beam_shape:
+        values["beam_shape_analytical"] = bool(beam_shape["analytical"])
+    for name, key in (
+        ("beam_shape_name", "shape"),
+        ("beam_profile_file", "profile_file"),
+        ("beam_profile_content", "profile_content"),
+        ("beam_profile_unit", "profile_unit"),
+        ("beam_profile_center", "profile_center"),
+    ):
+        if key in beam_shape:
+            values[name] = str(beam_shape[key])
+    if "profile_offset" in beam_shape:
+        values["beam_profile_offset_um"] = float(beam_shape["profile_offset"])
+    if "shape_values" in beam_shape:
+        values["beam_shape_values"] = tuple(
+            float(v) for v in np.atleast_1d(beam_shape["shape_values"])
+        )
     return CorrectionState(**values)
 
 
@@ -659,10 +713,14 @@ class ConfigData:
             sample_length_m = None
             sample_width_m = None
             beam_flux_density = None
+            beam_shape = {}
             if footprint_dialog is not None:
                 sample_length_m = footprint_dialog.sampleLength()
                 sample_width_m = footprint_dialog.sampleWidth()
                 beam_flux_density = footprint_dialog.beamFluxDensity()
+                # The dialog's own settings() dict, in its own display units;
+                # see CorrectionState.beam_shape_values.
+                beam_shape = footprint_dialog.settings()
             corrections = CorrectionState(
                 use_mask=bool(options.get("mask", False)) or repair_enabled,
                 use_background=getattr(gui, "background_image", None)
@@ -703,6 +761,14 @@ class ConfigData:
                 sample_length_m=sample_length_m,
                 sample_width_m=sample_width_m,
                 beam_flux_density=beam_flux_density,
+                beam_shape_analytical=beam_shape.get("analytical"),
+                beam_shape_name=beam_shape.get("shape"),
+                beam_shape_values=tuple(beam_shape.get("shape_values", ())),
+                beam_profile_file=beam_shape.get("profile_file"),
+                beam_profile_content=beam_shape.get("profile_content"),
+                beam_profile_unit=beam_shape.get("profile_unit"),
+                beam_profile_center=beam_shape.get("profile_center"),
+                beam_profile_offset_um=beam_shape.get("profile_offset"),
             )
             roi = ROIState(
                 region=dict(options.get("region", {})),
@@ -787,6 +853,8 @@ class ConfigData:
                 self.corrections.sample_length_m is not None
                 or self.corrections.sample_width_m is not None
                 or self.corrections.beam_flux_density is not None
+                or self.corrections.beam_shape_name is not None
+                or self.corrections.beam_profile_file is not None
             ):
                 corrections_dialog = getattr(
                     gui.scanSelector, "correctionsDialog", None
@@ -805,6 +873,28 @@ class ConfigData:
                         footprint_dialog.setBeamFluxDensity(
                             self.corrections.beam_flux_density
                         )
+                    # The dialog's own setSettings(), in its own display
+                    # units; only the keys this configuration actually
+                    # recorded are passed, so the rest of the dialog is left
+                    # alone (setSettings()'s own contract).
+                    beam_shape = {}
+                    for key, value in (
+                        ("analytical", self.corrections.beam_shape_analytical),
+                        ("shape", self.corrections.beam_shape_name),
+                        ("profile_file", self.corrections.beam_profile_file),
+                        ("profile_content", self.corrections.beam_profile_content),
+                        ("profile_unit", self.corrections.beam_profile_unit),
+                        ("profile_center", self.corrections.beam_profile_center),
+                        ("profile_offset", self.corrections.beam_profile_offset_um),
+                    ):
+                        if value is not None:
+                            beam_shape[key] = value
+                    if self.corrections.beam_shape_values:
+                        beam_shape["shape_values"] = list(
+                            self.corrections.beam_shape_values
+                        )
+                    if beam_shape:
+                        footprint_dialog.setSettings(beam_shape)
         gui.reconstruction_normalize_exposure = self.corrections.normalize_exposure
         gui.reconstruction_monitor_corrections = self.corrections.monitor_corrections
         if (

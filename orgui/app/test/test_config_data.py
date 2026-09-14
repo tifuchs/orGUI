@@ -229,12 +229,24 @@ def test_from_gui_captures_the_footprint_dialogs_inputs(qapp):
     assert unopened.corrections.sample_length_m is None
     assert unopened.corrections.sample_width_m is None
     assert unopened.corrections.beam_flux_density is None
+    assert unopened.corrections.beam_shape_name is None
+    assert unopened.corrections.beam_shape_values == ()
 
     footprint_dialog = IntegrationCorrectionsDialog()
     try:
         footprint_dialog.L.setValue(2.5)
         footprint_dialog.W.setValue(7.5)
         footprint_dialog.beamFlux.setValue(4.2)
+        footprint_dialog.shapeSelector.setCurrentIndex(
+            footprint_dialog.shapeSelector.findText("Trapezoid")
+        )
+        base, flat = footprint_dialog.shapeParameters[:2]
+        base.setValue(90.0)
+        flat.setValue(30.0)
+        footprint_dialog.profileCenter.setCurrentIndex(
+            footprint_dialog.profileCenter.findText("median")
+        )
+        footprint_dialog.profileOffset.setValue(-12.5)
         gui = SimpleNamespace(**unopened_gui.__dict__)
         gui.scanSelector = SimpleNamespace(
             get_integration_options=unopened_gui.scanSelector.get_integration_options,
@@ -246,6 +258,11 @@ def test_from_gui_captures_the_footprint_dialogs_inputs(qapp):
         assert captured.corrections.sample_length_m == pytest.approx(2.5e-3)
         assert captured.corrections.sample_width_m == pytest.approx(7.5e-3)
         assert captured.corrections.beam_flux_density == pytest.approx(4.2e6)
+        assert captured.corrections.beam_shape_analytical is True
+        assert captured.corrections.beam_shape_name == "Trapezoid"
+        assert captured.corrections.beam_shape_values == (90.0, 30.0)
+        assert captured.corrections.beam_profile_center == "median"
+        assert captured.corrections.beam_profile_offset_um == pytest.approx(-12.5)
     finally:
         footprint_dialog.deleteLater()
 
@@ -257,6 +274,11 @@ def test_apply_to_gui_restores_the_footprint_dialogs_inputs(qapp):
         sample_length_m=4e-3,
         sample_width_m=9e-3,
         beam_flux_density=3e12,
+        beam_shape_analytical=True,
+        beam_shape_name="Trapezoid",
+        beam_shape_values=(90.0, 30.0),
+        beam_profile_center="median",
+        beam_profile_offset_um=-12.5,
     )
     footprint_dialog = IntegrationCorrectionsDialog()
     try:
@@ -285,6 +307,12 @@ def test_apply_to_gui_restores_the_footprint_dialogs_inputs(qapp):
         assert footprint_dialog.sampleLength() == pytest.approx(4e-3)
         assert footprint_dialog.sampleWidth() == pytest.approx(9e-3)
         assert footprint_dialog.beamFluxDensity() == pytest.approx(3e12)
+        assert footprint_dialog.analyticalButton.isChecked() is True
+        assert footprint_dialog.currentShape().name == "Trapezoid"
+        assert footprint_dialog.shapeParameters[0].value() == pytest.approx(90.0)
+        assert footprint_dialog.shapeParameters[1].value() == pytest.approx(30.0)
+        assert footprint_dialog.profileCenter.currentText() == "median"
+        assert footprint_dialog.profileOffset.value() == pytest.approx(-12.5)
     finally:
         footprint_dialog.deleteLater()
 

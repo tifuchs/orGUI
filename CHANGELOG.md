@@ -120,9 +120,15 @@ Scientific and analysis additions:
   are now recorded in a typed ``integration_corrections/footprint`` NeXus
   group beside the correction switches -- previously none of the three
   reached the saved configuration at all, so a stored active-area calculation
-  could not be reproduced from its own output. A configuration written before
-  they existed, or a dialog that was never opened, leaves the running dialog
-  exactly as it is rather than resetting it to defaults.
+  could not be reproduced from its own output. **The beam shape itself was
+  the same gap and is now closed too:** whether the beam is described
+  analytically or by a measured profile, the selected shape and its
+  parameters, the profile file and how to read it, and where the sample sits
+  in the beam are all recorded in a new ``integration_corrections/beam_shape``
+  group, in the same units the dialog itself shows them in. A configuration
+  written before any of this existed, or a dialog that was never opened,
+  leaves the running dialog exactly as it is rather than resetting it to
+  defaults.
 
 - **All correction factors collected into one package.** Every factor between
   detector counts and a structure factor now lives in

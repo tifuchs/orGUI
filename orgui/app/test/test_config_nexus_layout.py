@@ -65,6 +65,14 @@ def _populated_corrections():
         sample_length_m=5e-3,
         sample_width_m=3e-3,
         beam_flux_density=1.2e16,
+        beam_shape_analytical=False,
+        beam_shape_name="Trapezoid",
+        beam_shape_values=(90.0, 30.0),
+        beam_profile_file="profiles/beam.dat",
+        beam_profile_content="height scan (-dI/dz)",
+        beam_profile_unit="mm",
+        beam_profile_center="median",
+        beam_profile_offset_um=-12.5,
     )
 
 
