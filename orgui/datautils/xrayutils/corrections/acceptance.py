@@ -55,16 +55,12 @@ region wide enough to contain the whole in-plane peak profile has
 
 .. note::
 
-    :math:`\Delta\gamma` is almost invariant under a detector-arm rotation.
-    Driving the :math:`\gamma` arm shifts the exit angle at the region center
-    by the full arm angle, but leaves the span that region subtends unchanged
-    to nine digits, because the rotation is about the axis :math:`\gamma` is
-    measured around; a :math:`\delta`-arm rotation of 40 degrees moves it by
-    one part in :math:`10^5`. So an acceptance computed without the arm is
-    still usable, which is the opposite of the polarization factor, where
-    ignoring the arm is a 10 % error at a scattering angle of 18 degrees (see
-    :mod:`~.detector`). Pass the arm anyway where it is known -- it costs
-    nothing -- but a missing arm is not a reason to distrust an acceptance.
+    Evaluate the acceptance at the actual detector-arm position whenever it
+    is known. Arm invariance is not general: a rolled or oblique detector
+    changes the projection of the pixel-edge rays onto :math:`\gamma`, and
+    realistic counterexamples differ by several percent. Omitting the arm is
+    retained only as an explicit compatibility fallback for measurements that
+    predate stored arm metadata.
 """
 
 import numpy as np
@@ -90,18 +86,45 @@ def _surface_gamma(detector, row, column, alpha, gamma_arm=None, delta_arm=None)
     one fixed column -- which is what a rocking integration passes -- would
     otherwise fail inside the extension with ``pos2.size == size``.
     """
+    if (gamma_arm is None) != (delta_arm is None):
+        raise ValueError("both gamma_arm and delta_arm must be given together")
     row, column = np.broadcast_arrays(
         np.asarray(row, dtype=np.float64),
         np.asarray(column, dtype=np.float64),
     )
-    gamma, _delta = detector.surfaceAnglesPoint(
-        np.ascontiguousarray(row),
-        np.ascontiguousarray(column),
-        alpha,
-        gamma_arm,
-        delta_arm,
+    if gamma_arm is None or (
+        np.ndim(gamma_arm) == 0 and np.ndim(delta_arm) == 0
+    ):
+        gamma, _delta = detector.surfaceAnglesPoint(
+            np.ascontiguousarray(row),
+            np.ascontiguousarray(column),
+            alpha,
+            gamma_arm,
+            delta_arm,
+        )
+        return np.asarray(gamma, dtype=np.float64)
+
+    # ``surfaceAnglesPoint`` accepts one arm geometry at a time. A rocking
+    # reduction instead supplies one ROI and one arm position per curve, so
+    # evaluate those pairs rather than forming every arm-by-ROI combination.
+    row, column, alpha, gamma_arm, delta_arm = np.broadcast_arrays(
+        row,
+        column,
+        np.asarray(alpha, dtype=np.float64),
+        np.asarray(gamma_arm, dtype=np.float64),
+        np.asarray(delta_arm, dtype=np.float64),
     )
-    return np.asarray(gamma, dtype=np.float64)
+    result = np.empty(row.shape, dtype=np.float64)
+    for index in np.ndindex(row.shape):
+        gamma, _delta = detector.surfaceAnglesPoint(
+            np.array([row[index]]),
+            np.array([column[index]]),
+            float(alpha[index]),
+            float(gamma_arm[index]),
+            float(delta_arm[index]),
+        )
+        result[index] = np.asarray(gamma, dtype=np.float64).reshape(-1)[0]
+    return result
 
 
 def out_of_plane_acceptance(

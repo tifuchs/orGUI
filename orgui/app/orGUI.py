@@ -130,6 +130,28 @@ except Exception:
 silx.config.DEFAULT_PLOT_SYMBOL = "."
 
 
+def _rocking_arm_snapshot(gamma_arm, delta_arm, curve_shape):
+    """Build the unit-tagged per-frame arm fields saved with rocking ROIs."""
+    curve_shape = tuple(curve_shape)
+    if len(curve_shape) != 2:
+        raise ValueError("rocking arm snapshot shape must be (curves, frames)")
+    frame_count = curve_shape[1]
+    gamma_arm = np.broadcast_to(
+        np.asarray(gamma_arm, dtype=np.float64), (frame_count,)
+    )
+    delta_arm = np.broadcast_to(
+        np.asarray(delta_arm, dtype=np.float64), (frame_count,)
+    )
+    return {
+        # scan_arm_angles already converted these to true primary-beam
+        # scattering angles. Radian storage feeds the geometry API directly.
+        "@detector_arm_unit": "rad",
+        "@detector_arm_angle_frame": "prim",
+        "gamma_arm": np.broadcast_to(gamma_arm, curve_shape).copy(),
+        "delta_arm": np.broadcast_to(delta_arm, curve_shape).copy(),
+    }
+
+
 def _display_roi_geometry(center, left, right, top, bottom):
     """Convert detector-array ROI slices to plot rectangle geometry.
 
@@ -1999,6 +2021,13 @@ ub : gui for UB matrix and angle calculations
             om = np.full_like(mu, om)
         if len(np.asarray(mu).shape) == 0:
             mu = np.full_like(om, mu)
+        gamma_arm, delta_arm = self.getArmAngles()
+        gamma_arm = np.broadcast_to(
+            np.asarray(gamma_arm, dtype=np.float64), (len(self.fscan),)
+        ).copy()
+        delta_arm = np.broadcast_to(
+            np.asarray(delta_arm, dtype=np.float64), (len(self.fscan),)
+        ).copy()
 
         config_snapshot = ConfigData.from_gui(self)
         data = {
@@ -2447,6 +2476,11 @@ ub : gui for UB matrix and angle calculations
             "vsize": np.array(vsize),
             "hsize": np.array(hsize),
             "axis": np.vstack(axis),
+            # True scattering angles are repeated for each extracted curve
+            # because its peak can occur at a different source frame.
+            **_rocking_arm_snapshot(
+                gamma_arm, delta_arm, np.vstack(alpha).shape
+            ),
         }
         if alpha_pk:
             rois["alpha_pk"] = np.array(alpha_pk)

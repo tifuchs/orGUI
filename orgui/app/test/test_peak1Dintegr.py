@@ -614,16 +614,13 @@ def _solid_angle_detector():
     return detector
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Stage 1: rocking acceptance is evaluated at the calibration arm",
-)
 def test_rocking_acceptance_uses_the_stored_arm_position():
     """Pin the rolled-detector counterexample from the physics review.
 
-    Angles stored with a scan are degrees; the acceptance API takes radians.
-    At this deliberately oblique geometry, using the home arm understates the
-    accepted gamma span by about 3.4 percent.
+    Frame diffraction angles are stored in degrees, while the explicitly
+    unit-tagged arm snapshot and the acceptance API use radians. At this
+    deliberately oblique geometry, using the home arm understates the accepted
+    gamma span by about 3.4 percent.
     """
     from orgui.datautils.xrayutils.corrections import acceptance
 
@@ -640,13 +637,16 @@ def test_rocking_acceptance_uses_the_stored_arm_position():
     column = np.array([440.0])
     height = np.array([60.0])
     alpha_deg = np.array([10.0])
-    gamma_arm_deg = np.array([30.0])
-    delta_arm_deg = np.array([40.0])
+    gamma_arm = np.deg2rad([[0.0, 30.0, 60.0]])
+    delta_arm = np.deg2rad([[0.0, 40.0, 50.0]])
     counters = {
         "vsize": height,
         "alpha_pk": alpha_deg,
-        "gamma_arm": gamma_arm_deg,
-        "delta_arm": delta_arm_deg,
+        "theta_pk": np.array([5.1]),
+        "alpha": np.array([[9.0, 10.0, 11.0]]),
+        "theta": np.array([[4.0, 5.0, 6.0]]),
+        "gamma_arm": gamma_arm,
+        "delta_arm": delta_arm,
     }
 
     expected = acceptance.out_of_plane_acceptance(
@@ -655,8 +655,8 @@ def test_rocking_acceptance_uses_the_stored_arm_position():
         column,
         height,
         np.deg2rad(alpha_deg),
-        np.deg2rad(gamma_arm_deg),
-        np.deg2rad(delta_arm_deg),
+        gamma_arm[:, 1],
+        delta_arm[:, 1],
     )
     actual, applied = RockingPeakIntegrator._rocking_acceptance(
         _stub(), detector, counters, x=column, y=row
@@ -664,6 +664,21 @@ def test_rocking_acceptance_uses_the_stored_arm_position():
 
     assert applied is True
     np.testing.assert_allclose(actual, expected, rtol=1e-10)
+
+
+def test_legacy_rocking_acceptance_reports_calibration_fallback(caplog):
+    """An old database remains usable but does not hide missing arm history."""
+    detector = _RowOnlyDetector()
+    counters = {"vsize": np.array([40.0]), "alpha_pk": np.zeros(1)}
+
+    with caplog.at_level("WARNING"):
+        actual, applied = RockingPeakIntegrator._rocking_acceptance(
+            _stub(), detector, counters, x=np.array([240.0]), y=np.array([300.0])
+        )
+
+    assert applied is True
+    np.testing.assert_allclose(actual, 40.0 * detector.PER_ROW, rtol=1e-12)
+    assert "calibration position (legacy fallback)" in caplog.text
 
 
 @pytest.mark.parametrize("applied_at_extraction", [True, False])

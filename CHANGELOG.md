@@ -8,8 +8,10 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 Scientific and analysis additions:
 
 - **The polarization correction now follows the detector arm.**
-  *This changes saved numbers for scans that move the detector arm, and only
-  those.* The per-pixel polarization array is built from the calibrated
+  *This changes saved numbers for scans that move the detector arm and for
+  arm-corrected integrations using a nonzero configured polarization axis;
+  the conventional axis-zero case is unchanged.* The per-pixel polarization
+  array is built from the calibrated
   geometry, which is right only while the arm stays there. On a scan that
   drives the arm -- a reflectivity curve, where it follows twice the incidence
   angle -- the same pixel looks in a different direction on every frame, and
@@ -18,11 +20,16 @@ Scientific and analysis additions:
   paths now apply a per-frame factor,
   ``corrections.detector.polarization_arm_correction``, that moves the
   correction onto the arm position each frame was measured at. It is exactly
-  one while the arm sits at its calibrated position, so a fixed-arm scan is
+  one while the arm sits at its calibrated position when both paths use the
+  same configured polarization axis, so an axis-zero fixed-arm scan is
   bit-identical and needs no switch. The factor is a ratio of two region
   means rather than a rebuilt per-pixel array, which keeps the cost to a
   region-sized evaluation per frame; the polarization is not flat across a
-  region at a large scattering angle, so the means matter. The detector solid
+  region at a large scattering angle, so the means matter. The arm-following
+  evaluator now rotates the incident electric-field basis by the configured
+  ``polarization_axis``, matching the calibrated array for zero, 90-degree and
+  intermediate axes and for mixed polarization fractions; it previously
+  assumed an axis of zero. The detector solid
   angle needs no such correction: an arm rotation is a rigid rotation about
   the sample, so every pixel keeps its distance and its obliquity to its own
   line of sight, and the solid angle is invariant under it exactly. The
@@ -173,8 +180,14 @@ Scientific and analysis additions:
   the aperture, and vectorized over a scan because orGUI resizes regions per
   detector position. ``gamma_range`` reports the span over the whole region as
   a check on rolled-detector geometries, and ``pixel_acceptance`` the one-row
-  case. The rocking integration now divides by it -- see the mode-equivalence
-  entry below.
+  case. New rocking extractions store the true primary-beam detector-arm
+  angles for every source frame, in radians, and evaluate the acceptance at
+  the frame nearest each calculated peak. This matters for rolled or oblique
+  detectors, where the actual-arm span can differ by several percent from the
+  calibrated-position span. Older databases have no arm history and retain
+  the calibrated-position result with an explicit warning. The rocking
+  integration now divides by this acceptance -- see the mode-equivalence entry
+  below.
 
 - **One structure-factor scale for rocking scans, stationary scans, and
   reflectivity.** The new public module

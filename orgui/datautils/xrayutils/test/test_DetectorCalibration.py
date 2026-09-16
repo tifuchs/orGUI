@@ -946,6 +946,23 @@ def test_del_gam_range():
 """
 
 
+def _polarization_from_outgoing_ray(
+    alpha_i, gamma, delta, axis, fraction
+):
+    """Independent electric-field projection reference."""
+    horizontal = (
+        np.sin(alpha_i) * np.cos(delta) * np.cos(gamma)
+        + np.cos(alpha_i) * np.sin(gamma)
+    )
+    vertical = np.sin(delta) * np.cos(gamma)
+    projection_1 = np.cos(axis) * horizontal + np.sin(axis) * vertical
+    projection_2 = -np.sin(axis) * horizontal + np.cos(axis) * vertical
+    return (
+        fraction * (1.0 - projection_1**2)
+        + (1.0 - fraction) * (1.0 - projection_2**2)
+    )
+
+
 def _polarization_reference(sxrddet, alpha_i):
     """Polarization from orGUI's own z-axis expression.
 
@@ -958,17 +975,13 @@ def _polarization_reference(sxrddet, alpha_i):
     if hasattr(sxrddet, "_alpha_i"):
         del sxrddet._alpha_i
     gamma, delta = sxrddet.surfaceAngles(alpha_i)
-    fraction = sxrddet._polFactor
-    p_hor = (
-        1.0
-        - (
-            np.sin(alpha_i) * np.cos(delta) * np.cos(gamma)
-            + np.cos(alpha_i) * np.sin(gamma)
-        )
-        ** 2
+    return _polarization_from_outgoing_ray(
+        alpha_i,
+        gamma,
+        delta,
+        sxrddet._polAxis,
+        sxrddet._polFactor,
     )
-    p_ver = 1.0 - (np.sin(delta) ** 2) * (np.cos(gamma) ** 2)
-    return fraction * p_hor + (1.0 - fraction) * p_ver
 
 
 def _sxrd_detector(azimuth_deg, pol_axis_deg, fraction):
@@ -1093,10 +1106,6 @@ def test_unpolarized_beam_has_no_azimuthal_dependence():
     np.testing.assert_allclose(correction, 0.5 * (1.0 + np.cos(tth) ** 2), atol=1e-6)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Stage 1: arm-following polarization ignores polarization_axis",
-)
 @pytest.mark.parametrize("pol_axis_deg", [30.0, 90.0])
 @pytest.mark.parametrize("fraction", [1.0, 0.75])
 def test_arm_following_polarization_honors_the_configured_axis(
@@ -1105,9 +1114,8 @@ def test_arm_following_polarization_honors_the_configured_axis(
     """Point and array evaluators must agree at the calibration position.
 
     This is the minimal reproduction for the targeted-review finding: the
-    array path uses ``_polAxis``, while the arm-following shared evaluator
-    currently does not.  Keeping the expected failure strict makes Stage 1
-    remove the marker when it fixes the shared evaluator.
+    array and arm-following paths must use the same configured incident-field
+    basis.
     """
     detector = _sxrd_detector(90.0, pol_axis_deg, fraction)
     row, column = 309, 243
@@ -1122,3 +1130,67 @@ def test_arm_following_polarization_honors_the_configured_axis(
     )[0]
 
     np.testing.assert_allclose(actual, expected, atol=1e-6)
+
+
+@pytest.mark.parametrize("pol_axis_deg", [0.0, 30.0, 90.0, -40.0])
+@pytest.mark.parametrize("fraction", [1.0, 0.75, 0.5])
+def test_arm_following_polarization_matches_outgoing_ray_projection(
+    pol_axis_deg, fraction
+):
+    """A moved-arm scalar evaluation honors axis and polarization fraction."""
+    detector = _sxrd_detector(90.0, pol_axis_deg, fraction)
+    row = np.array([309.0])
+    column = np.array([243.0])
+    alpha = np.deg2rad(0.6)
+    gamma_arm = np.deg2rad(30.0)
+    delta_arm = np.deg2rad(20.0)
+    gamma, delta = detector.surfaceAnglesPoint(
+        row, column, alpha, gamma_arm, delta_arm
+    )
+    expected = _polarization_from_outgoing_ray(
+        alpha,
+        gamma,
+        delta,
+        np.deg2rad(pol_axis_deg),
+        fraction,
+    )
+
+    actual = detector.polarizationAtPoints(
+        row, column, alpha, gamma_arm, delta_arm
+    )
+
+    np.testing.assert_allclose(actual, expected, atol=1e-12)
+
+
+def test_batched_arm_following_polarization_matches_outgoing_rays():
+    """The multi-frame evaluator preserves the scalar vector convention."""
+    detector = _sxrd_detector(90.0, 35.0, 0.8)
+    row = np.array([100.0, 309.0, 500.0])
+    column = np.array([80.0, 243.0, 420.0])
+    alpha = np.deg2rad([0.6, 2.0])
+    gamma_arm = np.deg2rad([0.0, 30.0])
+    delta_arm = np.deg2rad([0.0, 20.0])
+    expected = []
+    for frame in range(alpha.size):
+        gamma, delta = detector.surfaceAnglesPoint(
+            row,
+            column,
+            alpha[frame],
+            gamma_arm[frame],
+            delta_arm[frame],
+        )
+        expected.append(
+            _polarization_from_outgoing_ray(
+                alpha[frame],
+                gamma,
+                delta,
+                detector._polAxis,
+                detector._polFactor,
+            )
+        )
+
+    actual = detector.polarizationAtPointsFrames(
+        row, column, alpha, gamma_arm, delta_arm
+    )
+
+    np.testing.assert_allclose(actual, expected, atol=1e-12)

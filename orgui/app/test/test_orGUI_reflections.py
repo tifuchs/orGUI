@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from silx.gui import qt
 
-from orgui.app.orGUI import _display_roi_geometry, orGUI
+from orgui.app.orGUI import _display_roi_geometry, _rocking_arm_snapshot, orGUI
 from orgui.app.QReflectionSelector import (
     AutoBraggOptionsDialog,
     AutoBraggStatusDialog,
@@ -28,6 +28,19 @@ class FakeLinearDetector:
         y = np.asarray(y, dtype=float)
         alpha_i = np.asarray(alpha_i, dtype=float)
         return 2.0e-4 * y + alpha_i, 1.0e-4 * x
+
+
+def test_rocking_arm_snapshot_is_per_frame_and_unit_tagged():
+    """A saved rocking extraction retains the arm history needed later."""
+    gamma = np.deg2rad([0.0, 15.0, 30.0])
+    delta = np.deg2rad([0.0, 20.0, 40.0])
+
+    snapshot = _rocking_arm_snapshot(gamma, delta, (2, 3))
+
+    assert snapshot["@detector_arm_unit"] == "rad"
+    assert snapshot["@detector_arm_angle_frame"] == "prim"
+    np.testing.assert_allclose(snapshot["gamma_arm"], [gamma, gamma])
+    np.testing.assert_allclose(snapshot["delta_arm"], [delta, delta])
 
 
 class FakeScan:

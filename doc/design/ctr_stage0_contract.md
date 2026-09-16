@@ -27,9 +27,10 @@ unknown calibration. Existing tests in `test_config_data.py` and
 `test_peak1Dintegr.py` cover typed NeXus round trips, legacy JSON database
 dispatch, and both stored correction-group layouts used by the reducer.
 
-Strict expected-failure tests record the two Stage 1 defects without changing
-application code: the arm-following polarization evaluator ignores a nonzero
-polarization axis, and rocking acceptance ignores stored actual-arm angles.
+At Stage 0, strict expected-failure tests recorded the two Stage 1 defects
+without changing application code: the arm-following polarization evaluator
+ignored a nonzero polarization axis, and rocking acceptance ignored actual-arm
+angles. Stage 1 converts those reproductions into passing regressions.
 
 ## Settings-loader audit
 

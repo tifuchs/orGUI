@@ -579,21 +579,32 @@ class Detector2D_SXRD(geometry.Geometry):
         return self._polarizationFromSurfaceAngles(alpha_i, gamma, delta)
 
     def _polarizationFromSurfaceAngles(self, alpha_i, gamma, delta):
-        r"""The z-axis polarization expression of :meth:`polarizationAtPoints`.
+        r"""Polarization from surface angles and the configured beam axis.
 
         Factored out so :meth:`polarizationAtPointsFrames` can share it
         rather than recompute the same formula from different surface angles.
+        The two outgoing-ray projections below are the horizontal and
+        vertical terms of the ANA/ROD z-axis expression. ``_polAxis`` rotates
+        that incident electric-field basis; omitting it made the arm-following
+        evaluators disagree with :meth:`polarizationArray` for every nonzero
+        configured axis.
         """
         fraction = self._polFactor
-        p_hor = (
-            1.0
-            - (
-                np.sin(alpha_i) * np.cos(delta) * np.cos(gamma)
-                + np.cos(alpha_i) * np.sin(gamma)
-            )
-            ** 2
+        horizontal_projection = (
+            np.sin(alpha_i) * np.cos(delta) * np.cos(gamma)
+            + np.cos(alpha_i) * np.sin(gamma)
         )
-        p_ver = 1.0 - (np.sin(delta) ** 2) * (np.cos(gamma) ** 2)
+        vertical_projection = np.sin(delta) * np.cos(gamma)
+        cosine = np.cos(self._polAxis)
+        sine = np.sin(self._polAxis)
+        rotated_horizontal = (
+            cosine * horizontal_projection + sine * vertical_projection
+        )
+        rotated_vertical = (
+            -sine * horizontal_projection + cosine * vertical_projection
+        )
+        p_hor = 1.0 - rotated_horizontal**2
+        p_ver = 1.0 - rotated_vertical**2
         return fraction * p_hor + (1.0 - fraction) * p_ver
 
     def polarizationAtPointsFrames(self, x, y, alpha_i, gamma_arm, delta_arm):

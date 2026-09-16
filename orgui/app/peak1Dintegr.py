@@ -1558,11 +1558,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
         the row while ``x`` is the column -- every call site in the
         application passes them in that swapped order.
 
-        The acceptance is evaluated at the **calibrated** arm position. The
-        span a region subtends is invariant under an arm rotation to nine
-        digits, because that rotation is about the very axis
-        :math:`\\gamma` is measured around, so this costs nothing measurable;
-        see ``doc/design/ctr_structure_factor_scale.md`` section 4.4.
+        New extractions store the true detector-arm scattering angles for
+        every source frame. The frame nearest the calculated peak in
+        ``(alpha, theta)`` supplies the arm position used here. Old databases
+        have no such arrays; they retain the historical calibration-position
+        result, with a warning that makes that fallback visible.
 
         :param detector: The geometry the scan was measured with, from
             :meth:`_stored_detector`; ``None`` leaves the acceptance out.
@@ -1582,6 +1582,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
         if vsize.ndim > 1:
             vsize = vsize[:, 0]
         alpha_pk = np.deg2rad(np.asarray(cnters["alpha_pk"][()], dtype=float))
+        gamma_arm, delta_arm = RockingPeakIntegrator._rocking_peak_arm_angles(
+            cnters
+        )
 
         acceptance = acceptance_corrections.out_of_plane_acceptance(
             detector,
@@ -1589,8 +1592,88 @@ class RockingPeakIntegrator(qt.QMainWindow):
             np.asarray(x, dtype=float),
             vsize,
             alpha_pk,
+            gamma_arm,
+            delta_arm,
         )
         return np.asarray(acceptance, dtype=float), True
+
+    @staticmethod
+    def _rocking_peak_arm_angles(cnters):
+        """Stored detector arm at each calculated rocking-curve peak.
+
+        The saved arm arrays are in the primary-beam frame and carry an
+        explicit ``rad`` group attribute. A rocking scan can run in either
+        ``mu`` or ``th``; selecting the stored frame nearest the calculated
+        peak in both ``(alpha, theta)`` coordinates handles either mode and a
+        reversed scan without relying on a separate axis-name string.
+
+        :param cnters: The stored rocking ``rois`` group.
+        :returns: ``(gamma_arm, delta_arm)`` in radian, or ``(None, None)``
+            for an old database that has no arm snapshot.
+        :rtype: tuple
+        """
+        if "gamma_arm" not in cnters or "delta_arm" not in cnters:
+            logger.warning(
+                "This rocking extraction stores no detector-arm positions; "
+                "evaluating its out-of-plane acceptance at the detector "
+                "calibration position (legacy fallback)."
+            )
+            return None, None
+
+        try:
+            gamma_arm = np.asarray(cnters["gamma_arm"][()], dtype=float)
+            delta_arm = np.asarray(cnters["delta_arm"][()], dtype=float)
+            alpha_pk = np.asarray(cnters["alpha_pk"][()], dtype=float).reshape(-1)
+            theta_pk = np.asarray(cnters["theta_pk"][()], dtype=float).reshape(-1)
+
+            def at_peak(values):
+                values = np.asarray(values, dtype=float)
+                if values.ndim == 0:
+                    return np.full(alpha_pk.shape, float(values))
+                if values.shape == alpha_pk.shape:
+                    return values
+
+                alpha = np.asarray(cnters["alpha"][()], dtype=float)
+                theta = np.asarray(cnters["theta"][()], dtype=float)
+                expected = (alpha_pk.size, alpha.shape[-1])
+                alpha = np.broadcast_to(alpha, expected)
+                theta = np.broadcast_to(theta, expected)
+                values = np.broadcast_to(values, expected)
+
+                def angular_difference(actual, target):
+                    return (actual - target[:, None] + 180.0) % 360.0 - 180.0
+
+                distance = angular_difference(alpha, alpha_pk) ** 2
+                distance += angular_difference(theta, theta_pk) ** 2
+                if np.any(~np.isfinite(distance).any(axis=1)):
+                    raise ValueError("no finite frame lies near a calculated peak")
+                indices = np.nanargmin(distance, axis=1)
+                return values[np.arange(alpha_pk.size), indices]
+
+            gamma_arm = at_peak(gamma_arm)
+            delta_arm = at_peak(delta_arm)
+            attrs = getattr(cnters, "attrs", {})
+            unit = attrs.get("detector_arm_unit", "rad")
+            if isinstance(unit, bytes):
+                unit = unit.decode()
+            if unit == "deg":
+                gamma_arm = np.deg2rad(gamma_arm)
+                delta_arm = np.deg2rad(delta_arm)
+            elif unit != "rad":
+                raise ValueError(f"unsupported detector-arm unit {unit!r}")
+            if not np.all(np.isfinite(gamma_arm)) or not np.all(
+                np.isfinite(delta_arm)
+            ):
+                raise ValueError("detector-arm values are not finite")
+            return gamma_arm, delta_arm
+        except Exception:
+            logger.warning(
+                "Cannot resolve the detector-arm position stored with this "
+                "rocking extraction; evaluating its out-of-plane acceptance "
+                "at the detector calibration position.",
+                exc_info=True,
+            )
+            return None, None
 
     def integrate(self):
         """Integrate rocking-scan ROIs.

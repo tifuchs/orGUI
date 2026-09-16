@@ -107,6 +107,38 @@ def test_acceptance_is_positive_and_vectorized_over_a_scan():
     np.testing.assert_allclose(got, size * det.PER_ROW, rtol=1e-12)
 
 
+def test_acceptance_pairs_each_region_with_its_actual_arm_position():
+    """Vector arm metadata is pairwise, not an arm-by-region product."""
+    det = _calibrated_detector(rot3=np.deg2rad(30.0))
+    row = np.array([200.0, 350.0, 500.0])
+    column = np.array([100.0, 240.0, 440.0])
+    height = np.array([20.0, 40.0, 60.0])
+    alpha = np.deg2rad([1.0, 5.0, 10.0])
+    gamma_arm = np.deg2rad([0.0, 15.0, 30.0])
+    delta_arm = np.deg2rad([0.0, 20.0, 40.0])
+
+    got = acceptance.out_of_plane_acceptance(
+        det, row, column, height, alpha, gamma_arm, delta_arm
+    )
+    expected = np.array(
+        [
+            acceptance.out_of_plane_acceptance(
+                det,
+                row[index],
+                column[index],
+                height[index],
+                alpha[index],
+                gamma_arm[index],
+                delta_arm[index],
+            )
+            for index in range(row.size)
+        ]
+    ).reshape(-1)
+
+    assert got.shape == row.shape
+    np.testing.assert_allclose(got, expected, rtol=1e-12)
+
+
 def test_a_zero_or_negative_region_is_rejected():
     """An empty region accepts no rod, and silently returning 0 would divide."""
     det = _LinearDetector()
