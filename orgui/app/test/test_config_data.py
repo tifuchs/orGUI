@@ -312,6 +312,46 @@ def test_from_gui_captures_the_footprint_dialogs_inputs(qapp):
         footprint_dialog.deleteLater()
 
 
+def test_from_gui_embeds_a_loaded_measured_beam_profile():
+    """A future reader must not depend on the original profile file path."""
+    config = _make_config()
+    positions = np.array([-2e-4, 0.0, 2e-4])
+    density = np.array([500.0, 4000.0, 500.0])
+    profile = SimpleNamespace(profile_curve=lambda: (positions, density))
+    footprint = SimpleNamespace(
+        sampleLength=lambda: 3e-3,
+        sampleWidth=lambda: 8e-3,
+        beamFluxDensity=lambda: 2e12,
+        settings=lambda: {
+            "analytical": False,
+            "profile_file": "moved/or/replaced.dat",
+            "profile_content": "intensity",
+            "profile_unit": "mm",
+        },
+        measuredProfile=lambda: profile,
+    )
+    gui = SimpleNamespace(
+        ubcalc=SimpleNamespace(
+            detectorCal=config.detector,
+            crystal=config.unit_cell,
+            ubCal=config.ub_calculator,
+            mu=config.mu,
+            chi=config.chi,
+            phi=config.phi,
+            n=config.refraction_index,
+        ),
+        scanSelector=SimpleNamespace(
+            get_integration_options=lambda: {},
+            correctionsDialog=SimpleNamespace(footprintOptions=footprint),
+        ),
+    )
+
+    captured = ConfigData.from_gui(gui).corrections
+
+    assert captured.beam_profile_positions_m == pytest.approx(positions)
+    assert captured.beam_profile_density_per_m == pytest.approx(density)
+
+
 def test_apply_to_gui_restores_the_footprint_dialogs_inputs(qapp):
     """Restoring a config sets L, W and the beam flux on the shared dialog."""
     config = _make_config()

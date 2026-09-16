@@ -75,7 +75,12 @@ from .ReconstructionDialog import ReconstructionDialog
 from .bgroi import RectangleBgROI
 from .database import DataBase, FILTERS
 from .mask_config import MaskManager
-from .config_data import ConfigData
+from .config_data import (
+    CURVE_CORRECTIONS_GROUP,
+    ConfigData,
+    CurveCorrectionRecord,
+    curve_correction_record_to_nxdict,
+)
 from types import SimpleNamespace
 
 from ..backend.scans import SimulationScan, scan_arm_angles
@@ -150,6 +155,33 @@ def _rocking_arm_snapshot(gamma_arm, delta_arm, curve_shape):
         "gamma_arm": np.broadcast_to(gamma_arm, curve_shape).copy(),
         "delta_arm": np.broadcast_to(delta_arm, curve_shape).copy(),
     }
+
+
+def _curve_profile_provenance(state):
+    """Flat, self-contained beam-profile provenance for a curve record."""
+    result = {
+        "analytical": state.beam_shape_analytical,
+        "shape": state.beam_shape_name,
+        "shape_values": np.asarray(state.beam_shape_values, dtype=np.float64)
+        if state.beam_shape_values
+        else None,
+        "profile_file": state.beam_profile_file,
+        "profile_content": state.beam_profile_content,
+        "profile_unit": state.beam_profile_unit,
+        "profile_center": state.beam_profile_center,
+        "profile_offset_um": state.beam_profile_offset_um,
+        "profile_positions_m": np.asarray(
+            state.beam_profile_positions_m, dtype=np.float64
+        )
+        if state.beam_profile_positions_m
+        else None,
+        "profile_density_per_m": np.asarray(
+            state.beam_profile_density_per_m, dtype=np.float64
+        )
+        if state.beam_profile_density_per_m
+        else None,
+    }
+    return {name: value for name, value in result.items() if value is not None}
 
 
 def _display_roi_geometry(center, left, right, top, bottom):
@@ -1581,6 +1613,20 @@ ub : gui for UB matrix and angle calculations
             )
             return {"status": "error", "message": "No database available"}
         dc = self.ubcalc.detectorCal
+        rocking_roi_edges = {
+            "x_start": np.asarray(
+                [region[0].start for region in rois["center"]], dtype=np.int64
+            ),
+            "x_stop": np.asarray(
+                [region[0].stop for region in rois["center"]], dtype=np.int64
+            ),
+            "y_start": np.asarray(
+                [region[1].start for region in rois["center"]], dtype=np.int64
+            ),
+            "y_stop": np.asarray(
+                [region[1].stop for region in rois["center"]], dtype=np.int64
+            ),
+        }
 
         imgmask = None
 
@@ -2517,6 +2563,43 @@ ub : gui for UB matrix and angle calculations
                 }
 
         data_2d_structured[self.activescanname]["measurement"][name]["rois"] = rois
+        # A distinct versioned branch preserves the reversible scalar curve
+        # and applied-state provenance without changing the legacy ``rois``
+        # contract consumed by today's reducer. Stage 5 will opt into this
+        # branch when framewise Q/H normalization becomes active.
+        curve_record = CurveCorrectionRecord(
+            algorithm="legacy_rocking_roi_v1",
+            output_quantity="rocking_roi_curve",
+            scale_convention="legacy_unnormalized",
+            normalization_status="not_applied",
+            illumination_status="not_applied",
+            pixel_correction_status=("applied" if corr else "not_applied"),
+            alpha=np.deg2rad(rois["alpha"]),
+            base_croi=rois["croi"],
+            base_croi_variance=rois["croi"],
+            base_bgroi=rois["bgroi"],
+            base_bgroi_variance=rois["bgroi"],
+            base_croibg=rois["croibg"],
+            base_croibg_variance=np.square(rois["croibg_errors"]),
+            combined_croi_factor=rois["Cfactors_croi"],
+            combined_bgroi_factor=rois["Cfactors_bgroi"],
+            gamma_arm=rois["gamma_arm"],
+            delta_arm=rois["delta_arm"],
+            roi_x=rois["x"],
+            roi_y=rois["y"],
+            roi_width=rois["hsize"],
+            roi_height=rois["vsize"],
+            roi_x_start=rocking_roi_edges["x_start"],
+            roi_x_stop=rocking_roi_edges["x_stop"],
+            roi_y_start=rocking_roi_edges["y_start"],
+            roi_y_stop=rocking_roi_edges["y_stop"],
+            profile_provenance=_curve_profile_provenance(
+                config_snapshot.corrections
+            ),
+        )
+        data_2d_structured[self.activescanname]["measurement"][name][
+            CURVE_CORRECTIONS_GROUP
+        ] = curve_correction_record_to_nxdict(curve_record)
 
         error = self._saveIntegrationResult(
             data_2d_structured, f"the rocking scan integration {name}"
@@ -5943,6 +6026,10 @@ ub : gui for UB matrix and angle calculations
         y_coord1_a = hkl_del_gam_1[:, 7]
         roi_hsize1_a = np.full_like(dataavail, hsize, dtype=int)
         roi_vsize1_a = np.full_like(dataavail, vsize, dtype=int)
+        roi_x_start1_a = np.zeros_like(dataavail, dtype=int)
+        roi_x_stop1_a = np.zeros_like(dataavail, dtype=int)
+        roi_y_start1_a = np.zeros_like(dataavail, dtype=int)
+        roi_y_stop1_a = np.zeros_like(dataavail, dtype=int)
 
         croi2_a = np.zeros_like(dataavail, dtype=np.float64)
         cpixel2_a = np.zeros_like(dataavail, dtype=np.float64)
@@ -5973,6 +6060,10 @@ ub : gui for UB matrix and angle calculations
         y_coord2_a = hkl_del_gam_2[:, 7]
         roi_hsize2_a = np.full_like(dataavail, hsize, dtype=int)
         roi_vsize2_a = np.full_like(dataavail, vsize, dtype=int)
+        roi_x_start2_a = np.zeros_like(dataavail, dtype=int)
+        roi_x_stop2_a = np.zeros_like(dataavail, dtype=int)
+        roi_y_start2_a = np.zeros_like(dataavail, dtype=int)
+        roi_y_stop2_a = np.zeros_like(dataavail, dtype=int)
 
         progress = logger_utils.create_progress_logger(
             self, len(self.fscan), "Integrating stationary scan"
@@ -6023,12 +6114,16 @@ ub : gui for UB matrix and angle calculations
             )
             roi_hsize1_a[i] = int(np.abs(np.diff(croi_key[0])[0]))
             roi_vsize1_a[i] = int(np.abs(np.diff(croi_key[1])[0]))
+            roi_x_start1_a[i], roi_x_stop1_a[i] = croi_key[0]
+            roi_y_start1_a[i], roi_y_stop1_a[i] = croi_key[1]
             key = self.intkey(hkl_del_gam_2[i, 6:8])
             croi_key = np.array(
                 [[key[0].start, key[0].stop], [key[1].start, key[1].stop]]
             )
             roi_hsize2_a[i] = int(np.abs(np.diff(croi_key[0])[0]))
             roi_vsize2_a[i] = int(np.abs(np.diff(croi_key[1])[0]))
+            roi_x_start2_a[i], roi_x_stop2_a[i] = croi_key[0]
+            roi_y_start2_a[i], roi_y_stop2_a[i] = croi_key[1]
 
         if HAS_ACCEL:
             roi_lists_accel = []
@@ -6612,6 +6707,19 @@ ub : gui for UB matrix and angle calculations
                 ),
             )
 
+        # Reversible scalar base, after the existing background/pixel path but
+        # before the framewise normalization and illumination divisors. Keep a
+        # copy because apply_stationary_corrections returns the saved legacy
+        # intensity below.
+        base_croibg1 = np.asarray(croibg1_a, dtype=np.float64).copy()
+        base_croibg1_variance = np.square(
+            np.asarray(croibg1_err_a, dtype=np.float64)
+        )
+        base_croibg2 = np.asarray(croibg2_a, dtype=np.float64).copy()
+        base_croibg2_variance = np.square(
+            np.asarray(croibg2_err_a, dtype=np.float64)
+        )
+
         croibg1_a, croibg1_err_a = integration_corrections.apply_stationary_corrections(
             croibg1_a, croibg1_err_a, factors1
         )
@@ -6700,6 +6808,13 @@ ub : gui for UB matrix and angle calculations
             om = np.full_like(mu, om)
         if len(np.asarray(mu).shape) == 0:
             mu = np.full_like(om, mu)
+        gamma_arm_all, delta_arm_all = self.getArmAngles()
+        gamma_arm_all = np.broadcast_to(
+            np.asarray(gamma_arm_all, dtype=np.float64), (nodatapoints,)
+        ).copy()
+        delta_arm_all = np.broadcast_to(
+            np.asarray(delta_arm_all, dtype=np.float64), (nodatapoints,)
+        ).copy()
 
         suffix = ""
         i = 0
@@ -6859,6 +6974,120 @@ ub : gui for UB matrix and angle calculations
         }
 
         config_snapshot = ConfigData.from_gui(self)
+
+        normalization_status = "not_applied"
+        normalization_divisor = None
+        if options["normalization"]:
+            if normalization_applied:
+                normalization_status = "applied"
+                normalization_divisor = factors1.get("C_norm")
+            else:
+                normalization_status = "unavailable"
+        illumination_status = (
+            "applied" if options["footprint"] else "not_applied"
+        )
+
+        def versioned_stationary_curve(
+            factors,
+            base_croibg,
+            base_croibg_variance,
+            croi,
+            bgroi,
+            combined_croi,
+            combined_bgroi,
+            x,
+            y,
+            width,
+            height,
+            x_start,
+            x_stop,
+            y_start,
+            y_stop,
+        ):
+            """Build the non-legacy sibling branch for one trajectory."""
+            record = CurveCorrectionRecord(
+                algorithm="legacy_stationary_roi_v1",
+                output_quantity="stationary_roi_intensity",
+                scale_convention=(
+                    "legacy_density_area"
+                    if options["footprint"]
+                    else "legacy_relative"
+                ),
+                normalization_status=normalization_status,
+                illumination_status=illumination_status,
+                pixel_correction_status=("applied" if corr else "not_applied"),
+                normalization_divisor=normalization_divisor,
+                normalization_unit=(
+                    "legacy_counter_product"
+                    if normalization_divisor is not None
+                    else None
+                ),
+                normalization_components=tuple(normalization_applied),
+                illumination_divisor=factors.get("C_illum_area"),
+                illumination_convention=(
+                    "legacy_C_illum_area" if options["footprint"] else None
+                ),
+                vertical_intercepted_fraction=factors.get("C_flux_on_sample"),
+                alpha=alpha_all,
+                base_croi=croi,
+                base_croi_variance=croi,
+                base_bgroi=bgroi,
+                base_bgroi_variance=bgroi,
+                base_croibg=base_croibg,
+                base_croibg_variance=base_croibg_variance,
+                combined_croi_factor=combined_croi,
+                combined_bgroi_factor=combined_bgroi,
+                gamma_arm=gamma_arm_all,
+                delta_arm=delta_arm_all,
+                roi_x=x,
+                roi_y=y,
+                roi_width=width,
+                roi_height=height,
+                roi_x_start=x_start,
+                roi_x_stop=x_stop,
+                roi_y_start=y_start,
+                roi_y_stop=y_stop,
+                lorentz_mode=("stationary" if options["lorentz"] else None),
+                profile_provenance=_curve_profile_provenance(
+                    config_snapshot.corrections
+                ),
+            )
+            return curve_correction_record_to_nxdict(record)
+
+        datas1[CURVE_CORRECTIONS_GROUP] = versioned_stationary_curve(
+            factors1,
+            base_croibg1,
+            base_croibg1_variance,
+            croi1_a,
+            bgroi1_a,
+            Corr_croi1_a,
+            Corr_bgroi1_a,
+            x_coord1_a,
+            y_coord1_a,
+            roi_hsize1_a,
+            roi_vsize1_a,
+            roi_x_start1_a,
+            roi_x_stop1_a,
+            roi_y_start1_a,
+            roi_y_stop1_a,
+        )
+        datas2[CURVE_CORRECTIONS_GROUP] = versioned_stationary_curve(
+            factors2,
+            base_croibg2,
+            base_croibg2_variance,
+            croi2_a,
+            bgroi2_a,
+            Corr_croi2_a,
+            Corr_bgroi2_a,
+            x_coord2_a,
+            y_coord2_a,
+            roi_hsize2_a,
+            roi_vsize2_a,
+            roi_x_start2_a,
+            roi_x_stop2_a,
+            roi_y_start2_a,
+            roi_y_stop2_a,
+        )
         data = {
             self.activescanname: {
                 "instrument": {

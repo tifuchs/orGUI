@@ -22,10 +22,16 @@ from silx.io.dictdump import dicttonx, nxtodict
 
 from orgui.app.config_data import (
     CORRECTIONS_SCHEMA_VERSION,
+    CURVE_CORRECTIONS_GROUP,
+    CURVE_CORRECTIONS_SCHEMA_VERSION,
     CorrectionState,
+    CurveCorrectionRecord,
     ROIState,
     corrections_from_nxdict,
     corrections_to_nxdict,
+    curve_correction_record_from_nxdict,
+    curve_correction_record_to_nxdict,
+    curve_record_kind,
     roi_from_nxdict,
     roi_to_nxdict,
 )
@@ -65,6 +71,15 @@ def _populated_corrections():
         sample_length_m=5e-3,
         sample_width_m=3e-3,
         beam_flux_density=1.2e16,
+        total_incident_flux=4.2e11,
+        total_flux_calibrated=True,
+        primary_monitor="ic2",
+        primary_monitor_kind="rate",
+        primary_monitor_unit="count/s",
+        monitor_reference_reading=2.4e6,
+        monitor_reference_exposure_s=0.5,
+        horizontal_interception="fraction",
+        horizontal_intercepted_fraction=0.85,
         beam_shape_analytical=False,
         beam_shape_name="Trapezoid",
         beam_shape_values=(90.0, 30.0),
@@ -73,6 +88,8 @@ def _populated_corrections():
         beam_profile_unit="mm",
         beam_profile_center="median",
         beam_profile_offset_um=-12.5,
+        beam_profile_positions_m=(-1e-4, 0.0, 1e-4),
+        beam_profile_density_per_m=(1000.0, 8000.0, 1000.0),
     )
 
 
@@ -154,6 +171,16 @@ def test_a_nested_uncertainty_provenance_is_refused():
         corrections_to_nxdict(state)
 
 
+def test_an_incomplete_embedded_profile_is_refused():
+    state = CorrectionState(
+        beam_profile_positions_m=(0.0, 1.0),
+        beam_profile_density_per_m=(1.0,),
+    )
+
+    with pytest.raises(ValueError, match="equal length"):
+        corrections_to_nxdict(state)
+
+
 def test_unknown_datasets_are_ignored(tmp_path):
     """A configuration from a newer orGUI still loads."""
     nxdict = corrections_to_nxdict(CorrectionState(use_mask=True))
@@ -176,6 +203,150 @@ def test_the_layout_is_browsable_and_versioned(tmp_path):
     assert bool(nxdict["switches"]["use_solid_angle"]) is True
     assert int(nxdict["pixel_repair"]["radius"]) == 2
     assert np.array_equal(np.asarray(nxdict["excluded_frames"]), [3, 7, 11])
+
+
+def test_total_flux_fields_do_not_reinterpret_legacy_density(tmp_path):
+    """The two flux conventions remain distinct through persistence."""
+    state = CorrectionState(
+        beam_flux_density=1.2e16,
+        total_incident_flux=4.2e11,
+        total_flux_calibrated=True,
+        primary_monitor="ic2",
+        primary_monitor_kind="rate",
+        primary_monitor_unit="count/s",
+        monitor_reference_reading=2.4e6,
+        monitor_reference_exposure_s=0.5,
+        horizontal_interception="fraction",
+        horizontal_intercepted_fraction=0.85,
+    )
+
+    nxdict = _through_file(corrections_to_nxdict(state), tmp_path)
+    loaded = corrections_from_nxdict(nxdict)
+
+    assert nxdict["@orgui_schema_version"] == 3
+    assert nxdict["footprint"]["@beam_flux_density_unit"] == "1/(s m^2)"
+    assert nxdict["footprint"]["@total_incident_flux_unit"] == "photons/s"
+    assert loaded == state
+
+
+def _curve_record():
+    return CurveCorrectionRecord(
+        algorithm="legacy_stationary_roi_v1",
+        output_quantity="roi_intensity",
+        scale_convention="legacy_density_area",
+        normalization_status="applied",
+        illumination_status="applied",
+        pixel_correction_status="applied",
+        normalization_divisor=np.array([2.0, 4.0]),
+        normalization_unit="s count/s",
+        normalization_components=("exposure_time", "ic2"),
+        illumination_divisor=np.array([0.5, 0.25]),
+        illumination_convention="legacy_C_illum_area",
+        vertical_intercepted_fraction=np.array([0.8, 0.9]),
+        horizontal_intercepted_fraction=np.array([1.0, 1.0]),
+        intercepted_fraction=np.array([0.8, 0.9]),
+        alpha=np.deg2rad([1.0, 2.0]),
+        base_croi=np.array([100.0, 120.0]),
+        base_croi_variance=np.array([100.0, 120.0]),
+        base_bgroi=np.array([20.0, 24.0]),
+        base_bgroi_variance=np.array([20.0, 24.0]),
+        base_croibg=np.array([80.0, 96.0]),
+        base_croibg_variance=np.array([125.0, 150.0]),
+        combined_croi_factor=np.array([1.1, 1.2]),
+        combined_bgroi_factor=np.array([1.05, 1.06]),
+        gamma_arm=np.deg2rad([10.0, 20.0]),
+        delta_arm=np.deg2rad([1.0, 2.0]),
+        roi_x=np.array([12.0, 13.0]),
+        roi_y=np.array([22.0, 23.0]),
+        roi_width=np.array([10, 10]),
+        roi_height=np.array([6, 6]),
+        roi_x_start=np.array([7, 8]),
+        roi_x_stop=np.array([17, 18]),
+        roi_y_start=np.array([19, 20]),
+        roi_y_stop=np.array([25, 26]),
+        lorentz_mode="stationary",
+        profile_provenance={
+            "analytical": True,
+            "shape": "Gaussian",
+            "profile_content": "embedded parameters",
+        },
+    )
+
+
+def test_applied_curve_record_arrays_survive_save_and_reopen(tmp_path):
+    """Exact base values and divisors are independently recoverable."""
+    expected = _curve_record()
+    stored = _through_file(
+        curve_correction_record_to_nxdict(expected), tmp_path, "curve"
+    )
+    loaded = curve_correction_record_from_nxdict(stored)
+
+    assert stored["@orgui_schema_version"] == CURVE_CORRECTIONS_SCHEMA_VERSION
+    assert stored["@orgui_curve_contract"] == "frame_corrections"
+    assert loaded.algorithm == expected.algorithm
+    assert loaded.normalization_components == expected.normalization_components
+    assert loaded.normalization_unit == expected.normalization_unit
+    assert loaded.illumination_convention == expected.illumination_convention
+    assert loaded.profile_provenance == expected.profile_provenance
+    for name in (
+        "normalization_divisor",
+        "illumination_divisor",
+        "base_croi",
+        "base_croi_variance",
+        "base_bgroi",
+        "base_bgroi_variance",
+        "base_croibg",
+        "base_croibg_variance",
+        "gamma_arm",
+        "delta_arm",
+        "roi_x_start",
+        "roi_x_stop",
+        "roi_y_start",
+        "roi_y_stop",
+    ):
+        np.testing.assert_array_equal(getattr(loaded, name), getattr(expected, name))
+
+
+def test_versioned_curve_branch_is_not_dispatched_as_legacy():
+    """A normalized-capable branch cannot masquerade as ``rois/croibg``."""
+    versioned = {CURVE_CORRECTIONS_GROUP: curve_correction_record_to_nxdict(
+        _curve_record()
+    )}
+
+    assert CURVE_CORRECTIONS_GROUP != "rois"
+    assert curve_record_kind(versioned) == "versioned"
+    assert curve_record_kind({"rois": {"croibg": np.ones(2)}}) == "legacy"
+    assert curve_record_kind({"counters": {"croibg": np.ones(2)}}) == "legacy"
+    assert curve_record_kind({}) == "unknown"
+
+
+def test_missing_applied_fields_remain_unknown(tmp_path):
+    """Absence must never be interpreted as an applied divisor of one."""
+    record = CurveCorrectionRecord(
+        algorithm="legacy_import",
+        output_quantity="roi_intensity",
+        scale_convention="unknown",
+    )
+    loaded = curve_correction_record_from_nxdict(
+        _through_file(curve_correction_record_to_nxdict(record), tmp_path)
+    )
+
+    assert loaded.normalization_status == "unknown"
+    assert loaded.illumination_status == "unknown"
+    assert loaded.normalization_divisor is None
+    assert loaded.illumination_divisor is None
+
+
+def test_invalid_applied_status_is_refused():
+    record = CurveCorrectionRecord(
+        algorithm="bad",
+        output_quantity="roi_intensity",
+        scale_convention="unknown",
+        normalization_status="probably",
+    )
+
+    with pytest.raises(ValueError, match="normalization_status"):
+        curve_correction_record_to_nxdict(record)
 
 
 def test_a_legacy_json_configuration_still_reads():

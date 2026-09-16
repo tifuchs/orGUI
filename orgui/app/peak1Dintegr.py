@@ -56,6 +56,8 @@ import traceback
 
 from . import qutils
 from .config_data import (
+    CURVE_CORRECTIONS_GROUP,
+    CURVE_CORRECTIONS_SCHEMA_VERSION,
     ConfigData,
     CorrectionState,
     corrections_from_nxdict,
@@ -2000,10 +2002,54 @@ class RockingPeakIntegrator(qt.QMainWindow):
         # with qt.QSignalBlocker(self.anchorROIButton):
         #    self.anchorROIButton.setChecked(True)
 
+    @staticmethod
+    def _legacy_rocking_curve_group(h5_obj):
+        """Return legacy ``rois`` only when the sibling record permits it.
+
+        Stage-2 records describe the unchanged legacy extraction and therefore
+        explicitly allow this compatibility path. A future normalized record
+        uses the same distinct sibling name but a different algorithm; this
+        reducer must refuse to reinterpret that curve as unnormalized input.
+        An incomplete record beside an existing legacy group remains usable as
+        legacy data, with its provenance reported as unknown.
+        """
+        if CURVE_CORRECTIONS_GROUP in h5_obj:
+            record = h5_obj[CURVE_CORRECTIONS_GROUP]
+            version = int(record.attrs.get("orgui_schema_version", 0))
+            contract = record.attrs.get("orgui_curve_contract", "")
+            if isinstance(contract, bytes):
+                contract = contract.decode()
+            try:
+                algorithm = record["identity"]["algorithm"][()]
+                if isinstance(algorithm, bytes):
+                    algorithm = algorithm.decode()
+                else:
+                    algorithm = str(algorithm)
+            except (KeyError, TypeError, ValueError):
+                algorithm = None
+            if (
+                version == CURVE_CORRECTIONS_SCHEMA_VERSION
+                and contract == "frame_corrections"
+                and algorithm is not None
+                and not algorithm.startswith("legacy_rocking_roi_")
+            ):
+                raise ValueError(
+                    "This rocking curve uses a versioned normalized contract "
+                    "that the legacy reducer must not reinterpret. Use a "
+                    "reducer that supports its correction record."
+                )
+            if algorithm is None:
+                logger.warning(
+                    "The rocking curve has an incomplete correction record; "
+                    "using its preserved legacy ROI curve with unknown "
+                    "provenance."
+                )
+        return h5_obj["rois"]
+
     def get_ro_curve(self, idx):
         name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
-        cnters = h5_obj["rois"]
+        cnters = self._legacy_rocking_curve_group(h5_obj)
         curve = {
             "axisname": self._currentRoInfo["axisname"],
             "axis": self._currentRoInfo["axis"],
@@ -2015,7 +2061,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
     def get_all_ro_curves(self):
         name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
-        cnters = h5_obj["rois"]
+        cnters = self._legacy_rocking_curve_group(h5_obj)
         curve = {
             "axisname": self._currentRoInfo["axisname"],
             "axis": self._currentRoInfo["axis"],

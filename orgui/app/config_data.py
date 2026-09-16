@@ -31,9 +31,20 @@ from ..datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
 
 SCHEMA_VERSION = 1
 
-#: Layout version of the integration_corrections group. Version 2 is the
-#: typed layout that replaced a single JSON string.
-CORRECTIONS_SCHEMA_VERSION = 2
+#: Layout version of the integration_corrections group. Version 2 introduced
+#: the typed layout; version 3 adds explicit total-flux and primary-monitor
+#: settings without reinterpreting the legacy flux-density fields.
+CORRECTIONS_SCHEMA_VERSION = 3
+
+#: Layout version and group name of an applied per-curve correction record.
+#: This deliberately is not named ``rois``: an older reducer must not mistake
+#: a future frame-normalized curve for the legacy unnormalized input.
+CURVE_CORRECTIONS_SCHEMA_VERSION = 3
+CURVE_CORRECTIONS_GROUP = "ctr_curve_v3"
+
+CORRECTION_STATUSES = frozenset(
+    {"applied", "not_applied", "unavailable", "unknown"}
+)
 
 #: Layout version of the roi_integration group.
 ROI_SCHEMA_VERSION = 1
@@ -96,6 +107,18 @@ class CorrectionState:
     # an absolutely scaled structure factor (issue #15); a relative one does
     # not use it.
     beam_flux_density: float | None = None
+    # New total-flux convention. These fields describe requested settings;
+    # the exact values actually used for a curve live in CurveCorrectionRecord.
+    # ``None`` means unknown/not configured, never physical zero.
+    total_incident_flux: float | None = None
+    total_flux_calibrated: bool | None = None
+    primary_monitor: str | None = None
+    primary_monitor_kind: str | None = None
+    primary_monitor_unit: str | None = None
+    monitor_reference_reading: float | None = None
+    monitor_reference_exposure_s: float | None = None
+    horizontal_interception: str | None = None
+    horizontal_intercepted_fraction: float | None = None
     # The beam shape the footprint dialog describes the incident beam with --
     # analytical or measured, and every input either needs. Kept in the same
     # units the dialog itself shows them in (IntegrationCorrectionsDialog.
@@ -112,6 +135,10 @@ class CorrectionState:
     beam_profile_unit: str | None = None
     beam_profile_center: str | None = None
     beam_profile_offset_um: float | None = None
+    # Embedded, normalized measured profile. A path alone is not sufficient
+    # provenance once the source file moves or changes.
+    beam_profile_positions_m: tuple[float, ...] = ()
+    beam_profile_density_per_m: tuple[float, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible correction-state dictionary."""
@@ -133,7 +160,68 @@ class CorrectionState:
         values["beam_shape_values"] = tuple(
             float(value) for value in values.get("beam_shape_values", ())
         )
+        values["beam_profile_positions_m"] = tuple(
+            float(value) for value in values.get("beam_profile_positions_m", ())
+        )
+        values["beam_profile_density_per_m"] = tuple(
+            float(value)
+            for value in values.get("beam_profile_density_per_m", ())
+        )
         return cls(**values)
+
+
+@dataclass
+class CurveCorrectionRecord:
+    """Applied correction provenance for one saved curve branch.
+
+    Arrays are stored exactly as used, with radians at geometry boundaries.
+    The record is separate from :class:`CorrectionState`: that class captures
+    requested settings, while this one records what happened to the saved
+    numbers. Optional fields remain absent rather than being guessed as unity.
+
+    ``base_croibg`` and its variance are the reversible scalar curve before
+    normalization and illumination divisors. They are not raw detector images
+    and cannot undo arbitrary pixel reweighting.
+    """
+
+    algorithm: str
+    output_quantity: str
+    scale_convention: str
+    normalization_status: str = "unknown"
+    illumination_status: str = "unknown"
+    pixel_correction_status: str = "unknown"
+    normalization_divisor: Any = None
+    normalization_unit: str | None = None
+    normalization_components: tuple[str, ...] = ()
+    illumination_divisor: Any = None
+    illumination_convention: str | None = None
+    vertical_intercepted_fraction: Any = None
+    horizontal_intercepted_fraction: Any = None
+    intercepted_fraction: Any = None
+    alpha: Any = None
+    base_croi: Any = None
+    base_croi_variance: Any = None
+    base_bgroi: Any = None
+    base_bgroi_variance: Any = None
+    base_croibg: Any = None
+    base_croibg_variance: Any = None
+    combined_croi_factor: Any = None
+    combined_bgroi_factor: Any = None
+    polarization_croi_factor: Any = None
+    polarization_bgroi_factor: Any = None
+    gamma_arm: Any = None
+    delta_arm: Any = None
+    roi_x: Any = None
+    roi_y: Any = None
+    roi_width: Any = None
+    roi_height: Any = None
+    roi_x_start: Any = None
+    roi_x_stop: Any = None
+    roi_y_start: Any = None
+    roi_y_stop: Any = None
+    detector_acceptance: Any = None
+    lorentz_mode: str | None = None
+    profile_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 def _as_text(value):
@@ -368,6 +456,12 @@ def corrections_to_nxdict(state):
             "uncertainty_provenance must be a flat mapping of scalars; a "
             "nested value cannot be written as a NeXus group"
         )
+    if len(state.beam_profile_positions_m) != len(
+        state.beam_profile_density_per_m
+    ):
+        raise ValueError(
+            "embedded beam profile positions and density must have equal length"
+        )
     nxdict = {
         "@NX_class": "NXcollection",
         "@orgui_schema_version": CORRECTIONS_SCHEMA_VERSION,
@@ -381,7 +475,17 @@ def corrections_to_nxdict(state):
             "use_normalization": state.use_normalization,
         }),
         "normalization": _nx_group(
-            {"normalize_exposure": state.normalize_exposure}
+            {
+                "normalize_exposure": state.normalize_exposure,
+                "primary_monitor": state.primary_monitor,
+                "primary_monitor_kind": state.primary_monitor_kind,
+                "primary_monitor_unit": state.primary_monitor_unit,
+                "monitor_reference_reading": state.monitor_reference_reading,
+                "monitor_reference_exposure": (
+                    state.monitor_reference_exposure_s
+                ),
+            },
+            units={"@monitor_reference_exposure_unit": "s"},
         ),
         "pixel_repair": _nx_group({
             "enabled": state.repair_masked_pixels,
@@ -402,10 +506,17 @@ def corrections_to_nxdict(state):
                 "sample_length": state.sample_length_m,
                 "sample_width": state.sample_width_m,
                 "beam_flux_density": state.beam_flux_density,
+                "total_incident_flux": state.total_incident_flux,
+                "total_flux_calibrated": state.total_flux_calibrated,
+                "horizontal_interception": state.horizontal_interception,
+                "horizontal_intercepted_fraction": (
+                    state.horizontal_intercepted_fraction
+                ),
             },
             units={
                 "@sample_size_unit": "m",
                 "@beam_flux_density_unit": "1/(s m^2)",
+                "@total_incident_flux_unit": "photons/s",
             },
         ),
         # The dialog's own display units, not SI: see CorrectionState.
@@ -419,7 +530,11 @@ def corrections_to_nxdict(state):
                 "profile_center": state.beam_profile_center,
                 "profile_offset": state.beam_profile_offset_um,
             },
-            units={"@profile_offset_unit": "micron"},
+            units={
+                "@profile_offset_unit": "micron",
+                "@profile_position_unit": "m",
+                "@profile_density_unit": "1/m",
+            },
         ),
     }
     if state.monitor_corrections:
@@ -433,6 +548,14 @@ def corrections_to_nxdict(state):
     if state.beam_shape_values:
         nxdict["beam_shape"]["shape_values"] = np.asarray(
             state.beam_shape_values, dtype=np.float64
+        )
+    if state.beam_profile_positions_m:
+        nxdict["beam_shape"]["profile_positions"] = np.asarray(
+            state.beam_profile_positions_m, dtype=np.float64
+        )
+    if state.beam_profile_density_per_m:
+        nxdict["beam_shape"]["profile_density"] = np.asarray(
+            state.beam_profile_density_per_m, dtype=np.float64
         )
     if state.uncertainty_provenance:
         nxdict["uncertainty_provenance"] = _nx_group(
@@ -474,6 +597,21 @@ def corrections_from_nxdict(nxdict):
         "excluded_frames": tuple(int(v) for v in (excluded or ())),
         "uncertainty_provenance": _read_group(nxdict, "uncertainty_provenance"),
     }
+    for name in (
+        "primary_monitor",
+        "primary_monitor_kind",
+        "primary_monitor_unit",
+    ):
+        if name in normalization:
+            values[name] = str(normalization[name])
+    if "monitor_reference_reading" in normalization:
+        values["monitor_reference_reading"] = float(
+            normalization["monitor_reference_reading"]
+        )
+    if "monitor_reference_exposure" in normalization:
+        values["monitor_reference_exposure_s"] = float(
+            normalization["monitor_reference_exposure"]
+        )
     for name in ("use_lorentz", "use_footprint", "use_normalization"):
         if name in switches:
             values[name] = bool(switches[name])
@@ -497,9 +635,19 @@ def corrections_from_nxdict(nxdict):
         ("sample_length_m", "sample_length"),
         ("sample_width_m", "sample_width"),
         ("beam_flux_density", "beam_flux_density"),
+        ("total_incident_flux", "total_incident_flux"),
+        ("horizontal_intercepted_fraction", "horizontal_intercepted_fraction"),
     ):
         if key in footprint:
             values[name] = float(footprint[key])
+    if "total_flux_calibrated" in footprint:
+        values["total_flux_calibrated"] = bool(
+            footprint["total_flux_calibrated"]
+        )
+    if "horizontal_interception" in footprint:
+        values["horizontal_interception"] = str(
+            footprint["horizontal_interception"]
+        )
     beam_shape = _read_group(nxdict, "beam_shape")
     if "analytical" in beam_shape:
         values["beam_shape_analytical"] = bool(beam_shape["analytical"])
@@ -518,7 +666,261 @@ def corrections_from_nxdict(nxdict):
         values["beam_shape_values"] = tuple(
             float(v) for v in np.atleast_1d(beam_shape["shape_values"])
         )
+    if "profile_positions" in beam_shape:
+        values["beam_profile_positions_m"] = tuple(
+            float(v) for v in np.atleast_1d(beam_shape["profile_positions"])
+        )
+    if "profile_density" in beam_shape:
+        values["beam_profile_density_per_m"] = tuple(
+            float(v) for v in np.atleast_1d(beam_shape["profile_density"])
+        )
     return CorrectionState(**values)
+
+
+def _group_metadata(group, name, default=None):
+    """Read one ``@`` metadata value from a dict or live HDF5 group."""
+    if hasattr(group, "attrs"):
+        return _plain(group.attrs.get(name.removeprefix("@"), default))
+    return _plain(group.get(name, default))
+
+
+def _validate_correction_status(name, value):
+    if value not in CORRECTION_STATUSES:
+        raise ValueError(
+            f"{name} must be one of {sorted(CORRECTION_STATUSES)}, got {value!r}"
+        )
+
+
+def curve_correction_record_to_nxdict(record):
+    """Serialize an applied :class:`CurveCorrectionRecord` to NeXus.
+
+    The returned group is intended to live under
+    :data:`CURVE_CORRECTIONS_GROUP`, beside rather than inside legacy
+    ``rois``/``counters`` data. This makes its different normalization
+    contract visible to both humans and dispatch code.
+
+    :param CurveCorrectionRecord record: Applied curve provenance.
+    :rtype: dict
+    :raises ValueError: If a status or profile value is not representable.
+    """
+    for name in (
+        "normalization_status",
+        "illumination_status",
+        "pixel_correction_status",
+    ):
+        _validate_correction_status(name, getattr(record, name))
+    if any(
+        isinstance(value, (dict, list, tuple))
+        for value in record.profile_provenance.values()
+    ):
+        raise ValueError("profile_provenance must be a flat mapping of scalars")
+
+    result = {
+        "@NX_class": "NXcollection",
+        "@orgui_schema_version": CURVE_CORRECTIONS_SCHEMA_VERSION,
+        "@orgui_curve_contract": "frame_corrections",
+        "identity": _nx_group({
+            "algorithm": record.algorithm,
+            "output_quantity": record.output_quantity,
+            "scale_convention": record.scale_convention,
+        }),
+        "normalization": _nx_group({
+            "status": record.normalization_status,
+            "divisor": record.normalization_divisor,
+            "divisor_unit": record.normalization_unit,
+        }),
+        "illumination": _nx_group(
+            {
+                "status": record.illumination_status,
+                "divisor": record.illumination_divisor,
+                "convention": record.illumination_convention,
+                "vertical_intercepted_fraction": (
+                    record.vertical_intercepted_fraction
+                ),
+                "horizontal_intercepted_fraction": (
+                    record.horizontal_intercepted_fraction
+                ),
+                "intercepted_fraction": record.intercepted_fraction,
+                "alpha": record.alpha,
+            },
+            units={"@alpha_unit": "rad"},
+        ),
+        "base": _nx_group({
+            "croi": record.base_croi,
+            "croi_variance": record.base_croi_variance,
+            "bgroi": record.base_bgroi,
+            "bgroi_variance": record.base_bgroi_variance,
+            "croibg": record.base_croibg,
+            "croibg_variance": record.base_croibg_variance,
+        }),
+        "pixel_corrections": _nx_group({
+            "status": record.pixel_correction_status,
+            "combined_croi": record.combined_croi_factor,
+            "combined_bgroi": record.combined_bgroi_factor,
+            "polarization_croi": record.polarization_croi_factor,
+            "polarization_bgroi": record.polarization_bgroi_factor,
+        }),
+        "geometry": _nx_group(
+            {
+                "gamma_arm": record.gamma_arm,
+                "delta_arm": record.delta_arm,
+                "roi_x": record.roi_x,
+                "roi_y": record.roi_y,
+                "roi_width": record.roi_width,
+                "roi_height": record.roi_height,
+                "roi_x_start": record.roi_x_start,
+                "roi_x_stop": record.roi_x_stop,
+                "roi_y_start": record.roi_y_start,
+                "roi_y_stop": record.roi_y_stop,
+                "detector_acceptance": record.detector_acceptance,
+                "lorentz_mode": record.lorentz_mode,
+            },
+            units={
+                "@detector_arm_unit": "rad",
+                "@roi_position_unit": "px",
+                "@detector_acceptance_unit": "rad",
+            },
+        ),
+        "profile": _nx_group(
+            dict(record.profile_provenance),
+            units={
+                "@profile_position_unit": "m",
+                "@profile_density_unit": "1/m",
+                "@profile_offset_unit": "micron",
+            },
+        ),
+    }
+    if record.normalization_components:
+        result["normalization"]["components"] = _string_array(
+            record.normalization_components
+        )
+    return result
+
+
+def curve_correction_record_from_nxdict(nxdict):
+    """Load a :class:`CurveCorrectionRecord` from its versioned group.
+
+    :param dict nxdict: Contents of :data:`CURVE_CORRECTIONS_GROUP`.
+    :rtype: CurveCorrectionRecord
+    :raises ValueError: If this is not a supported versioned curve record.
+    """
+    version = int(_group_metadata(nxdict, "@orgui_schema_version", 0))
+    contract = _as_text(_group_metadata(nxdict, "@orgui_curve_contract", ""))
+    if version != CURVE_CORRECTIONS_SCHEMA_VERSION or contract != "frame_corrections":
+        raise ValueError(
+            f"unsupported curve correction record version/contract: "
+            f"{version}/{contract!r}"
+        )
+    identity = _read_group(nxdict, "identity")
+    normalization = _read_group(nxdict, "normalization")
+    illumination = _read_group(nxdict, "illumination")
+    base = _read_group(nxdict, "base")
+    pixel = _read_group(nxdict, "pixel_corrections")
+    geometry = _read_group(nxdict, "geometry")
+    components = normalization.get("components", ())
+    values = {
+        "algorithm": str(identity["algorithm"]),
+        "output_quantity": str(identity["output_quantity"]),
+        "scale_convention": str(identity["scale_convention"]),
+        "normalization_status": str(normalization.get("status", "unknown")),
+        "illumination_status": str(illumination.get("status", "unknown")),
+        "pixel_correction_status": str(pixel.get("status", "unknown")),
+        "normalization_components": tuple(_read_string_array(components)),
+        "profile_provenance": _read_group(nxdict, "profile"),
+    }
+    if "divisor_unit" in normalization:
+        values["normalization_unit"] = str(normalization["divisor_unit"])
+    if "convention" in illumination:
+        values["illumination_convention"] = str(illumination["convention"])
+    groups = (
+        (normalization, {"normalization_divisor": "divisor"}),
+        (
+            illumination,
+            {
+                "illumination_divisor": "divisor",
+                "vertical_intercepted_fraction": "vertical_intercepted_fraction",
+                "horizontal_intercepted_fraction": "horizontal_intercepted_fraction",
+                "intercepted_fraction": "intercepted_fraction",
+                "alpha": "alpha",
+            },
+        ),
+        (
+            base,
+            {
+                "base_croi": "croi",
+                "base_croi_variance": "croi_variance",
+                "base_bgroi": "bgroi",
+                "base_bgroi_variance": "bgroi_variance",
+                "base_croibg": "croibg",
+                "base_croibg_variance": "croibg_variance",
+            },
+        ),
+        (
+            pixel,
+            {
+                "combined_croi_factor": "combined_croi",
+                "combined_bgroi_factor": "combined_bgroi",
+                "polarization_croi_factor": "polarization_croi",
+                "polarization_bgroi_factor": "polarization_bgroi",
+            },
+        ),
+        (
+            geometry,
+            {
+                "gamma_arm": "gamma_arm",
+                "delta_arm": "delta_arm",
+                "roi_x": "roi_x",
+                "roi_y": "roi_y",
+                "roi_width": "roi_width",
+                "roi_height": "roi_height",
+                "roi_x_start": "roi_x_start",
+                "roi_x_stop": "roi_x_stop",
+                "roi_y_start": "roi_y_start",
+                "roi_y_stop": "roi_y_stop",
+                "detector_acceptance": "detector_acceptance",
+                "lorentz_mode": "lorentz_mode",
+            },
+        ),
+    )
+    for group, mapping in groups:
+        for field_name, dataset_name in mapping.items():
+            if dataset_name in group:
+                values[field_name] = group[dataset_name]
+    record = CurveCorrectionRecord(**values)
+    for name in (
+        "normalization_status",
+        "illumination_status",
+        "pixel_correction_status",
+    ):
+        _validate_correction_status(name, getattr(record, name))
+    return record
+
+
+def curve_record_kind(container):
+    """Classify a loaded curve container without guessing missing provenance.
+
+    :param container: Mapping or HDF5 group containing a saved curve.
+    :returns: ``"versioned"``, ``"legacy"``, or ``"unknown"``.
+    :rtype: str
+    """
+    if CURVE_CORRECTIONS_GROUP in container:
+        group = container[CURVE_CORRECTIONS_GROUP]
+        version = int(_group_metadata(group, "@orgui_schema_version", 0))
+        contract = _as_text(
+            _group_metadata(group, "@orgui_curve_contract", "")
+        )
+        if (
+            version == CURVE_CORRECTIONS_SCHEMA_VERSION
+            and contract == "frame_corrections"
+        ):
+            return "versioned"
+        return "unknown"
+    if "rois" in container or "croibg" in container:
+        return "legacy"
+    counters = container.get("counters") if hasattr(container, "get") else None
+    if counters is not None and "croibg" in counters:
+        return "legacy"
+    return "unknown"
 
 
 def roi_to_nxdict(state):
@@ -714,6 +1116,8 @@ class ConfigData:
             sample_width_m = None
             beam_flux_density = None
             beam_shape = {}
+            beam_profile_positions_m = ()
+            beam_profile_density_per_m = ()
             if footprint_dialog is not None:
                 sample_length_m = footprint_dialog.sampleLength()
                 sample_width_m = footprint_dialog.sampleWidth()
@@ -721,6 +1125,23 @@ class ConfigData:
                 # The dialog's own settings() dict, in its own display units;
                 # see CorrectionState.beam_shape_values.
                 beam_shape = footprint_dialog.settings()
+                if not beam_shape.get("analytical", True):
+                    try:
+                        positions, density = (
+                            footprint_dialog.measuredProfile().profile_curve()
+                        )
+                    except ValueError:
+                        # An unresolved imported path stays unresolved. Config
+                        # capture must not make an otherwise-unused correction
+                        # fatal or invent an empty physical profile.
+                        pass
+                    else:
+                        beam_profile_positions_m = tuple(
+                            float(value) for value in positions
+                        )
+                        beam_profile_density_per_m = tuple(
+                            float(value) for value in density
+                        )
             corrections = CorrectionState(
                 use_mask=bool(options.get("mask", False)) or repair_enabled,
                 use_background=getattr(gui, "background_image", None)
@@ -769,6 +1190,8 @@ class ConfigData:
                 beam_profile_unit=beam_shape.get("profile_unit"),
                 beam_profile_center=beam_shape.get("profile_center"),
                 beam_profile_offset_um=beam_shape.get("profile_offset"),
+                beam_profile_positions_m=beam_profile_positions_m,
+                beam_profile_density_per_m=beam_profile_density_per_m,
             )
             roi = ROIState(
                 region=dict(options.get("region", {})),

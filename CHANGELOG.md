@@ -7,6 +7,21 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **Saved CTR curves now carry a versioned correction record.** This is a
+  persistence-only compatibility step: numerical defaults and the established
+  ``rois``, ``croibg`` and ``Cfactors_*`` meanings are unchanged. A separate
+  ``ctr_curve_v3`` branch records the reversible pre-normalization scalar
+  curve and variance, exact applied normalization and illumination divisors,
+  explicit applied/not-applied/unavailable/unknown states, pixel-factor
+  provenance, detector-arm/ROI geometry and embedded beam-profile data. The
+  requested correction settings schema is version 3 and stores total incident
+  flux separately from the legacy flux density, together with primary-monitor
+  kind/reference and horizontal-interception fields; absent values remain
+  unknown rather than physical zero or unity. The rocking reducer explicitly
+  accepts the unchanged legacy-algorithm record but refuses a future
+  frame-normalized record until its dedicated dispatch path is implemented,
+  preventing it from silently normalizing a new curve twice.
+
 - **The polarization correction now follows the detector arm.**
   *This changes saved numbers for scans that move the detector arm and for
   arm-corrected integrations using a nonzero configured polarization axis;

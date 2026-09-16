@@ -681,6 +681,38 @@ def test_legacy_rocking_acceptance_reports_calibration_fallback(caplog):
     assert "calibration position (legacy fallback)" in caplog.text
 
 
+def test_stage2_record_explicitly_allows_the_legacy_curve(tmp_path):
+    """The new provenance sibling does not alter current numerical defaults."""
+    path = tmp_path / "legacy_curve_record.h5"
+    with h5py.File(path, "w") as database:
+        scan = database.create_group("scan")
+        rois = scan.create_group("rois")
+        record = scan.create_group("ctr_curve_v3")
+        record.attrs["orgui_schema_version"] = 3
+        record.attrs["orgui_curve_contract"] = "frame_corrections"
+        identity = record.create_group("identity")
+        identity.create_dataset("algorithm", data="legacy_rocking_roi_v1")
+
+        selected = RockingPeakIntegrator._legacy_rocking_curve_group(scan)
+        assert selected.name == rois.name
+
+
+def test_versioned_normalized_curve_is_not_consumed_as_legacy(tmp_path):
+    """Future Q/H-normalized curves require their explicit dispatch path."""
+    path = tmp_path / "normalized_curve_record.h5"
+    with h5py.File(path, "w") as database:
+        scan = database.create_group("scan")
+        scan.create_group("rois")
+        record = scan.create_group("ctr_curve_v3")
+        record.attrs["orgui_schema_version"] = 3
+        record.attrs["orgui_curve_contract"] = "frame_corrections"
+        identity = record.create_group("identity")
+        identity.create_dataset("algorithm", data="total_flux_framewise_v1")
+
+        with pytest.raises(ValueError, match="must not reinterpret"):
+            RockingPeakIntegrator._legacy_rocking_curve_group(scan)
+
+
 @pytest.mark.parametrize("applied_at_extraction", [True, False])
 def test_the_typed_corrections_group_is_read_back(applied_at_extraction):
     """The F6 compensation must survive the layout it is stored in.
