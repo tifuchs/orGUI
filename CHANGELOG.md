@@ -7,6 +7,29 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **Added opt-in incoherent CTR models for large surface height domains.**
+  A `PoissonSurface` distributes surface heights, and by default those heights
+  add as amplitudes: the coherent limit, in which every height lies inside one
+  coherence patch. When the lateral height domains are large compared with the
+  projected coherence area, each patch instead sees one flat height and the
+  patches add in intensity. The new `CTRincoherent.PoissonHeightDomains`
+  interpolates between the two through a dimensionless `incoherent_fraction`,
+  mixing the *complete* crystal amplitude of each height so that bulk-surface
+  and Film-surface interference stays inside every domain. Constructing a
+  `PoissonSurface` does not opt into the averaging: wrapping the crystal is
+  the explicit opt-in, and existing scripts, saved crystals, and optimizer
+  setups stay coherent and numerically unchanged. The fraction is a fixed
+  setting until it is added as a fit parameter, after which the wrapper is
+  fitted through `CTROptimizer`'s existing model argument, with
+  `optimizer.xtal` still the coherent crystal for callbacks and constraints.
+  `SXRDCrystal` gains `F2` and `evaluate_kinematic`, resolution now acts on
+  `F2` before the conversion back to a stored amplitude, and `CTROptimizer`
+  gains `n_parameters` for the full prepared vector. The first implementation
+  is kinematical: combining it with DWBA fails explicitly during
+  `prepareFit`. A component such as a water layer may be stacked above the
+  target surface, where it is common to every domain at the mean surface
+  height, as in the coherent model.
+
 - **Added live DWBA predictions to CTR fitting.** ``CTROptimizer.set_dwba``
   now evaluates the optimizer-owned crystal through the semi-infinite DWBA
   model, forms predictions independently in each dataset's stored F or

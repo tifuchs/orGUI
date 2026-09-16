@@ -684,6 +684,138 @@ No illuminated footprint, detector response, or experimental scale factor is
 included. Calculated intensity is proportional to
 :math:`|F_{\mathrm{crystal}}|^2`.
 
+Amplitudes, squared structure factors, and reflectivity
+--------------------------------------------------------
+
+Four quantities appear along the CTR path and are deliberately not
+interchangeable.
+
+``F``
+   The coherent complex structure factor returned by
+   :meth:`~orgui.datautils.xrayutils.CTRcalc.SXRDCrystal.F`, in electrons per
+   lateral cell of the reference unit cell.  It carries a phase.
+
+``F2``
+   The squared structure factor
+   :meth:`~orgui.datautils.xrayutils.CTRcalc.SXRDCrystal.F2`, equal to
+   ``abs(F) ** 2`` for a coherent crystal, in the squared units of ``F``.  It
+   is real and nonnegative and carries no phase.
+
+``r``
+   The optical reflection amplitude of the DWBA path, a dimensionless complex
+   ratio formed from the electron-density profile.
+
+``R``
+   Reflectivity, the dimensionless intensity ratio ``abs(r) ** 2``.
+
+None of these is detector counts.  Incident flux, illuminated footprint,
+polarization and Lorentz factors, detector response, acquisition time,
+background, and the fitted experimental scale all sit outside them.
+
+An incoherent model has a ``F2`` but no ``F``: a mixed state has no unique
+complex amplitude, so requesting one is a category error rather than a
+missing feature.  ``F2`` never changes meaning with the optimizer mode; a
+reflectivity is returned from a separately named boundary, never from a
+method called ``F2``.
+
+Incoherent height domains
+---------------------------------------------
+
+A :class:`~orgui.datautils.xrayutils.CTRfilm.PoissonSurface` describes a
+distribution of surface heights.  By default those heights are added as
+*amplitudes*, which is the coherent limit: every height lies inside one
+coherence patch, and the height distribution enters through the squared
+modulus of its characteristic function.
+
+When the lateral height domains are large compared with the projected
+coherence area, each patch instead sees a single flat height and the patches
+add in intensity.  The two limits are
+
+.. math::
+
+   F^2_{\mathrm{coherent}} = \left| \sum_n p_n A_n \right|^2,
+   \qquad
+   F^2_{\mathrm{incoherent}} = \sum_n p_n \left| A_n \right|^2,
+
+where :math:`p_n` is the probability of height state :math:`n` and
+:math:`A_n` is the **complete** crystal amplitude when that height covers the
+patch: bulk, Film, the flat-height Film correction, and the exposed
+termination together.  Averaging only the surface correction would drop the
+bulk-surface and Film-surface interference inside each domain and is a
+different quantity.
+
+:class:`~orgui.datautils.xrayutils.CTRincoherent.PoissonHeightDomains`
+interpolates between them with a dimensionless ``incoherent_fraction``
+:math:`\kappa` in ``[0, 1]``:
+
+.. math::
+
+   F^2_\kappa = (1 - \kappa) F^2_{\mathrm{coherent}}
+                + \kappa F^2_{\mathrm{incoherent}}.
+
+For a patch containing :math:`N_{\mathrm{eff}}` independent equal-area
+domains, :math:`\kappa \approx 1 / N_{\mathrm{eff}}`.  A CTR-only fit cannot
+separate domain size from beam coherence length; AFM, transverse scans,
+rocking widths, or reciprocal-space maps are needed to constrain one of them.
+
+Constructing a ``PoissonSurface`` does **not** opt a calculation into
+incoherent averaging.  Wrapping the crystal is the explicit opt-in, and
+existing scripts, saved crystals, and optimizer setups stay coherent::
+
+    from orgui.datautils.xrayutils.CTRincoherent import PoissonHeightDomains
+    from orgui.datautils.xrayutils.CTRopt import CTROptimizer
+
+    # The crystal on its own is unchanged and fully coherent.
+    coherent = crystal.F2(h, k, l)
+
+    domains = PoissonHeightDomains(
+        crystal,
+        surface="rough_surface",
+        incoherent_fraction=0.35,
+    )
+    mixed = domains.F2(h, k, l)
+
+The fraction is a fixed setting until it is explicitly added as a fit
+parameter, after which it occupies the first entry of the model block::
+
+    domains.addFitParameter(
+        "incoherent_fraction",
+        limits=(0.0, 1.0),
+        name="rough_surface incoherent_fraction",
+    )
+
+    fit = CTROptimizer(domains, ctrs)
+    fit.prepareFit()
+    assert fit.xtal is fit.model.coherent_model
+
+The wrapper is passed through the optimizer's existing model argument.
+``optimizer.xtal`` remains the coherent crystal, so registered fit callbacks
+and displacement constraints keep receiving an ``SXRDCrystal``, while
+``optimizer.model`` is the fitted forward model.  Resolution is applied to
+``F2`` before the conversion back to a stored ``|F|``.
+
+The first implementation is kinematical only.  Combining an incoherent
+``F2`` model with DWBA raises during ``prepareFit``: changing the flat
+surface height changes the optical reference profile and its internal fields,
+so a correct DWBA ensemble would have to prepare and evaluate each height
+separately and mix ``abs(r) ** 2``.
+
+The target surface does not have to be the topmost component: a water layer
+or a cap may be stacked above it.  Anything above the surface is placed once
+at the surface's *mean* height and is common to every domain, which is how
+the coherent model already treats it, so the :math:`\kappa = 0` endpoint is
+unchanged.  Note the approximation this carries: in a strict large-domain
+limit an overlayer would follow each domain's own height rather than the
+mean.
+
+Height states are indexed by the structural layer :math:`n` of the top filled
+layer, and the mass of that state is ``probability(n + 1)``: layer :math:`n`
+is the top filled layer exactly when the signed height change equals
+:math:`n + 1`.  The retained interval is chosen from the calculated
+probability masses and the profile's tail target, never from measured CTR
+values, and is renormalized once.  ``exact_layer_count`` (default 10) retains
+every state for a narrow distribution; it is a policy switch, not a cap.
+
 API reference
 -------------
 
@@ -702,8 +834,30 @@ API reference
    :member-order: bysource
 
 .. autoclass:: orgui.datautils.xrayutils.CTRcalc.SXRDCrystal
-   :members: F, F_surf, setGlobalReferenceUnitCell
+   :members: F, F2, F_surf, evaluate_kinematic, setGlobalReferenceUnitCell
    :member-order: bysource
+
+.. autoclass:: orgui.datautils.xrayutils.CTRincoherent.IncoherentModel
+   :members: coherent_model, setParameters, validate, to_config
+   :member-order: bysource
+
+.. autoclass:: orgui.datautils.xrayutils.CTRincoherent.IncoherentF2Model
+   :members: F2
+   :member-order: bysource
+
+.. autoclass:: orgui.datautils.xrayutils.CTRincoherent.CoherentStateEnsembleModel
+   :members: incoherent_fraction, accumulate_states
+   :member-order: bysource
+
+.. autoclass:: orgui.datautils.xrayutils.CTRincoherent.PoissonHeightDomains
+   :members: incoherent_fraction, target_surface
+   :member-order: bysource
+
+.. autofunction:: orgui.datautils.xrayutils.CTRincoherent.available_incoherent_models
+
+.. autofunction:: orgui.datautils.xrayutils.CTRincoherent.create_incoherent_model
+
+.. autofunction:: orgui.datautils.xrayutils.CTRincoherent.create_incoherent_model_from_config
 
 .. autoclass:: orgui.datautils.xrayutils.CTRuc.UnitCell
    :members: F_uc, F_bulk, setReferenceUnitCell, supercell, affine_layer_transform, as_surface_termination
@@ -718,7 +872,11 @@ API reference
    :member-order: bysource
 
 .. autoclass:: orgui.datautils.xrayutils.CTRfilm.PoissonSurface
-   :members: F_uc, uc_area, setReferenceUnitCell
+   :members: F_uc, uc_area, setReferenceUnitCell, flat_domain_corrections
+   :member-order: bysource
+
+.. autoclass:: orgui.datautils.xrayutils.CTRfilm.FlatHeightCorrections
+   :members: excluded_probability, iter_states, as_array
    :member-order: bysource
 
 .. autofunction:: orgui.datautils.xrayutils.CTRutil.generate_surface_termination_cells

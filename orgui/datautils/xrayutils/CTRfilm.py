@@ -33,6 +33,7 @@ import numpy as np
 from .. import util
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 # random.seed(45)
 
 
@@ -82,6 +83,180 @@ def _unwrapped_layer_positions(layer_positions, order):
         while positions[i] <= positions[i - 1]:
             positions[i] += 1.0
     return positions
+
+
+@dataclass(frozen=True)
+class _PoissonCandidates:
+    """Unmasked profile arrays for one Poisson surface evaluation.
+
+    No retention policy is applied here. The coherent layer assembly and the
+    incoherent height-state ensemble select from these arrays separately,
+    because they retain different sets for different reasons: the coherent
+    path keeps every layer carrying either exposed surface or a Film
+    correction and never renormalizes, while the ensemble keeps exposed
+    heights only and renormalizes over them.
+
+    :param PoissonProfile profile:
+        Profile rebuilt from the live basis.
+    :param numpy.ndarray layer_numbers:
+        Consecutive structural layer offsets covering the profile support.
+    :param numpy.ndarray material_occupancy:
+        Cumulative material occupancy, ``P(H > n)`` for height change ``H``.
+    :param numpy.ndarray surface_occupancy:
+        Exposed fraction per layer as the coherent assembly uses it. Its
+        terminal bin carries the folded upper tail.
+    :param numpy.ndarray exposed_probability:
+        Height-state mass ``probability(n + 1)``. Layer ``n`` is the top
+        filled layer exactly when ``H == n + 1``, which is why the argument is
+        shifted. This agrees with ``surface_occupancy`` on every interior bin
+        and deliberately differs at the terminal one.
+    :param numpy.ndarray film_correction_occupancy:
+        Material occupancy relative to the sharp Film boundary.
+    :param float tail_probability:
+        Cumulative tail target carried by the profile.
+    """
+
+    profile: object
+    layer_numbers: np.ndarray
+    material_occupancy: np.ndarray
+    surface_occupancy: np.ndarray
+    exposed_probability: np.ndarray
+    film_correction_occupancy: np.ndarray
+    tail_probability: float
+
+
+@dataclass(frozen=True)
+class FlatHeightState:
+    """One flat surface height and its occupancy-one correction.
+
+    :param int layer_number:
+        Structural layer of the top filled layer.
+    :param float probability:
+        Normalized mass of this state within the retained interval.
+    :param amplitude:
+        Complex correction relative to the sharp Film boundary, in electrons
+        for one lateral surface unit cell. The probability is *not* folded
+        into it.
+    """
+
+    layer_number: int
+    probability: float
+    amplitude: object
+
+
+@dataclass(frozen=True)
+class FlatHeightCorrections:
+    """Retained flat-height states of a Poisson surface.
+
+    ``probabilities`` are renormalized over the retained interval exactly
+    once, after selection, so they sum to one. The masses excluded below and
+    above the interval are reported separately and are taken from the
+    profile's own cumulative distribution, so the three add to one regardless
+    of where the candidate support was truncated.
+
+    The stored arrays are read-only. Amplitudes are produced lazily by
+    :meth:`iter_states` and are only valid while the surface's parameters are
+    unchanged.
+
+    :param numpy.ndarray layer_numbers:
+        Retained structural layers in ascending order.
+    :param numpy.ndarray probabilities:
+        Normalized state masses aligned with ``layer_numbers``.
+    :param float raw_retained_probability:
+        Retained mass before normalization.
+    :param float excluded_lower_probability:
+        Mass of heights below the retained interval.
+    :param float excluded_upper_probability:
+        Mass of heights above the retained interval.
+    :param callable amplitude_source:
+        Internal. Called with no arguments to obtain a generator of
+        ``(layer_number, amplitude)`` pairs.
+    """
+
+    layer_numbers: np.ndarray
+    probabilities: np.ndarray
+    raw_retained_probability: float
+    excluded_lower_probability: float
+    excluded_upper_probability: float
+    amplitude_source: object = field(repr=False)
+
+    def __post_init__(self):
+        for name in ("layer_numbers", "probabilities"):
+            array = getattr(self, name)
+            array.flags.writeable = False
+
+    @property
+    def excluded_probability(self):
+        """Return the total mass outside the retained interval."""
+        return (
+            self.excluded_lower_probability + self.excluded_upper_probability
+        )
+
+    def iter_states(self):
+        """Yield one :class:`FlatHeightState` at a time.
+
+        States are produced outward from the sharp Film boundary: those at or
+        above it in ascending order, then those below it in descending order.
+        That order lets the cumulative Film correction be built with one
+        evaluation per structural layer and one amplitude array in flight, so
+        it is the evaluation order rather than the ascending order of
+        :attr:`layer_numbers`. Each state carries its own layer number and
+        probability, so a consumer accumulating sums does not depend on it.
+
+        :returns:
+            Generator of flat-height states.
+        """
+        masses = dict(zip(self.layer_numbers.tolist(), self.probabilities))
+        for layer_number, amplitude in self.amplitude_source():
+            yield FlatHeightState(
+                int(layer_number), float(masses[layer_number]), amplitude
+            )
+
+    def as_array(self):
+        """Return every state amplitude, in ``layer_numbers`` order.
+
+        Diagnostic only: this materializes an ``(n_states, n_points)`` complex
+        array which the production path deliberately avoids.
+
+        :returns:
+            Stacked state corrections aligned with :attr:`layer_numbers`.
+        :rtype: numpy.ndarray
+        """
+        collected = {
+            int(state.layer_number): state.amplitude
+            for state in self.iter_states()
+        }
+        return np.array(
+            [collected[int(layer)] for layer in self.layer_numbers]
+        )
+
+
+def _retained_mass(candidates, low, high):
+    """Return the exact mass of the retained height-state interval.
+
+    Taken from the profile's cumulative distribution rather than by summing
+    the candidate masses, so truncation of the candidate support does not
+    leak into the reported retained and excluded masses.
+    """
+    layers = candidates.layer_numbers
+    occupancy = candidates.profile.occupancy(
+        [layers[low], layers[high] + 1]
+    )
+    return float(occupancy[0] - occupancy[1])
+
+
+@dataclass(frozen=True)
+class _LayerGeometry:
+    """Placement of the three slabs belonging to one structural layer."""
+
+    layer_number: int
+    layer_id: float
+    surface_uc: object
+    surface_matrix: np.ndarray
+    film_uc: object
+    film_matrix: np.ndarray
+    reference_uc: object
+    reference_matrix: np.ndarray
 
 
 def _translate_domains(layers, height):
@@ -2248,6 +2423,366 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         layer_height = film_uc.a[2] / len(self._layer_ids)
         return self.below_H + layer_height * (self.basis[0] + self.basis[2])
 
+    def _profile_candidates(self):
+        """Return the unmasked profile arrays for the live basis.
+
+        Applies no retention policy. The coherent assembly and the incoherent
+        height-state ensemble select from the result separately.
+
+        :returns:
+            Candidate layer numbers, occupancies, and masses.
+        :rtype: _PoissonCandidates
+        """
+        tail_probability = (
+            self.profile.tail_probability
+            if self.profile is not None
+            else DEFAULT_TAIL_PROBABILITY
+        )
+        profile = PoissonProfile(
+            mean_change=self.basis[0],
+            alpha=self.basis[1],
+            offset=self.basis[2],
+            tail_probability=tail_probability,
+        )
+        support_low, support_high = profile.support()
+        layer_numbers = np.arange(support_low, support_high + 1)
+        material_occupancy = profile.occupancy(layer_numbers)
+        sharp_film_occupancy = (layer_numbers < 0).astype(np.float64)
+        return _PoissonCandidates(
+            profile=profile,
+            layer_numbers=layer_numbers,
+            material_occupancy=material_occupancy,
+            surface_occupancy=profile.surface_occupancy(layer_numbers),
+            # Layer n is the top filled layer when the height change is n + 1.
+            exposed_probability=profile.probability(layer_numbers + 1),
+            film_correction_occupancy=material_occupancy - sharp_film_occupancy,
+            tail_probability=tail_probability,
+        )
+
+    @staticmethod
+    def _coherent_retention(candidates):
+        """Return the coherent assembly's retention mask.
+
+        Keeps every layer carrying either exposed surface or a Film
+        correction, and never renormalizes. This is the historical policy and
+        is deliberately not the height-state ensemble's.
+
+        :param _PoissonCandidates candidates:
+            Unmasked profile arrays.
+        :returns:
+            Boolean mask over ``candidates.layer_numbers``.
+        :rtype: numpy.ndarray
+        :raises ValueError:
+            If the profile represents no material or no exposed surface.
+        """
+        tail_probability = candidates.tail_probability
+        if not np.any(candidates.material_occupancy > tail_probability):
+            raise ValueError("Poisson surface profile has no represented material")
+        represented = (candidates.surface_occupancy > tail_probability) | (
+            np.abs(candidates.film_correction_occupancy) > tail_probability
+        )
+        exposed = candidates.surface_occupancy[represented]
+        if not np.any(exposed > tail_probability):
+            raise ValueError("Poisson surface profile has no represented surface")
+        return represented
+
+    @staticmethod
+    def _height_state_selection(candidates, exact_layer_count):
+        """Return the retained height-state interval and its masses.
+
+        Retains every candidate state when there are no more than
+        ``exact_layer_count`` of them. For a wider support it keeps a
+        contiguous interval containing the mode of the calculated masses,
+        holding at least ``exact_layer_count`` states, and expands it toward
+        the larger adjacent mass until the excluded mass meets the profile's
+        cumulative tail target. Measured CTR values never enter this choice.
+
+        The reported masses come from the profile's own cumulative
+        distribution rather than from summing the candidate array, so the
+        retained and two excluded masses add to one however the candidate
+        support was truncated.
+
+        :param _PoissonCandidates candidates:
+            Unmasked profile arrays.
+        :param int exact_layer_count:
+            Positive state count below which every state is retained.
+        :returns:
+            Low and high indices into ``candidates.layer_numbers``, the
+            normalized masses, and the raw retained, lower, and upper masses.
+        :rtype: tuple
+        :raises ValueError:
+            If ``exact_layer_count`` is not a positive integer or the profile
+            populates no height state.
+        """
+        if int(exact_layer_count) != exact_layer_count or exact_layer_count < 1:
+            raise ValueError("exact_layer_count must be a positive integer")
+        exact_layer_count = int(exact_layer_count)
+
+        masses = candidates.exposed_probability
+        populated = np.flatnonzero(masses > 0.0)
+        if populated.size == 0:
+            raise ValueError("Poisson surface profile has no populated height state")
+
+        if populated.size <= exact_layer_count:
+            low, high = int(populated[0]), int(populated[-1])
+        else:
+            # Ties resolve to the lower index. The maximum of the convolved
+            # masses is not floor(rate): for alpha < 1 the distribution is a
+            # two-point step mixture convolved with the Poisson.
+            low = high = int(np.argmax(masses))
+            first, last = int(populated[0]), int(populated[-1])
+            target = candidates.tail_probability
+            while low > first or high < last:
+                wide_enough = (high - low + 1) >= exact_layer_count
+                excluded = 1.0 - _retained_mass(candidates, low, high)
+                if wide_enough and excluded <= target:
+                    break
+                below = masses[low - 1] if low > first else -1.0
+                above = masses[high + 1] if high < last else -1.0
+                if above >= below:
+                    high += 1
+                else:
+                    low -= 1
+
+        raw_retained = _retained_mass(candidates, low, high)
+        if raw_retained <= 0.0:
+            raise ValueError("Poisson surface profile has no retained height mass")
+        layers = candidates.layer_numbers
+        excluded_lower = float(
+            1.0 - candidates.profile.occupancy([layers[low]])[0]
+        )
+        excluded_upper = float(
+            candidates.profile.occupancy([layers[high] + 1])[0]
+        )
+        probabilities = masses[low : high + 1] / raw_retained
+        return low, high, probabilities, raw_retained, excluded_lower, excluded_upper
+
+    def _layer_domain_geometry(self, layer_number, mat_0=None):
+        """Return the placement of one structural layer's three slabs.
+
+        Shared by :meth:`createLayers` and :meth:`flat_domain_corrections` so
+        that layer numbering, strain, and terrace placement are derived in one
+        place. The matrices do not yet carry the ``below_H`` translation which
+        ``_translate_domains`` applies to the stored domains.
+
+        :param int layer_number:
+            Structural layer offset relative to the sharp Film boundary.
+        :param numpy.ndarray mat_0:
+            Optional identity template, to avoid rebuilding it per layer.
+        :returns:
+            The three cells and their domain matrices.
+        :rtype: _LayerGeometry
+        """
+        if mat_0 is None:
+            mat_0 = np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
+        n_layers_in_uc = len(self._layer_ids)
+        order_index = layer_number % n_layers_in_uc
+        cycle_index = layer_number // n_layers_in_uc
+        surface_uc = self.layer_ucs[order_index]
+        film_uc = self.film_layer_ucs[order_index]
+        layer_id = self.layer_order[order_index]
+        reference_uc = self._film_termination_ucs[float(layer_id)]
+
+        relative_layer_position = (
+            cycle_index + self.layerpos[order_index] - self.layerpos[0]
+        )
+        layer_offset = (
+            relative_layer_position
+            - self.underlying_film.unitcell.layerpos[layer_id]
+        )
+        film_strain = self.underlying_film.unitcell.coherentDomainMatrix[0][2, 2]
+
+        film_matrix = np.copy(mat_0)
+        film_matrix[2, 2] = film_strain
+        film_matrix[2, 3] = layer_offset * film_strain
+
+        terrace_height = (
+            relative_layer_position * self.underlying_film.unitcell.a[2]
+        )
+
+        surface_matrix = np.copy(mat_0)
+        surface_strain = self._termination_domain_strain[float(layer_id)]
+        surface_origin = surface_uc.layerpos[float(layer_id)]
+        surface_matrix[2, 2] = surface_strain
+        surface_matrix[2, 3] = (
+            terrace_height / surface_uc.a[2] - surface_strain * surface_origin
+        )
+
+        reference_matrix = np.copy(mat_0)
+        reference_origin = reference_uc.layerpos[float(layer_id)]
+        reference_matrix[2, 2] = film_strain
+        reference_matrix[2, 3] = (
+            terrace_height / reference_uc.a[2] - film_strain * reference_origin
+        )
+        return _LayerGeometry(
+            layer_number=int(layer_number),
+            layer_id=float(layer_id),
+            surface_uc=surface_uc,
+            surface_matrix=surface_matrix,
+            film_uc=film_uc,
+            film_matrix=film_matrix,
+            reference_uc=reference_uc,
+            reference_matrix=reference_matrix,
+        )
+
+    def _with_below_translation(self, matrix, uc):
+        """Return the matrix carrying the same shift ``_translate_domains`` adds."""
+        translated = np.copy(matrix)
+        translated[2, 3] += self.below_H / uc.a[2]
+        return translated
+
+    @staticmethod
+    def _amplitude_for_domain(uc, matrix, occupancy, h, k, l):  # noqa: E741
+        """Evaluate one cell at one domain without disturbing stored domains.
+
+        The persistent ``coherentDomainMatrix``/``coherentDomainOccupancy``
+        lists are restored even when evaluation raises, so a flat-state
+        calculation never perturbs the coherent assembly.
+        """
+        saved_matrix = uc.coherentDomainMatrix
+        saved_occupancy = uc.coherentDomainOccupancy
+        try:
+            uc.coherentDomainMatrix = [matrix]
+            uc.coherentDomainOccupancy = [occupancy]
+            return uc.F_uc(h, k, l)
+        finally:
+            uc.coherentDomainMatrix = saved_matrix
+            uc.coherentDomainOccupancy = saved_occupancy
+
+    def _iter_flat_state_amplitudes(self, layer_numbers, h, k, l):  # noqa: E741
+        """Yield ``(layer_number, correction)`` outward from the boundary.
+
+        The cumulative Film correction is anchored at the sharp boundary,
+        where it is zero, and grown upward by adding layers and downward by
+        removing them. Each structural layer between the boundary and the
+        retained interval is evaluated exactly once, and only one amplitude
+        array is in flight.
+        """
+        film_occupancy = self.underlying_film.unitcell.coherentDomainOccupancy[0]
+        mat_0 = np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
+        lowest = int(layer_numbers[0])
+        highest = int(layer_numbers[-1])
+        prefix = np.zeros_like(np.asarray(l, dtype=np.float64), dtype=np.complex128)
+
+        running = prefix
+        for layer_number in range(0, highest + 1):
+            geometry = self._layer_domain_geometry(layer_number, mat_0)
+            running = running + self._film_layer_amplitude(
+                geometry, film_occupancy, h, k, l
+            )
+            if layer_number >= lowest:
+                yield layer_number, running + self._termination_correction(
+                    geometry, film_occupancy, h, k, l
+                )
+
+        running = prefix
+        for layer_number in range(-1, lowest - 1, -1):
+            geometry = self._layer_domain_geometry(layer_number, mat_0)
+            # Layers between the boundary and the retained interval still
+            # have to be walked through to build the correction, but they are
+            # not states of the ensemble and must not be yielded.
+            if layer_number <= highest:
+                yield layer_number, running + self._termination_correction(
+                    geometry, film_occupancy, h, k, l
+                )
+            if layer_number > lowest:
+                running = running - self._film_layer_amplitude(
+                    geometry, film_occupancy, h, k, l
+                )
+
+    def _film_layer_amplitude(self, geometry, film_occupancy, h, k, l):  # noqa: E741
+        """Return one Film layer slab at occupancy one."""
+        return self._amplitude_for_domain(
+            geometry.film_uc,
+            self._with_below_translation(geometry.film_matrix, geometry.film_uc),
+            film_occupancy,
+            h,
+            k,
+            l,
+        )
+
+    def _termination_correction(self, geometry, film_occupancy, h, k, l):  # noqa: E741
+        """Return the exposed termination minus the Film material it replaces."""
+        exposed = self._amplitude_for_domain(
+            geometry.surface_uc,
+            self._with_below_translation(
+                geometry.surface_matrix, geometry.surface_uc
+            ),
+            self._termination_domain_occupancy[geometry.layer_id],
+            h,
+            k,
+            l,
+        )
+        replaced = self._amplitude_for_domain(
+            geometry.reference_uc,
+            self._with_below_translation(
+                geometry.reference_matrix, geometry.reference_uc
+            ),
+            -film_occupancy,
+            h,
+            k,
+            l,
+        )
+        return exposed + replaced
+
+    def flat_domain_corrections(self, h, k, l, *, exact_layer_count=10):  # noqa: E741
+        """Return the retained flat-height states and their corrections.
+
+        Each correction is the occupancy-one component amplitude for one flat
+        surface height, relative to the same sharp Film boundary that
+        :meth:`F_uc` corrects. The state probability is not folded into it.
+
+        :param numpy.ndarray h:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray k:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray l:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param int exact_layer_count:
+            Retain every state when the support holds no more than this many.
+            A policy switch, not a cap: a wider support may still retain more.
+        :returns:
+            Retained states, their normalized masses, and the excluded tails.
+        :rtype: FlatHeightCorrections
+        :raises ValueError:
+            If the surface is not stacked on a Film, or the profile populates
+            no height state.
+        """
+        if self.underlying_film is None:
+            raise ValueError(
+                "PoissonSurface must be stacked immediately above a Film "
+                "before flat-height corrections can be calculated"
+            )
+        # Pick up parameter changes through the same path as `F_uc`.
+        if np.any(self._basis_created != self.basis):
+            self.createLayers()
+        if ctr_accel_enabled():
+            h, k, l = _ensure_contiguous(  # noqa: E741
+                h, k, l, testOnly=False, astype=np.float64
+            )
+        candidates = self._profile_candidates()
+        (
+            low,
+            high,
+            probabilities,
+            raw_retained,
+            excluded_lower,
+            excluded_upper,
+        ) = self._height_state_selection(candidates, exact_layer_count)
+        layer_numbers = np.array(
+            candidates.layer_numbers[low : high + 1], dtype=np.int64
+        )
+        return FlatHeightCorrections(
+            layer_numbers=layer_numbers,
+            probabilities=np.array(probabilities, dtype=np.float64),
+            raw_retained_probability=float(raw_retained),
+            excluded_lower_probability=excluded_lower,
+            excluded_upper_probability=excluded_upper,
+            amplitude_source=lambda: self._iter_flat_state_amplitudes(
+                layer_numbers, h, k, l
+            ),
+        )
+
     def createLayers(self):
         """Create co-located surface and covered-Film layer domains."""
         if self.underlying_film is None:
@@ -2292,37 +2827,15 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             ref.basis[:, 3] = film_basis[source_rows, 3] / repeats_z + z_offsets
 
         n_layers_in_uc = len(self._layer_ids)
-        tail_probability = (
-            self.profile.tail_probability
-            if self.profile is not None
-            else DEFAULT_TAIL_PROBABILITY
-        )
-        profile = PoissonProfile(
-            mean_change=self.basis[0],
-            alpha=self.basis[1],
-            offset=self.basis[2],
-            tail_probability=tail_probability,
-        )
-        support_low, support_high = profile.support()
-        layer_numbers = np.arange(support_low, support_high + 1)
-        material_occupancy = profile.occupancy(layer_numbers)
-        represented_material = np.flatnonzero(
-            material_occupancy > tail_probability
-        )
-        if represented_material.size == 0:
-            raise ValueError("Poisson surface profile has no represented material")
-        surface_occupancy = profile.surface_occupancy(layer_numbers)
-        sharp_film_occupancy = (layer_numbers < 0).astype(np.float64)
-        film_correction_occupancy = material_occupancy - sharp_film_occupancy
-        represented = (surface_occupancy > tail_probability) | (
-            np.abs(film_correction_occupancy) > tail_probability
-        )
-        layer_numbers = layer_numbers[represented]
-        surface_occupancy = surface_occupancy[represented]
-        film_correction_occupancy = film_correction_occupancy[represented]
+        candidates = self._profile_candidates()
+        tail_probability = candidates.tail_probability
+        represented = self._coherent_retention(candidates)
+        layer_numbers = candidates.layer_numbers[represented]
+        surface_occupancy = candidates.surface_occupancy[represented]
+        film_correction_occupancy = candidates.film_correction_occupancy[
+            represented
+        ]
         exposed_layers = layer_numbers[surface_occupancy > tail_probability]
-        if exposed_layers.size == 0:
-            raise ValueError("Poisson surface profile has no represented surface")
         top_surface_layer = exposed_layers[-1]
         layers_to_create = len(layer_numbers)
         for uc in self.layer_ucs:
@@ -2341,57 +2854,25 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         )
 
         for layer_index, layer_number in enumerate(layer_numbers):
-            order_index = layer_number % n_layers_in_uc
-            cycle_index = layer_number // n_layers_in_uc
-            uc = self.layer_ucs[order_index]
-            film_uc = self.film_layer_ucs[order_index]
-            reference_uc = self._film_termination_ucs[
-                float(self.layer_order[order_index])
-            ]
-            mat_i = np.copy(mat_0)
-            layer_id = self.layer_order[order_index]
-            relative_layer_position = (
-                cycle_index + self.layerpos[order_index] - self.layerpos[0]
-            )
-            layer_offset = (
-                relative_layer_position
-                - self.underlying_film.unitcell.layerpos[layer_id]
-            )
+            geometry = self._layer_domain_geometry(layer_number, mat_0)
 
-            film_strain = self.underlying_film.unitcell.coherentDomainMatrix[0][2, 2]
-            mat_i[2, 2] = film_strain
-            mat_i[2, 3] = layer_offset * film_strain
-
-            film_uc.coherentDomainMatrix.append(np.copy(mat_i))
-            film_uc.coherentDomainOccupancy.append(
+            geometry.film_uc.coherentDomainMatrix.append(geometry.film_matrix)
+            geometry.film_uc.coherentDomainOccupancy.append(
                 film_domain_occupancy * film_correction_occupancy[layer_index]
             )
 
-            terrace_height = (
-                relative_layer_position * self.underlying_film.unitcell.a[2]
+            geometry.surface_uc.coherentDomainMatrix.append(
+                geometry.surface_matrix
             )
-            surface_matrix = np.copy(mat_0)
-            surface_strain = self._termination_domain_strain[float(layer_id)]
-            surface_origin = uc.layerpos[float(layer_id)]
-            surface_matrix[2, 2] = surface_strain
-            surface_matrix[2, 3] = (
-                terrace_height / uc.a[2] - surface_strain * surface_origin
-            )
-            uc.coherentDomainMatrix.append(surface_matrix)
-            uc.coherentDomainOccupancy.append(
-                self._termination_domain_occupancy[float(layer_id)]
+            geometry.surface_uc.coherentDomainOccupancy.append(
+                self._termination_domain_occupancy[geometry.layer_id]
                 * surface_occupancy[layer_index]
             )
 
-            reference_matrix = np.copy(mat_0)
-            reference_origin = reference_uc.layerpos[float(layer_id)]
-            reference_matrix[2, 2] = film_strain
-            reference_matrix[2, 3] = (
-                terrace_height / reference_uc.a[2]
-                - film_strain * reference_origin
+            geometry.reference_uc.coherentDomainMatrix.append(
+                geometry.reference_matrix
             )
-            reference_uc.coherentDomainMatrix.append(reference_matrix)
-            reference_uc.coherentDomainOccupancy.append(
+            geometry.reference_uc.coherentDomainOccupancy.append(
                 -film_domain_occupancy * surface_occupancy[layer_index]
             )
 

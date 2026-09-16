@@ -32,6 +32,7 @@ import numpy as np
 from .. import util
 import warnings
 import os
+from dataclasses import dataclass
 
 # random.seed(45)
 import errno
@@ -56,6 +57,81 @@ from .CTRstacking import (  # noqa: F401
     LayerState,
     LayerTransition,
 )
+
+
+@dataclass(frozen=True)
+class KinematicComponentAmplitude:
+    """One top-level component's scaled contribution to ``SXRDCrystal.F``.
+
+    :param int index:
+        Position in ``SXRDCrystal.uc_surface_list``.
+    :param str name:
+        Stable component name. Component selection uses this rather than
+        object identity, which does not survive ``copy.deepcopy``.
+    :param amplitude:
+        Complex amplitude in electrons per reference lateral cell, already
+        carrying the reference-area scaling, the component weight, and every
+        outer coherent-domain transform and occupancy.
+    """
+
+    index: int
+    name: str
+    amplitude: object
+
+
+@dataclass(frozen=True)
+class KinematicAmplitudeResult:
+    """Immutable decomposition of one kinematical ``SXRDCrystal`` evaluation.
+
+    ``total`` is accumulated contribution by contribution in crystal order, so
+    it reproduces ``SXRDCrystal.F`` bitwise. It therefore agrees with
+    ``bulk + sum(part.amplitude for part in components)`` to floating-point
+    rounding rather than exactly.
+
+    The arrays are caller-owned: mutating one does not affect the crystal.
+    When the crystal has no surface components, ``total`` and ``bulk`` are the
+    same array.
+
+    :param bulk:
+        Semi-infinite bulk amplitude including reference-area scaling and
+        attenuation, in electrons per reference lateral cell.
+    :param tuple components:
+        One :class:`KinematicComponentAmplitude` per top-level component, in
+        ``SXRDCrystal.uc_surface_list`` order.
+    :param total:
+        Complete crystal amplitude, identical to ``SXRDCrystal.F``.
+    """
+
+    bulk: object
+    components: tuple
+    total: object
+
+    def component(self, name):
+        """Return the amplitude record of the component with this name.
+
+        :param str name:
+            Stable component name.
+        :returns:
+            The matching component record.
+        :rtype: KinematicComponentAmplitude
+        :raises KeyError:
+            If no component carries that name.
+        :raises ValueError:
+            If more than one does, which would make selection by name
+            ambiguous.
+        """
+        matches = [part for part in self.components if part.name == name]
+        if not matches:
+            available = ", ".join(part.name for part in self.components)
+            raise KeyError(
+                f"No component named {name!r}. Available: {available}"
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                f"{len(matches)} components are named {name!r}; component "
+                "names must be unique to select one"
+            )
+        return matches[0]
 
 
 class SXRDCrystal:
@@ -325,20 +401,133 @@ class SXRDCrystal:
             Complex crystal amplitude in electrons per reference lateral cell.
         :rtype: numpy.ndarray
         """
+        return self.evaluate_kinematic(harray, karray, Larray).total
+
+    def F2(self, harray, karray, Larray):
+        """Return the squared crystal structure factor.
+
+        This is ``abs(F) ** 2`` in the squared units of :meth:`F`, nominally
+        electrons squared per reference lateral cell. It is not detector
+        counts: incident flux, footprint, polarization and Lorentz factors,
+        detector response, acquisition time, background, and any fitted
+        experimental scale are all outside it. It is also not a reflectivity,
+        which is a dimensionless intensity ratio formed from an optical
+        reflection amplitude.
+
+        :param numpy.ndarray harray:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray karray:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray Larray:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :returns:
+            Real, nonnegative squared structure factor.
+        :rtype: numpy.ndarray
+        """
+        return np.abs(self.F(harray, karray, Larray)) ** 2
+
+    @staticmethod
+    def _component_F_uc(uc, harray, karray, Larray):
+        """Evaluate one component's own amplitude at the given coordinates."""
+        return uc.F_uc(harray, karray, Larray)
+
+    def _iter_scaled_contributions(self, index, hkl, evaluator):
+        """Yield one scaled contribution per outer coherent domain.
+
+        Each domain matrix transforms the coordinates *before* ``evaluator``
+        is called, so a caller evaluating something other than the component's
+        own ``F_uc`` -- one flat height state, say -- still sees the
+        coordinates that domain requires. The yielded values already carry the
+        reference-area scaling, the component weight, and the domain
+        occupancy.
+
+        :param int index:
+            Position in :attr:`uc_surface_list`.
+        :param numpy.ndarray hkl:
+            Stacked ``(3, N)`` reference-frame coordinates in r.l.u.
+        :param callable evaluator:
+            Called as ``evaluator(uc, h, k, l)`` and returning an amplitude in
+            electrons per the component's own lateral cell.
+        """
+        uc = self.uc_surface_list[index]
+        for matrix, scale in self._component_domain_factors(index):
+            hkl_n = np.dot(matrix, hkl)
+            yield scale * evaluator(uc, hkl_n[0], hkl_n[1], hkl_n[2])
+
+    def _component_domain_factors(self, index):
+        """Yield the transform and combined scale of each outer domain.
+
+        The scale is ``reference_area / component_area * occupancy * weight``.
+        This is the single definition of that product: an incoherent model
+        combining its own per-state amplitudes must use it rather than
+        rebuild it, or the two paths can drift apart.
+
+        :param int index:
+            Position in :attr:`uc_surface_list`.
+        :returns:
+            Generator of ``(matrix, scale)`` pairs in domain order.
+        """
+        uc = self.uc_surface_list[index]
+        area_scale = self.reference_area / uc.uc_area
+        weight = self.weights[index]
+        for matrix, occup in self.domains[index]:
+            yield matrix, area_scale * occup * weight
+
+    def evaluate_kinematic(self, harray, karray, Larray):
+        """Return the decomposed kinematical evaluation behind :meth:`F`.
+
+        Coordinates and units are exactly those of :meth:`F`. The bulk
+        amplitude carries the reference-area scaling, and every component
+        amplitude carries its own area scaling, weight, and outer
+        coherent-domain transforms and occupancies.
+
+        :param numpy.ndarray harray:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray karray:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :param numpy.ndarray Larray:
+            Reference-frame reciprocal coordinate in r.l.u.
+        :returns:
+            Bulk amplitude, per-component amplitudes in crystal order, and
+            their total.
+        :rtype: KinematicAmplitudeResult
+        """
         bulk_scale = self.reference_area / self.uc_bulk.uc_area
-        F = bulk_scale * self.uc_bulk.F_bulk(harray, karray, Larray, self.atten)
+        bulk = bulk_scale * self.uc_bulk.F_bulk(
+            harray, karray, Larray, self.atten
+        )
         hkl = np.vstack((harray, karray, Larray))
         if self.enable_uc_stacking:
             self.apply_stacking()
 
-        for uc, weight, domains in zip(
-            self.uc_surface_list, self.weights, self.domains
-        ):
-            area_scale = self.reference_area / uc.uc_area
-            for matrix, occup in domains:
-                hkl_n = np.dot(matrix, hkl)
-                F += area_scale * occup * weight * uc.F_uc(hkl_n[0], hkl_n[1], hkl_n[2])
-        return F
+        # `total` is accumulated contribution by contribution in the original
+        # component-then-domain order, so it reproduces the pre-refactor `F`
+        # bitwise rather than only to rounding.
+        total = bulk
+        components = []
+        for index, uc in enumerate(self.uc_surface_list):
+            amplitude = None
+            for contribution in self._iter_scaled_contributions(
+                index, hkl, self._component_F_uc
+            ):
+                total = total + contribution
+                amplitude = (
+                    contribution
+                    if amplitude is None
+                    else amplitude + contribution
+                )
+            if amplitude is None:
+                amplitude = np.zeros_like(
+                    np.asarray(bulk), dtype=np.complex128
+                )
+            components.append(
+                KinematicComponentAmplitude(
+                    index,
+                    getattr(uc, "name", f"component_{index}"),
+                    amplitude,
+                )
+            )
+        return KinematicAmplitudeResult(bulk, tuple(components), total)
 
     def setDomain(self, uc_no, domains):
         """
