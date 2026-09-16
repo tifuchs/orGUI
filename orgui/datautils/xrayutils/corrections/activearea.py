@@ -68,6 +68,13 @@ the mean of :math:`p(z)/p_\mathrm{max}` over the projected sample footprint.
     19 % at grazing incidence and by 6.5 % once the beam is fully on the
     sample, so the closed form is not a general shortcut and this module does
     not offer one.
+
+For the alternative total-incident-flux convention, this module also returns
+the intercepted fraction :math:`f_\mathrm{hit}=f_zf_x` and the dimensionless
+illumination divisor :math:`H=f_\mathrm{hit}/\sin\alpha`. These replace the
+legacy density-times-area term; they are not additional corrections. The
+horizontal fraction is required explicitly because a vertical profile cannot
+determine it.
 """
 
 import numpy as np
@@ -77,8 +84,109 @@ from . import geometry
 __all__ = [
     "beam_limited_area",
     "footprint_length",
+    "illumination_divisor",
+    "intercepted_fraction",
     "slit_limited_area",
 ]
+
+
+def _total_flux_inputs(alpha, sample_length, horizontal_fraction, profile):
+    """Validate and return inputs shared by total-flux overlap helpers."""
+    if profile is None:
+        raise ValueError("total-flux illumination needs a beam profile")
+    if not float(sample_length) > 0 or not np.isfinite(sample_length):
+        raise ValueError("sample_length must be finite and positive, in meter")
+    alpha = np.asarray(alpha, dtype=np.float64)
+    if (
+        np.any(alpha <= 0)
+        or np.any(alpha > np.pi / 2)
+        or not np.all(np.isfinite(alpha))
+    ):
+        raise ValueError(
+            "alpha must be finite and in the physical interval (0, pi/2] rad"
+        )
+    horizontal = np.asarray(horizontal_fraction, dtype=np.float64)
+    if (
+        np.any(horizontal <= 0)
+        or np.any(horizontal > 1)
+        or not np.all(np.isfinite(horizontal))
+    ):
+        raise ValueError("horizontal_fraction must be finite and in (0, 1]")
+    return alpha, horizontal
+
+
+def intercepted_fraction(
+    alpha,
+    sample_length,
+    profile,
+    *,
+    horizontal_fraction,
+):
+    r"""Fraction :math:`f_\mathrm{hit}=f_z f_x` of total flux on sample.
+
+    The vertical fraction ``f_z`` is the integral of ``profile`` over the
+    sample's projected interval. ``horizontal_fraction`` supplies the
+    independently known horizontal interception; a one-dimensional vertical
+    profile cannot infer it.
+
+    :param alpha: Incidence angle(s), in radian and in ``(0, pi/2]``.
+    :param float sample_length: Sample length along the beam, in meter.
+    :param profile: A :class:`~.beamprofile.BeamProfile`.
+    :param horizontal_fraction: Known horizontal intercepted fraction
+        :math:`f_x`, in ``(0, 1]``.
+    :returns: Dimensionless total intercepted fraction.
+    :rtype: numpy.ndarray
+    :raises ValueError: If the geometry, profile or fraction is invalid.
+    """
+    alpha, horizontal = _total_flux_inputs(
+        alpha, sample_length, horizontal_fraction, profile
+    )
+    vertical = np.asarray(
+        profile.flux_on_sample(alpha, float(sample_length)), dtype=np.float64
+    )
+    if (
+        np.any(vertical < 0)
+        or np.any(vertical > 1.0 + 1e-12)
+        or not np.all(np.isfinite(vertical))
+    ):
+        raise ValueError("beam profile returned an invalid intercepted fraction")
+    return vertical * horizontal
+
+
+def illumination_divisor(
+    alpha,
+    sample_length,
+    profile,
+    *,
+    horizontal_fraction,
+):
+    r"""Total-flux illumination divisor :math:`H=f_\mathrm{hit}/\sin\alpha`.
+
+    This is the dimensionless geometrical divisor paired with a total incident
+    frame fluence :math:`Q_f`. It is a replacement convention for the legacy
+    density-times-active-area product, not an additional footprint factor.
+    The profile evaluates ``f_z / sin(alpha)`` directly so the finite
+    grazing-incidence limit is retained without silently clipping the angle.
+
+    :param alpha: Incidence angle(s), in radian and in ``(0, pi/2]``.
+    :param float sample_length: Sample length along the beam, in meter.
+    :param profile: A :class:`~.beamprofile.BeamProfile`.
+    :param horizontal_fraction: Known horizontal intercepted fraction
+        :math:`f_x`, in ``(0, 1]``.
+    :returns: Dimensionless :math:`H`, broadcast over the inputs.
+    :rtype: numpy.ndarray
+    :raises ValueError: If the geometry or overlap is nonphysical.
+    """
+    alpha, horizontal = _total_flux_inputs(
+        alpha, sample_length, horizontal_fraction, profile
+    )
+    ratio = np.asarray(
+        profile.flux_over_sine(alpha, float(sample_length)), dtype=np.float64
+    )
+    result = ratio * horizontal
+    if np.any(result <= 0) or not np.all(np.isfinite(result)):
+        raise ValueError("sample/beam overlap must be finite and positive")
+    return result
 
 
 def footprint_length(alpha, beam_height, sample_length):

@@ -67,6 +67,23 @@ def test_measured_profile_reproduces_analytical_gaussian():
     np.testing.assert_allclose(area_num, area_ana, rtol=1e-6)
 
 
+def test_total_flux_ratio_reproduces_analytical_gaussian_and_zero_limit():
+    """Both Gaussian implementations evaluate ``f_z / sin(alpha)`` stably."""
+    fwhm = 20e-6
+    analytical = GaussianBeamProfile(fwhm)
+    numerical = MeasuredBeamProfile(*_sampled_gaussian(fwhm))
+    alpha = np.concatenate(([0.0, 1e-15], ALPHAS))
+
+    ratio_ana = analytical.flux_over_sine(alpha, L)
+    ratio_num = numerical.flux_over_sine(alpha, L)
+
+    sigma = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    assert ratio_ana[0] == pytest.approx(
+        L / (np.sqrt(2.0 * np.pi) * sigma), rel=1e-12
+    )
+    np.testing.assert_allclose(ratio_num, ratio_ana, rtol=1e-6)
+
+
 def test_measured_profile_recovers_gaussian_width():
     """FWHM, rms width and the three center definitions of a Gaussian."""
     fwhm = 264.7e-6

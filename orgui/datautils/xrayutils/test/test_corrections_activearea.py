@@ -110,6 +110,128 @@ def test_the_two_limits_disagree_and_that_is_the_experimental_question():
     np.testing.assert_allclose(beam, beam[0], rtol=1e-12)
 
 
+def test_total_flux_top_hat_overlap_has_the_closed_form():
+    """``H`` is the intercepted fraction divided by ``sin(alpha)``."""
+    alpha = np.deg2rad(np.array([0.05, 0.5, 5.0]))
+    horizontal = 0.72
+    vertical = np.minimum(L * np.sin(alpha) / H, 1.0)
+
+    fraction = activearea.intercepted_fraction(
+        alpha, L, top_hat_profile(H), horizontal_fraction=horizontal
+    )
+    divisor = activearea.illumination_divisor(
+        alpha, L, top_hat_profile(H), horizontal_fraction=horizontal
+    )
+
+    np.testing.assert_allclose(fraction, horizontal * vertical, rtol=1e-12)
+    np.testing.assert_allclose(
+        divisor, horizontal * vertical / np.sin(alpha), rtol=1e-12
+    )
+    np.testing.assert_allclose(divisor * np.sin(alpha), fraction, rtol=1e-12)
+
+
+def test_horizontal_interception_scales_total_flux_illumination():
+    """A vertical profile cannot infer horizontal sample/beam clipping."""
+    alpha = np.deg2rad(0.6)
+    profile = gaussian_profile(H)
+
+    full = activearea.illumination_divisor(
+        alpha, L, profile, horizontal_fraction=1.0
+    )
+    partial = activearea.illumination_divisor(
+        alpha, L, profile, horizontal_fraction=0.35
+    )
+
+    np.testing.assert_allclose(partial, 0.35 * full, rtol=1e-12)
+
+
+def test_horizontal_interception_must_be_explicit():
+    with pytest.raises(TypeError, match="horizontal_fraction"):
+        activearea.illumination_divisor(np.deg2rad(0.6), L, gaussian_profile(H))
+
+
+def test_total_flux_and_density_conventions_match_for_a_gaussian_beam():
+    """Integrating a 2-D Gaussian converts peak density into total flux."""
+    alpha = np.deg2rad(np.array([0.08, 0.3, 1.2, 8.0]))
+    sigma_x = 120e-6
+    sigma_z = 9e-6
+    fwhm_z = 2.0 * np.sqrt(2.0 * np.log(2.0)) * sigma_z
+    profile = gaussian_profile(fwhm_z)
+    peak_flux_density = 3.1e17  # photons / (s m^2)
+    total_flux = peak_flux_density * 2.0 * np.pi * sigma_x * sigma_z
+
+    legacy = peak_flux_density * activearea.beam_limited_area(
+        alpha,
+        np.sqrt(2.0 * np.pi) * sigma_x,
+        L,
+        profile,
+    )
+    total = total_flux * activearea.illumination_divisor(
+        alpha, L, profile, horizontal_fraction=1.0
+    )
+
+    np.testing.assert_allclose(total, legacy, rtol=2e-12)
+
+
+def test_vertical_offset_changes_total_flux_overlap():
+    """A displaced sample intercepts less of the same incident beam."""
+    alpha = np.deg2rad(0.12)
+    centered = activearea.intercepted_fraction(
+        alpha, L, gaussian_profile(H), horizontal_fraction=1.0
+    )
+    displaced = activearea.intercepted_fraction(
+        alpha,
+        L,
+        gaussian_profile(H, offset=2.0 * H),
+        horizontal_fraction=1.0,
+    )
+
+    assert displaced < centered
+
+
+def test_gaussian_illumination_has_a_finite_grazing_limit():
+    """The direct ratio avoids a zero-over-zero loss at tiny incidence."""
+    sigma = H / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    expected = L / (np.sqrt(2.0 * np.pi) * sigma)
+
+    got = activearea.illumination_divisor(
+        np.array([1e-20, 1e-15, 1e-10]),
+        L,
+        gaussian_profile(H),
+        horizontal_fraction=1.0,
+    )
+
+    np.testing.assert_allclose(got, expected, rtol=5e-9)
+
+
+@pytest.mark.parametrize("alpha", [0.0, -1e-3, np.pi, np.nan])
+def test_total_flux_illumination_rejects_nonphysical_angles(alpha):
+    with pytest.raises(ValueError, match="physical interval"):
+        activearea.illumination_divisor(
+            alpha, L, gaussian_profile(H), horizontal_fraction=1.0
+        )
+
+
+@pytest.mark.parametrize("horizontal", [0.0, -0.1, 1.1, np.inf])
+def test_total_flux_illumination_rejects_bad_horizontal_fraction(horizontal):
+    with pytest.raises(ValueError, match="horizontal_fraction"):
+        activearea.illumination_divisor(
+            np.deg2rad(1.0),
+            L,
+            gaussian_profile(H),
+            horizontal_fraction=horizontal,
+        )
+
+
+def test_total_flux_illumination_rejects_zero_overlap():
+    profile = top_hat_profile(H, offset=10.0 * H)
+
+    with pytest.raises(ValueError, match="overlap"):
+        activearea.illumination_divisor(
+            np.deg2rad(0.05), L, profile, horizontal_fraction=1.0
+        )
+
+
 def test_sizes_must_be_physical():
     """A zero or negative size is a units mistake, not a value."""
     alpha = np.deg2rad(1.0)

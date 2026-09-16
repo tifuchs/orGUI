@@ -126,6 +126,11 @@ for the open-slit area-detector case orGUI usually runs in.
 Either way :math:`A` is the same for a rocking and for a stationary
 measurement at the same incidence angle, so it cancels from their ratio and
 cannot be the reason the two disagree. It does set the absolute scale.
+
+The explicit total-flux entry points use the algebraically equivalent
+:math:`Y=N_\mathrm{net}/(QH)` and
+:math:`K=r_e^2\lambda^2/A_u^2`. They do not reinterpret ``flux_density`` or
+the legacy active-area APIs.
 """
 
 import numpy as np
@@ -142,10 +147,13 @@ __all__ = [
     "integrated_intensity",
     "mode_components",
     "normalized_intensity",
+    "photon_yield_from_structure_factor",
     "reflectivity_from_structure_factor",
     "scale_factor",
     "structure_factor_from_reflectivity",
     "structure_factor_squared",
+    "structure_factor_squared_from_photon_yield",
+    "total_flux_prefactor",
 ]
 
 #: Classical electron radius in meter (CODATA 2018).
@@ -418,6 +426,131 @@ def scale_factor(wavelength, unitcell_area, active_area=1.0, flux_density=1.0):
         * CLASSICAL_ELECTRON_RADIUS**2
         * lam**2
         / a_u**2
+    )
+
+
+def total_flux_prefactor(wavelength, unitcell_area):
+    r"""Total-flux CTR prefactor :math:`K=r_e^2\lambda^2/A_u^2`.
+
+    This is the prefactor paired with photon-normalized yield
+    :math:`Y=N_\mathrm{net}/(QH)`. It contains neither a flux density nor an
+    active area: the total incident frame fluence :math:`Q` and the
+    dimensionless illumination divisor :math:`H` replace that legacy product.
+
+    :param wavelength: X-ray wavelength, in Angstrom.
+    :param unitcell_area: Surface unit-cell area, in square Angstrom.
+    :returns: Dimensionless prefactor, broadcast over the inputs.
+    :rtype: numpy.ndarray
+    :raises ValueError: If either physical input is not finite and positive.
+    """
+    wavelength = np.asarray(wavelength, dtype=np.float64)
+    unitcell_area = np.asarray(unitcell_area, dtype=np.float64)
+    if not np.all(np.isfinite(wavelength)):
+        raise ValueError("wavelength must be finite and positive, in Angstrom")
+    if not np.all(np.isfinite(unitcell_area)):
+        raise ValueError(
+            "unitcell_area must be finite and positive, in square Angstrom"
+        )
+    return _reflectivity_prefactor(wavelength, unitcell_area)
+
+
+def _total_flux_efficiency(detector_efficiency):
+    efficiency = np.asarray(detector_efficiency, dtype=np.float64)
+    if np.any(efficiency <= 0) or not np.all(np.isfinite(efficiency)):
+        raise ValueError("detector_efficiency must be finite and positive")
+    return efficiency
+
+
+def structure_factor_squared_from_photon_yield(
+    photon_yield,
+    mode,
+    alpha=None,
+    delta=None,
+    gamma=None,
+    detector_acceptance=None,
+    wavelength=None,
+    unitcell_area=None,
+    detector_efficiency=1.0,
+):
+    r"""Reduce :math:`Y=N_\mathrm{net}/(QH)` to :math:`|F_{hkl}|^2`.
+
+    For a rocking scan ``photon_yield`` is the angular integral of the
+    framewise yield in radians. For a stationary frame it is the scalar yield
+    itself. The mode-dependent factor remains :func:`angular_factor`; only the
+    illumination/fluence convention differs from
+    :func:`structure_factor_squared`.
+
+    :param photon_yield: Counts divided framewise by calibrated incident
+        photons ``Q`` and dimensionless illumination ``H``.
+    :param str mode: Measurement mode accepted by :func:`angular_factor`.
+    :param alpha: Incidence angle, radian.
+    :param delta: In-plane detector angle, radian.
+    :param gamma: Out-of-plane detector angle, radian.
+    :param detector_acceptance: Rocking out-of-plane acceptance, radian.
+    :param wavelength: X-ray wavelength, Angstrom.
+    :param unitcell_area: Surface unit-cell area, square Angstrom.
+    :param detector_efficiency: Further multiplicative detector response.
+    :returns: Structure factor squared, in electron units squared for a
+        calibrated ``Q`` and stated detector response.
+    :rtype: numpy.ndarray
+    :raises ValueError: If scale inputs or detector efficiency are invalid.
+    """
+    if wavelength is None or unitcell_area is None:
+        raise ValueError(
+            "wavelength (Angstrom) and unitcell_area (square Angstrom) set the "
+            "scale and must both be given"
+        )
+    eta = angular_factor(
+        mode,
+        alpha=alpha,
+        delta=delta,
+        gamma=gamma,
+        detector_acceptance=detector_acceptance,
+    )
+    return np.asarray(photon_yield, dtype=np.float64) / (
+        total_flux_prefactor(wavelength, unitcell_area)
+        * eta
+        * _total_flux_efficiency(detector_efficiency)
+    )
+
+
+def photon_yield_from_structure_factor(
+    f2,
+    mode,
+    alpha=None,
+    delta=None,
+    gamma=None,
+    detector_acceptance=None,
+    wavelength=None,
+    unitcell_area=None,
+    detector_efficiency=1.0,
+):
+    r"""Forward total-flux model, inverse of the yield reduction.
+
+    Arguments and units match
+    :func:`structure_factor_squared_from_photon_yield`; ``f2`` is in electron
+    units squared and the result is the expected counts per ``Q H``.
+
+    :returns: Photon-normalized detector yield.
+    :rtype: numpy.ndarray
+    """
+    if wavelength is None or unitcell_area is None:
+        raise ValueError(
+            "wavelength (Angstrom) and unitcell_area (square Angstrom) set the "
+            "scale and must both be given"
+        )
+    eta = angular_factor(
+        mode,
+        alpha=alpha,
+        delta=delta,
+        gamma=gamma,
+        detector_acceptance=detector_acceptance,
+    )
+    return (
+        np.asarray(f2, dtype=np.float64)
+        * total_flux_prefactor(wavelength, unitcell_area)
+        * eta
+        * _total_flux_efficiency(detector_efficiency)
     )
 
 

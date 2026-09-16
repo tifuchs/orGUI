@@ -38,9 +38,16 @@ attribute name appears here.
 import numpy as np
 
 __all__ = [
+    "MONITOR_INTEGRATED",
+    "MONITOR_RATE",
     "broadcast_counter",
+    "frame_fluence",
     "normalization_divisor",
+    "relative_frame_fluence",
 ]
+
+MONITOR_RATE = "rate"
+MONITOR_INTEGRATED = "integrated"
 
 
 def broadcast_counter(value, size, name):
@@ -101,3 +108,143 @@ def normalization_divisor(size, exposure_time=None, monitors=None):
         applied.append(f"monitor:{name}")
 
     return divisor, applied
+
+
+def _positive(value, name):
+    """Return ``value`` as float array after physical-value validation."""
+    array = np.asarray(value, dtype=np.float64)
+    if np.any(array <= 0) or not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must be finite and positive")
+    return array
+
+
+def _monitor_inputs(monitor, monitor_kind):
+    """Validate the monitor-kind pair shared by fluence helpers."""
+    if monitor_kind is None:
+        if monitor is not None:
+            raise ValueError("monitor_kind is required when a monitor is given")
+        return None
+    if monitor_kind not in (MONITOR_RATE, MONITOR_INTEGRATED):
+        raise ValueError(
+            f"monitor_kind must be {MONITOR_RATE!r} or "
+            f"{MONITOR_INTEGRATED!r}, got {monitor_kind!r}"
+        )
+    if monitor is None:
+        raise ValueError(f"a {monitor_kind} monitor value is required")
+    return _positive(monitor, "monitor")
+
+
+def frame_fluence(
+    total_flux,
+    exposure_time=None,
+    monitor=None,
+    monitor_kind=None,
+    reference_monitor=None,
+    reference_exposure=None,
+):
+    r"""Calibrated incident photons :math:`Q_f` in every frame.
+
+    ``total_flux`` is the calibrated full beam at the sample position before
+    sample clipping, in photons/s. With no monitor it is assumed constant and
+    multiplied by the frame exposure. A rate-like monitor scales that product
+    by ``monitor / reference_monitor``. An integrated monitor already contains
+    the frame exposure, so it instead uses the calibration exposure exactly
+    once:
+
+    .. math::
+
+        Q_f = \Phi_\mathrm{ref} T_f M_f/M_\mathrm{ref}
+
+    for a rate, and
+
+    .. math::
+
+        Q_f = \Phi_\mathrm{ref} T_\mathrm{ref} U_f/U_\mathrm{ref}
+
+    for an integrated reading. Passing ``exposure_time`` in the integrated
+    case is allowed for a common calling interface but does not multiply the
+    result.
+
+    :param total_flux: Reference total incident flux, photons/s.
+    :param exposure_time: Per-frame exposure, seconds. Required without a
+        monitor and for a rate-like monitor.
+    :param monitor: Per-frame primary-monitor reading.
+    :param str monitor_kind: ``"rate"``, ``"integrated"`` or ``None``.
+    :param reference_monitor: Monitor reading associated with ``total_flux``.
+    :param reference_exposure: Exposure of an integrated reference reading,
+        seconds. Required only for an integrated monitor.
+    :returns: Incident photons per frame, broadcast over all inputs.
+    :rtype: numpy.ndarray
+    :raises ValueError: If a required input is absent, non-finite or not
+        positive, or the monitor kind is invalid.
+    """
+    flux = _positive(total_flux, "total_flux")
+    monitor_values = _monitor_inputs(monitor, monitor_kind)
+
+    if monitor_kind is None:
+        if reference_monitor is not None or reference_exposure is not None:
+            raise ValueError("monitor references require a monitor")
+        if exposure_time is None:
+            raise ValueError("exposure_time is required without a monitor")
+        return flux * _positive(exposure_time, "exposure_time")
+
+    if reference_monitor is None:
+        raise ValueError("reference_monitor is required for a calibrated monitor")
+    reference = _positive(reference_monitor, "reference_monitor")
+
+    if monitor_kind == MONITOR_RATE:
+        if exposure_time is None:
+            raise ValueError("exposure_time is required for a rate monitor")
+        if reference_exposure is not None:
+            raise ValueError(
+                "reference_exposure applies only to an integrated monitor"
+            )
+        return (
+            flux
+            * _positive(exposure_time, "exposure_time")
+            * monitor_values
+            / reference
+        )
+
+    if reference_exposure is None:
+        raise ValueError(
+            "reference_exposure is required for an integrated monitor"
+        )
+    return (
+        flux
+        * _positive(reference_exposure, "reference_exposure")
+        * monitor_values
+        / reference
+    )
+
+
+def relative_frame_fluence(
+    exposure_time=None,
+    monitor=None,
+    monitor_kind=None,
+):
+    r"""Uncalibrated relative incident fluence for every frame.
+
+    This preserves variations between frames without claiming photon units.
+    With no monitor the relative divisor is the exposure. For a rate monitor
+    it is ``exposure_time * monitor``; for an integrated monitor it is the
+    monitor reading alone, because that reading already integrated over the
+    frame exposure.
+
+    :param exposure_time: Per-frame exposure, seconds.
+    :param monitor: Per-frame primary-monitor reading.
+    :param str monitor_kind: ``"rate"``, ``"integrated"`` or ``None``.
+    :returns: Relative per-frame fluence divisor.
+    :rtype: numpy.ndarray
+    :raises ValueError: If required inputs are absent or nonphysical.
+    """
+    monitor_values = _monitor_inputs(monitor, monitor_kind)
+    if monitor_kind is None:
+        if exposure_time is None:
+            raise ValueError("exposure_time is required without a monitor")
+        return _positive(exposure_time, "exposure_time")
+    if monitor_kind == MONITOR_RATE:
+        if exposure_time is None:
+            raise ValueError("exposure_time is required for a rate monitor")
+        return _positive(exposure_time, "exposure_time") * monitor_values
+    return monitor_values

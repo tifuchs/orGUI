@@ -138,6 +138,45 @@ set of truncation rods can be brought onto one scale before they are combined.
 The relation is kinematical: it does not hold near a bulk Bragg peak, nor below
 the critical angle, where the distorted-wave treatment of :doc:`dwba` applies.
 
+Total-incident-flux numerical API
+---------------------------------
+
+The correction core provides an explicit alternative to the legacy peak-flux-
+density times effective-area convention. This API is available for scripted
+reductions, but is not yet selected by the integration dialogs or extraction
+paths.
+
+``corrections.normalization.frame_fluence`` calculates incident photons
+:math:`Q_f` in a frame. A rate-like monitor is multiplied by that frame's
+exposure; an integrated monitor is not, because its reading already contains
+the exposure. The monitor kind and its calibration reference are mandatory
+rather than inferred from a counter name. The uncalibrated
+``relative_frame_fluence`` helper follows the same exposure rule while keeping
+the output on a relative scale.
+
+For a normalized vertical beam profile, incidence angle :math:`\alpha` in
+radians and sample length :math:`L` in metres,
+``corrections.activearea.illumination_divisor`` returns
+
+.. math::
+
+   H = \frac{f_z f_x}{\sin\alpha},
+
+where :math:`f_z` is the vertical beam fraction on the sample and :math:`f_x`
+is an explicitly supplied horizontal intercepted fraction. ``H`` is
+dimensionless. It is not the fraction of photons that hit the sample; that
+fraction is :math:`f_\mathrm{hit}=f_zf_x`. Built-in profiles evaluate the
+finite grazing-incidence limit without clipping the angle.
+
+Given a background-subtracted photon-normalized yield
+:math:`Y=N_\mathrm{net}/(Q_f H)`, the pair
+``measurement.structure_factor_squared_from_photon_yield`` and
+``measurement.photon_yield_from_structure_factor`` applies the existing scan-
+mode angular factor and the total-flux prefactor
+:math:`K=r_e^2\lambda^2/A_u^2`. Wavelength is in Angstrom and surface
+unit-cell area in square Angstrom. Existing ``scale_factor`` and
+``structure_factor_squared`` calls keep their flux-density semantics.
+
 CTR fit predictions and statistics
 ----------------------------------
 

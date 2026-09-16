@@ -7,6 +7,17 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **The numerical correction core now has an explicit total-incident-flux
+  convention.** New pure APIs calculate calibrated photons per frame from a
+  constant flux or an explicitly rate-like/integrated monitor, distinguish the
+  intercepted fraction from the dimensionless illumination divisor
+  ``H = f_hit / sin(alpha)``, and reduce photon-normalized yield with
+  ``K = r_e^2 lambda^2 / A_u^2``. Built-in beam profiles retain the finite
+  grazing-incidence limit, and horizontal interception must be stated
+  separately because a vertical profile cannot infer it. This stage adds the
+  unit-audited numerical path only: current extraction/UI behavior and the
+  legacy flux-density APIs remain unchanged until the later wiring stage.
+
 - **Saved CTR curves now carry a versioned correction record.** This is a
   persistence-only compatibility step: numerical defaults and the established
   ``rois``, ``croibg`` and ``Cfactors_*`` meanings are unchanged. A separate

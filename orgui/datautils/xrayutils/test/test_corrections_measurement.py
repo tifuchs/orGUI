@@ -165,6 +165,78 @@ def test_scale_factor_rejects_nonphysical_lengths():
         ii.scale_factor(WAVELENGTH, 0.0)
 
 
+def test_total_flux_prefactor_has_no_density_or_area_conversion():
+    """``K`` contains only ``r_e``, wavelength and surface-cell area."""
+    expected = (
+        ii.CLASSICAL_ELECTRON_RADIUS**2
+        * (WAVELENGTH * 1e-10) ** 2
+        / (UC_AREA * 1e-20) ** 2
+    )
+
+    got = ii.total_flux_prefactor(WAVELENGTH, UC_AREA)
+
+    np.testing.assert_allclose(got, expected, rtol=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("wavelength", "unitcell_area", "message"),
+    [
+        (np.nan, UC_AREA, "wavelength"),
+        (WAVELENGTH, np.inf, "unitcell_area"),
+    ],
+)
+def test_total_flux_prefactor_rejects_nonfinite_scale_inputs(
+    wavelength, unitcell_area, message
+):
+    with pytest.raises(ValueError, match=message):
+        ii.total_flux_prefactor(wavelength, unitcell_area)
+
+
+def test_total_flux_photon_yield_round_trips_for_every_mode():
+    """The calibrated-photon reduction is invertible for all scan modes."""
+    f2 = np.array([273.6, 148.3, 108.2, 98.0, 865.9, 5000.0])
+    common = dict(
+        wavelength=WAVELENGTH,
+        unitcell_area=UC_AREA,
+        detector_efficiency=0.93,
+    )
+
+    for kwargs in (
+        dict(
+            mode=ii.ROCKING,
+            alpha=ALPHA,
+            delta=DELTA,
+            gamma=GAMMA,
+            detector_acceptance=DGAMMA,
+        ),
+        dict(mode=ii.STATIONARY, gamma=GAMMA),
+        dict(mode=ii.SPECULAR, alpha=GAMMA),
+    ):
+        photon_yield = ii.photon_yield_from_structure_factor(
+            f2, **kwargs, **common
+        )
+        back = ii.structure_factor_squared_from_photon_yield(
+            photon_yield, **kwargs, **common
+        )
+        np.testing.assert_allclose(back, f2, rtol=1e-12)
+
+
+def test_total_flux_reduction_rejects_missing_scale_or_bad_efficiency():
+    with pytest.raises(ValueError, match="set the scale"):
+        ii.structure_factor_squared_from_photon_yield(
+            1.0, ii.STATIONARY, gamma=GAMMA
+        )
+    with pytest.raises(ValueError, match="detector_efficiency"):
+        ii.structure_factor_squared_from_photon_yield(
+            1.0,
+            ii.STATIONARY,
+            gamma=GAMMA,
+            wavelength=WAVELENGTH,
+            unitcell_area=UC_AREA,
+            detector_efficiency=0.0,
+        )
+
+
 def test_structure_factor_round_trips_through_the_forward_model():
     """The reduction is the exact inverse of the forward model, per mode."""
     f2 = np.array([273.6, 148.3, 108.2, 98.0, 865.9, 5000.0])

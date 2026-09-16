@@ -152,6 +152,26 @@ class BeamProfile(ABC):
         """
         return self.flux_on_sample(alpha, L), self.illuminated_area_fraction(alpha, L)
 
+    def flux_over_sine(self, alpha, L):
+        r"""Stable ratio :math:`f_z(\alpha, L)/\sin\alpha`.
+
+        This is the vertical part of the total-flux illumination divisor.
+        Implementations continue the ratio to its finite grazing-incidence
+        limit instead of dividing two independently vanishing values.
+
+        :param alpha: Positive incidence angle(s), in radian.
+        :param float L: Sample length along the beam, in meter.
+        :returns: Dimensionless ratio, broadcast over ``alpha``.
+        Custom profiles may override this method to supply an analytic
+        grazing-incidence limit. The default remains compatible with older
+        :class:`BeamProfile` subclasses and is valid for nonzero ``alpha``.
+
+        :rtype: numpy.ndarray
+        """
+        sine = np.sin(np.asarray(alpha, dtype=np.float64))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.asarray(self.flux_on_sample(alpha, L)) / sine
+
     @abstractmethod
     def profile_curve(self, n=512):
         """Sample the profile for display.
@@ -266,6 +286,17 @@ class _CenteredProfile(BeamProfile):
         """
         return self._flux(L * np.sin(np.asarray(alpha, dtype=float)))
 
+    def flux_over_sine(self, alpha, L):
+        r"""Return :math:`f_z/\sin\alpha` with its finite grazing limit."""
+        sine = np.sin(np.asarray(alpha, dtype=np.float64))
+        h = float(L) * sine
+        result = np.empty_like(sine)
+        resolved = np.abs(h) > self._tiny
+        np.divide(self._flux(h), sine, out=result, where=resolved)
+        if np.any(~resolved):
+            result[~resolved] = float(L) * self._density_at(0.0)
+        return result
+
     def illuminated_area_fraction(self, alpha, L):
         """Illuminated fraction of the projected sample footprint.
 
@@ -314,6 +345,17 @@ class GaussianBeamProfile(BeamProfile):
         return (np.sqrt(2 * np.pi) * self.sigma * self.flux_on_sample(alpha, L)) / (
             L * np.sin(alpha)
         )
+
+    def flux_over_sine(self, alpha, L):
+        r"""Return :math:`f_z/\sin\alpha`, including its zero-angle limit."""
+        sine = np.sin(np.asarray(alpha, dtype=np.float64))
+        flux = self.flux_on_sample(alpha, L)
+        result = np.empty_like(sine)
+        nonzero = sine != 0.0
+        np.divide(flux, sine, out=result, where=nonzero)
+        if np.any(~nonzero):
+            result[~nonzero] = float(L) / (np.sqrt(2 * np.pi) * self.sigma)
+        return result
 
     def profile_curve(self, n=512):
         """Sample the Gaussian over +- 4 sigma around the sample center."""
