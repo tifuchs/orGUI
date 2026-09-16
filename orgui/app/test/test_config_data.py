@@ -1,4 +1,6 @@
 import h5py
+import json
+
 import numpy as np
 from silx.gui import qt
 from silx.io.dictdump import dicttonx, nxtodict
@@ -147,6 +149,49 @@ def test_config_data_round_trips_through_database_json():
 
     assert loaded.corrections == config.corrections
     assert np.allclose(loaded.ub_calculator.getUB(), config.ub_calculator.getUB())
+
+
+@pytest.fixture
+def legacy_corrections_database(tmp_path):
+    """Database snapshot using the pre-typed correction-settings group."""
+    config = _make_config()
+    values = {
+        "use_mask": True,
+        "use_background": True,
+        "use_solid_angle": True,
+        "use_polarization": True,
+        "use_lorentz": True,
+        "use_footprint": False,
+        "use_normalization": True,
+        "normalize_exposure": True,
+        "monitor_corrections": ["mondio"],
+        "sample_length_m": 0.004,
+        "sample_width_m": 0.008,
+        "beam_flux_density": 2.5e12,
+    }
+    nxdict = config.to_nxdict(role="scan")
+    nxdict["orgui"]["integration_corrections"] = {
+        "@NX_class": "NXcollection",
+        "json": json.dumps(values),
+    }
+    filename = tmp_path / "legacy_corrections.h5"
+    dicttonx({"configuration": nxdict}, filename)
+    return filename, values
+
+
+def test_pre_typed_database_correction_settings_still_load(
+    legacy_corrections_database,
+):
+    """Pin dispatch of an old database containing one opaque JSON dataset."""
+    filename, values = legacy_corrections_database
+
+    stored = nxtodict(filename)["configuration"]
+    loaded = ConfigData.from_nxdict(stored)
+
+    assert "json" in stored["orgui"]["integration_corrections"]
+    serialized = loaded.corrections.to_dict()
+    assert {name: serialized[name] for name in values} == values
+    assert loaded.corrections.monitor_corrections == ("mondio",)
 
 
 def test_enabled_pixel_repair_implies_mask_correction():

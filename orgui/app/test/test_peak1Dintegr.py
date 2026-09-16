@@ -614,6 +614,58 @@ def _solid_angle_detector():
     return detector
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Stage 1: rocking acceptance is evaluated at the calibration arm",
+)
+def test_rocking_acceptance_uses_the_stored_arm_position():
+    """Pin the rolled-detector counterexample from the physics review.
+
+    Angles stored with a scan are degrees; the acceptance API takes radians.
+    At this deliberately oblique geometry, using the home arm understates the
+    accepted gamma span by about 3.4 percent.
+    """
+    from orgui.datautils.xrayutils.corrections import acceptance
+
+    detector = _solid_angle_detector()
+    pixel = detector.detector.pixel1
+    detector.dist = 0.15
+    detector.poni1 = detector.detector.shape[0] * pixel / 2.0
+    detector.poni2 = detector.detector.shape[1] * pixel / 2.0
+    detector.rot3 = np.deg2rad(30.0)
+    detector.reset()
+    detector._cached_array = {}
+
+    row = np.array([500.0])
+    column = np.array([440.0])
+    height = np.array([60.0])
+    alpha_deg = np.array([10.0])
+    gamma_arm_deg = np.array([30.0])
+    delta_arm_deg = np.array([40.0])
+    counters = {
+        "vsize": height,
+        "alpha_pk": alpha_deg,
+        "gamma_arm": gamma_arm_deg,
+        "delta_arm": delta_arm_deg,
+    }
+
+    expected = acceptance.out_of_plane_acceptance(
+        detector,
+        row,
+        column,
+        height,
+        np.deg2rad(alpha_deg),
+        np.deg2rad(gamma_arm_deg),
+        np.deg2rad(delta_arm_deg),
+    )
+    actual, applied = RockingPeakIntegrator._rocking_acceptance(
+        _stub(), detector, counters, x=column, y=row
+    )
+
+    assert applied is True
+    np.testing.assert_allclose(actual, expected, rtol=1e-10)
+
+
 @pytest.mark.parametrize("applied_at_extraction", [True, False])
 def test_the_typed_corrections_group_is_read_back(applied_at_extraction):
     """The F6 compensation must survive the layout it is stored in.

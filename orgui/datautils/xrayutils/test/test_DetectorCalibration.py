@@ -1091,3 +1091,34 @@ def test_unpolarized_beam_has_no_azimuthal_dependence():
 
     tth = sxrddet.center_array(sxrddet.get_shape(), unit=pyFAI.units.TTH_RAD)
     np.testing.assert_allclose(correction, 0.5 * (1.0 + np.cos(tth) ** 2), atol=1e-6)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Stage 1: arm-following polarization ignores polarization_axis",
+)
+@pytest.mark.parametrize("pol_axis_deg", [30.0, 90.0])
+@pytest.mark.parametrize("fraction", [1.0, 0.75])
+def test_arm_following_polarization_honors_the_configured_axis(
+    pol_axis_deg, fraction
+):
+    """Point and array evaluators must agree at the calibration position.
+
+    This is the minimal reproduction for the targeted-review finding: the
+    array path uses ``_polAxis``, while the arm-following shared evaluator
+    currently does not.  Keeping the expected failure strict makes Stage 1
+    remove the marker when it fixes the shared evaluator.
+    """
+    detector = _sxrd_detector(90.0, pol_axis_deg, fraction)
+    row, column = 309, 243
+    alpha = np.deg2rad(0.6)
+
+    expected = np.asarray(detector.polarizationArray(), dtype=float)[row, column]
+    actual = np.asarray(
+        detector.polarizationAtPoints(
+            np.array([float(row)]), np.array([float(column)]), alpha
+        ),
+        dtype=float,
+    )[0]
+
+    np.testing.assert_allclose(actual, expected, atol=1e-6)
