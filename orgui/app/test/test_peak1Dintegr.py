@@ -32,6 +32,11 @@ from orgui.app.peak1Dintegr import (
     _compute_rocking_integration,
     _trapz_impl,
 )
+from orgui.app.integration_corrections import (
+    FOOTPRINT_APPLY,
+    FOOTPRINT_KEEP,
+    FOOTPRINT_REMOVE,
+)
 
 
 def _piecewise_curve(axis, regions, background=0.0):
@@ -856,6 +861,56 @@ def test_versioned_total_flux_curve_uses_stored_divisors_once(tmp_path):
     np.testing.assert_allclose(curves["croibg_errors"], np.sqrt(variance) / q / h)
     assert curves["correction_record"].algorithm == record.algorithm
     assert curves["illumination_action"] == "applied"
+
+
+def test_unknown_legacy_curve_only_allows_keep_and_requests_reextraction():
+    """Unknown provenance cannot expose apply/remove as safe operations."""
+    state = RockingPeakIntegrator._correctionUiState(
+        None, record_present=False
+    )
+
+    assert state["actions"] == (FOOTPRINT_KEEP,)
+    assert state["normalization"] == "Unknown (legacy data)"
+    assert "Re-extract images" in state["details"]
+
+
+def test_known_legacy_curve_allows_current_legacy_footprint_only():
+    """A typed legacy record retains the old, explicitly labeled workflow."""
+    record = CurveCorrectionRecord(
+        algorithm="legacy_rocking_roi_v1",
+        output_quantity="legacy_roi_curve",
+        scale_convention="legacy_relative",
+    )
+    state = RockingPeakIntegrator._correctionUiState(record)
+
+    assert state["actions"] == (FOOTPRINT_KEEP, FOOTPRINT_APPLY)
+    assert state["normalization"] == "Applied later by the legacy reducer"
+    assert FOOTPRINT_REMOVE not in state["actions"]
+
+
+def test_reversible_total_flux_curve_exposes_keep_apply_and_remove():
+    """All three actions are safe only with a known reversible base curve."""
+    record = CurveCorrectionRecord(
+        algorithm="framewise_ctr_total_flux_v1",
+        output_quantity="rocking_ctr_photon_curve",
+        scale_convention="total_flux_relative",
+        normalization_status="applied",
+        illumination_status="applied",
+        illumination_divisor=np.ones(3),
+        illumination_convention="total_flux_H",
+        base_croibg=np.ones((2, 3)),
+        base_croibg_variance=np.ones((2, 3)),
+    )
+    state = RockingPeakIntegrator._correctionUiState(record)
+
+    assert state["actions"] == (
+        FOOTPRINT_KEEP,
+        FOOTPRINT_APPLY,
+        FOOTPRINT_REMOVE,
+    )
+    assert state["normalization"] == "Applied during extraction"
+    assert state["footprint"] == "Applied during extraction"
+    assert "total_flux_H" in state["details"]
 
 
 @pytest.mark.parametrize("applied_at_extraction", [True, False])

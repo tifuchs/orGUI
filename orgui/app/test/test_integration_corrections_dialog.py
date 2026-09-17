@@ -329,6 +329,7 @@ def test_cancel_restores_the_last_accepted_settings(dialog, tmp_path):
     dialog.measuredButton.setChecked(True)
     dialog.profileFileEdit.setText(str(path))
     dialog.loadProfile()
+    dialog.setHorizontalInterception("full")
     dialog.onOk()
 
     dialog.L.setValue(7.5)
@@ -336,6 +337,7 @@ def test_cancel_restores_the_last_accepted_settings(dialog, tmp_path):
     dialog.profileCenter.setCurrentIndex(dialog.profileCenter.findText("peak"))
     _select_shape(dialog, "Top hat")
     dialog.analyticalButton.setChecked(True)
+    dialog.setHorizontalInterception("fraction", 0.25)
     dialog.onCancel()
 
     assert dialog.L.value() == pytest.approx(3.0)
@@ -343,6 +345,8 @@ def test_cancel_restores_the_last_accepted_settings(dialog, tmp_path):
     assert dialog.profileCenter.currentText() == "centroid"
     assert dialog.currentShape().name == "Gaussian"
     assert dialog.measuredButton.isChecked()
+    assert dialog.horizontalInterceptionMode() == "full"
+    assert dialog.horizontalInterceptedFraction() == pytest.approx(1.0)
     # The restored state is still usable, not just cosmetically reset.
     assert isinstance(dialog.beamProfile(), MeasuredBeamProfile)
 
@@ -362,6 +366,7 @@ def test_settings_round_trip(dialog, tmp_path):
     flat.setValue(30.0)
     dialog.profileCenter.setCurrentIndex(dialog.profileCenter.findText("median"))
     dialog.profileOffset.setValue(-12.5)
+    dialog.setHorizontalInterception("fraction", 0.35)
     saved = dialog.settings()
 
     restored = IntegrationCorrectionsDialog()
@@ -373,6 +378,39 @@ def test_settings_round_trip(dialog, tmp_path):
         )
     finally:
         restored.deleteLater()
+
+
+def test_horizontal_interception_is_explicit_and_round_trips(dialog):
+    """Unknown, full, and fractional horizontal overlap remain distinct."""
+    assert dialog.horizontalInterceptionMode() is None
+    assert dialog.horizontalInterceptedFraction() is None
+    assert not dialog.horizontalFraction.isEnabled()
+
+    dialog.setHorizontalInterception("full")
+    assert dialog.horizontalInterceptionMode() == "full"
+    assert dialog.horizontalInterceptedFraction() == pytest.approx(1.0)
+    assert not dialog.horizontalFraction.isEnabled()
+
+    dialog.setHorizontalInterception("fraction", 0.42)
+    assert dialog.horizontalInterceptionMode() == "fraction"
+    assert dialog.horizontalInterceptedFraction() == pytest.approx(0.42)
+    assert dialog.horizontalFraction.isEnabled()
+
+
+def test_total_flux_mode_disables_density_and_full_mode_width_input(dialog):
+    """Legacy density/area inputs cannot silently enter total-flux H."""
+    dialog.setTotalFluxMode(True)
+    assert not dialog.beamFlux.isEnabled()
+    assert dialog.W.isEnabled()
+    assert "does not set the total-flux scale" in dialog.W.toolTip()
+
+    dialog.setHorizontalInterception("full")
+    assert not dialog.W.isEnabled()
+    assert "Not a total-flux scale input" in dialog.W.toolTip()
+
+    dialog.setTotalFluxMode(False)
+    assert dialog.beamFlux.isEnabled()
+    assert dialog.W.isEnabled()
 
 
 def test_choosing_a_profile_file_selects_it_as_the_beam(dialog, tmp_path):

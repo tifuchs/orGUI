@@ -1305,6 +1305,7 @@ class ConfigData:
                 or self.corrections.beam_flux_density is not None
                 or self.corrections.beam_shape_name is not None
                 or self.corrections.beam_profile_file is not None
+                or self.corrections.horizontal_interception is not None
             ):
                 corrections_dialog = getattr(
                     gui.scanSelector, "correctionsDialog", None
@@ -1322,6 +1323,11 @@ class ConfigData:
                     if self.corrections.beam_flux_density is not None:
                         footprint_dialog.setBeamFluxDensity(
                             self.corrections.beam_flux_density
+                        )
+                    if self.corrections.horizontal_interception is not None:
+                        footprint_dialog.setHorizontalInterception(
+                            self.corrections.horizontal_interception,
+                            self.corrections.horizontal_intercepted_fraction,
                         )
                     # The dialog's own setSettings(), in its own display
                     # units; only the keys this configuration actually
@@ -1345,6 +1351,12 @@ class ConfigData:
                         )
                     if beam_shape:
                         footprint_dialog.setSettings(beam_shape)
+            corrections_dialog = getattr(
+                gui.scanSelector, "correctionsDialog", None
+            )
+            refresh = getattr(corrections_dialog, "refresh", None)
+            if refresh is not None:
+                refresh()
         gui.reconstruction_normalize_exposure = self.corrections.normalize_exposure
         gui.reconstruction_monitor_corrections = self.corrections.monitor_corrections
         if (

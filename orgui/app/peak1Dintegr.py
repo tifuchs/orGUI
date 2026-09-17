@@ -65,7 +65,9 @@ from .config_data import (
     detector_from_nxdict,
 )
 from .integration_corrections import (
+    FOOTPRINT_APPLY,
     FOOTPRINT_KEEP,
+    FOOTPRINT_REMOVE,
     corrected_curve_from_record,
 )
 from .. import resources
@@ -559,6 +561,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.filedialogdir = "."
         self._currentRoInfo = {}
         self._idx = 0
+        self.footprint_action = FOOTPRINT_KEEP
+        self.replacement_illumination = None
+        self.replacement_illumination_convention = None
+        self.allow_illumination_convention_change = False
 
         dbdockwidget = qt.QDockWidget("Integrated data")
 
@@ -738,17 +744,54 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
         roi_edit_layout.addWidget(modifyROIsGroup)
 
-        integrateOptionsGroup = qt.QGroupBox("Integrate options")
-        integrateOptionsGroupLayout = qt.QHBoxLayout()
+        integrateOptionsGroup = qt.QGroupBox("CTR reduction")
+        integrateOptionsGroupLayout = qt.QGridLayout()
 
-        self.lorentzButton = qt.QCheckBox("Lorentz")
-        self.footprintButton = qt.QCheckBox("footprint")
-        self.footprintOptionsButton = qt.QPushButton("options")
+        self.lorentzButton = qt.QCheckBox("Calculate CTR structure factor")
+        self.lorentzButton.setToolTip(
+            "Apply the rocking-mode Lorentz, rod-intersection and angular-"
+            "acceptance factors. Disable this to save diagnostic intensity "
+            "when Q or H is deliberately absent."
+        )
+        self.normalizationStatus = qt.QLabel(
+            "Normalization: Unknown (no rocking scan selected)"
+        )
+        self.normalizationStatus.setWordWrap(True)
+        self.footprintAction = qt.QComboBox()
+        self.footprintAction.addItem("Keep stored correction", FOOTPRINT_KEEP)
+        self.footprintAction.addItem("Apply current beam settings", FOOTPRINT_APPLY)
+        self.footprintAction.addItem(
+            "Remove stored correction", FOOTPRINT_REMOVE
+        )
+        self.footprintAction.setToolTip(
+            "Every action starts from the stored base curve. Unsafe actions "
+            "are disabled when correction provenance is unknown."
+        )
+        self.footprintStatus = qt.QLabel(
+            "Saved result: Unknown (no rocking scan selected)"
+        )
+        self.footprintStatus.setWordWrap(True)
+        self.reductionPreview = qt.QLabel("Next reduction: no scan selected")
+        self.reductionPreview.setWordWrap(True)
+        self.reductionDetails = qt.QLabel("")
+        self.reductionDetails.setWordWrap(True)
+        self.footprintOptionsButton = qt.QPushButton("Current beam settings ...")
         self.footprintOptionsButton.clicked.connect(self._showFootprintOptions)
+        self.footprintAction.currentIndexChanged.connect(
+            self._onFootprintActionChanged
+        )
+        self.lorentzButton.toggled.connect(self._onFootprintActionChanged)
 
-        integrateOptionsGroupLayout.addWidget(self.lorentzButton)
-        integrateOptionsGroupLayout.addWidget(self.footprintButton)
-        integrateOptionsGroupLayout.addWidget(self.footprintOptionsButton)
+        integrateOptionsGroupLayout.addWidget(self.lorentzButton, 0, 0, 1, 2)
+        integrateOptionsGroupLayout.addWidget(self.normalizationStatus, 1, 0, 1, 2)
+        integrateOptionsGroupLayout.addWidget(qt.QLabel("Footprint action:"), 2, 0)
+        integrateOptionsGroupLayout.addWidget(self.footprintAction, 2, 1)
+        integrateOptionsGroupLayout.addWidget(self.footprintStatus, 3, 0, 1, 2)
+        integrateOptionsGroupLayout.addWidget(self.reductionPreview, 4, 0, 1, 2)
+        integrateOptionsGroupLayout.addWidget(self.reductionDetails, 5, 0, 1, 2)
+        integrateOptionsGroupLayout.addWidget(
+            self.footprintOptionsButton, 6, 0, 1, 2
+        )
 
         integrateOptionsGroup.setLayout(integrateOptionsGroupLayout)
 
@@ -803,6 +846,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.curveSlider.sigValueChanged.connect(self.onSliderValueChanged)
         # self.roiwidget.sigROISignal.connect(lambda d: print(d))
 
+        self.integrationCorrection.settingsChanged.connect(
+            self._onFootprintActionChanged
+        )
+        self._refreshReductionCorrectionStatus()
+
     def _check_ro_present(self):
         if not self.database.nxfile:
             self._currentRoInfo = {}
@@ -844,8 +892,252 @@ class RockingPeakIntegrator(qt.QMainWindow):
             return
         previous = self.integrationCorrection
         self.integrationCorrection = dialog
+        self.integrationCorrection.settingsChanged.connect(
+            self._onFootprintActionChanged
+        )
         if previous is not None:
             previous.deleteLater()
+        self._onFootprintActionChanged()
+
+    @staticmethod
+    def _correctionUiState(record, record_present=True):
+        """Describe safe rocking-reduction actions for a stored record.
+
+        :param CurveCorrectionRecord or None record: Parsed stored record.
+        :param bool record_present: Whether a correction group exists at all.
+        :rtype: dict
+        """
+        if record is None:
+            reason = (
+                "an incomplete correction record"
+                if record_present
+                else "legacy data without a correction record"
+            )
+            return {
+                "actions": (FOOTPRINT_KEEP,),
+                "normalization": "Unknown (legacy data)",
+                "footprint": "Unknown",
+                "details": (
+                    f"Correction provenance is unknown because this scan has {reason}. "
+                    "Re-extract images to change this correction safely."
+                ),
+                "known_total_flux": False,
+            }
+
+        if record.algorithm.startswith("legacy_rocking_roi_"):
+            return {
+                "actions": (FOOTPRINT_KEEP, FOOTPRINT_APPLY),
+                "normalization": "Applied later by the legacy reducer",
+                "footprint": "Not applied to the saved curve",
+                "details": (
+                    f"Algorithm {record.algorithm}; scale {record.scale_convention}. "
+                    "Current beam settings may be applied using the preserved "
+                    "legacy density/area convention."
+                ),
+                "known_total_flux": False,
+            }
+
+        if record.algorithm.startswith("framewise_ctr_total_flux_"):
+            reversible = (
+                record.base_croibg is not None
+                and record.base_croibg_variance is not None
+            )
+            known_illumination = record.illumination_status in (
+                "applied",
+                "not_applied",
+            )
+            actions = [FOOTPRINT_KEEP]
+            if reversible and known_illumination:
+                actions.append(FOOTPRINT_APPLY)
+            if (
+                reversible
+                and record.illumination_status == "applied"
+                and record.illumination_divisor is not None
+            ):
+                actions.append(FOOTPRINT_REMOVE)
+            normalization = {
+                "applied": "Applied during extraction",
+                "not_applied": "Not applied",
+                "unavailable": "Unavailable",
+            }.get(record.normalization_status, "Unknown")
+            footprint = {
+                "applied": "Applied during extraction",
+                "not_applied": "Not applied",
+                "unavailable": "Unavailable",
+            }.get(record.illumination_status, "Unknown")
+            extra = ""
+            if not reversible or not known_illumination:
+                extra = " Re-extract images to change this correction safely."
+            return {
+                "actions": tuple(actions),
+                "normalization": normalization,
+                "footprint": footprint,
+                "details": (
+                    f"Algorithm {record.algorithm}; scale {record.scale_convention}; "
+                    f"illumination convention "
+                    f"{record.illumination_convention or 'none'}.{extra}"
+                ),
+                "known_total_flux": True,
+            }
+
+        return {
+            "actions": (FOOTPRINT_KEEP,),
+            "normalization": "Unknown",
+            "footprint": "Unknown",
+            "details": (
+                f"Unsupported correction algorithm {record.algorithm!r}. "
+                "Re-extract images to change this correction safely."
+            ),
+            "known_total_flux": False,
+        }
+
+    @staticmethod
+    def _storedCurveCorrectionRecord(h5_obj, nxfile):
+        """Return a parsed stored record, or ``None`` when it is incomplete."""
+        if CURVE_CORRECTIONS_GROUP not in h5_obj:
+            return None
+        record_group = h5_obj[CURVE_CORRECTIONS_GROUP]
+        try:
+            record_dict = h5todict(nxfile, record_group.name)
+            record_dict["@orgui_schema_version"] = record_group.attrs.get(
+                "orgui_schema_version", 0
+            )
+            record_dict["@orgui_curve_contract"] = record_group.attrs.get(
+                "orgui_curve_contract", ""
+            )
+            return curve_correction_record_from_nxdict(record_dict)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _setFootprintActionEnabled(self, action, enabled):
+        """Enable one footprint-action choice in the combo-box model."""
+        index = self.footprintAction.findData(action)
+        if index >= 0:
+            self.footprintAction.model().item(index).setEnabled(bool(enabled))
+
+    def _refreshReductionCorrectionStatus(self):
+        """Refresh saved-result provenance and safe next actions."""
+        record = None
+        present = False
+        if self._currentRoInfo and self.database.nxfile:
+            name = self._currentRoInfo.get("name")
+            if name in self.database.nxfile:
+                h5_obj = self.database.nxfile[name]
+                present = CURVE_CORRECTIONS_GROUP in h5_obj
+                record = self._storedCurveCorrectionRecord(
+                    h5_obj, self.database.nxfile
+                )
+        state = self._correctionUiState(record, present)
+        self._activeCorrectionRecord = record
+        self._activeCorrectionUiState = state
+        allowed = state["actions"]
+        for action in (FOOTPRINT_KEEP, FOOTPRINT_APPLY, FOOTPRINT_REMOVE):
+            self._setFootprintActionEnabled(action, action in allowed)
+        if self.footprintAction.currentData() not in allowed:
+            self.footprintAction.setCurrentIndex(
+                self.footprintAction.findData(FOOTPRINT_KEEP)
+            )
+        self.normalizationStatus.setText(
+            f"Saved normalization: {state['normalization']}"
+        )
+        self.footprintStatus.setText(
+            f"Saved footprint: {state['footprint']}"
+        )
+        self.reductionDetails.setText(state["details"])
+        self._onFootprintActionChanged()
+
+    def _onFootprintActionChanged(self, *args):
+        """Prepare and describe the selected next-reduction footprint action."""
+        action = self.footprintAction.currentData() or FOOTPRINT_KEEP
+        self.footprint_action = action
+        self.replacement_illumination = None
+        self.replacement_illumination_convention = None
+        self.allow_illumination_convention_change = False
+
+        action_text = {
+            FOOTPRINT_KEEP: "keep the stored footprint state",
+            FOOTPRINT_APPLY: "apply current beam settings from the base curve",
+            FOOTPRINT_REMOVE: "remove the stored footprint from the base curve",
+        }[action]
+        record = getattr(self, "_activeCorrectionRecord", None)
+        known_total_flux = bool(
+            getattr(self, "_activeCorrectionUiState", {}).get(
+                "known_total_flux", False
+            )
+        )
+        if action == FOOTPRINT_APPLY:
+            action_text = (
+                "Replaced here using current beam settings"
+                if record is not None and record.illumination_status == "applied"
+                else "Applied here using current beam settings"
+            )
+        f2_ready = action != FOOTPRINT_REMOVE
+        if known_total_flux:
+            f2_ready = record.normalization_status == "applied"
+            if action == FOOTPRINT_KEEP:
+                f2_ready = f2_ready and record.illumination_status == "applied"
+            elif action == FOOTPRINT_APPLY:
+                f2_ready = (
+                    f2_ready
+                    and self.integrationCorrection.horizontalInterceptedFraction()
+                    is not None
+                )
+            else:
+                f2_ready = False
+        if not f2_ready and self.lorentzButton.isChecked():
+            with qt.QSignalBlocker(self.lorentzButton):
+                self.lorentzButton.setChecked(False)
+        self.lorentzButton.setEnabled(f2_ready)
+        quantity = (
+            "CTR structure factor"
+            if self.lorentzButton.isChecked() and f2_ready
+            else "diagnostic intensity (not F²)"
+        )
+        warning = ""
+        if action == FOOTPRINT_REMOVE and self.lorentzButton.isChecked():
+            warning = " Remove leaves H absent, so F² is unavailable."
+        self.reductionPreview.setText(
+            f"Next reduction: {action_text}; output {quantity}.{warning}"
+        )
+
+    def _prepareFootprintAction(self, h5_obj):
+        """Resolve any live illumination divisor before reading the curve."""
+        action = self.footprintAction.currentData() or FOOTPRINT_KEEP
+        self.footprint_action = action
+        self.replacement_illumination = None
+        self.replacement_illumination_convention = None
+        record = self._storedCurveCorrectionRecord(h5_obj, self.database.nxfile)
+        if (
+            action == FOOTPRINT_APPLY
+            and record is not None
+            and record.algorithm.startswith("framewise_ctr_total_flux_")
+        ):
+            horizontal = self.integrationCorrection.horizontalInterceptedFraction()
+            if horizontal is None:
+                raise ValueError(
+                    "Applying current total-flux beam settings requires an "
+                    "explicit horizontal interception choice."
+                )
+            if record.alpha is None:
+                raise ValueError(
+                    "The stored curve has no incidence angles; re-extract "
+                    "images before changing its footprint."
+                )
+            self.replacement_illumination = (
+                activearea_corrections.illumination_divisor(
+                    record.alpha,
+                    self.integrationCorrection.sampleLength(),
+                    self.integrationCorrection.beamProfile(),
+                    horizontal_fraction=horizontal,
+                )
+            )
+            self.replacement_illumination_convention = "total_flux_H"
+        elif action != FOOTPRINT_KEEP and record is None:
+            raise ValueError(
+                "Correction provenance is unknown. Re-extract images before "
+                "changing the footprint."
+            )
+        return record
 
     def onIntegrate(self):
         try:
@@ -904,6 +1196,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.plotROIselect.resetZoom()
         if self.autozoom_checkbox.isChecked():
             self.resetXZoomScaled(self.zoomslider.value())
+        self._refreshReductionCorrectionStatus()
 
     def onAnchorSaveRoi(self):
         # GUI-only: user-triggered save dialog path.
@@ -1754,12 +2047,17 @@ class RockingPeakIntegrator(qt.QMainWindow):
         """
         if not self._currentRoInfo:
             raise ValueError("No rocking scan selected.")
+        name = self._currentRoInfo["name"]
+        h5_obj = self.database.nxfile[name]
+        self._prepareFootprintAction(h5_obj)
         curves = self.get_all_ro_curves()
         correction_record = curves.get("correction_record")
         versioned_total_flux = correction_record is not None
-        name = self._currentRoInfo["name"]
-        h5_obj = self.database.nxfile[name]
         cnters = h5_obj["rois"]
+        footprint_action = self.footprint_action
+        apply_legacy_footprint = (
+            not versioned_total_flux and footprint_action == FOOTPRINT_APPLY
+        )
 
         s_array = cnters["s"][()]
         alpha = np.deg2rad(cnters["alpha"][()])
@@ -1804,7 +2102,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             # live dialog here would scale the same photons a second time.
             C_flux_on_sample = 1.0
             C_illum_area = 1.0
-        elif self.footprintButton.isChecked():
+        elif apply_legacy_footprint:
             L = self.integrationCorrection.sampleLength()  # sample size, m
             # Gaussian or measured beam profile, depending on the dialog.
             # C_flux_on_sample is saved as the diagnostic numerator of the
@@ -1888,7 +2186,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             roi_info,
             aux,
             self.lorentzButton.isChecked(),
-            self.footprintButton.isChecked() and not versioned_total_flux,
+            apply_legacy_footprint,
             C_Lor=C_Lor,
             C_rod=C_rod,
             C_flux_on_sample=C_flux_on_sample,
@@ -2057,7 +2355,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     curves["illumination_action"]
                     in ("applied", "replaced", "applied_here")
                     if versioned_total_flux
-                    else self.footprintButton.isChecked()
+                    else apply_legacy_footprint
                 ),
             }
             if versioned_total_flux:
@@ -2074,7 +2372,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             if detector_acceptance is not None:
                 reduction["detector_acceptance"] = detector_acceptance
                 reduction["@detector_acceptance_unit"] = "rad"
-            if self.footprintButton.isChecked() and not versioned_total_flux:
+            if apply_legacy_footprint:
                 reduction["sample_size"] = L
                 reduction["@sample_size_unit"] = "m"
             measurement[availname1]["reduction"] = reduction
@@ -2084,6 +2382,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             update_mode="modify",
             h5path=self._currentRoInfo["name"] + "/measurement",
         )
+        self._refreshReductionCorrectionStatus()
 
     def onSliderValueChanged(self, ddict):
         try:
@@ -2212,26 +2511,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
         name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
         if CURVE_CORRECTIONS_GROUP in h5_obj:
-            record_group = h5_obj[CURVE_CORRECTIONS_GROUP]
-            try:
-                record_dict = h5todict(
-                    self.database.nxfile,
-                    record_group.name,
-                )
-                record_dict["@orgui_schema_version"] = record_group.attrs.get(
-                    "orgui_schema_version", 0
-                )
-                record_dict["@orgui_curve_contract"] = record_group.attrs.get(
-                    "orgui_curve_contract", ""
-                )
-                record = curve_correction_record_from_nxdict(
-                    record_dict
-                )
-            except ValueError:
-                # Let the legacy gate distinguish supported legacy records
-                # from unknown normalized contracts and produce its targeted
-                # error instead of guessing which numbers the curve contains.
-                record = None
+            record = RockingPeakIntegrator._storedCurveCorrectionRecord(
+                h5_obj, self.database.nxfile
+            )
             if record is not None and record.algorithm.startswith(
                 "framewise_ctr_total_flux_"
             ):
@@ -2887,6 +3169,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
     #: File-column meaning of the loaded beam-profile file.
     CONTENT_PROFILE = "beam profile"
     CONTENT_HEIGHT_SCAN = "height scan (-dI/dz)"
+    settingsChanged = qt.Signal()
 
     def __init__(self, parent=None):
         qt.QDialog.__init__(self, parent)
@@ -2938,23 +3221,51 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             "Only the absolute active area in square meter uses it; a "
             "structure factor on a relative scale is unaffected."
         )
+        self._legacyWidthToolTip = self.W.toolTip()
         sizesLayout.addWidget(self.W, 1, 1)
 
-        sizesLayout.addWidget(qt.QLabel("Beam flux:"), 2, 0)
+        self.legacyFluxLabel = qt.QLabel("Legacy flux density:")
+        sizesLayout.addWidget(self.legacyFluxLabel, 2, 0)
         self.beamFlux = qt.QDoubleSpinBox()
         self.beamFlux.setRange(0.0, 1e30)
         self.beamFlux.setDecimals(3)
         self.beamFlux.setSuffix(" ph/(s·mm²)")
         self.beamFlux.setValue(0.0)
         self.beamFlux.setToolTip(
-            "Incident photon flux density (Phi_0) at the sample position.\n"
-            "Called 'beam flux' here rather than Phi_0 or phi, to avoid "
-            "confusion with the sample-circle phi of the diffractometer.\n"
-            "Only needed for an absolutely scaled structure factor "
-            "(issue #15); leave at 0 if it has not been measured -- a "
-            "structure factor on a relative scale does not use it."
+            "Legacy incident photon flux density at the sample position. "
+            "This remains photons/(s mm²) and is never reinterpreted as "
+            "total photons/s. New total-flux calibration is configured in "
+            "the parent corrections dialog."
         )
+        self._legacyFluxToolTip = self.beamFlux.toolTip()
         sizesLayout.addWidget(self.beamFlux, 2, 1)
+
+        sizesLayout.addWidget(qt.QLabel("Horizontal interception:"), 3, 0)
+        self.horizontalInterception = qt.QComboBox()
+        self.horizontalInterception.addItem("Not specified", "")
+        self.horizontalInterception.addItem("Full beam intercepted", "full")
+        self.horizontalInterception.addItem(
+            "Known intercepted fraction", "fraction"
+        )
+        self.horizontalInterception.setToolTip(
+            "A vertical beam profile cannot establish how much of the beam "
+            "is intercepted horizontally. New total-flux corrections require "
+            "this choice to be explicit."
+        )
+        sizesLayout.addWidget(self.horizontalInterception, 3, 1)
+
+        self.horizontalFractionLabel = qt.QLabel("Horizontal fraction:")
+        sizesLayout.addWidget(self.horizontalFractionLabel, 4, 0)
+        self.horizontalFraction = qt.QDoubleSpinBox()
+        self.horizontalFraction.setRange(0.000001, 1.0)
+        self.horizontalFraction.setDecimals(6)
+        self.horizontalFraction.setSingleStep(0.01)
+        self.horizontalFraction.setValue(1.0)
+        self.horizontalFraction.setToolTip(
+            "Known fraction of the full incident beam intercepted in the "
+            "horizontal direction. Must be greater than zero and at most one."
+        )
+        sizesLayout.addWidget(self.horizontalFraction, 4, 1)
 
         modeLayout = qt.QHBoxLayout()
         self.analyticalButton = qt.QRadioButton("analytical beam shape")
@@ -3005,9 +3316,95 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         self.setLayout(verticalLayout)
 
         self.analyticalButton.toggled.connect(self._onModeChanged)
+        self.horizontalInterception.currentIndexChanged.connect(
+            self._onHorizontalInterceptionChanged
+        )
+        self.horizontalFraction.valueChanged.connect(self._settingsChanged)
+        self.L.valueChanged.connect(self._settingsChanged)
+        self.W.valueChanged.connect(self._settingsChanged)
+        self.beamFlux.valueChanged.connect(self._settingsChanged)
+        self.profileOffset.valueChanged.connect(self._settingsChanged)
+        self.profileCenter.currentIndexChanged.connect(self._settingsChanged)
+        self.analyticalButton.toggled.connect(self._settingsChanged)
         self._onShapeChanged()
         self._onModeChanged()
+        self._onHorizontalInterceptionChanged()
         self._settings_save = self.settings()
+
+    def _settingsChanged(self, *args):
+        """Notify owners that the effective beam settings changed."""
+        self.settingsChanged.emit()
+
+    def _onHorizontalInterceptionChanged(self, *args):
+        """Enable the fraction editor only for the explicit fraction mode."""
+        fraction_mode = self.horizontalInterception.currentData() == "fraction"
+        self.horizontalFractionLabel.setEnabled(fraction_mode)
+        self.horizontalFraction.setEnabled(fraction_mode)
+        self._updateLegacyControlState()
+        self._updatePreview()
+        self._settingsChanged()
+
+    def horizontalInterceptionMode(self):
+        """Return ``'full'``, ``'fraction'`` or ``None`` from the UI."""
+        return self.horizontalInterception.currentData() or None
+
+    def horizontalInterceptedFraction(self):
+        """Return the stated horizontal fraction, or ``None`` if unresolved."""
+        mode = self.horizontalInterceptionMode()
+        if mode == "full":
+            return 1.0
+        if mode == "fraction":
+            return self.horizontalFraction.value()
+        return None
+
+    def setHorizontalInterception(self, mode, fraction=None):
+        """Restore the horizontal interception convention.
+
+        :param str or None mode: ``'full'``, ``'fraction'`` or ``None``.
+        :param float or None fraction: Fraction used by ``'fraction'`` mode.
+        """
+        index = self.horizontalInterception.findData(mode or "")
+        with blockSignals([self.horizontalInterception, self.horizontalFraction]):
+            self.horizontalInterception.setCurrentIndex(max(index, 0))
+            if fraction is not None:
+                self.horizontalFraction.setValue(float(fraction))
+        self._onHorizontalInterceptionChanged()
+
+    def setTotalFluxMode(self, enabled):
+        """Show which legacy density controls are inactive in total-flux mode."""
+        self._totalFluxMode = bool(enabled)
+        self._updateLegacyControlState()
+
+    def _updateLegacyControlState(self):
+        """Apply total-flux/legacy enablement without changing stored values."""
+        enabled = bool(getattr(self, "_totalFluxMode", False))
+        self.beamFlux.setEnabled(not enabled)
+        self.legacyFluxLabel.setEnabled(not enabled)
+        full_horizontal = (
+            enabled and self.horizontalInterceptionMode() == "full"
+        )
+        self.W.setEnabled(not full_horizontal)
+        if full_horizontal:
+            reason = (
+                "Not a total-flux scale input. Horizontal interception is "
+                "explicitly the full beam."
+            )
+            self.W.setToolTip(reason)
+        elif enabled:
+            self.W.setToolTip(
+                "Retained for geometry and legacy density calculations; it "
+                "does not set the total-flux scale."
+            )
+        else:
+            self.W.setToolTip(self._legacyWidthToolTip)
+        if enabled:
+            self.beamFlux.setToolTip(
+                "Legacy density value preserved for compatibility; the "
+                "active total-flux convention uses photons/s in the parent "
+                "corrections dialog."
+            )
+        else:
+            self.beamFlux.setToolTip(self._legacyFluxToolTip)
 
     def _createShapeGroup(self):
         """Build the analytical-shape group box."""
@@ -3133,6 +3530,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             self.shapeGroup if analytical else self.profileGroup
         )
         self._updatePreview()
+        self._settingsChanged()
 
     def _onShapeChanged(self):
         """Relabel the numeric controls for the newly selected shape."""
@@ -3155,6 +3553,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
                     label.setVisible(False)
                     spin.setVisible(False)
         self._updatePreview()
+        self._settingsChanged()
 
     def _onShapeValueChanged(self):
         """Remember the edited values for the current shape and redraw."""
@@ -3163,6 +3562,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             self.shapeParameters[i].value() for i in range(len(shape.parameters))
         ]
         self._updatePreview()
+        self._settingsChanged()
 
     def currentShape(self):
         """Return the selected analytical beam shape.
@@ -3292,6 +3692,14 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             summary += f", centroid at {centroid * 1e6:+.1f} microns"
         else:
             summary += ", centroid undefined (the profile has no center of mass)"
+        mode = self.horizontalInterceptionMode()
+        if mode == "full":
+            summary += "; horizontal fraction 1 (full beam intercepted)"
+        elif mode == "fraction":
+            summary += f"; horizontal fraction {self.horizontalFraction.value():.6g}"
+        else:
+            summary += "; horizontal interception not specified"
+        summary += "; vertical fraction is evaluated per frame from L and incidence"
         self.profileInfo.setText(summary)
 
     def measuredProfile(self):
@@ -3425,6 +3833,10 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             "L": self.L.value(),
             "W": self.W.value(),
             "beam_flux": self.beamFlux.value(),
+            "horizontal_interception": self.horizontalInterceptionMode(),
+            "horizontal_intercepted_fraction": (
+                self.horizontalInterceptedFraction()
+            ),
             "analytical": self.analyticalButton.isChecked(),
             "shape": shape.name,
             "shape_values": list(self._shape_values[shape.name]),
@@ -3446,6 +3858,8 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             self.profileUnit,
             self.profileCenter,
             self.profileOffset,
+            self.horizontalInterception,
+            self.horizontalFraction,
             self.analyticalButton,
             self.shapeSelector,
         ] + self.shapeParameters
@@ -3456,6 +3870,17 @@ class IntegrationCorrectionsDialog(qt.QDialog):
                 self.W.setValue(settings["W"])
             if "beam_flux" in settings:
                 self.beamFlux.setValue(settings["beam_flux"])
+            if "horizontal_interception" in settings:
+                mode = settings["horizontal_interception"]
+                index = self.horizontalInterception.findData(mode or "")
+                self.horizontalInterception.setCurrentIndex(max(index, 0))
+            if (
+                "horizontal_intercepted_fraction" in settings
+                and settings["horizontal_intercepted_fraction"] is not None
+            ):
+                self.horizontalFraction.setValue(
+                    settings["horizontal_intercepted_fraction"]
+                )
             if "analytical" in settings:
                 self.analyticalButton.setChecked(bool(settings["analytical"]))
                 self.measuredButton.setChecked(not settings["analytical"])
@@ -3479,6 +3904,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
                 self.profileOffset.setValue(settings["profile_offset"])
         self._onShapeChanged()
         self._onModeChanged()
+        self._onHorizontalInterceptionChanged()
         self.loadProfile()
 
     def onOk(self):

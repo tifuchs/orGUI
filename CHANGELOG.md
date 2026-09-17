@@ -7,6 +7,20 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **CTR correction controls now state what is saved and what the next
+  operation will do.** The integration dialog separates detector signal,
+  incident beam and CTR result settings; new sessions use an explicitly
+  relative total-flux convention, while calibrated photon flux, one
+  rate-like or integrated primary monitor, its calibration reference and the
+  effective normalization formula are shown with units. Legacy flux density
+  and multi-monitor products remain labeled and are not reinterpreted.
+  Horizontal interception must be selected as full or as a known fraction;
+  unresolved imported settings stay ``Not specified``. The rocking reducer
+  shows the loaded curve's saved normalization/footprint provenance separately
+  from the next reduction and replaces the footprint checkbox with safe
+  keep/apply/remove actions. Unknown legacy provenance disables replacement
+  and removal and directs the user to re-extract rather than guessing.
+
 - **The numerical correction core now has an explicit total-incident-flux
   convention.** New pure APIs calculate calibrated photons per frame from a
   constant flux or an explicitly rate-like/integrated monitor, distinguish the
@@ -16,8 +30,8 @@ Scientific and analysis additions:
   grazing-incidence limit, and horizontal interception must be stated
   separately because a vertical profile cannot infer it. This stage adds the
   unit-audited numerical path; the extraction/reduction wiring described
-  below activates it only for explicit version-3 settings. The UI and legacy
-  flux-density APIs remain unchanged until the later UI stage.
+  below activates it only for explicit version-3 settings. Legacy
+  flux-density APIs retain their original units and meaning.
 
 - **Stationary and rocking CTR integrations now share one framewise total-flux
   policy.** An explicitly configured primary monitor is classified as a rate
