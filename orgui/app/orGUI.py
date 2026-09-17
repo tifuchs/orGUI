@@ -2710,17 +2710,106 @@ ub : gui for UB matrix and angle calculations
                 }
 
         data_2d_structured[self.activescanname]["measurement"][name]["rois"] = rois
-        # A distinct versioned branch preserves the reversible scalar curve
-        # and applied-state provenance without changing the legacy ``rois``
-        # contract consumed by today's reducer. Stage 5 will opt into this
-        # branch when framewise Q/H normalization becomes active.
+        options = self.scanSelector.get_integration_options()
+        beam_profile = sample_length = None
+        if options["footprint"]:
+            footprint_dialog = (
+                self.scanSelector.correctionsDialog.footprintOptions_shared()
+            )
+            beam_profile = footprint_dialog.beamProfile()
+            sample_length = footprint_dialog.sampleLength()
+        frame_policy = integration_corrections.frame_correction_policy(
+            self.fscan,
+            config_snapshot.corrections,
+            rois["axis"].shape[1],
+            use_normalization=options["normalization"],
+            use_illumination=options["footprint"],
+            alpha=np.deg2rad(rois["alpha"]),
+            beam_profile=beam_profile,
+            sample_length=sample_length,
+        )
+        profile_provenance = _curve_profile_provenance(
+            config_snapshot.corrections
+        )
+        profile_provenance.update(
+            {
+                "wavelength_angstrom": config_snapshot.ub_calculator.getLambda(),
+                "unitcell_area_angstrom2": config_snapshot.unit_cell.uc_area,
+                "detector_efficiency_assumed": 1.0,
+                "external_transmission_assumed": 1.0,
+            }
+        )
+        # The preserved ``rois`` group remains legacy-compatible. An explicit
+        # primary-monitor/total-flux setup activates the sibling framewise
+        # contract; its Q/H arrays are applied by the rocking reducer before
+        # angular aggregation.
         curve_record = CurveCorrectionRecord(
-            algorithm="legacy_rocking_roi_v2",
-            output_quantity="rocking_roi_curve",
-            scale_convention="legacy_unnormalized",
-            normalization_status="not_applied",
-            illumination_status="not_applied",
+            algorithm=(
+                "framewise_ctr_total_flux_v1"
+                if frame_policy.new_contract
+                else "legacy_rocking_roi_v2"
+            ),
+            output_quantity=(
+                "rocking_ctr_photon_curve"
+                if frame_policy.new_contract
+                else "rocking_roi_curve"
+            ),
+            scale_convention=(
+                frame_policy.scale_convention
+                if frame_policy.new_contract
+                else "legacy_unnormalized"
+            ),
+            normalization_status=(
+                frame_policy.normalization_status
+                if frame_policy.new_contract
+                else "not_applied"
+            ),
+            illumination_status=(
+                frame_policy.illumination_status
+                if frame_policy.new_contract
+                else "not_applied"
+            ),
             pixel_correction_status=("applied" if corr else "not_applied"),
+            normalization_divisor=(
+                frame_policy.normalization_divisor
+                if frame_policy.new_contract
+                else None
+            ),
+            normalization_unit=(
+                frame_policy.normalization_unit
+                if frame_policy.new_contract
+                else None
+            ),
+            normalization_components=(
+                frame_policy.normalization_components
+                if frame_policy.new_contract
+                else ()
+            ),
+            illumination_divisor=(
+                frame_policy.illumination_divisor
+                if frame_policy.new_contract
+                else None
+            ),
+            illumination_convention=(
+                frame_policy.illumination_convention
+                if frame_policy.new_contract
+                else None
+            ),
+            vertical_intercepted_fraction=(
+                frame_policy.vertical_intercepted_fraction
+                if frame_policy.new_contract
+                else None
+            ),
+            horizontal_intercepted_fraction=(
+                frame_policy.horizontal_intercepted_fraction
+                if frame_policy.new_contract
+                else None
+            ),
+            intercepted_fraction=(
+                frame_policy.intercepted_fraction
+                if frame_policy.new_contract
+                else None
+            ),
             alpha=np.deg2rad(rois["alpha"]),
             base_croi=rois["croi"],
             base_croi_variance=rois["croi"],
@@ -2742,9 +2831,7 @@ ub : gui for UB matrix and angle calculations
             roi_x_stop=rocking_roi_edges["x_stop"],
             roi_y_start=rocking_roi_edges["y_start"],
             roi_y_stop=rocking_roi_edges["y_stop"],
-            profile_provenance=_curve_profile_provenance(
-                config_snapshot.corrections
-            ),
+            profile_provenance=profile_provenance,
         )
         data_2d_structured[self.activescanname]["measurement"][name][
             CURVE_CORRECTIONS_GROUP
@@ -6815,6 +6902,7 @@ ub : gui for UB matrix and angle calculations
             np.atleast_1d(np.asarray(mu_all, dtype=np.float64)), (nodatapoints,)
         )
         options = self.scanSelector.get_integration_options()
+        config_snapshot = ConfigData.from_gui(self)
         beam_profile = None
         sample_size = None
         if options["footprint"]:
@@ -6823,17 +6911,22 @@ ub : gui for UB matrix and angle calculations
             )  # noqa: E501
             beam_profile = footprint_dialog.beamProfile()
             sample_size = footprint_dialog.sampleLength()  # m
-        normalization = None
-        normalization_applied = []
-        if options["normalization"]:
-            normalization, normalization_applied = (
-                integration_corrections.normalization_divisor(
-                    self.fscan,
-                    bool(getattr(self, "reconstruction_normalize_exposure", True)),
-                    tuple(getattr(self, "reconstruction_monitor_corrections", ())),
-                    nodatapoints,
-                )
-            )
+        frame_policy = integration_corrections.frame_correction_policy(
+            self.fscan,
+            config_snapshot.corrections,
+            nodatapoints,
+            use_normalization=options["normalization"],
+            use_illumination=options["footprint"],
+            alpha=alpha_all,
+            beam_profile=beam_profile,
+            sample_length=sample_size,
+        )
+        normalization = (
+            frame_policy.normalization_divisor
+            if frame_policy.normalization_status == "applied"
+            else None
+        )
+        normalization_applied = list(frame_policy.normalization_components)
 
         pol_arm1 = np.ones(nodatapoints, dtype=np.float64)
         pol_arm2 = np.ones(nodatapoints, dtype=np.float64)
@@ -6899,10 +6992,18 @@ ub : gui for UB matrix and angle calculations
                     hkl_del_gam[:, 3],
                     hkl_del_gam[:, 4],
                     use_lorentz=options["lorentz"],
-                    use_footprint=options["footprint"],
+                    use_footprint=(
+                        options["footprint"] and not frame_policy.new_contract
+                    ),
                     beam_profile=beam_profile,
                     sample_size=sample_size,
                     normalization=normalization,
+                    illumination_divisor=(
+                        frame_policy.illumination_divisor
+                        if frame_policy.new_contract
+                        and frame_policy.illumination_status == "applied"
+                        else None
+                    ),
                 )
             )
         factors1, factors2 = correction_factors
@@ -6960,12 +7061,37 @@ ub : gui for UB matrix and angle calculations
 
         F2_hkl1 = F2_hkl1_err = F2_hkl2 = F2_hkl2_err = None
         if options["lorentz"]:
-            F2_hkl1, F2_hkl1_err = integration_corrections.structure_factor(
-                ctr_croibg1_a, ctr_croibg1_err_a, factors1
-            )
-            F2_hkl2, F2_hkl2_err = integration_corrections.structure_factor(
-                ctr_croibg2_a, ctr_croibg2_err_a, factors2
-            )
+            try:
+                common_scale = {
+                    "wavelength": config_snapshot.ub_calculator.getLambda(),
+                    "unitcell_area": config_snapshot.unit_cell.uc_area,
+                }
+                F2_hkl1, F2_hkl1_err = (
+                    integration_corrections.structure_factor_from_policy(
+                        ctr_croibg1_a,
+                        ctr_croibg1_err_a,
+                        factors1,
+                        frame_policy,
+                        **common_scale,
+                    )
+                )
+                F2_hkl2, F2_hkl2_err = (
+                    integration_corrections.structure_factor_from_policy(
+                        ctr_croibg2_a,
+                        ctr_croibg2_err_a,
+                        factors2,
+                        frame_policy,
+                        **common_scale,
+                    )
+                )
+            except ValueError:
+                if not frame_policy.new_contract:
+                    raise
+                logger.warning(
+                    "The explicit CTR normalization is incomplete; saving "
+                    "diagnostic intensity without labeling it F2_hkl.",
+                    exc_info=True,
+                )
 
         rod_mask1 = np.isfinite(croibg1_a)
         rod_mask2 = np.isfinite(croibg2_a)
@@ -7110,6 +7236,7 @@ ub : gui for UB matrix and angle calculations
                 "C_Lorentz": factors1.get("C_Lorentz"),
                 "C_flux_on_sample": factors1.get("C_flux_on_sample"),
                 "C_illum_area": factors1.get("C_illum_area"),
+                "C_illumination": factors1.get("C_illumination"),
                 "C_norm": factors1.get("C_norm"),
             },
             "pixelcoord": {
@@ -7176,6 +7303,7 @@ ub : gui for UB matrix and angle calculations
                 "C_Lorentz": factors2.get("C_Lorentz"),
                 "C_flux_on_sample": factors2.get("C_flux_on_sample"),
                 "C_illum_area": factors2.get("C_illum_area"),
+                "C_illumination": factors2.get("C_illumination"),
                 "C_norm": factors2.get("C_norm"),
             },
             "pixelcoord": {
@@ -7196,18 +7324,16 @@ ub : gui for UB matrix and angle calculations
             "@orgui_meta": "roi",
         }
 
-        config_snapshot = ConfigData.from_gui(self)
-
-        normalization_status = "not_applied"
-        normalization_divisor = None
-        if options["normalization"]:
-            if normalization_applied:
-                normalization_status = "applied"
-                normalization_divisor = factors1.get("C_norm")
-            else:
-                normalization_status = "unavailable"
-        illumination_status = (
-            "applied" if options["footprint"] else "not_applied"
+        profile_provenance = _curve_profile_provenance(
+            config_snapshot.corrections
+        )
+        profile_provenance.update(
+            {
+                "wavelength_angstrom": config_snapshot.ub_calculator.getLambda(),
+                "unitcell_area_angstrom2": config_snapshot.unit_cell.uc_area,
+                "detector_efficiency_assumed": 1.0,
+                "external_transmission_assumed": 1.0,
+            }
         )
 
         def versioned_stationary_curve(
@@ -7231,28 +7357,40 @@ ub : gui for UB matrix and angle calculations
         ):
             """Build the non-legacy sibling branch for one trajectory."""
             record = CurveCorrectionRecord(
-                algorithm="legacy_stationary_roi_v2",
-                output_quantity="stationary_roi_intensity",
+                algorithm=(
+                    "framewise_ctr_total_flux_v1"
+                    if frame_policy.new_contract
+                    else "legacy_stationary_roi_v2"
+                ),
+                output_quantity=(
+                    "stationary_ctr_photon_curve"
+                    if frame_policy.new_contract
+                    else "stationary_roi_intensity"
+                ),
                 scale_convention=(
-                    "legacy_density_area"
-                    if options["footprint"]
-                    else "legacy_relative"
+                    frame_policy.scale_convention
+                    if frame_policy.new_contract
+                    else (
+                        "legacy_density_area"
+                        if options["footprint"]
+                        else "legacy_relative"
+                    )
                 ),
-                normalization_status=normalization_status,
-                illumination_status=illumination_status,
+                normalization_status=frame_policy.normalization_status,
+                illumination_status=frame_policy.illumination_status,
                 pixel_correction_status=("applied" if corr else "not_applied"),
-                normalization_divisor=normalization_divisor,
-                normalization_unit=(
-                    "legacy_counter_product"
-                    if normalization_divisor is not None
-                    else None
+                normalization_divisor=frame_policy.normalization_divisor,
+                normalization_unit=frame_policy.normalization_unit,
+                normalization_components=frame_policy.normalization_components,
+                illumination_divisor=frame_policy.illumination_divisor,
+                illumination_convention=frame_policy.illumination_convention,
+                vertical_intercepted_fraction=(
+                    frame_policy.vertical_intercepted_fraction
                 ),
-                normalization_components=tuple(normalization_applied),
-                illumination_divisor=factors.get("C_illum_area"),
-                illumination_convention=(
-                    "legacy_C_illum_area" if options["footprint"] else None
+                horizontal_intercepted_fraction=(
+                    frame_policy.horizontal_intercepted_fraction
                 ),
-                vertical_intercepted_fraction=factors.get("C_flux_on_sample"),
+                intercepted_fraction=frame_policy.intercepted_fraction,
                 alpha=alpha_all,
                 base_croi=croi,
                 base_croi_variance=croi,
@@ -7275,9 +7413,7 @@ ub : gui for UB matrix and angle calculations
                 roi_y_start=y_start,
                 roi_y_stop=y_stop,
                 lorentz_mode=("stationary" if options["lorentz"] else None),
-                profile_provenance=_curve_profile_provenance(
-                    config_snapshot.corrections
-                ),
+                profile_provenance=profile_provenance,
             )
             return curve_correction_record_to_nxdict(record)
 

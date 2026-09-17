@@ -15,8 +15,29 @@ Scientific and analysis additions:
   ``K = r_e^2 lambda^2 / A_u^2``. Built-in beam profiles retain the finite
   grazing-incidence limit, and horizontal interception must be stated
   separately because a vertical profile cannot infer it. This stage adds the
-  unit-audited numerical path only: current extraction/UI behavior and the
-  legacy flux-density APIs remain unchanged until the later wiring stage.
+  unit-audited numerical path; the extraction/reduction wiring described
+  below activates it only for explicit version-3 settings. The UI and legacy
+  flux-density APIs remain unchanged until the later UI stage.
+
+- **Stationary and rocking CTR integrations now share one framewise total-flux
+  policy.** An explicitly configured primary monitor is classified as a rate
+  or an integrated reading, so exposure enters its photon-fluence divisor
+  exactly once; an ``ic2``-style ion-chamber rate is therefore handled as
+  ``exposure * monitor_rate`` before applying its calibration factor. New
+  total-flux curves require both the stored incident-photon divisor ``Q`` and
+  the stated horizontal plus calculated vertical illumination divisor ``H``
+  before they can be labeled ``F2_hkl``. Stationary scans form that result
+  immediately. Rocking scans keep the existing later reduction step, but the
+  reducer now recognizes ``framewise_ctr_total_flux_v1``, reconstructs the
+  curve from its immutable polarization-only base values and exact stored Q/H
+  arrays, and does not call the live legacy normalization or footprint path a
+  second time. Calibrated curves additionally use the stored wavelength and
+  surface unit-cell area with ``r_e^2 lambda^2 / A_u^2``; detector efficiency
+  and external transmission remain explicit unity assumptions. Footprint
+  keep/remove/replace operations always restart from the saved base curve,
+  reject unknown provenance, and require explicit permission to cross between
+  the legacy active-area and new total-flux conventions. Legacy databases and
+  reconstruction defaults retain their existing numerical behavior.
 
 - **Saved CTR curves now carry a versioned correction record.** This is a
   persistence-only compatibility step: numerical defaults and the established
@@ -29,9 +50,10 @@ Scientific and analysis additions:
   flux separately from the legacy flux density, together with primary-monitor
   kind/reference and horizontal-interception fields; absent values remain
   unknown rather than physical zero or unity. The rocking reducer explicitly
-  accepts the unchanged legacy-algorithm record but refuses a future
-  frame-normalized record until its dedicated dispatch path is implemented,
-  preventing it from silently normalizing a new curve twice.
+  accepts unchanged legacy-algorithm records, dispatches the supported
+  total-flux algorithm through its stored divisors, and refuses any other
+  normalized contract, preventing it from silently normalizing a new curve
+  twice.
 
 - **The polarization correction now follows the detector arm.**
   *This changes saved numbers for scans that move the detector arm and for

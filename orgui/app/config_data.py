@@ -170,6 +170,19 @@ class CorrectionState:
         return cls(**values)
 
 
+_TOTAL_FLUX_STATE_FIELDS = (
+    "total_incident_flux",
+    "total_flux_calibrated",
+    "primary_monitor",
+    "primary_monitor_kind",
+    "primary_monitor_unit",
+    "monitor_reference_reading",
+    "monitor_reference_exposure_s",
+    "horizontal_interception",
+    "horizontal_intercepted_fraction",
+)
+
+
 @dataclass
 class CurveCorrectionRecord:
     """Applied correction provenance for one saved curve branch.
@@ -1193,6 +1206,14 @@ class ConfigData:
                 beam_profile_positions_m=beam_profile_positions_m,
                 beam_profile_density_per_m=beam_profile_density_per_m,
             )
+            # Stage 5 has a numerical total-flux path before Stage 6 adds its
+            # widgets. Preserve explicitly loaded/programmatic version-3
+            # settings on the GUI object instead of dropping them when a new
+            # extraction snapshot is captured.
+            total_flux_state = getattr(gui, "ctr_correction_state", None)
+            if total_flux_state is not None:
+                for name in _TOTAL_FLUX_STATE_FIELDS:
+                    setattr(corrections, name, getattr(total_flux_state, name))
             roi = ROIState(
                 region=dict(options.get("region", {})),
                 advanced=dict(options.get("advanced", {})),
@@ -1219,6 +1240,12 @@ class ConfigData:
         ub_widget = getattr(gui, "ubcalc", gui)
         ub_widget.detectorCal = detector_from_nxdict(detector_to_nxdict(self.detector))
         ub_widget.crystal = unit_cell_from_nxdict(unit_cell_to_nxdict(self.unit_cell))
+        # Keep the not-yet-widget-backed total-flux settings available to the
+        # extraction policy. Copy through the public JSON representation so a
+        # later GUI edit cannot mutate the loaded ConfigData instance.
+        gui.ctr_correction_state = CorrectionState.from_dict(
+            self.corrections.to_dict()
+        )
         ub_widget.ubCal = HKLVlieg.UBCalculator(
             ub_widget.crystal, self.ub_calculator.getEnergy()
         )

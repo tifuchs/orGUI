@@ -20,7 +20,13 @@ from types import SimpleNamespace
 import h5py
 import numpy as np
 import pytest
+from silx.io.dictdump import dicttonx
 
+from orgui.app.config_data import (
+    CURVE_CORRECTIONS_GROUP,
+    CurveCorrectionRecord,
+    curve_correction_record_to_nxdict,
+)
 from orgui.app.peak1Dintegr import (
     RockingPeakIntegrator,
     _compute_rocking_integration,
@@ -796,6 +802,60 @@ def test_versioned_normalized_curve_is_not_consumed_as_legacy(tmp_path):
 
         with pytest.raises(ValueError, match="must not reinterpret"):
             RockingPeakIntegrator._legacy_rocking_curve_group(scan)
+
+
+def test_versioned_total_flux_curve_uses_stored_divisors_once(tmp_path):
+    """The supported reducer dispatch ignores the legacy sibling values."""
+    base = np.array([[80.0, 96.0, 120.0], [40.0, 48.0, 60.0]])
+    variance = np.array([[16.0, 36.0, 64.0], [4.0, 9.0, 16.0]])
+    q = np.array([2.0, 4.0, 5.0])
+    h = np.array([0.5, 0.25, 1.0])
+    record = CurveCorrectionRecord(
+        algorithm="framewise_ctr_total_flux_v1",
+        output_quantity="rocking_ctr_photon_curve",
+        scale_convention="total_flux_calibrated",
+        normalization_status="applied",
+        normalization_divisor=q,
+        normalization_unit="photons",
+        illumination_status="applied",
+        illumination_divisor=h,
+        illumination_convention="total_flux_H",
+        base_croibg=base,
+        base_croibg_variance=variance,
+    )
+    path = tmp_path / "total_flux_curve.h5"
+    dicttonx(
+        {
+            "scan": {
+                "@NX_class": "NXcollection",
+                "rois": {
+                    "@NX_class": "NXcollection",
+                    "croibg": np.full_like(base, -999.0),
+                    "croibg_errors": np.ones_like(base),
+                },
+                CURVE_CORRECTIONS_GROUP: curve_correction_record_to_nxdict(
+                    record
+                ),
+            }
+        },
+        path,
+    )
+
+    with h5py.File(path, "r") as handle:
+        integrator = SimpleNamespace(
+            _currentRoInfo={
+                "name": "/scan",
+                "axisname": "mu",
+                "axis": np.arange(3.0),
+            },
+            database=SimpleNamespace(nxfile=handle),
+        )
+        curves = RockingPeakIntegrator.get_all_ro_curves(integrator)
+
+    np.testing.assert_allclose(curves["croibg"], base / q / h)
+    np.testing.assert_allclose(curves["croibg_errors"], np.sqrt(variance) / q / h)
+    assert curves["correction_record"].algorithm == record.algorithm
+    assert curves["illumination_action"] == "applied"
 
 
 @pytest.mark.parametrize("applied_at_extraction", [True, False])

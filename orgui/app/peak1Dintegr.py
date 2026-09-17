@@ -61,7 +61,12 @@ from .config_data import (
     ConfigData,
     CorrectionState,
     corrections_from_nxdict,
+    curve_correction_record_from_nxdict,
     detector_from_nxdict,
+)
+from .integration_corrections import (
+    FOOTPRINT_KEEP,
+    corrected_curve_from_record,
 )
 from .. import resources
 from .. import logger_utils
@@ -1750,6 +1755,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
         if not self._currentRoInfo:
             raise ValueError("No rocking scan selected.")
         curves = self.get_all_ro_curves()
+        correction_record = curves.get("correction_record")
+        versioned_total_flux = correction_record is not None
         name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
         cnters = h5_obj["rois"]
@@ -1791,7 +1798,13 @@ class RockingPeakIntegrator(qt.QMainWindow):
             C_Lor = 1.0
             C_rod = 1.0
 
-        if self.footprintButton.isChecked():
+        if versioned_total_flux:
+            # Q and H were resolved framewise at extraction and reconstructed
+            # from their stored divisors by get_all_ro_curves. Applying the
+            # live dialog here would scale the same photons a second time.
+            C_flux_on_sample = 1.0
+            C_illum_area = 1.0
+        elif self.footprintButton.isChecked():
             L = self.integrationCorrection.sampleLength()  # sample size, m
             # Gaussian or measured beam profile, depending on the dialog.
             # C_flux_on_sample is saved as the diagnostic numerator of the
@@ -1818,8 +1831,26 @@ class RockingPeakIntegrator(qt.QMainWindow):
             x = cnters["x"][()]
             y = cnters["y"][()]
 
-        C_norm, normalization_applied = self._rocking_normalization(aux, axis.size)
-        C_norm = np.broadcast_to(C_norm, np.shape(curves["croibg"])).copy()
+        if versioned_total_flux:
+            if (
+                correction_record.normalization_status != "applied"
+                or curves["illumination_action"]
+                not in ("applied", "replaced", "applied_here")
+                or curves["illumination_convention"] != "total_flux_H"
+            ):
+                raise ValueError(
+                    "This versioned total-flux curve lacks an applied Q or H "
+                    "divisor and cannot be reduced to a CTR structure factor."
+                )
+            C_norm = np.ones_like(curves["croibg"], dtype=np.float64)
+            normalization_applied = tuple(
+                correction_record.normalization_components
+            )
+        else:
+            C_norm, normalization_applied = self._rocking_normalization(
+                aux, axis.size
+            )
+            C_norm = np.broadcast_to(C_norm, np.shape(curves["croibg"])).copy()
 
         # Only F2_hkl is divided by these, so asking for them with the
         # Lorentz switch off would warn about a detector nothing needs.
@@ -1833,7 +1864,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             # New extractions carry their polarization-only CTR branch
             # directly. The separately estimated solid-angle compensation is
             # retained only for legacy database files that lack that branch.
-            if "ctr_croibg" not in curves:
+            if "ctr_croibg" not in curves and not versioned_total_flux:
                 solid_angle_mean, solid_angle_compensated = (
                     self._rocking_solid_angle_mean(
                         detector, scangroup, cnters, x, y
@@ -1857,7 +1888,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             roi_info,
             aux,
             self.lorentzButton.isChecked(),
-            self.footprintButton.isChecked(),
+            self.footprintButton.isChecked() and not versioned_total_flux,
             C_Lor=C_Lor,
             C_rod=C_rod,
             C_flux_on_sample=C_flux_on_sample,
@@ -1890,6 +1921,31 @@ class RockingPeakIntegrator(qt.QMainWindow):
         if self.lorentzButton.isChecked():
             F2_hkl = result["F2_hkl"]
             F2_hkl_errors = result["F2_hkl_errors"]
+            if versioned_total_flux and correction_record.scale_convention.startswith(
+                "total_flux_calibrated"
+            ):
+                provenance = correction_record.profile_provenance
+                try:
+                    prefactor = measurement_corrections.total_flux_prefactor(
+                        float(provenance["wavelength_angstrom"]),
+                        float(provenance["unitcell_area_angstrom2"]),
+                    )
+                    efficiency = float(
+                        provenance.get("detector_efficiency_assumed", 1.0)
+                    )
+                    transmission = float(
+                        provenance.get("external_transmission_assumed", 1.0)
+                    )
+                    absolute_divisor = prefactor * efficiency * transmission
+                    if not np.isfinite(absolute_divisor) or absolute_divisor <= 0:
+                        raise ValueError("absolute divisor is not positive")
+                except (KeyError, TypeError, ValueError) as error:
+                    raise ValueError(
+                        "The calibrated total-flux curve lacks valid wavelength, "
+                        "surface unit-cell area, or detector-response provenance."
+                    ) from error
+                F2_hkl = F2_hkl / absolute_divisor
+                F2_hkl_errors = F2_hkl_errors / absolute_divisor
 
         int_data["@NX_class"] = "NXdetector"
 
@@ -1997,12 +2053,28 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 "@acceptance_applied": bool(acceptance_applied),
                 "@solid_angle_compensated": bool(solid_angle_compensated),
                 "@photon_curve_used": "ctr_croibg" in curves,
-                "@active_area_applied": bool(self.footprintButton.isChecked()),
+                "@active_area_applied": bool(
+                    curves["illumination_action"]
+                    in ("applied", "replaced", "applied_here")
+                    if versioned_total_flux
+                    else self.footprintButton.isChecked()
+                ),
             }
+            if versioned_total_flux:
+                reduction.update({
+                    "@curve_algorithm": correction_record.algorithm,
+                    "@scale_convention": correction_record.scale_convention,
+                    "@illumination_action": curves["illumination_action"],
+                    "@illumination_convention": (
+                        curves["illumination_convention"] or "none"
+                    ),
+                    "@normalization_source": "stored_frame_divisor",
+                    "@illumination_source": "stored_frame_divisor",
+                })
             if detector_acceptance is not None:
                 reduction["detector_acceptance"] = detector_acceptance
                 reduction["@detector_acceptance_unit"] = "rad"
-            if self.footprintButton.isChecked():
+            if self.footprintButton.isChecked() and not versioned_total_flux:
                 reduction["sample_size"] = L
                 reduction["@sample_size_unit"] = "m"
             measurement[availname1]["reduction"] = reduction
@@ -2119,20 +2191,75 @@ class RockingPeakIntegrator(qt.QMainWindow):
         return h5_obj["rois"]
 
     def get_ro_curve(self, idx):
-        name = self._currentRoInfo["name"]
-        h5_obj = self.database.nxfile[name]
-        cnters = self._legacy_rocking_curve_group(h5_obj)
+        """Return one rocking curve under its stored correction contract."""
+        curves = self.get_all_ro_curves()
         curve = {
-            "axisname": self._currentRoInfo["axisname"],
-            "axis": self._currentRoInfo["axis"],
-            "croibg": cnters["croibg"][idx][()],
-            "croibg_errors": cnters["croibg_errors"][idx][()],
+            "axisname": curves["axisname"],
+            "axis": curves["axis"],
+            "croibg": curves["croibg"][idx],
+            "croibg_errors": curves["croibg_errors"][idx],
         }
         return curve
 
     def get_all_ro_curves(self):
+        """Return rocking curves without silently changing their scale.
+
+        New total-flux records are reconstructed from the immutable base
+        curve and the exact stored Q/H divisors. Legacy records retain the
+        historical ``rois`` path and are normalized later by
+        :meth:`_rocking_normalization`.
+        """
         name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
+        if CURVE_CORRECTIONS_GROUP in h5_obj:
+            record_group = h5_obj[CURVE_CORRECTIONS_GROUP]
+            try:
+                record_dict = h5todict(
+                    self.database.nxfile,
+                    record_group.name,
+                )
+                record_dict["@orgui_schema_version"] = record_group.attrs.get(
+                    "orgui_schema_version", 0
+                )
+                record_dict["@orgui_curve_contract"] = record_group.attrs.get(
+                    "orgui_curve_contract", ""
+                )
+                record = curve_correction_record_from_nxdict(
+                    record_dict
+                )
+            except ValueError:
+                # Let the legacy gate distinguish supported legacy records
+                # from unknown normalized contracts and produce its targeted
+                # error instead of guessing which numbers the curve contains.
+                record = None
+            if record is not None and record.algorithm.startswith(
+                "framewise_ctr_total_flux_"
+            ):
+                curve, errors, action, convention = corrected_curve_from_record(
+                    record,
+                    footprint_action=getattr(
+                        self, "footprint_action", FOOTPRINT_KEEP
+                    ),
+                    replacement_illumination=getattr(
+                        self, "replacement_illumination", None
+                    ),
+                    replacement_convention=getattr(
+                        self, "replacement_illumination_convention", None
+                    ),
+                    allow_convention_change=bool(
+                        getattr(self, "allow_illumination_convention_change", False)
+                    ),
+                )
+                return {
+                    "axisname": self._currentRoInfo["axisname"],
+                    "axis": self._currentRoInfo["axis"],
+                    "croibg": curve,
+                    "croibg_errors": errors,
+                    "correction_record": record,
+                    "illumination_action": action,
+                    "illumination_convention": convention,
+                }
+
         cnters = self._legacy_rocking_curve_group(h5_obj)
         curve = {
             "axisname": self._currentRoInfo["axisname"],

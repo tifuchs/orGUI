@@ -425,6 +425,47 @@ def test_apply_to_gui_sets_reconstruction_normalization_attributes():
     assert gui.reconstruction_monitor_corrections == ("mondio",)
 
 
+def test_total_flux_state_survives_before_its_widgets_exist():
+    """Stage-5 programmatic settings round-trip through the GUI snapshot."""
+    config = _make_config()
+    config.corrections = CorrectionState(
+        total_incident_flux=2.5e10,
+        total_flux_calibrated=True,
+        primary_monitor="ic2",
+        primary_monitor_kind="rate",
+        primary_monitor_unit="count/s",
+        monitor_reference_reading=4200.0,
+        horizontal_interception="fraction",
+        horizontal_intercepted_fraction=0.85,
+    )
+    gui = SimpleNamespace(
+        ubcalc=SimpleNamespace(
+            detectorCal=config.detector,
+            crystal=config.unit_cell,
+            ubCal=config.ub_calculator,
+            mu=config.mu,
+            chi=config.chi,
+            phi=config.phi,
+            n=config.refraction_index,
+        ),
+        scanSelector=SimpleNamespace(
+            get_integration_options=lambda: {},
+            set_integration_options=lambda options: None,
+        ),
+    )
+
+    config.apply_to_gui(gui)
+    captured = ConfigData.from_gui(gui).corrections
+
+    assert captured.total_incident_flux == pytest.approx(2.5e10)
+    assert captured.total_flux_calibrated is True
+    assert captured.primary_monitor == "ic2"
+    assert captured.primary_monitor_kind == "rate"
+    assert captured.monitor_reference_reading == pytest.approx(4200.0)
+    assert captured.horizontal_interception == "fraction"
+    assert captured.horizontal_intercepted_fraction == pytest.approx(0.85)
+
+
 def test_apply_to_gui_requests_a_replot(qapp):
     """Loading a config must refresh HKL-dependent plot elements too.
 
