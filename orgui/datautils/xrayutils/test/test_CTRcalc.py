@@ -1585,19 +1585,54 @@ class TestKinematicDecomposition(unittest.TestCase):
         self.assertTrue(np.all(np.isreal(squared)))
         self.assertTrue(np.all(squared >= 0.0))
 
-        # Scalar coordinates are rejected inside `F_bulk`, which predates this
-        # boundary; `F2` must inherit that rather than diverge from `F`.
-        with self.assertRaises(AttributeError):
-            crystal.F(0.0, 0.0, 1.3)
-        with self.assertRaises(AttributeError):
-            crystal.F2(0.0, 0.0, 1.3)
-
         one_point = np.array([1.3])
+        scalar = crystal.evaluate_kinematic(0.0, 0.0, 1.3)
+        self.assertEqual(scalar.bulk.shape, (1,))
+        self.assertEqual(scalar.total.shape, (1,))
+        self.assertTrue(
+            all(part.amplitude.shape == (1,) for part in scalar.components)
+        )
+        np.testing.assert_allclose(
+            scalar.total,
+            crystal.F(one_point * 0.0, one_point * 0.0, one_point),
+            rtol=1e-14,
+        )
+        np.testing.assert_allclose(
+            crystal.F2(0.0, 0.0, 1.3),
+            np.abs(scalar.total) ** 2,
+            rtol=1e-14,
+        )
         np.testing.assert_allclose(
             crystal.F2(one_point * 0.0, one_point * 0.0, one_point),
             np.abs(crystal.F(one_point * 0.0, one_point * 0.0, one_point))
             ** 2,
             rtol=1e-14,
+        )
+
+    def test_kinematic_coordinates_broadcast_and_preserve_shape(self):
+        """Scalar and array coordinates share one backend-independent boundary."""
+        crystal = self.crystal()
+        h = np.array([[0.0], [1.0]])
+        k = np.array([[0.0, 0.25, 0.5]])
+        l_value = 1.3
+
+        result = crystal.evaluate_kinematic(h, k, l_value)
+        self.assertEqual(result.bulk.shape, (2, 3))
+        self.assertEqual(result.total.shape, (2, 3))
+        self.assertTrue(
+            all(part.amplitude.shape == (2, 3) for part in result.components)
+        )
+        np.testing.assert_allclose(
+            result.total,
+            crystal.F(
+                np.broadcast_to(h, (2, 3)),
+                np.broadcast_to(k, (2, 3)),
+                l_value,
+            ),
+            rtol=1e-14,
+        )
+        np.testing.assert_allclose(
+            crystal.F2(h, k, l_value), np.abs(result.total) ** 2, rtol=1e-14
         )
 
 

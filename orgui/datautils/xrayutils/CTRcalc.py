@@ -59,6 +59,20 @@ from .CTRstacking import (  # noqa: F401
 )
 
 
+def _broadcast_kinematic_hkl(h, k, l):  # noqa: E741
+    """Return contiguous, flattened hkl arrays and their broadcast shape."""
+    arrays = np.broadcast_arrays(
+        np.asarray(h, dtype=np.float64),
+        np.asarray(k, dtype=np.float64),
+        np.asarray(l, dtype=np.float64),
+    )
+    shape = arrays[0].shape or (1,)
+    return (
+        tuple(np.ascontiguousarray(array).reshape(-1) for array in arrays),
+        shape,
+    )
+
+
 @dataclass(frozen=True)
 class KinematicComponentAmplitude:
     """One top-level component's scaled contribution to ``SXRDCrystal.F``.
@@ -391,12 +405,13 @@ class SXRDCrystal:
         scale is included; calculated intensity is proportional to
         ``abs(F)**2``.
 
-        :param numpy.ndarray harray:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param numpy.ndarray karray:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param numpy.ndarray Larray:
-            Reference-frame reciprocal coordinate in r.l.u.
+        ``harray``, ``karray``, and ``Larray`` are broadcast together. Scalar
+        coordinates produce a one-point array, preserving the array-valued
+        structure-factor boundary.
+
+        :param harray: Reference-frame reciprocal coordinate in r.l.u.
+        :param karray: Reference-frame reciprocal coordinate in r.l.u.
+        :param Larray: Reference-frame reciprocal coordinate in r.l.u.
         :returns:
             Complex crystal amplitude in electrons per reference lateral cell.
         :rtype: numpy.ndarray
@@ -414,12 +429,12 @@ class SXRDCrystal:
         which is a dimensionless intensity ratio formed from an optical
         reflection amplitude.
 
-        :param numpy.ndarray harray:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param numpy.ndarray karray:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param numpy.ndarray Larray:
-            Reference-frame reciprocal coordinate in r.l.u.
+        ``harray``, ``karray``, and ``Larray`` are broadcast together. Scalar
+        coordinates produce one-point arrays in every returned amplitude.
+
+        :param harray: Reference-frame reciprocal coordinate in r.l.u.
+        :param karray: Reference-frame reciprocal coordinate in r.l.u.
+        :param Larray: Reference-frame reciprocal coordinate in r.l.u.
         :returns:
             Real, nonnegative squared structure factor.
         :rtype: numpy.ndarray
@@ -481,17 +496,20 @@ class SXRDCrystal:
         amplitude carries its own area scaling, weight, and outer
         coherent-domain transforms and occupancies.
 
-        :param numpy.ndarray harray:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param numpy.ndarray karray:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param numpy.ndarray Larray:
-            Reference-frame reciprocal coordinate in r.l.u.
+        ``harray``, ``karray``, and ``Larray`` are broadcast together. Scalar
+        coordinates produce one-point arrays in every returned amplitude.
+
+        :param harray: Reference-frame reciprocal coordinate in r.l.u.
+        :param karray: Reference-frame reciprocal coordinate in r.l.u.
+        :param Larray: Reference-frame reciprocal coordinate in r.l.u.
         :returns:
             Bulk amplitude, per-component amplitudes in crystal order, and
             their total.
         :rtype: KinematicAmplitudeResult
         """
+        (harray, karray, Larray), output_shape = _broadcast_kinematic_hkl(
+            harray, karray, Larray
+        )
         bulk_scale = self.reference_area / self.uc_bulk.uc_area
         bulk = bulk_scale * self.uc_bulk.F_bulk(
             harray, karray, Larray, self.atten
@@ -524,9 +542,15 @@ class SXRDCrystal:
                 KinematicComponentAmplitude(
                     index,
                     getattr(uc, "name", f"component_{index}"),
-                    amplitude,
+                    np.asarray(amplitude).reshape(output_shape),
                 )
             )
+        total_is_bulk = total is bulk
+        bulk = np.asarray(bulk).reshape(output_shape)
+        if total_is_bulk:
+            total = bulk
+        else:
+            total = np.asarray(total).reshape(output_shape)
         return KinematicAmplitudeResult(bulk, tuple(components), total)
 
     def setDomain(self, uc_no, domains):
