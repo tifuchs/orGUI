@@ -242,11 +242,28 @@ acceptance that was divided out, whether the direct photon curve or legacy
 solid-angle compensation was used, and the active-area assumption, so that a
 saved rod can be placed on a common scale after the fact.
 
-What is still **not** on this scale is the absolute one: ``F2_hkl`` is
-proportional to :math:`|F_{hkl}|^2` with one common, arbitrary constant.
-:mod:`orgui.datautils.xrayutils.corrections.measurement` supplies the absolute
-prefactor given the incident flux density and the illuminated area, and
-converts between :math:`|F_{hkl}|^2` and absolute reflectivity.
+The scale is selected explicitly in the correction dialog. ``Relative
+total-flux`` produces a common relative ``F2_hkl`` scale. ``Calibrated
+total-flux`` additionally requires the incident photon flux, monitor
+calibration, wavelength and surface unit-cell area, and applies
+:math:`K=r_e^2\lambda^2/A_u^2`; its output is :math:`|F_{hkl}|^2` in electron
+units squared. Detector efficiency and external transmission are currently
+recorded unity assumptions, not inferred corrections. The older flux-density
+and numerical-active-area path remains available as ``Legacy`` and is not
+reinterpreted as total flux.
+
+This contract has independent simulated forward validation on calibrated
+pixel rays, including rate-like and integrated monitors, changing exposure,
+moving detector arms, full and clipped regions, measured beam profiles and
+rocking-grid convergence. The repository does not contain a distributable raw
+CTR scan with independently calibrated flux, so no real-data absolute-accuracy
+claim is made. In-plane detector acceptance :math:`C_\mathrm{det}` also remains
+an experimental responsibility: the reduction assumes a region wide enough
+to contain the complete in-plane peak unless clipping is deliberately retained
+as part of the measured resolution integral.
+
+:mod:`orgui.datautils.xrayutils.corrections.measurement` contains the pure
+forward/inverse functions and the absolute-reflectivity conversion.
 ``doc/physics/ctr_structure_factor_physics.tex`` is a typeset reference for
 every normalization and integration interval described here.
 
@@ -254,23 +271,47 @@ every normalization and integration interval described here.
 Exposure and Monitor Normalization
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``Normalize integrated intensities`` divides every image by its exposure time
-and by each configured monitor counter, the same normalization the
-reciprocal-space reconstruction applies, so an integration and a
-reconstruction of one scan are normalized identically. The settings are
-shared: changing them here changes them for the reconstruction and the other
-way round.
+For the total-flux convention, ``Normalize integrated intensities`` stores one
+fluence divisor :math:`Q_f` per frame. The selected primary monitor must be
+declared ``rate-like`` or ``integrated``. A rate-like ion chamber such as an
+``ic2`` counts-per-second channel uses
+``flux * exposure * monitor / reference``. An integrated monitor already
+contains the frame exposure and uses
+``flux * reference_exposure * monitor / reference``. Exposure therefore
+enters exactly once. The dialog shows the effective formula and units; it does
+not infer monitor kind from a counter name.
 
-A scan backend that provides no exposure time is not an error; the exposure
-part of the normalization is then skipped. A monitor counter that is missing,
-zero or non-finite does stop the integration, since it would otherwise scale
-intensities by infinity. The dialog lists the counters of the loaded scan that
-can be used.
+Without a flux calibration, the same exposure rule produces a relative
+fluence and the saved scale remains explicitly relative. The legacy
+normalization continues to divide by exposure and by every selected monitor
+counter, matching reciprocal-space reconstruction, but it is labeled as a
+counter product rather than photons.
+
+In the legacy path, a scan backend that provides no exposure time skips that
+part of the normalization. In the total-flux path, missing inputs required by
+the selected monitor convention stop extraction. A monitor counter that is
+missing, zero or non-finite always stops the integration, since it would
+otherwise produce an undefined scale. The dialog lists compatible one-value-
+per-frame counters from the loaded scan.
 
 Footprint Corrections
 ~~~~~~~~~~~~~~~~~~~~~
 
-``Beam footprint`` applies one numerical active-area correction that depends
+In the total-flux convention, ``Beam footprint`` uses the vertical beam
+profile and an explicit horizontal interception choice, and applies the
+dimensionless divisor
+
+.. math::
+
+   H = \frac{f_z f_x}{\sin\alpha},
+
+where :math:`f_z` is the vertical intercepted fraction and :math:`f_x` is the
+stated full or fractional horizontal interception. Both :math:`Q_f` and
+:math:`H` must be applied before the result may be labeled ``F2_hkl``. The
+intercepted photon fraction itself is :math:`f_zf_x`, not :math:`H`.
+
+The legacy ``Beam footprint`` convention applies one numerical active-area
+correction that depends
 on the incidence angle :math:`\alpha` and on the
 vertical profile :math:`p(z)` of the incident beam, normalized to
 :math:`\int p(z)\,\mathrm{d}z = 1`. With a sample of length :math:`L` along the

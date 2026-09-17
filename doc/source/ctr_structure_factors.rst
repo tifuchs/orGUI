@@ -138,13 +138,14 @@ set of truncation rods can be brought onto one scale before they are combined.
 The relation is kinematical: it does not hold near a bulk Bragg peak, nor below
 the critical angle, where the distorted-wave treatment of :doc:`dwba` applies.
 
-Total-incident-flux numerical API
----------------------------------
+Total-incident-flux measurement contract
+----------------------------------------
 
-The correction core provides an explicit alternative to the legacy peak-flux-
-density times effective-area convention. This API is available for scripted
-reductions, but is not yet selected by the integration dialogs or extraction
-paths.
+The correction core and both integration paths provide an explicit alternative
+to the legacy peak-flux-density times effective-area convention. New sessions
+default to a relative total-flux contract; calibrated output is opt-in and is
+labeled separately. Legacy saved configurations retain their old numerical
+meaning.
 
 ``corrections.normalization.frame_fluence`` calculates incident photons
 :math:`Q_f` in a frame. A rate-like monitor is multiplied by that frame's
@@ -176,6 +177,30 @@ mode angular factor and the total-flux prefactor
 :math:`K=r_e^2\lambda^2/A_u^2`. Wavelength is in Angstrom and surface
 unit-cell area in square Angstrom. Existing ``scale_factor`` and
 ``structure_factor_squared`` calls keep their flux-density semantics.
+
+The integration dialog stores the exact :math:`Q_f` and :math:`H` arrays used
+for every extracted curve, together with applied/not-applied status, monitor
+kind and units, beam-profile provenance, detector-arm/ROI geometry and the
+scale convention. A rocking reduction always reconstructs from the immutable
+polarization-only base curve before applying these divisors; keep, remove and
+replace actions therefore cannot compound a correction. Unknown legacy
+provenance is rejected rather than guessed.
+
+For calibrated total flux, stationary and rocking results additionally divide
+by :math:`K`. Detector efficiency and external transmission are currently
+explicit unity assumptions. The numerical contract has an independent
+finite-width Gaussian-rod forward test evaluated on calibrated detector rays.
+It varies flux, exposure, rate-like/integrated monitors, beam width/offset,
+detector arms and ROI clipping, and establishes rocking-grid convergence
+before setting tolerances. A finite or clipped ROI is compared with its
+resolution-weighted :math:`|F|^2` integral, not with an unrelated point value.
+
+No distributable raw CTR scan with independently calibrated incident flux is
+present in the repository. Consequently this validation establishes the
+implemented numerical contract but not beamline-specific absolute accuracy.
+That still requires a real standard measurement, detector efficiency and
+external transmission, and characterization of the in-plane acceptance
+:math:`C_\mathrm{det}` when the ROI does not contain the complete peak.
 
 CTR fit predictions and statistics
 ----------------------------------

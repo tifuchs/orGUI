@@ -7,6 +7,21 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **The end-to-end CTR correction contract now has an independent
+  calibrated-pixel forward validation and published limits.** A finite-width
+  Gaussian rod is simulated directly on calibrated detector rays without using the
+  production normalization, illumination, angular-factor or structure-factor
+  helpers, then reduced through the stationary and rocking workflows. The
+  matrix covers changing flux/exposure, rate-like and integrated monitors,
+  measured-profile width and offset, moving detector arms, complete and
+  clipped ROIs, and convergence of the rocking quadrature before its tolerance
+  is chosen. Finite apertures are compared with their resolution-weighted
+  structure-factor integral rather than a point value. No distributable raw
+  CTR scan with independent absolute-flux calibration is present, so the docs
+  deliberately stop short of a real-data absolute-accuracy claim and identify
+  detector efficiency, external transmission and in-plane acceptance as the
+  remaining experimental inputs.
+
 - **CTR correction controls now state what is saved and what the next
   operation will do.** The integration dialog separates detector signal,
   incident beam and CTR result settings; new sessions use an explicitly

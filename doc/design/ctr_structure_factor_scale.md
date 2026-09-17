@@ -1,7 +1,11 @@
 # One structure-factor scale for rocking scans, stationary scans and reflectivity
 
-> **Status: analysis complete, reduction landed and wired into both
-> integration paths.** This is the review document for
+> **Status: superseded as an implementation status document.** The reduction
+> described here is now wired into both integration paths, and the final
+> user-facing total-flux contract, assumptions and validation limits are in
+> [`image_integration.rst`](../source/image_integration.rst) and
+> [`ctr_structure_factors.rst`](../source/ctr_structure_factors.rst). This is
+> retained as the review document for
 > [issue #82](https://github.com/tifuchs/orGUI/issues/82) ("Regression tests
 > and validation of equivalence of rocking and stationary scan integration")
 > and for the physics half of
@@ -21,7 +25,10 @@
 > below as they stand. Findings are written in the present tense
 > of the analysis; section 5 says what each one's status is now, and
 > [`ctr_structure_factor_handover.md`](ctr_structure_factor_handover.md)
-> section 5 says how each was wired.
+> section 5 says how each was wired. Later total-flux work replaces the
+> document's remaining-absolute-scale status: calibrated `|F|^2` is now
+> available, with detector efficiency, external transmission and in-plane
+> acceptance retained as explicit experimental limitations.
 
 ## 1. What the two papers require
 
