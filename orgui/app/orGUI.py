@@ -157,6 +157,49 @@ def _rocking_arm_snapshot(gamma_arm, delta_arm, curve_shape):
     }
 
 
+def _correction_region_counters(correction, mask, center, backgrounds):
+    """Sum one correction array over the exact valid ROI pixels.
+
+    ``center`` and every entry of ``backgrounds`` use orGUI's ``(x, y)``
+    slice order. The returned four counters match the accelerated ROI-sum
+    contract: center sum/count and combined-background sum/count.
+    """
+    correction = np.asarray(correction, dtype=np.float64)
+    valid = ~np.asarray(mask, dtype=bool)
+
+    def region_values(region):
+        values = correction[region[::-1]]
+        region_valid = valid[region[::-1]] & np.isfinite(values)
+        return float(np.sum(values[region_valid])), float(np.sum(region_valid))
+
+    center_sum, center_pixels = region_values(center)
+    background_sum = 0.0
+    background_pixels = 0.0
+    for region in backgrounds:
+        summed, pixels = region_values(region)
+        background_sum += summed
+        background_pixels += pixels
+    return np.array(
+        [center_sum, center_pixels, background_sum, background_pixels],
+        dtype=np.float64,
+    )
+
+
+def _warn_masked_peak_scaling(valid_pixels, nominal_pixels, context):
+    """Warn once that nominal-area scaling cannot reconstruct masked peaks."""
+    valid_pixels = np.asarray(valid_pixels, dtype=np.float64)
+    nominal_pixels = np.asarray(nominal_pixels, dtype=np.float64)
+    incomplete = (nominal_pixels > 0) & (valid_pixels < nominal_pixels)
+    if np.any(incomplete):
+        logger.warning(
+            "%s contains masked or missing center-ROI pixels. Scaling by "
+            "nominal ROI area divided by valid-pixel count preserves a flat "
+            "density, but it is not a physical recovery of peak intensity "
+            "hidden by detector gaps or masks.",
+            context,
+        )
+
+
 def _curve_profile_provenance(state):
     """Flat, self-contained beam-profile provenance for a curve record."""
     result = {
@@ -1647,9 +1690,13 @@ ub : gui for UB matrix and angle calculations
                         }
                 logger.warn("No mask was selected with the masking tool.")
 
-        corr = (
-            self.scanSelector.useSolidAngleBox.isChecked()
-            or self.scanSelector.usePolarizationBox.isChecked()
+        use_solid_angle = self.scanSelector.useSolidAngleBox.isChecked()
+        use_polarization = self.scanSelector.usePolarizationBox.isChecked()
+        corr = use_solid_angle or use_polarization
+        mask = (
+            np.ascontiguousarray(imgmask, dtype=bool)
+            if imgmask is not None
+            else np.zeros(image.img.shape, dtype=bool)
         )
 
         # One definition of the per-pixel factors, shared with the rocking
@@ -1660,11 +1707,16 @@ ub : gui for UB matrix and angle calculations
         # NumPy-only path would otherwise be handed None.
         C_arr = detector_corrections.pixel_factors(
             dc,
-            solid_angle=self.scanSelector.useSolidAngleBox.isChecked(),
-            polarization=self.scanSelector.usePolarizationBox.isChecked(),
+            solid_angle=use_solid_angle,
+            polarization=use_polarization,
         )
         if C_arr is None:
             C_arr = np.ones(dc.detector.shape, dtype=np.float64)
+        P_arr = detector_corrections.pixel_factors(
+            dc, polarization=use_polarization
+        )
+        if P_arr is None:
+            P_arr = np.ones(dc.detector.shape, dtype=np.float64)
 
         def fill_counters(image, pixelavail, key, bkgkey):
             """CLI-safe: sum one center ROI and its background ROIs."""
@@ -1752,6 +1804,8 @@ ub : gui for UB matrix and angle calculations
                 "the polynomial fit's covariance.",
                 fitted_background_order,
             )
+        repair_enabled = False
+        roi_lists_accel = None
         if HAS_ACCEL:
             repair_enabled, repair, row_gaps, col_gaps = self._repair_config_for_image(
                 image.img.shape
@@ -1762,10 +1816,6 @@ ub : gui for UB matrix and angle calculations
                     "using the original mask for this integration."
                 )
                 repair_enabled = False
-            if imgmask is not None:
-                mask = np.ascontiguousarray(imgmask, dtype=bool)
-            else:
-                mask = np.zeros(image.img.shape, dtype=bool)
             if corr:
                 C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
             else:
@@ -2030,6 +2080,61 @@ ub : gui for UB matrix and angle calculations
                     "message": "Reason: Cancelled during integration",
                 }
 
+        # Accumulate polarization independently of the combined pixel factor.
+        # This uses the same center/background regions and valid-pixel policy
+        # as the raw ROI counters, including repaired center pixels when that
+        # path is active. The result is geometry-only and therefore needs to
+        # be calculated once for all frames of a rocking extraction.
+        polarization_counters = np.zeros((xylist.shape[0], 4), dtype=np.float64)
+        if use_polarization and HAS_ACCEL and repair_enabled:
+            dummy_counters = np.zeros_like(polarization_counters)
+            _roi_sum_accel.processImage_repair_Carr(
+                np.ones(image.img.shape, dtype=np.float64),
+                mask,
+                np.ascontiguousarray(P_arr, dtype=np.float64),
+                *roi_lists_accel,
+                row_gaps,
+                col_gaps,
+                dummy_counters,
+                polarization_counters,
+                repair.max_component_pixels,
+                repair.max_span,
+                repair.radius,
+                repair.min_valid_neighbors,
+            )
+        else:
+            for crnr in range(xylist.shape[0]):
+                polarization_counters[crnr] = _correction_region_counters(
+                    P_arr,
+                    mask,
+                    rois["center"][crnr],
+                    [
+                        rois["left"][crnr],
+                        rois["right"][crnr],
+                        rois["top"][crnr],
+                        rois["bottom"][crnr],
+                    ],
+                )
+        P_croi = integration_corrections.roi_mean_correction(
+            polarization_counters[:, 0], polarization_counters[:, 1]
+        )
+        P_bgroi = integration_corrections.roi_mean_correction(
+            polarization_counters[:, 2], polarization_counters[:, 3]
+        )
+        nominal_rocking_pixels = np.asarray(
+            [
+                (region[0].stop - region[0].start)
+                * (region[1].stop - region[1].start)
+                for region in rois["center"]
+            ],
+            dtype=np.float64,
+        )
+        _warn_masked_peak_scaling(
+            cpixel1_all,
+            np.broadcast_to(nominal_rocking_pixels, cpixel1_all.shape),
+            "Rocking extraction",
+        )
+
         currentPlotCount = len(self.integrdataPlot.getAllCurves())
         numberOfNewPlots = xylist.shape[0]
         maxAmountOfPlots = 30
@@ -2191,14 +2296,10 @@ ub : gui for UB matrix and angle calculations
                     croibg1_a = croi1_a * (roi_size / cpixel1_a)
                     croibg1_err_a = np.sqrt(croi1_a) * (roi_size / cpixel1_a)
 
-            if corr:
-                croibg1_a *= Corr1
-                croibg1_err_a *= Corr1
-                if croibg1_bgimg_a is not None:
-                    croibg1_bgimg_a *= Corr1
-                    croibg1_bgimg_err_a *= Corr1
-
-            if self.scanSelector.usePolarizationBox.isChecked():
+            base_croibg1 = np.asarray(croibg1_a, dtype=np.float64).copy()
+            base_croibg1_err = np.asarray(croibg1_err_a, dtype=np.float64).copy()
+            pol_arm1 = np.ones_like(base_croibg1)
+            if use_polarization:
                 # Corr1 carries the polarization of the calibrated geometry;
                 # move it onto the arm position of each frame (finding F5).
                 # Exactly 1 for a detector whose arm does not move.
@@ -2210,11 +2311,33 @@ ub : gui for UB matrix and angle calculations
                     roi_d[0].stop - roi_d[0].start,
                     mu,
                 )
-                croibg1_a = croibg1_a * pol_arm1
-                croibg1_err_a = croibg1_err_a * pol_arm1
-                if croibg1_bgimg_a is not None:
-                    croibg1_bgimg_a = croibg1_bgimg_a * pol_arm1
-                    croibg1_bgimg_err_a = croibg1_bgimg_err_a * pol_arm1
+
+            (
+                croibg1_a,
+                croibg1_err_a,
+                ctr_croibg1_a,
+                ctr_croibg1_err_a,
+            ) = integration_corrections.pixel_correction_branches(
+                base_croibg1,
+                base_croibg1_err,
+                Corr1,
+                P_croi[d],
+                pol_arm1,
+            )
+            combined_croi_factor = Corr1 * pol_arm1
+            combined_bgroi_factor = (
+                integration_corrections.roi_mean_correction(
+                    Corr_bgroi1_a, Corr_bgpixel1_all[..., d]
+                )
+                * pol_arm1
+            )
+            polarization_croi_factor = P_croi[d] * pol_arm1
+            polarization_bgroi_factor = P_bgroi[d] * pol_arm1
+            if croibg1_bgimg_a is not None:
+                croibg1_bgimg_a = croibg1_bgimg_a * combined_croi_factor
+                croibg1_bgimg_err_a = (
+                    croibg1_bgimg_err_a * combined_croi_factor
+                )
 
             rod_mask1 = np.isfinite(croibg1_a)
 
@@ -2305,6 +2428,8 @@ ub : gui for UB matrix and angle calculations
                     "@NX_class": "NXdetector",
                     "croibg": croibg1_a,
                     "croibg_errors": croibg1_err_a,
+                    "ctr_croibg": ctr_croibg1_a,
+                    "ctr_croibg_errors": ctr_croibg1_err_a,
                     "croibg_bgimg": croibg1_bgimg_a,  # when None, will not create data set  # noqa: E501
                     "croibg_bgimg_errors": croibg1_bgimg_err_a,  # when None, will not create data set  # noqa: E501
                     "croi": croi1_a,
@@ -2313,6 +2438,10 @@ ub : gui for UB matrix and angle calculations
                     "bgroi_pix": bgpixel1_a,
                     "Cfactors_croi": Corr_croi1_a,
                     "Cfactors_bgroi": Corr_bgroi1_a,
+                    "Cfactor_croi": combined_croi_factor,
+                    "Cfactor_bgroi": combined_bgroi_factor,
+                    "Pfactor_croi": polarization_croi_factor,
+                    "Pfactor_bgroi": polarization_bgroi_factor,
                     "bgimg_croi": bgimg_croi1_a,
                     "bgimg_bgroi": bgimg_bgroi1_a,
                 },
@@ -2406,6 +2535,8 @@ ub : gui for UB matrix and angle calculations
         l = []  # noqa: E741
         croibg = []
         croibg_errors = []
+        ctr_croibg = []
+        ctr_croibg_errors = []
         croi = []
         bgroi = []
         croi_pix = []
@@ -2414,6 +2545,10 @@ ub : gui for UB matrix and angle calculations
         croibg_bgimg_errors = []
         Cfactors_croi = []
         Cfactors_bgroi = []
+        Cfactor_croi = []
+        Cfactor_bgroi = []
+        Pfactor_croi = []
+        Pfactor_bgroi = []
         bgimg_croi = []
         bgimg_bgroi = []
         axis = []
@@ -2451,6 +2586,8 @@ ub : gui for UB matrix and angle calculations
                 # 2D arrays
                 croibg.append(dsc["counters"]["croibg"])
                 croibg_errors.append(dsc["counters"]["croibg_errors"])
+                ctr_croibg.append(dsc["counters"]["ctr_croibg"])
+                ctr_croibg_errors.append(dsc["counters"]["ctr_croibg_errors"])
                 croi.append(dsc["counters"]["croi"])
                 bgroi.append(dsc["counters"]["bgroi"])
                 croi_pix.append(dsc["counters"]["croi_pix"])
@@ -2460,6 +2597,10 @@ ub : gui for UB matrix and angle calculations
                     croibg_bgimg_errors.append(dsc["counters"]["croibg_bgimg_errors"])
                 Cfactors_croi.append(dsc["counters"]["Cfactors_croi"])
                 Cfactors_bgroi.append(dsc["counters"]["Cfactors_bgroi"])
+                Cfactor_croi.append(dsc["counters"]["Cfactor_croi"])
+                Cfactor_bgroi.append(dsc["counters"]["Cfactor_bgroi"])
+                Pfactor_croi.append(dsc["counters"]["Pfactor_croi"])
+                Pfactor_bgroi.append(dsc["counters"]["Pfactor_bgroi"])
                 bgimg_croi.append(dsc["counters"]["bgimg_croi"])
                 bgimg_bgroi.append(dsc["counters"]["bgimg_bgroi"])
 
@@ -2509,12 +2650,18 @@ ub : gui for UB matrix and angle calculations
             "l": np.vstack(l),
             "croibg": np.vstack(croibg),
             "croibg_errors": np.vstack(croibg_errors),
+            "ctr_croibg": np.vstack(ctr_croibg),
+            "ctr_croibg_errors": np.vstack(ctr_croibg_errors),
             "croi": np.vstack(croi),
             "bgroi": np.vstack(bgroi),
             "croi_pix": np.vstack(croi_pix),
             "bgroi_pix": np.vstack(bgroi_pix),
             "Cfactors_croi": np.vstack(Cfactors_croi),
             "Cfactors_bgroi": np.vstack(Cfactors_bgroi),
+            "Cfactor_croi": np.vstack(Cfactor_croi),
+            "Cfactor_bgroi": np.vstack(Cfactor_bgroi),
+            "Pfactor_croi": np.vstack(Pfactor_croi),
+            "Pfactor_bgroi": np.vstack(Pfactor_bgroi),
             "bgimg_croi": np.vstack(bgimg_croi),
             "bgimg_bgroi": np.vstack(bgimg_bgroi),
             "x": np.array(x),
@@ -2568,7 +2715,7 @@ ub : gui for UB matrix and angle calculations
         # contract consumed by today's reducer. Stage 5 will opt into this
         # branch when framewise Q/H normalization becomes active.
         curve_record = CurveCorrectionRecord(
-            algorithm="legacy_rocking_roi_v1",
+            algorithm="legacy_rocking_roi_v2",
             output_quantity="rocking_roi_curve",
             scale_convention="legacy_unnormalized",
             normalization_status="not_applied",
@@ -2579,10 +2726,12 @@ ub : gui for UB matrix and angle calculations
             base_croi_variance=rois["croi"],
             base_bgroi=rois["bgroi"],
             base_bgroi_variance=rois["bgroi"],
-            base_croibg=rois["croibg"],
-            base_croibg_variance=np.square(rois["croibg_errors"]),
-            combined_croi_factor=rois["Cfactors_croi"],
-            combined_bgroi_factor=rois["Cfactors_bgroi"],
+            base_croibg=rois["ctr_croibg"],
+            base_croibg_variance=np.square(rois["ctr_croibg_errors"]),
+            combined_croi_factor=rois["Cfactor_croi"],
+            combined_bgroi_factor=rois["Cfactor_bgroi"],
+            polarization_croi_factor=rois["Pfactor_croi"],
+            polarization_bgroi_factor=rois["Pfactor_bgroi"],
             gamma_arm=rois["gamma_arm"],
             delta_arm=rois["delta_arm"],
             roi_x=rois["x"],
@@ -5980,10 +6129,9 @@ ub : gui for UB matrix and angle calculations
                     "No mask was selected with the masking tool. Continue without mask."
                 )
 
-        corr = (
-            self.scanSelector.useSolidAngleBox.isChecked()
-            or self.scanSelector.usePolarizationBox.isChecked()
-        )
+        use_solid_angle = self.scanSelector.useSolidAngleBox.isChecked()
+        use_polarization = self.scanSelector.usePolarizationBox.isChecked()
+        corr = use_solid_angle or use_polarization
 
         # One definition of the per-pixel factors, shared with the rocking
         # integration and the reciprocal-space reconstruction. It returns None
@@ -5993,11 +6141,16 @@ ub : gui for UB matrix and angle calculations
         # NumPy-only path would otherwise be handed None.
         C_arr = detector_corrections.pixel_factors(
             dc,
-            solid_angle=self.scanSelector.useSolidAngleBox.isChecked(),
-            polarization=self.scanSelector.usePolarizationBox.isChecked(),
+            solid_angle=use_solid_angle,
+            polarization=use_polarization,
         )
         if C_arr is None:
             C_arr = np.ones(dc.detector.shape, dtype=np.float64)
+        P_arr = detector_corrections.pixel_factors(
+            dc, polarization=use_polarization
+        )
+        if P_arr is None:
+            P_arr = np.ones(dc.detector.shape, dtype=np.float64)
 
         hkl_del_gam_s1, hkl_del_gam_s2 = self.getROIloc()
 
@@ -6479,6 +6632,69 @@ ub : gui for UB matrix and angle calculations
         roi_size1 = roi_hsize1_a * roi_vsize1_a
         roi_size2 = roi_hsize2_a * roi_vsize2_a
 
+        # Polarization-only factors must be accumulated over the same valid
+        # pixels as the combined correction. This creates the direct CTR
+        # photon branch and avoids estimating it later as mean(S*P)/mean(S).
+        polarization_counters = np.zeros((nodatapoints, 2, 4), dtype=np.float64)
+        if use_polarization and HAS_ACCEL and repair_enabled:
+            for i in range(nodatapoints):
+                if not dataavail[i]:
+                    continue
+                dummy_counters = np.zeros((2, 4), dtype=np.float64)
+                _roi_sum_accel.processImage_repair_Carr(
+                    np.ones(image.img.shape, dtype=np.float64),
+                    mask,
+                    np.ascontiguousarray(P_arr, dtype=np.float64),
+                    *roi_lists_accel[i],
+                    row_gaps,
+                    col_gaps,
+                    dummy_counters,
+                    polarization_counters[i],
+                    repair.max_component_pixels,
+                    repair.max_span,
+                    repair.radius,
+                    repair.min_valid_neighbors,
+                )
+        else:
+            for i in range(nodatapoints):
+                for intersect, hkl_del_gam_current in enumerate(
+                    (hkl_del_gam_1, hkl_del_gam_2)
+                ):
+                    if not hkl_del_gam_current[i, -1]:
+                        continue
+                    coordinates = hkl_del_gam_current[i, 6:8]
+                    polarization_counters[i, intersect] = (
+                        _correction_region_counters(
+                            P_arr,
+                            mask,
+                            self.intkey(coordinates),
+                            self.bkgkeys(coordinates),
+                        )
+                    )
+
+        P_croi1 = integration_corrections.roi_mean_correction(
+            polarization_counters[:, 0, 0], polarization_counters[:, 0, 1]
+        )
+        P_bgroi1 = integration_corrections.roi_mean_correction(
+            polarization_counters[:, 0, 2], polarization_counters[:, 0, 3]
+        )
+        P_croi2 = integration_corrections.roi_mean_correction(
+            polarization_counters[:, 1, 0], polarization_counters[:, 1, 1]
+        )
+        P_bgroi2 = integration_corrections.roi_mean_correction(
+            polarization_counters[:, 1, 2], polarization_counters[:, 1, 3]
+        )
+        _warn_masked_peak_scaling(
+            cpixel1_a,
+            np.where(hkl_del_gam_1[:, -1], roi_size1, 0),
+            "Stationary S1 extraction",
+        )
+        _warn_masked_peak_scaling(
+            cpixel2_a,
+            np.where(hkl_del_gam_2[:, -1], roi_size2, 0),
+            "Stationary S2 extraction",
+        )
+
         # Mean correction over the valid pixels of the center ROI. The ROI sum
         # of the correction array must not be rescaled to the nominal ROI area
         # here: croibg already carries that (roi_size / cpixel) factor, so
@@ -6583,17 +6799,10 @@ ub : gui for UB matrix and angle calculations
                 croibg2_a = croi2_a * (roi_size2 / cpixel2_a)
                 croibg2_err_a = np.sqrt(croi2_a) * (roi_size2 / cpixel2_a)
 
-        if corr:
-            croibg1_a *= Corr1
-            croibg1_err_a *= Corr1
-            croibg2_a *= Corr2
-            croibg2_err_a *= Corr2
-            if croibg1_bgimg_a is not None:
-                croibg1_bgimg_a *= Corr1
-                croibg1_bgimg_err_a *= Corr1
-            if croibg2_bgimg_a is not None:
-                croibg2_bgimg_a *= Corr2
-                croibg2_bgimg_err_a *= Corr2
+        base_signal1 = np.asarray(croibg1_a, dtype=np.float64).copy()
+        base_error1 = np.asarray(croibg1_err_a, dtype=np.float64).copy()
+        base_signal2 = np.asarray(croibg2_a, dtype=np.float64).copy()
+        base_error2 = np.asarray(croibg2_err_a, dtype=np.float64).copy()
 
         # Geometrical, footprint and normalization corrections. The numerical
         # active area and normalization are intensity divisors. The
@@ -6626,7 +6835,9 @@ ub : gui for UB matrix and angle calculations
                 )
             )
 
-        if options["polarization"]:
+        pol_arm1 = np.ones(nodatapoints, dtype=np.float64)
+        pol_arm2 = np.ones(nodatapoints, dtype=np.float64)
+        if use_polarization:
             # Corr1/Corr2 carry the polarization of the calibrated geometry;
             # move it onto the arm position of each frame (finding F5). This is
             # exactly 1 for a detector whose arm does not move, and it is the
@@ -6635,53 +6846,53 @@ ub : gui for UB matrix and angle calculations
             pol_arm1 = self._polarizationArmFactor(
                 dc, y_coord1_a, x_coord1_a, roi_vsize1_a, roi_hsize1_a, alpha_all
             )
-            croibg1_a = croibg1_a * pol_arm1
-            croibg1_err_a = croibg1_err_a * pol_arm1
-            if croibg1_bgimg_a is not None:
-                croibg1_bgimg_a = croibg1_bgimg_a * pol_arm1
-                croibg1_bgimg_err_a = croibg1_bgimg_err_a * pol_arm1
-
             pol_arm2 = self._polarizationArmFactor(
                 dc, y_coord2_a, x_coord2_a, roi_vsize2_a, roi_hsize2_a, alpha_all
             )
-            croibg2_a = croibg2_a * pol_arm2
-            croibg2_err_a = croibg2_err_a * pol_arm2
-            if croibg2_bgimg_a is not None:
-                croibg2_bgimg_a = croibg2_bgimg_a * pol_arm2
-                croibg2_bgimg_err_a = croibg2_bgimg_err_a * pol_arm2
 
-        # The solid-angle correction is useful on the *intensity* -- for broad,
-        # non-rod features a differential cross-section is what is wanted --
-        # but it must not reach a structure factor: a region sum is already the
-        # complete angular integral, each pixel weighted by the solid angle it
-        # subtends. So it is measured here over the same regions and divided
-        # back out when F2_hkl is formed. Finding F6 of
-        # doc/design/ctr_structure_factor_scale.md; the per-pixel
-        # reconstruction keeps it, because that path does form a differential
-        # cross-section.
-        solid_angle_means = (None, None)
-        if self.scanSelector.useSolidAngleBox.isChecked():
-            solid_angle_means = tuple(
-                detector_corrections.roi_mean_inverse_solid_angle(
-                    dc,
-                    row,
-                    column,
-                    # A frame whose region fell off the detector can leave a
-                    # degenerate size behind; it carries no counts either, so
-                    # one pixel keeps the factor defined and harmless.
-                    np.maximum(row_size, 1),
-                    np.maximum(column_size, 1),
-                )
-                for row, column, row_size, column_size in (
-                    (y_coord1_a, x_coord1_a, roi_vsize1_a, roi_hsize1_a),
-                    (y_coord2_a, x_coord2_a, roi_vsize2_a, roi_hsize2_a),
-                )
+        (
+            croibg1_a,
+            croibg1_err_a,
+            ctr_croibg1_a,
+            ctr_croibg1_err_a,
+        ) = integration_corrections.pixel_correction_branches(
+            base_signal1, base_error1, Corr1, P_croi1, pol_arm1
+        )
+        (
+            croibg2_a,
+            croibg2_err_a,
+            ctr_croibg2_a,
+            ctr_croibg2_err_a,
+        ) = integration_corrections.pixel_correction_branches(
+            base_signal2, base_error2, Corr2, P_croi2, pol_arm2
+        )
+        combined_croi_factor1 = Corr1 * pol_arm1
+        combined_croi_factor2 = Corr2 * pol_arm2
+        combined_bgroi_factor1 = (
+            integration_corrections.roi_mean_correction(
+                Corr_bgroi1_a, Corr_bgpixel1_a
             )
+            * pol_arm1
+        )
+        combined_bgroi_factor2 = (
+            integration_corrections.roi_mean_correction(
+                Corr_bgroi2_a, Corr_bgpixel2_a
+            )
+            * pol_arm2
+        )
+        polarization_croi_factor1 = P_croi1 * pol_arm1
+        polarization_croi_factor2 = P_croi2 * pol_arm2
+        polarization_bgroi_factor1 = P_bgroi1 * pol_arm1
+        polarization_bgroi_factor2 = P_bgroi2 * pol_arm2
+        if croibg1_bgimg_a is not None:
+            croibg1_bgimg_a *= combined_croi_factor1
+            croibg1_bgimg_err_a *= combined_croi_factor1
+        if croibg2_bgimg_a is not None:
+            croibg2_bgimg_a *= combined_croi_factor2
+            croibg2_bgimg_err_a *= combined_croi_factor2
 
         correction_factors = []
-        for hkl_del_gam, solid_angle_mean in zip(
-            (hkl_del_gam_1, hkl_del_gam_2), solid_angle_means
-        ):
+        for hkl_del_gam in (hkl_del_gam_1, hkl_del_gam_2):
             correction_factors.append(
                 integration_corrections.stationary_correction_factors(
                     alpha_all,
@@ -6692,7 +6903,6 @@ ub : gui for UB matrix and angle calculations
                     beam_profile=beam_profile,
                     sample_size=sample_size,
                     normalization=normalization,
-                    solid_angle_mean=solid_angle_mean,
                 )
             )
         factors1, factors2 = correction_factors
@@ -6707,17 +6917,16 @@ ub : gui for UB matrix and angle calculations
                 ),
             )
 
-        # Reversible scalar base, after the existing background/pixel path but
-        # before the framewise normalization and illumination divisors. Keep a
-        # copy because apply_stationary_corrections returns the saved legacy
-        # intensity below.
-        base_croibg1 = np.asarray(croibg1_a, dtype=np.float64).copy()
+        # Reversible photon-counting base, after polarization but before the
+        # framewise normalization and illumination divisors. Detector solid
+        # angle remains confined to the diagnostic intensity branch.
+        base_croibg1 = np.asarray(ctr_croibg1_a, dtype=np.float64).copy()
         base_croibg1_variance = np.square(
-            np.asarray(croibg1_err_a, dtype=np.float64)
+            np.asarray(ctr_croibg1_err_a, dtype=np.float64)
         )
-        base_croibg2 = np.asarray(croibg2_a, dtype=np.float64).copy()
+        base_croibg2 = np.asarray(ctr_croibg2_a, dtype=np.float64).copy()
         base_croibg2_variance = np.square(
-            np.asarray(croibg2_err_a, dtype=np.float64)
+            np.asarray(ctr_croibg2_err_a, dtype=np.float64)
         )
 
         croibg1_a, croibg1_err_a = integration_corrections.apply_stationary_corrections(
@@ -6725,6 +6934,16 @@ ub : gui for UB matrix and angle calculations
         )
         croibg2_a, croibg2_err_a = integration_corrections.apply_stationary_corrections(
             croibg2_a, croibg2_err_a, factors2
+        )
+        ctr_croibg1_a, ctr_croibg1_err_a = (
+            integration_corrections.apply_stationary_corrections(
+                ctr_croibg1_a, ctr_croibg1_err_a, factors1
+            )
+        )
+        ctr_croibg2_a, ctr_croibg2_err_a = (
+            integration_corrections.apply_stationary_corrections(
+                ctr_croibg2_a, ctr_croibg2_err_a, factors2
+            )
         )
         if croibg1_bgimg_a is not None:
             croibg1_bgimg_a, croibg1_bgimg_err_a = (
@@ -6742,10 +6961,10 @@ ub : gui for UB matrix and angle calculations
         F2_hkl1 = F2_hkl1_err = F2_hkl2 = F2_hkl2_err = None
         if options["lorentz"]:
             F2_hkl1, F2_hkl1_err = integration_corrections.structure_factor(
-                croibg1_a, croibg1_err_a, factors1
+                ctr_croibg1_a, ctr_croibg1_err_a, factors1
             )
             F2_hkl2, F2_hkl2_err = integration_corrections.structure_factor(
-                croibg2_a, croibg2_err_a, factors2
+                ctr_croibg2_a, ctr_croibg2_err_a, factors2
             )
 
         rod_mask1 = np.isfinite(croibg1_a)
@@ -6868,6 +7087,8 @@ ub : gui for UB matrix and angle calculations
                 "@NX_class": "NXdetector",
                 "croibg": croibg1_a,
                 "croibg_errors": croibg1_err_a,
+                "ctr_croibg": ctr_croibg1_a,
+                "ctr_croibg_errors": ctr_croibg1_err_a,
                 "croibg_bgimg": croibg1_bgimg_a,  # when None, will not create data set
                 "croibg_bgimg_errors": croibg1_bgimg_err_a,  # when None, will not create data set  # noqa: E501
                 "croi": croi1_a,
@@ -6876,6 +7097,10 @@ ub : gui for UB matrix and angle calculations
                 "bgroi_pix": bgpixel1_a,
                 "Cfactors_croi": Corr_croi1_a,
                 "Cfactors_bgroi": Corr_bgroi1_a,
+                "Cfactor_croi": combined_croi_factor1,
+                "Cfactor_bgroi": combined_bgroi_factor1,
+                "Pfactor_croi": polarization_croi_factor1,
+                "Pfactor_bgroi": polarization_bgroi_factor1,
                 "bgimg_croi": bgimg_croi1_a,
                 "bgimg_bgroi": bgimg_bgroi1_a,
                 # None entries do not create a data set, so only the
@@ -6886,10 +7111,6 @@ ub : gui for UB matrix and angle calculations
                 "C_flux_on_sample": factors1.get("C_flux_on_sample"),
                 "C_illum_area": factors1.get("C_illum_area"),
                 "C_norm": factors1.get("C_norm"),
-                # Divided back out of F2_hkl rather than applied to it
-                # (finding F6); recorded so a saved rod can be put
-                # back on the intensity scale.
-                "C_solid_angle": factors1.get("C_solid_angle"),
             },
             "pixelcoord": {
                 "@NX_class": "NXdetector",
@@ -6932,6 +7153,8 @@ ub : gui for UB matrix and angle calculations
                 "@NX_class": "NXdetector",
                 "croibg": croibg2_a,
                 "croibg_errors": croibg2_err_a,
+                "ctr_croibg": ctr_croibg2_a,
+                "ctr_croibg_errors": ctr_croibg2_err_a,
                 "croibg_bgimg": croibg2_bgimg_a,
                 "croibg_bgimg_errors": croibg2_bgimg_err_a,
                 "croi": croi2_a,
@@ -6940,6 +7163,10 @@ ub : gui for UB matrix and angle calculations
                 "bgroi_pix": bgpixel2_a,
                 "Cfactors_croi": Corr_croi2_a,
                 "Cfactors_bgroi": Corr_bgroi2_a,
+                "Cfactor_croi": combined_croi_factor2,
+                "Cfactor_bgroi": combined_bgroi_factor2,
+                "Pfactor_croi": polarization_croi_factor2,
+                "Pfactor_bgroi": polarization_bgroi_factor2,
                 "bgimg_croi": bgimg_croi2_a,
                 "bgimg_bgroi": bgimg_bgroi2_a,
                 # None entries do not create a data set, so only the
@@ -6950,10 +7177,6 @@ ub : gui for UB matrix and angle calculations
                 "C_flux_on_sample": factors2.get("C_flux_on_sample"),
                 "C_illum_area": factors2.get("C_illum_area"),
                 "C_norm": factors2.get("C_norm"),
-                # Divided back out of F2_hkl rather than applied to it
-                # (finding F6); recorded so a saved rod can be put
-                # back on the intensity scale.
-                "C_solid_angle": factors2.get("C_solid_angle"),
             },
             "pixelcoord": {
                 "@NX_class": "NXdetector",
@@ -6995,6 +7218,8 @@ ub : gui for UB matrix and angle calculations
             bgroi,
             combined_croi,
             combined_bgroi,
+            polarization_croi,
+            polarization_bgroi,
             x,
             y,
             width,
@@ -7006,7 +7231,7 @@ ub : gui for UB matrix and angle calculations
         ):
             """Build the non-legacy sibling branch for one trajectory."""
             record = CurveCorrectionRecord(
-                algorithm="legacy_stationary_roi_v1",
+                algorithm="legacy_stationary_roi_v2",
                 output_quantity="stationary_roi_intensity",
                 scale_convention=(
                     "legacy_density_area"
@@ -7037,6 +7262,8 @@ ub : gui for UB matrix and angle calculations
                 base_croibg_variance=base_croibg_variance,
                 combined_croi_factor=combined_croi,
                 combined_bgroi_factor=combined_bgroi,
+                polarization_croi_factor=polarization_croi,
+                polarization_bgroi_factor=polarization_bgroi,
                 gamma_arm=gamma_arm_all,
                 delta_arm=delta_arm_all,
                 roi_x=x,
@@ -7060,8 +7287,10 @@ ub : gui for UB matrix and angle calculations
             base_croibg1_variance,
             croi1_a,
             bgroi1_a,
-            Corr_croi1_a,
-            Corr_bgroi1_a,
+            combined_croi_factor1,
+            combined_bgroi_factor1,
+            polarization_croi_factor1,
+            polarization_bgroi_factor1,
             x_coord1_a,
             y_coord1_a,
             roi_hsize1_a,
@@ -7077,8 +7306,10 @@ ub : gui for UB matrix and angle calculations
             base_croibg2_variance,
             croi2_a,
             bgroi2_a,
-            Corr_croi2_a,
-            Corr_bgroi2_a,
+            combined_croi_factor2,
+            combined_bgroi_factor2,
+            polarization_croi_factor2,
+            polarization_bgroi_factor2,
             x_coord2_a,
             y_coord2_a,
             roi_hsize2_a,

@@ -101,20 +101,31 @@ Scientific and analysis additions:
   0.3 m, varying across the detector and therefore a rod shape error). The
   switch stays, because that correction is the right one for a broad or
   diffuse feature where a differential cross section is wanted: it still
-  scales the intensity counters, and is now measured over the same regions of
-  interest and divided back out when ``F2_hkl`` is formed, so a structure
-  factor is the same number whether or not it was enabled. Its tooltip and the
+  scales the intensity counters, while a direct polarization-only photon
+  branch forms ``F2_hkl``, so a structure factor is the same number whether or
+  not it was enabled. Its tooltip and the
   ``SOLA`` status badge say so. The reciprocal-space reconstruction keeps
   applying it uncompensated, since that path does form a differential cross
   section per pixel. For rocking scans the correction is applied when the
-  curves are extracted, so whether to remove it again is read from the
-  configuration stored with the scan; an older database where that cannot be
-  established warns and is left uncompensated. Integrated rocking scans now
-  store a
+  curves are extracted. New extractions now derive a second CTR photon curve
+  from the same background-subtracted signal using only the polarization
+  correction, including its detector-arm adjustment; ``croibg`` retains the
+  combined solid-angle and polarization correction as the diagnostic
+  intensity. This direct branch removes the covariance error from dividing a
+  combined correction mean by a separately estimated solid-angle mean. Older
+  databases without the photon curve retain the configuration-driven scalar
+  fallback and warn if its correction state cannot be established. A partly
+  masked center ROI now also warns that nominal-area scaling preserves a flat
+  density but cannot physically reconstruct peak intensity hidden by a mask
+  or detector gap. Integrated rocking scans store a
   ``reduction`` group beside ``F2_hkl`` recording the mode, the angle unit,
   which normalizations were applied, the acceptance used, whether the
-  solid-angle correction was compensated, and the active-area assumption, so
-  that a saved rod can be placed on a common scale afterwards.
+  direct photon curve or legacy solid-angle compensation was used, and the
+  active-area assumption, so that a saved rod can be placed on a common scale
+  afterwards. Rocking reductions also average the joint Lorentz and
+  rod-intersection factor with the same angular quadrature as the counts,
+  avoiding a covariance residual from multiplying two separately averaged
+  factors.
   Rocking normalization uses the counters stored with the scan, so it requires
   a backend that declares ``exposure_time`` in ``auxillary_counters``; a
   missing counter is skipped and recorded rather than failing the integration.
@@ -142,9 +153,10 @@ Scientific and analysis additions:
   JSON layout are still read. The Lorentz, footprint and normalization
   switches are recorded alongside the others, and a configuration that predates
   them leaves those controls as the user has them rather than silently
-  switching a correction off. ``C_solid_angle`` is now saved beside
-  ``F2_hkl``, because the structure factor divides it back out and a saved rod
-  cannot otherwise be returned to the intensity scale.
+  switching a correction off. New curve records save the combined and
+  polarization-only region factors separately, which makes the
+  diagnostic-intensity and CTR-photon branches reproducible; legacy reductions
+  continue to read ``C_solid_angle`` where it is available.
 
 - **The corrections dialog now asks for the sample size across the beam.** A
   second size ``W`` sits beside the existing sample size ``L``, in millimeter.

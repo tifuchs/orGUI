@@ -186,6 +186,49 @@ def test_disabled_corrections_leave_the_intensity_untouched():
     np.testing.assert_array_equal(errors, np.ones(3))
 
 
+def test_pixel_branches_keep_solid_angle_out_of_ctr_counts():
+    """The CTR branch is built directly, not by scalar compensation."""
+    base = np.array([100.0, 200.0])
+    errors = np.array([10.0, 14.0])
+    polarization = np.array([1.2, 1.3])
+    arm = np.array([1.0, 1.1])
+
+    off = ic.pixel_correction_branches(
+        base, errors, polarization, polarization, arm
+    )
+    on = ic.pixel_correction_branches(
+        base,
+        errors,
+        np.array([2.4, 3.9]),
+        polarization,
+        arm,
+    )
+
+    assert not np.allclose(on[0], off[0])
+    np.testing.assert_allclose(on[2], off[2])
+    np.testing.assert_allclose(on[3], off[3])
+    np.testing.assert_allclose(on[2], base * polarization * arm)
+
+
+def test_pixel_branches_do_not_leak_combined_factor_covariance():
+    """``mean(S*P)/mean(S)`` must not stand in for ``mean(P)``."""
+    solid_angle = np.array([1.0, 2.0])
+    polarization = np.array([2.0, 1.0])
+    combined_mean = np.mean(solid_angle * polarization)
+    solid_angle_mean = np.mean(solid_angle)
+    polarization_mean = np.mean(polarization)
+    assert combined_mean / solid_angle_mean != polarization_mean
+
+    _, _, ctr, _ = ic.pixel_correction_branches(
+        np.array([10.0]),
+        np.array([2.0]),
+        np.array([combined_mean]),
+        np.array([polarization_mean]),
+    )
+
+    np.testing.assert_allclose(ctr, 10.0 * polarization_mean)
+
+
 def test_factors_broadcast_to_the_shape_of_alpha():
     """A scalar normalization still yields one factor per image."""
     factors = ic.stationary_correction_factors(

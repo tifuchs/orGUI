@@ -158,10 +158,12 @@ def _orgui_rocking_f2(rod, acceptance, reduce=True, solid_angle_mean=None):
         distortion test below needs to compare against.
     """
     ell, alpha, delta, gamma, _, _, _ = rod
-    axis, curves = _simulate_rocking(rod, acceptance)
+    axis, photon_curves = _simulate_rocking(rod, acceptance)
+    curves = photon_curves
     if solid_angle_mean is not None:
         # As the per-pixel correction does when the switch is on: it scales
-        # the counts, region by region.
+        # the diagnostic intensity, region by region. The independently
+        # accumulated CTR branch retains the photon counts.
         curves = curves * np.asarray(solid_angle_mean)[:, None]
     shape = curves.shape
     lorentz = np.broadcast_to(
@@ -173,7 +175,8 @@ def _orgui_rocking_f2(rod, acceptance, reduce=True, solid_angle_mean=None):
         extra = dict(
             C_norm=np.full(shape, ROCKING_EXPOSURE * ROCKING_MONITOR),
             detector_acceptance=acceptance,
-            solid_angle_mean=solid_angle_mean,
+            ctr_croibg_curves=photon_curves,
+            ctr_croibg_errors_curves=np.sqrt(np.abs(photon_curves)),
             angle_unit="deg",
         )
     else:
@@ -198,14 +201,18 @@ def _orgui_stationary_f2(rod, solid_angle_mean=None):
     """``F2_hkl`` as :mod:`orgui.app.integration_corrections` computes it.
 
     :param solid_angle_mean: When given, the region-mean solid-angle
-        correction is applied to the counts, as the per-pixel array does when
-        the switch is on, and handed to the reduction so that it comes back
-        out of the structure factor.
+        correction is applied only to the diagnostic intensity. The direct
+        photon branch used for the structure factor remains unchanged.
     """
     ell, alpha, delta, gamma, _, _, _ = rod
-    counts = _simulate_stationary(rod)
-    if solid_angle_mean is not None:
-        counts = counts * np.asarray(solid_angle_mean)
+    photon_counts = _simulate_stationary(rod)
+    combined = 1.0 if solid_angle_mean is None else solid_angle_mean
+    _, _, ctr_counts, ctr_errors = ic.pixel_correction_branches(
+        photon_counts,
+        np.sqrt(photon_counts),
+        combined,
+        1.0,
+    )
     factors = ic.stationary_correction_factors(
         alpha,
         delta,
@@ -214,12 +221,11 @@ def _orgui_stationary_f2(rod, solid_angle_mean=None):
         normalization=np.full(
             ell.size, STATIONARY_EXPOSURE * STATIONARY_MONITOR
         ),
-        solid_angle_mean=solid_angle_mean,
     )
-    intensity, errors = ic.apply_stationary_corrections(
-        counts, np.sqrt(counts), factors
+    ctr_intensity, ctr_errors = ic.apply_stationary_corrections(
+        ctr_counts, ctr_errors, factors
     )
-    return ic.structure_factor(intensity, errors, factors)[0]
+    return ic.structure_factor(ctr_intensity, ctr_errors, factors)[0]
 
 
 def test_the_unified_reduction_recovers_one_structure_factor(rod):

@@ -71,10 +71,56 @@ __all__ = [
     "apply_stationary_corrections",
     "monitor_counter_candidates",
     "normalization_divisor",
+    "pixel_correction_branches",
     "roi_mean_correction",
     "stationary_correction_factors",
     "structure_factor",
 ]
+
+
+def pixel_correction_branches(
+    base_intensity,
+    base_errors,
+    combined_factor,
+    polarization_factor,
+    polarization_arm_factor=1.0,
+):
+    r"""Build diagnostic and CTR branches from one scalar ROI signal.
+
+    The diagnostic intensity retains the established combined per-pixel
+    correction (solid angle times polarization). The CTR photon branch uses
+    the independently accumulated polarization-only mean, so detector solid
+    angle never has to be divided out through a separately estimated scalar.
+    Both branches start from the same background-subtracted signal and apply
+    the actual-arm polarization ratio exactly once.
+
+    This remains the existing ROI-mean approximation: it does not claim that
+    a geometric mean correction equals a signal-weighted per-pixel sum.
+
+    :param base_intensity: Background-subtracted ROI signal before pixel
+        corrections.
+    :param base_errors: One-sigma errors paired with ``base_intensity``.
+    :param combined_factor: Mean combined pixel correction over the valid
+        center-ROI pixels.
+    :param polarization_factor: Mean inverse-polarization correction over the
+        same valid center-ROI pixels; one when polarization is disabled.
+    :param polarization_arm_factor: Ratio moving the home-geometry
+        polarization mean to the actual arm position; one when polarization
+        is disabled.
+    :returns: ``(intensity, errors, ctr_intensity, ctr_errors)``.
+    :rtype: tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray]
+    """
+    base_intensity = np.asarray(base_intensity, dtype=np.float64)
+    base_errors = np.asarray(base_errors, dtype=np.float64)
+    arm = np.asarray(polarization_arm_factor, dtype=np.float64)
+    combined_scale = np.asarray(combined_factor, dtype=np.float64) * arm
+    polarization_scale = np.asarray(polarization_factor, dtype=np.float64) * arm
+    return (
+        base_intensity * combined_scale,
+        base_errors * combined_scale,
+        base_intensity * polarization_scale,
+        base_errors * polarization_scale,
+    )
 
 
 def monitor_counter_candidates(scan):

@@ -6,7 +6,13 @@ import numpy as np
 import pytest
 from silx.gui import qt
 
-from orgui.app.orGUI import _display_roi_geometry, _rocking_arm_snapshot, orGUI
+from orgui.app.orGUI import (
+    _correction_region_counters,
+    _display_roi_geometry,
+    _rocking_arm_snapshot,
+    _warn_masked_peak_scaling,
+    orGUI,
+)
 from orgui.app.QReflectionSelector import (
     AutoBraggOptionsDialog,
     AutoBraggStatusDialog,
@@ -28,6 +34,44 @@ class FakeLinearDetector:
         y = np.asarray(y, dtype=float)
         alpha_i = np.asarray(alpha_i, dtype=float)
         return 2.0e-4 * y + alpha_i, 1.0e-4 * x
+
+
+def test_correction_counters_share_mask_across_center_and_backgrounds():
+    correction = np.arange(30, dtype=float).reshape(5, 6) + 1.0
+    mask = np.zeros_like(correction, dtype=bool)
+    mask[1, 2] = True
+    mask[3, 4] = True
+    center = (slice(1, 4), slice(1, 3))
+    backgrounds = [
+        (slice(0, 1), slice(1, 3)),
+        (slice(4, 6), slice(3, 5)),
+    ]
+
+    counters = _correction_region_counters(
+        correction, mask, center, backgrounds
+    )
+
+    valid = np.where(mask, np.nan, correction)
+    expected_center = valid[1:3, 1:4]
+    expected_background = np.concatenate(
+        [valid[1:3, 0:1].ravel(), valid[3:5, 4:6].ravel()]
+    )
+    np.testing.assert_allclose(
+        counters,
+        [
+            np.nansum(expected_center),
+            np.sum(np.isfinite(expected_center)),
+            np.nansum(expected_background),
+            np.sum(np.isfinite(expected_background)),
+        ],
+    )
+
+
+def test_masked_peak_scaling_warning_explains_nonphysical_recovery(caplog):
+    with caplog.at_level(logging.WARNING):
+        _warn_masked_peak_scaling([8.0, 10.0], [10.0, 10.0], "Test ROI")
+
+    assert "not a physical recovery of peak intensity" in caplog.text
 
 
 def test_rocking_arm_snapshot_is_per_frame_and_unit_tagged():

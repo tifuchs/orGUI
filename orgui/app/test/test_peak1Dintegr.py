@@ -417,6 +417,91 @@ def test_the_acceptance_divides_f2_and_only_f2():
     )
 
 
+def test_joint_lorentz_rod_factor_uses_the_count_quadrature():
+    """Correlated factors are averaged as a product on a nonuniform axis."""
+    axis = np.array([-0.5, -0.2, 0.0, 0.1, 0.5])
+    curve = np.full(axis.shape, 10.0)
+    lorentz = np.array([[1.0, 1.4, 2.0, 2.5, 4.0]])
+    rod = np.array([[4.0, 2.5, 2.0, 1.4, 1.0]])
+    result = _compute_rocking_integration(
+        np.array([0.0]),
+        axis,
+        curve[None, :],
+        np.sqrt(curve)[None, :],
+        _roi_info(0.0, {"sig_1": (-0.5, 0.5)}),
+        {},
+        True,
+        False,
+        C_Lor=lorentz,
+        C_rod=rod,
+        angle_unit="rad",
+    )
+
+    joint = _trapz_impl((lorentz * rod)[0], axis) / (axis[-1] - axis[0])
+    separate = (
+        _trapz_impl(lorentz[0], axis)
+        * _trapz_impl(rod[0], axis)
+        / (axis[-1] - axis[0]) ** 2
+    )
+    assert not np.isclose(joint, separate)
+    np.testing.assert_allclose(result["F2_hkl"], result["croibg"] / joint)
+
+    reversed_result = _compute_rocking_integration(
+        np.array([0.0]),
+        axis[::-1],
+        curve[None, ::-1],
+        np.sqrt(curve)[None, ::-1],
+        _roi_info(0.0, {"sig_1": (-0.5, 0.5)}),
+        {},
+        True,
+        False,
+        C_Lor=lorentz[:, ::-1],
+        C_rod=rod[:, ::-1],
+        angle_unit="rad",
+    )
+    np.testing.assert_allclose(reversed_result["F2_hkl"], result["F2_hkl"])
+    np.testing.assert_allclose(
+        reversed_result["F2_hkl_errors"], result["F2_hkl_errors"]
+    )
+
+
+def test_polarization_only_rocking_branch_controls_f2():
+    """Solid-angle changes remain in intensity but cannot enter new F2."""
+    axis = np.linspace(-0.5, 0.5, 101)
+    photon_curve = np.full((1, axis.size), 10.0)
+    intensity_curve = photon_curve * 2.5
+    errors = np.sqrt(photon_curve)
+    common = dict(
+        s_array=np.array([0.0]),
+        axis=axis,
+        croibg_errors_curves=errors,
+        roi_info=_roi_info(0.0, {"sig_1": (-0.4, 0.4)}),
+        aux={},
+        use_lorentz=True,
+        use_footprint=False,
+        C_Lor=np.ones_like(photon_curve),
+        C_rod=np.ones_like(photon_curve),
+        ctr_croibg_curves=photon_curve,
+        ctr_croibg_errors_curves=errors,
+        angle_unit="rad",
+    )
+
+    with_solid_angle = _compute_rocking_integration(
+        croibg_curves=intensity_curve, **common
+    )
+    without = _compute_rocking_integration(
+        croibg_curves=photon_curve, **common
+    )
+
+    np.testing.assert_allclose(
+        with_solid_angle["croibg"], 2.5 * without["croibg"]
+    )
+    np.testing.assert_allclose(with_solid_angle["F2_hkl"], without["F2_hkl"])
+    np.testing.assert_allclose(
+        with_solid_angle["F2_hkl_errors"], without["F2_hkl_errors"]
+    )
+
+
 class _RowOnlyDetector:
     """A detector whose exit angle depends only on pyFAI dimension 1.
 

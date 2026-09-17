@@ -128,6 +128,8 @@ def _compute_rocking_integration(
     C_norm=1.0,
     detector_acceptance=None,
     solid_angle_mean=None,
+    ctr_croibg_curves=None,
+    ctr_croibg_errors_curves=None,
     angle_unit="deg",
     progress_callback=None,
     should_cancel=None,
@@ -195,6 +197,15 @@ def _compute_rocking_integration(
         detector obliquity in a structure factor even though it is what a
         broad, non-rod feature wants on its intensity. ``None`` when the
         correction was not applied.
+    :param ctr_croibg_curves:
+        Optional polarization-only per-image ROI curves for new extractions,
+        with the same shape as ``croibg_curves``. When supplied, ``F2_hkl``
+        is derived from this branch while the saved intensity outputs retain
+        ``croibg_curves``. Legacy curves omit it and keep the historical
+        solid-angle compensation path.
+    :param ctr_croibg_errors_curves:
+        One-sigma errors paired with ``ctr_croibg_curves``. Both CTR arrays
+        must be supplied together.
     :param str angle_unit:
         Unit of ``axis``, ``'deg'`` or ``'rad'``. The published expressions
         integrate the rocking angle in radian; ``'deg'`` converts the integral
@@ -215,6 +226,10 @@ def _compute_rocking_integration(
         ``use_lorentz`` is ``True``, ``F2_hkl`` and ``F2_hkl_errors``.
     :rtype: dict
     """
+    if (ctr_croibg_curves is None) != (ctr_croibg_errors_curves is None):
+        raise ValueError(
+            "ctr_croibg_curves and ctr_croibg_errors_curves must be given together"
+        )
     int_data = {}
     for roikey in roi_info:
         if roikey.startswith("sig") or roikey.startswith("bg"):
@@ -227,6 +242,7 @@ def _compute_rocking_integration(
                 "C_norm": [],
                 "C_Lor": [],
                 "C_rod": [],
+                "C_Lorentz_rod": [],
                 "C_flux_on_sample": [],
                 "C_illum_area": [],
                 "auxillary": dict((a, []) for a in aux),
@@ -271,8 +287,23 @@ def _compute_rocking_integration(
                 int_data[roikey]["C_norm"].append(1.0)
 
             if use_lorentz:
-                int_data[roikey]["C_Lor"].append(np.mean(C_Lor[i][roi_slice]))
-                int_data[roikey]["C_rod"].append(np.mean(C_rod[i][roi_slice]))
+                lorentz_roi = np.asarray(C_Lor[i][roi_slice], dtype=float)
+                rod_roi = np.asarray(C_rod[i][roi_slice], dtype=float)
+
+                def interval_mean(values):
+                    if values.size < 2 or int_interval == 0.0:
+                        return float(np.mean(values))
+                    return float(
+                        _trapz_impl(values, roi_axis)
+                        * sign_interval
+                        / int_interval
+                    )
+
+                int_data[roikey]["C_Lor"].append(interval_mean(lorentz_roi))
+                int_data[roikey]["C_rod"].append(interval_mean(rod_roi))
+                int_data[roikey]["C_Lorentz_rod"].append(
+                    interval_mean(lorentz_roi * rod_roi)
+                )
 
             if use_footprint:
                 int_data[roikey]["C_flux_on_sample"].append(
@@ -344,6 +375,7 @@ def _compute_rocking_integration(
     sig_interval = np.zeros(s_array.size, dtype=float)
     C_Lorentz = np.zeros(s_array.size, dtype=float)
     C_rod_intersect = np.zeros(s_array.size, dtype=float)
+    C_Lorentz_rod = np.zeros(s_array.size, dtype=float)
     aux_cnts_integral = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
     aux_cnts_integral_mean = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
     aux_cnts_sum = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
@@ -374,6 +406,9 @@ def _compute_rocking_integration(
                     int_data[roikey]["int_interval"] / sig_interval
                 )
                 C_rod_intersect += int_data[roikey]["C_rod"] * (
+                    int_data[roikey]["int_interval"] / sig_interval
+                )
+                C_Lorentz_rod += int_data[roikey]["C_Lorentz_rod"] * (
                     int_data[roikey]["int_interval"] / sig_interval
                 )
 
@@ -468,16 +503,44 @@ def _compute_rocking_integration(
         intensity_errors = measurement_corrections.normalized_intensity(
             croibg_errors, angle_unit=angle_unit
         )
-        # The mode components are interval-weighted means over the rocking
-        # interval, which is why they are multiplied here rather than asking
-        # measurement.angular_factor to rebuild eta from point angles.
-        denominator = C_Lorentz * C_rod_intersect
+        # The joint factor is integrated with the same trapezoidal angular
+        # quadrature as the counts. Multiplying independently averaged
+        # Lorentz and rod terms leaves a covariance residual whenever both
+        # vary through the rocking window.
+        denominator = C_Lorentz_rod
         if detector_acceptance is not None:
             denominator = denominator * np.asarray(detector_acceptance, dtype=float)
         if solid_angle_mean is not None:
             denominator = denominator * np.asarray(solid_angle_mean, dtype=float)
         result["F2_hkl"] = intensity / denominator
         result["F2_hkl_errors"] = intensity_errors / denominator
+
+        if ctr_croibg_curves is not None:
+            # New extractions carry a polarization-only curve made from the
+            # same base signal. Re-run the pure aggregation on that branch so
+            # signal/background windows, nonuniform or reversed angular
+            # quadrature and error propagation stay identical. No separately
+            # estimated solid-angle mean enters this path.
+            ctr_result = _compute_rocking_integration(
+                s_array,
+                axis,
+                ctr_croibg_curves,
+                ctr_croibg_errors_curves,
+                roi_info,
+                aux,
+                use_lorentz,
+                use_footprint,
+                C_Lor=C_Lor,
+                C_rod=C_rod,
+                C_flux_on_sample=C_flux_on_sample,
+                C_illum_area=C_illum_area,
+                C_norm=C_norm,
+                detector_acceptance=detector_acceptance,
+                solid_angle_mean=None,
+                angle_unit=angle_unit,
+            )
+            result["F2_hkl"] = ctr_result["F2_hkl"]
+            result["F2_hkl_errors"] = ctr_result["F2_hkl_errors"]
 
     return result
 
@@ -1767,9 +1830,15 @@ class RockingPeakIntegrator(qt.QMainWindow):
             detector_acceptance, acceptance_applied = self._rocking_acceptance(
                 detector, cnters, x, y
             )
-            solid_angle_mean, solid_angle_compensated = (
-                self._rocking_solid_angle_mean(detector, scangroup, cnters, x, y)
-            )
+            # New extractions carry their polarization-only CTR branch
+            # directly. The separately estimated solid-angle compensation is
+            # retained only for legacy database files that lack that branch.
+            if "ctr_croibg" not in curves:
+                solid_angle_mean, solid_angle_compensated = (
+                    self._rocking_solid_angle_mean(
+                        detector, scangroup, cnters, x, y
+                    )
+                )
 
         self.database.nxfile[self._currentRoInfo["name"] + "/integration/"]
         roi_info = h5todict(
@@ -1796,6 +1865,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
             C_norm=C_norm,
             detector_acceptance=detector_acceptance,
             solid_angle_mean=solid_angle_mean,
+            ctr_croibg_curves=curves.get("ctr_croibg"),
+            ctr_croibg_errors_curves=curves.get("ctr_croibg_errors"),
             angle_unit="deg",
             progress_callback=progress.update,
             should_cancel=progress.wasCanceled,
@@ -1925,6 +1996,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 "@normalization_applied": ",".join(normalization_applied) or "none",
                 "@acceptance_applied": bool(acceptance_applied),
                 "@solid_angle_compensated": bool(solid_angle_compensated),
+                "@photon_curve_used": "ctr_croibg" in curves,
                 "@active_area_applied": bool(self.footprintButton.isChecked()),
             }
             if detector_acceptance is not None:
@@ -2068,6 +2140,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
             "croibg": cnters["croibg"][()],
             "croibg_errors": cnters["croibg_errors"][()],
         }
+        if "ctr_croibg" in cnters and "ctr_croibg_errors" in cnters:
+            curve["ctr_croibg"] = cnters["ctr_croibg"][()]
+            curve["ctr_croibg_errors"] = cnters["ctr_croibg_errors"][()]
         return curve
 
     # def onAnchorBtnToggled(self, state):

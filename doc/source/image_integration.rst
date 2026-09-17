@@ -215,23 +215,32 @@ diffuse feature**, where a differential cross section rather than an
 integrated rod intensity is what is wanted. What it does is scoped:
 
 * it scales the **intensity** counters, as before;
-* it is measured over the same regions of interest and **divided back out**
-  when ``F2_hkl`` is formed, so a structure factor is the same number whether
-  or not the switch was on;
+* a new extraction builds a **separate CTR photon curve** from the same
+  background-subtracted signal using the polarization correction but not the
+  solid-angle correction. ``F2_hkl`` uses that direct curve, so it is the same
+  number whether or not the switch was on, without dividing one independently
+  estimated region mean by another;
 * the **reciprocal-space reconstruction** keeps applying it and does not
   divide it out, since that path forms a differential cross section per pixel.
 
-For a rocking scan the correction is applied when the curves are extracted, so
-whether to remove it again is read from the configuration stored with the
-scan rather than from the current state of the switch. If that cannot be
-established -- an older database -- the integration warns and leaves it in
+For a rocking scan both curves are saved when the images are extracted. An
+older database has no direct photon curve, so its reduction retains the scalar
+solid-angle fallback read from the configuration stored with the scan. If the
+old correction state cannot be established, integration warns and leaves it in
 rather than guessing.
+
+The Lorentz and rod-intersection terms can both vary through a rocking window.
+They are therefore multiplied point by point and averaged with the same
+trapezoidal angular quadrature as the counts, rather than multiplying two
+separately averaged factors. This remains the explicit region-mean
+approximation used by extraction; it does not claim a signal-weighted
+per-pixel correction.
 
 Each integrated rocking scan stores a ``reduction`` group beside ``F2_hkl``
 recording the mode, the angle unit, which normalizations were applied, the
-acceptance that was divided out, whether the solid-angle correction was
-compensated and the active-area assumption, so that a saved rod can be placed
-on a common scale after the fact.
+acceptance that was divided out, whether the direct photon curve or legacy
+solid-angle compensation was used, and the active-area assumption, so that a
+saved rod can be placed on a common scale after the fact.
 
 What is still **not** on this scale is the absolute one: ``F2_hkl`` is
 proportional to :math:`|F_{hkl}|^2` with one common, arbitrary constant.
@@ -413,6 +422,11 @@ When ``Use pixel mask`` is enabled for integration, masked pixels are excluded
 from center ROI sums, background ROI sums, background-image counters, fitted
 background samples, and correction counters unless pixel repair explicitly
 repairs a tiny signal-ROI defect as described below.
+
+When only some center-ROI pixels remain valid, orGUI retains the established
+nominal-area/valid-pixel scaling and emits a warning. That scaling preserves a
+flat intensity density; it is not a physical reconstruction of peak intensity
+hidden by a detector gap or mask.
 
 .. _pixel-repair-algorithm:
 
