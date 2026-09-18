@@ -425,6 +425,42 @@ def test_apply_to_gui_sets_reconstruction_normalization_attributes():
     assert gui.reconstruction_monitor_corrections == ("mondio",)
 
 
+def test_apply_to_gui_peak_angles_use_the_loaded_orientation():
+    """Loaded U must reach ``angles``, which calcReflection reads."""
+    config = _make_config()
+    rotation = np.deg2rad(68.0)
+    config.ub_calculator.setU(
+        np.array(
+            [
+                [np.cos(rotation), -np.sin(rotation), 0.0],
+                [np.sin(rotation), np.cos(rotation), 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+    )
+    stale = HKLVlieg.UBCalculator(config.unit_cell, 70.0)
+    stale.defaultU()
+    gui = SimpleNamespace(
+        ubcalc=SimpleNamespace(
+            detectorCal=config.detector,
+            crystal=config.unit_cell,
+            ubCal=stale,
+            angles=HKLVlieg.VliegAngles(stale),
+        ),
+    )
+
+    config.apply_to_gui(gui)
+
+    hkl = np.array([[1.0], [0.0], [1.0]])
+    expected = HKLVlieg.VliegAngles(config.ub_calculator).anglesZmode(
+        hkl, config.mu, "in", config.chi, config.phi
+    )
+    np.testing.assert_allclose(
+        gui.ubcalc.angles.anglesZmode(hkl, config.mu, "in", config.chi, config.phi),
+        expected,
+    )
+
+
 def test_total_flux_state_survives_before_its_widgets_exist():
     """Stage-5 programmatic settings round-trip through the GUI snapshot."""
     config = _make_config()

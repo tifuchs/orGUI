@@ -425,7 +425,13 @@ def _nx_group(mapping, units=None):
 
 
 def _plain(value):
-    """Strip the numpy and bytes wrappers that HDF5 hands back."""
+    """Strip the numpy and bytes wrappers that HDF5 hands back.
+
+    Live datasets with two or more dimensions (per-curve, per-frame arrays)
+    are returned unread so callers can slice one curve lazily.
+    """
+    if isinstance(value, h5py.Dataset):
+        return value if value.ndim >= 2 else _plain(value[()])
     if isinstance(value, bytes):
         return value.decode()
     if isinstance(value, np.ndarray):
@@ -1250,6 +1256,9 @@ class ConfigData:
             ub_widget.crystal, self.ub_calculator.getEnergy()
         )
         ub_widget.ubCal.setU(self.ub_calculator.getU())
+        # calcReflection reads the orientation through ``angles``; it must
+        # not keep the replaced calculator (peak positions used the old U).
+        ub_widget.angles = HKLVlieg.VliegAngles(ub_widget.ubCal)
         ub_widget.mu = self.mu
         ub_widget.chi = self.chi
         ub_widget.phi = self.phi

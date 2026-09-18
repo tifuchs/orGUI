@@ -863,6 +863,48 @@ def test_versioned_total_flux_curve_uses_stored_divisors_once(tmp_path):
     assert curves["illumination_action"] == "applied"
 
 
+def test_one_total_flux_curve_is_read_lazily_in_its_stored_state(tmp_path):
+    """Selecting a curve reads its row only and ignores a pending action."""
+    base = np.array([[80.0, 96.0, 120.0], [40.0, 48.0, 60.0]])
+    variance = np.array([[16.0, 36.0, 64.0], [4.0, 9.0, 16.0]])
+    q = np.array([2.0, 4.0, 5.0])
+    h = np.array([[0.5, 0.25, 1.0], [0.8, 0.4, 0.2]])
+    record = CurveCorrectionRecord(
+        algorithm="framewise_ctr_total_flux_v1",
+        output_quantity="rocking_ctr_photon_curve",
+        scale_convention="total_flux_calibrated",
+        normalization_status="applied",
+        normalization_divisor=q,
+        normalization_unit="photons",
+        illumination_status="applied",
+        illumination_divisor=h,
+        illumination_convention="total_flux_H",
+        base_croibg=base,
+        base_croibg_variance=variance,
+    )
+    path = tmp_path / "lazy_curve.h5"
+    dicttonx(
+        {"scan": {CURVE_CORRECTIONS_GROUP: curve_correction_record_to_nxdict(record)}},
+        path,
+    )
+
+    with h5py.File(path, "r") as handle:
+        integrator = SimpleNamespace(
+            _currentRoInfo={"name": "/scan", "axisname": "mu", "axis": np.arange(3.0)},
+            database=SimpleNamespace(nxfile=handle),
+            footprint_action=FOOTPRINT_APPLY,
+            replacement_illumination=None,
+        )
+        stored = RockingPeakIntegrator._storedCurveCorrectionRecord(handle["scan"])
+        assert isinstance(stored.base_croibg, h5py.Dataset)
+        assert isinstance(stored.illumination_divisor, h5py.Dataset)
+        curve = RockingPeakIntegrator.get_all_ro_curves(integrator, 1)
+
+    np.testing.assert_allclose(curve["croibg"], base[1] / q / h[1])
+    np.testing.assert_allclose(curve["croibg_errors"], np.sqrt(variance[1]) / q / h[1])
+    assert curve["illumination_action"] == "applied"
+
+
 def test_unknown_legacy_curve_only_allows_keep_and_requests_reextraction():
     """Unknown provenance cannot expose apply/remove as safe operations."""
     state = RockingPeakIntegrator._correctionUiState(

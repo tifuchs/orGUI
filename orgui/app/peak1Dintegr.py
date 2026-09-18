@@ -31,6 +31,7 @@ __license__ = "MIT License"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
+import dataclasses
 import json
 import logging
 import sys
@@ -992,20 +993,18 @@ class RockingPeakIntegrator(qt.QMainWindow):
         }
 
     @staticmethod
-    def _storedCurveCorrectionRecord(h5_obj, nxfile):
-        """Return a parsed stored record, or ``None`` when it is incomplete."""
+    def _storedCurveCorrectionRecord(h5_obj):
+        """Return a parsed stored record, or ``None`` when it is incomplete.
+
+        Parsed from the live group: 2-D per-curve arrays stay unread
+        ``h5py.Dataset`` objects, valid while the database file is open.
+        """
         if CURVE_CORRECTIONS_GROUP not in h5_obj:
             return None
-        record_group = h5_obj[CURVE_CORRECTIONS_GROUP]
         try:
-            record_dict = h5todict(nxfile, record_group.name)
-            record_dict["@orgui_schema_version"] = record_group.attrs.get(
-                "orgui_schema_version", 0
+            return curve_correction_record_from_nxdict(
+                h5_obj[CURVE_CORRECTIONS_GROUP]
             )
-            record_dict["@orgui_curve_contract"] = record_group.attrs.get(
-                "orgui_curve_contract", ""
-            )
-            return curve_correction_record_from_nxdict(record_dict)
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -1024,9 +1023,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             if name in self.database.nxfile:
                 h5_obj = self.database.nxfile[name]
                 present = CURVE_CORRECTIONS_GROUP in h5_obj
-                record = self._storedCurveCorrectionRecord(
-                    h5_obj, self.database.nxfile
-                )
+                record = self._storedCurveCorrectionRecord(h5_obj)
         state = self._correctionUiState(record, present)
         self._activeCorrectionRecord = record
         self._activeCorrectionUiState = state
@@ -1106,7 +1103,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.footprint_action = action
         self.replacement_illumination = None
         self.replacement_illumination_convention = None
-        record = self._storedCurveCorrectionRecord(h5_obj, self.database.nxfile)
+        record = self._storedCurveCorrectionRecord(h5_obj)
         if (
             action == FOOTPRINT_APPLY
             and record is not None
@@ -1125,7 +1122,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 )
             self.replacement_illumination = (
                 activearea_corrections.illumination_divisor(
-                    record.alpha,
+                    np.asarray(record.alpha),
                     self.integrationCorrection.sampleLength(),
                     self.integrationCorrection.beamProfile(),
                     horizontal_fraction=horizontal,
@@ -2491,46 +2488,60 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
     def get_ro_curve(self, idx):
         """Return one rocking curve under its stored correction contract."""
-        curves = self.get_all_ro_curves()
-        curve = {
-            "axisname": curves["axisname"],
-            "axis": curves["axis"],
-            "croibg": curves["croibg"][idx],
-            "croibg_errors": curves["croibg_errors"][idx],
-        }
-        return curve
+        return self.get_all_ro_curves(idx)
 
-    def get_all_ro_curves(self):
+    def get_all_ro_curves(self, idx=None):
         """Return rocking curves without silently changing their scale.
 
         New total-flux records are reconstructed from the immutable base
         curve and the exact stored Q/H divisors. Legacy records retain the
         historical ``rois`` path and are normalized later by
         :meth:`_rocking_normalization`.
+
+        :param int or None idx: Read only this curve. It is shown in its
+            stored footprint state; a pending footprint action is applied
+            only by :meth:`integrate`.
         """
         name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
         if CURVE_CORRECTIONS_GROUP in h5_obj:
-            record = RockingPeakIntegrator._storedCurveCorrectionRecord(
-                h5_obj, self.database.nxfile
-            )
+            record = RockingPeakIntegrator._storedCurveCorrectionRecord(h5_obj)
             if record is not None and record.algorithm.startswith(
                 "framewise_ctr_total_flux_"
             ):
+                if idx is None:
+                    footprint = {
+                        "footprint_action": getattr(
+                            self, "footprint_action", FOOTPRINT_KEEP
+                        ),
+                        "replacement_illumination": getattr(
+                            self, "replacement_illumination", None
+                        ),
+                        "replacement_convention": getattr(
+                            self, "replacement_illumination_convention", None
+                        ),
+                        "allow_convention_change": bool(
+                            getattr(
+                                self, "allow_illumination_convention_change", False
+                            )
+                        ),
+                    }
+                else:
+                    # (curve, frame) arrays: read one row; 1-D divisors are
+                    # shared per frame and broadcast unchanged.
+                    record = dataclasses.replace(record, **{
+                        field: getattr(record, field)[idx]
+                        for field in (
+                            "base_croibg",
+                            "base_croibg_variance",
+                            "normalization_divisor",
+                            "illumination_divisor",
+                        )
+                        if np.ndim(getattr(record, field)) == 2
+                    })
+                    footprint = {}
                 curve, errors, action, convention = corrected_curve_from_record(
-                    record,
-                    footprint_action=getattr(
-                        self, "footprint_action", FOOTPRINT_KEEP
-                    ),
-                    replacement_illumination=getattr(
-                        self, "replacement_illumination", None
-                    ),
-                    replacement_convention=getattr(
-                        self, "replacement_illumination_convention", None
-                    ),
-                    allow_convention_change=bool(
-                        getattr(self, "allow_illumination_convention_change", False)
-                    ),
+                    record, **footprint
                 )
                 return {
                     "axisname": self._currentRoInfo["axisname"],
@@ -2543,15 +2554,16 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 }
 
         cnters = self._legacy_rocking_curve_group(h5_obj)
+        rows = () if idx is None else idx
         curve = {
             "axisname": self._currentRoInfo["axisname"],
             "axis": self._currentRoInfo["axis"],
-            "croibg": cnters["croibg"][()],
-            "croibg_errors": cnters["croibg_errors"][()],
+            "croibg": cnters["croibg"][rows],
+            "croibg_errors": cnters["croibg_errors"][rows],
         }
         if "ctr_croibg" in cnters and "ctr_croibg_errors" in cnters:
-            curve["ctr_croibg"] = cnters["ctr_croibg"][()]
-            curve["ctr_croibg_errors"] = cnters["ctr_croibg_errors"][()]
+            curve["ctr_croibg"] = cnters["ctr_croibg"][rows]
+            curve["ctr_croibg_errors"] = cnters["ctr_croibg_errors"][rows]
         return curve
 
     # def onAnchorBtnToggled(self, state):
