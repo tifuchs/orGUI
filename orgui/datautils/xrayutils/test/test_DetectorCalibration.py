@@ -28,6 +28,7 @@ __version__ = "1.0.0"
 __maintainer__ = "Timo Fuchs"
 __email__ = "fuchs@physik.uni-kiel.de"
 
+import json
 import unittest
 
 from .. import DetectorCalibration, HKLVlieg
@@ -119,6 +120,16 @@ class TestRWDetector2D_SXRD(unittest.TestCase):
         self.check_sxrd_equal(othersxrddet)
 
         os.remove(self._nxfilename)
+
+    def test_nx_shape_restores_python_ints(self):
+        """h5 configs store the shape as int64; it must not leak numpy
+        scalars into consumers such as ``json.dumps``."""
+        other = DetectorCalibration.Detector2D_SXRD()
+        other.fromNXdict(self.sxrddet.toNXdict())
+        for shape in (other.detector.shape, other.detector.max_shape):
+            self.assertEqual(shape, tuple(self.sxrddet.detector.shape))
+            self.assertTrue(all(type(n) is int for n in shape))
+        json.dumps(other.detector.shape)
 
     def _destruct_file(self, filename):
         if os.path.exists(filename):

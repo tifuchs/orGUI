@@ -332,6 +332,14 @@ def _format_size(size_bytes):
         size_bytes /= 1024
 
 
+def _json_display(value):
+    # Numpy scalars/arrays leak in from h5-loaded configs; the summary is
+    # display-only, so fall back to their Python equivalents or repr.
+    if isinstance(value, (np.generic, np.ndarray)):
+        return value.tolist()
+    return str(value)
+
+
 class _ReconstructionCancelled(RuntimeError):
     """Signal cancellation between reconstruction tasks."""
 
@@ -1727,7 +1735,9 @@ class ReconstructionDialog(qt.QDialog):
                 self.experiment_summary.setPlainText("No active scan.")
                 return
             config = ConfigData.from_gui(self.orgui)
-            detector_shape = self.orgui.ubcalc.detectorCal.detector.shape
+            detector_shape = tuple(
+                int(n) for n in self.orgui.ubcalc.detectorCal.detector.shape
+            )
             summary = {
                 "scan": getattr(
                     self.orgui.fscan,
@@ -1745,7 +1755,9 @@ class ReconstructionDialog(qt.QDialog):
                 "memory_MiB": self.orgui.maxMemory,
             }
             self.experiment_summary.setPlainText(
-                json.dumps(summary, indent=2, sort_keys=True)
+                json.dumps(
+                    summary, indent=2, sort_keys=True, default=_json_display
+                )
             )
             stem = "".join(
                 character if character.isalnum() or character in "-_" else "_"

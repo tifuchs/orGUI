@@ -433,10 +433,11 @@ class Detector2D_SXRD(geometry.Geometry):
         if "detector" in config:
             config["detector"] = str(config["detector"])
         self.set_config(config)
+        # Stored as an int64 array; restore plain ints like pyFAI itself uses.
         if max_shape is not None:
-            self.detector.max_shape = tuple(max_shape)
+            self.detector.max_shape = tuple(int(n) for n in max_shape)
         if shape is not None:
-            self.detector.shape = tuple(shape)
+            self.detector.shape = tuple(int(n) for n in shape)
         self.setAzimuthalReference(detdict["azimuth"])
         self.setPolarization(detdict["polarization_axis"], detdict["polarization"])
         # Calibrations written before the moveable detector arm carry no
