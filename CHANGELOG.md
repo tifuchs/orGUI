@@ -1483,6 +1483,35 @@ Reciprocal-space reconstruction:
   is now fully retired before its replacement starts, and any leftover
   signals are cleared while nothing is reading the queue. Mapped output
   is unaffected.
+- **Reciprocal-space mapping now discards a whole block of detector at a
+  time when it cannot reach the output volume.** The kernel could already
+  prove that an individual pixel misses the grid, but only one pixel at a
+  time, so every frame paid that proof for all 6.2 million of them --
+  including the roughly half of a full rotation whose frames reach the
+  selected volume nowhere at all. The same test now runs once per work
+  block first, and a block it rejects is never opened. On the reference
+  job a frame that contributes nothing became 5.3x faster to reject and a
+  frame that does contribute 1.25x faster, 1.46x averaged over the scan;
+  a block that cannot be rejected costs about 0.1% extra. Mapped output
+  is identical, checked record for record on 21 frames across the scan.
+  The profile reports `skipped_bricks`, and `valid_pixels` now counts
+  only pixels actually visited. Applies to flat detectors without a
+  distortion spline.
+- **A reciprocal-space mapping run no longer reads frames that cannot
+  reach the reconstruction volume.** Whether a frame's detector can reach
+  the selected volume at all depends only on the exposure's angles, the
+  detector geometry and the volume, so it is now decided for the whole
+  scan before the first frame is opened. A frame ruled out costs no read,
+  no correction and no mapping; on the reference job, a small volume
+  crossed by a full rotation, 1516 of 3651 frames are ruled out, and
+  deciding that for the whole scan takes 0.084 s. The test only ever
+  rules a frame *out*, never in, so a frame that is kept costs exactly
+  what it did before. Every one of those 1516 frames was mapped to
+  confirm it produces no records. Skipped frames still count toward their
+  checkpoint, so resuming an interrupted job is unaffected, and progress
+  still reaches 100%. A volume that no frame reaches now fails with the
+  existing empty-result error rather than mapping nothing. Set
+  `ORGUI_NO_FRAME_SKIP=1` to disable.
 
 
 ## [1.5.0] (2026-06-07)

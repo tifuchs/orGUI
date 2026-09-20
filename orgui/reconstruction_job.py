@@ -35,6 +35,7 @@ from .datautils.xrayutils.reconstruction import (
     _calibration_probe_all_grids,
     _detector_corner_rays,
     _discover_checkpoint_state,
+    _empty_batch,
     _files_per_job,
     _finalize_reconstruction,
     _kernel_for_grid,
@@ -3123,6 +3124,112 @@ def _frame_groups(frame_range, router, grid_names, frames_per_group):
     return groups
 
 
+FRAME_SKIP_ENV_VAR = "ORGUI_NO_FRAME_SKIP"
+"""Set to disable retiring frames that provably reach no grid.
+
+An escape hatch and an A/B switch, not a tuning knob: the two arms must
+produce identical records, and this is how that is checked on real data.
+"""
+
+
+def _retire_unreachable_groups(
+    frame_groups,
+    spec,
+    config,
+    bounds,
+    detector_tiles,
+    ray_arrays,
+    router,
+    grid_names,
+    *,
+    completed_images,
+    total_images,
+    progress,
+):
+    """Drop frame groups that cannot reach any output grid.
+
+    A small volume swept through a full rotation is only crossed at some
+    sample angles, so a large share of a scan's frames contribute
+    nothing. Deciding that needs no pixel data -- only the exposure's
+    angle bounds, the detector's rays and the grid -- so it can be
+    settled here, before a single frame is read, and those frames then
+    cost no read, no correction and no kernel call at all.
+
+    The test is
+    :meth:`ReconstructionKernel.frames_reach_grid`, the same reject the
+    brick loop runs, applied to the whole tile and then quartered. It is
+    one-directional: a frame it rejects provably maps nothing, while a
+    frame it accepts may still map nothing and simply costs what it
+    always did. Verified on the reference job by mapping all 1516
+    rejected frames of 3651 and confirming every one produced zero
+    records (``doc/design/reciprocal_space_brick_reject.md``).
+
+    A retired group is still announced to ``router`` as covered, with an
+    empty batch. The checkpoint countdown and the ``frames_covered``
+    attribute that makes a part resumable both count frames, so a group
+    that vanished silently would leave its checkpoint short, unflushed
+    and unresumable for the rest of the run.
+
+    Groups are retired whole. A group whose frames are not all
+    unreachable is mapped as before, so grouping never costs coverage.
+
+    :param completed_images:
+        Frames already mapped, for the progress report.
+    :returns:
+        ``(groups_to_map, completed_images)`` with the retired groups'
+        frames added to ``completed_images``.
+    """
+    if not frame_groups or os.environ.get(FRAME_SKIP_ENV_VAR):
+        return frame_groups, completed_images
+    kernels = _build_kernels(spec, config.ub_calculator, threads=1)
+    probe = next(iter(kernels.values()), None)
+    if probe is None or not hasattr(probe, "frames_reach_grid"):
+        # An extension older than this filter: map everything, as before.
+        return frame_groups, completed_images
+
+    started = time.monotonic()
+    angles_start = np.ascontiguousarray(bounds[:, 0])
+    angles_end = np.ascontiguousarray(bounds[:, 1])
+    reaches = np.zeros(bounds.shape[0], dtype=bool)
+    for grid_name in grid_names:
+        kernel = kernels[grid_name]
+        for detector_tile in detector_tiles:
+            reaches |= kernel.frames_reach_grid(
+                ray_arrays[detector_tile], angles_start, angles_end
+            )
+
+    kept = []
+    retired_frames = 0
+    for group in frame_groups:
+        if reaches[list(group)].any():
+            kept.append(group)
+            continue
+        for grid_name in grid_names:
+            router.route(
+                grid_name, group[0], _empty_batch(), frames=len(group)
+            )
+        retired_frames += len(group)
+        completed_images += len(group)
+
+    if retired_frames:
+        logger.info(
+            "frame reach filter: %d of %d frame(s) reach no output grid "
+            "and will not be read (%.1f%%, decided in %.2f s)",
+            retired_frames,
+            retired_frames + sum(len(group) for group in kept),
+            100.0 * retired_frames / max(1, retired_frames
+                                         + sum(len(g) for g in kept)),
+            time.monotonic() - started,
+        )
+        if progress is not None:
+            progress(
+                completed_images,
+                total_images + 1,
+                f"Skipped {retired_frames} frame(s) that reach no grid",
+            )
+    return kept, completed_images
+
+
 def _map_frame_groups_streamed(
     spec,
     scan,
@@ -3721,7 +3828,33 @@ def _map_pending_ranges(
         )
     ]
 
+    frame_groups, completed_images = _retire_unreachable_groups(
+        frame_groups,
+        spec,
+        config,
+        bounds,
+        detector_tiles,
+        ray_arrays,
+        router,
+        grid_names,
+        completed_images=completed_images,
+        total_images=total_images,
+        progress=progress,
+    )
+
     routed_before = getattr(router, "routed_records", 0)
+
+    if not frame_groups:
+        # Every group was retired, so there is nothing to schedule -- and
+        # the per-frame scheduler must not be started empty: its
+        # completion signal is raised by a delivered group, so with none
+        # to deliver the coordinator would wait for it forever. The
+        # checkpoints are already complete, having been routed above; all
+        # that is left is to decide whether an empty result is legitimate.
+        _fail_if_nothing_was_routed(
+            router, routed_before, total_images, progress
+        )
+        return
 
     if frames_per_group > 1:
         group_workers, group_threads, group_depth = _group_pipeline_layout(

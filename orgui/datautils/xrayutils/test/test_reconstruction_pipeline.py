@@ -785,6 +785,158 @@ def test_map_pending_ranges_automatic_mode_rebalances_and_stays_stable(
     assert len(set(compute_pool_sizes)) == len(compute_pool_sizes)
 
 
+def test_retired_groups_still_complete_their_checkpoint(tmp_path, monkeypatch):
+    """A frame skipped for geometry must still count toward its checkpoint.
+
+    A checkpoint flushes when its remaining-frame countdown reaches zero,
+    and a part is resumable only when its parts' ``frames_covered`` sum to
+    the planned frame count. Both count frames, not ``route()`` calls, so
+    a group that simply vanished would leave its checkpoint one short:
+    never flushed, never written, and on the next run not resumable
+    either. Retiring a group therefore announces it to the router with an
+    empty batch rather than dropping it.
+    """
+    frame_count = 8
+    reachable = 3
+    spec = _spec()
+    grid_name = spec.grids[0].grid_name
+    router = _router({grid_name: [(0, frame_count)]}, tmp_path=tmp_path)
+    bounds = np.zeros((frame_count, 2, 4), dtype=np.float64)
+    tile = (0, 1, 0, 1)
+
+    class _StubKernel:
+        """Reports only the first ``reachable`` frames as reaching."""
+
+        def frames_reach_grid(
+            self, corner_rays, angles_start, angles_end, minimum_cell=64
+        ):
+            reaches = np.zeros(angles_start.shape[0], dtype=bool)
+            reaches[:reachable] = True
+            return reaches
+
+    monkeypatch.setattr(
+        reconstruction_job_module,
+        "_build_kernels",
+        lambda *a, **k: {grid_name: _StubKernel()},
+    )
+
+    groups = [(frame,) for frame in range(frame_count)]
+    kept, completed = reconstruction_job_module._retire_unreachable_groups(
+        groups,
+        spec,
+        _FakeConfig(),
+        bounds,
+        [tile],
+        {tile: np.zeros((2, 2, 3), dtype=np.float64)},
+        router,
+        [grid_name],
+        completed_images=0,
+        total_images=frame_count,
+        progress=None,
+    )
+
+    assert kept == groups[:reachable]
+    assert completed == frame_count - reachable, (
+        "retired frames must be reported as already done, or progress "
+        "never reaches its total"
+    )
+    # Nothing is written yet: the checkpoint is still short the frames
+    # the caller is about to map.
+    assert router.written == []
+
+    # Map the survivors the way the schedulers would, and the checkpoint
+    # must now be complete and carry every frame.
+    from orgui.datautils.xrayutils.reconstruction import (
+        _empty_batch,
+        _read_checkpoint,
+    )
+
+    for group in kept:
+        router.route(grid_name, group[0], _empty_batch(), frames=len(group))
+
+    assert len(router.written) == 1
+    written = _read_checkpoint(router.written[0])
+    assert written["chunk_id"].size == 0
+    import h5py
+
+    with h5py.File(router.written[0], "r") as stored:
+        covered = int(stored.attrs["frames_covered"])
+    assert covered == frame_count, (
+        "every frame must be accounted for, skipped ones included, or a "
+        "resume will redo this checkpoint"
+    )
+
+
+def test_retiring_every_group_fails_instead_of_waiting_forever(
+    tmp_path, monkeypatch
+):
+    """A grid no frame reaches must raise, not hang.
+
+    The per-frame scheduler's completion signal is raised by a delivered
+    group, so starting it with nothing to deliver leaves the coordinator
+    waiting for a signal that can never come. Before the reach filter no
+    caller could reach that state; retiring every group is exactly how to
+    get there, so the empty case returns before the schedulers start and
+    lets the empty-result guard decide.
+    """
+    frame_count = 4
+    spec = _spec()
+    grid_name = spec.grids[0].grid_name
+    router = _router({grid_name: [(0, frame_count)]}, tmp_path=tmp_path)
+    tile = (0, 1, 0, 1)
+
+    class _NothingReaches:
+        def frames_reach_grid(
+            self, corner_rays, angles_start, angles_end, minimum_cell=64
+        ):
+            return np.zeros(angles_start.shape[0], dtype=bool)
+
+    monkeypatch.setattr(
+        reconstruction_job_module,
+        "_build_kernels",
+        lambda *a, **k: {grid_name: _NothingReaches()},
+    )
+    # The per-frame scheduler is the one at risk: the grouped one ends
+    # itself on an empty dispatch. Without this the test takes the
+    # grouped path and passes whether the guard is there or not.
+    monkeypatch.setattr(
+        reconstruction_job_module, "_choose_frames_per_group", lambda *a, **k: 1
+    )
+
+    failure = []
+
+    def run():
+        try:
+            _map_pending_ranges(
+                spec,
+                _SlowScan(frame_count, delay=0.0),
+                _FakeConfig(),
+                np.zeros((frame_count, 2, 4), dtype=np.float64),
+                [tile],
+                [(0, frame_count)],
+                router,
+                correction_pipeline=_correction,
+                effective_memory=256 * 1024**2,
+                threads_per_image=1,
+                accumulation_budget_bytes=None,
+                total_images=frame_count,
+                completed_images=0,
+                progress=None,
+            )
+        except BaseException as error:  # noqa: BLE001 -- reported below
+            failure.append(error)
+
+    runner = threading.Thread(target=run, daemon=True)
+    runner.start()
+    runner.join(timeout=60)
+    assert not runner.is_alive(), (
+        "_map_pending_ranges hung with nothing to map"
+    )
+    assert failure and isinstance(failure[0], RuntimeError), (
+        f"expected the empty-result guard to fire, got {failure!r}"
+    )
+
+
 def test_drain_surplus_sentinels_removes_only_sentinels():
     """The drain keeps queued work and reports what it took out."""
     from queue import Queue
