@@ -683,6 +683,13 @@ struct BlockProfile {
     // Pixels whose whole footprint was proved to miss the grid, so no
     // subdivision was run for them at all (see pixel_misses_grid).
     std::uint64_t skipped_pixels = 0;
+    // Bricks proved to miss the grid whole, so their pixels were never
+    // visited one by one (see the brick reject in accumulate_brick).
+    // Their pixels are counted in skipped_pixels, but not in
+    // valid_pixels: a rejected brick's mask is never read, since a pixel
+    // that cannot reach the grid contributes nothing whether it is
+    // masked or not.
+    std::uint64_t skipped_bricks = 0;
     std::uint64_t voxel_weights = 0;
     std::uint64_t maximum_weights_per_pixel = 0;
     std::uint64_t unreduced_records = 0;
@@ -1384,7 +1391,96 @@ public:
         return output;
     }
 
+    // Which of many frames can reach this grid through one detector
+    // tile, decided from geometry alone -- no pixel data, so a caller can
+    // ask before reading anything.
+    //
+    // The same reject the brick loop runs, applied top down: a whole tile
+    // is one cell, and a cell that cannot be proved outside is quartered
+    // and its children tried, down to cells of `minimum_cell` pixels. A
+    // frame is reported as reaching as soon as one leaf survives, so a
+    // frame that does reach costs a walk down one branch and a frame that
+    // does not usually costs a single test for the whole tile.
+    //
+    // False is a proof and true is not: a frame reported as reaching may
+    // still map nothing, which only costs the work it would have cost
+    // anyway. A frame reported as missing provably maps nothing, so
+    // skipping it cannot change any output.
+    py::array_t<bool> frames_reach_grid(
+        const FloatArray &corner_rays,
+        const FloatArray &angles_start,
+        const FloatArray &angles_end,
+        const std::size_t minimum_cell = 64
+    ) const {
+        const py::buffer_info ray_info = corner_rays.request();
+        const py::buffer_info start_info = angles_start.request();
+        const py::buffer_info end_info = angles_end.request();
+        if (ray_info.ndim != 3 || ray_info.shape[2] != 3) {
+            throw py::value_error("corner_rays must have shape (rows, columns, 3)");
+        }
+        if (ray_info.shape[0] < 2 || ray_info.shape[1] < 2) {
+            throw py::value_error("corner_rays must cover at least one pixel");
+        }
+        if (
+            start_info.ndim != 2 || start_info.shape[1] != 4
+            || end_info.ndim != 2 || end_info.shape[1] != 4
+            || start_info.shape[0] != end_info.shape[0]
+        ) {
+            throw py::value_error(
+                "angles_start and angles_end must have matching shape (frames, 4)"
+            );
+        }
+        if (minimum_cell < 1) {
+            throw py::value_error("minimum_cell must be positive");
+        }
+        const auto frames = static_cast<std::size_t>(start_info.shape[0]);
+        const auto rows = static_cast<std::size_t>(ray_info.shape[0] - 1);
+        const auto columns = static_cast<std::size_t>(ray_info.shape[1] - 1);
+        const auto *ray_data = static_cast<const double *>(ray_info.ptr);
+        const auto *start_data = static_cast<const double *>(start_info.ptr);
+        const auto *end_data = static_cast<const double *>(end_info.ptr);
+
+        py::array_t<bool> output(static_cast<py::ssize_t>(frames));
+        auto *reaches = static_cast<bool *>(output.request().ptr);
+        {
+            py::gil_scoped_release release;
+            for (std::size_t frame = 0; frame < frames; ++frame) {
+                const double *frame_start = start_data + frame * 4;
+                const double *frame_end = end_data + frame * 4;
+                bool still = true;
+                for (int index = 0; index < 4; ++index) {
+                    still = still && frame_start[index] == frame_end[index];
+                }
+                std::vector<CoordinateTransform> transforms;
+                for (const FrameRotation &rotation :
+                     frame_rotations(frame_start, frame_end)) {
+                    transforms.push_back(coordinate_transform(rotation));
+                }
+                const CoordinateTransform &centre_transform =
+                    transforms[transforms.size() / 2];
+                const PixelReach reach = still
+                    ? stationary_reach(centre_transform)
+                    : moving_reach(transforms);
+                reaches[frame] = cell_reaches_grid(
+                    0,
+                    rows,
+                    0,
+                    columns,
+                    columns,
+                    ray_data,
+                    transforms,
+                    centre_transform,
+                    still,
+                    reach,
+                    minimum_cell
+                );
+            }
+        }
+        return output;
+    }
+
 private:
+
     Grid grid_;
     CoordinateFrame frame_;
     double wavevector_;
@@ -1424,6 +1520,7 @@ private:
             combined.valid_pixels += block.valid_pixels;
             combined.coordinate_evaluations += block.coordinate_evaluations;
             combined.skipped_pixels += block.skipped_pixels;
+            combined.skipped_bricks += block.skipped_bricks;
             combined.voxel_weights += block.voxel_weights;
             combined.maximum_weights_per_pixel = std::max(
                 combined.maximum_weights_per_pixel,
@@ -1442,6 +1539,7 @@ private:
         details["valid_pixels"] = combined.valid_pixels;
         details["coordinate_evaluations"] = combined.coordinate_evaluations;
         details["skipped_pixels"] = combined.skipped_pixels;
+        details["skipped_bricks"] = combined.skipped_bricks;
         details["voxel_weights"] = combined.voxel_weights;
         details["maximum_weights_per_pixel"] =
             combined.maximum_weights_per_pixel;
@@ -1629,9 +1727,29 @@ private:
         }
     }
 
-    PixelRays pixel_rays(
-        const std::size_t row,
-        const std::size_t column,
+    // The bilinear patch through the four corner rays of an arbitrary
+    // rectangular cell of the detector, not necessarily one pixel.
+    //
+    // Nothing in this construction, in ray_at(), or in the reach bound
+    // that pixel_misses_grid() applies to it is specific to a cell one
+    // pixel wide: the reach's curvature term is driven by
+    // squared_ray_diameter() of the cell's own corner rays, so it grows
+    // with the cell and stays rigorous at any size. That is what lets a
+    // whole brick be tested against the grid at the cost of one pixel --
+    // see the brick reject in accumulate_brick().
+    //
+    // It does rely on the detector's pixel-to-ray map being affine in
+    // pixel coordinates, so that a cell's interior rays really are the
+    // radial projections of this patch. That holds for a flat detector
+    // without a distortion spline, which is what
+    // DetectorCalibration.primBeamPoints() builds. A distorted detector
+    // would need a measured bound on the deviation added to the reach
+    // before a cell larger than one pixel could be rejected.
+    PixelRays cell_rays(
+        const std::size_t row_begin,
+        const std::size_t row_end,
+        const std::size_t column_begin,
+        const std::size_t column_end,
         const std::size_t columns,
         const double *rays
     ) const {
@@ -1640,10 +1758,10 @@ private:
             const std::size_t offset = (r * stride + c) * 3;
             return Vec3{rays[offset], rays[offset + 1], rays[offset + 2]};
         };
-        const Vec3 r00 = value(row, column);
-        const Vec3 r10 = value(row + 1, column);
-        const Vec3 r01 = value(row, column + 1);
-        const Vec3 r11 = value(row + 1, column + 1);
+        const Vec3 r00 = value(row_begin, column_begin);
+        const Vec3 r10 = value(row_end, column_begin);
+        const Vec3 r01 = value(row_begin, column_end);
+        const Vec3 r11 = value(row_end, column_end);
         return {
             r00,
             {
@@ -1662,6 +1780,15 @@ private:
                 r11.z - r10.z - r01.z + r00.z,
             },
         };
+    }
+
+    PixelRays pixel_rays(
+        const std::size_t row,
+        const std::size_t column,
+        const std::size_t columns,
+        const double *rays
+    ) const {
+        return cell_rays(row, row + 1, column, column + 1, columns, rays);
     }
 
     Vec3 ray_at(
@@ -2010,6 +2137,124 @@ private:
     ) {
         return reach.matrix_norm * squared_ray_diameter(rays) * 0.25
             + reach.rotation_spread;
+    }
+
+    // True only when an entire brick's footprint provably misses the
+    // grid, so none of its pixels could have produced a voxel.
+    //
+    // The same test the per-pixel path runs, one level up. Measured on
+    // the reference 39_1-rsmap job (6.2-megapixel detector, a grid
+    // covering ~1% of a reaching frame, 45x45 bricks): it rejects 98.7%
+    // of bricks on a frame that reaches the grid and 100% on one that
+    // does not, for eight coordinate evaluations against the 16,384 the
+    // brick's pixels would otherwise spend proving the same thing. The
+    // worst case -- nothing rejected anywhere -- costs those eight, or
+    // 0.05% of the brick.
+    bool brick_misses_grid(
+        const PixelRays &brick,
+        const std::vector<CoordinateTransform> &transforms,
+        const CoordinateTransform &centre_transform,
+        const bool stationary,
+        const PixelReach &reach,
+        BlockProfile *profile
+    ) const {
+        if (stationary) {
+            Vec3 footprint[4];
+            for (int corner = 0; corner < 4; ++corner) {
+                footprint[corner] = evaluate_stationary_sample(
+                    brick,
+                    (corner & 1) != 0 ? 1.0 : 0.0,
+                    (corner & 2) != 0 ? 1.0 : 0.0,
+                    centre_transform,
+                    profile
+                ).coordinate;
+            }
+            return pixel_misses_grid(footprint, 4, brick, reach);
+        }
+        Vec3 footprint[8];
+        for (int corner = 0; corner < 8; ++corner) {
+            footprint[corner] = evaluate_lattice_sample(
+                brick,
+                (corner & 1) != 0 ? 1.0 : 0.0,
+                (corner & 2) != 0 ? 1.0 : 0.0,
+                (corner & 4) != 0 ? 1.0 : 0.0,
+                transforms,
+                profile
+            ).coordinate;
+        }
+        return pixel_misses_grid(footprint, 8, brick, reach);
+    }
+
+    bool cell_reaches_grid(
+        const std::size_t row_begin,
+        const std::size_t row_end,
+        const std::size_t column_begin,
+        const std::size_t column_end,
+        const std::size_t columns,
+        const double *rays,
+        const std::vector<CoordinateTransform> &transforms,
+        const CoordinateTransform &centre_transform,
+        const bool stationary,
+        const PixelReach &reach,
+        const std::size_t minimum_cell
+    ) const {
+        const PixelRays cell = cell_rays(
+            row_begin, row_end, column_begin, column_end, columns, rays
+        );
+        if (
+            brick_misses_grid(
+                cell, transforms, centre_transform, stationary, reach, nullptr
+            )
+        ) {
+            return false;
+        }
+        const std::size_t cell_rows = row_end - row_begin;
+        const std::size_t cell_columns = column_end - column_begin;
+        // Small enough that subdividing would buy little: report it as
+        // reaching, which is the conservative answer.
+        if (cell_rows <= minimum_cell && cell_columns <= minimum_cell) {
+            return true;
+        }
+        const std::size_t row_middle = cell_rows > 1
+            ? row_begin + cell_rows / 2
+            : row_end;
+        const std::size_t column_middle = cell_columns > 1
+            ? column_begin + cell_columns / 2
+            : column_end;
+        for (const auto &child : {
+            std::pair<std::size_t, std::size_t>{row_begin, row_middle},
+            std::pair<std::size_t, std::size_t>{row_middle, row_end},
+        }) {
+            if (child.first >= child.second) {
+                continue;
+            }
+            for (const auto &span : {
+                std::pair<std::size_t, std::size_t>{column_begin, column_middle},
+                std::pair<std::size_t, std::size_t>{column_middle, column_end},
+            }) {
+                if (span.first >= span.second) {
+                    continue;
+                }
+                if (
+                    cell_reaches_grid(
+                        child.first,
+                        child.second,
+                        span.first,
+                        span.second,
+                        columns,
+                        rays,
+                        transforms,
+                        centre_transform,
+                        stationary,
+                        reach,
+                        minimum_cell
+                    )
+                ) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // True only when the pixel's whole footprint provably lies outside the
@@ -2760,6 +3005,18 @@ private:
         const std::size_t brick_rows = brick.row_end - brick.row_begin;
         const std::size_t brick_columns = brick.column_end - brick.column_begin;
         const std::size_t row_stride = pixels.row_stride;
+        // Pure detector geometry, like centre_rays below: the frame's
+        // rotation enters only through the transform applied after it,
+        // so the brick's own patch is built once for every frame in the
+        // group rather than once per (brick, frame).
+        const PixelRays brick_rays = cell_rays(
+            brick.row_begin,
+            brick.row_end,
+            brick.column_begin,
+            brick.column_end,
+            columns,
+            rays
+        );
 
         if (max_depth_ == 0) {
             // A pixel's centre ray is pure detector geometry -- the frame's
@@ -2798,6 +3055,30 @@ private:
             const double *const intensity = pixels.intensity[frame];
             const double *const variance = pixels.variance[frame];
             const bool *const mask = pixels.mask[frame];
+            // One test for the whole brick before any of its pixels is
+            // visited. A frame that does not reach the grid at all --
+            // about half of them on a small volume swept through a full
+            // rotation -- leaves here having spent eight coordinate
+            // evaluations instead of eight per pixel.
+            if (
+                brick_misses_grid(
+                    brick_rays,
+                    frame_transforms,
+                    centre_transform,
+                    stationary[frame] != 0,
+                    reach,
+                    profile
+                )
+            ) {
+                if (profile != nullptr) {
+                    // Counted as seen and skipped, so both totals stay
+                    // comparable with a run that visited every pixel.
+                    profile->pixels_seen += brick_rows * brick_columns;
+                    profile->skipped_pixels += brick_rows * brick_columns;
+                    ++profile->skipped_bricks;
+                }
+                continue;
+            }
             for (std::size_t row = brick.row_begin; row < brick.row_end; ++row) {
                 const std::size_t row_offset = row * row_stride;
                 for (
@@ -3422,6 +3703,14 @@ PYBIND11_MODULE(_reciprocal_reconstruction_cpp, module) {
             py::arg("threads") = 1,
             py::arg("work_block_pixels") = 4096,
             py::arg("memory_budget_bytes") = 512ULL * 1024ULL * 1024ULL
+        )
+        .def(
+            "frames_reach_grid",
+            &ReconstructionKernel::frames_reach_grid,
+            py::arg("corner_rays"),
+            py::arg("angles_start"),
+            py::arg("angles_end"),
+            py::arg("minimum_cell") = 64
         )
         .def(
             "accumulate",

@@ -31,6 +31,8 @@ __license__ = "MIT License"
 __maintainer__ = "Timo Fuchs"
 __email__ = "tfuchs@cornell.edu"
 
+import dataclasses
+import json
 import logging
 import sys
 import os
@@ -54,10 +56,32 @@ from silx.utils.weakref import WeakMethodProxy
 import traceback
 
 from . import qutils
-from .config_data import ConfigData
+from .config_data import (
+    CURVE_CORRECTIONS_GROUP,
+    CURVE_CORRECTIONS_SCHEMA_VERSION,
+    ConfigData,
+    CorrectionState,
+    corrections_from_nxdict,
+    curve_correction_record_from_nxdict,
+    detector_from_nxdict,
+)
+from .integration_corrections import (
+    FOOTPRINT_APPLY,
+    FOOTPRINT_KEEP,
+    FOOTPRINT_REMOVE,
+    corrected_curve_from_record,
+    framewise_illumination_divisor,
+)
 from .. import resources
 from .. import logger_utils
-from ..datautils.xrayutils import beamprofile, geometrycorrections
+from ..datautils.xrayutils.corrections import beamprofile
+from ..datautils.xrayutils.corrections import (
+    acceptance as acceptance_corrections,
+    activearea as activearea_corrections,
+    detector as detector_corrections,
+    measurement as measurement_corrections,
+    normalization as normalization_corrections,
+)
 
 import numpy as np
 from scipy import interpolate as interp
@@ -110,6 +134,12 @@ def _compute_rocking_integration(
     C_rod=1.0,
     C_flux_on_sample=1.0,
     C_illum_area=1.0,
+    C_norm=1.0,
+    detector_acceptance=None,
+    solid_angle_mean=None,
+    ctr_croibg_curves=None,
+    ctr_croibg_errors_curves=None,
+    angle_unit="deg",
     progress_callback=None,
     should_cancel=None,
 ):
@@ -155,6 +185,41 @@ def _compute_rocking_integration(
     :param C_illum_area:
         Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, illuminated-area
         factor.
+    :param C_norm:
+        Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, the per-frame
+        exposure-time and monitor divisor. It is applied **inside** the
+        rocking integral, not to the result: with a varying counting time or a
+        drifting monitor the quantity Vlieg's expression integrates is
+        :math:`\\int N(\\omega)/(T M)\\,d\\omega`, and dividing the finished
+        integral by a mean would only be equivalent for constant counters.
+    :param detector_acceptance:
+        Out-of-plane acceptance :math:`\\Delta\\gamma` of the region of
+        interest per ``s`` point, in **radian**, shape ``(n_s,)``. A rocking
+        scan intercepts a slice of rod proportional to it, so it divides
+        ``F2_hkl``. ``None`` leaves it out, which reproduces the historical,
+        acceptance-blind scale.
+    :param solid_angle_mean:
+        Region mean of :math:`1/\\widetilde{\\Omega}` per ``s`` point, shape
+        ``(n_s,)``, when the solid-angle correction is already inside the
+        curves. It divides ``F2_hkl``, removing it again: a region sum is the
+        complete angular integral already, so the correction double-counts the
+        detector obliquity in a structure factor even though it is what a
+        broad, non-rod feature wants on its intensity. ``None`` when the
+        correction was not applied.
+    :param ctr_croibg_curves:
+        Optional polarization-only per-image ROI curves for new extractions,
+        with the same shape as ``croibg_curves``. When supplied, ``F2_hkl``
+        is derived from this branch while the saved intensity outputs retain
+        ``croibg_curves``. Legacy curves omit it and keep the historical
+        solid-angle compensation path.
+    :param ctr_croibg_errors_curves:
+        One-sigma errors paired with ``ctr_croibg_curves``. Both CTR arrays
+        must be supplied together.
+    :param str angle_unit:
+        Unit of ``axis``, ``'deg'`` or ``'rad'``. The published expressions
+        integrate the rocking angle in radian; ``'deg'`` converts the integral
+        when ``F2_hkl`` is formed, leaving the stored intensities and interval
+        widths in the unit they were measured in.
     :param progress_callback:
         Optional callable invoked with the current ``s`` index after each
         point is processed.
@@ -170,6 +235,10 @@ def _compute_rocking_integration(
         ``use_lorentz`` is ``True``, ``F2_hkl`` and ``F2_hkl_errors``.
     :rtype: dict
     """
+    if (ctr_croibg_curves is None) != (ctr_croibg_errors_curves is None):
+        raise ValueError(
+            "ctr_croibg_curves and ctr_croibg_errors_curves must be given together"
+        )
     int_data = {}
     for roikey in roi_info:
         if roikey.startswith("sig") or roikey.startswith("bg"):
@@ -179,8 +248,10 @@ def _compute_rocking_integration(
                 "raw_cnts": [],
                 "raw_cnts_errors": [],
                 "int_interval": [],
+                "C_norm": [],
                 "C_Lor": [],
                 "C_rod": [],
+                "C_Lorentz_rod": [],
                 "C_flux_on_sample": [],
                 "C_illum_area": [],
                 "auxillary": dict((a, []) for a in aux),
@@ -213,9 +284,35 @@ def _compute_rocking_integration(
             cnts_errors = croibg_errors[roi_slice]
 
             C_corr = np.ones(cnts.size, dtype=float)
+            if not np.isscalar(C_norm) or C_norm != 1.0:
+                # Per-frame, so it belongs under the integral sign; see the
+                # C_norm parameter documentation.
+                C_norm_roi = np.broadcast_to(
+                    np.asarray(C_norm, dtype=float), croibg_curves.shape
+                )[i][roi_slice]
+                int_data[roikey]["C_norm"].append(np.mean(C_norm_roi))
+                C_corr = C_corr * C_norm_roi
+            else:
+                int_data[roikey]["C_norm"].append(1.0)
+
             if use_lorentz:
-                int_data[roikey]["C_Lor"].append(np.mean(C_Lor[i][roi_slice]))
-                int_data[roikey]["C_rod"].append(np.mean(C_rod[i][roi_slice]))
+                lorentz_roi = np.asarray(C_Lor[i][roi_slice], dtype=float)
+                rod_roi = np.asarray(C_rod[i][roi_slice], dtype=float)
+
+                def interval_mean(values):
+                    if values.size < 2 or int_interval == 0.0:
+                        return float(np.mean(values))
+                    return float(
+                        _trapz_impl(values, roi_axis)
+                        * sign_interval
+                        / int_interval
+                    )
+
+                int_data[roikey]["C_Lor"].append(interval_mean(lorentz_roi))
+                int_data[roikey]["C_rod"].append(interval_mean(rod_roi))
+                int_data[roikey]["C_Lorentz_rod"].append(
+                    interval_mean(lorentz_roi * rod_roi)
+                )
 
             if use_footprint:
                 int_data[roikey]["C_flux_on_sample"].append(
@@ -287,6 +384,7 @@ def _compute_rocking_integration(
     sig_interval = np.zeros(s_array.size, dtype=float)
     C_Lorentz = np.zeros(s_array.size, dtype=float)
     C_rod_intersect = np.zeros(s_array.size, dtype=float)
+    C_Lorentz_rod = np.zeros(s_array.size, dtype=float)
     aux_cnts_integral = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
     aux_cnts_integral_mean = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
     aux_cnts_sum = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
@@ -317,6 +415,9 @@ def _compute_rocking_integration(
                     int_data[roikey]["int_interval"] / sig_interval
                 )
                 C_rod_intersect += int_data[roikey]["C_rod"] * (
+                    int_data[roikey]["int_interval"] / sig_interval
+                )
+                C_Lorentz_rod += int_data[roikey]["C_Lorentz_rod"] * (
                     int_data[roikey]["int_interval"] / sig_interval
                 )
 
@@ -401,8 +502,54 @@ def _compute_rocking_integration(
     result["auxil"] = auxil
 
     if use_lorentz:
-        result["F2_hkl"] = croibg / (C_Lorentz * C_rod_intersect)
-        result["F2_hkl_errors"] = croibg_errors / (C_Lorentz * C_rod_intersect)
+        # The rocking angle is the integration variable and must be in radian
+        # (Vlieg eq. 42, Drnec eq. 2). The exposure and monitor divisor is
+        # already inside croibg, applied per frame above, so only the angle
+        # conversion is left for normalized_intensity to do here.
+        intensity = measurement_corrections.normalized_intensity(
+            croibg, angle_unit=angle_unit
+        )
+        intensity_errors = measurement_corrections.normalized_intensity(
+            croibg_errors, angle_unit=angle_unit
+        )
+        # The joint factor is integrated with the same trapezoidal angular
+        # quadrature as the counts. Multiplying independently averaged
+        # Lorentz and rod terms leaves a covariance residual whenever both
+        # vary through the rocking window.
+        denominator = C_Lorentz_rod
+        if detector_acceptance is not None:
+            denominator = denominator * np.asarray(detector_acceptance, dtype=float)
+        if solid_angle_mean is not None:
+            denominator = denominator * np.asarray(solid_angle_mean, dtype=float)
+        result["F2_hkl"] = intensity / denominator
+        result["F2_hkl_errors"] = intensity_errors / denominator
+
+        if ctr_croibg_curves is not None:
+            # New extractions carry a polarization-only curve made from the
+            # same base signal. Re-run the pure aggregation on that branch so
+            # signal/background windows, nonuniform or reversed angular
+            # quadrature and error propagation stay identical. No separately
+            # estimated solid-angle mean enters this path.
+            ctr_result = _compute_rocking_integration(
+                s_array,
+                axis,
+                ctr_croibg_curves,
+                ctr_croibg_errors_curves,
+                roi_info,
+                aux,
+                use_lorentz,
+                use_footprint,
+                C_Lor=C_Lor,
+                C_rod=C_rod,
+                C_flux_on_sample=C_flux_on_sample,
+                C_illum_area=C_illum_area,
+                C_norm=C_norm,
+                detector_acceptance=detector_acceptance,
+                solid_angle_mean=None,
+                angle_unit=angle_unit,
+            )
+            result["F2_hkl"] = ctr_result["F2_hkl"]
+            result["F2_hkl_errors"] = ctr_result["F2_hkl_errors"]
 
     return result
 
@@ -416,6 +563,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.filedialogdir = "."
         self._currentRoInfo = {}
         self._idx = 0
+        self.footprint_action = FOOTPRINT_KEEP
+        self.replacement_illumination = None
+        self.replacement_illumination_convention = None
+        self.allow_illumination_convention_change = False
 
         dbdockwidget = qt.QDockWidget("Integrated data")
 
@@ -595,17 +746,54 @@ class RockingPeakIntegrator(qt.QMainWindow):
 
         roi_edit_layout.addWidget(modifyROIsGroup)
 
-        integrateOptionsGroup = qt.QGroupBox("Integrate options")
-        integrateOptionsGroupLayout = qt.QHBoxLayout()
+        integrateOptionsGroup = qt.QGroupBox("CTR reduction")
+        integrateOptionsGroupLayout = qt.QGridLayout()
 
-        self.lorentzButton = qt.QCheckBox("Lorentz")
-        self.footprintButton = qt.QCheckBox("footprint")
-        self.footprintOptionsButton = qt.QPushButton("options")
+        self.lorentzButton = qt.QCheckBox("Calculate CTR structure factor")
+        self.lorentzButton.setToolTip(
+            "Apply the rocking-mode Lorentz, rod-intersection and angular-"
+            "acceptance factors. Disable this to save diagnostic intensity "
+            "when Q or H is deliberately absent."
+        )
+        self.normalizationStatus = qt.QLabel(
+            "Normalization: Unknown (no rocking scan selected)"
+        )
+        self.normalizationStatus.setWordWrap(True)
+        self.footprintAction = qt.QComboBox()
+        self.footprintAction.addItem("Keep stored correction", FOOTPRINT_KEEP)
+        self.footprintAction.addItem("Apply current beam settings", FOOTPRINT_APPLY)
+        self.footprintAction.addItem(
+            "Remove stored correction", FOOTPRINT_REMOVE
+        )
+        self.footprintAction.setToolTip(
+            "Every action starts from the stored base curve. Unsafe actions "
+            "are disabled when correction provenance is unknown."
+        )
+        self.footprintStatus = qt.QLabel(
+            "Saved result: Unknown (no rocking scan selected)"
+        )
+        self.footprintStatus.setWordWrap(True)
+        self.reductionPreview = qt.QLabel("Next reduction: no scan selected")
+        self.reductionPreview.setWordWrap(True)
+        self.reductionDetails = qt.QLabel("")
+        self.reductionDetails.setWordWrap(True)
+        self.footprintOptionsButton = qt.QPushButton("Current beam settings ...")
         self.footprintOptionsButton.clicked.connect(self._showFootprintOptions)
+        self.footprintAction.currentIndexChanged.connect(
+            self._onFootprintActionChanged
+        )
+        self.lorentzButton.toggled.connect(self._onFootprintActionChanged)
 
-        integrateOptionsGroupLayout.addWidget(self.lorentzButton)
-        integrateOptionsGroupLayout.addWidget(self.footprintButton)
-        integrateOptionsGroupLayout.addWidget(self.footprintOptionsButton)
+        integrateOptionsGroupLayout.addWidget(self.lorentzButton, 0, 0, 1, 2)
+        integrateOptionsGroupLayout.addWidget(self.normalizationStatus, 1, 0, 1, 2)
+        integrateOptionsGroupLayout.addWidget(qt.QLabel("Footprint action:"), 2, 0)
+        integrateOptionsGroupLayout.addWidget(self.footprintAction, 2, 1)
+        integrateOptionsGroupLayout.addWidget(self.footprintStatus, 3, 0, 1, 2)
+        integrateOptionsGroupLayout.addWidget(self.reductionPreview, 4, 0, 1, 2)
+        integrateOptionsGroupLayout.addWidget(self.reductionDetails, 5, 0, 1, 2)
+        integrateOptionsGroupLayout.addWidget(
+            self.footprintOptionsButton, 6, 0, 1, 2
+        )
 
         integrateOptionsGroup.setLayout(integrateOptionsGroupLayout)
 
@@ -660,6 +848,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.curveSlider.sigValueChanged.connect(self.onSliderValueChanged)
         # self.roiwidget.sigROISignal.connect(lambda d: print(d))
 
+        self.integrationCorrection.settingsChanged.connect(
+            self._onFootprintActionChanged
+        )
+        self._refreshReductionCorrectionStatus()
+
     def _check_ro_present(self):
         if not self.database.nxfile:
             self._currentRoInfo = {}
@@ -701,8 +894,246 @@ class RockingPeakIntegrator(qt.QMainWindow):
             return
         previous = self.integrationCorrection
         self.integrationCorrection = dialog
+        self.integrationCorrection.settingsChanged.connect(
+            self._onFootprintActionChanged
+        )
         if previous is not None:
             previous.deleteLater()
+        self._onFootprintActionChanged()
+
+    @staticmethod
+    def _correctionUiState(record, record_present=True):
+        """Describe safe rocking-reduction actions for a stored record.
+
+        :param CurveCorrectionRecord or None record: Parsed stored record.
+        :param bool record_present: Whether a correction group exists at all.
+        :rtype: dict
+        """
+        if record is None:
+            reason = (
+                "an incomplete correction record"
+                if record_present
+                else "legacy data without a correction record"
+            )
+            return {
+                "actions": (FOOTPRINT_KEEP,),
+                "normalization": "Unknown (legacy data)",
+                "footprint": "Unknown",
+                "details": (
+                    f"Correction provenance is unknown because this scan has {reason}. "
+                    "Re-extract images to change this correction safely."
+                ),
+                "known_total_flux": False,
+            }
+
+        if record.algorithm.startswith("legacy_rocking_roi_"):
+            return {
+                "actions": (FOOTPRINT_KEEP, FOOTPRINT_APPLY),
+                "normalization": "Applied later by the legacy reducer",
+                "footprint": "Not applied to the saved curve",
+                "details": (
+                    f"Algorithm {record.algorithm}; scale {record.scale_convention}. "
+                    "Current beam settings may be applied using the preserved "
+                    "legacy density/area convention."
+                ),
+                "known_total_flux": False,
+            }
+
+        if record.algorithm.startswith("framewise_ctr_total_flux_"):
+            reversible = (
+                record.base_croibg is not None
+                and record.base_croibg_variance is not None
+            )
+            known_illumination = record.illumination_status in (
+                "applied",
+                "not_applied",
+            )
+            actions = [FOOTPRINT_KEEP]
+            if reversible and known_illumination:
+                actions.append(FOOTPRINT_APPLY)
+            if (
+                reversible
+                and record.illumination_status == "applied"
+                and record.illumination_divisor is not None
+            ):
+                actions.append(FOOTPRINT_REMOVE)
+            normalization = {
+                "applied": "Applied during extraction",
+                "not_applied": "Not applied",
+                "unavailable": "Unavailable",
+            }.get(record.normalization_status, "Unknown")
+            footprint = {
+                "applied": "Applied during extraction",
+                "not_applied": "Not applied",
+                "unavailable": "Unavailable",
+            }.get(record.illumination_status, "Unknown")
+            extra = ""
+            if not reversible or not known_illumination:
+                extra = " Re-extract images to change this correction safely."
+            return {
+                "actions": tuple(actions),
+                "normalization": normalization,
+                "footprint": footprint,
+                "details": (
+                    f"Algorithm {record.algorithm}; scale {record.scale_convention}; "
+                    f"illumination convention "
+                    f"{record.illumination_convention or 'none'}.{extra}"
+                ),
+                "known_total_flux": True,
+            }
+
+        return {
+            "actions": (FOOTPRINT_KEEP,),
+            "normalization": "Unknown",
+            "footprint": "Unknown",
+            "details": (
+                f"Unsupported correction algorithm {record.algorithm!r}. "
+                "Re-extract images to change this correction safely."
+            ),
+            "known_total_flux": False,
+        }
+
+    @staticmethod
+    def _storedCurveCorrectionRecord(h5_obj):
+        """Return a parsed stored record, or ``None`` when it is incomplete.
+
+        Parsed from the live group: 2-D per-curve arrays stay unread
+        ``h5py.Dataset`` objects, valid while the database file is open.
+        """
+        if CURVE_CORRECTIONS_GROUP not in h5_obj:
+            return None
+        try:
+            return curve_correction_record_from_nxdict(
+                h5_obj[CURVE_CORRECTIONS_GROUP]
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _setFootprintActionEnabled(self, action, enabled):
+        """Enable one footprint-action choice in the combo-box model."""
+        index = self.footprintAction.findData(action)
+        if index >= 0:
+            self.footprintAction.model().item(index).setEnabled(bool(enabled))
+
+    def _refreshReductionCorrectionStatus(self):
+        """Refresh saved-result provenance and safe next actions."""
+        record = None
+        present = False
+        if self._currentRoInfo and self.database.nxfile:
+            name = self._currentRoInfo.get("name")
+            if name in self.database.nxfile:
+                h5_obj = self.database.nxfile[name]
+                present = CURVE_CORRECTIONS_GROUP in h5_obj
+                record = self._storedCurveCorrectionRecord(h5_obj)
+        state = self._correctionUiState(record, present)
+        self._activeCorrectionRecord = record
+        self._activeCorrectionUiState = state
+        allowed = state["actions"]
+        for action in (FOOTPRINT_KEEP, FOOTPRINT_APPLY, FOOTPRINT_REMOVE):
+            self._setFootprintActionEnabled(action, action in allowed)
+        if self.footprintAction.currentData() not in allowed:
+            self.footprintAction.setCurrentIndex(
+                self.footprintAction.findData(FOOTPRINT_KEEP)
+            )
+        self.normalizationStatus.setText(
+            f"Saved normalization: {state['normalization']}"
+        )
+        self.footprintStatus.setText(
+            f"Saved footprint: {state['footprint']}"
+        )
+        self.reductionDetails.setText(state["details"])
+        self._onFootprintActionChanged()
+
+    def _onFootprintActionChanged(self, *args):
+        """Prepare and describe the selected next-reduction footprint action."""
+        action = self.footprintAction.currentData() or FOOTPRINT_KEEP
+        self.footprint_action = action
+        self.replacement_illumination = None
+        self.replacement_illumination_convention = None
+        self.allow_illumination_convention_change = False
+
+        action_text = {
+            FOOTPRINT_KEEP: "keep the stored footprint state",
+            FOOTPRINT_APPLY: "apply current beam settings from the base curve",
+            FOOTPRINT_REMOVE: "remove the stored footprint from the base curve",
+        }[action]
+        record = getattr(self, "_activeCorrectionRecord", None)
+        known_total_flux = bool(
+            getattr(self, "_activeCorrectionUiState", {}).get(
+                "known_total_flux", False
+            )
+        )
+        if action == FOOTPRINT_APPLY:
+            action_text = (
+                "Replaced here using current beam settings"
+                if record is not None and record.illumination_status == "applied"
+                else "Applied here using current beam settings"
+            )
+        f2_ready = action != FOOTPRINT_REMOVE
+        if known_total_flux:
+            f2_ready = record.normalization_status == "applied"
+            if action == FOOTPRINT_KEEP:
+                f2_ready = f2_ready and record.illumination_status == "applied"
+            elif action == FOOTPRINT_APPLY:
+                f2_ready = (
+                    f2_ready
+                    and self.integrationCorrection.horizontalInterceptedFraction()
+                    is not None
+                )
+            else:
+                f2_ready = False
+        if not f2_ready and self.lorentzButton.isChecked():
+            with qt.QSignalBlocker(self.lorentzButton):
+                self.lorentzButton.setChecked(False)
+        self.lorentzButton.setEnabled(f2_ready)
+        quantity = (
+            "CTR structure factor"
+            if self.lorentzButton.isChecked() and f2_ready
+            else "diagnostic intensity (not F²)"
+        )
+        warning = ""
+        if action == FOOTPRINT_REMOVE and self.lorentzButton.isChecked():
+            warning = " Remove leaves H absent, so F² is unavailable."
+        self.reductionPreview.setText(
+            f"Next reduction: {action_text}; output {quantity}.{warning}"
+        )
+
+    def _prepareFootprintAction(self, h5_obj):
+        """Resolve any live illumination divisor before reading the curve."""
+        action = self.footprintAction.currentData() or FOOTPRINT_KEEP
+        self.footprint_action = action
+        self.replacement_illumination = None
+        self.replacement_illumination_convention = None
+        record = self._storedCurveCorrectionRecord(h5_obj)
+        if (
+            action == FOOTPRINT_APPLY
+            and record is not None
+            and record.algorithm.startswith("framewise_ctr_total_flux_")
+        ):
+            horizontal = self.integrationCorrection.horizontalInterceptedFraction()
+            if horizontal is None:
+                raise ValueError(
+                    "Applying current total-flux beam settings requires an "
+                    "explicit horizontal interception choice."
+                )
+            if record.alpha is None:
+                raise ValueError(
+                    "The stored curve has no incidence angles; re-extract "
+                    "images before changing its footprint."
+                )
+            self.replacement_illumination = framewise_illumination_divisor(
+                np.asarray(record.alpha),
+                self.integrationCorrection.sampleLength(),
+                self.integrationCorrection.beamProfile(),
+                horizontal_fraction=horizontal,
+            )[0]
+            self.replacement_illumination_convention = "total_flux_H"
+        elif action != FOOTPRINT_KEEP and record is None:
+            raise ValueError(
+                "Correction provenance is unknown. Re-extract images before "
+                "changing the footprint."
+            )
+        return record
 
     def onIntegrate(self):
         try:
@@ -761,6 +1192,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.plotROIselect.resetZoom()
         if self.autozoom_checkbox.isChecked():
             self.resetXZoomScaled(self.zoomslider.value())
+        self._refreshReductionCorrectionStatus()
 
     def onAnchorSaveRoi(self):
         # GUI-only: user-triggered save dialog path.
@@ -1301,6 +1733,307 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     roih5grp[roikey]["to"][:] = to_ar
             self.plotRoCurve(self._idx)
 
+    def _rocking_normalization(self, aux, size):
+        """Per-frame exposure and monitor divisor of the rocking scan.
+
+        Unlike the stationary path this cannot ask a live scan object: a
+        rocking integration runs off the database, so the counters are read
+        from the ``auxillary`` group that
+        :meth:`orgui.app.orGUI.orGUI.rocking_integrate` copied there. Which
+        counters count as a monitor is the same setting the stationary
+        integration and the reconstruction use, so all three normalize
+        identically.
+
+        A counter that is simply not there is not an error -- a backend that
+        does not declare ``exposure_time`` in ``auxillary_counters`` never
+        stored one. The names of the factors that did apply are returned so
+        they can be saved beside ``F2_hkl``; without them a rod cannot be put
+        on a common scale after the fact.
+
+        :param dict aux: Auxiliary counters, each of shape ``(n_pts,)``.
+        :param int size: Number of frames of the rocking scan.
+        :returns: ``(divisor, applied)`` with the divisor of shape
+            ``(size,)``.
+        :rtype: tuple
+        """
+        config_target = self.database.config_target
+        monitor_names = tuple(
+            getattr(config_target, "reconstruction_monitor_corrections", ()) or ()
+        )
+
+        exposure = aux.get("exposure_time")
+        if exposure is None:
+            logger.warning(
+                "The rocking scan stores no exposure_time counter, so the "
+                "integrated intensities are not normalized to counting time. "
+                "They are then only comparable to other scans of the same "
+                "duration. The scan backend decides this by declaring "
+                "'exposure_time' in auxillary_counters."
+            )
+
+        monitors = {}
+        for name in monitor_names:
+            if name in aux:
+                monitors[name] = aux[name]
+            else:
+                logger.warning(
+                    "Monitor counter %r is configured but was not stored with "
+                    "this rocking scan; skipping it.",
+                    name,
+                )
+
+        return normalization_corrections.normalization_divisor(
+            size, exposure_time=exposure, monitors=monitors
+        )
+
+    def _stored_detector(self, scangroup):
+        """The detector geometry the rocking curves were measured with.
+
+        Read from the configuration stored beside the scan, never from the
+        current application state. The acceptance and the solid-angle factor
+        are properties of the geometry the data was *taken* with, and a
+        reduction run later -- from a batch script, or after another
+        calibration has been loaded -- would otherwise silently use whatever
+        detector happens to be loaded. Measured on a LaNiO3 rocking scan, that
+        mistake scaled every ``Delta_gamma`` by 2.3 and left no trace in the
+        output.
+
+        :param scangroup: The scan group holding ``configuration``.
+        :returns: A
+            :class:`~orgui.datautils.xrayutils.DetectorCalibration.Detector2D_SXRD`,
+            or ``None`` when the scan stores no detector configuration.
+        :rtype: object or None
+        """
+        path = scangroup.name + "/configuration/instrument/detector_SXRD"
+        if path not in self.database.nxfile:
+            logger.warning(
+                "This scan stores no detector configuration, so the "
+                "out-of-plane acceptance cannot be calculated from the "
+                "geometry the data was measured with. F2_hkl is left on the "
+                "acceptance-blind scale."
+            )
+            return None
+        try:
+            return detector_from_nxdict(h5todict(self.database.nxfile, path))
+        except Exception:
+            logger.exception(
+                "Cannot rebuild the detector geometry stored with this scan, "
+                "so the out-of-plane acceptance cannot be calculated. F2_hkl "
+                "is left on the acceptance-blind scale.",
+                extra={"title": "Cannot read the stored detector geometry"},
+            )
+            return None
+
+    def _rocking_solid_angle_mean(self, detector, scangroup, cnters, x, y):
+        """Region mean of the solid-angle correction that was applied, or None.
+
+        The solid-angle correction is applied to the *intensity* when the
+        rocking curves are extracted, which is useful there: for a broad,
+        non-rod feature a differential cross-section is what is wanted. It
+        must not reach a structure factor, though, because a region sum is
+        already the complete angular integral with every pixel weighted by the
+        solid angle it subtends. So it is measured over the same regions here
+        and divided back out of ``F2_hkl``. See
+        ``doc/design/ctr_structure_factor_scale.md`` finding F6.
+
+        Whether it was applied is a property of the *extraction*, not of the
+        switches in this dialog, so it is read from the configuration snapshot
+        stored with the scan rather than from the current GUI state -- as is
+        the detector geometry it is measured over.
+
+        :param detector: The geometry the scan was measured with, from
+            :meth:`_stored_detector`.
+        :param scangroup: The scan group holding the ``configuration`` written
+            when the rocking curves were extracted.
+        :param cnters: The ``rois`` group of the rocking scan.
+        :param x: Region centre column per ``s`` point, in pixels.
+        :param y: Region centre row per ``s`` point, in pixels.
+        :returns: ``(mean, applied)`` -- the per-``s`` mean of
+            :math:`1/\\widetilde{\\Omega}` and whether it will be divided out,
+            or ``(None, False)`` when the correction was not applied or cannot
+            be established.
+        :rtype: tuple
+        """
+        path = scangroup.name + "/configuration/orgui/integration_corrections"
+        try:
+            group = h5todict(self.database.nxfile, path)
+            if "json" in group:
+                # Configurations written before the typed layout.
+                raw = group["json"]
+                if isinstance(raw, bytes):
+                    raw = raw.decode()
+                state = CorrectionState.from_dict(json.loads(str(raw)))
+            else:
+                state = corrections_from_nxdict(group)
+            was_applied = bool(state.use_solid_angle)
+        except Exception:
+            logger.warning(
+                "Cannot tell from this scan's stored configuration whether the "
+                "solid angle correction was applied when the rocking curves "
+                "were extracted, so it is not divided out of F2_hkl. If it was "
+                "applied, F2_hkl carries the detector obliquity and will not "
+                "agree with a stationary integration of the same rod."
+            )
+            return None, False
+
+        if not was_applied:
+            return None, False
+
+        if detector is None:
+            logger.warning(
+                "The solid angle correction was applied to these rocking "
+                "curves, but the detector geometry stored with the scan is "
+                "not available to measure it over the regions of interest, so "
+                "it is not divided out of F2_hkl."
+            )
+            return None, False
+
+        hsize = np.asarray(cnters["hsize"][()], dtype=float)
+        vsize = np.asarray(cnters["vsize"][()], dtype=float)
+        if hsize.ndim > 1:
+            hsize = hsize[:, 0]
+        if vsize.ndim > 1:
+            vsize = vsize[:, 0]
+
+        mean = detector_corrections.roi_mean_inverse_solid_angle(
+            detector,
+            np.asarray(y, dtype=float),
+            np.asarray(x, dtype=float),
+            np.maximum(vsize, 1.0),
+            np.maximum(hsize, 1.0),
+        )
+        return np.asarray(mean, dtype=float), True
+
+    def _rocking_acceptance(self, detector, cnters, x, y):
+        """Out-of-plane acceptance of every region of interest, in radian.
+
+        A rocking scan intercepts a slice of rod proportional to
+        :math:`\\Delta\\gamma` (Vlieg equation 20), so ``F2_hkl`` is only on
+        the same scale as a stationary measurement once it is divided by it.
+
+        The region centre and its vertical size are stored per ``s`` point.
+        Note the coordinate order: ``surfaceAnglesPoint`` takes pyFAI
+        dimension 1 first, which is the detector *row*, and orGUI's ``y`` is
+        the row while ``x`` is the column -- every call site in the
+        application passes them in that swapped order.
+
+        New extractions store the true detector-arm scattering angles for
+        every source frame. The frame nearest the calculated peak in
+        ``(alpha, theta)`` supplies the arm position used here. Old databases
+        have no such arrays; they retain the historical calibration-position
+        result, with a warning that makes that fallback visible.
+
+        :param detector: The geometry the scan was measured with, from
+            :meth:`_stored_detector`; ``None`` leaves the acceptance out.
+        :param cnters: The ``rois`` group of the rocking scan.
+        :param x: Region centre column per ``s`` point, in pixels.
+        :param y: Region centre row per ``s`` point, in pixels.
+        :returns: ``(acceptance, applied)`` -- the acceptance in radian of
+            shape ``(n_s,)``, or ``(None, False)`` when the stored geometry
+            is unavailable.
+        :rtype: tuple
+        """
+        if detector is None:
+            return None, False
+
+        vsize = cnters["vsize"][()]
+        vsize = np.asarray(vsize, dtype=float)
+        if vsize.ndim > 1:
+            vsize = vsize[:, 0]
+        alpha_pk = np.deg2rad(np.asarray(cnters["alpha_pk"][()], dtype=float))
+        gamma_arm, delta_arm = RockingPeakIntegrator._rocking_peak_arm_angles(
+            cnters
+        )
+
+        acceptance = acceptance_corrections.out_of_plane_acceptance(
+            detector,
+            np.asarray(y, dtype=float),
+            np.asarray(x, dtype=float),
+            vsize,
+            alpha_pk,
+            gamma_arm,
+            delta_arm,
+        )
+        return np.asarray(acceptance, dtype=float), True
+
+    @staticmethod
+    def _rocking_peak_arm_angles(cnters):
+        """Stored detector arm at each calculated rocking-curve peak.
+
+        The saved arm arrays are in the primary-beam frame and carry an
+        explicit ``rad`` group attribute. A rocking scan can run in either
+        ``mu`` or ``th``; selecting the stored frame nearest the calculated
+        peak in both ``(alpha, theta)`` coordinates handles either mode and a
+        reversed scan without relying on a separate axis-name string.
+
+        :param cnters: The stored rocking ``rois`` group.
+        :returns: ``(gamma_arm, delta_arm)`` in radian, or ``(None, None)``
+            for an old database that has no arm snapshot.
+        :rtype: tuple
+        """
+        if "gamma_arm" not in cnters or "delta_arm" not in cnters:
+            logger.warning(
+                "This rocking extraction stores no detector-arm positions; "
+                "evaluating its out-of-plane acceptance at the detector "
+                "calibration position (legacy fallback)."
+            )
+            return None, None
+
+        try:
+            gamma_arm = np.asarray(cnters["gamma_arm"][()], dtype=float)
+            delta_arm = np.asarray(cnters["delta_arm"][()], dtype=float)
+            alpha_pk = np.asarray(cnters["alpha_pk"][()], dtype=float).reshape(-1)
+            theta_pk = np.asarray(cnters["theta_pk"][()], dtype=float).reshape(-1)
+
+            def at_peak(values):
+                values = np.asarray(values, dtype=float)
+                if values.ndim == 0:
+                    return np.full(alpha_pk.shape, float(values))
+                if values.shape == alpha_pk.shape:
+                    return values
+
+                alpha = np.asarray(cnters["alpha"][()], dtype=float)
+                theta = np.asarray(cnters["theta"][()], dtype=float)
+                expected = (alpha_pk.size, alpha.shape[-1])
+                alpha = np.broadcast_to(alpha, expected)
+                theta = np.broadcast_to(theta, expected)
+                values = np.broadcast_to(values, expected)
+
+                def angular_difference(actual, target):
+                    return (actual - target[:, None] + 180.0) % 360.0 - 180.0
+
+                distance = angular_difference(alpha, alpha_pk) ** 2
+                distance += angular_difference(theta, theta_pk) ** 2
+                if np.any(~np.isfinite(distance).any(axis=1)):
+                    raise ValueError("no finite frame lies near a calculated peak")
+                indices = np.nanargmin(distance, axis=1)
+                return values[np.arange(alpha_pk.size), indices]
+
+            gamma_arm = at_peak(gamma_arm)
+            delta_arm = at_peak(delta_arm)
+            attrs = getattr(cnters, "attrs", {})
+            unit = attrs.get("detector_arm_unit", "rad")
+            if isinstance(unit, bytes):
+                unit = unit.decode()
+            if unit == "deg":
+                gamma_arm = np.deg2rad(gamma_arm)
+                delta_arm = np.deg2rad(delta_arm)
+            elif unit != "rad":
+                raise ValueError(f"unsupported detector-arm unit {unit!r}")
+            if not np.all(np.isfinite(gamma_arm)) or not np.all(
+                np.isfinite(delta_arm)
+            ):
+                raise ValueError("detector-arm values are not finite")
+            return gamma_arm, delta_arm
+        except Exception:
+            logger.warning(
+                "Cannot resolve the detector-arm position stored with this "
+                "rocking extraction; evaluating its out-of-plane acceptance "
+                "at the detector calibration position.",
+                exc_info=True,
+            )
+            return None, None
+
     def integrate(self):
         """Integrate rocking-scan ROIs.
 
@@ -1310,10 +2043,17 @@ class RockingPeakIntegrator(qt.QMainWindow):
         """
         if not self._currentRoInfo:
             raise ValueError("No rocking scan selected.")
-        curves = self.get_all_ro_curves()
         name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
+        self._prepareFootprintAction(h5_obj)
+        curves = self.get_all_ro_curves()
+        correction_record = curves.get("correction_record")
+        versioned_total_flux = correction_record is not None
         cnters = h5_obj["rois"]
+        footprint_action = self.footprint_action
+        apply_legacy_footprint = (
+            not versioned_total_flux and footprint_action == FOOTPRINT_APPLY
+        )
 
         s_array = cnters["s"][()]
         alpha = np.deg2rad(cnters["alpha"][()])
@@ -1335,27 +2075,31 @@ class RockingPeakIntegrator(qt.QMainWindow):
             # A mu scan rocks the incidence angle, which is how a
             # reflectivity curve is measured; a th scan rocks the sample.
             # The two take different Lorentz factors from the z-axis table,
-            # and neither is the stationary-scan factor.
+            # and neither is the stationary-scan factor. Which factors each
+            # mode applies is decided in one place, by mode_components.
             if curves["axisname"] == "mu":
-                C_Lor = geometrycorrections.lorentz_factor(
-                    geometrycorrections.REFLECTIVITY_ROCKING, alpha=alpha
-                )
+                mode = measurement_corrections.REFLECTIVITY_ROCKING
             elif curves["axisname"] == "th":
-                C_Lor = geometrycorrections.lorentz_factor(
-                    geometrycorrections.ROCKING,
-                    alpha=alpha,
-                    delta=delta,
-                    gamma=gamma,
-                )
+                mode = measurement_corrections.ROCKING
             else:
                 raise NotImplementedError()
-            C_rod = geometrycorrections.rod_interception(gamma)
+            components = measurement_corrections.mode_components(
+                mode, alpha=alpha, delta=delta, gamma=gamma
+            )
+            C_Lor = components["C_Lorentz"]
+            C_rod = components["C_rod"]
         else:
             C_Lor = 1.0
             C_rod = 1.0
 
-        if self.footprintButton.isChecked():
-            L = self.integrationCorrection.L.value() * 1e-3  # sample size (mm -> m)
+        if versioned_total_flux:
+            # Q and H were resolved framewise at extraction and reconstructed
+            # from their stored divisors by get_all_ro_curves. Applying the
+            # live dialog here would scale the same photons a second time.
+            C_flux_on_sample = 1.0
+            C_illum_area = 1.0
+        elif apply_legacy_footprint:
+            L = self.integrationCorrection.sampleLength()  # sample size, m
             # Gaussian or measured beam profile, depending on the dialog.
             # C_flux_on_sample is saved as the diagnostic numerator of the
             # single applied active-area factor.
@@ -1365,6 +2109,61 @@ class RockingPeakIntegrator(qt.QMainWindow):
         else:
             C_flux_on_sample = 1.0
             C_illum_area = 1.0
+
+        if cnters["x"].ndim > 1:
+            warnings.warn(
+                "You are using an old data base orGUI v1.3.0-alpha"
+                "X and Y pixel coordinates of rocking scans will be incorrect"
+            )
+            x = cnters["x"][:, 0][
+                ()
+            ]  # may provide fix of database here, if anyone asks
+            y = cnters["y"][:, 0][
+                ()
+            ]  # may provide fix of database here, if anyone asks
+        else:
+            x = cnters["x"][()]
+            y = cnters["y"][()]
+
+        if versioned_total_flux:
+            if (
+                correction_record.normalization_status != "applied"
+                or curves["illumination_action"]
+                not in ("applied", "replaced", "applied_here")
+                or curves["illumination_convention"] != "total_flux_H"
+            ):
+                raise ValueError(
+                    "This versioned total-flux curve lacks an applied Q or H "
+                    "divisor and cannot be reduced to a CTR structure factor."
+                )
+            C_norm = np.ones_like(curves["croibg"], dtype=np.float64)
+            normalization_applied = tuple(
+                correction_record.normalization_components
+            )
+        else:
+            C_norm, normalization_applied = self._rocking_normalization(
+                aux, axis.size
+            )
+            C_norm = np.broadcast_to(C_norm, np.shape(curves["croibg"])).copy()
+
+        # Only F2_hkl is divided by these, so asking for them with the
+        # Lorentz switch off would warn about a detector nothing needs.
+        detector_acceptance, acceptance_applied = None, False
+        solid_angle_mean, solid_angle_compensated = None, False
+        if self.lorentzButton.isChecked():
+            detector = self._stored_detector(scangroup)
+            detector_acceptance, acceptance_applied = self._rocking_acceptance(
+                detector, cnters, x, y
+            )
+            # New extractions carry their polarization-only CTR branch
+            # directly. The separately estimated solid-angle compensation is
+            # retained only for legacy database files that lack that branch.
+            if "ctr_croibg" not in curves and not versioned_total_flux:
+                solid_angle_mean, solid_angle_compensated = (
+                    self._rocking_solid_angle_mean(
+                        detector, scangroup, cnters, x, y
+                    )
+                )
 
         self.database.nxfile[self._currentRoInfo["name"] + "/integration/"]
         roi_info = h5todict(
@@ -1383,11 +2182,17 @@ class RockingPeakIntegrator(qt.QMainWindow):
             roi_info,
             aux,
             self.lorentzButton.isChecked(),
-            self.footprintButton.isChecked(),
+            apply_legacy_footprint,
             C_Lor=C_Lor,
             C_rod=C_rod,
             C_flux_on_sample=C_flux_on_sample,
             C_illum_area=C_illum_area,
+            C_norm=C_norm,
+            detector_acceptance=detector_acceptance,
+            solid_angle_mean=solid_angle_mean,
+            ctr_croibg_curves=curves.get("ctr_croibg"),
+            ctr_croibg_errors_curves=curves.get("ctr_croibg_errors"),
+            angle_unit="deg",
             progress_callback=progress.update,
             should_cancel=progress.wasCanceled,
         )
@@ -1410,6 +2215,31 @@ class RockingPeakIntegrator(qt.QMainWindow):
         if self.lorentzButton.isChecked():
             F2_hkl = result["F2_hkl"]
             F2_hkl_errors = result["F2_hkl_errors"]
+            if versioned_total_flux and correction_record.scale_convention.startswith(
+                "total_flux_calibrated"
+            ):
+                provenance = correction_record.profile_provenance
+                try:
+                    prefactor = measurement_corrections.total_flux_prefactor(
+                        float(provenance["wavelength_angstrom"]),
+                        float(provenance["unitcell_area_angstrom2"]),
+                    )
+                    efficiency = float(
+                        provenance.get("detector_efficiency_assumed", 1.0)
+                    )
+                    transmission = float(
+                        provenance.get("external_transmission_assumed", 1.0)
+                    )
+                    absolute_divisor = prefactor * efficiency * transmission
+                    if not np.isfinite(absolute_divisor) or absolute_divisor <= 0:
+                        raise ValueError("absolute divisor is not positive")
+                except (KeyError, TypeError, ValueError) as error:
+                    raise ValueError(
+                        "The calibrated total-flux curve lacks valid wavelength, "
+                        "surface unit-cell area, or detector-response provenance."
+                    ) from error
+                F2_hkl = F2_hkl / absolute_divisor
+                F2_hkl_errors = F2_hkl_errors / absolute_divisor
 
         int_data["@NX_class"] = "NXdetector"
 
@@ -1446,21 +2276,6 @@ class RockingPeakIntegrator(qt.QMainWindow):
             suffix = f"_{i}"
             i += 1
         availname1 = name1 + suffix
-
-        if cnters["x"].ndim > 1:
-            warnings.warn(
-                "You are using an old data base orGUI v1.3.0-alpha"
-                "X and Y pixel coordinates of rocking scans will be incorrect"
-            )
-            x = cnters["x"][:, 0][
-                ()
-            ]  # may provide fix of database here, if anyone asks
-            y = cnters["y"][:, 0][
-                ()
-            ]  # may provide fix of database here, if anyone asks
-        else:
-            x = cnters["x"][()]
-            y = cnters["y"][()]
 
         datas1 = {
             "@NX_class": "NXdata",
@@ -1521,12 +2336,49 @@ class RockingPeakIntegrator(qt.QMainWindow):
             measurement[availname1]["counters"]["F2_hkl"] = F2_hkl
             measurement[availname1]["counters"]["F2_hkl_errors"] = F2_hkl_errors
             measurement[availname1]["@signal"] = "counters/F2_hkl"
+            # What the reduction actually divided out. A saved rod cannot be
+            # put on a common scale with another scan after the fact without
+            # this, and which factors were available depends on the scan.
+            reduction = {
+                "@NX_class": "NXcollection",
+                "@mode": mode,
+                "@angle_unit": "rad",
+                "@normalization_applied": ",".join(normalization_applied) or "none",
+                "@acceptance_applied": bool(acceptance_applied),
+                "@solid_angle_compensated": bool(solid_angle_compensated),
+                "@photon_curve_used": "ctr_croibg" in curves,
+                "@active_area_applied": bool(
+                    curves["illumination_action"]
+                    in ("applied", "replaced", "applied_here")
+                    if versioned_total_flux
+                    else apply_legacy_footprint
+                ),
+            }
+            if versioned_total_flux:
+                reduction.update({
+                    "@curve_algorithm": correction_record.algorithm,
+                    "@scale_convention": correction_record.scale_convention,
+                    "@illumination_action": curves["illumination_action"],
+                    "@illumination_convention": (
+                        curves["illumination_convention"] or "none"
+                    ),
+                    "@normalization_source": "stored_frame_divisor",
+                    "@illumination_source": "stored_frame_divisor",
+                })
+            if detector_acceptance is not None:
+                reduction["detector_acceptance"] = detector_acceptance
+                reduction["@detector_acceptance_unit"] = "rad"
+            if apply_legacy_footprint:
+                reduction["sample_size"] = L
+                reduction["@sample_size_unit"] = "m"
+            measurement[availname1]["reduction"] = reduction
 
         self.database.add_nxdict(
             measurement,
             update_mode="modify",
             h5path=self._currentRoInfo["name"] + "/measurement",
         )
+        self._refreshReductionCorrectionStatus()
 
     def onSliderValueChanged(self, ddict):
         try:
@@ -1589,28 +2441,128 @@ class RockingPeakIntegrator(qt.QMainWindow):
         # with qt.QSignalBlocker(self.anchorROIButton):
         #    self.anchorROIButton.setChecked(True)
 
-    def get_ro_curve(self, idx):
-        name = self._currentRoInfo["name"]
-        h5_obj = self.database.nxfile[name]
-        cnters = h5_obj["rois"]
-        curve = {
-            "axisname": self._currentRoInfo["axisname"],
-            "axis": self._currentRoInfo["axis"],
-            "croibg": cnters["croibg"][idx][()],
-            "croibg_errors": cnters["croibg_errors"][idx][()],
-        }
-        return curve
+    @staticmethod
+    def _legacy_rocking_curve_group(h5_obj):
+        """Return legacy ``rois`` only when the sibling record permits it.
 
-    def get_all_ro_curves(self):
+        Stage-2 records describe the unchanged legacy extraction and therefore
+        explicitly allow this compatibility path. A future normalized record
+        uses the same distinct sibling name but a different algorithm; this
+        reducer must refuse to reinterpret that curve as unnormalized input.
+        An incomplete record beside an existing legacy group remains usable as
+        legacy data, with its provenance reported as unknown.
+        """
+        if CURVE_CORRECTIONS_GROUP in h5_obj:
+            record = h5_obj[CURVE_CORRECTIONS_GROUP]
+            version = int(record.attrs.get("orgui_schema_version", 0))
+            contract = record.attrs.get("orgui_curve_contract", "")
+            if isinstance(contract, bytes):
+                contract = contract.decode()
+            try:
+                algorithm = record["identity"]["algorithm"][()]
+                if isinstance(algorithm, bytes):
+                    algorithm = algorithm.decode()
+                else:
+                    algorithm = str(algorithm)
+            except (KeyError, TypeError, ValueError):
+                algorithm = None
+            if (
+                version == CURVE_CORRECTIONS_SCHEMA_VERSION
+                and contract == "frame_corrections"
+                and algorithm is not None
+                and not algorithm.startswith("legacy_rocking_roi_")
+            ):
+                raise ValueError(
+                    "This rocking curve uses a versioned normalized contract "
+                    "that the legacy reducer must not reinterpret. Use a "
+                    "reducer that supports its correction record."
+                )
+            if algorithm is None:
+                logger.warning(
+                    "The rocking curve has an incomplete correction record; "
+                    "using its preserved legacy ROI curve with unknown "
+                    "provenance."
+                )
+        return h5_obj["rois"]
+
+    def get_ro_curve(self, idx):
+        """Return one rocking curve under its stored correction contract."""
+        return self.get_all_ro_curves(idx)
+
+    def get_all_ro_curves(self, idx=None):
+        """Return rocking curves without silently changing their scale.
+
+        New total-flux records are reconstructed from the immutable base
+        curve and the exact stored Q/H divisors. Legacy records retain the
+        historical ``rois`` path and are normalized later by
+        :meth:`_rocking_normalization`.
+
+        :param int or None idx: Read only this curve. It is shown in its
+            stored footprint state; a pending footprint action is applied
+            only by :meth:`integrate`.
+        """
         name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
-        cnters = h5_obj["rois"]
+        if CURVE_CORRECTIONS_GROUP in h5_obj:
+            record = RockingPeakIntegrator._storedCurveCorrectionRecord(h5_obj)
+            if record is not None and record.algorithm.startswith(
+                "framewise_ctr_total_flux_"
+            ):
+                if idx is None:
+                    footprint = {
+                        "footprint_action": getattr(
+                            self, "footprint_action", FOOTPRINT_KEEP
+                        ),
+                        "replacement_illumination": getattr(
+                            self, "replacement_illumination", None
+                        ),
+                        "replacement_convention": getattr(
+                            self, "replacement_illumination_convention", None
+                        ),
+                        "allow_convention_change": bool(
+                            getattr(
+                                self, "allow_illumination_convention_change", False
+                            )
+                        ),
+                    }
+                else:
+                    # (curve, frame) arrays: read one row; 1-D divisors are
+                    # shared per frame and broadcast unchanged.
+                    record = dataclasses.replace(record, **{
+                        field: getattr(record, field)[idx]
+                        for field in (
+                            "base_croibg",
+                            "base_croibg_variance",
+                            "normalization_divisor",
+                            "illumination_divisor",
+                        )
+                        if np.ndim(getattr(record, field)) == 2
+                    })
+                    footprint = {}
+                curve, errors, action, convention = corrected_curve_from_record(
+                    record, **footprint
+                )
+                return {
+                    "axisname": self._currentRoInfo["axisname"],
+                    "axis": self._currentRoInfo["axis"],
+                    "croibg": curve,
+                    "croibg_errors": errors,
+                    "correction_record": record,
+                    "illumination_action": action,
+                    "illumination_convention": convention,
+                }
+
+        cnters = self._legacy_rocking_curve_group(h5_obj)
+        rows = () if idx is None else idx
         curve = {
             "axisname": self._currentRoInfo["axisname"],
             "axis": self._currentRoInfo["axis"],
-            "croibg": cnters["croibg"][()],
-            "croibg_errors": cnters["croibg_errors"][()],
+            "croibg": cnters["croibg"][rows],
+            "croibg_errors": cnters["croibg_errors"][rows],
         }
+        if "ctr_croibg" in cnters and "ctr_croibg_errors" in cnters:
+            curve["ctr_croibg"] = cnters["ctr_croibg"][rows]
+            curve["ctr_croibg_errors"] = cnters["ctr_croibg_errors"][rows]
         return curve
 
     # def onAnchorBtnToggled(self, state):
@@ -2165,7 +3117,7 @@ def _width(label, default):
 
 #: Analytical beam shapes, in the order they appear in the dialog. The first
 #: is the default and reproduces the Gaussian correction orGUI has always
-#: applied; see :mod:`orgui.datautils.xrayutils.beamprofile`.
+#: applied; see :mod:`orgui.datautils.xrayutils.corrections.beamprofile`.
 BEAM_SHAPES = (
     _BeamShape(
         "Gaussian",
@@ -2214,7 +3166,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
 
     The incident beam is described either by an analytical shape from
     :data:`BEAM_SHAPES` or by a beam profile measured at the beamline. Both
-    are evaluated by :mod:`orgui.datautils.xrayutils.beamprofile`, which
+    are evaluated by :mod:`orgui.datautils.xrayutils.corrections.beamprofile`, which
     evaluates the illuminated surface integral over the projected sample
     footprint. The intercepted-flux fraction is available as a diagnostic
     numerator but is not applied as a second correction. Only a measured
@@ -2228,6 +3180,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
     #: File-column meaning of the loaded beam-profile file.
     CONTENT_PROFILE = "beam profile"
     CONTENT_HEIGHT_SCAN = "height scan (-dI/dz)"
+    settingsChanged = qt.Signal()
 
     def __init__(self, parent=None):
         qt.QDialog.__init__(self, parent)
@@ -2236,6 +3189,9 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         img = qutils.AspectRatioPixmapLabel(self)
         pixmp = qt.QPixmap(resources.getPath("incident_corrections.png"))
         img.setPixmap(pixmp)
+        # A schematic, not the main content: capped so a wide-aspect image
+        # cannot by itself push the dialog past a normal screen's height.
+        img.setMaximumHeight(110)
 
         verticalLayout.addWidget(img)
 
@@ -2248,15 +3204,81 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             shape.name: [p.default for p in shape.parameters] for shape in BEAM_SHAPES
         }
 
-        layout = qt.QGridLayout()
-        layout.addWidget(qt.QLabel("Sample size L:"), 0, 0)
+        sizesLayout = qt.QGridLayout()
+        sizesLayout.addWidget(qt.QLabel("Sample size L:"), 0, 0)
         self.L = qt.QDoubleSpinBox()
         self.L.setRange(0.00001, 1000000)
         self.L.setDecimals(4)
         self.L.setSuffix(" mm")
         self.L.setValue(5)
-        layout.addWidget(self.L, 0, 1)
+        self.L.setToolTip(
+            "Sample size along the beam. With the beam profile, this sets the "
+            "illuminated fraction of the projected footprint, which is the "
+            "active-area correction for open post-sample slits."
+        )
+        sizesLayout.addWidget(self.L, 0, 1)
 
+        sizesLayout.addWidget(qt.QLabel("Sample size W:"), 1, 0)
+        self.W = qt.QDoubleSpinBox()
+        self.W.setRange(0.00001, 1000000)
+        self.W.setDecimals(4)
+        self.W.setSuffix(" mm")
+        self.W.setValue(5)
+        self.W.setToolTip(
+            "Sample size perpendicular to the beam, in the surface plane.\n"
+            "The horizontal extent of the active area is taken to be this "
+            "value, i.e. the beam is assumed at least as wide as the sample, "
+            "so the sample bounds the illuminated width.\n"
+            "Only the absolute active area in square meter uses it; a "
+            "structure factor on a relative scale is unaffected."
+        )
+        self._legacyWidthToolTip = self.W.toolTip()
+        sizesLayout.addWidget(self.W, 1, 1)
+
+        self.legacyFluxLabel = qt.QLabel("Legacy flux density:")
+        sizesLayout.addWidget(self.legacyFluxLabel, 2, 0)
+        self.beamFlux = qt.QDoubleSpinBox()
+        self.beamFlux.setRange(0.0, 1e30)
+        self.beamFlux.setDecimals(3)
+        self.beamFlux.setSuffix(" ph/(s·mm²)")
+        self.beamFlux.setValue(0.0)
+        self.beamFlux.setToolTip(
+            "Legacy incident photon flux density at the sample position. "
+            "This remains photons/(s mm²) and is never reinterpreted as "
+            "total photons/s. New total-flux calibration is configured in "
+            "the parent corrections dialog."
+        )
+        self._legacyFluxToolTip = self.beamFlux.toolTip()
+        sizesLayout.addWidget(self.beamFlux, 2, 1)
+
+        sizesLayout.addWidget(qt.QLabel("Horizontal interception:"), 3, 0)
+        self.horizontalInterception = qt.QComboBox()
+        self.horizontalInterception.addItem("Not specified", "")
+        self.horizontalInterception.addItem("Full beam intercepted", "full")
+        self.horizontalInterception.addItem(
+            "Known intercepted fraction", "fraction"
+        )
+        self.horizontalInterception.setToolTip(
+            "A vertical beam profile cannot establish how much of the beam "
+            "is intercepted horizontally. New total-flux corrections require "
+            "this choice to be explicit."
+        )
+        sizesLayout.addWidget(self.horizontalInterception, 3, 1)
+
+        self.horizontalFractionLabel = qt.QLabel("Horizontal fraction:")
+        sizesLayout.addWidget(self.horizontalFractionLabel, 4, 0)
+        self.horizontalFraction = qt.QDoubleSpinBox()
+        self.horizontalFraction.setRange(0.000001, 1.0)
+        self.horizontalFraction.setDecimals(6)
+        self.horizontalFraction.setSingleStep(0.01)
+        self.horizontalFraction.setValue(1.0)
+        self.horizontalFraction.setToolTip(
+            "Known fraction of the full incident beam intercepted in the "
+            "horizontal direction. Must be greater than zero and at most one."
+        )
+        sizesLayout.addWidget(self.horizontalFraction, 4, 1)
+
+        modeLayout = qt.QHBoxLayout()
         self.analyticalButton = qt.QRadioButton("analytical beam shape")
         self.analyticalButton.setChecked(True)
         self.analyticalButton.setToolTip(
@@ -2267,14 +3289,33 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             "Use a beam profile measured at the beamline. Required for a "
             "beam that is asymmetric or has more than one maximum."
         )
-        layout.addWidget(self.analyticalButton, 1, 0)
-        layout.addWidget(self.measuredButton, 1, 1)
-        verticalLayout.addLayout(layout)
+        modeLayout.addWidget(self.analyticalButton)
+        modeLayout.addWidget(self.measuredButton)
 
-        verticalLayout.addWidget(self._createShapeGroup())
-        verticalLayout.addWidget(self._createProfileGroup())
-        verticalLayout.addWidget(self._createCenteringGroup())
-        verticalLayout.addWidget(self._createPreviewGroup())
+        # Left column: the beam and sample. Right column: where the sample
+        # sits in the beam, and the resulting preview. Side by side rather
+        # than one long stack, so the dialog fits a normal screen instead of
+        # running off the bottom of it.
+        leftColumn = qt.QVBoxLayout()
+        leftColumn.addLayout(sizesLayout)
+        leftColumn.addLayout(modeLayout)
+        # Only the active beam model's settings take up space; the other is
+        # hidden rather than merely disabled, which used to reserve room for
+        # both at once.
+        self.beamModelStack = qt.QStackedWidget()
+        self.beamModelStack.addWidget(self._createShapeGroup())
+        self.beamModelStack.addWidget(self._createProfileGroup())
+        leftColumn.addWidget(self.beamModelStack)
+        leftColumn.addStretch(1)
+
+        rightColumn = qt.QVBoxLayout()
+        rightColumn.addWidget(self._createCenteringGroup())
+        rightColumn.addWidget(self._createPreviewGroup())
+
+        columns = qt.QHBoxLayout()
+        columns.addLayout(leftColumn, 1)
+        columns.addLayout(rightColumn, 1)
+        verticalLayout.addLayout(columns)
 
         buttons = qt.QDialogButtonBox(
             qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
@@ -2286,9 +3327,95 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         self.setLayout(verticalLayout)
 
         self.analyticalButton.toggled.connect(self._onModeChanged)
+        self.horizontalInterception.currentIndexChanged.connect(
+            self._onHorizontalInterceptionChanged
+        )
+        self.horizontalFraction.valueChanged.connect(self._settingsChanged)
+        self.L.valueChanged.connect(self._settingsChanged)
+        self.W.valueChanged.connect(self._settingsChanged)
+        self.beamFlux.valueChanged.connect(self._settingsChanged)
+        self.profileOffset.valueChanged.connect(self._settingsChanged)
+        self.profileCenter.currentIndexChanged.connect(self._settingsChanged)
+        self.analyticalButton.toggled.connect(self._settingsChanged)
         self._onShapeChanged()
         self._onModeChanged()
+        self._onHorizontalInterceptionChanged()
         self._settings_save = self.settings()
+
+    def _settingsChanged(self, *args):
+        """Notify owners that the effective beam settings changed."""
+        self.settingsChanged.emit()
+
+    def _onHorizontalInterceptionChanged(self, *args):
+        """Enable the fraction editor only for the explicit fraction mode."""
+        fraction_mode = self.horizontalInterception.currentData() == "fraction"
+        self.horizontalFractionLabel.setEnabled(fraction_mode)
+        self.horizontalFraction.setEnabled(fraction_mode)
+        self._updateLegacyControlState()
+        self._updatePreview()
+        self._settingsChanged()
+
+    def horizontalInterceptionMode(self):
+        """Return ``'full'``, ``'fraction'`` or ``None`` from the UI."""
+        return self.horizontalInterception.currentData() or None
+
+    def horizontalInterceptedFraction(self):
+        """Return the stated horizontal fraction, or ``None`` if unresolved."""
+        mode = self.horizontalInterceptionMode()
+        if mode == "full":
+            return 1.0
+        if mode == "fraction":
+            return self.horizontalFraction.value()
+        return None
+
+    def setHorizontalInterception(self, mode, fraction=None):
+        """Restore the horizontal interception convention.
+
+        :param str or None mode: ``'full'``, ``'fraction'`` or ``None``.
+        :param float or None fraction: Fraction used by ``'fraction'`` mode.
+        """
+        index = self.horizontalInterception.findData(mode or "")
+        with blockSignals([self.horizontalInterception, self.horizontalFraction]):
+            self.horizontalInterception.setCurrentIndex(max(index, 0))
+            if fraction is not None:
+                self.horizontalFraction.setValue(float(fraction))
+        self._onHorizontalInterceptionChanged()
+
+    def setTotalFluxMode(self, enabled):
+        """Show which legacy density controls are inactive in total-flux mode."""
+        self._totalFluxMode = bool(enabled)
+        self._updateLegacyControlState()
+
+    def _updateLegacyControlState(self):
+        """Apply total-flux/legacy enablement without changing stored values."""
+        enabled = bool(getattr(self, "_totalFluxMode", False))
+        self.beamFlux.setEnabled(not enabled)
+        self.legacyFluxLabel.setEnabled(not enabled)
+        full_horizontal = (
+            enabled and self.horizontalInterceptionMode() == "full"
+        )
+        self.W.setEnabled(not full_horizontal)
+        if full_horizontal:
+            reason = (
+                "Not a total-flux scale input. Horizontal interception is "
+                "explicitly the full beam."
+            )
+            self.W.setToolTip(reason)
+        elif enabled:
+            self.W.setToolTip(
+                "Retained for geometry and legacy density calculations; it "
+                "does not set the total-flux scale."
+            )
+        else:
+            self.W.setToolTip(self._legacyWidthToolTip)
+        if enabled:
+            self.beamFlux.setToolTip(
+                "Legacy density value preserved for compatibility; the "
+                "active total-flux convention uses photons/s in the parent "
+                "corrections dialog."
+            )
+        else:
+            self.beamFlux.setToolTip(self._legacyFluxToolTip)
 
     def _createShapeGroup(self):
         """Build the analytical-shape group box."""
@@ -2404,11 +3531,17 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         return group
 
     def _onModeChanged(self):
-        """Enable the widgets belonging to the selected beam model."""
+        """Show only the settings of the selected beam model.
+
+        The other group is hidden by switching the stacked page rather than
+        merely disabled, so it stops reserving layout space it is not using.
+        """
         analytical = self.analyticalButton.isChecked()
-        self.shapeGroup.setEnabled(analytical)
-        self.profileGroup.setEnabled(not analytical)
+        self.beamModelStack.setCurrentWidget(
+            self.shapeGroup if analytical else self.profileGroup
+        )
         self._updatePreview()
+        self._settingsChanged()
 
     def _onShapeChanged(self):
         """Relabel the numeric controls for the newly selected shape."""
@@ -2431,6 +3564,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
                     label.setVisible(False)
                     spin.setVisible(False)
         self._updatePreview()
+        self._settingsChanged()
 
     def _onShapeValueChanged(self):
         """Remember the edited values for the current shape and redraw."""
@@ -2439,6 +3573,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             self.shapeParameters[i].value() for i in range(len(shape.parameters))
         ]
         self._updatePreview()
+        self._settingsChanged()
 
     def currentShape(self):
         """Return the selected analytical beam shape.
@@ -2459,7 +3594,9 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             self.profilePlot = silx.gui.plot.Plot1D(self)
             self.profilePlot.setGraphXLabel("position rel. to sample center / microns")
             self.profilePlot.setGraphYLabel("normalized profile / mm$^{-1}$")
-            self.profilePlot.setMinimumHeight(220)
+            # Small enough that the two-column dialog still fits a normal
+            # screen; still tall enough to read the profile shape.
+            self.profilePlot.setMinimumHeight(160)
             self._previewLayout.insertWidget(0, self.profilePlot)
             self._updatePreview()
         qt.QDialog.showEvent(self, event)
@@ -2566,6 +3703,14 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             summary += f", centroid at {centroid * 1e6:+.1f} microns"
         else:
             summary += ", centroid undefined (the profile has no center of mass)"
+        mode = self.horizontalInterceptionMode()
+        if mode == "full":
+            summary += "; horizontal fraction 1 (full beam intercepted)"
+        elif mode == "fraction":
+            summary += f"; horizontal fraction {self.horizontalFraction.value():.6g}"
+        else:
+            summary += "; horizontal interception not specified"
+        summary += "; vertical fraction is evaluated per frame from L and incidence"
         self.profileInfo.setText(summary)
 
     def measuredProfile(self):
@@ -2573,7 +3718,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
 
         :returns: The tabulated profile, referenced to the sample center
             chosen in the dialog.
-        :rtype: orgui.datautils.xrayutils.beamprofile.MeasuredBeamProfile
+        :rtype: orgui.datautils.xrayutils.corrections.beamprofile.MeasuredBeamProfile
         :raises ValueError: If no profile file has been loaded.
         """
         if self._profile_z is None:
@@ -2592,7 +3737,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
     def analyticalProfile(self):
         """Return the analytical beam profile described by the dialog.
 
-        :rtype: orgui.datautils.xrayutils.beamprofile.BeamProfile
+        :rtype: orgui.datautils.xrayutils.corrections.beamprofile.BeamProfile
         :raises ValueError: If the shape rejects the entered parameters.
         """
         shape = self.currentShape()
@@ -2610,7 +3755,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         """Return the incident-beam profile selected in the dialog.
 
         :returns: An analytical or measured beam profile, in meters.
-        :rtype: orgui.datautils.xrayutils.beamprofile.BeamProfile
+        :rtype: orgui.datautils.xrayutils.corrections.beamprofile.BeamProfile
         :raises ValueError: If the measured profile is selected but no
             profile file has been loaded, or if the analytical parameters
             do not describe a usable profile.
@@ -2618,6 +3763,76 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         if self.analyticalButton.isChecked():
             return self.analyticalProfile()
         return self.measuredProfile()
+
+    def sampleLength(self):
+        """Sample size along the beam, converted from millimeter to **meter**.
+
+        :rtype: float
+        """
+        return self.L.value() * 1e-3
+
+    def setSampleLength(self, value):
+        """Set the sample size along the beam, from **meter**.
+
+        :param float value: Sample size in meter.
+        """
+        self.L.setValue(value * 1e3)
+
+    def sampleWidth(self):
+        """Sample size perpendicular to the beam, in **meter**.
+
+        The dialog shows millimeter. This is the horizontal extent the active
+        area is taken to have: the beam is assumed at least as wide as the
+        sample, so the sample bounds the illuminated width rather than the
+        beam. Only :meth:`activeArea` uses it.
+
+        :rtype: float
+        """
+        return self.W.value() * 1e-3
+
+    def setSampleWidth(self, value):
+        """Set the sample size perpendicular to the beam, from **meter**.
+
+        :param float value: Sample size in meter.
+        """
+        self.W.setValue(value * 1e3)
+
+    def activeArea(self, alpha):
+        """Illuminated sample area at incidence angle ``alpha``, in m^2.
+
+        The dimensionless active-area correction applied to an integrated
+        intensity is
+        :meth:`~.beamprofile.BeamProfile.illuminated_area_fraction`; this is
+        the same quantity carrying its area, which is what an *absolute*
+        structure factor needs (issue #15). It assumes open post-sample
+        slits, and the horizontal extent of :meth:`sampleWidth`.
+
+        :param alpha: Incidence angle(s) in radian, any array shape.
+        :returns: The active area in square meter, broadcast over ``alpha``.
+        :rtype: numpy.ndarray
+        """
+        return activearea_corrections.beam_limited_area(
+            alpha, self.sampleWidth(), self.sampleLength(), self.beamProfile()
+        )
+
+    def beamFluxDensity(self):
+        """Incident flux density, converted to **photons/(s m^2)**.
+
+        The dialog shows photons/(s mm^2). ``0`` means unmeasured; pass it as
+        ``flux_density`` to :func:`~.measurement.scale_factor` only once it
+        is nonzero, since ``0`` there would zero the absolute scale rather
+        than fall back to the relative one.
+
+        :rtype: float
+        """
+        return self.beamFlux.value() * 1e6
+
+    def setBeamFluxDensity(self, value):
+        """Set the incident flux density from **photons/(s m^2)**.
+
+        :param float value: Flux density in photons/(s m^2).
+        """
+        self.beamFlux.setValue(value * 1e-6)
 
     def settings(self):
         """Return the dialog state as a plain dict.
@@ -2627,6 +3842,12 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         shape = self.currentShape()
         return {
             "L": self.L.value(),
+            "W": self.W.value(),
+            "beam_flux": self.beamFlux.value(),
+            "horizontal_interception": self.horizontalInterceptionMode(),
+            "horizontal_intercepted_fraction": (
+                self.horizontalInterceptedFraction()
+            ),
             "analytical": self.analyticalButton.isChecked(),
             "shape": shape.name,
             "shape_values": list(self._shape_values[shape.name]),
@@ -2648,12 +3869,29 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             self.profileUnit,
             self.profileCenter,
             self.profileOffset,
+            self.horizontalInterception,
+            self.horizontalFraction,
             self.analyticalButton,
             self.shapeSelector,
         ] + self.shapeParameters
         with blockSignals(widgets):
             if "L" in settings:
                 self.L.setValue(settings["L"])
+            if "W" in settings:
+                self.W.setValue(settings["W"])
+            if "beam_flux" in settings:
+                self.beamFlux.setValue(settings["beam_flux"])
+            if "horizontal_interception" in settings:
+                mode = settings["horizontal_interception"]
+                index = self.horizontalInterception.findData(mode or "")
+                self.horizontalInterception.setCurrentIndex(max(index, 0))
+            if (
+                "horizontal_intercepted_fraction" in settings
+                and settings["horizontal_intercepted_fraction"] is not None
+            ):
+                self.horizontalFraction.setValue(
+                    settings["horizontal_intercepted_fraction"]
+                )
             if "analytical" in settings:
                 self.analyticalButton.setChecked(bool(settings["analytical"]))
                 self.measuredButton.setChecked(not settings["analytical"])
@@ -2677,6 +3915,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
                 self.profileOffset.setValue(settings["profile_offset"])
         self._onShapeChanged()
         self._onModeChanged()
+        self._onHorizontalInterceptionChanged()
         self.loadProfile()
 
     def onOk(self):

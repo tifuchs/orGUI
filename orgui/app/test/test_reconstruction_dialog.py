@@ -663,7 +663,7 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
     )
     shared_options = {
         "mask": False,
-        "solidAngle": False,
+        "solid_angle": False,
         "polarization": False,
     }
     dialog.orgui.scanSelector = SimpleNamespace(
@@ -684,7 +684,7 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
     assert dialog.use_polarization.isChecked()
     assert shared_options == {
         "mask": True,
-        "solidAngle": True,
+        "solid_angle": True,
         "polarization": True,
     }
     assert not dialog.normalize_exposure.isChecked()
@@ -721,7 +721,7 @@ def test_reconstruction_correction_switches_sync_with_integration_options(
     dialog = _dialog(tmp_path)
     shared_options = {
         "mask": True,
-        "solidAngle": False,
+        "solid_angle": False,
         "polarization": True,
         "advanced": {"unchanged": True},
     }
@@ -741,7 +741,7 @@ def test_reconstruction_correction_switches_sync_with_integration_options(
 
     assert shared_options == {
         "mask": True,
-        "solidAngle": True,
+        "solid_angle": True,
         "polarization": False,
         "advanced": {"unchanged": True},
     }

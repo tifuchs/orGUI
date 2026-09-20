@@ -1,0 +1,74 @@
+{
+  "contract_head": "d52ab8f5234e",
+  "stationary": {
+    "units": {
+      "angles": "rad",
+      "counts": "detector counts per frame",
+      "errors": "1-sigma detector counts per frame",
+      "normalization": "exposure times selected monitor product",
+      "output": "current relative F2 scale"
+    },
+    "alpha": [0.017453292519943295, 0.03490658503988659],
+    "delta": [0.3490658503988659, 0.4363323129985824],
+    "gamma": [0.5235987755982988, 1.0471975511965976],
+    "counts": [120.0, 180.0],
+    "errors": [10.954451150103322, 13.416407864998739],
+    "normalization": [2.0, 3.0],
+    "expected": {
+      "intensity": [60.0, 60.0],
+      "intensity_errors": [5.477225575051661, 4.47213595499958],
+      "F2_hkl": [29.999999999999993, 51.96152422706631],
+      "F2_hkl_errors": [2.73861278752583, 3.8729833462074166]
+    }
+  },
+  "rocking": {
+    "units": {
+      "s": "r.l.u.",
+      "axis": "deg",
+      "curves": "detector counts per frame",
+      "normalization": "exposure times selected monitor product",
+      "acceptance": "rad",
+      "output": "current relative F2 scale"
+    },
+    "s": [0.1, 0.2],
+    "axis": [-1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0],
+    "curves": [
+      [2.0, 2.0, 2.0, 12.0, 22.0, 12.0, 2.0, 2.0, 2.0],
+      [4.0, 4.0, 4.0, 24.0, 44.0, 24.0, 4.0, 4.0, 4.0]
+    ],
+    "roi": {
+      "sig_1": [-0.25, 0.25],
+      "bg_1": [-1.0, -0.5],
+      "bg_2": [0.5, 1.0]
+    },
+    "normalization": [2.0, 4.0],
+    "C_Lorentz": [2.0, 2.0],
+    "C_rod": [0.8, 0.8],
+    "acceptance": [0.01, 0.02],
+    "expected": {
+      "raw_croi": [8.5, 17.0],
+      "raw_bgroi": [1.0, 2.0],
+      "raw_croibg": [7.5, 15.0],
+      "croi": [4.25, 4.25],
+      "bgroi": [0.5, 0.5],
+      "croibg": [3.75, 3.75],
+      "croibg_errors": [0.6789237807000135, 0.480071609241788],
+      "F2_hkl": [4.090615434361709, 2.0453077171808545],
+      "F2_hkl_errors": [0.7405909589564478, 0.26183844458177613]
+    }
+  },
+  "legacy_corrections": {
+    "use_mask": true,
+    "use_background": true,
+    "use_solid_angle": true,
+    "use_polarization": true,
+    "use_lorentz": true,
+    "use_footprint": false,
+    "use_normalization": true,
+    "normalize_exposure": true,
+    "monitor_corrections": ["mondio"],
+    "sample_length_m": 0.004,
+    "sample_width_m": 0.008,
+    "beam_flux_density": 2500000000000.0
+  }
+}

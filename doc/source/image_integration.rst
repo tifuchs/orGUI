@@ -93,6 +93,17 @@ integration. The current implementation records the applied ROI sizes,
 reciprocal-space coordinates, detector coordinates, and relevant scan metadata
 with the integrated intensities.
 
+The **polarization correction follows the detector arm**. Its per-pixel array
+is built from the calibrated geometry, which is correct only while the arm
+stays there; on a scan that drives the arm the same pixel looks in a different
+direction on every frame, and the calibrated-position value understates the
+correction by 3 % at a scattering angle of 10 degrees, 10 % at 18 and 33 % at
+30. Both integration paths therefore apply a per-frame factor that moves the
+correction onto the arm position each frame was measured at. It is exactly one
+while the arm is at its calibrated position, so a fixed-arm scan is unchanged.
+The reciprocal-space reconstruction applies the polarization per pixel and
+does not carry this correction.
+
 The Corrections Dialog
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -161,26 +172,146 @@ footprint and sample size". orGUI does not apply it: the footprint corrections
 below evaluate the beam profile and the finite sample size numerically
 instead, which is the row the manual marks as calculated numerically.
 
+.. _comparing-scan-modes:
+
+Comparing Scan Modes
+~~~~~~~~~~~~~~~~~~~~
+
+A rocking scan and a stationary scan of the same rod are reduced to the same
+``F2_hkl`` and may be plotted and fitted together. Verified on simulated data
+to a relative :math:`10^{-6}`, the residual being the trapezoidal sampling of
+the rocking profile.
+
+Vlieg's rocking-scan expression (equation 42) contains three factors that the
+stationary expression (equation 54) does not, and all three are applied:
+
+* the **counting time and monitor**, divided out per frame *inside* the
+  rocking integral, so that a varying counting time or a drifting monitor is
+  handled correctly and not merely on average. A rocking integration takes
+  these from the counters stored with the scan, so it needs a beamline backend
+  that lists ``exposure_time`` among its auxiliary counters; a counter that is
+  not there is skipped, and what was applied is recorded with the result.
+* the **unit of the rocking angle**. The published expressions integrate in
+  radian; the motor axis is in degrees, and the factor :math:`180/\pi` is
+  applied when ``F2_hkl`` is formed. The stored ``croibg`` and the integration
+  interval stay in degrees, the unit they were measured in.
+* the **out-of-plane angular acceptance** :math:`\Delta\gamma` of the region
+  of interest. A rocking scan intercepts a slice of rod whose length is
+  proportional to :math:`\Delta\gamma`, so its integrated intensity is too; a
+  stationary measurement intercepts the whole rod cross-section and has no
+  such factor. Because ROIs are sized per detector position, this factor is
+  not constant along one rocking data set, so leaving it out changed the
+  *shape* of a rod and not only its scale.
+
+The **detector solid-angle correction** is treated separately, and does not
+reach a structure factor. Summing a region of interest already produces the
+complete angular integral, each pixel weighted by the solid angle it subtends,
+so dividing by that solid angle again would double-count the detector
+obliquity -- 0.7 % for a detector at 1 m and 7 % at 0.3 m, varying across the
+detector face, and therefore a rod *shape* error.
+
+The switch remains, because the correction is the right one for a **broad or
+diffuse feature**, where a differential cross section rather than an
+integrated rod intensity is what is wanted. What it does is scoped:
+
+* it scales the **intensity** counters, as before;
+* a new extraction builds a **separate CTR photon curve** from the same
+  background-subtracted signal using the polarization correction but not the
+  solid-angle correction. ``F2_hkl`` uses that direct curve, so it is the same
+  number whether or not the switch was on, without dividing one independently
+  estimated region mean by another;
+* the **reciprocal-space reconstruction** keeps applying it and does not
+  divide it out, since that path forms a differential cross section per pixel.
+
+For a rocking scan both curves are saved when the images are extracted. An
+older database has no direct photon curve, so its reduction retains the scalar
+solid-angle fallback read from the configuration stored with the scan. If the
+old correction state cannot be established, integration warns and leaves it in
+rather than guessing.
+
+The Lorentz and rod-intersection terms can both vary through a rocking window.
+They are therefore multiplied point by point and averaged with the same
+trapezoidal angular quadrature as the counts, rather than multiplying two
+separately averaged factors. This remains the explicit region-mean
+approximation used by extraction; it does not claim a signal-weighted
+per-pixel correction.
+
+Each integrated rocking scan stores a ``reduction`` group beside ``F2_hkl``
+recording the mode, the angle unit, which normalizations were applied, the
+acceptance that was divided out, whether the direct photon curve or legacy
+solid-angle compensation was used, and the active-area assumption, so that a
+saved rod can be placed on a common scale after the fact.
+
+The scale is selected explicitly in the correction dialog. ``Relative
+total-flux`` produces a common relative ``F2_hkl`` scale. ``Calibrated
+total-flux`` additionally requires the incident photon flux, monitor
+calibration, wavelength and surface unit-cell area, and applies
+:math:`K=r_e^2\lambda^2/A_u^2`; its output is :math:`|F_{hkl}|^2` in electron
+units squared. Detector efficiency and external transmission are currently
+recorded unity assumptions, not inferred corrections. The older flux-density
+and numerical-active-area path remains available as ``Legacy`` and is not
+reinterpreted as total flux.
+
+This contract has independent simulated forward validation on calibrated
+pixel rays, including rate-like and integrated monitors, changing exposure,
+moving detector arms, full and clipped regions, measured beam profiles and
+rocking-grid convergence. The repository does not contain a distributable raw
+CTR scan with independently calibrated flux, so no real-data absolute-accuracy
+claim is made. In-plane detector acceptance :math:`C_\mathrm{det}` also remains
+an experimental responsibility: the reduction assumes a region wide enough
+to contain the complete in-plane peak unless clipping is deliberately retained
+as part of the measured resolution integral.
+
+:mod:`orgui.datautils.xrayutils.corrections.measurement` contains the pure
+forward/inverse functions and the absolute-reflectivity conversion.
+``doc/physics/ctr_structure_factor_physics.tex`` is a typeset reference for
+every normalization and integration interval described here.
+
+
 Exposure and Monitor Normalization
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``Normalize integrated intensities`` divides every image by its exposure time
-and by each configured monitor counter, the same normalization the
-reciprocal-space reconstruction applies, so an integration and a
-reconstruction of one scan are normalized identically. The settings are
-shared: changing them here changes them for the reconstruction and the other
-way round.
+For the total-flux convention, ``Normalize integrated intensities`` stores one
+fluence divisor :math:`Q_f` per frame. The selected primary monitor must be
+declared ``rate-like`` or ``integrated``. A rate-like ion chamber such as an
+``ic2`` counts-per-second channel uses
+``flux * exposure * monitor / reference``. An integrated monitor already
+contains the frame exposure and uses
+``flux * reference_exposure * monitor / reference``. Exposure therefore
+enters exactly once. The dialog shows the effective formula and units; it does
+not infer monitor kind from a counter name.
 
-A scan backend that provides no exposure time is not an error; the exposure
-part of the normalization is then skipped. A monitor counter that is missing,
-zero or non-finite does stop the integration, since it would otherwise scale
-intensities by infinity. The dialog lists the counters of the loaded scan that
-can be used.
+Without a flux calibration, the same exposure rule produces a relative
+fluence and the saved scale remains explicitly relative. The legacy
+normalization continues to divide by exposure and by every selected monitor
+counter, matching reciprocal-space reconstruction, but it is labeled as a
+counter product rather than photons.
+
+In the legacy path, a scan backend that provides no exposure time skips that
+part of the normalization. In the total-flux path, missing inputs required by
+the selected monitor convention stop extraction. A monitor counter that is
+missing, zero or non-finite always stops the integration, since it would
+otherwise produce an undefined scale. The dialog lists compatible one-value-
+per-frame counters from the loaded scan.
 
 Footprint Corrections
 ~~~~~~~~~~~~~~~~~~~~~
 
-``Beam footprint`` applies one numerical active-area correction that depends
+In the total-flux convention, ``Beam footprint`` uses the vertical beam
+profile and an explicit horizontal interception choice, and applies the
+dimensionless divisor
+
+.. math::
+
+   H = \frac{f_z f_x}{\sin\alpha},
+
+where :math:`f_z` is the vertical intercepted fraction and :math:`f_x` is the
+stated full or fractional horizontal interception. Both :math:`Q_f` and
+:math:`H` must be applied before the result may be labeled ``F2_hkl``. The
+intercepted photon fraction itself is :math:`f_zf_x`, not :math:`H`.
+
+The legacy ``Beam footprint`` convention applies one numerical active-area
+correction that depends
 on the incidence angle :math:`\alpha` and on the
 vertical profile :math:`p(z)` of the incident beam, normalized to
 :math:`\int p(z)\,\mathrm{d}z = 1`. With a sample of length :math:`L` along the
@@ -332,6 +463,11 @@ When ``Use pixel mask`` is enabled for integration, masked pixels are excluded
 from center ROI sums, background ROI sums, background-image counters, fitted
 background samples, and correction counters unless pixel repair explicitly
 repairs a tiny signal-ROI defect as described below.
+
+When only some center-ROI pixels remain valid, orGUI retains the established
+nominal-area/valid-pixel scaling and emits a warning. That scaling preserves a
+flat intensity density; it is not a physical reconstruction of peak intensity
+hidden by a detector gap or mask.
 
 .. _pixel-repair-algorithm:
 

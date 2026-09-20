@@ -268,9 +268,13 @@ def main():
         os.environ["NUMEXPR_NUM_THREADS"] = os.environ["NUMEXPR_MAX_THREADS"]
 
     if options.cli:
-        os.environ["QT_QPA_PLATFORM"] = (
-            "minimal"  # "offscreen" # maybe use minimal instead
-        )
+        # "offscreen" rather than "minimal": the minimal platform plugin has
+        # no font database, so Qt cannot load an application font there. silx
+        # builds its plot windows with qtawesome icons, which loads one, and
+        # under "minimal" that fails the whole CLI startup with a FontError
+        # before any batch script runs. setdefault so an explicitly chosen
+        # platform still wins.
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from . import logger_utils
 
         logger_utils.set_logging_context("cli")

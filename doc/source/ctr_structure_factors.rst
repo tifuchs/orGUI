@@ -121,6 +121,87 @@ ANAROD F export, and symmetry averaging reject reflectivity explicitly. Plot
 panels select labels from the stored quantity and F/R datasets cannot share one
 axis.
 
+Converting between the two quantities is a question of scale, not of data
+handling: Vlieg (1997) equation (63) relates them by
+
+.. math::
+
+   R = \frac{r_e^2\lambda^2 P_r}
+            {A_u^2\,\sin\alpha\,\sin\beta_\mathrm{out}}\,|F_{hkl}|^2 ,
+
+with :math:`A_u` the surface unit-cell area and
+:math:`\alpha`, :math:`\beta_\mathrm{out}` the incidence and exit angles that
+``CTRScanGeometry`` already records.
+:func:`orgui.datautils.xrayutils.corrections.measurement.structure_factor_from_reflectivity`
+and its inverse implement it, so an absolutely scaled reflectivity curve and a
+set of truncation rods can be brought onto one scale before they are combined.
+The relation is kinematical: it does not hold near a bulk Bragg peak, nor below
+the critical angle, where the distorted-wave treatment of :doc:`dwba` applies.
+
+Total-incident-flux measurement contract
+----------------------------------------
+
+The correction core and both integration paths provide an explicit alternative
+to the legacy peak-flux-density times effective-area convention. New sessions
+default to a relative total-flux contract; calibrated output is opt-in and is
+labeled separately. Legacy saved configurations retain their old numerical
+meaning.
+
+``corrections.normalization.frame_fluence`` calculates incident photons
+:math:`Q_f` in a frame. A rate-like monitor is multiplied by that frame's
+exposure; an integrated monitor is not, because its reading already contains
+the exposure. The monitor kind and its calibration reference are mandatory
+rather than inferred from a counter name. The uncalibrated
+``relative_frame_fluence`` helper follows the same exposure rule while keeping
+the output on a relative scale.
+
+For a normalized vertical beam profile, incidence angle :math:`\alpha` in
+radians and sample length :math:`L` in metres,
+``corrections.activearea.illumination_divisor`` returns
+
+.. math::
+
+   H = \frac{f_z f_x}{\sin\alpha},
+
+where :math:`f_z` is the vertical beam fraction on the sample and :math:`f_x`
+is an explicitly supplied horizontal intercepted fraction. ``H`` is
+dimensionless. It is not the fraction of photons that hit the sample; that
+fraction is :math:`f_\mathrm{hit}=f_zf_x`. Built-in profiles evaluate the
+finite grazing-incidence limit without clipping the angle.
+
+Given a background-subtracted photon-normalized yield
+:math:`Y=N_\mathrm{net}/(Q_f H)`, the pair
+``measurement.structure_factor_squared_from_photon_yield`` and
+``measurement.photon_yield_from_structure_factor`` applies the existing scan-
+mode angular factor and the total-flux prefactor
+:math:`K=r_e^2\lambda^2/A_u^2`. Wavelength is in Angstrom and surface
+unit-cell area in square Angstrom. Existing ``scale_factor`` and
+``structure_factor_squared`` calls keep their flux-density semantics.
+
+The integration dialog stores the exact :math:`Q_f` and :math:`H` arrays used
+for every extracted curve, together with applied/not-applied status, monitor
+kind and units, beam-profile provenance, detector-arm/ROI geometry and the
+scale convention. A rocking reduction always reconstructs from the immutable
+polarization-only base curve before applying these divisors; keep, remove and
+replace actions therefore cannot compound a correction. Unknown legacy
+provenance is rejected rather than guessed.
+
+For calibrated total flux, stationary and rocking results additionally divide
+by :math:`K`. Detector efficiency and external transmission are currently
+explicit unity assumptions. The numerical contract has an independent
+finite-width Gaussian-rod forward test evaluated on calibrated detector rays.
+It varies flux, exposure, rate-like/integrated monitors, beam width/offset,
+detector arms and ROI clipping, and establishes rocking-grid convergence
+before setting tolerances. A finite or clipped ROI is compared with its
+resolution-weighted :math:`|F|^2` integral, not with an unrelated point value.
+
+No distributable raw CTR scan with independently calibrated incident flux is
+present in the repository. Consequently this validation establishes the
+implemented numerical contract but not beamline-specific absolute accuracy.
+That still requires a real standard measurement, detector efficiency and
+external transmission, and characterization of the in-plane acceptance
+:math:`C_\mathrm{det}` when the ROI does not contain the complete peak.
+
 CTR fit predictions and statistics
 ----------------------------------
 

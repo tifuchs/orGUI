@@ -1,5 +1,8 @@
 import h5py
+import json
+
 import numpy as np
+from silx.gui import qt
 from silx.io.dictdump import dicttonx, nxtodict
 import pytest
 from types import SimpleNamespace
@@ -7,8 +10,22 @@ from types import SimpleNamespace
 from orgui.app.QReflectionSelector import HKLReflection
 from orgui.app.config_data import CorrectionState, ConfigData, ConfigHandler
 from orgui.app.database import config_data_from_json, config_data_to_json
+from orgui.app.peak1Dintegr import IntegrationCorrectionsDialog
 from orgui.datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
 from orgui.reconstruction_job import _snapshot_assets
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """The Qt application, kept referenced for the whole test session.
+
+    A ``QApplication`` that is not held on to is garbage-collected, and
+    creating a widget afterwards aborts the interpreter.
+    """
+    application = qt.QApplication.instance()
+    if application is None:
+        application = qt.QApplication([])
+    return application
 
 
 def _make_config():
@@ -134,6 +151,49 @@ def test_config_data_round_trips_through_database_json():
     assert np.allclose(loaded.ub_calculator.getUB(), config.ub_calculator.getUB())
 
 
+@pytest.fixture
+def legacy_corrections_database(tmp_path):
+    """Database snapshot using the pre-typed correction-settings group."""
+    config = _make_config()
+    values = {
+        "use_mask": True,
+        "use_background": True,
+        "use_solid_angle": True,
+        "use_polarization": True,
+        "use_lorentz": True,
+        "use_footprint": False,
+        "use_normalization": True,
+        "normalize_exposure": True,
+        "monitor_corrections": ["mondio"],
+        "sample_length_m": 0.004,
+        "sample_width_m": 0.008,
+        "beam_flux_density": 2.5e12,
+    }
+    nxdict = config.to_nxdict(role="scan")
+    nxdict["orgui"]["integration_corrections"] = {
+        "@NX_class": "NXcollection",
+        "json": json.dumps(values),
+    }
+    filename = tmp_path / "legacy_corrections.h5"
+    dicttonx({"configuration": nxdict}, filename)
+    return filename, values
+
+
+def test_pre_typed_database_correction_settings_still_load(
+    legacy_corrections_database,
+):
+    """Pin dispatch of an old database containing one opaque JSON dataset."""
+    filename, values = legacy_corrections_database
+
+    stored = nxtodict(filename)["configuration"]
+    loaded = ConfigData.from_nxdict(stored)
+
+    assert "json" in stored["orgui"]["integration_corrections"]
+    serialized = loaded.corrections.to_dict()
+    assert {name: serialized[name] for name in values} == values
+    assert loaded.corrections.monitor_corrections == ("mondio",)
+
+
 def test_enabled_pixel_repair_implies_mask_correction():
     config = _make_config()
     repair = SimpleNamespace(
@@ -158,7 +218,7 @@ def test_enabled_pixel_repair_implies_mask_correction():
         scanSelector=SimpleNamespace(
             get_integration_options=lambda: {
                 "mask": False,
-                "solidAngle": False,
+                "solid_angle": False,
                 "polarization": False,
             }
         ),
@@ -178,6 +238,168 @@ def test_enabled_pixel_repair_implies_mask_correction():
     assert captured.corrections.use_mask is True
     assert captured.corrections.normalize_exposure is False
     assert captured.corrections.monitor_corrections == ("mondio",)
+
+
+def test_from_gui_captures_the_footprint_dialogs_inputs(qapp):
+    """L, W and the beam flux are captured only if the dialog was opened.
+
+    An unopened footprint dialog has nothing to record, which must be the
+    same "not recorded" state as a config written before these fields
+    existed -- not a silent zero.
+    """
+    config = _make_config()
+    unopened_gui = SimpleNamespace(
+        ubcalc=SimpleNamespace(
+            detectorCal=config.detector,
+            crystal=config.unit_cell,
+            ubCal=config.ub_calculator,
+            mu=config.mu,
+            chi=config.chi,
+            phi=config.phi,
+            n=config.refraction_index,
+        ),
+        scanSelector=SimpleNamespace(
+            get_integration_options=lambda: {
+                "mask": False,
+                "solid_angle": False,
+                "polarization": False,
+            },
+            correctionsDialog=SimpleNamespace(footprintOptions=None),
+        ),
+        excludedImagesDialog=SimpleNamespace(
+            getData=lambda: np.empty(0, dtype=np.int64)
+        ),
+    )
+    unopened = ConfigData.from_gui(unopened_gui)
+    assert unopened.corrections.sample_length_m is None
+    assert unopened.corrections.sample_width_m is None
+    assert unopened.corrections.beam_flux_density is None
+    assert unopened.corrections.beam_shape_name is None
+    assert unopened.corrections.beam_shape_values == ()
+
+    footprint_dialog = IntegrationCorrectionsDialog()
+    try:
+        footprint_dialog.L.setValue(2.5)
+        footprint_dialog.W.setValue(7.5)
+        footprint_dialog.beamFlux.setValue(4.2)
+        footprint_dialog.shapeSelector.setCurrentIndex(
+            footprint_dialog.shapeSelector.findText("Trapezoid")
+        )
+        base, flat = footprint_dialog.shapeParameters[:2]
+        base.setValue(90.0)
+        flat.setValue(30.0)
+        footprint_dialog.profileCenter.setCurrentIndex(
+            footprint_dialog.profileCenter.findText("median")
+        )
+        footprint_dialog.profileOffset.setValue(-12.5)
+        gui = SimpleNamespace(**unopened_gui.__dict__)
+        gui.scanSelector = SimpleNamespace(
+            get_integration_options=unopened_gui.scanSelector.get_integration_options,
+            correctionsDialog=SimpleNamespace(footprintOptions=footprint_dialog),
+        )
+
+        captured = ConfigData.from_gui(gui)
+
+        assert captured.corrections.sample_length_m == pytest.approx(2.5e-3)
+        assert captured.corrections.sample_width_m == pytest.approx(7.5e-3)
+        assert captured.corrections.beam_flux_density == pytest.approx(4.2e6)
+        assert captured.corrections.beam_shape_analytical is True
+        assert captured.corrections.beam_shape_name == "Trapezoid"
+        assert captured.corrections.beam_shape_values == (90.0, 30.0)
+        assert captured.corrections.beam_profile_center == "median"
+        assert captured.corrections.beam_profile_offset_um == pytest.approx(-12.5)
+    finally:
+        footprint_dialog.deleteLater()
+
+
+def test_from_gui_embeds_a_loaded_measured_beam_profile():
+    """A future reader must not depend on the original profile file path."""
+    config = _make_config()
+    positions = np.array([-2e-4, 0.0, 2e-4])
+    density = np.array([500.0, 4000.0, 500.0])
+    profile = SimpleNamespace(profile_curve=lambda: (positions, density))
+    footprint = SimpleNamespace(
+        sampleLength=lambda: 3e-3,
+        sampleWidth=lambda: 8e-3,
+        beamFluxDensity=lambda: 2e12,
+        settings=lambda: {
+            "analytical": False,
+            "profile_file": "moved/or/replaced.dat",
+            "profile_content": "intensity",
+            "profile_unit": "mm",
+        },
+        measuredProfile=lambda: profile,
+    )
+    gui = SimpleNamespace(
+        ubcalc=SimpleNamespace(
+            detectorCal=config.detector,
+            crystal=config.unit_cell,
+            ubCal=config.ub_calculator,
+            mu=config.mu,
+            chi=config.chi,
+            phi=config.phi,
+            n=config.refraction_index,
+        ),
+        scanSelector=SimpleNamespace(
+            get_integration_options=lambda: {},
+            correctionsDialog=SimpleNamespace(footprintOptions=footprint),
+        ),
+    )
+
+    captured = ConfigData.from_gui(gui).corrections
+
+    assert captured.beam_profile_positions_m == pytest.approx(positions)
+    assert captured.beam_profile_density_per_m == pytest.approx(density)
+
+
+def test_apply_to_gui_restores_the_footprint_dialogs_inputs(qapp):
+    """Restoring a config sets L, W and the beam flux on the shared dialog."""
+    config = _make_config()
+    config.corrections = CorrectionState(
+        sample_length_m=4e-3,
+        sample_width_m=9e-3,
+        beam_flux_density=3e12,
+        beam_shape_analytical=True,
+        beam_shape_name="Trapezoid",
+        beam_shape_values=(90.0, 30.0),
+        beam_profile_center="median",
+        beam_profile_offset_um=-12.5,
+    )
+    footprint_dialog = IntegrationCorrectionsDialog()
+    try:
+        corrections_dialog = SimpleNamespace(
+            footprintOptions_shared=lambda: footprint_dialog
+        )
+        gui = SimpleNamespace(
+            ubcalc=SimpleNamespace(
+                detectorCal=config.detector,
+                crystal=config.unit_cell,
+                ubCal=config.ub_calculator,
+                mu=config.mu,
+                chi=config.chi,
+                phi=config.phi,
+                n=config.refraction_index,
+            ),
+            scanSelector=SimpleNamespace(
+                get_integration_options=lambda: {},
+                set_integration_options=lambda options: None,
+                correctionsDialog=corrections_dialog,
+            ),
+        )
+
+        config.apply_to_gui(gui)
+
+        assert footprint_dialog.sampleLength() == pytest.approx(4e-3)
+        assert footprint_dialog.sampleWidth() == pytest.approx(9e-3)
+        assert footprint_dialog.beamFluxDensity() == pytest.approx(3e12)
+        assert footprint_dialog.analyticalButton.isChecked() is True
+        assert footprint_dialog.currentShape().name == "Trapezoid"
+        assert footprint_dialog.shapeParameters[0].value() == pytest.approx(90.0)
+        assert footprint_dialog.shapeParameters[1].value() == pytest.approx(30.0)
+        assert footprint_dialog.profileCenter.currentText() == "median"
+        assert footprint_dialog.profileOffset.value() == pytest.approx(-12.5)
+    finally:
+        footprint_dialog.deleteLater()
 
 
 def test_apply_to_gui_sets_reconstruction_normalization_attributes():
@@ -201,6 +423,132 @@ def test_apply_to_gui_sets_reconstruction_normalization_attributes():
 
     assert gui.reconstruction_normalize_exposure is False
     assert gui.reconstruction_monitor_corrections == ("mondio",)
+
+
+def test_apply_to_gui_peak_angles_use_the_loaded_orientation():
+    """Loaded U must reach ``angles``, which calcReflection reads."""
+    config = _make_config()
+    rotation = np.deg2rad(68.0)
+    config.ub_calculator.setU(
+        np.array(
+            [
+                [np.cos(rotation), -np.sin(rotation), 0.0],
+                [np.sin(rotation), np.cos(rotation), 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+    )
+    stale = HKLVlieg.UBCalculator(config.unit_cell, 70.0)
+    stale.defaultU()
+    gui = SimpleNamespace(
+        ubcalc=SimpleNamespace(
+            detectorCal=config.detector,
+            crystal=config.unit_cell,
+            ubCal=stale,
+            angles=HKLVlieg.VliegAngles(stale),
+        ),
+    )
+
+    config.apply_to_gui(gui)
+
+    hkl = np.array([[1.0], [0.0], [1.0]])
+    expected = HKLVlieg.VliegAngles(config.ub_calculator).anglesZmode(
+        hkl, config.mu, "in", config.chi, config.phi
+    )
+    np.testing.assert_allclose(
+        gui.ubcalc.angles.anglesZmode(hkl, config.mu, "in", config.chi, config.phi),
+        expected,
+    )
+
+
+def test_total_flux_state_survives_before_its_widgets_exist():
+    """Stage-5 programmatic settings round-trip through the GUI snapshot."""
+    config = _make_config()
+    config.corrections = CorrectionState(
+        total_incident_flux=2.5e10,
+        total_flux_calibrated=True,
+        primary_monitor="ic2",
+        primary_monitor_kind="rate",
+        primary_monitor_unit="count/s",
+        monitor_reference_reading=4200.0,
+        horizontal_interception="fraction",
+        horizontal_intercepted_fraction=0.85,
+    )
+    gui = SimpleNamespace(
+        ubcalc=SimpleNamespace(
+            detectorCal=config.detector,
+            crystal=config.unit_cell,
+            ubCal=config.ub_calculator,
+            mu=config.mu,
+            chi=config.chi,
+            phi=config.phi,
+            n=config.refraction_index,
+        ),
+        scanSelector=SimpleNamespace(
+            get_integration_options=lambda: {},
+            set_integration_options=lambda options: None,
+        ),
+    )
+
+    config.apply_to_gui(gui)
+    captured = ConfigData.from_gui(gui).corrections
+
+    assert captured.total_incident_flux == pytest.approx(2.5e10)
+    assert captured.total_flux_calibrated is True
+    assert captured.primary_monitor == "ic2"
+    assert captured.primary_monitor_kind == "rate"
+    assert captured.monitor_reference_reading == pytest.approx(4200.0)
+    assert captured.horizontal_interception == "fraction"
+    assert captured.horizontal_intercepted_fraction == pytest.approx(0.85)
+
+
+def test_apply_to_gui_requests_a_replot(qapp):
+    """Loading a config must refresh HKL-dependent plot elements too.
+
+    Every interactive path that changes mu/chi/phi, the UB matrix or the
+    detector geometry (``_onMachineParamsChanged``, ``_onCrystalParamsChanged``,
+    ``_onAlignU``) emits ``sigReplotRequest`` right after
+    ``updateReflectionMismatch()`` -- that method's own docstring documents
+    the contract. Without it here, ``mu``/``chi``/``phi`` and the UB matrix
+    were already correct immediately after loading (they are read fresh, not
+    cached), but the ROI and reflection overlays and the Q-plot kept showing
+    the geometry from before the config was loaded -- what looked like
+    "loading a config does not update the angles to hkl conversion."
+    """
+    config = _make_config()
+
+    class _UBStub(qt.QObject):
+        sigPlottableMachineParamsChanged = qt.pyqtSignal()
+        sigReplotRequest = qt.pyqtSignal(bool)
+
+        def __init__(self):
+            super().__init__()
+            self.detectorCal = config.detector
+            self.crystal = config.unit_cell
+            self.ubCal = config.ub_calculator
+            self.mu = 0.0
+            self.chi = 0.0
+            self.phi = 0.0
+            self.n = 1.0
+
+        def updateReflectionMismatch(self):
+            pass
+
+    ub_widget = _UBStub()
+    gui = SimpleNamespace(ubcalc=ub_widget)
+
+    replot_calls = []
+    ub_widget.sigReplotRequest.connect(replot_calls.append)
+    plottable_calls = []
+    ub_widget.sigPlottableMachineParamsChanged.connect(
+        lambda: plottable_calls.append(True)
+    )
+
+    config.apply_to_gui(gui)
+
+    assert replot_calls == [True]
+    assert plottable_calls == [True]
+    assert ub_widget.mu == config.mu, "the angle itself must also be updated"
 
 
 def test_snapshot_assets_serializes_active_mask(tmp_path):

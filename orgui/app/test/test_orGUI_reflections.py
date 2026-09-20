@@ -6,7 +6,13 @@ import numpy as np
 import pytest
 from silx.gui import qt
 
-from orgui.app.orGUI import _display_roi_geometry, orGUI
+from orgui.app.orGUI import (
+    _correction_region_counters,
+    _display_roi_geometry,
+    _rocking_arm_snapshot,
+    _warn_masked_peak_scaling,
+    orGUI,
+)
 from orgui.app.QReflectionSelector import (
     AutoBraggOptionsDialog,
     AutoBraggStatusDialog,
@@ -28,6 +34,57 @@ class FakeLinearDetector:
         y = np.asarray(y, dtype=float)
         alpha_i = np.asarray(alpha_i, dtype=float)
         return 2.0e-4 * y + alpha_i, 1.0e-4 * x
+
+
+def test_correction_counters_share_mask_across_center_and_backgrounds():
+    correction = np.arange(30, dtype=float).reshape(5, 6) + 1.0
+    mask = np.zeros_like(correction, dtype=bool)
+    mask[1, 2] = True
+    mask[3, 4] = True
+    center = (slice(1, 4), slice(1, 3))
+    backgrounds = [
+        (slice(0, 1), slice(1, 3)),
+        (slice(4, 6), slice(3, 5)),
+    ]
+
+    counters = _correction_region_counters(
+        correction, mask, center, backgrounds
+    )
+
+    valid = np.where(mask, np.nan, correction)
+    expected_center = valid[1:3, 1:4]
+    expected_background = np.concatenate(
+        [valid[1:3, 0:1].ravel(), valid[3:5, 4:6].ravel()]
+    )
+    np.testing.assert_allclose(
+        counters,
+        [
+            np.nansum(expected_center),
+            np.sum(np.isfinite(expected_center)),
+            np.nansum(expected_background),
+            np.sum(np.isfinite(expected_background)),
+        ],
+    )
+
+
+def test_masked_peak_scaling_warning_explains_nonphysical_recovery(caplog):
+    with caplog.at_level(logging.WARNING):
+        _warn_masked_peak_scaling([8.0, 10.0], [10.0, 10.0], "Test ROI")
+
+    assert "not a physical recovery of peak intensity" in caplog.text
+
+
+def test_rocking_arm_snapshot_is_per_frame_and_unit_tagged():
+    """A saved rocking extraction retains the arm history needed later."""
+    gamma = np.deg2rad([0.0, 15.0, 30.0])
+    delta = np.deg2rad([0.0, 20.0, 40.0])
+
+    snapshot = _rocking_arm_snapshot(gamma, delta, (2, 3))
+
+    assert snapshot["@detector_arm_unit"] == "rad"
+    assert snapshot["@detector_arm_angle_frame"] == "prim"
+    np.testing.assert_allclose(snapshot["gamma_arm"], [gamma, gamma])
+    np.testing.assert_allclose(snapshot["delta_arm"], [delta, delta])
 
 
 class FakeScan:
@@ -924,3 +981,124 @@ def test_display_roi_geometry_maps_clipped_detector_rows_to_plot_sides(
         expected_top,
         expected_bottom,
     )
+
+
+class FakeArmPolarizationDetector:
+    """A detector whose polarization falls off with the arm angle.
+
+    Lets the per-frame arm factor be written in closed form, independently of
+    the real z-axis expression, so a failure points at the plumbing rather
+    than at the physics.
+    """
+
+    def polarizationAtPoints(
+        self, row, column, alpha_i, gamma_arm=None, delta_arm=None
+    ):
+        arm = 0.0 if gamma_arm is None else float(gamma_arm)
+        return np.full(np.shape(row), 1.0 - 0.5 * arm**2, dtype=float)
+
+    def polarizationAtPointsFrames(self, row, column, alpha_i, gamma_arm, delta_arm):
+        """The batched counterpart, same closed form, one arm per frame."""
+        gamma_arm = np.asarray(gamma_arm, dtype=float)
+        factor = 1.0 - 0.5 * gamma_arm**2
+        return np.broadcast_to(
+            factor.reshape(factor.shape + (1,) * np.ndim(row)),
+            factor.shape + np.shape(row),
+        ).astype(float)
+
+
+def test_the_polarization_arm_factor_follows_a_moving_arm():
+    """Finding F5: the factor is per frame and one at the calibrated position.
+
+    ``_polarizationArmFactor`` reads the arm from ``getArmAngles``, sharing
+    that convention with every other arm consumer in the application, and
+    returns what an intensity corrected at the calibrated position has to be
+    multiplied by.
+    """
+    arms = np.array([0.0, 0.1, 0.2])
+    stub = SimpleNamespace(getArmAngles=lambda: (arms, np.zeros_like(arms)))
+
+    got = orGUI._polarizationArmFactor(
+        stub, FakeArmPolarizationDetector(), 300.0, 240.0, 20.0, 20.0, 0.01
+    )
+
+    np.testing.assert_allclose(got, 1.0 / (1.0 - 0.5 * arms**2), rtol=1e-12)
+    assert got[0] == 1.0, "no arm rotation must leave the intensity alone"
+
+
+def test_the_polarization_arm_factor_broadcasts_a_constant_arm():
+    """The constant-arm shortcut must agree with the per-frame path.
+
+    A fixed arm is evaluated once and broadcast to keep the cost off the
+    common path, so the two branches have to give the same number.
+    """
+    constant = np.full(4, 0.2)
+    varying = np.array([0.2, 0.2, 0.2, 0.2000001])
+    detector = FakeArmPolarizationDetector()
+
+    fast = orGUI._polarizationArmFactor(
+        SimpleNamespace(getArmAngles=lambda: (constant, np.zeros(4))),
+        detector, 300.0, 240.0, 20.0, 20.0, 0.01,
+    )
+    looped = orGUI._polarizationArmFactor(
+        SimpleNamespace(getArmAngles=lambda: (varying, np.zeros(4))),
+        detector, 300.0, 240.0, 20.0, 20.0, 0.01,
+    )
+
+    assert fast.shape == (4,)
+    np.testing.assert_allclose(fast, 1.0 / (1.0 - 0.5 * 0.2**2), rtol=1e-12)
+    np.testing.assert_allclose(looped[:3], fast[:3], rtol=1e-12)
+
+
+def test_the_polarization_arm_factor_batches_a_varying_arm_on_one_region():
+    """A moving arm on one fixed region must take one batched call, not N.
+
+    This is the mu-scan performance fix: a rocking or reflectivity scan
+    tracks one region across a curve with the arm different every frame,
+    which used to force a Python loop calling ``polarizationAtPoints`` once
+    per frame -- slow enough that a scan with thousands of points made the
+    reduction take minutes. The routing in ``_polarizationArmFactor`` must
+    recognise "one region, many frames" and call the batched
+    ``polarizationAtPointsFrames`` exactly once, not fall back to the loop.
+    """
+    calls = SimpleNamespace(points=0, frames=0)
+
+    class CountingDetector(FakeArmPolarizationDetector):
+        def polarizationAtPoints(self, *args, **kwargs):
+            calls.points += 1
+            return super().polarizationAtPoints(*args, **kwargs)
+
+        def polarizationAtPointsFrames(self, *args, **kwargs):
+            calls.frames += 1
+            return super().polarizationAtPointsFrames(*args, **kwargs)
+
+    arms = np.linspace(0.0, 0.3, 50)
+    stub = SimpleNamespace(getArmAngles=lambda: (arms, np.zeros_like(arms)))
+
+    got = orGUI._polarizationArmFactor(
+        stub, CountingDetector(), 300.0, 240.0, 20.0, 20.0, 0.01
+    )
+
+    np.testing.assert_allclose(got, 1.0 / (1.0 - 0.5 * arms**2), rtol=1e-12)
+    assert calls.frames == 1, "one region and 50 frames must be one batched call"
+    assert calls.points == 1, "only the shared 'at home' evaluation, also batched"
+
+
+def test_the_polarization_arm_factor_still_loops_when_the_region_also_moves():
+    """A stationary scan tracking a rod has no single shared region to batch.
+
+    There, the per-frame region position is itself an array -- the ROI
+    follows the reflection across the detector -- so batching on "one
+    region" does not apply and the per-frame loop, unchanged, is still the
+    correct fallback.
+    """
+    row = np.array([300.0, 310.0, 320.0])
+    column = np.array([240.0, 242.0, 244.0])
+    arm = np.array([0.0, 0.1, 0.2])
+    stub = SimpleNamespace(getArmAngles=lambda: (arm, np.zeros_like(arm)))
+
+    got = orGUI._polarizationArmFactor(
+        stub, FakeArmPolarizationDetector(), row, column, 20.0, 20.0, 0.01
+    )
+
+    np.testing.assert_allclose(got, 1.0 / (1.0 - 0.5 * arm**2), rtol=1e-12)

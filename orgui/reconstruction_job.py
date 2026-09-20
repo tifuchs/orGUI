@@ -25,6 +25,7 @@ from .app.config_data import ConfigData
 from .app.database import FILTERS, config_data_from_json, config_data_to_json
 from .app.mask_config import create_pixel_repair_plan
 from .backend.scans import ScanReference
+from .datautils.xrayutils.corrections import detector as detector_corrections
 from .datautils.xrayutils.reconstruction import (
     _CHECKPOINT_BYTES_PER_ROW,
     _CheckpointRouter,
@@ -34,6 +35,7 @@ from .datautils.xrayutils.reconstruction import (
     _calibration_probe_all_grids,
     _detector_corner_rays,
     _discover_checkpoint_state,
+    _empty_batch,
     _files_per_job,
     _finalize_reconstruction,
     _kernel_for_grid,
@@ -1245,23 +1247,22 @@ def _correction_pipeline(config, scan, assets, provenance):
         if correction.use_mask and "mask" in assets
         else None
     )
-    static_factor = None
-    if correction.use_solid_angle:
-        static_factor = 1.0 / np.asarray(
-            detector.solidAngleArray(), dtype=np.float64
-        )
-        provenance.setdefault("factor_uncertainty", {})[
-            "solid_angle"
-        ] = "deterministic-no-uncertainty"
-    if correction.use_polarization:
-        polarization = np.asarray(detector.polarizationArray(), dtype=np.float64)
-        if static_factor is None:
-            static_factor = 1.0 / polarization
-        else:
-            static_factor /= polarization
-        provenance.setdefault("factor_uncertainty", {})[
-            "polarization"
-        ] = "deterministic-no-uncertainty"
+    # The per-pixel factors are defined once, in the corrections package,
+    # and shared with the direct-space integrations. Only their application
+    # is special here: it is fused into the native pass below.
+    static_factor = detector_corrections.pixel_factors(
+        detector,
+        solid_angle=correction.use_solid_angle,
+        polarization=correction.use_polarization,
+    )
+    for name, enabled in (
+        ("solid_angle", correction.use_solid_angle),
+        ("polarization", correction.use_polarization),
+    ):
+        if enabled:
+            provenance.setdefault("factor_uncertainty", {})[
+                name
+            ] = "deterministic-no-uncertainty"
     if static_factor is not None:
         static_factor = np.ascontiguousarray(static_factor, dtype=np.float64)
         static_factor_squared = np.square(static_factor)
@@ -2476,7 +2477,53 @@ block is what left a prepare worker parked while every exit condition was
 already true -- observed repeatedly in 2026-08, on two builds, with
 ``cancellation`` and ``dispatch_done`` set and the queue empty. A sentinel
 wakes the consumer with data instead of with the clock.
+
+A sentinel is addressed to a *pool*, but it travels on a queue, so it is
+really addressed to whoever reads it next. Where one pool replaces
+another on the same queue, the replacement must therefore not be
+consuming yet when the retired pool is woken -- see
+:func:`_drain_surplus_sentinels` and the compute-pool generation swap in
+:func:`_map_pending_ranges`.
 """
+
+
+def _drain_surplus_sentinels(work_queue):
+    """Remove leftover :data:`_SHUTDOWN_SENTINEL` values from a queue.
+
+    A pool's ``shutdown`` puts one sentinel per outstanding worker, and a
+    worker that had already exited leaves its sentinel behind. Harmless
+    while that queue has no other consumer; fatal once a replacement pool
+    starts draining the same queue, because the first thing each new
+    worker reads is an exit order meant for a thread that is already
+    gone.
+
+    Call this only when no consumer is running -- between a retired
+    pool's join and its replacement's first worker. Real work items are
+    put back, so nothing queued is lost; producers may interleave with
+    the put-back, which reorders items relative to each other. Groups are
+    mapped independently and accumulated commutatively, so queue order
+    carries no meaning to preserve.
+
+    :param queue.Queue work_queue:
+        The queue both pool generations drain.
+    :returns:
+        Number of sentinels removed.
+    """
+    kept = []
+    removed = 0
+    while True:
+        try:
+            item = work_queue.get_nowait()
+        except Empty:
+            break
+        if item is _SHUTDOWN_SENTINEL:
+            removed += 1
+        else:
+            kept.append(item)
+    for item in kept:
+        work_queue.put(item)
+    return removed
+
 
 _POLL_TIMEOUT_SECONDS = 0.2
 _REBALANCE_INITIAL_SECONDS = 30
@@ -3077,6 +3124,112 @@ def _frame_groups(frame_range, router, grid_names, frames_per_group):
     return groups
 
 
+FRAME_SKIP_ENV_VAR = "ORGUI_NO_FRAME_SKIP"
+"""Set to disable retiring frames that provably reach no grid.
+
+An escape hatch and an A/B switch, not a tuning knob: the two arms must
+produce identical records, and this is how that is checked on real data.
+"""
+
+
+def _retire_unreachable_groups(
+    frame_groups,
+    spec,
+    config,
+    bounds,
+    detector_tiles,
+    ray_arrays,
+    router,
+    grid_names,
+    *,
+    completed_images,
+    total_images,
+    progress,
+):
+    """Drop frame groups that cannot reach any output grid.
+
+    A small volume swept through a full rotation is only crossed at some
+    sample angles, so a large share of a scan's frames contribute
+    nothing. Deciding that needs no pixel data -- only the exposure's
+    angle bounds, the detector's rays and the grid -- so it can be
+    settled here, before a single frame is read, and those frames then
+    cost no read, no correction and no kernel call at all.
+
+    The test is
+    :meth:`ReconstructionKernel.frames_reach_grid`, the same reject the
+    brick loop runs, applied to the whole tile and then quartered. It is
+    one-directional: a frame it rejects provably maps nothing, while a
+    frame it accepts may still map nothing and simply costs what it
+    always did. Verified on the reference job by mapping all 1516
+    rejected frames of 3651 and confirming every one produced zero
+    records (``doc/design/reciprocal_space_brick_reject.md``).
+
+    A retired group is still announced to ``router`` as covered, with an
+    empty batch. The checkpoint countdown and the ``frames_covered``
+    attribute that makes a part resumable both count frames, so a group
+    that vanished silently would leave its checkpoint short, unflushed
+    and unresumable for the rest of the run.
+
+    Groups are retired whole. A group whose frames are not all
+    unreachable is mapped as before, so grouping never costs coverage.
+
+    :param completed_images:
+        Frames already mapped, for the progress report.
+    :returns:
+        ``(groups_to_map, completed_images)`` with the retired groups'
+        frames added to ``completed_images``.
+    """
+    if not frame_groups or os.environ.get(FRAME_SKIP_ENV_VAR):
+        return frame_groups, completed_images
+    kernels = _build_kernels(spec, config.ub_calculator, threads=1)
+    probe = next(iter(kernels.values()), None)
+    if probe is None or not hasattr(probe, "frames_reach_grid"):
+        # An extension older than this filter: map everything, as before.
+        return frame_groups, completed_images
+
+    started = time.monotonic()
+    angles_start = np.ascontiguousarray(bounds[:, 0])
+    angles_end = np.ascontiguousarray(bounds[:, 1])
+    reaches = np.zeros(bounds.shape[0], dtype=bool)
+    for grid_name in grid_names:
+        kernel = kernels[grid_name]
+        for detector_tile in detector_tiles:
+            reaches |= kernel.frames_reach_grid(
+                ray_arrays[detector_tile], angles_start, angles_end
+            )
+
+    kept = []
+    retired_frames = 0
+    for group in frame_groups:
+        if reaches[list(group)].any():
+            kept.append(group)
+            continue
+        for grid_name in grid_names:
+            router.route(
+                grid_name, group[0], _empty_batch(), frames=len(group)
+            )
+        retired_frames += len(group)
+        completed_images += len(group)
+
+    if retired_frames:
+        logger.info(
+            "frame reach filter: %d of %d frame(s) reach no output grid "
+            "and will not be read (%.1f%%, decided in %.2f s)",
+            retired_frames,
+            retired_frames + sum(len(group) for group in kept),
+            100.0 * retired_frames / max(1, retired_frames
+                                         + sum(len(g) for g in kept)),
+            time.monotonic() - started,
+        )
+        if progress is not None:
+            progress(
+                completed_images,
+                total_images + 1,
+                f"Skipped {retired_frames} frame(s) that reach no grid",
+            )
+    return kept, completed_images
+
+
 def _map_frame_groups_streamed(
     spec,
     scan,
@@ -3675,7 +3828,33 @@ def _map_pending_ranges(
         )
     ]
 
+    frame_groups, completed_images = _retire_unreachable_groups(
+        frame_groups,
+        spec,
+        config,
+        bounds,
+        detector_tiles,
+        ray_arrays,
+        router,
+        grid_names,
+        completed_images=completed_images,
+        total_images=total_images,
+        progress=progress,
+    )
+
     routed_before = getattr(router, "routed_records", 0)
+
+    if not frame_groups:
+        # Every group was retired, so there is nothing to schedule -- and
+        # the per-frame scheduler must not be started empty: its
+        # completion signal is raised by a delivered group, so with none
+        # to deliver the coordinator would wait for it forever. The
+        # checkpoints are already complete, having been routed above; all
+        # that is left is to decide whether an empty result is legitimate.
+        _fail_if_nothing_was_routed(
+            router, routed_before, total_images, progress
+        )
+        return
 
     if frames_per_group > 1:
         group_workers, group_threads, group_depth = _group_pipeline_layout(
@@ -4039,6 +4218,23 @@ def _map_pending_ranges(
                             feasible.append(
                                 (candidate_threads, min(needed, ceiling))
                             )
+                    # The whole decision, in one record. Every term that
+                    # steers it is either measured against a single
+                    # sample tile of one frame (the sweep) or gated by
+                    # the configuration currently in effect (the rate),
+                    # so a choice that looks wrong in hindsight can only
+                    # be attributed with the inputs written down.
+                    logger.debug(
+                        "rebalance: rate %.3f frame/s over %.1f s; "
+                        "sweep (s/frame) %s; feasible %s; in effect "
+                        "%d worker(s) x %d thread(s)",
+                        rate,
+                        elapsed,
+                        {c: round(t, 4) for c, t in sweep.items()},
+                        feasible,
+                        compute_pool.size,
+                        current_kernel_threads[0],
+                    )
                     if feasible:
                         new_kernel_threads, new_image_workers = max(
                             feasible, key=lambda pair: pair[0]
@@ -4055,27 +4251,54 @@ def _map_pending_ranges(
                             # kernel_threads change: each compute worker's
                             # kernel is built once at worker-start, so this
                             # needs a full generation swap, not a resize.
-                            # ready_queue/gate are untouched -- readers and
-                            # already-queued frames are unaffected, only
-                            # which pool drains the queue changes.
+                            # Queued frames survive it -- readers are
+                            # unaffected and only which pool drains the
+                            # queue changes; the one thing taken off
+                            # ready_queue is the retired pool's own wake
+                            # sentinels, below.
                             current_kernel_threads[0] = new_kernel_threads
                             gate.retarget(
                                 new_image_workers + _PREFETCH_QUEUE_SLACK
                             )
                             old_compute_pool = compute_pool
+                            # Retire the old generation *before* the new
+                            # one exists. Its shutdown wakes its workers
+                            # by putting one _SHUTDOWN_SENTINEL per
+                            # outstanding worker on ready_queue, and a
+                            # sentinel belongs to whoever reads it next:
+                            # spawning the replacement first let the new
+                            # workers drain the backlog, reach that block
+                            # of sentinels and exit on the spot, every
+                            # one of them. That left no consumer at all,
+                            # so no one released the gate, readers parked
+                            # on it, readers_done never fired and this
+                            # loop waited forever -- the mid-run stall
+                            # caught on 39_1-rsmap on 2026-09-19.
+                            #
+                            # The join blocks until every straggler
+                            # finishes its in-flight _map_frame_group
+                            # call -- a deliberate, rare stall (this
+                            # whole block runs at most once per rebalance
+                            # interval), never abandons in-flight work.
+                            old_compute_pool.shutdown(wait=True)
+                            # Sentinels put for workers that had already
+                            # exited outlive the join; with no consumer
+                            # running they are safe to take back out, and
+                            # must be, or the new generation inherits
+                            # them.
+                            surplus = _drain_surplus_sentinels(ready_queue)
+                            if surplus:
+                                logger.debug(
+                                    "compute pool swap: dropped %d surplus "
+                                    "shutdown sentinel(s)",
+                                    surplus,
+                                )
                             compute_pool = _AdjustablePool(
                                 compute_loop,
                                 initial_size=new_image_workers,
                                 name="orgui-rsmap-compute",
                             )
                             compute_pool.wake_workers = _wake_compute
-                            # Blocks until every straggler on the retired
-                            # generation finishes its in-flight
-                            # _map_frame_group call -- a deliberate, rare
-                            # stall (this whole block runs at most once per
-                            # rebalance interval), never abandons
-                            # in-flight work.
-                            old_compute_pool.shutdown(wait=True)
                             rate_at_last_rebalance = rate
                             rebalance_interval = _REBALANCE_INITIAL_SECONDS
                         elif new_image_workers != compute_pool.size:

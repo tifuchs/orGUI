@@ -234,6 +234,168 @@ def test_single_frame_group_reaches_the_same_voxels_as_accumulate():
             )
 
 
+def _partial_grid_case(frames, moving, max_depth, block=64):
+    """A grid covering only a corner of what the detector reaches.
+
+    The brick reject needs both kinds of brick present to be worth
+    testing: some that provably miss the grid and some that do not.
+    """
+    rays = _rays()
+    start, end = _angles(frames, moving)
+    minimum, step, shape = _grid(rays, start, end)
+    # Keep the low corner of the full footprint, a quarter of it per
+    # axis, so most of the detector maps outside.
+    partial_shape = np.maximum(1, shape // 4)
+    kernel = _kernel(minimum, step, partial_shape, max_depth, 1, block)
+    intensity, variance, mask = _payload(frames)
+    return kernel, rays, start, end, intensity, variance, mask
+
+
+@pytest.mark.parametrize("moving", [False, True])
+@pytest.mark.parametrize("max_depth", [0, 2, 3])
+def test_brick_reject_skips_bricks_without_changing_the_answer(
+    moving, max_depth
+):
+    """Rejecting a whole brick must be invisible in the output.
+
+    A brick is proved to miss the grid by the same test a pixel is, one
+    level up, so a rejected brick is one whose pixels would each have
+    been rejected in turn. Skipping it is therefore an optimization with
+    no scientific content -- which only means anything if it is checked
+    against the path that does not have it. ``accumulate`` partitions the
+    detector into runs of the flattened image rather than bricks and has
+    no brick reject, so it is an independent reference here.
+    """
+    case = _partial_grid_case(4, moving, max_depth)
+    kernel, rays, start, end, intensity, variance, mask = case
+
+    grouped = kernel.accumulate_group(
+        intensity, variance, mask, rays, start, end, True
+    )
+    profile = grouped["_profile"]
+    bricks_total = profile["skipped_bricks"] + 1
+    assert profile["skipped_bricks"] > 0, (
+        "the partial grid must leave some brick provably outside it, "
+        "or this test proves nothing"
+    )
+    assert grouped["chunk_id"].size > 0, (
+        "and some brick must still reach it"
+    )
+    assert bricks_total > 1
+
+    reference = _per_frame_reference(
+        kernel, rays, start, end, intensity, variance, mask
+    )
+    found = _as_mapping(grouped)
+    expected = _as_mapping(reference)
+    assert set(found) == set(expected)
+    for key, (weighted, variance_, weight, contributors) in expected.items():
+        got = found[key]
+        assert got[3] == contributors, key
+        assert got[0] == pytest.approx(weighted, rel=1e-12), key
+        assert got[1] == pytest.approx(variance_, rel=1e-12), key
+        assert got[2] == pytest.approx(weight, rel=1e-12), key
+
+
+@pytest.mark.parametrize("moving", [False, True])
+def test_frames_reach_grid_never_rejects_a_frame_that_maps_records(moving):
+    """The frame filter's claim, checked against what mapping produces.
+
+    ``frames_reach_grid`` decides from geometry alone, before any frame
+    is read, so the pipeline can skip a frame's read, correction and
+    kernel call outright. That is only safe because the claim is
+    one-directional: a rejected frame provably maps nothing. An accepted
+    frame may still map nothing, which costs only the work it would have
+    cost anyway.
+
+    A full rotation against a grid sized to one frame's footprint is the
+    case the filter exists for -- most sample angles carry the detector
+    nowhere near that volume.
+    """
+    rays = _rays()
+    frames = 48
+    start = np.zeros((frames, 4))
+    start[:, 0] = 0.10471975511965978
+    start[:, 1] = np.linspace(0.0, 2.0 * np.pi, frames, endpoint=False)
+    end = start.copy()
+    if moving:
+        end[:, 1] += np.deg2rad(0.1)
+    start = np.ascontiguousarray(start)
+    end = np.ascontiguousarray(end)
+
+    # A grid covering what the first frame reaches, and little else.
+    minimum, step, shape = _grid(
+        rays,
+        np.ascontiguousarray(start[:1]),
+        np.ascontiguousarray(end[:1]),
+    )
+    kernel = _kernel(minimum, step, shape, 2, 1, 256)
+
+    reaches = kernel.frames_reach_grid(rays, start, end)
+    assert reaches.shape == (frames,)
+    assert reaches.any(), "the grid was built from a frame that reaches it"
+    assert not reaches.all(), (
+        "a full rotation against a one-frame grid must leave some frame "
+        "provably outside it, or this test proves nothing"
+    )
+
+    intensity, variance, mask = _payload(1)
+    mapped = 0
+    for frame in range(frames):
+        batch = kernel.accumulate_group(
+            intensity,
+            variance,
+            mask,
+            rays,
+            np.ascontiguousarray(start[frame : frame + 1]),
+            np.ascontiguousarray(end[frame : frame + 1]),
+        )
+        if batch["chunk_id"].size:
+            mapped += 1
+            assert reaches[frame], (
+                f"frame {frame} mapped {batch['chunk_id'].size} records "
+                "but the filter would have skipped it"
+            )
+    assert mapped > 0
+
+
+@pytest.mark.parametrize("moving", [False, True])
+def test_brick_reject_costs_a_frame_that_misses_almost_nothing(moving):
+    """A frame that reaches no part of the grid must not be walked.
+
+    This is the case the reject exists for: on a small volume swept
+    through a full rotation about half the scan's frames reach it at all,
+    and each of the rest used to pay four or eight coordinate evaluations
+    for every one of its pixels to establish that. The cost is now one
+    test per brick, so the evaluation count must fall to a small multiple
+    of the brick count rather than of the pixel count.
+    """
+    rays = _rays()
+    start, end = _angles(2, moving)
+    minimum, step, shape = _grid(rays, start, end)
+    # Far outside anything the detector maps to, on every axis at once.
+    unreachable = np.asarray(minimum) + 1000.0 * np.asarray(
+        step
+    ) * np.asarray(shape)
+    kernel = _kernel(unreachable, step, shape, 3, 1, 64)
+    intensity, variance, mask = _payload(2)
+
+    batch = kernel.accumulate_group(
+        intensity, variance, mask, rays, start, end, True
+    )
+    profile = batch["_profile"]
+
+    assert batch["chunk_id"].size == 0
+    assert profile["skipped_bricks"] > 0
+    assert profile["skipped_pixels"] == profile["pixels_seen"]
+    # The whole point: proportional to bricks, not to pixels. A block of
+    # 64 pixels over a 24x28 detector is a handful of bricks per frame,
+    # so anything near the pixel count means the reject did not fire.
+    assert profile["coordinate_evaluations"] < profile["pixels_seen"], (
+        "a missing frame must not cost a per-pixel evaluation"
+    )
+
+
 @pytest.mark.parametrize("moving", [False, True])
 def test_group_is_independent_of_threads_and_brick_size(moving):
     """Splitting the group across workers or bricks changes nothing."""

@@ -1,0 +1,758 @@
+% Compile with:  lualatex ctr_structure_factor_physics.tex   (twice, for refs)
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=27mm]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue!45!black,urlcolor=blue!45!black,
+            citecolor=blue!45!black]{hyperref}
+
+\newcommand{\Fhkl}{\left|F_{hkl}\right|^{2}}
+\newcommand{\dgam}{\Delta\gamma}
+\newcommand{\dOm}{\Delta\Omega}
+\newcommand{\Ored}{\widetilde{\Omega}}
+\newcommand{\Crod}{C_{\mathrm{rod}}}
+\newcommand{\Cdet}{C_{\mathrm{det}}}
+\newcommand{\Carea}{C_{\mathrm{area}}}
+\newcommand{\Cbeam}{C_{\mathrm{beam}}}
+\newcommand{\Cillum}{C_{\mathrm{illum}}}
+\newcommand{\bin}{\beta_{\mathrm{in}}}
+\newcommand{\bout}{\beta_{\mathrm{out}}}
+\newcommand{\re}{r_{e}}
+\newcommand{\Au}{A_{u}}
+% Long dotted module paths are unbreakable in \texttt; let them break after
+% a dot, and give TeX a little slack rather than an overfull line.
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\dt}{.\allowbreak}
+\setlength{\emergencystretch}{3em}
+
+\newcommand{\unit}[1]{\;\mathrm{#1}}
+\newcommand{\Ang}{\text{\AA}}
+
+\title{Structure factors from area-detector surface diffraction data\\
+       \large The normalizations and integration intervals used by orGUI}
+\author{orGUI --- \code{orgui\dt datautils\dt xrayutils\dt corrections}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This document states, in one place, how orGUI turns detector counts into
+$\Fhkl$: every normalization that is divided out, every integration interval
+that is summed or integrated over, and the unit each quantity carries at the
+boundary where it changes. It covers the two direct-space measurement modes
+--- rocking scans and stationary area-detector scans --- and the conversion to
+and from specular reflectivity. The reciprocal-space reconstruction is a third
+route with a different set of factors and is only contrasted here, not
+derived.
+
+The physics is that of E.~Vlieg, \emph{J.~Appl.~Cryst.} \textbf{30} (1997) 532,
+in the two-dimensional-detector form of J.~Drnec \emph{et al.},
+\emph{J.~Appl.~Cryst.} \textbf{47} (2014) 365. What this document adds is the
+mapping from those expressions onto what the code actually sums, and the
+resolution of two couplings that the published expressions do not address
+because they do not arise with a point detector: the interaction between the
+detector solid-angle correction and the out-of-plane acceptance, and the
+choice of integration variable and its interval.
+\end{abstract}
+
+\tableofcontents
+
+\section{Conventions}
+
+\subsection{Geometry and angles}
+
+orGUI works in the \textbf{z-axis geometry}, with angles as defined in
+\code{orgui\dt datautils\dt xrayutils\dt HKLVlieg}. It is essential to
+separate the \emph{motor positions} of the diffractometer from the
+\emph{scattering angles} of an individual detector pixel, because only the
+latter enter any correction factor:
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Symbol & Meaning & Kind & Varies with \\
+\midrule
+$\alpha$ & incidence angle on the surface & circle (\code{mu})
+  & frame \\
+$\omega$ & sample rotation about the surface normal & circle (\code{th})
+  & frame \\
+$\gamma_{\mathrm{arm}}$, $\delta_{\mathrm{arm}}$
+  & detector arm position & circles & frame \\
+\addlinespace
+$\gamma_p$, $\delta_p$ & laboratory-frame angles of a pixel & derived
+  & pixel, arm \\
+$\gamma$, $\delta$ & \textbf{surface-frame} angles of a pixel & derived
+  & pixel, arm, $\alpha$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+$\gamma$ and $\delta$ are \textbf{not} diffractometer circles and are
+\textbf{not} the arm angles. They are per-pixel quantities, computed from
+where a pixel sits \emph{after} the detector has been rotated to the arm
+position of that frame. Within one frame they vary across the detector face;
+between frames they change both because the arm moved and because $\alpha$
+changed. In this geometry $\gamma$ is the exit angle of the diffracted beam
+from the surface, so $\bout = \gamma$ and $\bin = \alpha$.
+
+All angles are in \textbf{radian} everywhere inside
+\code{orgui\dt datautils\dt xrayutils\dt corrections}; degrees appear only at
+the user interface and in raw motor positions read from a scan.
+
+\subsection{From a pixel to its scattering angles}
+\label{sec:pixelangles}
+
+The conversion runs in three steps, all in
+\code{DetectorCalibration\dt Detector2D\_SXRD}.
+
+\paragraph{1. The arm position becomes a detector geometry.} The arm angles
+are given as the true laboratory-frame angles
+$(\gamma_{\mathrm{arm}}, \delta_{\mathrm{arm}})$ the arm reference direction
+points at. The rotation from the \emph{calibrated} arm position to the
+requested one,
+\begin{equation}
+  R_{\mathrm{rel}} = R_{\mathrm{arm}}(\gamma_{\mathrm{arm}},
+                                      \delta_{\mathrm{arm}})\,
+                     R_{\mathrm{arm}}^{\mathrm{ref}\,\top} ,
+\end{equation}
+is folded into the pyFAI \emph{home} geometry
+$[\,d, \mathrm{poni}_1, \mathrm{poni}_2, \mathrm{rot}_1, \mathrm{rot}_2,
+\mathrm{rot}_3\,]$ by \code{paramAtArm}. A moving arm is therefore represented
+as a \emph{modified pyFAI geometry}, not as an angular offset added after the
+fact --- which is what makes the parallax and obliquity of the following step
+come out right at every arm position.
+
+Two conventions here are easy to get wrong. Passing \code{None} for both arm
+angles means \emph{at the calibrated arm position}, which is not the same as
+passing $0.0$ unless the calibration was taken with the motors reading zero.
+And exactly one of the two is rejected rather than defaulted, because the
+calibration reference is a rotation and not a pair of independent offsets.
+
+\paragraph{2. Pixel to laboratory frame.} On that geometry, the pixel position
+gives the scattering angle $2\theta$ and the azimuth $\chi$ --- with parallax
+applied, and $\chi$ offset by the azimuthal reference --- and from those the
+laboratory-frame angles $(\gamma_p, \delta_p)$ of the pixel
+(\code{primBeamPoints}).
+
+\paragraph{3. Laboratory to surface frame.} Tilting into the surface frame of
+a sample at incidence angle $\alpha$ (\code{surfaceAnglesPoint}):
+\begin{align}
+  \gamma &= \arcsin\bigl(\cos\alpha \, \sin\gamma_p
+            - \sin\alpha \, \cos\delta_p \, \cos\gamma_p \bigr) ,
+  \label{eq:gamma}\\[2pt]
+  \delta &= \arcsin\!\left(
+            \frac{\sin\delta_p \, \cos\gamma_p}{\cos\gamma} \right) .
+  \label{eq:delta}
+\end{align}
+At $\alpha = 0$ these collapse to $\gamma = \gamma_p$ and
+$\delta = \delta_p$, as they must: at zero incidence the surface frame is the
+laboratory frame.
+
+\paragraph{Which angles the corrections use.} Every factor in this document
+that names $\gamma$ or $\delta$ means the surface-frame angles of
+Eqs.~\eqref{eq:gamma} and~\eqref{eq:delta}, evaluated \textbf{at the
+reflection position} --- the centre of the region of interest --- for the arm
+position and $\alpha$ of that frame. The integration paths read them from the
+stored per-reflection angles, not from arm motors. Two places in this document
+depend on the distinction directly:
+
+\begin{itemize}[leftmargin=1.4em]
+\item $\dgam$ (Section~\ref{sec:acceptance}) is a \emph{difference} of
+  Eq.~\eqref{eq:gamma} between two pixel rows, which is only meaningful
+  because $\gamma$ varies across the detector face within one frame.
+\item The polarization factor (Section~\ref{sec:notmodelled}) is built on the
+  \emph{home} geometry rather than at the frame's arm position, which is why
+  it needs a per-frame correction for a scan that drives the arm --- and why
+  the reconstruction, which cannot use that correction, is still wrong there.
+\end{itemize}
+
+\subsection{Units at the boundaries}
+
+Units are deliberately mixed, following the repository convention that
+crystallographic quantities are in \AA ngstrom and instrument quantities in
+meter. Getting this wrong is a factor of $10^{20}$ in the scale factor, so it
+is stated at every function boundary and pinned by
+\code{test\_scale\_factor\_carries\_its\_documented\_units}.
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Quantity & Symbol & Unit \\
+\midrule
+Wavelength                    & $\lambda$ & \AA ngstrom \\
+Surface unit-cell area        & $\Au$     & \AA ngstrom squared \\
+Classical electron radius     & $\re$     & meter ($2.8179403262\times10^{-15}$) \\
+Active illuminated area       & $A$       & square meter \\
+Incident flux density         & $\Phi_0$  & photons per second and square meter \\
+Counting time                 & $T$       & second \\
+All angles                    &           & radian \\
+Structure factor squared      & $\Fhkl$   & electron units squared \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+$\Phi_0$ is a flux \emph{density}: $\Phi_0 A_0$ is the total flux on the
+sample, with $A_0$ the beam cross-section.
+
+\section{What one detector frame contains}
+\label{sec:frame}
+
+A pixel $i$ of one frame of counting time $T$ accumulates
+\begin{equation}
+  N_i = \Phi_0\, T \left(\frac{d\sigma}{d\Omega}\right)_{\!i} \dOm_i ,
+  \label{eq:pixel}
+\end{equation}
+where $\dOm_i$ is the solid angle that pixel subtends at the sample. For a
+flat detector at distance $d$ with square pixels of size $p$, seen at an
+incidence angle $\theta$ on the detector face,
+\begin{equation}
+  \dOm = \frac{p^{2}}{d^{2}}\cos^{3}\theta ,
+  \qquad
+  \delta\gamma = \frac{p}{d}\cos^{2}\theta ,
+  \qquad
+  \delta\psi = \frac{p}{d}\cos\theta ,
+  \label{eq:pixelgeom}
+\end{equation}
+with $\delta\gamma$ the angular height of the pixel in the direction it is
+tilted away from the normal and $\delta\psi$ the angular width perpendicular
+to it; their product is $\dOm$ as it must be. pyFAI's
+\code{solidAngleArray} returns the \emph{normalized} solid angle
+\begin{equation}
+  \Ored = \dOm \Big/ \frac{p^{2}}{d^{2}} = \cos^{3}\theta ,
+\end{equation}
+which equals $1$ at the point of normal incidence and which orGUI verifies
+against $\cos^{3}\theta$ to $10^{-9}$ in
+\code{test\_corrections\_acceptance.py}.
+
+Equation~\eqref{eq:pixel} is the origin of the central result of
+Section~\ref{sec:solidangle}: a \emph{sum} of $N_i$ over a region already
+carries each pixel's own $\dOm_i$, and is therefore already an angular
+integral. Only a quantity that is meant to be a differential cross-section at
+a point needs $\dOm_i$ divided out.
+
+\section{Integration intervals}
+\label{sec:intervals}
+
+This section fixes exactly which counts enter the integrated intensity, for
+each mode. Everything here is a statement about \emph{domains}; the divisors
+follow in Section~\ref{sec:normalizations}.
+
+\subsection{The region of interest, and its background}
+
+Both direct-space modes reduce a frame to a single number by summing a
+rectangular signal region and subtracting a background estimated from
+separate background regions.
+
+\paragraph{Stationary mode} (\code{orGUI.integrateROI}). With $S$ the signal
+region, $B$ the union of the background regions, $n_S$ and $n_B$ the numbers
+of \emph{valid} (unmasked, present) pixels in each, and $n_S^{\mathrm{nom}}$
+the nominal region size in pixels,
+\begin{equation}
+  N \;=\; \Biggl(\underbrace{\sum_{i\in S} N_i}_{\text{signal sum}}
+        \;-\; \frac{n_S}{n_B}\underbrace{\sum_{i\in B} N_i}_{\text{background sum}}
+    \Biggr)\,
+    \frac{n_S^{\mathrm{nom}}}{n_S} .
+  \label{eq:stationary_roi}
+\end{equation}
+The factor $n_S/n_B$ puts the background on a per-pixel basis and scales it to
+the signal region. The trailing $n_S^{\mathrm{nom}}/n_S$ rescales from the
+pixels that were actually valid to the nominal region area, so that masked
+pixels and detector gaps do not reduce the integrated intensity.
+
+That last rescaling is the reason the nominal region area must \emph{not}
+appear again in any correction factor: the ROI-mean bookkeeping of
+\code{corrections.roi.roi\_mean\_correction} divides the summed correction by
+the valid-pixel count and never by the nominal area. Multiplying by the area a
+second time would scale every intensity by the size of its own region, and
+because orGUI resizes regions with detector position
+(\code{ROIutils.calc\_corrections}), two measurements of one rod taken on
+different parts of the detector would be scaled apart.
+
+\paragraph{Rocking mode} (\code{peak1Dintegr}). The same per-frame reduction is
+applied first, giving a curve $N(\omega_k)$ over the frames of the scan, and
+that curve is then integrated over the rocking angle.
+
+\subsection{The rocking integral}
+\label{sec:rockinginterval}
+
+For each output point the integration interval is a closed interval
+$[\omega_{\mathrm{from}}, \omega_{\mathrm{to}}]$, snapped to the nearest
+sampled motor positions and ordered so that the result is positive:
+\begin{equation}
+  \mathcal{I} \;=\; \int_{\omega_{\mathrm{from}}}^{\omega_{\mathrm{to}}}
+                     N(\omega)\, d\omega
+    \;\longrightarrow\;
+    \sum_{k=k_{\mathrm{from}}}^{k_{\mathrm{to}}-1}
+      \tfrac{1}{2}\bigl(N_k + N_{k+1}\bigr)\,(\omega_{k+1}-\omega_k) ,
+\end{equation}
+a trapezoidal rule over a slice that \textbf{includes both endpoints}
+(\code{slice(idx\_from, idx\_to + 1)}), so that the integrated samples, the
+error weights and the reported interval width all describe the same domain.
+The interval width recorded alongside the result is
+$\Delta\omega = |\omega_{k_{\mathrm{to}}} - \omega_{k_{\mathrm{from}}}|$.
+
+Background regions are integrated over their own intervals and then scaled to
+the signal interval by the ratio of interval widths,
+$\Delta\omega_S/\sum_{B}\Delta\omega_B$, before being subtracted. The result
+is deliberately \emph{not} divided by $\Delta\omega_S$: it is an integral, not
+a mean, because that is what Vlieg's expression requires.
+
+\paragraph{The integration variable must be in radian.} The published
+expressions integrate $d\omega$ in radian. The motor axis is in degrees, so
+the integral as computed is larger by $180/\pi = 57.3$. This is a constant, so
+it is invisible within one data set and only appears when a rocking scan is
+compared with a stationary scan, or with an absolute scale.
+
+\subsection{The out-of-plane acceptance $\dgam$}
+\label{sec:acceptance}
+
+A rocking scan does not measure a whole rod. It intercepts a slice whose
+length is (Vlieg eq.~20)
+\begin{equation}
+  \Delta l = \Crod \, \frac{V_u}{\lambda \Au}\, \dgam ,
+\end{equation}
+so its integrated intensity is proportional to $\dgam$, the out-of-plane
+angular acceptance of the region of interest. A stationary measurement
+intercepts the whole rod cross-section and carries no such factor.
+
+With a point detector $\dgam$ was a slit setting: fixed for an experiment and
+absorbed into an overall scale factor. On an area detector it is a property of
+the region, and orGUI sizes regions per detector position, so it varies
+\emph{along a scan} and changes the shape of a rod rather than only its scale.
+
+\code{corrections.acceptance} evaluates it as the exit-angle span between the
+top and bottom \textbf{edges} of the region, at its centre column:
+\begin{equation}
+  \dgam = \Bigl|\,
+    \gamma\bigl(r + \tfrac{n}{2},\, c\bigr) -
+    \gamma\bigl(r - \tfrac{n}{2},\, c\bigr)\Bigr| ,
+  \label{eq:dgamma}
+\end{equation}
+for a region of $n$ rows centred on pixel $(r,c)$, with $\gamma(\cdot)$ the
+surface-frame exit angle of Eq.~\eqref{eq:gamma} evaluated at that pixel and
+at the frame's arm position and $\alpha$. Two choices in
+Eq.~\eqref{eq:dgamma} are deliberate:
+
+\begin{itemize}[leftmargin=1.4em]
+\item \textbf{Edges, not pixel centres.} A region of $n$ rows accepts $n$
+  pixels' worth of angle, not $n-1$. Measuring between the centres of the
+  first and last row understates every acceptance by one pixel: $1\,\%$ on a
+  100-row region, $10\,\%$ on a 10-row one.
+\item \textbf{The centre column.} The region is centred on the rod, and it is
+  the range of $\gamma$ over which \emph{the rod} crosses the aperture that
+  sets the intercepted length. The corner-to-corner span over the whole
+  rectangle is computed separately by \code{gamma\_range}; the two agree when
+  lines of constant $\gamma$ run along the detector rows and separate on a
+  detector rolled about the beam, so their ratio is a cheap diagnostic for
+  whether the estimate can be trusted.
+\end{itemize}
+
+\paragraph{The detector arm barely matters --- for the span.} Driving the
+$\gamma$ arm shifts $\gamma$ at the region centre by the full arm angle, so
+the arm position matters a great deal for \emph{where on the rod} the region
+sits. It leaves the \emph{span} of Eq.~\eqref{eq:dgamma} unchanged to nine
+digits, because that rotation is about the very axis $\gamma$ is measured
+around; a $40^{\circ}$ $\delta$-arm rotation moves it by one part in $10^{5}$.
+So how much rod is accepted is nearly independent of the arm even though which
+part is accepted is not, and an acceptance computed without arm bookkeeping
+remains usable. Pass the arm angles anyway where they are known --- they cost
+nothing. This is the opposite of the polarization factor
+(Section~\ref{sec:notmodelled}), where ignoring the arm is a $10\,\%$ error at
+a scattering angle of $18^{\circ}$.
+
+\section{Normalizations}
+\label{sec:normalizations}
+
+\subsection{Counting time and monitor}
+
+Both published expressions carry $\Phi_0 T$, so neither an integrated rocking
+curve nor a stationary frame means anything until it is divided by its
+counting time and by whatever counter the incident flux is tracked with:
+\begin{equation}
+  I = \frac{\mathcal{N}}{T \prod_j M_j} ,
+\end{equation}
+with $\mathcal{N}$ the background-subtracted integrated counts of
+Section~\ref{sec:intervals} and $M_j$ the monitor counters
+(\code{corrections.normalization.normalization\_divisor}).
+
+For a rocking scan this is the \textbf{per-frame} counting time, not the sum
+over the scan. The rocking angle is the integration variable; the time is not.
+Using the summed time would divide by the number of frames a second time.
+
+Beyond mode equivalence, this matters \emph{within} one data set: rocking
+scans taken at different $l$ with different counting times, or with a drifting
+ring current, are otherwise placed on different scales with nothing in the
+saved data recording it.
+
+\subsection{Polarization}
+
+The polarization factor $P$ is a per-pixel property of the scattering angle.
+It is divided out as the mean of $1/P$ over the region
+(\code{roi\_mean\_correction}) before the reduction; the master equation of
+Section~\ref{sec:master} therefore takes an intensity from which $P$ has
+already been removed.
+
+\subsection{Solid angle: why a summed region takes none}
+\label{sec:solidangle}
+
+This is the one normalization whose \emph{absence} needs an argument, because
+the array is available and applying it looks harmless.
+
+\paragraph{The statement.} A region-summed intensity gets no solid-angle
+correction, in either direct-space mode. The array belongs only to the
+per-pixel reciprocal-space reconstruction, which forms a differential
+cross-section rather than a sum over an aperture.
+
+\paragraph{Why.} From Eq.~\eqref{eq:pixel}, the raw sum over a region is
+\begin{equation}
+  \sum_{i\in S} N_i
+  = \Phi_0 T \sum_{i \in S} \left(\frac{d\sigma}{d\Omega}\right)_{\!i} \dOm_i
+  \;\simeq\; \Phi_0 T \iint_{S} \frac{d\sigma}{d\Omega}\, d\gamma\, d\psi ,
+\end{equation}
+already the complete angular integral over the aperture. Every photon is
+counted once, weighted by the solid angle of the pixel that caught it. There
+is nothing to correct. Three remarks make this robust:
+
+\begin{enumerate}[leftmargin=1.6em]
+\item If the reflection were \emph{not} fully contained --- post-sample slits
+  narrower than the peak --- the missing part is Vlieg's $\Cdet$, an
+  aperture-against-profile model. A per-pixel obliquity weight does not repair
+  a truncated tail, so the conclusion does not depend on the open-slit
+  assumption holding.
+\item A rocking sum is a complete integral too, over a $\dgam$ slice of the
+  rod. The slice is what $\dgam$ accounts for; there is still no per-pixel
+  weighting to undo.
+\item Where a differential cross-section \emph{is} the goal --- binning
+  individual pixels into reciprocal-space voxels --- the correction is
+  required, and the reconstruction path applies it under its own switch.
+\end{enumerate}
+
+\paragraph{What goes wrong if it is applied anyway.} It does not merely add a
+constant. For a rocking scan the $\omega$-integrated counts in pixel row $j$
+go as that row's angular height $\delta\gamma_j$, so
+\begin{equation}
+  \text{raw sum} \;\longleftrightarrow\; \sum_j \delta\gamma_j = \dgam ,
+  \qquad
+  \text{corrected sum} \;\longleftrightarrow\;
+      \sum_j \frac{\delta\gamma_j}{\Ored_j} \simeq \frac{\dgam}{\langle\Ored\rangle} .
+  \label{eq:partners}
+\end{equation}
+The solid-angle factor cancels against the acceptance in the rocking mode ---
+which is exactly why leaving it in \emph{looks} harmless there. A stationary
+sum has no $\dgam$ for it to cancel against, so the factor survives into the
+saved number and the two modes disagree by $\langle 1/\Ored\rangle$: $0.7\,\%$
+for a detector at $1$~m and $7\,\%$ at $0.3$~m.
+
+Table~\ref{tab:f6} measures Eq.~\eqref{eq:partners} on a calibrated
+$172\,\mu$m detector with a 60-row region. The last two columns
+agreeing to $5\times10^{-6}$ is the cancellation.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+$d$ & $\theta$ & $\dgam/\dgam_{\mathrm{nom}}$ & exact$/\dgam_{\mathrm{nom}}$
+    & exact$/\dgam$ & $1/\langle\Ored\rangle$ \\
+\midrule
+$1.0$~m & $2.7^{\circ}$ & 0.99774 & 1.00112 & 1.003383 & 1.003383 \\
+$0.3$~m & $5.6^{\circ}$ & 0.99039 & 1.00476 & 1.014512 & 1.014509 \\
+$0.3$~m & $9.0^{\circ}$ & 0.97549 & 1.01236 & 1.037795 & 1.037788 \\
+\bottomrule
+\end{tabular}
+\caption{The two partners of Eq.~\eqref{eq:partners}, against the nominal
+$\dgam_{\mathrm{nom}} = n\,p/d$. Here the region is displaced from the point
+of normal incidence along its rows, so by Eq.~\eqref{eq:pixelgeom}
+$\dgam = \dgam_{\mathrm{nom}}\cos^{2}\theta$ against $\Ored = \cos^{3}\theta$
+and the corrected-sum partner is $\dgam_{\mathrm{nom}}/\cos\theta$. That
+decomposition depends on the orientation of the region relative to the normal;
+the ratio in the last two columns does not, since it follows from
+Eq.~\eqref{eq:partners} alone. Pinned by
+\code{test\_the\_solid\_angle\_correction\_and\_the\_acceptance\_carry\_one\_obliquity}.}
+\label{tab:f6}
+\end{table}
+
+\paragraph{Two traps this leaves behind.}
+\begin{itemize}[leftmargin=1.4em]
+\item \textbf{$\dgam$ does not become unnecessary.} It is a \emph{size} factor
+  --- how many rows of rod the region accepted --- while the solid angle is an
+  \emph{obliquity} factor. They overlap only in the obliquity, a fraction of a
+  percent.
+\item \textbf{A constant nominal $n\,p/d$ is not a valid substitute for
+  Eq.~\eqref{eq:dgamma}.} It is wrong by $1/\cos\theta$: $0.1\,\%$ at $1$~m,
+  $1.2\,\%$ at $\theta = 9^{\circ}$. The single-pixel acceptance times the row
+  count is the same angle-derived quantity as Eq.~\eqref{eq:dgamma}, not a
+  cheaper alternative to it.
+\end{itemize}
+
+\subsection{The active area and the beam footprint}
+\label{sec:area}
+
+$A$ is the surface area that actually contributes counts. Vlieg writes it as
+$A = A_0\,\Carea\,\Cbeam$ (his eq.~41). Which of two limits applies is an
+experimental question, and orGUI builds both:
+
+\paragraph{Beam-limited (open slits, orGUI's usual case).}
+\begin{equation}
+  A(\alpha) = w\, L\, \Cillum(\alpha, L) ,
+  \label{eq:beamarea}
+\end{equation}
+with $w$ the horizontal beam width, $L$ the sample length along the beam, and
+$\Cillum$ the profile integrated over the projected sample and normalized to a
+uniform beam,
+\begin{equation}
+  \Cillum(\alpha,L)
+    = \frac{1}{p_{\max}\, h_{\mathrm{proj}}}
+      \int_{-h_{\mathrm{proj}}/2}^{+h_{\mathrm{proj}}/2} p(z)\, dz ,
+  \qquad h_{\mathrm{proj}} = L\sin\alpha .
+\end{equation}
+Note that $\Cillum$ is a dimensionless \emph{fraction}, not an area; the
+horizontal direction is the plain beam width, since it is not projected. For a
+top-hat profile of full height $h$, Eq.~\eqref{eq:beamarea} reduces exactly to
+the familiar closed form
+\begin{equation}
+  A = w \min\!\left(L,\; \frac{h}{\sin\alpha}\right) ,
+\end{equation}
+verified to $3.3\times10^{-16}$. It does \emph{not} reduce to it for any other
+profile --- a Gaussian of the same width departs by up to $19\,\%$ --- which
+is why the closed form is not used.
+
+\paragraph{Slit-limited.} When post-sample slits cut the footprint,
+$\Carea = 1/(\sin\delta\,\cos(\alpha - \bin))$ applies instead (Vlieg eqs.~37
+and~38). Because $\delta$ varies along a rod, this is a \emph{shape} effect,
+not only a scale: on a simulated Pt(111) $(1,0,l)$ rod, $\delta$ moves from
+$16.77^{\circ}$ to $16.95^{\circ}$ between $l = 0.4$ and $l = 3.0$, a
+$1.1\,\%$ error, and much larger between rods at different in-plane momentum
+transfer.
+
+\paragraph{It cannot explain a mode disagreement.} $A$ enters the rocking and
+the stationary expressions identically and cancels from their ratio. It sets
+the absolute scale and nothing else.
+
+\section{The master equation}
+\label{sec:master}
+
+With $I$ the normalized integrated intensity of
+Section~\ref{sec:normalizations} --- counts per second per monitor unit, with
+$P$ already divided out ---
+\begin{equation}
+  \boxed{\;
+  I \;=\; \Phi_0\, \frac{\re^{2} A \lambda^{2}}{\Au^{2}}\;
+          \Fhkl \; \eta \; \Cdet \; }
+  \label{eq:master}
+\end{equation}
+and the mode enters only through the angular factor $\eta$:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Mode & $\eta$ & Lorentz factor \\
+\midrule
+Rocking scan (\code{th}/$\omega$)      & $L_\varphi\,\Crod\,\dgam$
+  & $L_\varphi = 1/(\sin\delta\,\cos\alpha\,\cos\gamma)$ \\
+Reflectivity rocking (\code{mu})       & $L_r\,\Crod\,\dgam$
+  & $L_r = 1/\sin 2\alpha$ \\
+Stationary area detector               & $L_s$
+  & $L_s = 1/\sin\gamma$ \\
+Specular reflectivity                  & $L_s$ at $\gamma = \alpha$
+  & $L_s = 1/\sin\alpha$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+with the rod interception $\Crod = \cos\gamma$. The three Lorentz factors are
+\textbf{alternatives selected by how the intensity was measured}, not factors
+to be combined. Two structural points:
+
+\begin{itemize}[leftmargin=1.4em]
+\item The rocking modes carry $\Crod$ and $\dgam$; the stationary mode carries
+  neither. A stationary measurement integrates across the whole rod
+  cross-section, so there is no interception factor and no acceptance ---
+  \code{angular\_factor} \emph{rejects} an acceptance passed for a stationary
+  mode, rather than ignoring it.
+\item The area correction $1/\sin\delta$ listed in the ANA/ROD z-axis table is
+  \emph{not} applied; the numerically evaluated footprint of
+  Section~\ref{sec:area} is used instead, which is the row the manual marks as
+  calculated numerically.
+\end{itemize}
+
+\subsection{Dimensional check}
+
+The radian in $\dgam$ is what makes the two modes dimensionally distinct, and
+it is worth checking that it lands correctly. Writing $[\cdot]$ for the unit
+of a quantity and taking a unit monitor,
+\begin{align}
+  \text{prefactor:}&\quad
+    \frac{1}{\mathrm{s}\,\mathrm{m}^{2}} \cdot \mathrm{m}^{2}
+    \cdot \mathrm{m}^{2} \cdot \frac{\mathrm{m}^{2}}{\mathrm{m}^{4}}
+    = \frac{1}{\mathrm{s}} , \\
+  \text{stationary:}&\quad
+    [I] = \frac{\text{counts}}{\mathrm{s}} ,
+    \qquad \eta \text{ dimensionless} \quad\checkmark \\
+  \text{rocking:}&\quad
+    [I] = \frac{\text{counts}\cdot\mathrm{rad}}{\mathrm{s}} ,
+    \qquad [\eta] = \mathrm{rad} \quad\checkmark
+\end{align}
+The rocking intensity carries one radian more than the stationary one, and
+$\dgam$ is what absorbs it. Integrating in degrees and omitting $\dgam$ are
+therefore not two independent mistakes but a single unbalanced unit, which is
+why they were measured together as one ratio.
+
+\subsection{Inverting to a structure factor}
+
+\begin{equation}
+  \Fhkl = \frac{I}{S\,\eta\,\Cdet} ,
+  \qquad
+  S = \Phi_0\, A\, \frac{\re^{2}\lambda^{2}}{\Au^{2}} ,
+\end{equation}
+with $S$ the mode-independent prefactor, in $1/\mathrm{s}$
+(\code{measurement.scale\_factor}). Leaving $\Phi_0 = A = 1$ gives the
+\textbf{relative} scale, which is all that is needed to place different scan
+modes of one experiment on a common scale. Supplying the measured flux density
+and illuminated area gives the \textbf{absolute} scale, and $\Fhkl$ then comes
+out in electron units squared --- the same scale on which
+\code{CTRcalc.SXRDCrystal} calculates.
+
+\section{Reflectivity}
+
+Specular reflectivity is the stationary case at $\gamma = \alpha$ with a
+beam-limited active area $A_r = A_0/\sin\alpha$. Vlieg's eq.~63, generalized to
+a non-specular exit angle, is
+\begin{equation}
+  R = \frac{\re^{2}\lambda^{2} P_r}{\Au^{2}\,\sin\alpha\,\sin\bout}\, \Fhkl ,
+  \label{eq:refl}
+\end{equation}
+the fraction of the incident flux scattered into the rod. For the specular rod
+$\bout = \alpha$ and this is the familiar $1/\sin^{2}\alpha$: one power from
+the footprint, one from the stationary Lorentz factor.
+
+Nothing beyond an absolutely scaled $\Fhkl$ is required, so \textbf{an absolute
+reflectivity comes for free} once the scale factor is absolute, and a
+reflectivity curve can be refined together with the truncation rods.
+Equation~\eqref{eq:refl} inverts to put a measured reflectivity onto the
+$\Fhkl$ scale.
+
+Three caveats:
+\begin{enumerate}[leftmargin=1.6em]
+\item It is the \textbf{kinematic} result. It fails near a bulk Bragg peak and
+  below the critical angle, where refraction and multiple scattering dominate
+  --- which is where much of the interesting part of a reflectivity curve
+  lies. Compare against a DWBA treatment there.
+\item A reflectivity scan \textbf{drives the detector arm}, which is where the
+  polarization issue of Section~\ref{sec:notmodelled} bit hardest. The two
+  direct-space integration paths correct for it; a reflectivity reduced from a
+  reconstructed map does not.
+\item \textbf{Off-specular}, $R$ is well defined for a truncation rod
+  integrated across its cross-section, but not for diffuse scattering, where
+  only a differential cross-section is meaningful.
+\end{enumerate}
+
+Note also that the ANA ``reflectivity rocking scan'' Lorentz factor
+$1/\sin 2\alpha$ describes rocking \emph{through} the specular ridge. That is a
+different measurement from a stationary specular scan; both are legitimate and
+they are not interchangeable.
+
+\section{What is deliberately not modelled}
+\label{sec:notmodelled}
+
+\begin{description}[leftmargin=0pt,style=unboxed]
+\item[$\Cdet$, the in-plane detector acceptance.] Vlieg's sections 2.4--2.5.
+  It is close to $1$ for a region wide enough to contain the whole in-plane
+  peak profile, which is what Eq.~\eqref{eq:master} assumes by taking
+  $\Cdet = 1$. It is \emph{not} the same for the two modes when the rod is
+  broad: Drnec's Fig.~18 shows direct stationary integration underestimating
+  $|F|$ at low $l$ by up to a factor of $2$ for exactly this reason. This is
+  the one remaining mechanism that can make the two modes disagree after
+  everything in this document is applied, and it is a modelling problem rather
+  than a normalization one. It cannot be validated on simulated data --- it
+  needs the overlap region of a rocking and a stationary scan on the same rod.
+
+\item[The polarization at a moving detector arm, in the reconstruction.] The
+  per-pixel polarization array is built once, outside the frame loop, from the
+  \emph{home} geometry --- step 1 of Section~\ref{sec:pixelangles} is skipped,
+  so it is the array at the calibrated arm position rather than at the
+  frame's. For a fixed arm that is correct: each pixel already carries its own
+  scattering angle, and the apparent $\alpha$ dependence of the z-axis
+  expression is only a change of frame. For a scan that drives the arm it
+  understates the correction: $3\,\%$ at a scattering angle of $10^{\circ}$,
+  $10\,\%$ at $18^{\circ}$ and $33\,\%$ at $30^{\circ}$. This is the opposite
+  of the acceptance (Section~\ref{sec:acceptance}), whose \emph{span} survives
+  a moving arm unchanged, and of the solid angle, which is invariant under it
+  exactly --- an arm rotation is a rigid rotation about the sample, so every
+  pixel keeps its distance and its obliquity to its own line of sight.
+
+  The two direct-space integration paths \textbf{correct} for this: they
+  reduce the polarization to a region mean anyway, so a per-frame ratio of two
+  region means, $\langle 1/P_{\mathrm{arm}}\rangle /
+  \langle 1/P_{\mathrm{home}}\rangle$, moves it onto the frame's arm position.
+  That ratio is exactly $1$ at the calibrated position, so a fixed-arm scan is
+  untouched. What remains uncorrected is the \textbf{reciprocal-space
+  reconstruction}, which applies the polarization per pixel rather than as a
+  region mean and would need the array itself rebuilt per frame.
+
+\item[Uncertainty of $\dgam$.] Errors follow the same divisors as the
+  intensities, but a $\dgam$ estimated from the calibrated geometry has an
+  uncertainty of its own that is not currently propagated.
+
+\item[The reciprocal-space route.] Voxel binning absorbs the Lorentz factor
+  (Drnec section 4), so a reconstructed map needs $\Carea$, $\Cbeam$, $P$ and
+  a $\Delta l$, but no Lorentz factor --- a different set of factors from
+  either direct-space mode. Placing it on the same absolute scale is separate
+  work.
+\end{description}
+
+\section{Summary}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.18}
+\begin{tabular}{@{}lllcc@{}}
+\toprule
+Factor & Symbol & Where & Rocking & Stationary \\
+\midrule
+Counting time, monitor      & $T$, $M_j$   & \code{normalization} & yes & yes \\
+Integration in radian       & --           & integration path     & yes & n/a \\
+Out-of-plane acceptance     & $\dgam$      & \code{acceptance}    & yes & \textbf{no} \\
+Lorentz                     & $L_\varphi$ / $L_s$ & \code{geometry} & yes & yes \\
+Rod interception            & $\Crod$      & \code{geometry}      & yes & \textbf{no} \\
+Polarization                & $P$          & \code{detector}      & yes & yes \\
+\quad arm correction        & --           & \code{detector}      & yes & yes \\
+Solid angle                 & $\dOm$       & \code{detector}      & \textbf{no} & \textbf{no} \\
+Active area / footprint     & $A$          & \code{activearea}    & yes & yes \\
+Area correction             & $\Carea$     & \code{geometry}      & slits only & slits only \\
+In-plane acceptance         & $\Cdet$      & ---                  & assumed 1 & assumed 1 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The three entries that distinguish the modes are $\dgam$, $\Crod$ and the
+choice of Lorentz factor. Everything else is common, and the two factors
+marked \textbf{no} for both modes are the ones whose absence is a deliberate
+result rather than an omission.
+
+\section*{References}
+\addcontentsline{toc}{section}{References}
+
+\begin{enumerate}[leftmargin=1.6em]
+\item E.~Vlieg, \emph{Integrated intensities using a six-circle surface X-ray
+  diffractometer}, J.~Appl.~Cryst. \textbf{30} (1997) 532--543.
+\item E.~Vlieg, \emph{ANA --- program for the analysis of surface X-ray
+  diffraction data}, Appendix~A (z-axis correction-factor table).
+\item J.~Drnec, T.~Zhou, S.~Pintea, W.~Onderwaater, E.~Vlieg, G.~Renaud and
+  R.~Felici, \emph{Integration techniques for surface X-ray diffraction data
+  obtained with a two-dimensional detector}, J.~Appl.~Cryst. \textbf{47}
+  (2014) 365--377.
+\end{enumerate}
+
+\end{document}

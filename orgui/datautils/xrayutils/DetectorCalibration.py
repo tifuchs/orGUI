@@ -433,10 +433,11 @@ class Detector2D_SXRD(geometry.Geometry):
         if "detector" in config:
             config["detector"] = str(config["detector"])
         self.set_config(config)
+        # Stored as an int64 array; restore plain ints like pyFAI itself uses.
         if max_shape is not None:
-            self.detector.max_shape = tuple(max_shape)
+            self.detector.max_shape = tuple(int(n) for n in max_shape)
         if shape is not None:
-            self.detector.shape = tuple(shape)
+            self.detector.shape = tuple(int(n) for n in shape)
         self.setAzimuthalReference(detdict["azimuth"])
         self.setPolarization(detdict["polarization_axis"], detdict["polarization"])
         # Calibrations written before the moveable detector arm carry no
@@ -576,17 +577,76 @@ class Detector2D_SXRD(geometry.Geometry):
         :rtype: numpy.ndarray
         """
         gamma, delta = self.surfaceAnglesPoint(x, y, alpha_i, gamma_arm, delta_arm)
+        return self._polarizationFromSurfaceAngles(alpha_i, gamma, delta)
+
+    def _polarizationFromSurfaceAngles(self, alpha_i, gamma, delta):
+        r"""Polarization from surface angles and the configured beam axis.
+
+        Factored out so :meth:`polarizationAtPointsFrames` can share it
+        rather than recompute the same formula from different surface angles.
+        The two outgoing-ray projections below are the horizontal and
+        vertical terms of the ANA/ROD z-axis expression. ``_polAxis`` rotates
+        that incident electric-field basis; omitting it made the arm-following
+        evaluators disagree with :meth:`polarizationArray` for every nonzero
+        configured axis.
+        """
         fraction = self._polFactor
-        p_hor = (
-            1.0
-            - (
-                np.sin(alpha_i) * np.cos(delta) * np.cos(gamma)
-                + np.cos(alpha_i) * np.sin(gamma)
-            )
-            ** 2
+        horizontal_projection = (
+            np.sin(alpha_i) * np.cos(delta) * np.cos(gamma)
+            + np.cos(alpha_i) * np.sin(gamma)
         )
-        p_ver = 1.0 - (np.sin(delta) ** 2) * (np.cos(gamma) ** 2)
+        vertical_projection = np.sin(delta) * np.cos(gamma)
+        cosine = np.cos(self._polAxis)
+        sine = np.sin(self._polAxis)
+        rotated_horizontal = (
+            cosine * horizontal_projection + sine * vertical_projection
+        )
+        rotated_vertical = (
+            -sine * horizontal_projection + cosine * vertical_projection
+        )
+        p_hor = 1.0 - rotated_horizontal**2
+        p_ver = 1.0 - rotated_vertical**2
         return fraction * p_hor + (1.0 - fraction) * p_ver
+
+    def polarizationAtPointsFrames(self, x, y, alpha_i, gamma_arm, delta_arm):
+        r"""Polarization correction of one set of points, at many arm positions.
+
+        Vectorized counterpart of :meth:`polarizationAtPoints` for the shape
+        of problem a rocking or reflectivity scan has: one region of
+        interest, many frames, each at its own incidence angle and arm
+        position. See :meth:`_tthAzimuthAtArms` for why this is one batched
+        evaluation instead of ``len(alpha_i)`` separate ones.
+
+        Unlike :meth:`polarizationAtPoints`, ``gamma_arm``/``delta_arm`` are
+        required here rather than defaulting to the calibrated position --
+        :meth:`polarizationAtPoints` already broadcasts a per-frame
+        ``alpha_i`` correctly at a *fixed* arm position (including the
+        calibrated one), so this method exists only for the case that does
+        not broadcast: the arm moving too.
+
+        :param x: detector coordinates along pyFAI dimension 1, in pixels,
+            any shape, shared by every frame.
+        :param y: detector coordinates along pyFAI dimension 2, same shape.
+        :param alpha_i: incidence angle per frame, shape ``(n_frames,)``, in
+            rad.
+        :param gamma_arm: detector arm position per frame, shape
+            ``(n_frames,)``, as true scattering angle ``gamma_p``, in rad.
+        :param delta_arm: detector arm position per frame, shape
+            ``(n_frames,)``.
+        :returns: The polarization correction, shape
+            ``(n_frames,) + numpy.shape(x)``.
+        :rtype: numpy.ndarray
+        """
+        alpha_i = np.asarray(alpha_i, dtype=np.float64)
+        tth, azimuth = self._tthAzimuthAtArms(x, y, gamma_arm, delta_arm)
+        gamma_p, delta_p = _primBeamFromTthAzimuth(tth, azimuth)
+        alpha = alpha_i.reshape(alpha_i.shape + (1,) * (gamma_p.ndim - 1))
+        gamma = np.arcsin(
+            np.cos(alpha) * np.sin(gamma_p)
+            - np.sin(alpha) * np.cos(delta_p) * np.cos(gamma_p)
+        )
+        delta = np.arcsin(np.sin(delta_p) * np.cos(gamma_p) / np.cos(gamma))
+        return self._polarizationFromSurfaceAngles(alpha, gamma, delta)
 
     def polarizationArray(self, shape=None):
         r"""Polarization correction of every detector pixel.
@@ -682,6 +742,93 @@ class Detector2D_SXRD(geometry.Geometry):
             param=np.asarray(self.paramAtArm(gamma_arm, delta_arm), dtype=float),
             do_parallax=True,
         )
+        tth = np.arctan2(np.sqrt(t1 * t1 + t2 * t2), t3)
+        return tth, np.arctan2(t1, t2) + self._deltaChi
+
+    def _tthAzimuthAtArms(self, x, y, gamma_arm, delta_arm):
+        """:meth:`_tthAzimuthAtArm` for one set of points at many arm positions.
+
+        A rocking or reflectivity scan needs exactly this shape of problem:
+        one region of interest, many frames, each at its own arm position.
+        Computing it frame by frame repeats the position-only half of the
+        geometry -- pixel coordinates, minus the PONI, converted to a vector
+        from the sample -- which does not depend on the arm at all; only the
+        final rotation into the sample frame does (an arm rotates the
+        detector rigidly about the sample). This does that position step
+        once and applies every frame's rotation as one batched
+        matrix-vector product, instead of ``len(gamma_arm)`` separate calls
+        each repeating it.
+
+        Numerically this must reproduce :meth:`_tthAzimuthAtArm` called once
+        per frame; ``test_DetectorCalibration.py`` pins the two against each
+        other rather than against a closed form, because the closed form
+        *is* :meth:`_tthAzimuthAtArm`.
+
+        :param x: Pixel row (pyFAI dimension 1), any shape, shared by every
+            frame.
+        :param y: Pixel column (pyFAI dimension 2), same shape as ``x``.
+        :param gamma_arm: Arm ``gamma_p`` per frame, shape ``(n_frames,)``.
+        :param delta_arm: Arm ``delta_p`` per frame, shape ``(n_frames,)``.
+        :returns: ``(tth, azimuth)``, each shape ``(n_frames,) + x.shape``,
+            in rad, azimuth already offset by the azimuthal reference.
+        :rtype: tuple
+        :raises NotImplementedError: If a parallax correction is configured.
+            orGUI never configures one -- :meth:`_tthAzimuthAtArm` is always
+            called with ``do_parallax=True``, but that only has an effect
+            once :meth:`~pyFAI.geometry.Geometry.set_parallax` has been
+            called, which nothing in this repository does.
+        """
+        if self._parallax is not None:
+            raise NotImplementedError(
+                "the batched arm-position geometry does not implement the "
+                "parallax correction; call _tthAzimuthAtArm per frame "
+                "instead if one has been configured"
+            )
+        x = np.asarray(x, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        gamma_arm = np.asarray(gamma_arm, dtype=np.float64)
+        delta_arm = np.asarray(delta_arm, dtype=np.float64)
+        point_shape = x.shape
+
+        # The position-only half: pixel coordinates minus the PONI, as a
+        # vector from the sample. Computed once, shared by every frame.
+        # Reproduces the non-cython branch of calc_pos_zyx exactly, which is
+        # what a per-frame param there would also fall back to.
+        p1, p2, p3 = self.detector.calc_cartesian_positions(x, y)
+        p1 = (np.asarray(p1, dtype=np.float64) - self.poni1).ravel()
+        p2 = (np.asarray(p2, dtype=np.float64) - self.poni2).ravel()
+        if p3 is None:
+            p3 = np.full(p1.shape, self._dist, dtype=np.float64)
+        else:
+            p3 = (np.asarray(p3, dtype=np.float64) + self._dist).ravel()
+        coord_det = np.stack((p1, p2, p3), axis=0)  # (3, n_points)
+
+        # Every frame's rotation, batched: the arm rotation (which is where
+        # the frames differ) composed with the fixed calibrated-position
+        # rotation, without the round trip through the (rot1, rot2, rot3)
+        # parameterization -- pyFAI's own rotation_matrix() builds one
+        # matrix for one geometry, not a stack of them, so paramAtArm's
+        # angle decomposition exists only so a *scalar* param can be handed
+        # back to it. Skipping that here is what makes this batchable; see
+        # armAdjustedParam for the same composition with it.
+        relative = armRotation(gamma_arm, delta_arm) @ self._R_arm_reference.T
+        relabel = azimuthRelabel(self._deltaChi)
+        home = pyFAIRotationMatrix(*self.param[3:6])
+        rotation = relabel.T @ relative @ relabel @ home  # (n_frames, 3, 3)
+
+        coord_sample = np.einsum("nij,jm->nim", rotation, coord_det)
+        t1, t2, t3 = coord_sample[:, 0], coord_sample[:, 1], coord_sample[:, 2]
+
+        orientation = self.detector.orientation
+        if orientation in (1, 2):
+            t1 = -t1
+        if orientation in (1, 4):
+            t2 = -t2
+
+        out_shape = (gamma_arm.shape[0],) + point_shape
+        t1 = t1.reshape(out_shape)
+        t2 = t2.reshape(out_shape)
+        t3 = t3.reshape(out_shape)
         tth = np.arctan2(np.sqrt(t1 * t1 + t2 * t2), t3)
         return tth, np.arctan2(t1, t2) + self._deltaChi
 

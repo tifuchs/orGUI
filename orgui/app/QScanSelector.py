@@ -49,6 +49,8 @@ from .. import resources
 from ..backend import backends, scans
 from . import qutils
 from . import integration_corrections
+from .config_data import CorrectionState
+from ._option_keys import LegacyKeyDict, canonical_options
 from .QReflectionSelector import QReflectionAnglesDialog
 from .QHKLDialog import HKLDialog
 
@@ -745,11 +747,15 @@ class QScanSelector(qt.QMainWindow):
         # attributes of this widget so that get_integration_options() and the
         # integration code keep reading them from the same place.
         self.useMaskBox = qt.QCheckBox("Use pixel mask")
-        self.useSolidAngleBox = qt.QCheckBox("Solid angle correction")
+        self.useSolidAngleBox = qt.QCheckBox(
+            "Solid-angle normalization (intensity output only)"
+        )
         self.usePolarizationBox = qt.QCheckBox("Polarization correction")
-        self.useLorentzBox = qt.QCheckBox("Lorentz correction")
-        self.useFootprintBox = qt.QCheckBox("Beam footprint")
-        self.useNormalizationBox = qt.QCheckBox("Normalize integrated intensities")
+        self.useLorentzBox = qt.QCheckBox("Calculate CTR structure factor")
+        self.useFootprintBox = qt.QCheckBox("Correct beam/sample overlap")
+        self.useNormalizationBox = qt.QCheckBox(
+            "Normalize intensity frame by frame"
+        )
 
         # Parent this top-level dialog to the stable application window, not
         # to this widget inside a dock.  Dock tab/visibility changes can
@@ -891,32 +897,115 @@ class QScanSelector(qt.QMainWindow):
 
         self.sigROIChanged.emit()
 
+    #: Integration switch name -> the checkbox holding it.
+    @property
+    def _switch_boxes(self):
+        return {
+            "mask": self.useMaskBox,
+            "solid_angle": self.useSolidAngleBox,
+            "polarization": self.usePolarizationBox,
+            "lorentz": self.useLorentzBox,
+            "footprint": self.useFootprintBox,
+            "normalization": self.useNormalizationBox,
+        }
+
+    #: Region control name -> the spin box or check box holding it.
+    @property
+    def _region_controls(self):
+        return {
+            "hsize": self.hsize,
+            "vsize": self.vsize,
+            "left": self.left,
+            "right": self.right,
+            "top": self.top,
+            "bottom": self.bottom,
+            "auto_hsize": self.autoROIHsize,
+            "auto_vsize": self.autoROIVsize,
+        }
+
+    #: Rocking-scan sampling control name -> the spin box holding it.
+    @property
+    def _rocking_controls(self):
+        return {"delta_s": self.roscanDeltaS, "max_s": self.roscanMaxS}
+
     def set_integration_options(self, ddict):
-        for key in ddict:
-            if key == "mask":
-                self.useMaskBox.setChecked(ddict[key])
-            elif key == "solidAngle":
-                self.useSolidAngleBox.setChecked(ddict[key])
-            elif key == "polarization":
-                self.usePolarizationBox.setChecked(ddict[key])
-            elif key == "lorentz":
-                self.useLorentzBox.setChecked(ddict[key])
-            elif key == "footprint":
-                self.useFootprintBox.setChecked(ddict[key])
-            elif key == "normalization":
-                self.useNormalizationBox.setChecked(ddict[key])
+        """Restore integration options from a mapping.
+
+        A key this version does not know is ignored rather than rejected,
+        which is what lets an older orGUI read a newer configuration. Legacy
+        key spellings are accepted with a deprecation warning; see
+        :mod:`orgui.app._option_keys`.
+
+        :param dict ddict: Any subset of the keys
+            :meth:`get_integration_options` returns.
+        """
+        ddict = canonical_options(ddict)
+        boxes = self._switch_boxes
+        for key, value in ddict.items():
+            if key in boxes:
+                boxes[key].setChecked(bool(value))
             elif key == "advanced":
-                self.roioptions.set_parameters(ddict[key])
+                self.roioptions.set_parameters(value)
+            elif key == "region":
+                self._set_region_options(value)
+            elif key == "rocking_scan":
+                self._set_rocking_options(value)
+
+    def _set_region_options(self, ddict):
+        """Restore the region sizes and the automatic-sizing switches."""
+        controls = self._region_controls
+        ddict = canonical_options(ddict)
+        for key, value in ddict.items():
+            control = controls.get(key)
+            if control is None:
+                continue
+            with blockSignals(control):
+                if key.startswith("auto_"):
+                    control.setChecked(bool(value))
+                else:
+                    control.setValue(float(value))
+        self.sigROIChanged.emit()
+
+    def _set_rocking_options(self, ddict):
+        """Restore the rocking-scan sampling.
+
+        Signals are blocked deliberately: assigning ``delta_s`` normally runs
+        :meth:`onRoSChanged`, which clips it to the detector resolution and
+        writes the clipped value back. The stored value is already the
+        clipped one, and re-clipping it against whatever scan happens to be
+        loaded would not restore what was saved.
+        """
+        controls = self._rocking_controls
+        ddict = canonical_options(ddict)
+        for key, value in ddict.items():
+            control = controls.get(key)
+            if control is not None:
+                with blockSignals(control):
+                    control.setValue(float(value))
 
     def get_integration_options(self):
-        ddict = {}
-        ddict["mask"] = self.useMaskBox.isChecked()
-        ddict["solidAngle"] = self.useSolidAngleBox.isChecked()
-        ddict["polarization"] = self.usePolarizationBox.isChecked()
-        ddict["lorentz"] = self.useLorentzBox.isChecked()
-        ddict["footprint"] = self.useFootprintBox.isChecked()
-        ddict["normalization"] = self.useNormalizationBox.isChecked()
+        """Every integration option, under its current key spelling.
+
+        :returns: The switches as flat booleans, plus ``advanced`` (the
+            region-of-interest options dialog), ``region`` (sizes and
+            automatic sizing) and ``rocking_scan`` (the ``s`` sampling).
+            Reading a legacy key off the result still works, with a
+            deprecation warning.
+        :rtype: LegacyKeyDict
+        """
+        ddict = LegacyKeyDict(
+            (name, box.isChecked()) for name, box in self._switch_boxes.items()
+        )
         ddict["advanced"] = self.roioptions.get_parameters()
+        ddict["region"] = LegacyKeyDict(
+            (name, control.isChecked() if name.startswith("auto_")
+             else control.value())
+            for name, control in self._region_controls.items()
+        )
+        ddict["rocking_scan"] = LegacyKeyDict(
+            (name, control.value())
+            for name, control in self._rocking_controls.items()
+        )
         return ddict
 
     #: Enabled corrections, as ``(checkbox attribute, abbreviation, color,
@@ -924,26 +1013,31 @@ class QScanSelector(qt.QMainWindow):
     #: corrections button shows.
     CORRECTION_BADGES = (
         ("useMaskBox", "MASK", "#b58900", "Pixel mask applied"),
-        ("useSolidAngleBox", "SOLA", "#268bd2", "Solid angle correction"),
+        (
+            "useSolidAngleBox",
+            "SOLA",
+            "#268bd2",
+            "Solid angle correction (intensity only; divided back out of F2_hkl)",
+        ),
         ("usePolarizationBox", "POL", "#6c71c4", "Polarization correction"),
         (
             "useLorentzBox",
-            "LOR",
+            "CTR",
             "#2aa198",
-            "Lorentz correction and F2_hkl; rocking scans also include rod "
-            "interception",
+            "Calculate CTR structure factor; rocking scans also include rod "
+            "interception and angular acceptance",
         ),
         (
             "useFootprintBox",
             "FOOT",
             "#859900",
-            "Numerical active surface area from the beam profile",
+            "Beam/sample overlap from stored vertical and horizontal inputs",
         ),
         (
             "useNormalizationBox",
             "NORM",
             "#d33682",
-            "Exposure time and monitor normalization",
+            "Framewise incident-fluence normalization",
         ),
     )
 
@@ -1758,36 +1852,56 @@ class ROIAdvancedOptions(qt.QWidget):
         self._onAnyValueChanged()
 
     def get_parameters(self):
+        """Advanced region-of-interest options, under current key spellings.
+
+        Sample sizes are in **meter** and offsets in **pixels**, which is the
+        unit the consumers of this dictionary expect; the widgets show
+        micrometer. Reading a legacy key off the result still works, with a
+        deprecation warning.
+
+        :rtype: LegacyKeyDict
+        """
         sizes = self.get_sample_size()
-        offX, offY = self._offsetx.value(), self._offsety.value()
-
-        ddict = {
-            "DetectorInclination": self.hasDetectorInclination(),
-            "ProjectSampleSize": self.hasProjectSampleSize(),
-            "xoffset": offX,
-            "yoffset": offY,
-            "sizeX": sizes[0],
-            "sizeY": sizes[1],
-            "sizeZ": sizes[2],
+        return LegacyKeyDict({
+            "detector_inclination": self.hasDetectorInclination(),
+            "project_sample_size": self.hasProjectSampleSize(),
+            "offset_x": self._offsetx.value(),
+            "offset_y": self._offsety.value(),
+            "sample_size_x": sizes[0],
+            "sample_size_y": sizes[1],
+            "sample_size_z": sizes[2],
             "factor": self.get_apply_factor(),
-            "FittedBackground": self.hasFittedBackground(),
-            "FittedBackgroundOrder": self.get_background_fit_order(),
-        }
-
-        return ddict
+            "fitted_background": self.hasFittedBackground(),
+            "fitted_background_order": self.get_background_fit_order(),
+        })
 
     def set_parameters(self, ddict):
+        """Restore the advanced options from a mapping.
+
+        Legacy key spellings are accepted with a deprecation warning; see
+        :mod:`orgui.app._option_keys`. Sample sizes are in meter, offsets in
+        pixels.
+
+        :param dict ddict: As returned by :meth:`get_parameters`.
+        """
+        ddict = canonical_options(ddict)
         self._updating_parameters = True
         try:
-            self.inclinationBox.setChecked(ddict["DetectorInclination"])
-            self.sizeGroup.setChecked(ddict["ProjectSampleSize"])
-            self.set_sample_size(ddict["sizeX"], ddict["sizeY"], ddict["sizeZ"])
-            self.set_offsets(ddict["xoffset"], ddict["yoffset"])
+            self.inclinationBox.setChecked(ddict["detector_inclination"])
+            self.sizeGroup.setChecked(ddict["project_sample_size"])
+            self.set_sample_size(
+                ddict["sample_size_x"],
+                ddict["sample_size_y"],
+                ddict["sample_size_z"],
+            )
+            self.set_offsets(ddict["offset_x"], ddict["offset_y"])
             self.set_apply_factor(ddict["factor"])
-            self.backgroundFitGroup.setChecked(ddict.get("FittedBackground", False))
-            self._backgroundFitOrder.setValue(ddict.get("FittedBackgroundOrder", 1))
-        except Exception:
-            raise
+            self.backgroundFitGroup.setChecked(
+                ddict.get("fitted_background", False)
+            )
+            self._backgroundFitOrder.setValue(
+                ddict.get("fitted_background_order", 1)
+            )
         finally:
             self._updating_parameters = False
         self._onAnyValueChanged()
@@ -1890,10 +2004,13 @@ class IntegrationOptionsDialog(qt.QDialog):
         # Shared with the rocking-scan integration; see
         # RockingPeakIntegrator.useSharedFootprintOptions.
         self.footprintOptions = None
+        self._standaloneCorrectionState = CorrectionState(
+            total_flux_calibrated=False
+        )
 
         layout = qt.QVBoxLayout(self)
 
-        detector = qt.QGroupBox("Detector corrections")
+        detector = qt.QGroupBox("Detector signal")
         detectorLayout = qt.QVBoxLayout()
         detectorLayout.addWidget(selector.useMaskBox)
         self.maskToolBtn = qt.QPushButton("Open mask tool ...")
@@ -1903,14 +2020,142 @@ class IntegrationOptionsDialog(qt.QDialog):
         )
         self.maskToolBtn.clicked.connect(self._openMaskTool)
         detectorLayout.addWidget(self.maskToolBtn)
+        selector.useSolidAngleBox.setToolTip(
+            "Divide each pixel by the solid angle it subtends, giving an "
+            "intensity proportional to the differential cross section. This "
+            "is what a broad or diffuse feature needs.\n\n"
+            "It does not affect structure factors. A rod is integrated by "
+            "summing a region, which already gives the complete angular "
+            "integral with every pixel weighted by its own solid angle, so "
+            "the correction is measured over the region and divided back out "
+            "when F2_hkl is formed. Leaving it in would double-count the "
+            "detector obliquity: 0.7 % for a detector at 1 m and 7 % at "
+            "0.3 m, varying across the detector.\n\n"
+            "The reciprocal-space reconstruction has its own switch, and does "
+            "need this correction."
+        )
         detectorLayout.addWidget(selector.useSolidAngleBox)
         detectorLayout.addWidget(selector.usePolarizationBox)
+        selector.useSolidAngleBox.setText(
+            "Solid-angle normalization (intensity output only)"
+        )
         detector.setLayout(detectorLayout)
         layout.addWidget(detector)
 
-        geometry = qt.QGroupBox("Geometrical corrections")
-        geometryLayout = qt.QVBoxLayout()
-        geometryLayout.addWidget(selector.useLorentzBox)
+        incident = qt.QGroupBox("Incident beam")
+        incidentLayout = qt.QVBoxLayout()
+        incidentLayout.addWidget(selector.useNormalizationBox)
+        selector.useNormalizationBox.setText("Normalize intensity frame by frame")
+        selector.useNormalizationBox.setToolTip(
+            "Apply the selected exposure/primary-monitor convention to each "
+            "frame. The reciprocal-space reconstruction keeps its separate "
+            "legacy monitor-product settings below."
+        )
+
+        scaleRow = qt.QHBoxLayout()
+        scaleRow.addWidget(qt.QLabel("Flux convention:"))
+        self.scaleModeCombo = qt.QComboBox()
+        self.scaleModeCombo.addItem("Total flux — relative scale", "relative")
+        self.scaleModeCombo.addItem("Total flux — calibrated", "calibrated")
+        self.scaleModeCombo.addItem("Legacy density/area", "legacy")
+        self.scaleModeCombo.setToolTip(
+            "New sessions use total incident flux. Legacy density/area is "
+            "retained only for imported configurations and is never converted "
+            "without a known horizontal beam profile."
+        )
+        scaleRow.addWidget(self.scaleModeCombo, 1)
+        incidentLayout.addLayout(scaleRow)
+
+        fluxRow = qt.QHBoxLayout()
+        fluxRow.addWidget(qt.QLabel("Total incident beam flux:"))
+        self.totalFluxEdit = qt.QLineEdit()
+        self.totalFluxEdit.setPlaceholderText("Not calibrated")
+        fluxValidator = qt.QDoubleValidator(0.0, 1e300, 12, self)
+        fluxValidator.setNotation(qt.QDoubleValidator.ScientificNotation)
+        self.totalFluxEdit.setValidator(fluxValidator)
+        self.totalFluxEdit.setToolTip(
+            "Full beam at the sample position before clipping, after upstream "
+            "attenuation, in photons/s. Required only for calibrated scale."
+        )
+        fluxRow.addWidget(self.totalFluxEdit, 1)
+        fluxRow.addWidget(qt.QLabel("photons/s"))
+        incidentLayout.addLayout(fluxRow)
+
+        monitorRow = qt.QGridLayout()
+        monitorRow.addWidget(qt.QLabel("Primary monitor:"), 0, 0)
+        self.primaryMonitorCombo = qt.QComboBox()
+        self.primaryMonitorCombo.setMinimumContentsLength(12)
+        monitorRow.addWidget(self.primaryMonitorCombo, 0, 1)
+        monitorRow.addWidget(qt.QLabel("Monitor records:"), 1, 0)
+        self.monitorKindCombo = qt.QComboBox()
+        self.monitorKindCombo.addItem("Rate", "rate")
+        self.monitorKindCombo.addItem("Integrated per frame", "integrated")
+        monitorRow.addWidget(self.monitorKindCombo, 1, 1)
+        monitorRow.addWidget(qt.QLabel("Counter unit:"), 2, 0)
+        self.monitorUnitEdit = qt.QLineEdit()
+        self.monitorUnitEdit.setPlaceholderText("Not reported")
+        monitorRow.addWidget(self.monitorUnitEdit, 2, 1)
+        monitorRow.addWidget(qt.QLabel("Reference reading:"), 3, 0)
+        self.referenceMonitorEdit = qt.QLineEdit()
+        self.referenceMonitorEdit.setValidator(fluxValidator)
+        monitorRow.addWidget(self.referenceMonitorEdit, 3, 1)
+        self.referenceExposureLabel = qt.QLabel("Reference exposure:")
+        monitorRow.addWidget(self.referenceExposureLabel, 4, 0)
+        self.referenceExposureEdit = qt.QLineEdit()
+        self.referenceExposureEdit.setValidator(fluxValidator)
+        self.referenceExposureEdit.setPlaceholderText("seconds")
+        monitorRow.addWidget(self.referenceExposureEdit, 4, 1)
+        incidentLayout.addLayout(monitorRow)
+
+        self.normalizationFormula = qt.QLabel()
+        self.normalizationFormula.setWordWrap(True)
+        incidentLayout.addWidget(self.normalizationFormula)
+
+        incidentLayout.addWidget(selector.useFootprintBox)
+        selector.useFootprintBox.setText("Correct beam/sample overlap")
+        selector.useFootprintBox.setToolTip(
+            "Apply the vertical profile and explicitly stated horizontal "
+            "interception once per frame."
+        )
+        self.footprintBtn = qt.QPushButton(
+            "Beam profile, sample size and horizontal interception ..."
+        )
+        self.footprintBtn.clicked.connect(self._openFootprintOptions)
+        incidentLayout.addWidget(self.footprintBtn)
+
+        legacy = qt.QFrame()
+        legacy.setFrameShape(qt.QFrame.StyledPanel)
+        legacyLayout = qt.QVBoxLayout()
+        legacyHeading = qt.QLabel("<b>Legacy / reconstruction normalization</b>")
+        legacyLayout.addWidget(legacyHeading)
+        self.normalizeExposureBox = qt.QCheckBox("Normalize by exposure time")
+        self.normalizeExposureBox.setChecked(True)
+        self.normalizeExposureBox.toggled.connect(self._onNormalizationChanged)
+        legacyLayout.addWidget(self.normalizeExposureBox)
+        legacyMonitorRow = qt.QHBoxLayout()
+        legacyMonitorRow.addWidget(qt.QLabel("Monitor product:"))
+        self.monitorEdit = qt.QLineEdit()
+        self.monitorEdit.setPlaceholderText("Optional counters, comma-separated")
+        self.monitorEdit.setToolTip(
+            "Preserved multi-counter convention used by reconstruction and "
+            "legacy rocking reductions. It is not reinterpreted as the new "
+            "primary monitor."
+        )
+        self.monitorEdit.editingFinished.connect(self._onNormalizationChanged)
+        legacyMonitorRow.addWidget(self.monitorEdit)
+        legacyLayout.addLayout(legacyMonitorRow)
+        self.monitorInfo = qt.QLabel("")
+        self.monitorInfo.setWordWrap(True)
+        legacyLayout.addWidget(self.monitorInfo)
+        legacy.setLayout(legacyLayout)
+        incidentLayout.addWidget(legacy)
+        incident.setLayout(incidentLayout)
+        layout.addWidget(incident)
+
+        ctr = qt.QGroupBox("CTR result")
+        ctrLayout = qt.QVBoxLayout()
+        selector.useLorentzBox.setText("Calculate CTR structure factor")
+        ctrLayout.addWidget(selector.useLorentzBox)
         selector.useLorentzBox.setToolTip(
             "Divide out the Lorentz factor and store the structure factor "
             "F2_hkl. Rocking scans also divide out rod interception; "
@@ -1919,59 +2164,14 @@ class IntegrationOptionsDialog(qt.QDialog):
             "1/(sin(delta) cos(alpha) cos(gamma)) for a rocking scan and "
             "1/sin(2 alpha) for a reflectivity rocking scan."
         )
-        self.lorentzInfo = qt.QLabel(
-            "<i>Stationary scans use the stationary-mode factor "
-            "1/sin(&gamma;) without rod interception; rocking scans use "
-            "their own Lorentz factor and cos(&gamma;).</i>"
-        )
-        self.lorentzInfo.setWordWrap(True)
-        # Wrapped labels report a one-line height to a layout that has not
-        # laid them out yet, which clips them in a freshly sized dialog.
-        self.lorentzInfo.setMinimumHeight(self.lorentzInfo.fontMetrics().height() * 3)
-        geometryLayout.addWidget(self.lorentzInfo)
-
-        geometryLayout.addWidget(selector.useFootprintBox)
-        selector.useFootprintBox.setToolTip(
-            "Correct the numerical active surface area from the vertical "
-            "beam profile. Its overlap integral already includes beam "
-            "overspill and is applied only once."
-        )
-        self.footprintBtn = qt.QPushButton("Beam profile and sample size ...")
-        self.footprintBtn.clicked.connect(self._openFootprintOptions)
-        geometryLayout.addWidget(self.footprintBtn)
-        geometry.setLayout(geometryLayout)
-        layout.addWidget(geometry)
-
-        normalization = qt.QGroupBox("Exposure and monitor normalization")
-        normalizationLayout = qt.QVBoxLayout()
-        normalizationLayout.addWidget(selector.useNormalizationBox)
-        selector.useNormalizationBox.setToolTip(
-            "Divide each image by its exposure time and by the monitor "
-            "counters below, the same normalization the reciprocal-space "
-            "reconstruction applies."
-        )
-        self.normalizeExposureBox = qt.QCheckBox("Normalize by exposure time")
-        self.normalizeExposureBox.setChecked(True)
-        self.normalizeExposureBox.toggled.connect(self._onNormalizationChanged)
-        normalizationLayout.addWidget(self.normalizeExposureBox)
-
-        monitorRow = qt.QHBoxLayout()
-        monitorRow.addWidget(qt.QLabel("Monitor counters:"))
-        self.monitorEdit = qt.QLineEdit()
-        self.monitorEdit.setPlaceholderText("Optional scan counters, comma-separated")
-        self.monitorEdit.setToolTip(
-            "Counters applied as divisive normalizations. Shared with the "
-            "reciprocal-space reconstruction settings."
-        )
-        self.monitorEdit.editingFinished.connect(self._onNormalizationChanged)
-        monitorRow.addWidget(self.monitorEdit)
-        normalizationLayout.addLayout(monitorRow)
-
-        self.monitorInfo = qt.QLabel("")
-        self.monitorInfo.setWordWrap(True)
-        normalizationLayout.addWidget(self.monitorInfo)
-        normalization.setLayout(normalizationLayout)
-        layout.addWidget(normalization)
+        self.measurementModeInfo = qt.QLabel()
+        self.measurementModeInfo.setWordWrap(True)
+        ctrLayout.addWidget(self.measurementModeInfo)
+        self.scaleStatus = qt.QLabel()
+        self.scaleStatus.setWordWrap(True)
+        ctrLayout.addWidget(self.scaleStatus)
+        ctr.setLayout(ctrLayout)
+        layout.addWidget(ctr)
 
         self.reconstructionBtn = qt.QPushButton("Reciprocal-space reconstruction ...")
         self.reconstructionBtn.setToolTip(
@@ -1984,6 +2184,23 @@ class IntegrationOptionsDialog(qt.QDialog):
         buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+        for signal in (
+            self.scaleModeCombo.currentIndexChanged,
+            self.totalFluxEdit.editingFinished,
+            self.primaryMonitorCombo.currentIndexChanged,
+            self.monitorKindCombo.currentIndexChanged,
+            self.monitorUnitEdit.editingFinished,
+            self.referenceMonitorEdit.editingFinished,
+            self.referenceExposureEdit.editingFinished,
+            selector.useNormalizationBox.toggled,
+            selector.useFootprintBox.toggled,
+            selector.useLorentzBox.toggled,
+        ):
+            signal.connect(self._onTotalFluxChanged)
+        if hasattr(selector, "scanstab"):
+            selector.scanstab.currentChanged.connect(self._updateCtrStatus)
+        self.refresh()
 
     def reject(self):
         """Hide this persistent non-modal dialog.
@@ -2003,9 +2220,40 @@ class IntegrationOptionsDialog(qt.QDialog):
         """Return the orGUI main window, or ``None`` outside the app."""
         return getattr(self._selector, "parentmainwindow", None)
 
+    def _correctionState(self):
+        """Return the live total-flux state, creating a new-session default."""
+        main = self._mainWindow()
+        if main is None:
+            return self._standaloneCorrectionState
+        state = getattr(main, "ctr_correction_state", None)
+        if state is None:
+            state = CorrectionState(total_flux_calibrated=False)
+            main.ctr_correction_state = state
+        return state
+
+    @staticmethod
+    def _optionalFloat(editor):
+        """Parse an optional scientific-notation line editor."""
+        text = editor.text().strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            # A connected widget can briefly contain an intermediate value
+            # such as ``1e`` while another control emits. Treat that as an
+            # incomplete required input until editing is finished.
+            return None
+
+    @staticmethod
+    def _setOptionalFloat(editor, value):
+        """Show an optional float compactly in scientific notation."""
+        editor.setText("" if value is None else f"{float(value):.8g}")
+
     def refresh(self):
         """Reload the settings shared with other parts of the application."""
         main = self._mainWindow()
+        state = self._correctionState()
         if main is not None:
             with blockSignals([self.normalizeExposureBox, self.monitorEdit]):
                 self.normalizeExposureBox.setChecked(
@@ -2015,6 +2263,70 @@ class IntegrationOptionsDialog(qt.QDialog):
                     ", ".join(getattr(main, "reconstruction_monitor_corrections", ()))
                 )
         self._updateMonitorInfo()
+        available = self._availableMonitorNames()
+        selected = state.primary_monitor
+        if selected and selected not in available:
+            available.append(selected)
+        widgets = [
+            self.scaleModeCombo,
+            self.primaryMonitorCombo,
+            self.monitorKindCombo,
+            self.monitorUnitEdit,
+            self.totalFluxEdit,
+            self.referenceMonitorEdit,
+            self.referenceExposureEdit,
+        ]
+        with blockSignals(widgets):
+            self.primaryMonitorCombo.clear()
+            self.primaryMonitorCombo.addItem("No primary monitor", "")
+            for name in sorted(available):
+                self.primaryMonitorCombo.addItem(name, name)
+            self.primaryMonitorCombo.setCurrentIndex(
+                max(self.primaryMonitorCombo.findData(selected or ""), 0)
+            )
+            kind = state.primary_monitor_kind or "rate"
+            self.monitorKindCombo.setCurrentIndex(
+                max(self.monitorKindCombo.findData(kind), 0)
+            )
+            self.monitorUnitEdit.setText(state.primary_monitor_unit or "")
+            self._setOptionalFloat(self.totalFluxEdit, state.total_incident_flux)
+            self._setOptionalFloat(
+                self.referenceMonitorEdit, state.monitor_reference_reading
+            )
+            self._setOptionalFloat(
+                self.referenceExposureEdit,
+                state.monitor_reference_exposure_s,
+            )
+            explicit = any(
+                getattr(state, name) is not None
+                for name in (
+                    "total_incident_flux",
+                    "total_flux_calibrated",
+                    "primary_monitor",
+                    "primary_monitor_kind",
+                    "horizontal_interception",
+                    "horizontal_intercepted_fraction",
+                )
+            )
+            if not explicit:
+                mode = "legacy"
+            elif state.total_flux_calibrated:
+                mode = "calibrated"
+            else:
+                mode = "relative"
+            self.scaleModeCombo.setCurrentIndex(
+                max(self.scaleModeCombo.findData(mode), 0)
+            )
+        self._syncFootprintState()
+        self._updateCtrStatus()
+
+    def _availableMonitorNames(self):
+        """Return usable monitor names from the currently loaded scan."""
+        main = self._mainWindow()
+        scan = getattr(main, "fscan", None) if main is not None else None
+        if scan is None:
+            return []
+        return integration_corrections.monitor_counter_candidates(scan)
 
     def _updateMonitorInfo(self):
         """Show which counters of the loaded scan could be used as monitors."""
@@ -2023,7 +2335,7 @@ class IntegrationOptionsDialog(qt.QDialog):
         if scan is None:
             self.monitorInfo.setText("<i>No scan loaded.</i>")
             return
-        available = integration_corrections.monitor_counter_candidates(scan)
+        available = self._availableMonitorNames()
         if available:
             self.monitorInfo.setText(
                 "<i>Available in this scan: " + ", ".join(available) + "</i>"
@@ -2045,6 +2357,184 @@ class IntegrationOptionsDialog(qt.QDialog):
             if value.strip()
         )
 
+    def _onTotalFluxChanged(self, *args):
+        """Write total-flux widgets to the typed correction state."""
+        state = self._correctionState()
+        mode = self.scaleModeCombo.currentData()
+        if mode == "legacy":
+            state.total_incident_flux = None
+            state.total_flux_calibrated = None
+            state.primary_monitor = None
+            state.primary_monitor_kind = None
+            state.primary_monitor_unit = None
+            state.monitor_reference_reading = None
+            state.monitor_reference_exposure_s = None
+            state.horizontal_interception = None
+            state.horizontal_intercepted_fraction = None
+        else:
+            state.total_flux_calibrated = mode == "calibrated"
+            state.total_incident_flux = (
+                self._optionalFloat(self.totalFluxEdit)
+                if mode == "calibrated"
+                else None
+            )
+            monitor = self.primaryMonitorCombo.currentData() or None
+            state.primary_monitor = monitor
+            state.primary_monitor_kind = (
+                self.monitorKindCombo.currentData() if monitor else None
+            )
+            state.primary_monitor_unit = (
+                self.monitorUnitEdit.text().strip() or None
+                if monitor
+                else None
+            )
+            state.monitor_reference_reading = (
+                self._optionalFloat(self.referenceMonitorEdit)
+                if monitor and mode == "calibrated"
+                else None
+            )
+            state.monitor_reference_exposure_s = (
+                self._optionalFloat(self.referenceExposureEdit)
+                if monitor
+                and mode == "calibrated"
+                and state.primary_monitor_kind == "integrated"
+                else None
+            )
+            if self.footprintOptions is not None:
+                state.horizontal_interception = (
+                    self.footprintOptions.horizontalInterceptionMode()
+                )
+                state.horizontal_intercepted_fraction = (
+                    self.footprintOptions.horizontalInterceptedFraction()
+                )
+        self._syncFootprintState()
+        self._updateCtrStatus()
+
+    def _syncFootprintState(self):
+        """Keep the shared overlap dialog on the active scale convention."""
+        if self.footprintOptions is None:
+            return
+        state = self._correctionState()
+        total_flux = self.scaleModeCombo.currentData() != "legacy"
+        self.footprintOptions.setTotalFluxMode(total_flux)
+        if total_flux:
+            self.footprintOptions.setHorizontalInterception(
+                state.horizontal_interception,
+                state.horizontal_intercepted_fraction,
+            )
+
+    def _onFootprintChanged(self):
+        """Copy horizontal-overlap edits into the typed correction state."""
+        if self.footprintOptions is None:
+            return
+        state = self._correctionState()
+        if self.scaleModeCombo.currentData() != "legacy":
+            state.horizontal_interception = (
+                self.footprintOptions.horizontalInterceptionMode()
+            )
+            state.horizontal_intercepted_fraction = (
+                self.footprintOptions.horizontalInterceptedFraction()
+            )
+        self._updateCtrStatus()
+
+    def _updateCtrStatus(self, *args):
+        """Show the next extraction's mode, formula, and scale completeness."""
+        state = self._correctionState()
+        mode = self.scaleModeCombo.currentData()
+        monitor = self.primaryMonitorCombo.currentData() or None
+        kind = self.monitorKindCombo.currentData() if monitor else None
+        if mode == "legacy":
+            formula = (
+                "Legacy convention: exposure × every listed monitor; beam "
+                "density and numerical active area remain separate."
+            )
+        elif monitor is None:
+            formula = (
+                "Q = Φtot × exposure" if mode == "calibrated" else "Q ∝ exposure"
+            )
+        elif kind == "rate":
+            formula = (
+                "Q = Φref × exposure × M/Mref"
+                if mode == "calibrated"
+                else "Q ∝ exposure × monitor rate"
+            )
+        else:
+            formula = (
+                "Q = Φref × Tref × U/Uref (no second frame exposure)"
+                if mode == "calibrated"
+                else "Q ∝ integrated monitor (frame exposure already included)"
+            )
+        unit = self.monitorUnitEdit.text().strip()
+        if monitor and unit:
+            formula += f"; {monitor} [{unit}]"
+        self.normalizationFormula.setText(f"<i>{formula}</i>")
+
+        rocking = False
+        scanstab = getattr(self._selector, "scanstab", None)
+        if scanstab is not None:
+            rocking = scanstab.currentIndex() in (2, 3)
+        self.measurementModeInfo.setText(
+            "Measurement mode: rocking scan — calculated after rocking-curve "
+            "integration; angular acceptance is applied there."
+            if rocking
+            else "Measurement mode: stationary — calculated during ROI integration."
+        )
+
+        missing = []
+        if not self._selector.useNormalizationBox.isChecked():
+            missing.append("frame normalization Q")
+        if not self._selector.useFootprintBox.isChecked():
+            missing.append("illumination H")
+        if mode == "calibrated":
+            flux = self._optionalFloat(self.totalFluxEdit)
+            if flux is None or flux <= 0:
+                missing.append("positive total flux")
+            if monitor and self._optionalFloat(self.referenceMonitorEdit) is None:
+                missing.append("reference monitor reading")
+            elif (
+                monitor
+                and self._optionalFloat(self.referenceMonitorEdit) is not None
+                and self._optionalFloat(self.referenceMonitorEdit) <= 0
+            ):
+                missing.append("positive reference monitor reading")
+            if (
+                monitor
+                and kind == "integrated"
+                and (
+                    self._optionalFloat(self.referenceExposureEdit) is None
+                    or self._optionalFloat(self.referenceExposureEdit) <= 0
+                )
+            ):
+                missing.append("positive reference exposure")
+        if mode != "legacy" and state.horizontal_interception is None:
+            missing.append("horizontal interception")
+
+        calibrated = mode == "calibrated" and not missing
+        if mode == "legacy":
+            status = "Legacy density/area convention"
+        elif missing:
+            scale = "Calibrated scale" if mode == "calibrated" else "Relative scale"
+            status = f"{scale} pending — missing " + ", ".join(missing)
+        elif calibrated:
+            status = (
+                "Calibrated F² scale; detector efficiency and external "
+                "transmission are currently explicit unity assumptions."
+            )
+        else:
+            status = "Relative F² scale (arbitrary units)"
+        self.scaleStatus.setText(f"<b>Next extraction:</b> {status}")
+
+        total_flux = mode != "legacy"
+        self.totalFluxEdit.setEnabled(mode == "calibrated")
+        self.primaryMonitorCombo.setEnabled(total_flux)
+        self.monitorKindCombo.setEnabled(total_flux and monitor is not None)
+        self.monitorUnitEdit.setEnabled(total_flux and monitor is not None)
+        reference = mode == "calibrated" and monitor is not None
+        self.referenceMonitorEdit.setEnabled(reference)
+        integrated_reference = reference and kind == "integrated"
+        self.referenceExposureLabel.setEnabled(integrated_reference)
+        self.referenceExposureEdit.setEnabled(integrated_reference)
+
     def footprintOptions_shared(self):
         """Return the beam-profile dialog, creating it on first use.
 
@@ -2057,6 +2547,10 @@ class IntegrationOptionsDialog(qt.QDialog):
             from .peak1Dintegr import IntegrationCorrectionsDialog
 
             self.footprintOptions = IntegrationCorrectionsDialog(self)
+            self.footprintOptions.settingsChanged.connect(
+                self._onFootprintChanged
+            )
+            self._syncFootprintState()
         return self.footprintOptions
 
     # GUI-only: user-triggered dialog.

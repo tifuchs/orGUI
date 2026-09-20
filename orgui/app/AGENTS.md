@@ -12,10 +12,33 @@ This directory contains GUI components and user workflows:
 - `ReconstructionDialog.py`: GUI front-end for the out-of-core reciprocal-space
   reconstruction pipeline (`orgui/reconstruction_job.py`,
   `reconstruction_cli.py`, `reconstruction_cluster.py`).
+- `integration_corrections.py`: the adapter between the integration workflow
+  and `orgui/datautils/xrayutils/corrections/`. It reads which corrections
+  were switched on and what a loaded scan calls its counters, and assembles
+  the factor bundle stored beside the intensity.
 - Dialogs and tests under this directory cover user-facing behavior and GUI
   regressions.
 
 Use the repository root instructions together with this file.
+
+## Corrections Belong In datautils
+
+`datautils` holds self-consistent physics modules. Never let UI or UI state
+code leak into it: no widget, no configuration object, and no scan object may
+appear in `orgui/datautils/`. A correction factor is defined once, in
+`orgui/datautils/xrayutils/corrections/`, as a function of numbers.
+
+What belongs on this side of the boundary instead:
+
+- reading checkbox and dialog state, and turning it into arguments;
+- resolving a beamline scan's counter names into values (see also
+  `orgui/backend/scans.py`, which owns scan-object conventions);
+- assembling the named factors into the bundle that is saved.
+
+When a new correction is needed, add the physics to `corrections/` and call it
+from here. Do not compute a factor inline in `orGUI.py` or `peak1Dintegr.py`:
+the rocking integration, the stationary integration and the reconstruction
+must share one definition or they silently drift onto different scales.
 
 ## GUI And Shared-Code Boundary
 
