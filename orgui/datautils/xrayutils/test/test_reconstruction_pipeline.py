@@ -18,9 +18,11 @@ from orgui.backend.scans import h5_Image
 from orgui.reconstruction_job import (
     _AdjustablePool,
     _BoundedGate,
+    _drain_surplus_sentinels,
     _kernel_threads_candidates,
     _map_pending_ranges,
     _FrameFingerprintLog,
+    _SHUTDOWN_SENTINEL,
 )
 from orgui.datautils.xrayutils.reconstruction import _GridSpec, _ReconstructionSpec
 
@@ -781,6 +783,191 @@ def test_map_pending_ranges_automatic_mode_rebalances_and_stays_stable(
     # would otherwise converge to.
     assert len(compute_pool_sizes) <= 2
     assert len(set(compute_pool_sizes)) == len(compute_pool_sizes)
+
+
+def test_drain_surplus_sentinels_removes_only_sentinels():
+    """The drain keeps queued work and reports what it took out."""
+    from queue import Queue
+
+    work_queue = Queue()
+    first, second = object(), object()
+    for item in (_SHUTDOWN_SENTINEL, first, _SHUTDOWN_SENTINEL, second):
+        work_queue.put(item)
+
+    assert _drain_surplus_sentinels(work_queue) == 2
+    assert work_queue.qsize() == 2
+    assert {work_queue.get_nowait(), work_queue.get_nowait()} == {first, second}
+    assert _drain_surplus_sentinels(work_queue) == 0
+
+
+def test_compute_pool_swap_does_not_hand_the_new_generation_an_exit_order(
+    tmp_path, monkeypatch
+):
+    """A kernel_threads swap must leave the replacement pool working.
+
+    The retired pool is woken by putting one ``_SHUTDOWN_SENTINEL`` per
+    outstanding worker on ``ready_queue``, and a sentinel belongs to
+    whoever reads it next. While the replacement pool was spawned
+    *before* that shutdown, its workers drained the backlog, reached the
+    block of sentinels and returned -- all of them. Nothing was left to
+    release the gate, so the readers parked on it, ``readers_done`` never
+    fired, and the coordinator waited forever with three live threads and
+    no CPU. Caught mid-run on the real ``39_1-rsmap`` job, 2026-09-19,
+    at 9% of 3651 frames.
+
+    The ingredient that makes it deterministic rather than a race is a
+    *backlog*: with work already queued, the retired workers exit on
+    their cancellation check long before their own sentinels surface, so
+    every sentinel falls through to the new generation. This test builds
+    that backlog on purpose by making a map call far slower than a read.
+    """
+    real_parallelism = reconstruction_job_module._frame_parallelism
+    real_map_frame_group = reconstruction_job_module._map_frame_group
+    events = []
+    events_lock = threading.Lock()
+
+    class _SpyPool(reconstruction_job_module._AdjustablePool):
+        def __init__(self, worker_fn, *, initial_size, name):
+            if name == "orgui-rsmap-compute":
+                with events_lock:
+                    events.append(("created", initial_size))
+            super().__init__(worker_fn, initial_size=initial_size, name=name)
+
+        def shutdown(self, *, wait=True):
+            super().shutdown(wait=wait)
+            if self._name == "orgui-rsmap-compute":
+                with events_lock:
+                    events.append(("retired", None))
+
+    def fixed_parallelism(spec, tiles, memory_bytes, **kwargs):
+        # Pins the seed: eight pending ranges each affording eight
+        # workers give one native thread per image, so the sweep below
+        # unambiguously favors a *different* kernel_threads and the swap
+        # is guaranteed to happen rather than depending on what the
+        # memory estimate makes of this synthetic grid.
+        _limit, native, memory, accumulation = real_parallelism(
+            spec, tiles, memory_bytes, **kwargs
+        )
+        return 8, kwargs.get("threads_per_image", native), memory, accumulation
+
+    def fake_sweep(*args, candidates, **kwargs):
+        # Favors the largest candidate at an effectively-zero per-frame
+        # time, so every candidate stays feasible and the rebalance picks
+        # the largest -- away from the seeded 1.
+        return {c: (0.5 if c == 1 else 1e-6) for c in candidates}
+
+    def slow_map_frame_group(*args, **kwargs):
+        # Slower than a read, so the readers keep ready_queue non-empty
+        # and the retired workers are mid-call when the swap lands.
+        time.sleep(0.005)
+        return real_map_frame_group(*args, **kwargs)
+
+    monkeypatch.setattr(reconstruction_job_module, "_AdjustablePool", _SpyPool)
+    monkeypatch.setattr(
+        reconstruction_job_module, "_frame_parallelism", fixed_parallelism
+    )
+    # One frame per group: frame grouping routes to
+    # _map_frame_groups_streamed, which has a single compute-pool
+    # generation and therefore no swap to test. Without this the whole
+    # test passes vacuously.
+    monkeypatch.setattr(
+        reconstruction_job_module, "_choose_frames_per_group", lambda *a, **k: 1
+    )
+    monkeypatch.setattr(
+        reconstruction_job_module, "_kernel_threads_sweep", fake_sweep
+    )
+    monkeypatch.setattr(
+        reconstruction_job_module, "_map_frame_group", slow_map_frame_group
+    )
+    monkeypatch.setattr(
+        reconstruction_job_module, "_REBALANCE_INITIAL_SECONDS", 0.05
+    )
+    monkeypatch.setattr(
+        reconstruction_job_module, "_COORDINATOR_TICK_SECONDS", 0.05
+    )
+
+    frame_count = 240
+    range_size = frame_count // 8
+    pending_ranges = [
+        (start, start + range_size)
+        for start in range(0, frame_count, range_size)
+    ]
+    scan = _SlowScan(frame_count, delay=0.0)
+    config = _FakeConfig()
+    spec = _ReconstructionSpec(
+        grids=(
+            _GridSpec(
+                minimum=(-1.0, -1.0, -1.0),
+                maximum=(1.0, 1.0, 1.0),
+                step=(1.0, 1.0, 1.0),
+                frame="lab",
+                chunk_shape=(2, 2, 2),
+            ),
+        ),
+        max_depth=0,
+        threads=4,
+    )
+    bounds = np.zeros((frame_count, 2, 4), dtype=np.float64)
+    tiles = [(0, 1, 0, 1)]
+    grid_name = spec.grids[0].grid_name
+    router = _router({grid_name: [(0, frame_count)]}, tmp_path=tmp_path)
+    failure = []
+
+    def run():
+        try:
+            _map_pending_ranges(
+                spec,
+                scan,
+                config,
+                bounds,
+                tiles,
+                pending_ranges,
+                router,
+                correction_pipeline=_correction,
+                effective_memory=256 * 1024**2,
+                threads_per_image=None,
+                accumulation_budget_bytes=None,
+                total_images=frame_count,
+                completed_images=0,
+                progress=None,
+            )
+        except BaseException as error:  # noqa: BLE001 -- reported below
+            failure.append(error)
+
+    # In a thread with a deadline: the regression is a permanent stall,
+    # and a test that reproduces it must fail rather than hang the suite.
+    runner = threading.Thread(target=run, daemon=True)
+    runner.start()
+    runner.join(timeout=120)
+    assert not runner.is_alive(), (
+        "_map_pending_ranges never returned -- the compute pool was left "
+        "with no workers after a kernel_threads swap"
+    )
+    if failure:
+        raise failure[0]
+
+    # The swap happened, and each replacement was created only after its
+    # predecessor had been joined. That ordering is the fix: it is what
+    # makes the retired pool the only possible reader of its own wake
+    # sentinels. Counting creations, not retirements -- the coordinator's
+    # own teardown retires the last pool too, so a retirement alone does
+    # not prove a swap and an assertion on it passes vacuously.
+    creations = [event for event in events if event[0] == "created"]
+    assert len(creations) >= 2, f"no compute-pool swap occurred: {events}"
+    for index, (kind, _size) in enumerate(events):
+        if kind == "created" and index > 0:
+            assert events[index - 1][0] == "retired", (
+                "a replacement compute pool was spawned while the retired "
+                f"one was still being woken on the shared ready_queue: {events}"
+            )
+
+    from orgui.datautils.xrayutils.reconstruction import _read_checkpoint
+
+    # And the swap still changes nothing scientific: every frame lands
+    # exactly once.
+    assert len(router.written) == 1
+    written = _read_checkpoint(router.written[0])
+    assert int(written["contributors"].sum()) == frame_count
 
 
 def test_frame_fingerprint_flags_a_reused_read_buffer(tmp_path):

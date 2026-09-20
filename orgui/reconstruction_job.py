@@ -2476,7 +2476,53 @@ block is what left a prepare worker parked while every exit condition was
 already true -- observed repeatedly in 2026-08, on two builds, with
 ``cancellation`` and ``dispatch_done`` set and the queue empty. A sentinel
 wakes the consumer with data instead of with the clock.
+
+A sentinel is addressed to a *pool*, but it travels on a queue, so it is
+really addressed to whoever reads it next. Where one pool replaces
+another on the same queue, the replacement must therefore not be
+consuming yet when the retired pool is woken -- see
+:func:`_drain_surplus_sentinels` and the compute-pool generation swap in
+:func:`_map_pending_ranges`.
 """
+
+
+def _drain_surplus_sentinels(work_queue):
+    """Remove leftover :data:`_SHUTDOWN_SENTINEL` values from a queue.
+
+    A pool's ``shutdown`` puts one sentinel per outstanding worker, and a
+    worker that had already exited leaves its sentinel behind. Harmless
+    while that queue has no other consumer; fatal once a replacement pool
+    starts draining the same queue, because the first thing each new
+    worker reads is an exit order meant for a thread that is already
+    gone.
+
+    Call this only when no consumer is running -- between a retired
+    pool's join and its replacement's first worker. Real work items are
+    put back, so nothing queued is lost; producers may interleave with
+    the put-back, which reorders items relative to each other. Groups are
+    mapped independently and accumulated commutatively, so queue order
+    carries no meaning to preserve.
+
+    :param queue.Queue work_queue:
+        The queue both pool generations drain.
+    :returns:
+        Number of sentinels removed.
+    """
+    kept = []
+    removed = 0
+    while True:
+        try:
+            item = work_queue.get_nowait()
+        except Empty:
+            break
+        if item is _SHUTDOWN_SENTINEL:
+            removed += 1
+        else:
+            kept.append(item)
+    for item in kept:
+        work_queue.put(item)
+    return removed
+
 
 _POLL_TIMEOUT_SECONDS = 0.2
 _REBALANCE_INITIAL_SECONDS = 30
@@ -4039,6 +4085,23 @@ def _map_pending_ranges(
                             feasible.append(
                                 (candidate_threads, min(needed, ceiling))
                             )
+                    # The whole decision, in one record. Every term that
+                    # steers it is either measured against a single
+                    # sample tile of one frame (the sweep) or gated by
+                    # the configuration currently in effect (the rate),
+                    # so a choice that looks wrong in hindsight can only
+                    # be attributed with the inputs written down.
+                    logger.debug(
+                        "rebalance: rate %.3f frame/s over %.1f s; "
+                        "sweep (s/frame) %s; feasible %s; in effect "
+                        "%d worker(s) x %d thread(s)",
+                        rate,
+                        elapsed,
+                        {c: round(t, 4) for c, t in sweep.items()},
+                        feasible,
+                        compute_pool.size,
+                        current_kernel_threads[0],
+                    )
                     if feasible:
                         new_kernel_threads, new_image_workers = max(
                             feasible, key=lambda pair: pair[0]
@@ -4055,27 +4118,54 @@ def _map_pending_ranges(
                             # kernel_threads change: each compute worker's
                             # kernel is built once at worker-start, so this
                             # needs a full generation swap, not a resize.
-                            # ready_queue/gate are untouched -- readers and
-                            # already-queued frames are unaffected, only
-                            # which pool drains the queue changes.
+                            # Queued frames survive it -- readers are
+                            # unaffected and only which pool drains the
+                            # queue changes; the one thing taken off
+                            # ready_queue is the retired pool's own wake
+                            # sentinels, below.
                             current_kernel_threads[0] = new_kernel_threads
                             gate.retarget(
                                 new_image_workers + _PREFETCH_QUEUE_SLACK
                             )
                             old_compute_pool = compute_pool
+                            # Retire the old generation *before* the new
+                            # one exists. Its shutdown wakes its workers
+                            # by putting one _SHUTDOWN_SENTINEL per
+                            # outstanding worker on ready_queue, and a
+                            # sentinel belongs to whoever reads it next:
+                            # spawning the replacement first let the new
+                            # workers drain the backlog, reach that block
+                            # of sentinels and exit on the spot, every
+                            # one of them. That left no consumer at all,
+                            # so no one released the gate, readers parked
+                            # on it, readers_done never fired and this
+                            # loop waited forever -- the mid-run stall
+                            # caught on 39_1-rsmap on 2026-09-19.
+                            #
+                            # The join blocks until every straggler
+                            # finishes its in-flight _map_frame_group
+                            # call -- a deliberate, rare stall (this
+                            # whole block runs at most once per rebalance
+                            # interval), never abandons in-flight work.
+                            old_compute_pool.shutdown(wait=True)
+                            # Sentinels put for workers that had already
+                            # exited outlive the join; with no consumer
+                            # running they are safe to take back out, and
+                            # must be, or the new generation inherits
+                            # them.
+                            surplus = _drain_surplus_sentinels(ready_queue)
+                            if surplus:
+                                logger.debug(
+                                    "compute pool swap: dropped %d surplus "
+                                    "shutdown sentinel(s)",
+                                    surplus,
+                                )
                             compute_pool = _AdjustablePool(
                                 compute_loop,
                                 initial_size=new_image_workers,
                                 name="orgui-rsmap-compute",
                             )
                             compute_pool.wake_workers = _wake_compute
-                            # Blocks until every straggler on the retired
-                            # generation finishes its in-flight
-                            # _map_frame_group call -- a deliberate, rare
-                            # stall (this whole block runs at most once per
-                            # rebalance interval), never abandons
-                            # in-flight work.
-                            old_compute_pool.shutdown(wait=True)
                             rate_at_last_rebalance = rate
                             rebalance_interval = _REBALANCE_INITIAL_SECONDS
                         elif new_image_workers != compute_pool.size:

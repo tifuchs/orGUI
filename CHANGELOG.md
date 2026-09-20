@@ -1471,6 +1471,18 @@ Reciprocal-space reconstruction:
   times the headroom actually needed and still falls back to the heap if
   a block ever exceeds it, so this bounds memory, never correctness;
   mapped output is unchanged, verified record for record.
+- **A reciprocal-space mapping run no longer stops partway through when
+  automatic mode retunes its thread split.** Changing the native threads
+  per image needs a whole new compute pool rather than a resize, and the
+  replacement used to be started before the outgoing one was retired.
+  Both then drew from the same queue, so the outgoing pool's shutdown
+  signals were picked up by the incoming workers, which stopped
+  immediately -- leaving the run with no compute workers, no error and no
+  progress, indefinitely. Affected runs hung at whichever frame the
+  retune landed on, typically within the first minute. The outgoing pool
+  is now fully retired before its replacement starts, and any leftover
+  signals are cleared while nothing is reading the queue. Mapped output
+  is unaffected.
 
 
 ## [1.5.0] (2026-06-07)
