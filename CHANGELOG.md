@@ -7,6 +7,15 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Scientific and analysis additions:
 
+- **Reciprocal-space reconstruction now offers explicit sampled-volume
+  weighting for continuous scans.** The opt-in mode weights each corrected
+  detector/exposure cell by a centred-secant reciprocal-space Jacobian and
+  conserves that volume through adaptive voxel subdivision. It refuses
+  stationary exposures and center-only depth because neither defines the
+  required three-dimensional source cell. The legacy parameter-space average
+  remains the default, detector solid-angle correction remains independent,
+  and output HDF5 files record the selected mode and weight units.
+
 - **The end-to-end CTR correction contract now has an independent
   calibrated-pixel forward validation and published limits.** A finite-width
   Gaussian rod is simulated directly on calibrated detector rays without using the

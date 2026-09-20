@@ -468,6 +468,24 @@ enum class CoordinateFrame {
     Hkl,
 };
 
+enum class WeightingMode {
+    ParameterAverage,
+    ReciprocalVolumeAverage,
+};
+
+WeightingMode parse_weighting_mode(const std::string &mode) {
+    if (mode == "parameter_average") {
+        return WeightingMode::ParameterAverage;
+    }
+    if (mode == "reciprocal_volume_average") {
+        return WeightingMode::ReciprocalVolumeAverage;
+    }
+    throw py::value_error(
+        "weighting_mode must be parameter_average or "
+        "reciprocal_volume_average"
+    );
+}
+
 CoordinateFrame parse_frame(const std::string &frame) {
     if (frame == "lab" || frame == "q_lab") {
         return CoordinateFrame::Lab;
@@ -712,9 +730,11 @@ public:
         const int max_depth = 2,
         int threads = 1,
         const std::size_t work_block_pixels = 4096,
-        const std::size_t memory_budget_bytes = 512ULL * 1024ULL * 1024ULL
+        const std::size_t memory_budget_bytes = 512ULL * 1024ULL * 1024ULL,
+        const std::string &weighting_mode = "parameter_average"
     )
         : frame_(parse_frame(frame)),
+          weighting_mode_(parse_weighting_mode(weighting_mode)),
           wavevector_(wavevector),
           ub_inverse_(matrix_from_array(ub_inverse, "ub_inverse")),
           u_inverse_(matrix_from_array(u_inverse, "u_inverse")),
@@ -767,6 +787,15 @@ public:
         if (max_depth_ < 0 || max_depth_ > 8) {
             throw py::value_error("max_depth must be between 0 and 8");
         }
+        if (
+            weighting_mode_ == WeightingMode::ReciprocalVolumeAverage
+            && max_depth_ == 0
+        ) {
+            throw py::value_error(
+                "reciprocal_volume_average requires max_depth >= 1 so the "
+                "reciprocal-space cell corners are evaluated"
+            );
+        }
         if (threads_ < 1) {
             threads_ = 1;
         }
@@ -812,6 +841,16 @@ public:
         bool stationary = true;
         for (int index = 0; index < 4; ++index) {
             stationary = stationary && start_data[index] == end_data[index];
+        }
+        if (
+            stationary
+            && weighting_mode_ == WeightingMode::ReciprocalVolumeAverage
+        ) {
+            throw py::value_error(
+                "reciprocal_volume_average requires a continuous exposure "
+                "with nonzero scan-angle bounds; a stationary detector pixel "
+                "has zero three-dimensional reciprocal-space volume"
+            );
         }
         const std::vector<FrameRotation> rotations =
             frame_rotations(start_data, end_data);
@@ -1168,6 +1207,16 @@ public:
             for (int index = 0; index < 4; ++index) {
                 still = still && frame_start[index] == frame_end[index];
             }
+            if (
+                still
+                && weighting_mode_ == WeightingMode::ReciprocalVolumeAverage
+            ) {
+                throw py::value_error(
+                    "reciprocal_volume_average requires every frame to have "
+                    "nonzero scan-angle bounds; a stationary detector pixel "
+                    "has zero three-dimensional reciprocal-space volume"
+                );
+            }
             stationary[frame] = still ? 1 : 0;
             for (const FrameRotation &rotation :
                  frame_rotations(frame_start, frame_end)) {
@@ -1483,6 +1532,7 @@ private:
 
     Grid grid_;
     CoordinateFrame frame_;
+    WeightingMode weighting_mode_;
     double wavevector_;
     Mat3 ub_inverse_;
     Mat3 u_inverse_;
@@ -2956,6 +3006,46 @@ private:
             }
             return;
         }
+        double root_weight = 1.0;
+        if (weighting_mode_ == WeightingMode::ReciprocalVolumeAverage) {
+            // Centred secants estimate the Jacobian columns of the mapping
+            // (u, v, t) -> selected reciprocal coordinates. Averaging the
+            // four parallel edges in each direction is symmetric under scan
+            // reversal and uses the corner coordinates already needed by the
+            // adaptive splitter, so normal depths incur no extra transforms.
+            Vec3 du{0.0, 0.0, 0.0};
+            Vec3 dv{0.0, 0.0, 0.0};
+            Vec3 dt{0.0, 0.0, 0.0};
+            for (int base : {0, 2, 4, 6}) {
+                du.x += footprint[base | 1].x - footprint[base].x;
+                du.y += footprint[base | 1].y - footprint[base].y;
+                du.z += footprint[base | 1].z - footprint[base].z;
+            }
+            for (int base : {0, 1, 4, 5}) {
+                dv.x += footprint[base | 2].x - footprint[base].x;
+                dv.y += footprint[base | 2].y - footprint[base].y;
+                dv.z += footprint[base | 2].z - footprint[base].z;
+            }
+            for (int base = 0; base < 4; ++base) {
+                dt.x += footprint[base | 4].x - footprint[base].x;
+                dt.y += footprint[base | 4].y - footprint[base].y;
+                dt.z += footprint[base | 4].z - footprint[base].z;
+            }
+            du = {0.25 * du.x, 0.25 * du.y, 0.25 * du.z};
+            dv = {0.25 * dv.x, 0.25 * dv.y, 0.25 * dv.z};
+            dt = {0.25 * dt.x, 0.25 * dt.y, 0.25 * dt.z};
+            const Vec3 cross{
+                du.y * dv.z - du.z * dv.y,
+                du.z * dv.x - du.x * dv.z,
+                du.x * dv.y - du.y * dv.x,
+            };
+            root_weight = std::abs(
+                cross.x * dt.x + cross.y * dt.y + cross.z * dt.z
+            );
+            if (!std::isfinite(root_weight) || root_weight <= 0.0) {
+                return;
+            }
+        }
         subdivide_moving(
             rays,
             transforms,
@@ -2965,7 +3055,7 @@ private:
             1.0,
             0.0,
             1.0,
-            1.0,
+            root_weight,
             0,
             corners,
             weights,
@@ -3689,7 +3779,8 @@ PYBIND11_MODULE(_reciprocal_reconstruction_cpp, module) {
                 int,
                 int,
                 std::size_t,
-                std::size_t
+                std::size_t,
+                const std::string &
             >(),
             py::arg("minimum"),
             py::arg("step"),
@@ -3702,7 +3793,8 @@ PYBIND11_MODULE(_reciprocal_reconstruction_cpp, module) {
             py::arg("max_depth") = 2,
             py::arg("threads") = 1,
             py::arg("work_block_pixels") = 4096,
-            py::arg("memory_budget_bytes") = 512ULL * 1024ULL * 1024ULL
+            py::arg("memory_budget_bytes") = 512ULL * 1024ULL * 1024ULL,
+            py::arg("weighting_mode") = "parameter_average"
         )
         .def(
             "frames_reach_grid",

@@ -400,8 +400,33 @@ def test_finalize_reads_single_checkpoint_per_grid(tmp_path):
         group = h5file[f"entry/reconstruction/results/{grid.grid_name}"]
         assert group["intensity"][1, 1, 1] == 5.0
         assert group["weight"][1, 1, 1] == 2.0
+        assert group.attrs["weighting_mode"] == "parameter_average"
+        assert group["weight"].attrs["units"] == "1"
         assert group["contributors"][1, 1, 1] == 1
         assert np.isnan(group["intensity"][0, 0, 0])
+
+
+def test_finalize_labels_reciprocal_volume_weights(tmp_path):
+    """The HDF5 output makes the denominator's physical meaning explicit."""
+    grid = _grid()
+    spec = _ReconstructionSpec(
+        grids=(grid,),
+        max_depth=1,
+        weighting_mode="reciprocal_volume_average",
+        compression="gzip",
+    )
+
+    result = _finalize_reconstruction(
+        spec, {grid.grid_name: []}, tmp_path / "volume-weighted.h5"
+    )
+
+    with h5py.File(result["path"], "r") as h5file:
+        group = h5file[f"entry/reconstruction/results/{grid.grid_name}"]
+        assert group.attrs["weighting_mode"] == "reciprocal_volume_average"
+        assert group["weight"].attrs["weighting_mode"] == (
+            "reciprocal_volume_average"
+        )
+        assert group["weight"].attrs["units"] == "Angstrom^-3"
 
 
 def test_finalize_merges_overlapping_records_across_checkpoints(tmp_path):

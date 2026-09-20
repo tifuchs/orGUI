@@ -387,6 +387,7 @@ class ReconstructionDialog(qt.QDialog):
             self.memory_override[2].valueChanged,
             self.cluster_array_task_count.valueChanged,
             self.accuracy.currentIndexChanged,
+            self.weighting_mode.currentIndexChanged,
             self.angle_fallback.currentIndexChanged,
         ):
             signal.connect(self._refresh_file_count_summary)
@@ -959,6 +960,25 @@ class ReconstructionDialog(qt.QDialog):
             "Select the adaptive pixel-footprint subdivision depth. Higher "
             "depths resolve voxel boundaries more accurately but require "
             "substantially more computation.",
+        )
+        self.weighting_mode = qt.QComboBox()
+        self.weighting_mode.addItem(
+            "Parameter-space average (legacy)", "parameter_average"
+        )
+        self.weighting_mode.addItem(
+            "Reciprocal-volume average (continuous scans)",
+            "reciprocal_volume_average",
+        )
+        self._add_form_row(
+            accuracy_form,
+            "Voxel weighting:",
+            self.weighting_mode,
+            "Choose how samples are averaged inside each reciprocal-space "
+            "voxel. Reciprocal-volume mode weights each continuous-exposure "
+            "detector cell by the reciprocal-space volume it covers. It "
+            "requires nonzero scan-angle bounds and footprint depth 1 or "
+            "higher. This is separate from the detector solid-angle "
+            "intensity correction on the Experiment tab.",
         )
         layout.addWidget(accuracy_group)
 
@@ -2163,6 +2183,7 @@ class ReconstructionDialog(qt.QDialog):
             output_path=output_path,
             accuracy=accuracy,
             advanced_depth=advanced_depth,
+            weighting_mode=self.weighting_mode.currentData(),
             compression_override=(
                 self.orgui.reconstruction_compression_override
             ),
@@ -2374,6 +2395,7 @@ class ReconstructionDialog(qt.QDialog):
             self.output_path.setText(job.output_path)
             self.scratch_path.setText(job.scratch_path)
             self._set_accuracy(job.accuracy, job.advanced_depth)
+            self._set_combo_value(self.weighting_mode, job.weighting_mode)
             angle_index = self.angle_fallback.findData(job.angle_fallback)
             if angle_index < 0:
                 raise ValueError(

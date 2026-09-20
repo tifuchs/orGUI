@@ -336,7 +336,19 @@ Each detector pixel and exposure sweep is treated as a parametric cell.
 Adaptive splitting tests transformed cell corners against voxel boundaries.
 A leaf wholly inside one voxel contributes its full weight. Otherwise it is
 subdivided until it becomes single-voxel or reaches the selected depth, where
-its centroid is assigned. Total source-pixel weight is conserved.
+its centroid is assigned.
+
+``Voxel weighting`` selects the measure conserved by that subdivision.
+``Parameter-space average (legacy)`` conserves one unit per valid source
+pixel and remains the default. ``Reciprocal-volume average`` instead
+calculates the root cell's centred-secant Jacobian in the selected output
+coordinates and conserves that sampled volume across its leaves. The latter
+is an opt-in quantitative mode for continuous exposures with nonzero
+scan-angle bounds and requires depth 1 or higher. A stationary detector pixel
+spans a reciprocal-space surface, not a three-dimensional volume, so the
+volume mode refuses stationary frames rather than inventing a thickness.
+Detector solid-angle correction remains a separate intensity correction and
+may be used with either voxel-weighting mode.
 
 ``Center only (depth 0)``
    Assign one centroid per pixel. Fastest, without finite-footprint splitting.
@@ -535,10 +547,13 @@ Final voxel datasets are:
    I_\mathrm{voxel} = \frac{S_I}{S_w},\qquad
    v_\mathrm{voxel} = \frac{S_v}{S_w^2}.
 
-Empty intensity and variance voxels are NaN. ``weight`` stores :math:`S_w`;
-``contributors`` stores the number of independent source pixels. Adaptive
-footprint splitting creates cross-voxel covariance, so ``variance`` contains
-marginal variances only.
+Empty intensity and variance voxels are NaN. ``weight`` stores :math:`S_w`.
+Its ``weighting_mode`` and ``units`` attributes identify whether it is the
+dimensionless legacy parameter weight, sampled HKL volume in
+:math:`\mathrm{r.l.u.}^3`, or sampled Cartesian-Q volume in
+:math:`\mathrm{\mathring{A}}^{-3}`. ``contributors`` stores the number of
+independent source pixels. Adaptive footprint splitting creates cross-voxel
+covariance, so ``variance`` contains marginal variances only.
 
 Out-of-Core Execution
 ---------------------
@@ -913,7 +928,7 @@ Each selected coordinate system is an ``NXdata`` group below
 * float64 marginal ``variance``;
 * float64 ``weight``;
 * uint64 ``contributors``;
-* coordinate-frame, signal, axes, and units attributes.
+* coordinate-frame, weighting-mode, signal, axes, and units attributes.
 
 All scientific arrays default to float64 except the contributor count. The
 file is conventional HDF5 and can be read with h5py, silx, and NeXus-aware

@@ -47,7 +47,7 @@ from .datautils.xrayutils.reconstruction import (
 )
 
 
-JOB_SCHEMA_VERSION = 6
+JOB_SCHEMA_VERSION = 7
 ACCURACY_DEPTHS = {
     "center": 0,
     "low": 1,
@@ -219,6 +219,7 @@ class ReconstructionJob:
     runtime_memory_bytes: int = 6_000 * 1024 * 1024
     angle_fallback: str = "stationary"
     accuracy: str = "balanced"
+    weighting_mode: str = "parameter_average"
     advanced_depth: int | None = None
     thread_override: int | None = None
     memory_override_bytes: int | None = None
@@ -305,6 +306,7 @@ class ReconstructionJob:
             checkpoint_count=self.checkpoint_count,
             compression=f"database:{self.compression}",
             infer_angle_bounds=self.angle_fallback == "midpoint",
+            weighting_mode=self.weighting_mode,
         )
 
 
@@ -1033,6 +1035,7 @@ def prepare_job(
     output_path,
     accuracy="balanced",
     advanced_depth=None,
+    weighting_mode="parameter_average",
     compression_override=None,
     angle_fallback="stationary",
     user_note="",
@@ -1051,10 +1054,24 @@ def prepare_job(
         raise RuntimeError("Load a scan before preparing reconstruction")
     if accuracy not in ACCURACY_DEPTHS:
         raise ValueError(f"Unknown accuracy preset: {accuracy}")
+    if weighting_mode not in {
+        "parameter_average",
+        "reciprocal_volume_average",
+    }:
+        raise ValueError(f"Unknown reconstruction weighting mode: {weighting_mode}")
     if angle_fallback not in {"stationary", "midpoint"}:
         raise ValueError("Angle fallback must be stationary or midpoint")
     if advanced_depth is not None and not 0 <= advanced_depth <= 8:
         raise ValueError("Advanced split depth must be between 0 and 8")
+    effective_depth = (
+        ACCURACY_DEPTHS[accuracy]
+        if advanced_depth is None
+        else advanced_depth
+    )
+    if weighting_mode == "reciprocal_volume_average" and effective_depth == 0:
+        raise ValueError(
+            "Reciprocal-volume weighting requires footprint depth 1 or higher"
+        )
     if compression_override is not None and compression_override not in FILTERS:
         raise ValueError(
             f"Unknown HDF5 compression override: {compression_override}"
@@ -1127,6 +1144,7 @@ def prepare_job(
         runtime_threads=max(1, int(gui.numberthreads)),
         runtime_memory_bytes=max(1, int(gui.maxMemory * 1024 * 1024)),
         accuracy=accuracy,
+        weighting_mode=weighting_mode,
         advanced_depth=advanced_depth,
         angle_fallback=angle_fallback,
         user_note=user_note,
@@ -4366,9 +4384,10 @@ def _log_job_summary(job, path, *, stage):
             grid["step"],
         )
     logger.info(
-        "%s: accuracy '%s', angle fallback '%s', compression '%s'",
+        "%s: accuracy '%s', weighting '%s', angle fallback '%s', compression '%s'",
         stage,
         job.accuracy,
+        job.weighting_mode,
         job.angle_fallback,
         job.compression,
     )

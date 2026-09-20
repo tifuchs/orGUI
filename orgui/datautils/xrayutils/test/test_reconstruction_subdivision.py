@@ -138,7 +138,16 @@ def _grid_for(rays, angles_start, angles_end, voxels_per_pixel, chunk_shape):
     return lower, step, shape
 
 
-def _kernel(minimum, step, shape, chunk_shape, max_depth, threads, block):
+def _kernel(
+    minimum,
+    step,
+    shape,
+    chunk_shape,
+    max_depth,
+    threads,
+    block,
+    weighting_mode="parameter_average",
+):
     return native.ReconstructionKernel(
         np.ascontiguousarray(minimum),
         np.ascontiguousarray(step),
@@ -152,6 +161,7 @@ def _kernel(minimum, step, shape, chunk_shape, max_depth, threads, block):
         threads,
         block,
         1 << 40,
+        weighting_mode,
     )
 
 
@@ -452,7 +462,14 @@ def _assert_matches_reference(case, max_depth):
     return result
 
 
-def _accumulate(case, max_depth, threads=1, block=64, profile=False):
+def _accumulate(
+    case,
+    max_depth,
+    threads=1,
+    block=64,
+    profile=False,
+    weighting_mode="parameter_average",
+):
     kernel = _kernel(
         case["minimum"],
         case["step"],
@@ -461,6 +478,7 @@ def _accumulate(case, max_depth, threads=1, block=64, profile=False):
         max_depth,
         threads,
         block,
+        weighting_mode,
     )
     return kernel.accumulate(
         case["intensity"],
@@ -471,6 +489,95 @@ def _accumulate(case, max_depth, threads=1, block=64, profile=False):
         case["angles_end"],
         profile,
     )
+
+
+def _root_reciprocal_volume(case, row, column):
+    """Centred-secant cell volume in the selected r.l.u. coordinates."""
+    probe = _probe_kernel()
+    corners = np.empty((2, 2, 2, 3), dtype=np.float64)
+    for u in range(2):
+        for v in range(2):
+            for t in range(2):
+                corners[u, v, t] = probe.coordinate(
+                    case["rays"],
+                    case["angles_start"],
+                    case["angles_end"],
+                    row,
+                    column,
+                    float(u),
+                    float(v),
+                    float(t),
+                )
+    du = np.mean(corners[1] - corners[0], axis=(0, 1))
+    dv = np.mean(corners[:, 1] - corners[:, 0], axis=(0, 1))
+    dt = np.mean(corners[:, :, 1] - corners[:, :, 0], axis=(0, 1))
+    return abs(float(np.dot(np.cross(du, dv), dt)))
+
+
+def test_reciprocal_volume_weighting_uses_the_root_cell_jacobian():
+    """Leaf fractions conserve each pixel's sampled reciprocal volume."""
+    case = _case(3, 4, moving=True, voxels_per_pixel=0.5)
+    result = _accumulate(
+        case, 2, weighting_mode="reciprocal_volume_average"
+    )
+    expected_weight = 0.0
+    expected_intensity = 0.0
+    for row, column in np.ndindex(case["intensity"].shape):
+        if case["mask"][row, column]:
+            continue
+        volume = _root_reciprocal_volume(case, row, column)
+        expected_weight += volume
+        expected_intensity += volume * case["intensity"][row, column]
+
+    assert float(np.sum(result["weight"])) == pytest.approx(
+        expected_weight, rel=1e-11
+    )
+    assert float(np.sum(result["weighted_intensity"])) == pytest.approx(
+        expected_intensity, rel=1e-11
+    )
+
+
+def test_reciprocal_volume_weighting_is_invariant_to_scan_reversal():
+    """Reversing the exposure changes orientation, not sampled volume."""
+    forward = _case(3, 4, moving=True, voxels_per_pixel=0.5)
+    reverse = dict(forward)
+    reverse["angles_start"] = forward["angles_end"]
+    reverse["angles_end"] = forward["angles_start"]
+
+    forward_result = _accumulate(
+        forward, 2, weighting_mode="reciprocal_volume_average"
+    )
+    reverse_result = _accumulate(
+        reverse, 2, weighting_mode="reciprocal_volume_average"
+    )
+    assert float(np.sum(reverse_result["weight"])) == pytest.approx(
+        float(np.sum(forward_result["weight"])), rel=1e-11
+    )
+
+
+def test_reciprocal_volume_weighting_rejects_stationary_exposures():
+    """A stationary pixel is a surface, not a three-dimensional cell."""
+    case = _case(2, 2, moving=False)
+    with pytest.raises(ValueError, match="continuous exposure"):
+        _accumulate(
+            case, 1, weighting_mode="reciprocal_volume_average"
+        )
+
+
+def test_reciprocal_volume_weighting_rejects_center_only_depth():
+    """Depth zero has no corner lattice from which to calculate volume."""
+    case = _case(2, 2, moving=True)
+    with pytest.raises(ValueError, match="max_depth >= 1"):
+        _kernel(
+            case["minimum"],
+            case["step"],
+            case["shape"],
+            case["chunk_shape"],
+            0,
+            1,
+            64,
+            "reciprocal_volume_average",
+        )
 
 
 @pytest.mark.parametrize("max_depth", [0, 1, 2, 3, 4])

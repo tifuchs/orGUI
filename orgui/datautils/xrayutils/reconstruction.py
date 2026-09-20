@@ -44,6 +44,11 @@ _CHECKPOINT_BYTES_PER_ROW = 40
 column -- 2 * 4 + 3 * 8 + 4 = 40 bytes). Used to convert calibration-probe
 record counts into byte estimates for the checkpoint file-count formula."""
 
+_WEIGHTING_MODES = {
+    "parameter_average",
+    "reciprocal_volume_average",
+}
+
 _CHECKPOINT_PART_PATTERN = re.compile(r"^ckpt(?P<index>\d+)_p(?P<part>\d+)\.h5$")
 
 
@@ -201,6 +206,7 @@ class _ReconstructionSpec:
     checkpoint_count: int = 10
     compression: str = "bitshuffle-lz4"
     infer_angle_bounds: bool = False
+    weighting_mode: str = "parameter_average"
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -226,6 +232,15 @@ class _ReconstructionSpec:
             raise ValueError("memory_budget_bytes must be at least 1 MiB")
         if self.checkpoint_count < 1:
             raise ValueError("checkpoint_count must be at least one")
+        if self.weighting_mode not in _WEIGHTING_MODES:
+            raise ValueError(
+                "weighting_mode must be parameter_average or "
+                "reciprocal_volume_average"
+            )
+        if self.weighting_mode == "reciprocal_volume_average" and self.max_depth == 0:
+            raise ValueError(
+                "reciprocal_volume_average requires max_depth >= 1"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""
@@ -337,6 +352,7 @@ def _kernel_for_grid(
             if memory_budget_bytes is None
             else memory_budget_bytes
         ),
+        spec.weighting_mode,
     )
 
 
@@ -2095,6 +2111,7 @@ def _finalize_reconstruction(
             )
             group.attrs["coordinate_frame"] = grid.frame
             group.attrs["units"] = "r.l.u." if grid.frame == "hkl" else "Angstrom^-1"
+            group.attrs["weighting_mode"] = spec.weighting_mode
             axis_names = ("h", "k", "l") if grid.frame == "hkl" else ("qx", "qy", "qz")
             for axis, axis_name in enumerate(axis_names):
                 values = grid.minimum[axis] + (
@@ -2125,7 +2142,7 @@ def _finalize_reconstruction(
                 fillvalue=np.nan,
                 **compression,
             )
-            group.create_dataset(
+            weight = group.create_dataset(
                 "weight",
                 shape=grid.shape,
                 dtype=np.float64,
@@ -2133,6 +2150,19 @@ def _finalize_reconstruction(
                 fillvalue=0.0,
                 **compression,
             )
+            weight.attrs["weighting_mode"] = spec.weighting_mode
+            if spec.weighting_mode == "reciprocal_volume_average":
+                weight.attrs["long_name"] = (
+                    "accumulated sampled reciprocal-space volume"
+                )
+                weight.attrs["units"] = (
+                    "(r.l.u.)^3" if grid.frame == "hkl" else "Angstrom^-3"
+                )
+            else:
+                weight.attrs["long_name"] = (
+                    "accumulated normalized detector/exposure parameter weight"
+                )
+                weight.attrs["units"] = "1"
             group.create_dataset(
                 "contributors",
                 shape=grid.shape,

@@ -34,6 +34,22 @@ def _dialog(tmp_path):
     return dialog
 
 
+def test_voxel_weighting_control_is_explicit_and_legacy_by_default(tmp_path):
+    """Volume weighting is opt-in and carries a stable job value."""
+    dialog = _dialog(tmp_path)
+
+    assert dialog.weighting_mode.currentData() == "parameter_average"
+    index = dialog.weighting_mode.findData("reciprocal_volume_average")
+    assert index >= 0
+    dialog.weighting_mode.setCurrentIndex(index)
+    assert dialog.weighting_mode.currentData() == (
+        "reciprocal_volume_average"
+    )
+
+    dialog.close()
+    dialog._test_parent.close()
+
+
 def test_no_scan_actions_are_reported_without_raising(tmp_path, caplog):
     """User actions without an active scan must remain non-fatal."""
     dialog = _dialog(tmp_path)

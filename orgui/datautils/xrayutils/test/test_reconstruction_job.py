@@ -487,10 +487,15 @@ def test_threads_per_image_none_round_trips_and_reports_automatic_mode(
     distinctly from a pinned int, without requiring a live run."""
     scan, job = _two_frame_job(tmp_path, "result.h5")
     job.threads_per_image = None
+    job.weighting_mode = "reciprocal_volume_average"
 
     assert job.schema_version == reconstruction_job_module.JOB_SCHEMA_VERSION
     restored = ReconstructionJob.from_dict(job.to_dict())
     assert restored.threads_per_image is None
+    assert restored.weighting_mode == "reciprocal_volume_average"
+    assert restored.internal_spec().weighting_mode == (
+        "reciprocal_volume_average"
+    )
 
     settings = reconstruction_execution_settings(
         job, scan=scan, config=job.config_data
