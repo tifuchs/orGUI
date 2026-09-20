@@ -61,6 +61,7 @@ This module holds no Qt state and reads only public scan attributes, so it is
 safe in CLI and batch use.
 """
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -85,6 +86,7 @@ __all__ = [
     "apply_stationary_corrections",
     "corrected_curve_from_record",
     "frame_correction_policy",
+    "framewise_illumination_divisor",
     "monitor_counter_candidates",
     "normalization_divisor",
     "pixel_correction_branches",
@@ -97,6 +99,8 @@ __all__ = [
 FOOTPRINT_KEEP = "keep"
 FOOTPRINT_APPLY = "apply"
 FOOTPRINT_REMOVE = "remove"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -163,6 +167,69 @@ def _horizontal_fraction(state):
         "total-flux illumination requires horizontal_interception to be "
         "'full' or 'fraction'"
     )
+
+
+def framewise_illumination_divisor(
+    alpha,
+    sample_length,
+    profile,
+    *,
+    horizontal_fraction,
+):
+    r"""Total-flux :math:`H` per frame, excluding nonphysical incidence.
+
+    :func:`~orgui.datautils.xrayutils.corrections.activearea.illumination_divisor`
+    only accepts incidence angles in :math:`(0, \pi/2]`. A scan that starts
+    at the horizon (e.g. ``flyscan th 0 12`` on a z-axis backend that maps
+    ``th`` to ``alpha``) contains frames without a defined illumination.
+    Those frames are excluded, not extrapolated: their :math:`H` and
+    :math:`f_\mathrm{hit}` are NaN, so every value corrected with them is NaN
+    and any integral over them is NaN rather than silently integrating over a
+    gap.
+
+    :param alpha: Incidence angle(s) per frame, in radian.
+    :param float sample_length: Sample length along the beam, in meter.
+    :param profile: A :class:`~.beamprofile.BeamProfile`.
+    :param horizontal_fraction: Horizontal intercepted fraction, in
+        ``(0, 1]``.
+    :returns: ``(H, f_hit, valid)`` broadcast to the shape of ``alpha``;
+        ``valid`` is the boolean mask of frames with a defined :math:`H`.
+    :rtype: tuple of numpy.ndarray
+    :raises ValueError: If no frame has a physical incidence angle, or the
+        geometry or profile is otherwise invalid.
+    """
+    alpha = np.asarray(alpha, dtype=np.float64)
+    valid = np.isfinite(alpha) & (alpha > 0) & (alpha <= np.pi / 2)
+    if not np.any(valid):
+        raise ValueError(
+            "total-flux illumination needs at least one frame with an "
+            "incidence angle in (0, 90] deg"
+        )
+    illumination = np.full(alpha.shape, np.nan)
+    intercepted = np.full(alpha.shape, np.nan)
+    illumination[valid] = activearea.illumination_divisor(
+        alpha[valid],
+        sample_length,
+        profile,
+        horizontal_fraction=horizontal_fraction,
+    )
+    intercepted[valid] = activearea.intercepted_fraction(
+        alpha[valid],
+        sample_length,
+        profile,
+        horizontal_fraction=horizontal_fraction,
+    )
+    excluded = int(np.count_nonzero(~valid))
+    if excluded:
+        logger.warning(
+            "Total-flux illumination is undefined for %d of %d frame values "
+            "with incidence angle outside (0, 90] deg (e.g. alpha = %.4g deg); "
+            "these frames are excluded (NaN).",
+            excluded,
+            alpha.size,
+            np.rad2deg(alpha[~valid].flat[0]),
+        )
+    return illumination, intercepted, valid
 
 
 def frame_correction_policy(
@@ -305,21 +372,16 @@ def frame_correction_policy(
                 "sample length"
             )
         horizontal = _horizontal_fraction(state)
+        illumination, intercepted, valid = framewise_illumination_divisor(
+            alpha,
+            sample_length,
+            beam_profile,
+            horizontal_fraction=horizontal,
+        )
         vertical = np.asarray(
             beam_profile.flux_on_sample(alpha, sample_length), dtype=np.float64
         )
-        illumination = activearea.illumination_divisor(
-            alpha,
-            sample_length,
-            beam_profile,
-            horizontal_fraction=horizontal,
-        )
-        intercepted = activearea.intercepted_fraction(
-            alpha,
-            sample_length,
-            beam_profile,
-            horizontal_fraction=horizontal,
-        )
+        vertical = np.where(valid, vertical, np.nan)
         illum_status = "applied"
 
     if calibrated:
@@ -436,8 +498,16 @@ def corrected_curve_from_record(
         convention = replacement_convention
 
     if illumination is not None:
-        if np.any(illumination <= 0) or not np.all(np.isfinite(illumination)):
-            raise ValueError("illumination divisor must be finite and positive")
+        # NaN marks a frame excluded by framewise_illumination_divisor (no
+        # physical incidence angle); it propagates to that frame only.
+        if (
+            np.any(illumination <= 0)
+            or np.any(np.isinf(illumination))
+            or np.all(np.isnan(illumination))
+        ):
+            raise ValueError(
+                "illumination divisor must be positive where defined"
+            )
         curve = curve / illumination
         variance = variance / np.square(illumination)
     return curve, np.sqrt(variance), status, convention

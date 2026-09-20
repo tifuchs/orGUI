@@ -70,6 +70,7 @@ from .integration_corrections import (
     FOOTPRINT_KEEP,
     FOOTPRINT_REMOVE,
     corrected_curve_from_record,
+    framewise_illumination_divisor,
 )
 from .. import resources
 from .. import logger_utils
@@ -1120,14 +1121,12 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     "The stored curve has no incidence angles; re-extract "
                     "images before changing its footprint."
                 )
-            self.replacement_illumination = (
-                activearea_corrections.illumination_divisor(
-                    np.asarray(record.alpha),
-                    self.integrationCorrection.sampleLength(),
-                    self.integrationCorrection.beamProfile(),
-                    horizontal_fraction=horizontal,
-                )
-            )
+            self.replacement_illumination = framewise_illumination_divisor(
+                np.asarray(record.alpha),
+                self.integrationCorrection.sampleLength(),
+                self.integrationCorrection.beamProfile(),
+                horizontal_fraction=horizontal,
+            )[0]
             self.replacement_illumination_convention = "total_flux_H"
         elif action != FOOTPRINT_KEEP and record is None:
             raise ValueError(

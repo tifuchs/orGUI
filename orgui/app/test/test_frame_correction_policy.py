@@ -90,6 +90,53 @@ def test_total_flux_illumination_requires_horizontal_provenance():
         )
 
 
+def test_total_flux_illumination_excludes_frames_at_the_horizon():
+    """A scan starting at alpha = 0 drops that frame instead of failing.
+
+    Regression: ``flyscan th 0 12`` on the CHESS QM2 backend (th -> alpha)
+    rejected the whole extraction because of its first frame.
+    """
+    scan = SimpleNamespace(exposure_time=np.ones(4), ic2=np.ones(4) * 100.0)
+    alpha = np.deg2rad([[0.0, 0.5, 1.0, -0.1]] * 2)
+    profile = top_hat_profile(300e-6)
+
+    policy = ic.frame_correction_policy(
+        scan,
+        _state(),
+        4,
+        use_normalization=True,
+        use_illumination=True,
+        alpha=alpha,
+        beam_profile=profile,
+        sample_length=5e-3,
+    )
+
+    valid = np.array([[False, True, True, False]] * 2)
+    expected = ic.activearea.illumination_divisor(
+        alpha[valid], 5e-3, profile, horizontal_fraction=1.0
+    )
+    for values in (
+        policy.illumination_divisor,
+        policy.intercepted_fraction,
+        policy.vertical_intercepted_fraction,
+    ):
+        assert values.shape == alpha.shape
+        np.testing.assert_array_equal(np.isfinite(values), valid)
+    np.testing.assert_allclose(policy.illumination_divisor[valid], expected)
+    assert policy.illumination_status == "applied"
+
+
+def test_total_flux_illumination_needs_one_physical_frame():
+    """Excluding frames must not turn an all-invalid scan into all-NaN data."""
+    with pytest.raises(ValueError, match="at least one frame"):
+        ic.framewise_illumination_divisor(
+            np.deg2rad([0.0, -1.0]),
+            5e-3,
+            top_hat_profile(300e-6),
+            horizontal_fraction=1.0,
+        )
+
+
 def test_legacy_policy_preserves_counter_product_and_active_area():
     """Absent version-3 fields retain the established numerical convention."""
     exposure = np.array([0.5, 1.0, 2.0])
@@ -167,6 +214,22 @@ def test_footprint_actions_always_restart_from_the_stored_base():
     assert (status, convention) == ("applied", "total_flux_H")
     assert removed_status == "removed"
     assert replaced_status == "replaced"
+
+
+def test_excluded_illumination_frame_is_nan_only_in_that_frame():
+    """A NaN H marks an excluded frame; a nonpositive H is still an error."""
+    curve, errors, _status, _convention = ic.corrected_curve_from_record(
+        _record(illumination_divisor=np.array([np.nan, 0.25]))
+    )
+    assert np.isnan(curve[0]) and np.isnan(errors[0])
+    np.testing.assert_allclose(curve[1], 96.0 / 4.0 / 0.25)
+    np.testing.assert_allclose(errors[1], 6.0 / 4.0 / 0.25)
+
+    for bad in ([0.0, 0.25], [np.inf, 0.25], [np.nan, np.nan]):
+        with pytest.raises(ValueError, match="positive where defined"):
+            ic.corrected_curve_from_record(
+                _record(illumination_divisor=np.array(bad))
+            )
 
 
 def test_convention_change_and_unknown_provenance_are_explicit_errors():
