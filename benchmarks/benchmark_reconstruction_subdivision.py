@@ -77,7 +77,9 @@ def _arguments():
     return parser.parse_args()
 
 
-def _synthetic_case(rows, columns, row_origin, column_origin):
+def _synthetic_case(
+    rows, columns, row_origin, column_origin, sweep_degrees=0.1
+):
     """A flat detector off-axis, with a grid sized to the pixel footprint.
 
     Mirrors the regime the real job runs in -- roughly half a voxel per pixel
@@ -103,7 +105,9 @@ def _synthetic_case(rows, columns, row_origin, column_origin):
     rays = np.ascontiguousarray(rays)
 
     angles_start = np.array([0.10471975511965978, 0.7, 0.0, 0.0])
-    sweep = np.array([0.0, 0.00174533, 0.0, 0.0])
+    if not np.isfinite(sweep_degrees) or sweep_degrees <= 0.0:
+        raise ValueError("sweep_degrees must be finite and positive")
+    sweep = np.array([0.0, np.deg2rad(sweep_degrees), 0.0, 0.0])
 
     native = _native_module()
     probe = native.ReconstructionKernel(

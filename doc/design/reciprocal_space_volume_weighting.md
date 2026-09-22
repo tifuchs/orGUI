@@ -1,9 +1,11 @@
 # Reciprocal-space volume weighting
 
-Status: first production stage implemented. The root-cell centred-secant
-Jacobian mode is available explicitly as ``reciprocal_volume_average``;
-``parameter_average`` remains the compatibility default. Adaptive hybrid and
-per-leaf volume algorithms remain proposed.
+Status: first production and synthetic-validation stages implemented. The
+root-cell centred-secant Jacobian mode is available explicitly as
+``reciprocal_volume_average``; ``parameter_average`` remains the compatibility
+default. Independent per-leaf and Gaussian-quadrature reference paths now
+bound its error on small cases. Representative real-job validation and any
+adaptive hybrid remain pending.
 
 ## Decision summary
 
@@ -326,12 +328,14 @@ many coordinate evaluations.
 1. Add a mode field with explicit `parameter_average` and
    `reciprocal_volume_average` values.
 2. Implement Option A and expose cell-volume diagnostics.
-3. Implement Option B in the subdivision benchmark/reference path.
-4. Compare A and B on synthetic fields and representative real jobs.
+3. [Implemented] Implement Option B in the subdivision benchmark/reference
+   path.
+4. [Synthetic complete; real jobs pending] Compare A and B on synthetic fields
+   and representative real jobs.
 5. Keep A as the production path if its difference from B remains below the
    statistical validation threshold. Otherwise use B, or select B only for
    cells whose Jacobian-variation diagnostic exceeds a measured tolerance.
-6. Keep Option C as a validation oracle on bounded subsets.
+6. [Implemented] Keep Option C as a validation oracle on bounded subsets.
 
 An automatic hybrid is preferable to making every ordinary cell pay the full
 per-leaf cost. Its switching metric and tolerance must come from the A/B
@@ -439,6 +443,55 @@ The later-mode estimates must be replaced by results from
 benchmark once an implementation exists. Record coordinate evaluations,
 leaves per pixel, records per pixel, nanoseconds per pixel, frames per second,
 peak resident memory, scratch bytes, and final-file bytes.
+
+## First synthetic accuracy measurement
+
+An independent Python oracle now validates the native root-cell mode without
+sharing its determinant or subdivision implementation. It provides:
+
+- uniform dyadic leaves with a centred-secant determinant and exact mapped
+  centre for each leaf (Option B reference);
+- tensor-product Gauss-Legendre integration of ``abs(det(J))``, with numerical
+  centred derivatives, on a bounded pixel subset (Option C reference);
+- conditioning, normalized-determinant, leaf-variation, and orientation-sign
+  diagnostics.
+
+The analytic regression suite covers affine determinants, curved-map
+convergence, a folded mapping hidden by the root corners, output rotations,
+linear Q-to-HKL volume scaling, scan-direction reversal, and stationary zero
+volume.
+
+The first native comparison used an 8 x 8 detector tile at pixel origin
+``(1000, 1000)``, 0.172 mm pixels, 500 mm sample-detector distance, HKL output,
+and subdivision depth 2. Quadrature order 3 was evaluated on eight pixels.
+The scan angle below is the continuous exposure width.
+
+| Sweep | Max root/quadrature volume error | Max leaf/quadrature volume error | Root/leaf total volume | Map p99 relative intensity | Map p99 pull |
+|---:|---:|---:|---:|---:|---:|
+| 0.01 deg | 2.12e-8 | 1.70e-8 | 0.999999990 | 1.14e-4 | 0.00281 sigma |
+| 0.1 deg | 5.30e-7 | 4.81e-8 | 0.999999519 | 1.15e-4 | 0.00255 sigma |
+| 1.0 deg | 5.08e-5 | 3.19e-6 | 0.999952399 | 5.57e-6 | 0.000521 sigma |
+
+At 0.1 deg and depth 3, the maximum leaf/quadrature volume error fell to
+2.41e-8; the map p99 pull remained small at 0.00311 sigma. No orientation-sign
+change occurred in any of these cells. At the 0.1 deg production-like case,
+the root Jacobian condition number was 1.71--1.73 and the normalized
+determinant was about 0.96, so this was a well-conditioned geometry rather than
+a degeneracy test.
+
+These results support retaining the root-cell implementation for short
+continuous exposures on this synthetic geometry. They do not justify making
+the mode the default: representative calibrated jobs, ill-conditioned
+geometries, detector-distance comparisons, and full-pipeline measurements are
+still required. The Python reference is intentionally slow (about 151 ms for
+64 pixels at depth 2 versus about 1 ms in the native mapper) and is an accuracy
+oracle, not a production Option B performance measurement.
+
+Reproduce or extend the measurement with
+``benchmarks/benchmark_reconstruction_volume_weighting.py``. Pass
+``--synthetic-sweep-degrees`` for a synthetic sweep or ``--job`` and ``--frame``
+for a prepared real job. The JSON report contains the exact native-module path
+so a stale extension is visible.
 
 ## Numerical and scientific risks
 

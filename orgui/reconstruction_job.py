@@ -4350,6 +4350,26 @@ def _map_pending_ranges(
                     still_computing = bool(blocked_counts)
                 if not still_computing:
                     break
+            elif (
+                first_exception
+                and reader_pool.live == 0
+                and compute_pool.live == 0
+            ):
+                # An exception anywhere sets first_exception, and a reader
+                # checks should_stop() (which reads it) only at the top of
+                # its own loop -- before claiming its next group, never
+                # mid-item -- so every reader stops claiming work without
+                # accounting for whatever was still unclaimed in the
+                # one-shot work_iterator. remaining can then never reach
+                # zero, so readers_done can never fire, and without this
+                # branch the block above would wait forever even though
+                # nothing is left running to make it fire. Once both pools
+                # have actually drained -- not merely retired, but no
+                # thread left alive -- there is nothing further to wait
+                # for, so stop waiting and let the exception below surface
+                # it instead of hanging silently at whatever fraction was
+                # mapped.
+                break
         if first_exception:
             raise first_exception[0]
     finally:

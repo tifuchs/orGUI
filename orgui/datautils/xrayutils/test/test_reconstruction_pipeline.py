@@ -1122,6 +1122,106 @@ def test_compute_pool_swap_does_not_hand_the_new_generation_an_exit_order(
     assert int(written["contributors"].sum()) == frame_count
 
 
+def test_a_mid_run_exception_does_not_hang_the_coordinator_forever(
+    tmp_path, monkeypatch
+):
+    """A worker exception must surface, not wedge the coordinator forever.
+
+    A reader checks ``should_stop()`` (true once any worker, reader or
+    compute, has called ``record_exception``) only at the top of its own
+    loop, *before* claiming its next group from the one-shot
+    ``work_iterator`` -- never for a group already claimed. Once it trips,
+    every reader stops claiming new groups, and whatever was never
+    claimed is never counted toward ``remaining``, so ``remaining`` can
+    get stuck above zero forever and ``readers_done`` can never fire.
+    Before this fix the coordinator's only way out of its wait loop was
+    ``readers_done.is_set()``, so a single bad frame anywhere left it
+    waiting forever with every reader and compute worker already exited
+    and the recorded exception never raised -- caught live on the real
+    ``39_1-rsmap`` job at 3306/3651 frames, no CPU, no error, no
+    progress, 2026-09-22.
+    """
+    frame_count = 200
+    # Slow enough that reading all 200 frames takes on the order of a
+    # second, so the vast majority are still unclaimed in
+    # ``work_iterator`` when the very first compute call raises -- the
+    # ingredient that turns "one worker crashed" into "remaining is
+    # stuck above zero", not just "the job finished a bit short".
+    scan = _SlowScan(frame_count, delay=0.02)
+    config = _FakeConfig()
+    spec = _spec()
+    bounds = np.zeros((frame_count, 2, 4), dtype=np.float64)
+    tiles = [(0, 1, 0, 1)]
+    grid_name = spec.grids[0].grid_name
+    router = _router({grid_name: [(0, frame_count)]}, tmp_path=tmp_path)
+
+    # One frame per group: grouped frames route through
+    # _map_frame_groups_streamed, a separate scheduler with its own
+    # completion logic that this test is not exercising. Without this
+    # the test would pass on both versions no matter what the coordinator
+    # fix does.
+    monkeypatch.setattr(
+        reconstruction_job_module, "_choose_frames_per_group", lambda *a, **k: 1
+    )
+
+    class _SyntheticMappingFailure(RuntimeError):
+        pass
+
+    real_map_frame_group = reconstruction_job_module._map_frame_group
+    raised = threading.Event()
+
+    def flaky_map_frame_group(*args, **kwargs):
+        # Exactly one bad frame: the first group any compute worker
+        # picks up fails, every other call behaves normally, matching a
+        # single poisoned frame rather than a systemic one.
+        if not raised.is_set():
+            raised.set()
+            raise _SyntheticMappingFailure("synthetic mapping failure")
+        return real_map_frame_group(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reconstruction_job_module, "_map_frame_group", flaky_map_frame_group
+    )
+
+    failure = []
+
+    def run():
+        try:
+            _map_pending_ranges(
+                spec,
+                scan,
+                config,
+                bounds,
+                tiles,
+                [(0, frame_count)],
+                router,
+                correction_pipeline=_correction,
+                effective_memory=256 * 1024**2,
+                threads_per_image=1,
+                accumulation_budget_bytes=None,
+                total_images=frame_count,
+                completed_images=0,
+                progress=None,
+            )
+        except BaseException as error:  # noqa: BLE001 -- reported below
+            failure.append(error)
+
+    # In a thread with a deadline: the regression is a permanent stall,
+    # and a test that reproduces it must fail rather than hang the suite.
+    runner = threading.Thread(target=run, daemon=True)
+    runner.start()
+    runner.join(timeout=60)
+    assert not runner.is_alive(), (
+        "_map_pending_ranges hung after a worker exception instead of "
+        "raising it -- the coordinator waited on readers_done, which a "
+        "should_stop()-abandoned reader can never set"
+    )
+    assert raised.is_set(), "the synthetic failure never actually fired"
+    assert failure and isinstance(failure[0], _SyntheticMappingFailure), (
+        f"expected the recorded exception to surface, got {failure!r}"
+    )
+
+
 def test_frame_fingerprint_flags_a_reused_read_buffer(tmp_path):
     """A frame served another frame's pixels must be visible.
 
