@@ -1629,6 +1629,7 @@ def _map_frame_group(
     router: _CheckpointRouter,
     *,
     corrected_frames: Sequence[tuple] | None = None,
+    active_grid_names: frozenset[str] | None = None,
 ) -> None:
     """Process one already-loaded group of frames: correction, per-tile-
     per-grid kernel accumulate, merge, and route.
@@ -1675,6 +1676,10 @@ def _map_frame_group(
     :param corrected_frames:
         Optional pre-corrected ``(intensity, variance, mask)`` triples,
         one per frame, each full-detector sized.
+    :param active_grid_names:
+        Grids not proved unreachable for this frame group. Omitted grids
+        receive an empty batch with the group's full frame count, so their
+        checkpoints remain complete and resumable. ``None`` maps every grid.
     :param angles_start:
         ``(frames, 4)`` exposure-start diffractometer angles, radians.
     :param angles_end:
@@ -1704,8 +1709,15 @@ def _map_frame_group(
     # per (group, grid) -- the router's remaining-frame countdown
     # (Sec9/Sec10) counts frames, so a multi-tile group must be merged
     # down to one routed batch per grid before reaching it.
+    active_grids = (
+        spec.grids
+        if active_grid_names is None
+        else tuple(
+            grid for grid in spec.grids if grid.grid_name in active_grid_names
+        )
+    )
     tile_batches: dict[str, list[Mapping[str, np.ndarray]]] = {
-        grid.grid_name: [] for grid in spec.grids
+        grid.grid_name: [] for grid in active_grids
     }
     if corrected_frames is not None:
         # Checked once for the whole group rather than once per tile, and
@@ -1730,7 +1742,7 @@ def _map_frame_group(
             # -- purely to give the call a shape it does not need. The
             # kernel already walks rows within a tile, so it reads the
             # rectangle through the frame's own row stride instead.
-            for grid in spec.grids:
+            for grid in active_grids:
                 batch = kernels[grid.grid_name].accumulate_group_tile(
                     [values[0] for values in corrected_frames],
                     [values[1] for values in corrected_frames],
@@ -1771,7 +1783,7 @@ def _map_frame_group(
             np.stack([values[2] for values in tile_values]), dtype=bool
         )
         del tile_values
-        for grid in spec.grids:
+        for grid in active_grids:
             batch = kernels[grid.grid_name].accumulate_group(
                 intensity,
                 variance,
@@ -1782,7 +1794,11 @@ def _map_frame_group(
             )
             tile_batches[grid.grid_name].append(batch)
     for grid in spec.grids:
-        merged = _reduce_batches(tile_batches[grid.grid_name])
+        merged = (
+            _reduce_batches(tile_batches[grid.grid_name])
+            if grid.grid_name in tile_batches
+            else _empty_batch()
+        )
         router.route(
             grid.grid_name,
             frame_indices[0],

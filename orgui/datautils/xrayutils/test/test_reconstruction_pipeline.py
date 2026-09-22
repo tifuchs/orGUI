@@ -867,6 +867,159 @@ def test_retired_groups_still_complete_their_checkpoint(tmp_path, monkeypatch):
     )
 
 
+def test_multi_grid_reach_keeps_a_grid_if_any_frame_in_group_reaches_it(
+    tmp_path, monkeypatch
+):
+    """Group reach is an OR within each grid, not an OR across grids."""
+    first = dataclasses.replace(_spec().grids[0], name="first")
+    second = dataclasses.replace(first, name="second")
+    spec = dataclasses.replace(_spec(), grids=(first, second))
+    reaches = {
+        "first": np.array([1, 0, 0, 1, 0, 0, 0, 0], dtype=bool),
+        "second": np.array([0, 1, 0, 0, 0, 1, 0, 0], dtype=bool),
+    }
+
+    class _ReachKernel:
+        def __init__(self, name):
+            self.name = name
+
+        def frames_reach_grid(self, corner_rays, angles_start, angles_end):
+            return reaches[self.name]
+
+    monkeypatch.setattr(
+        reconstruction_job_module,
+        "_build_kernels",
+        lambda *args, **kwargs: {
+            name: _ReachKernel(name) for name in reaches
+        },
+    )
+    frame_count = 8
+    groups = [(start, start + 1) for start in range(0, frame_count, 2)]
+    router = _router(
+        {grid.grid_name: [(0, frame_count)] for grid in spec.grids},
+        tmp_path=tmp_path,
+    )
+    active_grids_by_group = {}
+    kept, completed = reconstruction_job_module._retire_unreachable_groups(
+        groups,
+        spec,
+        _FakeConfig(),
+        np.zeros((frame_count, 2, 4), dtype=np.float64),
+        [(0, 1, 0, 1)],
+        {(0, 1, 0, 1): np.zeros((2, 2, 3), dtype=np.float64)},
+        router,
+        ["first", "second"],
+        completed_images=0,
+        total_images=frame_count,
+        progress=None,
+        active_grids_by_group=active_grids_by_group,
+    )
+
+    assert kept == groups[:3]
+    assert completed == 2
+    assert active_grids_by_group == {
+        2: frozenset({"first"}),
+        4: frozenset({"second"}),
+    }
+
+
+@pytest.mark.parametrize("frames_per_group", [1, 2])
+@pytest.mark.parametrize("whole_frame_correction", [False, True])
+def test_multi_grid_reach_skips_only_proven_empty_grid_calls(
+    tmp_path, monkeypatch, frames_per_group, whole_frame_correction
+):
+    """A sparse grid needs no native calls but still needs a full checkpoint.
+
+    Compare with the unfiltered native path so both the mapped values and
+    the empty grid's resume accounting are checked through the actual
+    per-frame and grouped schedulers.
+    """
+    from orgui.datautils.xrayutils.reconstruction import _read_checkpoint
+
+    near = dataclasses.replace(_spec().grids[0], name="near")
+    far = dataclasses.replace(
+        near,
+        minimum=(100.0, 100.0, 100.0),
+        maximum=(102.0, 102.0, 102.0),
+        name="far",
+    )
+    spec = dataclasses.replace(
+        _spec(), grids=(near, far), frames_per_group=frames_per_group
+    )
+    frame_count = 8
+    bounds = np.zeros((frame_count, 2, 4), dtype=np.float64)
+    calls = []
+    real_map = reconstruction_job_module._map_frame_group
+
+    def correction(payload, raw, frame, tile):
+        return _correction(payload, raw, frame, tile)
+
+    if whole_frame_correction:
+        correction.correct_frame = lambda payload, raw, frame: _correction(
+            payload, raw, frame, (0, 1, 0, 1)
+        )
+
+    def recording_map(*args, **kwargs):
+        calls.append(kwargs.get("active_grid_names"))
+        return real_map(*args, **kwargs)
+
+    monkeypatch.setattr(reconstruction_job_module, "_map_frame_group", recording_map)
+
+    def run(filtered):
+        if filtered:
+            monkeypatch.delenv("ORGUI_NO_FRAME_SKIP", raising=False)
+        else:
+            monkeypatch.setenv("ORGUI_NO_FRAME_SKIP", "1")
+        router = _router(
+            {grid.grid_name: [(0, frame_count)] for grid in spec.grids},
+            tmp_path=tmp_path / ("filtered" if filtered else "baseline"),
+        )
+        _map_pending_ranges(
+            spec,
+            _SlowScan(frame_count, delay=0.0),
+            _FakeConfig(),
+            bounds,
+            [(0, 1, 0, 1)],
+            [(0, frame_count)],
+            router,
+            correction_pipeline=correction,
+            effective_memory=256 * 1024**2,
+            threads_per_image=1,
+            accumulation_budget_bytes=None,
+            total_images=frame_count,
+            completed_images=0,
+            progress=None,
+        )
+        return router
+
+    filtered = run(True)
+    filtered_calls = list(calls)
+    calls.clear()
+    baseline = run(False)
+
+    assert filtered_calls
+    assert all(names == frozenset({"near"}) for names in filtered_calls)
+    assert all(names is None for names in calls)
+    assert len(filtered.written) == len(baseline.written) == 2
+    for grid in spec.grids:
+        filtered_path = next(
+            path for path in filtered.written if path.parent.name == grid.grid_name
+        )
+        baseline_path = next(
+            path for path in baseline.written if path.parent.name == grid.grid_name
+        )
+        filtered_batch = _read_checkpoint(filtered_path)
+        baseline_batch = _read_checkpoint(baseline_path)
+        for column in filtered_batch:
+            np.testing.assert_array_equal(
+                filtered_batch[column], baseline_batch[column]
+            )
+        import h5py
+
+        with h5py.File(filtered_path, "r") as saved:
+            assert int(saved.attrs["frames_covered"]) == frame_count
+
+
 def test_retiring_every_group_fails_instead_of_waiting_forever(
     tmp_path, monkeypatch
 ):

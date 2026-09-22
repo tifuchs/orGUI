@@ -3163,8 +3163,9 @@ def _retire_unreachable_groups(
     completed_images,
     total_images,
     progress,
+    active_grids_by_group=None,
 ):
-    """Drop frame groups that cannot reach any output grid.
+    """Drop groups that reach no grid and retain each survivor's active grids.
 
     A small volume swept through a full rotation is only crossed at some
     sample angles, so a large share of a scan's frames contribute
@@ -3188,11 +3189,16 @@ def _retire_unreachable_groups(
     that vanished silently would leave its checkpoint short, unflushed
     and unresumable for the rest of the run.
 
-    Groups are retired whole. A group whose frames are not all
-    unreachable is mapped as before, so grouping never costs coverage.
+    Groups are retired whole. For each surviving group, a grid is active
+    when any frame may reach it; the mapper routes an empty batch for the
+    other grids. This preserves the group's checkpoint frame counts.
 
     :param completed_images:
         Frames already mapped, for the progress report.
+    :param active_grids_by_group:
+        Optional dictionary populated with the active grid names for each
+        surviving group that does not need every grid. Keys are the first
+        frame indices of groups; no entry means all grids stay active.
     :returns:
         ``(groups_to_map, completed_images)`` with the retired groups'
         frames added to ``completed_images``.
@@ -3208,19 +3214,31 @@ def _retire_unreachable_groups(
     started = time.monotonic()
     angles_start = np.ascontiguousarray(bounds[:, 0])
     angles_end = np.ascontiguousarray(bounds[:, 1])
-    reaches = np.zeros(bounds.shape[0], dtype=bool)
+    reaches_by_grid = {}
     for grid_name in grid_names:
         kernel = kernels[grid_name]
+        reaches = np.zeros(bounds.shape[0], dtype=bool)
         for detector_tile in detector_tiles:
             reaches |= kernel.frames_reach_grid(
                 ray_arrays[detector_tile], angles_start, angles_end
             )
+        reaches_by_grid[grid_name] = reaches
 
     kept = []
     retired_frames = 0
+    skipped_grid_groups = 0
     for group in frame_groups:
-        if reaches[list(group)].any():
+        frames = list(group)
+        active = frozenset(
+            grid_name
+            for grid_name in grid_names
+            if reaches_by_grid[grid_name][frames].any()
+        )
+        skipped_grid_groups += len(grid_names) - len(active)
+        if active:
             kept.append(group)
+            if active_grids_by_group is not None and len(active) < len(grid_names):
+                active_grids_by_group[group[0]] = active
             continue
         for grid_name in grid_names:
             router.route(
@@ -3229,6 +3247,14 @@ def _retire_unreachable_groups(
         retired_frames += len(group)
         completed_images += len(group)
 
+    if skipped_grid_groups:
+        logger.info(
+            "frame reach filter: skipped %d of %d grid-group mapping(s) "
+            "(decided in %.2f s)",
+            skipped_grid_groups,
+            len(frame_groups) * len(grid_names),
+            time.monotonic() - started,
+        )
     if retired_frames:
         logger.info(
             "frame reach filter: %d of %d frame(s) reach no output grid "
@@ -3268,6 +3294,7 @@ def _map_frame_groups_streamed(
     total_images,
     completed_images,
     progress,
+    active_grids_by_group,
 ):
     """Map frame groups with one all-threads native call at a time.
 
@@ -3509,6 +3536,7 @@ def _map_frame_groups_streamed(
                                     if corrects_whole_frame
                                     else None
                                 ),
+                                active_grid_names=active_grids_by_group.get(group[0]),
                             )
                     except BaseException as exc:  # noqa: BLE001
                         record_exception(exc)
@@ -3846,6 +3874,7 @@ def _map_pending_ranges(
         )
     ]
 
+    active_grids_by_group = {}
     frame_groups, completed_images = _retire_unreachable_groups(
         frame_groups,
         spec,
@@ -3858,6 +3887,7 @@ def _map_pending_ranges(
         completed_images=completed_images,
         total_images=total_images,
         progress=progress,
+        active_grids_by_group=active_grids_by_group,
     )
 
     routed_before = getattr(router, "routed_records", 0)
@@ -3897,6 +3927,7 @@ def _map_pending_ranges(
             total_images=total_images,
             completed_images=completed_images,
             progress=progress,
+            active_grids_by_group=active_grids_by_group,
         )
         _fail_if_nothing_was_routed(
             router, routed_before, total_images, progress
@@ -4111,6 +4142,7 @@ def _map_pending_ranges(
                             np.ascontiguousarray(bounds[group, 0]),
                             np.ascontiguousarray(bounds[group, 1]),
                             router,
+                            active_grid_names=active_grids_by_group.get(group[0]),
                         )
                     except BaseException as exc:  # noqa: BLE001
                         record_exception(exc)

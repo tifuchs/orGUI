@@ -130,10 +130,11 @@ class _FeatureSelectionDialog(qt.QDialog):
     Collects the feature kind, the output frame, the integer index limits, the
     per-axis half-widths, and the three voxel steps shared by every selected
     grid. Half-widths and steps are in r.l.u. for ``hkl`` and ``Angstrom^-1``
-    for ``crystal``.
+    for ``crystal``. Bragg selection also takes a per-lattice-constant strain,
+    entered in percent.
     """
 
-    def __init__(self, parent=None, *, steps=None):
+    def __init__(self, parent=None, *, steps=None, strain_percent=None):
         super().__init__(parent)
         self.setWindowTitle("Select reciprocal-space volumes")
         layout = qt.QVBoxLayout(self)
@@ -259,6 +260,34 @@ class _FeatureSelectionDialog(qt.QDialog):
             widths_form.addRow(f"Axis {axis + 1}:", row)
         layout.addWidget(widths_group)
 
+        self.strain_group = qt.QGroupBox(
+            "Strain (relative to set lattice, in %)"
+        )
+        self.strain_group.setToolTip(
+            "Bragg reflections only. Scales each lattice constant as "
+            "a * (1 + strain / 100) at unchanged cell angles, as in the "
+            "rocking-scan Bragg extraction; the boxes move to the strained "
+            "reflection positions. Output grids stay in the reference "
+            "lattice's hkl or crystal frame."
+        )
+        strain_layout = qt.QHBoxLayout(self.strain_group)
+        self.strain_editors = []
+        for axis, label in enumerate("abc"):
+            editor = qt.QDoubleSpinBox()
+            editor.setDecimals(3)
+            editor.setRange(-99.999, 1000.0)
+            editor.setSingleStep(0.1)
+            editor.setSuffix(" %")
+            editor.setValue(
+                float(strain_percent[axis]) if strain_percent is not None
+                else 0.0
+            )
+            strain_layout.addWidget(qt.QLabel(f"{label}:"))
+            strain_layout.addWidget(editor)
+            self.strain_editors.append(editor)
+        strain_layout.addStretch(1)
+        layout.addWidget(self.strain_group)
+
         self.replace_editor = qt.QCheckBox("Replace the existing grid rows")
         self.replace_editor.setChecked(True)
         self.replace_editor.setToolTip(
@@ -278,6 +307,7 @@ class _FeatureSelectionDialog(qt.QDialog):
     def _sync_kind(self):
         """Rods have no L index limit, and default to the measured L range."""
         is_ctr = self.kind == "ctr"
+        self.strain_group.setEnabled(not is_ctr)
         enabled, lower, upper, symmetric = self.limit_editors[2]
         # A rod already runs the whole measured L range, so an L index limit
         # would mean nothing; the control is switched off rather than merely
@@ -323,6 +353,15 @@ class _FeatureSelectionDialog(qt.QDialog):
     def step(self):
         """Return the three voxel steps in the frame's units."""
         return tuple(editor.value() for editor in self.step_editors)
+
+    @property
+    def strain(self):
+        """Return the fractional ``(a, b, c)`` lattice strain.
+
+        The editors hold percent; the returned values are dimensionless
+        (``0.01`` is 1 %), as :func:`derive_bragg_grids` expects.
+        """
+        return tuple(editor.value() / 100.0 for editor in self.strain_editors)
 
 
 def _format_size(size_bytes):
@@ -1829,7 +1868,18 @@ class ReconstructionDialog(qt.QDialog):
             return
         try:
             config = ConfigData.from_gui(self.orgui)
-            dialog = _FeatureSelectionDialog(self)
+            # Start from the strain set for the rocking-scan Bragg extraction.
+            strain_boxes = getattr(
+                getattr(self.orgui, "scanSelector", None), "strain_Bragg", None
+            )
+            dialog = _FeatureSelectionDialog(
+                self,
+                strain_percent=(
+                    [box.value() for box in strain_boxes]
+                    if strain_boxes is not None
+                    else None
+                ),
+            )
             if dialog.exec() != qt.QDialog.Accepted:
                 return
             # One coverage sample serves both the enumeration limits and the
@@ -1856,6 +1906,7 @@ class ReconstructionDialog(qt.QDialog):
                     config,
                     self.orgui.fscan,
                     l_limits=dialog.limits(2),
+                    strain=dialog.strain,
                     **common,
                 )
                 described = "Bragg reflection"

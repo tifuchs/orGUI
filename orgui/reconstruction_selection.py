@@ -557,6 +557,7 @@ def derive_bragg_grids(
     h_limits=None,
     k_limits=None,
     l_limits=None,
+    strain=None,
     coverage=None,
     detector_samples=33,
     frame_samples=128,
@@ -569,6 +570,15 @@ def derive_bragg_grids(
     cell within the enumerated index limits. Each becomes a box of
     ``center +- half_width`` in the output frame, and is kept only if a sampled
     coverage point falls inside that box.
+
+    With ``strain``, the reflections belong to a strained lattice whose
+    lattice constants are ``a_i * (1 + strain_i)`` at unchanged cell angles and
+    orientation -- the same convention as the rocking-scan Bragg extraction
+    (``orGUI.get_Bragg_rocking_coordinates``). Each reciprocal basis vector
+    then scales by ``1 / (1 + strain_i)``, so the strained reflection
+    ``(H, K, L)`` is centered at reference ``(H / (1 + strain_a),
+    K / (1 + strain_b), L / (1 + strain_c))`` r.l.u. Grid frame and names stay
+    those of the reference lattice and the strained indices respectively.
 
     :param config:
         Central :class:`~orgui.app.config_data.ConfigData` experiment snapshot.
@@ -589,10 +599,16 @@ def derive_bragg_grids(
     :param k_limits:
         As ``h_limits``, for ``K``.
     :param l_limits:
-        As ``h_limits``, for ``L``.
+        As ``h_limits``, for ``L``. All index limits refer to the strained
+        lattice when ``strain`` is given.
+    :param strain:
+        Optional fractional strain ``(strain_a, strain_b, strain_c)`` of the
+        direct lattice constants, dimensionless (``0.01`` is 1 %). A single
+        number applies to all three. Each entry must be above ``-1``.
+        ``None`` or zeros select the reference lattice.
     :param coverage:
         Optional pre-computed ``(n, 3)`` r.l.u. coverage cloud from
-        :func:`sample_hkl_coverage`.
+        :func:`sample_hkl_coverage`, in the reference lattice.
     :param int detector_samples:
         Forwarded to :func:`sample_hkl_coverage`.
     :param int frame_samples:
@@ -607,15 +623,29 @@ def derive_bragg_grids(
         ``bragg_<H>_<K>_<L>`` with ``m`` standing in for a minus sign.
     :rtype: list[orgui.reconstruction_job.ReconstructionGrid]
     :raises ValueError:
-        If the frame rotates with the sample, the steps are not positive, or
-        the selection exceeds ``max_grids``.
+        If the frame rotates with the sample, the steps are not positive, a
+        strain is not above ``-1``, or the selection exceeds ``max_grids``.
     """
+    lattice_scale = np.ones(3)
+    if strain is not None:
+        strain = np.broadcast_to(
+            np.asarray(strain, dtype=np.float64).reshape(-1), (3,)
+        )
+        if np.any(~np.isfinite(strain)) or np.any(strain <= -1.0):
+            raise ValueError(
+                "Lattice strain must be finite and above -1 (-100 %)"
+            )
+        # Direct lattice constant a_i -> a_i (1 + strain_i); reference
+        # r.l.u. = strained index / (1 + strain_i).
+        lattice_scale = 1.0 + strain
     matrix = hkl_to_frame_matrix(config.ub_calculator, frame)
     coverage = _prepare_coverage(
         config, scan, coverage, detector_samples, frame_samples
     )
-    coverage_minimum = np.min(coverage, axis=0)
-    coverage_maximum = np.max(coverage, axis=0)
+    # Enumerate in strained indices: the positive per-axis scale keeps the
+    # coverage bounds ordered.
+    coverage_minimum = np.min(coverage, axis=0) * lattice_scale
+    coverage_maximum = np.max(coverage, axis=0) * lattice_scale
 
     axis_values = [
         _axis_integers(limits, coverage_minimum[axis], coverage_maximum[axis])
@@ -641,7 +671,9 @@ def derive_bragg_grids(
 
     grids = []
     for hkl in allowed:
-        center = np.asarray([[float(value) for value in hkl]])
+        center = (
+            np.asarray([[float(value) for value in hkl]]) / lattice_scale
+        )
         minimum, maximum = _feature_box(matrix, center, half_width)
         if not np.any(
             np.all(

@@ -1514,13 +1514,20 @@ Reciprocal-space reconstruction:
   no correction and no mapping; on the reference job, a small volume
   crossed by a full rotation, 1516 of 3651 frames are ruled out, and
   deciding that for the whole scan takes 0.084 s. The test only ever
-  rules a frame *out*, never in, so a frame that is kept costs exactly
-  what it did before. Every one of those 1516 frames was mapped to
+  rules a frame *out*, never in. Every one of those 1516 frames was mapped to
   confirm it produces no records. Skipped frames still count toward their
   checkpoint, so resuming an interrupted job is unaffected, and progress
   still reaches 100%. A volume that no frame reaches now fails with the
   existing empty-result error rather than mapping nothing. Set
   `ORGUI_NO_FRAME_SKIP=1` to disable.
+- **Multi-volume reciprocal-space mapping skips volumes a frame group
+  provably cannot reach.** The geometry prepass now keeps its result for
+  each volume, so a frame that reaches one rod no longer invokes the
+  native kernel for every other selected rod. Empty contributions still
+  count toward each volume's checkpoint. On a 33-rod scan, 87.4% of the
+  frame-volume pairs were proven empty; filtered and unfiltered
+  checkpoints agree in focused tests for both single-frame and grouped
+  mapping. `ORGUI_NO_FRAME_SKIP=1` also disables this per-volume filter.
 
 
 ## [1.5.0] (2026-06-07)

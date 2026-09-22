@@ -295,6 +295,77 @@ def test_bragg_selection_honours_explicit_index_limits():
     assert [grid.name for grid in grids] == ["bragg_1_0_m1", "bragg_1_0_0"]
 
 
+def test_strained_bragg_boxes_sit_at_scaled_reference_hkl():
+    """a_i -> a_i (1 + e_i) moves reflection H_i to H_i / (1 + e_i) r.l.u."""
+    coverage = _grid_cloud((-0.2, 1.2), (-0.2, 0.2), (-0.2, 1.2))
+    strain = (0.02, 0.0, -0.05)
+    grids = derive_bragg_grids(
+        _config(),
+        _Scan(),
+        step=(0.02, 0.02, 0.02),
+        half_width=0.1,
+        strain=strain,
+        coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == [
+        "bragg_0_0_0",
+        "bragg_0_0_1",
+        "bragg_1_0_0",
+        "bragg_1_0_1",
+    ]
+    peak = next(grid for grid in grids if grid.name == "bragg_1_0_1")
+    center = np.asarray([1.0 / 1.02, 0.0, 1.0 / 0.95])
+    np.testing.assert_allclose(peak.minimum, center - 0.1)
+    np.testing.assert_allclose(peak.maximum, center + 0.1)
+
+
+def test_strain_matches_a_strained_b_matrix():
+    """The strained center equals B^-1 B' H of the strained lattice."""
+    from orgui.datautils.xrayutils.HKLVlieg import Lattice
+
+    a = np.asarray([3.2, 4.1, 5.3])
+    alpha = np.asarray([80.0, 95.0, 110.0])
+    strain = np.asarray([0.03, -0.01, 0.07])
+    reference = Lattice(a, alpha)
+    strained = Lattice(a * (1.0 + strain), alpha)
+    index = np.asarray([2.0, -1.0, 3.0])
+    np.testing.assert_allclose(
+        np.linalg.solve(reference.B_mat, strained.B_mat @ index),
+        index / (1.0 + strain),
+    )
+
+
+def test_strained_enumeration_covers_the_shifted_reflection():
+    """A large strain can pull an index beyond the reference coverage in."""
+    # Reference coverage reaches L = 1.2 only; with c stretched by 100 %, the
+    # strained L = 2 reflection sits at reference L = 1.
+    coverage = _grid_cloud((-0.2, 0.2), (-0.2, 0.2), (0.8, 1.2))
+    grids = derive_bragg_grids(
+        _config(),
+        _Scan(),
+        step=(0.02, 0.02, 0.02),
+        half_width=0.1,
+        strain=(0.0, 0.0, 1.0),
+        coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == ["bragg_0_0_2"]
+
+
+@pytest.mark.parametrize("strain", [-1.0, (0.0, -1.5, 0.0), np.nan])
+def test_non_physical_strain_is_rejected(strain):
+    """A lattice constant cannot shrink to zero or below."""
+    coverage = _grid_cloud((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))
+    with pytest.raises(ValueError, match="strain"):
+        derive_bragg_grids(
+            _config(),
+            _Scan(),
+            step=(0.01, 0.01, 0.01),
+            half_width=0.1,
+            strain=strain,
+            coverage=coverage,
+        )
+
+
 def test_selection_beyond_the_grid_limit_is_refused():
     """A runaway selection fails loudly instead of queuing thousands of grids."""
     coverage = _grid_cloud((-2.5, 2.5), (-2.5, 2.5), (0.5, 2.0))
