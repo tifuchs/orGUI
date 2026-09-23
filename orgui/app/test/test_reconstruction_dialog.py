@@ -637,6 +637,7 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
         scratch_path=str(tmp_path / "scratch"),
         accuracy="high",
         advanced_depth=None,
+        weighting_mode="reciprocal_volume_average",
         angle_fallback="midpoint",
         user_note="restored note",
         checkpoint_count=17,
@@ -693,6 +694,7 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
     assert dialog.accuracy.currentData() == "high", (
         dialog.preview_output.toPlainText()
     )
+    assert dialog.weighting_mode.currentData() == "reciprocal_volume_average"
     assert dialog.angle_fallback.currentData() == "midpoint"
     assert dialog.user_note.text() == "restored note"
     assert dialog.use_pixel_mask.isChecked()

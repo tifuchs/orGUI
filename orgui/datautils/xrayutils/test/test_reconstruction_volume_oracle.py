@@ -3,10 +3,15 @@
 import numpy as np
 import pytest
 
-from benchmarks.reconstruction_volume_oracle import (
-    _dyadic_leaf_oracle,
-    _gauss_legendre_volume,
-)
+# `benchmarks` is a repo-root dev package, not part of the installed
+# `orgui` distribution: CI runs `pytest --pyargs orgui` against the
+# installed package, where it is not on sys.path. Skip rather than error,
+# the same way an optional native extension is guarded elsewhere in this
+# suite -- an unguarded ModuleNotFoundError here is a collection error
+# that aborts the *entire* pytest session before any test runs.
+_oracle = pytest.importorskip("benchmarks.reconstruction_volume_oracle")
+_dyadic_leaf_oracle = _oracle._dyadic_leaf_oracle
+_gauss_legendre_volume = _oracle._gauss_legendre_volume
 
 
 def test_affine_oracles_reproduce_the_analytic_determinant():
