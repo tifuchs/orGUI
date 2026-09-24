@@ -185,6 +185,34 @@ def test_legacy_multi_monitor_settings_remain_separate_and_labeled(qapp):
         main.deleteLater()
 
 
+def test_monitor_editor_updates_the_shared_correction_state(qapp):
+    """The one editor owns the monitor selection captured by mapping."""
+    main = qt.QMainWindow()
+    main.fscan = _Scan()
+    selector = _selector(main)
+    dialog = IntegrationOptionsDialog(selector, parent=main)
+    try:
+        assert not dialog.legacyNormalization.isEnabled()
+        dialog.scaleModeCombo.setCurrentIndex(
+            dialog.scaleModeCombo.findData("legacy")
+        )
+        assert dialog.legacyNormalization.isEnabled()
+        dialog.normalizeExposureBox.setChecked(False)
+        dialog.monitorEdit.setText("ic2, temperature")
+        dialog._onNormalizationChanged()
+
+        state = main.ctr_correction_state
+        assert state.normalize_exposure is False
+        assert state.monitor_corrections == ("ic2", "temperature")
+        assert not hasattr(main, "reconstruction_monitor_corrections")
+        dialog.monitorEdit.setText("stale")
+        dialog.refresh()
+        assert dialog.monitorEdit.text() == "ic2, temperature"
+    finally:
+        dialog.deleteLater()
+        main.deleteLater()
+
+
 def test_rocking_scan_reports_that_ctr_is_calculated_during_reduction(qapp):
     """The extraction dialog identifies the later rocking-reducer boundary."""
     main = qt.QMainWindow()

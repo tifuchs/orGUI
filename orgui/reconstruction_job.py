@@ -23,6 +23,10 @@ import numpy as np
 
 from .app.config_data import ConfigData
 from .app.database import FILTERS, config_data_from_json, config_data_to_json
+from .app.integration_corrections import (
+    _explicit_total_flux_contract,
+    frame_correction_policy,
+)
 from .app.mask_config import create_pixel_repair_plan
 from .backend.scans import ScanReference
 from .datautils.xrayutils.corrections import detector as detector_corrections
@@ -1096,11 +1100,28 @@ def prepare_job(
     for values in grid_values:
         _GridSpec(**values)
     config = ConfigData.from_gui(gui)
-    for monitor in config.corrections.monitor_corrections:
-        if not hasattr(gui.fscan, monitor):
-            raise ValueError(
-                f"Active scan has no monitor counter named {monitor!r}"
-            )
+    shared_normalization = config.corrections.shared_frame_normalization
+    if (
+        shared_normalization
+        and config.corrections.use_normalization
+        and _explicit_total_flux_contract(config.corrections)
+    ):
+        frame_correction_policy(
+            gui.fscan,
+            config.corrections,
+            len(gui.fscan),
+            use_normalization=True,
+            use_illumination=False,
+        )
+    elif (
+        not shared_normalization
+        or config.corrections.use_normalization
+    ):
+        for monitor in config.corrections.monitor_corrections:
+            if not hasattr(gui.fscan, monitor):
+                raise ValueError(
+                    f"Active scan has no monitor counter named {monitor!r}"
+                )
     reference = ScanReference.from_scan(gui.fscan)
     scratch = Path(scratch_path).absolute()
     for component in (scratch, *scratch.parents):
@@ -1249,6 +1270,27 @@ def _correction_extension():
 
 def _correction_pipeline(config, scan, assets, provenance):
     correction = config.corrections
+    normalize = (
+        correction.use_normalization
+        if correction.shared_frame_normalization else True
+    )
+    total_flux_normalization = (
+        correction.shared_frame_normalization
+        and normalize
+        and _explicit_total_flux_contract(correction)
+    )
+    frame_divisor = None
+    if total_flux_normalization:
+        policy = frame_correction_policy(
+            scan,
+            correction,
+            len(scan),
+            use_normalization=True,
+            use_illumination=False,
+        )
+        frame_divisor = policy.normalization_divisor
+        provenance["normalization_convention"] = policy.scale_convention
+        provenance["normalization_unit"] = policy.normalization_unit
     detector = config.detector
     background = (
         np.asarray(assets["background"], dtype=np.float64)
@@ -1301,7 +1343,8 @@ def _correction_pipeline(config, scan, assets, provenance):
 
     exposure = (
         np.asarray(scan.exposure_time, dtype=np.float64)
-        if correction.normalize_exposure and hasattr(scan, "exposure_time")
+        if normalize and not total_flux_normalization
+        and correction.normalize_exposure and hasattr(scan, "exposure_time")
         else None
     )
     exposure_variance = (
@@ -1312,6 +1355,7 @@ def _correction_pipeline(config, scan, assets, provenance):
     monitor_values = {
         name: np.asarray(getattr(scan, name), dtype=np.float64)
         for name in correction.monitor_corrections
+        if normalize and not total_flux_normalization
     }
     monitor_variances = {
         name: (
@@ -1320,6 +1364,7 @@ def _correction_pipeline(config, scan, assets, provenance):
             else None
         )
         for name in correction.monitor_corrections
+        if normalize and not total_flux_normalization
     }
 
     def frame_value(values, frame_index):
@@ -1357,6 +1402,45 @@ def _correction_pipeline(config, scan, assets, provenance):
         :rtype: list[tuple]
         """
         found = []
+        if total_flux_normalization:
+            divisor = float(frame_divisor[frame_index])
+            factor = 1.0 / divisor
+            relative_variance = 0.0
+            has_variance = False
+            monitor_name = correction.primary_monitor
+            if monitor_name is None or correction.primary_monitor_kind == "rate":
+                exposure_value = frame_value(
+                    np.asarray(scan.exposure_time, dtype=np.float64), frame_index
+                )
+                if hasattr(scan, "exposure_time_variance"):
+                    exposure_variance_value = frame_value(
+                        np.asarray(scan.exposure_time_variance, dtype=np.float64),
+                        frame_index,
+                    )
+                    relative_variance += (
+                        exposure_variance_value / exposure_value**2
+                    )
+                    has_variance = True
+            if monitor_name is not None and hasattr(
+                scan, f"{monitor_name}_variance"
+            ):
+                monitor_value = frame_value(
+                    np.asarray(getattr(scan, monitor_name), dtype=np.float64),
+                    frame_index,
+                )
+                monitor_variance_value = frame_value(
+                    np.asarray(
+                        getattr(scan, f"{monitor_name}_variance"),
+                        dtype=np.float64,
+                    ),
+                    frame_index,
+                )
+                relative_variance += monitor_variance_value / monitor_value**2
+                has_variance = True
+            factor_variance = (
+                factor**2 * relative_variance if has_variance else None
+            )
+            return [(factor, factor**2, factor_variance, "normalization")]
         if exposure is not None:
             value = frame_value(exposure, frame_index)
             if value <= 0 or not math.isfinite(value):
@@ -1367,7 +1451,11 @@ def _correction_pipeline(config, scan, assets, provenance):
                 value_variance = frame_value(exposure_variance, frame_index)
                 factor_variance = value_variance / value**4
             found.append((factor, factor**2, factor_variance, "exposure"))
-        elif correction.normalize_exposure:
+        elif (
+            normalize
+            and not total_flux_normalization
+            and correction.normalize_exposure
+        ):
             provenance["exposure_normalization"] = "unavailable"
         for name, values in monitor_values.items():
             value = frame_value(values, frame_index)

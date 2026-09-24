@@ -33,9 +33,11 @@ from ..reconstruction_selection import (
     STATIC_FRAMES,
     derive_bragg_grids,
     derive_ctr_grids,
+    derive_fractional_bragg_grids,
+    derive_fractional_rod_grids,
     sample_hkl_coverage,
 )
-from .config_data import ConfigData
+from .config_data import ConfigData, CorrectionState
 from .database import FILTERS
 from .HDF5SettingsDialog import (
     HDF5SettingsDialog,
@@ -140,9 +142,10 @@ class _FeatureSelectionDialog(qt.QDialog):
         layout = qt.QVBoxLayout(self)
         explanation = qt.QLabel(
             "Build one small output grid per crystallographic feature: a "
-            "column along L for every allowed crystal truncation rod, or a "
-            "box around every allowed Bragg reflection. Features the active "
-            "scan never reaches are dropped. Every selected grid shares one "
+            "column along L for integer or selected fractional rods, or a "
+            "box around allowed integer or selected fractional Bragg peaks. "
+            "Features the active scan never reaches are dropped. "
+            "Every selected grid shares one "
             "frame and one voxel step, so the reconstruction extracts them "
             "all in a single pass over the images."
         )
@@ -153,9 +156,17 @@ class _FeatureSelectionDialog(qt.QDialog):
         self.kind_editor = qt.QComboBox()
         self.kind_editor.addItem("Crystal truncation rods (columns along L)", "ctr")
         self.kind_editor.addItem("Bragg reflections (one box each)", "bragg")
+        self.kind_editor.addItem(
+            "Fractional-order rods (columns along L)", "fractional_rod"
+        )
+        self.kind_editor.addItem(
+            "Fractional-order Bragg peaks (one box each)",
+            "fractional_bragg",
+        )
         self.kind_editor.setToolTip(
-            "Rods span the measured L range at each allowed integer (H, K); "
-            "Bragg boxes are centered on each allowed integer (H, K, L)."
+            "Integer and fractional rods span measured L. Integer Bragg "
+            "boxes follow bulk structure factors; fractional peak boxes "
+            "follow explicit H,K,L rules."
         )
         self.kind_editor.currentIndexChanged.connect(self._sync_kind)
         form.addRow("Feature:", self.kind_editor)
@@ -264,7 +275,8 @@ class _FeatureSelectionDialog(qt.QDialog):
             "Strain (relative to set lattice, in %)"
         )
         self.strain_group.setToolTip(
-            "Bragg reflections only. Scales each lattice constant as "
+            "Integer and fractional Bragg peaks only. Scales each lattice "
+            "constant as "
             "a * (1 + strain / 100) at unchanged cell angles, as in the "
             "rocking-scan Bragg extraction; the boxes move to the strained "
             "reflection positions. Output grids stay in the reference "
@@ -288,6 +300,62 @@ class _FeatureSelectionDialog(qt.QDialog):
         strain_layout.addStretch(1)
         layout.addWidget(self.strain_group)
 
+        self.peak_rules_group = qt.QGroupBox("Fractional feature rules")
+        peak_rules_layout = qt.QVBoxLayout(self.peak_rules_group)
+        self.rules_stack = qt.QStackedWidget()
+        rod_rules = qt.QWidget()
+        rod_rules_form = qt.QFormLayout(rod_rules)
+        self.rod_families_editor = qt.QLineEdit()
+        self.rod_families_editor.setText("any half")
+        self.rod_families_editor.setPlaceholderText(
+            "any half; 1/2,1/2 where h+k even"
+        )
+        self.rod_families_editor.setToolTip(
+            "Fractional parts of H,K in r.l.u. Separate families with ;. "
+            "Use any half, all half, or e.g. 1/2,1/2 where h+k even. "
+            "Each selected rod spans measured L; no integer rods are added."
+        )
+        rod_rules_form.addRow("Rod families:", self.rod_families_editor)
+        self.exclude_rods_editor = qt.QLineEdit()
+        self.exclude_rods_editor.setPlaceholderText(
+            "all half; h+k odd; 1/2,*"
+        )
+        self.exclude_rods_editor.setToolTip(
+            "Separate exclusion rules with ;. An H,K fractional-part pair "
+            "matches indices modulo one; * matches any part. Conditions "
+            "include any half, all half, and index sums such as h+k even. "
+            "A noninteger sum is neither even nor odd."
+        )
+        rod_rules_form.addRow("Exclude rods:", self.exclude_rods_editor)
+        self.rules_stack.addWidget(rod_rules)
+
+        bragg_rules = qt.QWidget()
+        bragg_rules_form = qt.QFormLayout(bragg_rules)
+        self.bragg_families_editor = qt.QLineEdit()
+        self.bragg_families_editor.setText("any half")
+        self.bragg_families_editor.setPlaceholderText(
+            "any half; 1/2,1/2,0 where h+k even"
+        )
+        self.bragg_families_editor.setToolTip(
+            "Fractional parts of H,K,L in r.l.u. Separate families with ;. "
+            "Use any half, all half, or e.g. 1/2,1/2,0 where h+k even. "
+            "Only noninteger peaks are selected."
+        )
+        bragg_rules_form.addRow("Peak families:", self.bragg_families_editor)
+        self.exclude_bragg_editor = qt.QLineEdit()
+        self.exclude_bragg_editor.setPlaceholderText(
+            "all half; h+k odd; 1/2,*,*"
+        )
+        self.exclude_bragg_editor.setToolTip(
+            "Separate exclusion rules with ;. An H,K,L phase triple "
+            "matches indices modulo one; * matches any part. Conditions "
+            "include any half, all half, and sums such as h+k even."
+        )
+        bragg_rules_form.addRow("Exclude peaks:", self.exclude_bragg_editor)
+        self.rules_stack.addWidget(bragg_rules)
+        peak_rules_layout.addWidget(self.rules_stack)
+        layout.addWidget(self.peak_rules_group)
+
         self.replace_editor = qt.QCheckBox("Replace the existing grid rows")
         self.replace_editor.setChecked(True)
         self.replace_editor.setToolTip(
@@ -306,16 +374,22 @@ class _FeatureSelectionDialog(qt.QDialog):
 
     def _sync_kind(self):
         """Rods have no L index limit, and default to the measured L range."""
-        is_ctr = self.kind == "ctr"
-        self.strain_group.setEnabled(not is_ctr)
+        is_rod = self.kind in ("ctr", "fractional_rod")
+        self.strain_group.setEnabled(not is_rod)
+        self.peak_rules_group.setEnabled(
+            self.kind in ("fractional_rod", "fractional_bragg")
+        )
+        self.rules_stack.setCurrentIndex(
+            1 if self.kind == "fractional_bragg" else 0
+        )
         enabled, lower, upper, symmetric = self.limit_editors[2]
         # A rod already runs the whole measured L range, so an L index limit
         # would mean nothing; the control is switched off rather than merely
         # greyed out, so that limits(2) reports the coverage default.
-        enabled.setChecked(not is_ctr)
+        enabled.setChecked(not is_rod)
         for widget in (enabled, lower, upper, symmetric):
-            widget.setEnabled(not is_ctr)
-        if is_ctr:
+            widget.setEnabled(not is_rod)
+        if is_rod:
             self.half_width_editors[2].setValue(0.0)
         elif self.half_width_editors[2].value() == 0.0:
             self.half_width_editors[2].setValue(
@@ -324,7 +398,7 @@ class _FeatureSelectionDialog(qt.QDialog):
 
     @property
     def kind(self):
-        """Return ``ctr`` or ``bragg``."""
+        """Return the selected integer or fractional feature kind."""
         return self.kind_editor.currentData()
 
     @property
@@ -363,6 +437,26 @@ class _FeatureSelectionDialog(qt.QDialog):
         """
         return tuple(editor.value() / 100.0 for editor in self.strain_editors)
 
+    @property
+    def rod_families(self):
+        """Return fractional-rod H,K families in r.l.u."""
+        return self.rod_families_editor.text().strip()
+
+    @property
+    def exclude_rods(self):
+        """Return the semicolon-separated rod exclusion rules."""
+        return self.exclude_rods_editor.text().strip()
+
+    @property
+    def bragg_families(self):
+        """Return fractional Bragg H,K,L families in r.l.u."""
+        return self.bragg_families_editor.text().strip()
+
+    @property
+    def exclude_bragg_peaks(self):
+        """Return the semicolon-separated peak exclusion rules."""
+        return self.exclude_bragg_editor.text().strip()
+
 
 def _format_size(size_bytes):
     for suffix in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
@@ -393,10 +487,6 @@ class ReconstructionDialog(qt.QDialog):
             self.orgui.reconstruction_chunk_shape = (64, 64, 64)
         if not hasattr(self.orgui, "reconstruction_compression_override"):
             self.orgui.reconstruction_compression_override = None
-        if not hasattr(self.orgui, "reconstruction_normalize_exposure"):
-            self.orgui.reconstruction_normalize_exposure = True
-        if not hasattr(self.orgui, "reconstruction_monitor_corrections"):
-            self.orgui.reconstruction_monitor_corrections = ()
         self.setWindowTitle("Reciprocal-space reconstruction")
         self.resize(900, 760)
         layout = qt.QVBoxLayout(self)
@@ -617,39 +707,20 @@ class ReconstructionDialog(qt.QDialog):
         )
         layout.addWidget(metadata_group)
 
-        normalization_group = qt.QGroupBox("Exposure and monitor normalization")
-        normalization_form = qt.QFormLayout(normalization_group)
-        self.normalize_exposure = qt.QCheckBox("Normalize by exposure time")
-        self.normalize_exposure.setChecked(
-            bool(self.orgui.reconstruction_normalize_exposure)
+        normalization_group = qt.QGroupBox("Frame normalization")
+        normalization_form = qt.QVBoxLayout(normalization_group)
+        normalization_form.addWidget(qt.QLabel(
+            "Reconstruction uses the frame normalization selected for "
+            "integration, including the primary monitor or legacy monitor "
+            "product."
+        ))
+        self.normalization_settings = qt.QPushButton(
+            "Corrections and normalization ..."
         )
-        self.normalize_exposure.toggled.connect(
-            self._on_normalize_exposure_changed
+        self.normalization_settings.clicked.connect(
+            self._open_normalization_settings
         )
-        self._add_form_row(
-            normalization_form,
-            "",
-            self.normalize_exposure,
-            "Divide each frame by its exposure time when the scan backend "
-            "provides one. Applies only to reciprocal-space reconstruction.",
-        )
-        self.monitor_corrections = qt.QLineEdit()
-        self.monitor_corrections.setPlaceholderText(
-            "Optional scan counters, comma-separated"
-        )
-        self.monitor_corrections.setText(
-            ", ".join(self.orgui.reconstruction_monitor_corrections)
-        )
-        self.monitor_corrections.editingFinished.connect(
-            self._on_monitor_corrections_changed
-        )
-        self._add_form_row(
-            normalization_form,
-            "Monitor corrections:",
-            self.monitor_corrections,
-            "Counters applied as divisive monitor normalizations. Applies "
-            "only to reciprocal-space reconstruction.",
-        )
+        normalization_form.addWidget(self.normalization_settings)
         layout.addWidget(normalization_group)
         return widget
 
@@ -673,15 +744,13 @@ class ReconstructionDialog(qt.QDialog):
             with qt.QSignalBlocker(control):
                 control.setChecked(bool(options.get(key, False)))
 
-    def _on_normalize_exposure_changed(self, checked):
-        self.orgui.reconstruction_normalize_exposure = bool(checked)
-
-    def _on_monitor_corrections_changed(self):
-        self.orgui.reconstruction_monitor_corrections = tuple(
-            value.strip()
-            for value in self.monitor_corrections.text().split(",")
-            if value.strip()
-        )
+    # GUI-only: user-triggered non-modal corrections dialog.
+    def _open_normalization_settings(self):
+        """Show the one correction editor used by integration and mapping."""
+        selector = getattr(self.orgui, "scanSelector", None)
+        show = getattr(selector, "_showCorrectionsDialog", None)
+        if show is not None:
+            show()
 
     def _grid_tab(self):
         widget = qt.QWidget()
@@ -738,10 +807,10 @@ class ReconstructionDialog(qt.QDialog):
             "Add an editable momentum-transfer grid in a selected frame."
         )
         add_q.clicked.connect(self._add_q_grid)
-        select_features = qt.QPushButton("Select CTRs or Bragg peaks")
+        select_features = qt.QPushButton("Select rods or Bragg peaks")
         select_features.setToolTip(
-            "Add one small grid per crystal truncation rod or per Bragg "
-            "reflection the active scan reaches. Every selected grid shares "
+            "Add one small grid per integer or fractional rod, or per "
+            "integer or fractional Bragg peak. Every grid shares "
             "a frame and a voxel step, so they are all extracted together in "
             "one pass over the images."
         )
@@ -1901,6 +1970,26 @@ class ReconstructionDialog(qt.QDialog):
             if dialog.kind == "ctr":
                 grids = derive_ctr_grids(config, self.orgui.fscan, **common)
                 described = "crystal truncation rod"
+            elif dialog.kind == "fractional_rod":
+                grids = derive_fractional_rod_grids(
+                    config,
+                    self.orgui.fscan,
+                    families=dialog.rod_families,
+                    exclude_rods=dialog.exclude_rods,
+                    **common,
+                )
+                described = "fractional-order rod"
+            elif dialog.kind == "fractional_bragg":
+                grids = derive_fractional_bragg_grids(
+                    config,
+                    self.orgui.fscan,
+                    l_limits=dialog.limits(2),
+                    strain=dialog.strain,
+                    families=dialog.bragg_families,
+                    exclude_peaks=dialog.exclude_bragg_peaks,
+                    **common,
+                )
+                described = "fractional-order Bragg peak"
             else:
                 grids = derive_bragg_grids(
                     config,
@@ -2459,13 +2548,29 @@ class ReconstructionDialog(qt.QDialog):
             self.use_pixel_mask.setChecked(corrections.use_mask)
             self.use_solid_angle.setChecked(corrections.use_solid_angle)
             self.use_polarization.setChecked(corrections.use_polarization)
-            self.normalize_exposure.setChecked(
-                corrections.normalize_exposure
+            state = getattr(self.orgui, "ctr_correction_state", None)
+            if state is None:
+                state = CorrectionState()
+                self.orgui.ctr_correction_state = state
+            state.normalize_exposure = corrections.normalize_exposure
+            state.monitor_corrections = corrections.monitor_corrections
+            for name in (
+                "total_incident_flux", "total_flux_calibrated",
+                "primary_monitor", "primary_monitor_kind",
+                "primary_monitor_unit", "monitor_reference_reading",
+                "monitor_reference_exposure_s",
+            ):
+                setattr(state, name, getattr(corrections, name))
+            if corrections.use_normalization is not None:
+                self._set_integration_option(
+                    "normalization", corrections.use_normalization
+                )
+            selector = getattr(self.orgui, "scanSelector", None)
+            refresh = getattr(
+                getattr(selector, "correctionsDialog", None), "refresh", None
             )
-            self.monitor_corrections.setText(
-                ", ".join(corrections.monitor_corrections)
-            )
-            self._on_monitor_corrections_changed()
+            if refresh is not None:
+                refresh()
             self.checkpoint_count.setValue(job.checkpoint_count)
             self._set_optional_value(
                 self.thread_override, job.thread_override

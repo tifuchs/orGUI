@@ -11,6 +11,8 @@ from orgui.datautils.xrayutils.reconstruction import _ReconstructionSpec
 from orgui.reconstruction_selection import (
     derive_bragg_grids,
     derive_ctr_grids,
+    derive_fractional_bragg_grids,
+    derive_fractional_rod_grids,
     hkl_to_frame_matrix,
     sample_hkl_coverage,
 )
@@ -256,6 +258,188 @@ def test_ctr_grids_in_the_crystal_frame_carry_inverse_angstrom_bounds():
     # L range 0..2 r.l.u. becomes 0..1 Angstrom^-1 along the third axis.
     np.testing.assert_allclose(rod.minimum, (1.95, -0.05, 0.0))
     np.testing.assert_allclose(rod.maximum, (2.05, 0.05, 1.0))
+
+
+def test_fractional_rods_span_measured_l_without_integer_reflections():
+    """The rod hypothesis selects HK columns and does not add bulk peaks."""
+    coverage = np.asarray([
+        [0.5, 0.0, 0.0], [0.5, 0.0, 2.0],
+        [0.0, 0.0, 0.0], [0.0, 0.0, 2.0],
+    ])
+    config = _config()
+    config.unit_cell = None  # Fractional rods must not query the bulk cell.
+    grids = derive_fractional_rod_grids(
+        config, _Scan(), step=(0.02,) * 3, half_width=(0.1, 0.1, 0.0),
+        h_limits=(0, 1), k_limits=(0, 0), coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == ["fractional_rod_1p2_0"]
+    np.testing.assert_allclose(grids[0].minimum, (0.4, -0.1, 0.0))
+    np.testing.assert_allclose(grids[0].maximum, (0.6, 0.1, 2.0))
+
+
+def test_fractional_rod_crystal_frame_uses_fixed_hkl_to_q_map():
+    coverage = np.asarray([[0.5, 0.0, 0.0], [0.5, 0.0, 2.0]])
+    grids = derive_fractional_rod_grids(
+        _config(), _Scan(), step=(0.02,) * 3,
+        half_width=(0.1, 0.1, 0.0), frame="crystal",
+        h_limits=(0, 1), k_limits=(0, 0), coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == ["fractional_rod_1p2_0"]
+    np.testing.assert_allclose(grids[0].minimum, (0.9, -0.1, 0.0))
+    np.testing.assert_allclose(grids[0].maximum, (1.1, 0.1, 1.0))
+
+
+@pytest.mark.parametrize(
+    ("families", "names"),
+    [
+        ("any half", ["fractional_rod_0_1p2", "fractional_rod_1p2_0",
+                      "fractional_rod_1p2_1p2"]),
+        ("all half", ["fractional_rod_1p2_1p2"]),
+    ],
+)
+def test_fractional_rod_family_shortcuts(families, names):
+    coverage = np.asarray([
+        [0.0, 0.5, 0.0], [0.5, 0.0, 0.5], [0.5, 0.5, 1.0],
+    ])
+    grids = derive_fractional_rod_grids(
+        _config(), _Scan(), step=(0.02,) * 3, half_width=(0.05,) * 3,
+        h_limits=(0, 1), k_limits=(0, 1), families=families,
+        coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == names
+
+
+def test_fractional_rod_parity_uses_integer_index_sum():
+    """Two half indices may sum to even or odd; one half does neither."""
+    coverage = np.asarray([
+        [-0.5, 0.5, 0.0], [0.5, 0.5, 0.5], [0.5, 0.0, 1.0],
+    ])
+    grids = derive_fractional_rod_grids(
+        _config(), _Scan(), step=(0.02,) * 3, half_width=(0.05,) * 3,
+        h_limits=(-1, 1), k_limits=(0, 1),
+        families="all half where h+k=even; 1/2,0 where h+k odd",
+        coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == ["fractional_rod_m1p2_1p2"]
+
+
+@pytest.mark.parametrize(
+    ("rule", "names"),
+    [
+        ("all half", ["fractional_rod_0_1p2", "fractional_rod_1p2_0"]),
+        ("h+k odd", ["fractional_rod_0_1p2", "fractional_rod_1p2_0"]),
+        ("1/2,*", ["fractional_rod_0_1p2"]),
+    ],
+)
+def test_fractional_rod_exclusions_apply_to_hk_not_l(rule, names):
+    coverage = np.asarray([
+        [0.0, 0.5, 0.0], [0.5, 0.0, 0.5], [0.5, 0.5, 1.0],
+    ])
+    grids = derive_fractional_rod_grids(
+        _config(), _Scan(), step=(0.02,) * 3, half_width=(0.05,) * 3,
+        h_limits=(0, 1), k_limits=(0, 1), families="any half",
+        exclude_rods=rule, coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == names
+
+
+@pytest.mark.parametrize("rule", ["0,0", "1/2,0,0", "h+h even", "1/25,0"])
+def test_invalid_fractional_rod_family_is_rejected(rule):
+    with pytest.raises(ValueError, match="fractional|Fractional"):
+        derive_fractional_rod_grids(
+            _config(), _Scan(), step=(0.02,) * 3, half_width=(0.05,) * 3,
+            families=rule, coverage=np.asarray([[0.5, 0.0, 0.0],
+                                                 [0.5, 0.0, 1.0]]),
+        )
+
+
+def test_fractional_bragg_selects_only_noninteger_hkl_boxes():
+    coverage = np.asarray([
+        [0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.0, 0.5]
+    ])
+    config = _config()
+    config.unit_cell = None  # Explicit fractional peaks do not use bulk F.
+    grids = derive_fractional_bragg_grids(
+        config, _Scan(), step=(0.01,) * 3, half_width=0.05,
+        h_limits=(0, 1), k_limits=(0, 0), l_limits=(0, 1),
+        coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == [
+        "fractional_bragg_0_0_1p2", "fractional_bragg_1p2_0_0"
+    ]
+    np.testing.assert_allclose(grids[0].minimum, (-0.05, -0.05, 0.45))
+
+
+def test_fractional_bragg_families_and_exclusions_use_all_three_axes():
+    coverage = np.asarray([
+        [0.5, 0.0, 0.0], [0.5, 0.5, 0.5], [0.0, 0.0, 0.5]
+    ])
+    grids = derive_fractional_bragg_grids(
+        _config(), _Scan(), step=(0.01,) * 3, half_width=0.05,
+        h_limits=(0, 1), k_limits=(0, 1), l_limits=(0, 1),
+        families="any half", exclude_peaks="all half; *,*,1/2",
+        coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == ["fractional_bragg_1p2_0_0"]
+
+
+def test_fractional_bragg_parity_matches_only_integer_index_sums():
+    coverage = np.asarray([
+        [-0.5, 0.5, 0.0], [0.5, 0.5, 0.0], [0.5, 0.0, 0.0]
+    ])
+    grids = derive_fractional_bragg_grids(
+        _config(), _Scan(), step=(0.01,) * 3, half_width=0.05,
+        h_limits=(-1, 1), k_limits=(0, 1), l_limits=(0, 0),
+        families="1/2,1/2,0 where h+k even; 1/2,0,0 where h+k odd",
+        coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == [
+        "fractional_bragg_m1p2_1p2_0"
+    ]
+
+
+def test_fractional_bragg_rule_can_sum_h_and_l():
+    coverage = np.asarray([[0.5, 0.0, -0.5], [0.5, 0.0, 0.5]])
+    grids = derive_fractional_bragg_grids(
+        _config(), _Scan(), step=(0.01,) * 3, half_width=0.05,
+        h_limits=(0, 1), k_limits=(0, 0), l_limits=(-1, 1),
+        families="1/2,0,1/2 where h+l even", coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == [
+        "fractional_bragg_1p2_0_m1p2"
+    ]
+
+
+def test_fractional_bragg_strain_moves_center_in_reference_hkl():
+    coverage = np.asarray([[0.25, 0.0, 0.0]])
+    grids = derive_fractional_bragg_grids(
+        _config(), _Scan(), step=(0.01,) * 3, half_width=0.05,
+        h_limits=(0, 1), k_limits=(0, 0), l_limits=(0, 0),
+        strain=(1.0, 0.0, 0.0), families="1/2,0,0",
+        coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == ["fractional_bragg_1p2_0_0"]
+    np.testing.assert_allclose(grids[0].minimum, (0.2, -0.05, -0.05))
+
+
+def test_fractional_bragg_crystal_frame_uses_fixed_q_map():
+    coverage = np.asarray([[0.5, 0.0, 0.0]])
+    grids = derive_fractional_bragg_grids(
+        _config(), _Scan(), step=(0.01,) * 3, half_width=0.05,
+        frame="crystal", h_limits=(0, 1), k_limits=(0, 0),
+        l_limits=(0, 0), families="1/2,0,0", coverage=coverage,
+    )
+    assert [grid.name for grid in grids] == ["fractional_bragg_1p2_0_0"]
+    np.testing.assert_allclose(grids[0].minimum, (0.95, -0.05, -0.05))
+
+
+@pytest.mark.parametrize("rule", ["1/2,0", "0,0,0", "h+h even", "1/25,0,0"])
+def test_invalid_fractional_bragg_family_is_rejected(rule):
+    with pytest.raises(ValueError, match="fractional|Fractional"):
+        derive_fractional_bragg_grids(
+            _config(), _Scan(), step=(0.01,) * 3, half_width=0.05,
+            families=rule, coverage=np.asarray([[0.5, 0.0, 0.0]]),
+        )
 
 
 def test_bragg_grids_are_boxes_centered_on_each_reflection():

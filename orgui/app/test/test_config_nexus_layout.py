@@ -62,6 +62,7 @@ def _populated_corrections():
         repair_use_pyfai_gaps=False,
         repair_gap_size_px=6,
         normalize_exposure=False,
+        shared_frame_normalization=True,
         monitor_corrections=("mondio", "ic1"),
         excluded_frames=(3, 7, 11),
         mask_asset="assets/mask",

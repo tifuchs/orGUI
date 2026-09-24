@@ -705,9 +705,8 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
         "solid_angle": True,
         "polarization": True,
     }
-    assert not dialog.normalize_exposure.isChecked()
-    assert dialog.monitor_corrections.text() == "monitor, ring"
-    assert dialog.orgui.reconstruction_monitor_corrections == (
+    assert not dialog.orgui.ctr_correction_state.normalize_exposure
+    assert dialog.orgui.ctr_correction_state.monitor_corrections == (
         "monitor",
         "ring",
     )
@@ -803,6 +802,155 @@ def test_ctr_selection_takes_its_l_range_from_the_scan(tmp_path):
     assert selection.half_width[2] == selection.half_width[0]
 
     selection.close()
+
+
+def test_rod_rules_are_available_only_for_fractional_rods(tmp_path):
+    _dialog(tmp_path)
+    selection = reconstruction_dialog_module._FeatureSelectionDialog()
+    assert not selection.peak_rules_group.isEnabled()
+
+    selection.kind_editor.setCurrentIndex(1)
+    assert not selection.peak_rules_group.isEnabled()
+    selection.kind_editor.setCurrentIndex(2)
+    assert selection.kind == "fractional_rod"
+    assert selection.peak_rules_group.isEnabled()
+    assert selection.limits(2) is None
+    assert selection.half_width[2] == 0.0
+    selection.rod_families_editor.setText("1/2,1/2 where h+k even")
+    selection.exclude_rods_editor.setText("all half; h+k odd")
+    assert selection.rod_families == "1/2,1/2 where h+k even"
+    assert selection.exclude_rods == "all half; h+k odd"
+    selection.kind_editor.setCurrentIndex(3)
+    assert selection.kind == "fractional_bragg"
+    assert selection.peak_rules_group.isEnabled()
+    assert selection.rules_stack.currentIndex() == 1
+    assert selection.limits(2) == (-3, 3)
+    assert selection.strain_group.isEnabled()
+    assert selection.half_width[2] == selection.half_width[0]
+    selection.bragg_families_editor.setText("1/2,1/2,0 where h+k even")
+    selection.exclude_bragg_editor.setText("all half; *,*,1/2")
+    assert selection.bragg_families == "1/2,1/2,0 where h+k even"
+    assert selection.exclude_bragg_peaks == "all half; *,*,1/2"
+    selection.close()
+
+
+def test_rod_rules_reach_fractional_selector(tmp_path, monkeypatch):
+    dialog = _dialog(tmp_path)
+    dialog.orgui.fscan = object()
+    dialog.add_derived_grid = lambda frame: None
+    monkeypatch.setattr(
+        reconstruction_dialog_module, "ConfigData",
+        SimpleNamespace(from_gui=lambda gui: object()),
+    )
+    monkeypatch.setattr(
+        reconstruction_dialog_module, "sample_hkl_coverage",
+        lambda config, scan: np.asarray([[0.5, 0.0, 0.0]]),
+    )
+    selection = SimpleNamespace(
+        exec=lambda: qt.QDialog.Accepted,
+        step=(0.01,) * 3,
+        half_width=(0.05,) * 3,
+        frame="hkl",
+        limits=lambda axis: (0, 1),
+        kind="fractional_rod",
+        strain=(0.0,) * 3,
+        rod_families="1/2,0",
+        exclude_rods="h+k odd",
+        replace=True,
+    )
+    monkeypatch.setattr(
+        reconstruction_dialog_module, "_FeatureSelectionDialog",
+        lambda *args, **kwargs: selection,
+    )
+    captured = {}
+
+    def fake_derive(config, scan, **kwargs):
+        captured.update(kwargs)
+        return [ReconstructionGrid(
+            minimum=(0.45, -0.05, -0.05),
+            maximum=(0.55, 0.05, 0.05),
+            step=(0.01,) * 3,
+            name="fractional_rod_1p2_0",
+        )]
+
+    monkeypatch.setattr(
+        reconstruction_dialog_module, "derive_fractional_rod_grids", fake_derive,
+    )
+    monkeypatch.setattr(dialog, "_refresh_file_count_summary", lambda: None)
+    dialog._select_features()
+    assert captured["families"] == "1/2,0"
+    assert captured["exclude_rods"] == "h+k odd"
+    dialog.close()
+    dialog._test_parent.close()
+
+
+def test_fractional_bragg_rules_reach_peak_selector(tmp_path, monkeypatch):
+    dialog = _dialog(tmp_path)
+    dialog.orgui.fscan = object()
+    dialog.add_derived_grid = lambda frame: None
+    monkeypatch.setattr(
+        reconstruction_dialog_module, "ConfigData",
+        SimpleNamespace(from_gui=lambda gui: object()),
+    )
+    monkeypatch.setattr(
+        reconstruction_dialog_module, "sample_hkl_coverage",
+        lambda config, scan: np.asarray([[0.5, 0.0, 0.0]]),
+    )
+    selection = SimpleNamespace(
+        exec=lambda: qt.QDialog.Accepted,
+        step=(0.01,) * 3,
+        half_width=(0.05,) * 3,
+        frame="hkl",
+        limits=lambda axis: (0, 1),
+        kind="fractional_bragg",
+        strain=(0.01, 0.0, 0.0),
+        bragg_families="1/2,0,0",
+        exclude_bragg_peaks="h+k odd",
+        replace=True,
+    )
+    monkeypatch.setattr(
+        reconstruction_dialog_module, "_FeatureSelectionDialog",
+        lambda *args, **kwargs: selection,
+    )
+    captured = {}
+
+    def fake_derive(config, scan, **kwargs):
+        captured.update(kwargs)
+        return [ReconstructionGrid(
+            minimum=(0.45, -0.05, -0.05),
+            maximum=(0.55, 0.05, 0.05),
+            step=(0.01,) * 3,
+            name="fractional_bragg_1p2_0_0",
+        )]
+
+    monkeypatch.setattr(
+        reconstruction_dialog_module, "derive_fractional_bragg_grids",
+        fake_derive,
+    )
+    monkeypatch.setattr(dialog, "_refresh_file_count_summary", lambda: None)
+    dialog._select_features()
+    assert captured["families"] == "1/2,0,0"
+    assert captured["exclude_peaks"] == "h+k odd"
+    assert captured["strain"] == (0.01, 0.0, 0.0)
+    assert captured["l_limits"] == (0, 1)
+    dialog.close()
+    dialog._test_parent.close()
+
+
+def test_normalization_button_opens_the_shared_editor(tmp_path):
+    """Reconstruction has no second monitor editor to drift out of sync."""
+    dialog = _dialog(tmp_path)
+    show = Mock()
+    dialog.orgui.scanSelector = SimpleNamespace(
+        _showCorrectionsDialog=show
+    )
+
+    dialog.normalization_settings.click()
+
+    show.assert_called_once_with()
+    assert not hasattr(dialog, "monitor_corrections")
+    dialog.close()
+    dialog._test_parent.close()
 
 
 def test_selected_feature_grids_replace_the_grid_table(

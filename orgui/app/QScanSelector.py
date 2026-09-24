@@ -2048,8 +2048,7 @@ class IntegrationOptionsDialog(qt.QDialog):
         selector.useNormalizationBox.setText("Normalize intensity frame by frame")
         selector.useNormalizationBox.setToolTip(
             "Apply the selected exposure/primary-monitor convention to each "
-            "frame. The reciprocal-space reconstruction keeps its separate "
-            "legacy monitor-product settings below."
+            "frame in integration and reciprocal-space reconstruction."
         )
 
         scaleRow = qt.QHBoxLayout()
@@ -2124,9 +2123,10 @@ class IntegrationOptionsDialog(qt.QDialog):
         incidentLayout.addWidget(self.footprintBtn)
 
         legacy = qt.QFrame()
+        self.legacyNormalization = legacy
         legacy.setFrameShape(qt.QFrame.StyledPanel)
         legacyLayout = qt.QVBoxLayout()
-        legacyHeading = qt.QLabel("<b>Legacy / reconstruction normalization</b>")
+        legacyHeading = qt.QLabel("<b>Legacy normalization</b>")
         legacyLayout.addWidget(legacyHeading)
         self.normalizeExposureBox = qt.QCheckBox("Normalize by exposure time")
         self.normalizeExposureBox.setChecked(True)
@@ -2137,9 +2137,8 @@ class IntegrationOptionsDialog(qt.QDialog):
         self.monitorEdit = qt.QLineEdit()
         self.monitorEdit.setPlaceholderText("Optional counters, comma-separated")
         self.monitorEdit.setToolTip(
-            "Preserved multi-counter convention used by reconstruction and "
-            "legacy rocking reductions. It is not reinterpreted as the new "
-            "primary monitor."
+            "Preserved multi-counter convention for imported configurations. "
+            "It is not reinterpreted as the new primary monitor."
         )
         self.monitorEdit.editingFinished.connect(self._onNormalizationChanged)
         legacyMonitorRow.addWidget(self.monitorEdit)
@@ -2175,8 +2174,8 @@ class IntegrationOptionsDialog(qt.QDialog):
 
         self.reconstructionBtn = qt.QPushButton("Reciprocal-space reconstruction ...")
         self.reconstructionBtn.setToolTip(
-            "The reconstruction shares these normalization settings and has "
-            "its own dialog for everything else."
+            "The reconstruction uses these normalization settings and has "
+            "its own dialog for grids and execution."
         )
         self.reconstructionBtn.clicked.connect(self._openReconstructionSettings)
         layout.addWidget(self.reconstructionBtn)
@@ -2252,16 +2251,10 @@ class IntegrationOptionsDialog(qt.QDialog):
 
     def refresh(self):
         """Reload the settings shared with other parts of the application."""
-        main = self._mainWindow()
         state = self._correctionState()
-        if main is not None:
-            with blockSignals([self.normalizeExposureBox, self.monitorEdit]):
-                self.normalizeExposureBox.setChecked(
-                    bool(getattr(main, "reconstruction_normalize_exposure", True))
-                )
-                self.monitorEdit.setText(
-                    ", ".join(getattr(main, "reconstruction_monitor_corrections", ()))
-                )
+        with blockSignals([self.normalizeExposureBox, self.monitorEdit]):
+            self.normalizeExposureBox.setChecked(state.normalize_exposure)
+            self.monitorEdit.setText(", ".join(state.monitor_corrections))
         self._updateMonitorInfo()
         available = self._availableMonitorNames()
         selected = state.primary_monitor
@@ -2348,10 +2341,9 @@ class IntegrationOptionsDialog(qt.QDialog):
         main = self._mainWindow()
         if main is None:
             return
-        main.reconstruction_normalize_exposure = bool(
-            self.normalizeExposureBox.isChecked()
-        )
-        main.reconstruction_monitor_corrections = tuple(
+        state = self._correctionState()
+        state.normalize_exposure = bool(self.normalizeExposureBox.isChecked())
+        state.monitor_corrections = tuple(
             value.strip()
             for value in self.monitorEdit.text().split(",")
             if value.strip()
@@ -2441,6 +2433,7 @@ class IntegrationOptionsDialog(qt.QDialog):
         """Show the next extraction's mode, formula, and scale completeness."""
         state = self._correctionState()
         mode = self.scaleModeCombo.currentData()
+        self.legacyNormalization.setEnabled(mode == "legacy")
         monitor = self.primaryMonitorCombo.currentData() or None
         kind = self.monitorKindCombo.currentData() if monitor else None
         if mode == "legacy":

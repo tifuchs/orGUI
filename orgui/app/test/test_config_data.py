@@ -238,6 +238,14 @@ def test_enabled_pixel_repair_implies_mask_correction():
     assert captured.corrections.use_mask is True
     assert captured.corrections.normalize_exposure is False
     assert captured.corrections.monitor_corrections == ("mondio",)
+    assert captured.corrections.shared_frame_normalization is True
+
+    gui.ctr_correction_state = CorrectionState(
+        normalize_exposure=True, monitor_corrections=("current",)
+    )
+    captured = ConfigData.from_gui(gui)
+    assert captured.corrections.normalize_exposure is True
+    assert captured.corrections.monitor_corrections == ("current",)
 
 
 def test_from_gui_captures_the_footprint_dialogs_inputs(qapp):
@@ -407,6 +415,7 @@ def test_apply_to_gui_sets_reconstruction_normalization_attributes():
     config.corrections = CorrectionState(
         normalize_exposure=False, monitor_corrections=("mondio",)
     )
+    refreshed = []
     gui = SimpleNamespace(
         ubcalc=SimpleNamespace(
             detectorCal=config.detector,
@@ -417,12 +426,21 @@ def test_apply_to_gui_sets_reconstruction_normalization_attributes():
             phi=config.phi,
             n=config.refraction_index,
         ),
+        scanSelector=SimpleNamespace(
+            set_integration_options=lambda options: None,
+            correctionsDialog=SimpleNamespace(
+                refresh=lambda: refreshed.append(True)
+            ),
+        ),
     )
 
     config.apply_to_gui(gui)
 
     assert gui.reconstruction_normalize_exposure is False
     assert gui.reconstruction_monitor_corrections == ("mondio",)
+    assert gui.ctr_correction_state.normalize_exposure is False
+    assert gui.ctr_correction_state.monitor_corrections == ("mondio",)
+    assert refreshed == [True]
 
 
 def test_apply_to_gui_peak_angles_use_the_loaded_orientation():

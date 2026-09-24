@@ -120,16 +120,14 @@ settings are refreshed.
 ``User note``
    Optional free text stored in the job descriptor and final provenance.
 
-``Normalize by exposure time``
-   Divides each frame by its exposure time when the active scan backend
-   provides one. Enabled by default. This setting is specific to
-   reconstruction and does not affect ROI/CTR image integration.
-
-``Monitor corrections``
-   Comma-separated scan counter names applied as divisive monitor
-   normalizations, each with uncertainty propagated when the backend
-   exposes a matching ``<name>_variance`` counter. This setting is specific
-   to reconstruction and does not affect ROI/CTR image integration.
+``Frame normalization``
+   Opens the shared ``Corrections and normalization`` dialog. Its frame
+   normalization switch and monitor convention apply to both ROI/CTR
+   integration and new reconstruction jobs. A rate monitor is multiplied by
+   frame exposure; an integrated monitor reading already includes exposure
+   and is used once. Imported configurations retaining the legacy convention
+   still use exposure times the listed monitor product. Prepared jobs retain
+   their saved correction selections when resumed.
 
 Output Grid Parameters
 ----------------------
@@ -208,7 +206,7 @@ Adding and Removing Grids
 ``Add derived Q grid``
    Prompts for a Q reference frame and adds its derived coverage.
 
-``Select CTRs or Bragg peaks``
+``Select rods or Bragg peaks``
    Replaces or extends the table with one small grid per crystallographic
    feature; see :ref:`automatic-volume-selection` below.
 
@@ -222,19 +220,59 @@ Automatic Reciprocal-Space Volume Selection
 
 Instead of one large grid covering the whole measured volume, a scan can be
 reconstructed as many small grids, each holding one crystallographic feature.
-``Select CTRs or Bragg peaks`` builds them:
+``Select rods or Bragg peaks`` builds them:
 
 ``Crystal truncation rods``
    One column along ``L`` per allowed integer ``(H, K)``, spanning the ``L``
    range the scan actually measured. Rods carry no ``L`` index limit.
 
-``Bragg reflections``
-   One box centered on each allowed integer ``(H, K, L)``.
+``Fractional-order rods``
+   One column along the measured ``L`` range at each selected fractional
+   ``(H, K)``. No integer rod or Bragg reflection is added in this mode.
 
-Candidate indices come from the reference unit cell: a rod is kept when the
-unit-cell structure factor is non-zero somewhere in the measured ``L`` range, a
-reflection when its structure factor is non-zero. Index limits are symmetric by
-default -- entering ``H = 3`` enumerates ``-3`` to ``3`` -- and clearing the
+``Bragg reflections``
+   One box centered on each bulk-allowed integer ``(H, K, L)``.
+
+``Fractional-order Bragg peaks``
+   One compact box at each selected noninteger ``(H, K, L)``. No integer
+   Bragg reflection or rod is added in this mode.
+
+For fractional rods, the ``Rod families`` descriptor selects ``(H, K)``
+positions in reference-lattice r.l.u. The default ``any half`` selects rods
+with a half index on ``H`` or ``K`` or both; ``all half`` requires both to be
+half order. Alternatively, enter semicolon-separated phase pairs such as
+``1/2,0; 0,1/2``. Each phase is modulo one, so ``1/2,0`` covers all
+``(integer + 1/2, integer)`` rods within the index limits. Fractional rods
+are explicit existence hypotheses because the bulk unit cell cannot supply
+their structure factors or systematic absences. The active scan must still
+reach a rod for it to be selected.
+
+A rod family may have a condition, for example
+``1/2,1/2 where h+k even`` or ``all half where h+k=even``. Here ``even``
+means the sum is an even integer; a noninteger sum matches neither ``even``
+nor ``odd``. ``Exclude rods`` accepts semicolon-separated rules, for example
+``all half; h+k odd; 1/2,*``. The ``*`` matches any phase on that axis.
+Exclusion rules are combined with OR and apply only to the selected
+fractional rods. All rules refer to ``H`` and ``K``; the rod continues across
+the measured ``L`` range.
+
+For fractional Bragg peaks, ``Peak families`` and ``Exclude peaks`` use the
+same grammar with three phases ``(H, K, L)``. The default ``any half`` selects
+peaks with a half index on at least one axis; ``all half`` requires all three.
+For example, ``1/2,1/2,0 where h+k even`` selects a particular family, while
+``1/2,*,*`` excludes every candidate with half-order ``H``. Conditions may
+sum any of ``h``, ``k``, and ``l`` once. These peaks are explicit existence
+hypotheses; the reference bulk structure factor is not used. If strain is
+specified, the rules apply to strained-lattice indices and the box centers
+are mapped into the reference output frame by the same scaling as integer
+Bragg reflections.
+
+Integer candidate indices come from the reference unit cell: an integer rod
+is kept when the unit-cell structure factor is non-zero somewhere in the
+measured ``L`` range, and a Bragg reflection when its structure factor is
+non-zero. Fractional candidates come from their descriptors above. Index
+limits are symmetric by default -- entering ``H = 3`` enumerates ``-3`` to
+``3`` -- and clearing the
 ``limit`` checkbox takes the range from the measured coverage instead.
 
 Each feature becomes the box that bounds it, expanded by the three
@@ -505,9 +543,10 @@ tiling:
    otherwise record that the background was treated as deterministic.
 3. Apply the active detector mask and optional pixel repair.
 4. Apply inverse solid-angle and inverse polarization factors.
-5. Normalize by exposure time when enabled and available.
-6. Apply explicitly selected divisive monitor counters.
-7. Mask non-finite corrected intensity or variance.
+5. Apply the saved frame-normalization policy. New jobs use the shared
+   integration switch and primary-monitor convention; older jobs use their
+   original exposure and listed-monitor product.
+6. Mask non-finite corrected intensity or variance.
 
 For a deterministic multiplicative factor :math:`c`:
 

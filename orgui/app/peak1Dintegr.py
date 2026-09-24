@@ -1757,12 +1757,22 @@ class RockingPeakIntegrator(qt.QMainWindow):
         :rtype: tuple
         """
         config_target = self.database.config_target
+        correction_state = getattr(config_target, "ctr_correction_state", None)
         monitor_names = tuple(
-            getattr(config_target, "reconstruction_monitor_corrections", ()) or ()
+            getattr(
+                correction_state,
+                "monitor_corrections",
+                getattr(config_target, "reconstruction_monitor_corrections", ()),
+            ) or ()
         )
 
-        exposure = aux.get("exposure_time")
-        if exposure is None:
+        normalize_exposure = getattr(
+            correction_state,
+            "normalize_exposure",
+            getattr(config_target, "reconstruction_normalize_exposure", True),
+        )
+        exposure = aux.get("exposure_time") if normalize_exposure else None
+        if normalize_exposure and exposure is None:
             logger.warning(
                 "The rocking scan stores no exposure_time counter, so the "
                 "integrated intensities are not normalized to counting time. "

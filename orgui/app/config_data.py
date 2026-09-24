@@ -91,6 +91,9 @@ class CorrectionState:
     repair_gap_size_px: int = 1
     normalize_exposure: bool = True
     monitor_corrections: tuple[str, ...] = ()
+    # Older prepared reconstruction jobs ignored use_normalization and the
+    # primary-monitor contract. Missing means their original legacy behavior.
+    shared_frame_normalization: bool = False
     excluded_frames: tuple[int, ...] = ()
     mask_asset: str | None = None
     background_asset: str | None = None
@@ -496,6 +499,7 @@ def corrections_to_nxdict(state):
         "normalization": _nx_group(
             {
                 "normalize_exposure": state.normalize_exposure,
+                "shared_frame_normalization": state.shared_frame_normalization,
                 "primary_monitor": state.primary_monitor,
                 "primary_monitor_kind": state.primary_monitor_kind,
                 "primary_monitor_unit": state.primary_monitor_unit,
@@ -607,6 +611,9 @@ def corrections_from_nxdict(nxdict):
         "repair_gap_size_px": int(repair.get("gap_size_px", 1)),
         "normalize_exposure": bool(
             normalization.get("normalize_exposure", True)
+        ),
+        "shared_frame_normalization": bool(
+            normalization.get("shared_frame_normalization", False)
         ),
         # Written with _string_array, i.e. a uint8 matrix, so it needs the
         # matching reader rather than a plain tuple().
@@ -1186,11 +1193,20 @@ class ConfigData:
                     getattr(repair, "gap_size_px", 1)
                 ),
                 normalize_exposure=bool(
-                    getattr(gui, "reconstruction_normalize_exposure", True)
+                    getattr(
+                        getattr(gui, "ctr_correction_state", None),
+                        "normalize_exposure",
+                        getattr(gui, "reconstruction_normalize_exposure", True),
+                    )
                 ),
                 monitor_corrections=tuple(
-                    getattr(gui, "reconstruction_monitor_corrections", ())
+                    getattr(
+                        getattr(gui, "ctr_correction_state", None),
+                        "monitor_corrections",
+                        getattr(gui, "reconstruction_monitor_corrections", ()),
+                    )
                 ),
+                shared_frame_normalization=True,
                 excluded_frames=tuple(
                     sorted(
                         int(value)
@@ -1360,14 +1376,13 @@ class ConfigData:
                         )
                     if beam_shape:
                         footprint_dialog.setSettings(beam_shape)
-            corrections_dialog = getattr(
-                gui.scanSelector, "correctionsDialog", None
-            )
-            refresh = getattr(corrections_dialog, "refresh", None)
-            if refresh is not None:
-                refresh()
         gui.reconstruction_normalize_exposure = self.corrections.normalize_exposure
         gui.reconstruction_monitor_corrections = self.corrections.monitor_corrections
+        selector = getattr(gui, "scanSelector", None)
+        corrections_dialog = getattr(selector, "correctionsDialog", None)
+        refresh = getattr(corrections_dialog, "refresh", None)
+        if refresh is not None:
+            refresh()
         if (
             hasattr(gui, "maskManager")
             and self.corrections.repair_max_component_pixels is not None
