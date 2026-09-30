@@ -719,13 +719,29 @@ class DataBase(qt.QMainWindow):
 
     def add_nxdict(self, nxentry, update_mode="add", h5path="/"):
         nxfile = self._requireOpenFile()
-        dicttonx(
-            nxentry,
-            nxfile,
-            h5path=h5path,
-            update_mode="add",
-            create_dataset_args={"compression": self.compression},
-        )
+        try:
+            dicttonx(
+                nxentry,
+                nxfile,
+                h5path=h5path,
+                update_mode="add",
+                create_dataset_args={"compression": self.compression},
+            )
+        except Exception:
+            # A failed HDF5 write can leave the file handle unusable. Check
+            # pending writes even when dicttonx raised before the flush.
+            try:
+                nxfile.flush()
+            except Exception:
+                self.closeSafe()
+            raise
+        try:
+            # HDF5 can defer writes until flush or close. Report a failed
+            # integration now, while its caller can still handle the error.
+            nxfile.flush()
+        except Exception:
+            self.closeSafe()
+            raise
         while self.hdf5model.hasPendingOperations():
             qt.QApplication.processEvents()
             time.sleep(0.01)

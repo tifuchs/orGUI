@@ -83,6 +83,22 @@ def test_close_safe_reports_failure_without_raising(database):
     assert database.closeSafe() is True  # nothing left to close
 
 
+def test_failed_integration_flush_detaches_unusable_database(database, tmp_path):
+    nxfile = database.nxfile
+    nxfile.flush = _writeError  # buffered write fails after dicttonx returns
+    nxfile.close = _writeError  # disconnected drive also fails on close
+
+    with pytest.raises(RuntimeError, match="file write failed"):
+        database.add_nxdict({"entry": {"counter": 1}})
+
+    assert not database.isOpen()
+    assert database.hdf5model.rowCount() == 0
+
+    database.createNewDBFile(str(tmp_path / "recovered.h5"))
+    database.add_nxdict({"entry": {"counter": 2}})
+    assert database.nxfile["entry/counter"][()] == 2
+
+
 def test_fallback_database_is_created_if_the_new_database_fails(database, monkeypatch):
     monkeypatch.setattr(
         qt.QFileDialog,
