@@ -160,6 +160,10 @@ class RockingBatchWriter:
             return True
         if not path.startswith("ctr_curve_v3/"):
             return False
+        # Component names are shared metadata, encoded as a 2-D uint8
+        # string array. Its leading axis counts names, not ROI curves.
+        if path == "ctr_curve_v3/normalization/components":
+            return False
         parts = path.split("/")
         return (
             parts[1] in ("base", "pixel_corrections", "geometry") or np.ndim(value) >= 2

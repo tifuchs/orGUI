@@ -20,6 +20,10 @@ Other user-visible changes:
   the database drive disconnects during a write, orGUI reports the failed save
   and detaches the unusable file so a new database can be opened.
 
+- Rocking extraction preserves normalization-component names as shared
+  metadata. Their encoded string array previously caused a curve-row mismatch
+  when saving calibrated monitor-normalized scans.
+
 Scientific and analysis additions:
 
 - **Integration and reciprocal-space reconstruction now share frame

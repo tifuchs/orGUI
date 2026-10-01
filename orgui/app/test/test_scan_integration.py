@@ -215,6 +215,43 @@ def test_line_configuration_round_trip():
     assert roi_from_nxdict({}).lines == {}
 
 
+def test_rocking_writer_keeps_normalization_names_as_shared_metadata(context):
+    """Encoded component names must not be appended as ROI curve rows."""
+    from orgui.app.database import RockingBatchWriter
+    from orgui.app.config_data import (
+        CURVE_CORRECTIONS_GROUP,
+        CurveCorrectionRecord,
+        curve_correction_record_to_nxdict,
+        curve_correction_record_from_nxdict,
+    )
+
+    ctx, scan, file = context
+    components = ("exposure", "primary_monitor:monitor:rate")
+    writer = RockingBatchWriter(ctx.database, len(scan), 2)
+    for value in (1.0, 2.0):
+        base = np.full((1, len(scan)), value)
+        record = CurveCorrectionRecord(
+            algorithm="framewise_ctr_total_flux_v1",
+            output_quantity="rocking_ctr_photon_curve",
+            scale_convention="total_flux_calibrated",
+            normalization_status="applied",
+            normalization_divisor=np.ones(len(scan)),
+            normalization_components=components,
+            base_croibg=base,
+            base_croibg_variance=base,
+        )
+        writer.append_tile(
+            "ctr",
+            {"rois": {"croibg": base},
+             CURVE_CORRECTIONS_GROUP: curve_correction_record_to_nxdict(record)},
+        )
+    stored = writer.group["results/ctr"][CURVE_CORRECTIONS_GROUP]
+    restored = curve_correction_record_from_nxdict(stored)
+    assert restored.normalization_components == components
+    np.testing.assert_equal(restored.base_croibg[:, 0], [1.0, 2.0])
+    writer.close(state="aborted")
+
+
 @pytest.mark.parametrize("accelerator", [False, True])
 def test_stationary_lines_read_once_and_route(context, monkeypatch, accelerator):
     """Pin stationary multi-line routing and one read per source frame."""

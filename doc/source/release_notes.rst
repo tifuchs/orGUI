@@ -15,6 +15,8 @@ Other user-visible changes:
 
 - Integration saves now flush the HDF5 database before reporting success. If the database drive disconnects during a write, orGUI reports the failed save and detaches the unusable file so a new database can be opened.
 
+- Rocking extraction preserves normalization-component names as shared metadata. Their encoded string array previously caused a curve-row mismatch when saving calibrated monitor-normalized scans.
+
 Scientific and analysis additions:
 
 - **Integration and reciprocal-space reconstruction now share frame normalization controls.** New reconstruction jobs follow the integration normalization switch and its rate or integrated primary-monitor convention. The reconstruction dialog opens the shared editor, removing duplicate monitor fields that could display stale values. Older prepared jobs retain their saved legacy exposure and multi-monitor product behavior.
