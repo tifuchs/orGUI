@@ -1056,6 +1056,19 @@ frames, two voxel weighting modes and grid refinement. This tests the
 kinematic, fully captured rod case; detector efficiency, transmission and
 incomplete peak capture still require experimental corrections.
 
+The executed :doc:`scan_mode_equivalence` notebook provides a smooth
+RuO2/TiO2 film example with generated detector frames, CTR comparisons, map
+cross-sections, grid refinement and a diagnostic of differing L resolution.
+Its noise study maps the same background-subtracted photon realizations used
+by stationary and rocking integration. The detector ROI and the corresponding
+HK and h-L views below show the actual selected three-dimensional volume.
+Negative background-subtracted values are retained. Every map runs through the
+production correction, native mapping, checkpoint and HDF5 finalization
+routines. The structure-factor scripting helper is explicit post-processing;
+reconstruction jobs do not automatically export CTR structure factors or their
+integrated errors. Map points in the notebook therefore have no error bars.
+This indicates unavailable uncertainty, not zero uncertainty.
+
 An unused native ``backproject_coefficients`` prototype is retained as a
 reminder of the missing integration-error propagation. It is not called by
 the default reconstruction workflow or by the diagnostic notebook. It returns
@@ -1069,6 +1082,13 @@ count before squaring, retaining its cross-voxel covariance. Production wiring
 and validation remain necessary before this can supply integration errors.
 Exposure-angle bounds remain in radians; grid integration measures remain
 in r.l.u.
+
+.. figure:: _static/scan_mode_equivalence/roi_and_maps.png
+   :alt: Observed detector frames with stationary and rocking ROIs alongside corresponding background-subtracted HK and h-L maps.
+   :width: 100%
+
+   Detector counts and corresponding native reciprocal-space maps for the
+   three background cases, all drawn from the same simulated scan.
 
 Diagnostic Environment Variables
 --------------------------------

@@ -923,3 +923,26 @@ This document is the physics. For the state of the branch — what is wired and
 what is not, the next commit in detail, the build recipe, and the predictions
 made here that turned out wrong — see
 [`ctr_structure_factor_handover.md`](ctr_structure_factor_handover.md).
+
+### Diagnostic notebook and the unresolved map uncertainty
+
+The first noisy notebook version called an additional native
+`ReconstructionKernel.backproject_coefficients` method and cached correction
+gains to calculate integrated map errors. Those calculations were not wired
+into the default reconstruction workflow. Presenting their errors alongside
+production outputs overstated what the application implements.
+
+The notebook now omits that executable code. It runs stationary extraction,
+rocking extraction and reduction through the app routines with Nexus I/O,
+including the existing ROI-mean polarization approximation. Each reciprocal
+map runs through production correction, mapping, checkpointing and HDF5
+finalization. Its intensity is explicitly post-processed with the existing
+structure-factor scripting helper, which returns a value only. No map
+integration error is supplied or inferred from marginal voxel variances.
+
+Keep the native prototype and its focused tests as a reminder: propagating a
+volume integral requires summing a pixel's contributions before squaring,
+including the voxel-mean normalization and raw-count correction gain. Wiring
+this into production, handling repair covariance and exposing a supported
+integration/error API remain unfinished. The notebook must show this gap until
+that work is implemented and validated in the application.

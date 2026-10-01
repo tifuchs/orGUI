@@ -33,6 +33,20 @@ Scientific and analysis additions:
   Detector-level simulations verify agreement with stationary and rocking
   integration, including repeated acquisitions and both map weighting modes.
   Missing voxels are rejected instead of silently counted as zero signal.
+  An executed diagnostic notebook in the documentation demonstrates the three
+  paths with smooth RuO2/TiO2 thin-film CTRs, detector and map plots, grid
+  refinement, and finite-resolution averaging. A three-frame illustration
+  shows stationary and rocking integration boundaries with zero, uniform and
+  oblique gradient Poisson backgrounds, including a peak-pixel SNR of one.
+  The complete noisy scans are now integrated through all three techniques,
+  with stationary ROIs, corresponding native reciprocal maps and saved
+  stationary/rocking photon-count error bars. The notebook runs the app
+  extraction and reduction routines and the reconstruction HDF5 pipeline.
+  Map integration returns no uncertainty; its points have no error bars.
+  An unused native back-projection prototype remains as a reminder of that
+  production gap and is not used to supplement notebook results.
+  The normalization control also displays loss from a smaller stationary ROI
+  alongside the full-detector result, without compensating for lost signal.
 
 - **Rocking CTR reduction now applies the joint Lorentz and rod-interception
   divisor per frame.** Averaging that divisor over the signal window biased
@@ -42,10 +56,6 @@ Scientific and analysis additions:
   and reversed axes, and degrees or radians. Errors follow the same framewise
   divisor; diagnostic intensity counters and saved factor means retain their
   existing meanings. Constant-geometry results are unchanged.
-
-- An experimental native back-projection prototype retains pixel contributions
-  before squaring for covariance-aware volume errors. It is not used by the
-  production workflow; integrated map uncertainty remains unavailable.
 
 - **Integration and reciprocal-space reconstruction now share frame
   normalization controls.** New reconstruction jobs follow the integration

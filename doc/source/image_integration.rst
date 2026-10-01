@@ -7,6 +7,40 @@ position, and summing the detector intensity with optional background and
 correction handling. Integration results are written to the active Nexus
 database file.
 
+.. toctree::
+   :maxdepth: 1
+
+   scan_mode_equivalence
+
+The executed :doc:`scan_mode_equivalence` notebook compares stationary,
+rocking and HKL-map integration on synthetic detector data generated from
+smooth RuO2/TiO2 thin-film CTRs, including plots of normalization and resolution
+effects. A three-frame illustration marks the stationary and rocking ROIs
+and compares zero, uniform and oblique gradient Poisson backgrounds. The uniform
+background example has a peak-pixel signal-to-noise ratio of one.
+The noiseless control compares the original full-detector stationary aperture
+with the smaller ROI, displaying the latter's peak-capture loss explicitly.
+
+The notebook also reduces the complete noisy scans through all three techniques.
+The comparison below subtracts the known background mean and retains the
+original observed photon counts as the variance. Stationary and rocking error
+bars are read from the saved app integration results, using its ROI-mean
+polarization convention. The map is produced through correction, mapping,
+checkpointing and HDF5 finalization, then reduced by the structure-factor
+scripting API. That API returns no integrated uncertainty, so map points have
+no error bars. The notebook does not replace this missing production behavior
+with a separate uncertainty calculation.
+Dotted curves are each technique's noiseless result for the same
+continuous CTR, so the residual plots isolate photon noise from L resolution.
+
+.. figure:: _static/scan_mode_equivalence/noisy_ctrs.png
+   :alt: Noisy CTRs with saved stationary and rocking error bars; map integral uncertainty is unavailable.
+   :width: 100%
+
+   Integrated RuO2/TiO2 (1,1,L) CTRs for zero, uniform and oblique gradient
+   backgrounds. Stationary and rocking show their saved one-standard-deviation
+   errors; the current map integration API supplies no integrated error.
+
 Stationary Reciprocal-Space Integration
 ---------------------------------------
 
