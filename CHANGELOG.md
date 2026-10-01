@@ -7,6 +7,15 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- UB calculation accepts fixed scalar omega values from scans with constant
+  theta, avoiding an indexing error when using their reference reflections.
+
+- Stationary and rocking hklscan integration can process several named
+  reciprocal-space lines in one pass through the images. Line definitions
+  survive configuration save/reload. Stationary counters stay in RAM; rocking
+  extraction and later curve reduction use bounded batches, retaining the
+  existing per-line results and correction conventions.
+
 - Integration saves now flush the HDF5 database before reporting success. If
   the database drive disconnects during a write, orGUI reports the failed save
   and detaches the unusable file so a new database can be opened.

@@ -184,6 +184,28 @@ def test_a_legacy_option_dictionary_is_still_accepted(selector):
         assert options["solidAngle"] is True
 
 
+def test_multiple_lines_round_trip_and_legacy_restore(selector, tmp_path):
+    """Ordered line collections survive HDF5 and reset on legacy config restore."""
+    from silx.io.dictdump import dicttonx, nxtodict
+
+    lines = {
+        "stationary": [{"id": "a", "H_0": [1, 0, 0], "H_1": [0, 0, 1]}],
+        "rocking": [
+            {"id": "b", "H_0": [0, 1, 0], "H_1": [0, 0, 1]},
+            {"id": "c", "H_0": [1, 1, 0], "H_1": [0, 0, 1]},
+        ],
+    }
+    selector.set_integration_options({"lines": lines})
+    path = tmp_path / "lines.h5"
+    dicttonx({"roi": roi_to_nxdict(ROIState(lines=lines))}, path)
+    restored = roi_from_nxdict(nxtodict(path)["roi"])
+    selector.set_integration_options({"lines": restored.lines})
+    assert selector.get_integration_options()["lines"] == lines
+    selector.set_integration_options({"lines": roi_from_nxdict({}).lines})
+    assert selector.get_integration_lines("stationary") == []
+    assert selector.get_integration_lines("rocking") == []
+
+
 def test_an_unknown_option_is_ignored(selector):
     """What lets an older orGUI open a newer configuration."""
     selector.set_integration_options({"mask": True, "from_the_future": 1})
@@ -193,8 +215,7 @@ def test_an_unknown_option_is_ignored(selector):
 
 def test_sample_sizes_are_stored_in_meter(selector):
     """The widgets show micrometer; the dictionary and the file use meter."""
-    selector.set_integration_options({"advanced": {**ADVANCED,
-                                                   "sample_size_y": 7e-3}})
+    selector.set_integration_options({"advanced": {**ADVANCED, "sample_size_y": 7e-3}})
 
     assert selector.get_integration_options()["advanced"][
         "sample_size_y"

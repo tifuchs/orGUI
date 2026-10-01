@@ -26,6 +26,13 @@ This mode is the usual choice for crystal truncation rods in stationary
 rotation scans. To preview the calculated ROI positions, enable
 ``View -> Show ROI``.
 
+Use ``Integration lines…`` to integrate several lines in the same scan. Each
+row has a unique ID and its own :math:`\vec{H}_0` and :math:`\vec{H}_1` in
+r.l.u. An empty table uses the existing single-line controls. Images are read
+once for all lines and intersections; extracted stationary counters stay in
+memory until results are saved one line at a time. The ROI preview continues
+to show the line in the existing controls.
+
 Fixed-Pixel Integration
 -----------------------
 
@@ -49,6 +56,45 @@ Rocking integration is often a better choice for quantitative CTR extraction
 because the rocking dimension helps separate the CTR signal from broad or
 environmental background. It is more computationally expensive than stationary
 integration.
+
+``Integration lines…`` also accepts several rocking lines. ROI sizing and
+detector-resolution sampling are resolved separately for each line, using the
+shared ROI/background settings and selected intersection. Results remain
+separate rocking groups so each line can be selected in the rocking reducer.
+Saved line IDs, sampled-point indices and effective step sizes identify the
+original points even when a line has no detector coverage or masked points
+are omitted.
+
+Rocking extraction buffers bounded frame batches in temporary datasets in
+the active database, then constructs complete curves in bounded tiles. The
+later angular reduction also reads curve tiles; each angular integral still
+uses its entire scan axis. Cancellation retains completed published lines
+and removes unpublished temporary results. A failed source read aborts
+extraction before any line is published. Deleting temporary HDF5 datasets
+does not necessarily shrink the database file, so allow disk space for both
+temporary counters and final curves.
+
+Scripts can set line collections and execution limits explicitly::
+
+    from orgui.app.scan_integration import BatchOptions
+
+    window.scanSelector.set_integration_lines("rocking", [
+        {"id": "rod_10", "H_0": [1, 0, 0], "H_1": [0, 0, 1]},
+        {"id": "rod_01", "H_0": [0, 1, 0], "H_1": [0, 0, 1]},
+    ])
+    window.rocking_batch_options = BatchOptions(
+        frames=64, curves=32, memory_mib=256,
+    )
+    window.roPkIntegrTab.rocking_batch_options = window.rocking_batch_options
+
+Use ``"stationary"`` for stationary line definitions. Line collections
+survive configuration save/reload; old configurations select the existing
+single-line workflow. Batch limits do not change scientific corrections and
+are reduced automatically when the estimated working arrays exceed the
+budget. Detector images, correction maps, application state and HDF5 caches
+need additional RAM. Existing ``rocking_integrate`` calls still accept and
+use their supplied geometry. Explicit ``get_all_ro_curves()`` calls continue
+to return all curves; the normal reduction workflow uses bounded reads.
 
 .. warning::
 

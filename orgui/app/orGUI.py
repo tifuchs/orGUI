@@ -62,7 +62,13 @@ import traceback
 
 from . import qutils, ROIutils, autoBraggWorkflow
 from .QScanSelector import QScanSelector
-from . import integration_corrections
+from . import scan_integration
+from .scan_integration import (
+    _rocking_arm_snapshot as _rocking_arm_snapshot,
+    _correction_region_counters as _correction_region_counters,
+    _warn_masked_peak_scaling as _warn_masked_peak_scaling,
+    _curve_profile_provenance as _curve_profile_provenance,
+)
 from ..datautils.xrayutils.corrections import detector as detector_corrections
 from .QReflectionSelector import QReflectionSelector, QReflectionAnglesDialog
 from .QUBCalculator import QUBCalculator
@@ -75,12 +81,7 @@ from .ReconstructionDialog import ReconstructionDialog
 from .bgroi import RectangleBgROI
 from .database import DataBase, FILTERS
 from .mask_config import MaskManager
-from .config_data import (
-    CURVE_CORRECTIONS_GROUP,
-    ConfigData,
-    CurveCorrectionRecord,
-    curve_correction_record_to_nxdict,
-)
+from .config_data import ConfigData
 from types import SimpleNamespace
 
 from ..backend.scans import SimulationScan, scan_arm_angles
@@ -90,6 +91,7 @@ from ..backend import interlacedScanLoader
 from .. import resources
 
 import numpy as np
+from scipy.optimize import root_scalar
 from ..datautils.xrayutils import HKLVlieg, CTRcalc
 from . import qconversion
 from ..datautils.xrayutils import ReciprocalNavigation as rn
@@ -135,96 +137,12 @@ except Exception:
 silx.config.DEFAULT_PLOT_SYMBOL = "."
 
 
-def _rocking_arm_snapshot(gamma_arm, delta_arm, curve_shape):
-    """Build the unit-tagged per-frame arm fields saved with rocking ROIs."""
-    curve_shape = tuple(curve_shape)
-    if len(curve_shape) != 2:
-        raise ValueError("rocking arm snapshot shape must be (curves, frames)")
-    frame_count = curve_shape[1]
-    gamma_arm = np.broadcast_to(
-        np.asarray(gamma_arm, dtype=np.float64), (frame_count,)
-    )
-    delta_arm = np.broadcast_to(
-        np.asarray(delta_arm, dtype=np.float64), (frame_count,)
-    )
-    return {
-        # scan_arm_angles already converted these to true primary-beam
-        # scattering angles. Radian storage feeds the geometry API directly.
-        "@detector_arm_unit": "rad",
-        "@detector_arm_angle_frame": "prim",
-        "gamma_arm": np.broadcast_to(gamma_arm, curve_shape).copy(),
-        "delta_arm": np.broadcast_to(delta_arm, curve_shape).copy(),
-    }
 
 
-def _correction_region_counters(correction, mask, center, backgrounds):
-    """Sum one correction array over the exact valid ROI pixels.
-
-    ``center`` and every entry of ``backgrounds`` use orGUI's ``(x, y)``
-    slice order. The returned four counters match the accelerated ROI-sum
-    contract: center sum/count and combined-background sum/count.
-    """
-    correction = np.asarray(correction, dtype=np.float64)
-    valid = ~np.asarray(mask, dtype=bool)
-
-    def region_values(region):
-        values = correction[region[::-1]]
-        region_valid = valid[region[::-1]] & np.isfinite(values)
-        return float(np.sum(values[region_valid])), float(np.sum(region_valid))
-
-    center_sum, center_pixels = region_values(center)
-    background_sum = 0.0
-    background_pixels = 0.0
-    for region in backgrounds:
-        summed, pixels = region_values(region)
-        background_sum += summed
-        background_pixels += pixels
-    return np.array(
-        [center_sum, center_pixels, background_sum, background_pixels],
-        dtype=np.float64,
-    )
 
 
-def _warn_masked_peak_scaling(valid_pixels, nominal_pixels, context):
-    """Warn once that nominal-area scaling cannot reconstruct masked peaks."""
-    valid_pixels = np.asarray(valid_pixels, dtype=np.float64)
-    nominal_pixels = np.asarray(nominal_pixels, dtype=np.float64)
-    incomplete = (nominal_pixels > 0) & (valid_pixels < nominal_pixels)
-    if np.any(incomplete):
-        logger.warning(
-            "%s contains masked or missing center-ROI pixels. Scaling by "
-            "nominal ROI area divided by valid-pixel count preserves a flat "
-            "density, but it is not a physical recovery of peak intensity "
-            "hidden by detector gaps or masks.",
-            context,
-        )
 
 
-def _curve_profile_provenance(state):
-    """Flat, self-contained beam-profile provenance for a curve record."""
-    result = {
-        "analytical": state.beam_shape_analytical,
-        "shape": state.beam_shape_name,
-        "shape_values": np.asarray(state.beam_shape_values, dtype=np.float64)
-        if state.beam_shape_values
-        else None,
-        "profile_file": state.beam_profile_file,
-        "profile_content": state.beam_profile_content,
-        "profile_unit": state.beam_profile_unit,
-        "profile_center": state.beam_profile_center,
-        "profile_offset_um": state.beam_profile_offset_um,
-        "profile_positions_m": np.asarray(
-            state.beam_profile_positions_m, dtype=np.float64
-        )
-        if state.beam_profile_positions_m
-        else None,
-        "profile_density_per_m": np.asarray(
-            state.beam_profile_density_per_m, dtype=np.float64
-        )
-        if state.beam_profile_density_per_m
-        else None,
-    }
-    return {name: value for name, value in result.items() if value is not None}
 
 
 def _display_roi_geometry(center, left, right, top, bottom):
@@ -1336,6 +1254,191 @@ ub : gui for UB matrix and angle calculations
         roi_dict["bottom"] = bottomrois
         return roi_dict
 
+    def _integration_context(self):
+        """Capture app state before image workers or Qt event processing."""
+        scan = self.fscan
+        if scan is None or not len(scan):
+            raise ValueError("No scan images loaded")
+        output_file = self.database._requireOpenFile()
+        image = scan.get_raw_img(0)
+        options = self.scanSelector.get_integration_options()
+        mode = self.scanSelector.scanstab.currentIndex()
+        h0 = [control.value() for control in self.scanSelector.H_0]
+        h1 = [control.value() for control in self.scanSelector.H_1]
+        xy = [control.value() for control in self.scanSelector.xy_static]
+        footprint = None
+        if options["footprint"]:
+            dialog = self.scanSelector.correctionsDialog.footprintOptions_shared()
+            profile, length = dialog.beamProfile(), dialog.sampleLength()
+            footprint = SimpleNamespace(
+                beamProfile=lambda: profile,
+                sampleLength=lambda: length,
+            )
+        selector = scan_integration.prepared_selector(
+            options,
+            mode,
+            h0,
+            h1,
+            xy,
+            footprint,
+        )
+        angles = tuple(np.array(value, copy=True) for value in self.getMuOm())
+        arms = tuple(np.array(value, copy=True) for value in self.getArmAngles())
+        arm_groups = self.armFrameGroups(len(scan))
+        mask = self.get_detector_mask(image.img.shape) if options["mask"] else None
+        repair = self._repair_config_for_image(image.img.shape)
+
+        def validate():
+            """Reject replacement or closure of the captured scan/database."""
+            if self.fscan is not scan or self.database.nxfile is not output_file:
+                raise RuntimeError("Scan or output database changed during integration")
+            if not output_file.id.valid:
+                raise RuntimeError("Output database closed during integration")
+
+        def save(data, description):
+            """Validate captured output identity before saving a result."""
+            validate()
+            return self._saveIntegrationResult(data, description)
+
+        return scan_integration.IntegrationContext(
+            fscan=scan_integration._CapturedScan(scan, image),
+            scanSelector=selector,
+            ubcalc=SimpleNamespace(
+                detectorCal=self.ubcalc.detectorCal,
+                chi=self.ubcalc.chi,
+                phi=self.ubcalc.phi,
+                n=np.array(self.ubcalc.n, copy=True),
+                angles=self.ubcalc.angles,
+            ),
+            database=self.database,
+            config_snapshot=ConfigData.from_gui(self),
+            activescanname=self.activescanname,
+            background_image=self.background_image,
+            numberthreads=self.numberthreads,
+            owner=self,
+            integrdataPlot=scan_integration._PlotBudget(self.integrdataPlot),
+            getMuOm=lambda: angles,
+            getArmAngles=lambda: arms,
+            getROIloc=self.getROIloc,
+            get_detector_mask=lambda shape: mask,
+            _repair_config_for_image=lambda shape: repair,
+            _saveIntegrationResult=save,
+            armFrameGroups=lambda count: arm_groups,
+            validate=validate,
+        )
+
+    def _run_scan_integration(self, operation):
+        """Keep one captured integration job active while Qt processes events."""
+        if getattr(self, "_scan_integration_active", False):
+            return {"status": "error", "message": "An integration is already active"}
+        self._scan_integration_active = True
+        controls = [self.centralWidget(), self.menuBar()]
+        enabled = [widget.isEnabled() for widget in controls]
+        try:
+            context = self._integration_context()
+            for widget in controls:
+                widget.setEnabled(False)
+            result = operation(context)
+            if result.get("status") == "error":
+                logger.error(
+                    result.get("message", "Integration aborted"),
+                    extra={
+                        "show_dialog": True,
+                        "parent": self,
+                        "title": "Cannot integrate scan",
+                        "description": result.get("traceback", result.get("message")),
+                    },
+                )
+            return result
+        except scan_integration.IntegrationCancelled:
+            return {"status": "cancelled", "message": "Integration cancelled"}
+        finally:
+            for widget, state in zip(controls, enabled):
+                widget.setEnabled(state)
+            self._scan_integration_active = False
+
+    def _dispatch_scan_integration(self):
+        mode = self.scanSelector.scanstab.currentIndex()
+        if mode == 2:
+            return self.rocking_extraction()
+        if mode == 3:
+            return self.rocking_Bragg_extraction()
+        lines = (
+            self.scanSelector.get_integration_lines("stationary") if mode == 0 else []
+        )
+        return self._run_scan_integration(
+            lambda context: scan_integration.integrate_stationary_scan(
+                context,
+                lines=lines,
+                geometry_provider=lambda line: self.getROIloc(
+                    H_0=np.asarray(line["H_0"]), H_1=np.asarray(line["H_1"])
+                ),
+            )
+        )
+
+    def _integrate_prepared_rocking(self, xy, rois, reflections, name):
+        return self._run_scan_integration(
+            lambda context: scan_integration.integrate_rocking_scan(
+                context,
+                xy,
+                rois,
+                reflections,
+                name,
+                geometry_provider=lambda coordinates: (
+                    scan_integration.fixed_roi_geometry(context, coordinates)
+                ),
+                batch_options=getattr(self, "rocking_batch_options", None),
+            )
+        )
+
+    def _prepare_rocking_line(self, h0, h1, intersect):
+        """Resolve the existing one-pixel sampling limit for this line alone."""
+        step = self.scanSelector.roscanDeltaS.value()
+        maximum = self.scanSelector.roscanMaxS.value()
+
+        def coordinates(width):
+            return self.get_rocking_coordinates(
+                H_0=np.asarray(h0),
+                H_1=np.asarray(h1),
+                step_width=width,
+                maxValue=maximum,
+            )
+
+        def spacing(reflections):
+            points = reflections[f"xy_{intersect}"][reflections[f"mask_{intersect}"]]
+            if len(points) < 2:
+                return np.inf
+            return np.median(np.linalg.norm(np.diff(points, axis=0), axis=1))
+
+        reflections = coordinates(step)
+        if spacing(reflections) < 1.0:
+            try:
+                step = root_scalar(
+                    lambda width: spacing(coordinates(width)) - 1.0000001,
+                    bracket=[step, 5.0],
+                ).root
+                reflections = coordinates(step)
+            except ValueError:
+                logger.warning(
+                    "Cannot resolve detector sampling for line %s + s * %s",
+                    h0,
+                    h1,
+                    exc_info=True,
+                )
+        valid = reflections[f"mask_{intersect}"]
+        for key, source in (
+            ("angles", f"angles_{intersect}"),
+            ("s_masked", "s"),
+            ("hkl_masked", "hkl"),
+        ):
+            reflections[key] = reflections[source][valid]
+        reflections["point_indices"] = np.flatnonzero(valid)
+        samples = reflections["s"]
+        reflections["effective_delta_s"] = (
+            float(samples[1] - samples[0]) if len(samples) > 1 else step
+        )
+        return reflections
+
     def rocking_extraction(self):
         """Start CTR-style rocking extraction along a reciprocal-space line.
 
@@ -1406,14 +1509,56 @@ ub : gui for UB matrix and angle calculations
         refldict["hkl_masked"] = refldict["hkl"][mask]
 
         roi_keys = self.intbkgkeys_rocking(refldict)
-        hkl_del_gam = self.getStaticROIparams(xy)
 
         ro_name = "rocking_[{:.2f} {:.2f} {:.2f}]_H0_[{:.2f} {:.2f} {:.2f}]_H1".format(
             *refldict["H_0"], *refldict["H_1"]
         )
 
         logger.info(f"Start rocking integration of scan {ro_name}")
-        return self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
+        lines = self.scanSelector.get_integration_lines("rocking")
+        if not lines:
+            return self._integrate_prepared_rocking(xy, roi_keys, refldict, ro_name)
+        prepared = []
+        for line in lines:
+            reflections = self._prepare_rocking_line(
+                line["H_0"],
+                line["H_1"],
+                intersect,
+            )
+            valid = reflections[f"mask_{intersect}"]
+            for key, source in (
+                ("angles", f"angles_{intersect}"),
+                ("s_masked", "s"),
+                ("hkl_masked", "hkl"),
+            ):
+                reflections[key] = reflections[source][valid]
+            prepared.append(
+                {
+                    "id": line["id"],
+                    "xy": reflections[f"xy_{intersect}"][valid],
+                    "rois": self.intbkgkeys_rocking(reflections, intersect=intersect),
+                    "reflections": reflections,
+                    "point_indices": reflections["point_indices"],
+                    "effective_delta_s": reflections["effective_delta_s"],
+                    "intersection": intersect,
+                    "name": (
+                        "rocking_[{:.2f} {:.2f} {:.2f}]_H0_"
+                        "[{:.2f} {:.2f} {:.2f}]_H1"
+                    ).format(
+                        *line["H_0"], *line["H_1"]
+                    ),
+                }
+            )
+        return self._run_scan_integration(
+            lambda context: scan_integration.integrate_rocking_scan(
+                context,
+                lines=prepared,
+                geometry_provider=lambda coordinates: (
+                    scan_integration.fixed_roi_geometry(context, coordinates)
+                ),
+                batch_options=getattr(self, "rocking_batch_options", None),
+            )
+        )
 
     def rocking_Bragg_extraction(self):
         """Integrate rocking-scan ROIs centered on Bragg peak coordinates.
@@ -1476,10 +1621,9 @@ ub : gui for UB matrix and angle calculations
         roi_keys = self.intbkgkeys_rocking(
             refldict, autovsize=False, autohsize=False, intersect=1
         )
-        hkl_del_gam = self.getStaticROIparams(xy)
 
         ro_name = "rocking_Bragg"
-        return self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
+        return self._integrate_prepared_rocking(xy, roi_keys, refldict, ro_name)
 
     def rocking_static_extraction(self, xy, hsize, vsize):
         """Integrate fixed detector-pixel ROIs through a rocking scan.
@@ -1518,7 +1662,6 @@ ub : gui for UB matrix and angle calculations
             )
             return {"status": "error", "message": "no scan loaded"}
 
-        hkl_del_gam = self.getStaticROIparams(xy)
         refldict = {"xy_1": xy}
         size_exact = np.vstack([hsize, vsize]).T
 
@@ -1532,7 +1675,7 @@ ub : gui for UB matrix and angle calculations
         )
 
         ro_name = "rocking_static"
-        return self.rocking_integrate(xy, roi_keys, hkl_del_gam, refldict, ro_name)
+        return self._integrate_prepared_rocking(xy, roi_keys, refldict, ro_name)
 
     def _onIntegrateROI(self):
         """GUI-only: integrate the active ROI and report unexpected errors.
@@ -1624,1226 +1767,17 @@ ub : gui for UB matrix and angle calculations
         .. note::
            CLI-capable. Progress reporting is routed through ``logger_utils``.
         """
-        logger.info(f"Start rocking integration of scan {name}")
-        try:
-            image = self.fscan.get_raw_img(0)
-        except Exception:
-            logger.exception(
-                "No image found in current scan.",
-                extra={
-                    "title": "No image found in current scan",
-                    "description": "Cannot integrate scan: No image found in current scan.",  # noqa: E501
-                    "show_dialog": True,
-                    "dialog_level": logging.WARNING,
-                    "parent": self,
-                },
+        return self._run_scan_integration(
+            lambda context: scan_integration.integrate_rocking_scan(
+                context,
+                xylist,
+                rois,
+                refldict,
+                name,
+                geometry=hkl_del_gam,
+                batch_options=getattr(self, "rocking_batch_options", None),
             )
-            return {
-                "status": "error",
-                "message": "No image found in current scan",
-                "traceback": traceback.format_exc(),
-            }
-        if not self.database.isOpen():
-            logger.error(
-                "Cannot integrate scan: No database available.",
-                extra={
-                    "title": "Cannot integrate scan",
-                    "description": "Cannot integrate scan: No database available.",
-                    "show_dialog": True,
-                    "dialog_level": logging.WARNING,
-                    "parent": self,
-                },
-            )
-            return {"status": "error", "message": "No database available"}
-        dc = self.ubcalc.detectorCal
-        rocking_roi_edges = {
-            "x_start": np.asarray(
-                [region[0].start for region in rois["center"]], dtype=np.int64
-            ),
-            "x_stop": np.asarray(
-                [region[0].stop for region in rois["center"]], dtype=np.int64
-            ),
-            "y_start": np.asarray(
-                [region[1].start for region in rois["center"]], dtype=np.int64
-            ),
-            "y_stop": np.asarray(
-                [region[1].stop for region in rois["center"]], dtype=np.int64
-            ),
-        }
-
-        imgmask = None
-
-        if self.scanSelector.useMaskBox.isChecked():
-            imgmask = self.get_detector_mask(image.img.shape)
-            if imgmask is None:
-                if logger_utils.get_logging_context() == "gui":
-                    btn = qt.QMessageBox.question(
-                        self,
-                        "No mask available",
-                        """No mask was selected with the masking tool.
-        Do you want to continue without mask?""",
-                    )
-                    if btn != qt.QMessageBox.Yes:
-                        return {
-                            "status": "cancelled",
-                            "message": "Reason: no mask selected",
-                        }
-                logger.warn("No mask was selected with the masking tool.")
-
-        use_solid_angle = self.scanSelector.useSolidAngleBox.isChecked()
-        use_polarization = self.scanSelector.usePolarizationBox.isChecked()
-        corr = use_solid_angle or use_polarization
-        mask = (
-            np.ascontiguousarray(imgmask, dtype=bool)
-            if imgmask is not None
-            else np.zeros(image.img.shape, dtype=bool)
         )
-
-        # One definition of the per-pixel factors, shared with the rocking
-        # integration and the reciprocal-space reconstruction. It returns None
-        # when neither correction is enabled, so that the reconstruction can
-        # skip its multiplication; here the array of ones is required, because
-        # the branch below that rebuilds it runs only under HAS_ACCEL and the
-        # NumPy-only path would otherwise be handed None.
-        C_arr = detector_corrections.pixel_factors(
-            dc,
-            solid_angle=use_solid_angle,
-            polarization=use_polarization,
-        )
-        if C_arr is None:
-            C_arr = np.ones(dc.detector.shape, dtype=np.float64)
-        P_arr = detector_corrections.pixel_factors(
-            dc, polarization=use_polarization
-        )
-        if P_arr is None:
-            P_arr = np.ones(dc.detector.shape, dtype=np.float64)
-
-        def fill_counters(image, pixelavail, key, bkgkey):
-            """CLI-safe: sum one center ROI and its background ROIs."""
-
-            cimg = image[key[::-1]]
-
-            # !!!!!!!!!! add mask here  !!!!!!!!!
-            croi = np.nansum(cimg)
-            cpixel = np.nansum(pixelavail[key[::-1]])
-            bgroi = 0.0
-            bgpixel = 0.0
-            for bg in bkgkey:
-                bgimg = image[bg[::-1]]
-                bgroi += np.nansum(bgimg)
-                bgpixel += np.nansum(pixelavail[bg[::-1]])
-
-            return (croi, cpixel, bgroi, bgpixel)
-
-        hkl_del_gam_1 = hkl_del_gam[0]  # needed to initialize integration
-
-        # initialize 1d np arrays for storing roi integration counters for all images
-        croi1_a = np.zeros_like(hkl_del_gam_1.shape[0], dtype=np.float64)
-        cpixel1_a = np.zeros_like(hkl_del_gam_1.shape[0], dtype=np.float64)
-        bgroi1_a = np.zeros_like(hkl_del_gam_1.shape[0], dtype=np.float64)
-        bgpixel1_a = np.zeros_like(hkl_del_gam_1.shape[0], dtype=np.float64)
-
-        # initialize 2d np array to store roi integration counters together for all images/ROIs  # noqa: E501
-        croi1_all = np.zeros(
-            (hkl_del_gam_1.shape[0],) + (xylist.shape[0],), dtype=np.float64
-        )
-        cpixel1_all = np.zeros(
-            (hkl_del_gam_1.shape[0],) + (xylist.shape[0],), dtype=np.float64
-        )
-        bgroi1_all = np.zeros(
-            (hkl_del_gam_1.shape[0],) + (xylist.shape[0],), dtype=np.float64
-        )
-        bgpixel1_all = np.zeros(
-            (hkl_del_gam_1.shape[0],) + (xylist.shape[0],), dtype=np.float64
-        )
-        Corr_croi1_all = np.zeros(
-            (hkl_del_gam_1.shape[0],) + (xylist.shape[0],), dtype=np.float64
-        )
-        Corr_cpixel1_all = np.zeros(
-            (hkl_del_gam_1.shape[0],) + (xylist.shape[0],), dtype=np.float64
-        )
-        Corr_bgroi1_all = np.zeros(
-            (hkl_del_gam_1.shape[0],) + (xylist.shape[0],), dtype=np.float64
-        )
-        Corr_bgpixel1_all = np.zeros(
-            (hkl_del_gam_1.shape[0],) + (xylist.shape[0],), dtype=np.float64
-        )
-
-        bgimg_croi1_all = np.zeros(
-            (hkl_del_gam_1.shape[0],) + (xylist.shape[0],), dtype=np.float64
-        )
-        bgimg_cpixel1_all = np.zeros(
-            (hkl_del_gam_1.shape[0],) + (xylist.shape[0],), dtype=np.float64
-        )
-        bgimg_bgroi1_all = np.zeros(
-            (hkl_del_gam_1.shape[0],) + (xylist.shape[0],), dtype=np.float64
-        )
-        bgimg_bgpixel1_all = np.zeros(
-            (hkl_del_gam_1.shape[0],) + (xylist.shape[0],), dtype=np.float64
-        )
-
-        progress = logger_utils.create_progress_logger(
-            self, len(self.fscan), "Integrating images"
-        )
-
-        background_image = self.background_image
-        has_bg_img = False
-        roioptions = self.scanSelector.roioptions.get_parameters()
-        use_fitted_background = bool(roioptions.get("fitted_background", False))
-        fitted_background_order = int(roioptions.get("fitted_background_order", 1))
-        if use_fitted_background and not HAS_ACCEL:
-            logger.warning(
-                "Fitted local background requires the compiled ROI accelerator; "
-                "using summed background ROIs instead."
-            )
-        if use_fitted_background and fitted_background_order >= 1:
-            logger.warning(
-                "Fitted local background order %d underestimates the "
-                "background error: the saved uncertainty still assumes an "
-                "unweighted flat-background sample and does not propagate "
-                "the polynomial fit's covariance.",
-                fitted_background_order,
-            )
-        repair_enabled = False
-        roi_lists_accel = None
-        if HAS_ACCEL:
-            repair_enabled, repair, row_gaps, col_gaps = self._repair_config_for_image(
-                image.img.shape
-            )
-            if repair_enabled and use_fitted_background:
-                logger.warning(
-                    "Pixel repair is disabled for fitted local background; "
-                    "using the original mask for this integration."
-                )
-                repair_enabled = False
-            if corr:
-                C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
-            else:
-                C_arr = np.ones(image.img.shape, dtype=np.float64)
-            if not repair_enabled:
-                C_arr[mask] = np.nan
-
-            roi_lists_accel = []
-            for roiname in ["center", "left", "right", "top", "bottom"]:
-                roi_list = []
-                for r in rois[roiname]:
-                    roi_list.append(
-                        np.array([[r[0].start, r[0].stop], [r[1].start, r[1].stop]])
-                    )
-                roi_list = np.ascontiguousarray(np.stack(roi_list), dtype=np.int64)
-                roi_lists_accel.append(roi_list)
-            if (
-                background_image is not None
-                and background_image.shape == image.img.shape
-            ):
-                if use_fitted_background:
-                    logger.warning(
-                        "Fitted local background is ignored when a background "
-                        "image is selected."
-                    )
-                bg = background_image.astype(np.float64, order="C", copy=True)
-                bg[mask] = np.nan
-                has_bg_img = True
-
-                def sumImage(i):
-                    """CLI-safe worker: read and integrate one image with background."""
-                    image = self.fscan.get_raw_img(i).img.astype(
-                        np.float64, order="C", copy=True
-                    )  # unlocks gil during file read
-
-                    all_counters = np.zeros(
-                        (roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    Carr_counters = np.zeros(
-                        (roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    BgImg_counters = np.zeros(
-                        (roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    if repair_enabled:
-                        _roi_sum_accel.processImage_repair_bg_Carr(
-                            image,
-                            bg,
-                            mask,
-                            C_arr,
-                            *roi_lists_accel,
-                            row_gaps,
-                            col_gaps,
-                            all_counters,
-                            Carr_counters,
-                            BgImg_counters,
-                            repair.max_component_pixels,
-                            repair.max_span,
-                            repair.radius,
-                            repair.min_valid_neighbors,
-                        )  # compiled accelerator releases the GIL
-                    else:
-                        _roi_sum_accel.processImage_bg_Carr(
-                            image,
-                            bg,
-                            mask,
-                            C_arr,
-                            *roi_lists_accel,
-                            all_counters,
-                            Carr_counters,
-                            BgImg_counters,
-                        )  # compiled accelerator releases the GIL
-                    return all_counters, Carr_counters, BgImg_counters
-            else:
-
-                def sumImage(i):
-                    """CLI-safe worker: read and integrate one image."""
-                    image = self.fscan.get_raw_img(i).img.astype(
-                        np.float64, order="C", copy=True
-                    )  # unlocks gil during file read
-
-                    Carr_counters = np.zeros(
-                        (roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    all_counters = np.zeros(
-                        (roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    if use_fitted_background:
-                        _roi_sum_accel.processImage_polybg_Carr(
-                            image,
-                            mask,
-                            C_arr,
-                            *roi_lists_accel,
-                            all_counters,
-                            Carr_counters,
-                            fitted_background_order,
-                        )  # compiled accelerator releases the GIL
-                    elif repair_enabled:
-                        _roi_sum_accel.processImage_repair_Carr(
-                            image,
-                            mask,
-                            C_arr,
-                            *roi_lists_accel,
-                            row_gaps,
-                            col_gaps,
-                            all_counters,
-                            Carr_counters,
-                            repair.max_component_pixels,
-                            repair.max_span,
-                            repair.radius,
-                            repair.min_valid_neighbors,
-                        )  # compiled accelerator releases the GIL
-                    else:
-                        _roi_sum_accel.processImage_Carr(
-                            image,
-                            mask,
-                            C_arr,
-                            *roi_lists_accel,
-                            all_counters,
-                            Carr_counters,
-                        )  # compiled accelerator releases the GIL
-                    return all_counters, Carr_counters
-
-        else:
-            has_bg_img = (
-                background_image is not None
-                and background_image.shape == image.img.shape
-            )
-
-            def sumImage(i):
-                """CLI-safe worker: read and integrate one image without acceleration."""  # noqa: E501
-                image = self.fscan.get_raw_img(i).img.astype(
-                    np.float64, order="C", copy=True
-                )
-                if imgmask is not None:
-                    image[imgmask] = np.nan
-                    pixelavail = (~imgmask).astype(np.float64)
-                else:
-                    pixelavail = np.ones_like(image)
-
-                # Keep raw counts and correction factors separate, matching
-                # the accelerated path.  Applying C_arr to image here would
-                # corrupt the Poisson counts used for error propagation.
-                all_counters = np.zeros((xylist.shape[0], 4), dtype=np.float64)
-                Carr_counters = np.zeros_like(all_counters)
-                correction_image = C_arr.copy()
-                if imgmask is not None:
-                    correction_image[imgmask] = np.nan
-
-                if has_bg_img:
-                    background = background_image.astype(
-                        np.float64, order="C", copy=True
-                    )
-                    if imgmask is not None:
-                        background[imgmask] = np.nan
-                    BgImg_counters = np.zeros_like(all_counters)
-
-                for crnr in range(xylist.shape[0]):
-                    # set ROI (moved to rocking-function)
-
-                    # get roi
-                    key = rois["center"][crnr]
-                    bgkey = [
-                        rois["left"][crnr],
-                        rois["right"][crnr],
-                        rois["top"][crnr],
-                        rois["bottom"][crnr],
-                    ]
-                    # fill counters
-                    all_counters[crnr] = fill_counters(
-                        image, pixelavail, key, bgkey
-                    )
-                    Carr_counters[crnr] = fill_counters(
-                        correction_image, pixelavail, key, bgkey
-                    )
-                    if has_bg_img:
-                        BgImg_counters[crnr] = fill_counters(
-                            background, pixelavail, key, bgkey
-                        )
-
-                if has_bg_img:
-                    return all_counters, Carr_counters, BgImg_counters
-                return all_counters, Carr_counters
-
-        cancelled = False
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.numberthreads
-        ) as executor:
-            futures = {}
-            for i in range(len(self.fscan)):
-                futures[executor.submit(sumImage, i)] = i
-
-            status = "no error"
-            for f in concurrent.futures.as_completed(futures):  # iteration over jobs
-                try:
-                    i = futures[f]
-                    if has_bg_img:
-                        img_counters, Carr_counters, BgImg_counters = f.result()
-                        bgimg_croi1_all[i] = BgImg_counters.T[0]
-                        bgimg_cpixel1_all[i] = BgImg_counters.T[1]
-                        bgimg_bgroi1_all[i] = BgImg_counters.T[2]
-                        bgimg_bgpixel1_all[i] = BgImg_counters.T[3]
-                    else:
-                        img_counters, Carr_counters = f.result()
-
-                    croi1_all[i] = img_counters.T[0]
-                    cpixel1_all[i] = img_counters.T[1]
-                    bgroi1_all[i] = img_counters.T[2]
-                    bgpixel1_all[i] = img_counters.T[3]
-
-                    Corr_croi1_all[i] = Carr_counters.T[0]
-                    Corr_cpixel1_all[i] = Carr_counters.T[1]
-                    Corr_bgroi1_all[i] = Carr_counters.T[2]
-                    Corr_bgpixel1_all[i] = Carr_counters.T[3]
-                    # for j in range(len(img_counters)): # iteration over ROIs
-                    #    (croi1, cpixel1, bgroi1, bgpixel1) = img_counters[j]
-                    #
-                    #    croi1_all[i][j] = croi1
-                    #    cpixel1_all[i][j] = cpixel1
-                    #    bgroi1_all[i][j] = bgroi1
-                    #    bgpixel1_all[i][j] = bgpixel1
-                    progress.update(futures[f])
-                    del f
-                except concurrent.futures.CancelledError:
-                    pass
-                except Exception:
-                    logger.warn(
-                        f"Cannot read image, cancel to avoid memory leak:\n{traceback.format_exc()}"  # noqa: E501
-                    )
-                    [f.cancel() for f in futures]
-                    cancelled = True
-                    status = "error"
-                    exc_info = sys.exc_info()
-                if progress.wasCanceled():
-                    cancelled = True
-                    [f.cancel() for f in futures]
-                    break
-
-        progress.finish()
-        if cancelled:
-            if status == "error":
-                trace = "".join(traceback.format_exception(*exc_info))
-                logger.error(
-                    "Error during integration",
-                    exc_info=exc_info,
-                    extra={
-                        "title": "Error during integration",
-                        "description": "Error during integration. Integration was aborted.",  # noqa: E501
-                        "show_dialog": True,
-                        "dialog_level": logging.ERROR,
-                        "parent": self,
-                    },
-                )
-                return {
-                    "status": "error",
-                    "message": "Error during integration",
-                    "traceback": trace,
-                }
-            else:
-                return {
-                    "status": "cancelled",
-                    "message": "Reason: Cancelled during integration",
-                }
-
-        # Accumulate polarization independently of the combined pixel factor.
-        # This uses the same center/background regions and valid-pixel policy
-        # as the raw ROI counters, including repaired center pixels when that
-        # path is active. The result is geometry-only and therefore needs to
-        # be calculated once for all frames of a rocking extraction.
-        polarization_counters = np.zeros((xylist.shape[0], 4), dtype=np.float64)
-        if use_polarization and HAS_ACCEL and repair_enabled:
-            dummy_counters = np.zeros_like(polarization_counters)
-            _roi_sum_accel.processImage_repair_Carr(
-                np.ones(image.img.shape, dtype=np.float64),
-                mask,
-                np.ascontiguousarray(P_arr, dtype=np.float64),
-                *roi_lists_accel,
-                row_gaps,
-                col_gaps,
-                dummy_counters,
-                polarization_counters,
-                repair.max_component_pixels,
-                repair.max_span,
-                repair.radius,
-                repair.min_valid_neighbors,
-            )
-        else:
-            for crnr in range(xylist.shape[0]):
-                polarization_counters[crnr] = _correction_region_counters(
-                    P_arr,
-                    mask,
-                    rois["center"][crnr],
-                    [
-                        rois["left"][crnr],
-                        rois["right"][crnr],
-                        rois["top"][crnr],
-                        rois["bottom"][crnr],
-                    ],
-                )
-        P_croi = integration_corrections.roi_mean_correction(
-            polarization_counters[:, 0], polarization_counters[:, 1]
-        )
-        P_bgroi = integration_corrections.roi_mean_correction(
-            polarization_counters[:, 2], polarization_counters[:, 3]
-        )
-        nominal_rocking_pixels = np.asarray(
-            [
-                (region[0].stop - region[0].start)
-                * (region[1].stop - region[1].start)
-                for region in rois["center"]
-            ],
-            dtype=np.float64,
-        )
-        _warn_masked_peak_scaling(
-            cpixel1_all,
-            np.broadcast_to(nominal_rocking_pixels, cpixel1_all.shape),
-            "Rocking extraction",
-        )
-
-        currentPlotCount = len(self.integrdataPlot.getAllCurves())
-        numberOfNewPlots = xylist.shape[0]
-        maxAmountOfPlots = 30
-        plotOnlyNth = (
-            numberOfNewPlots // max((maxAmountOfPlots - currentPlotCount), 1)
-        ) + 1
-
-        # print('Number of integration curves: ' + str(numberOfPlots))
-        # print('We can plot every ' + str(plotOnlyNth) + '-th curve.' )
-
-        suffix = ""
-        i = 0
-        while (
-            self.activescanname + "/measurement/" + name + suffix
-            in self.database.nxfile
-        ):
-            suffix = f"_{i}"
-            i += 1
-        name = name + suffix
-
-        auxcounters = {"@NX_class": "NXcollection"}
-        for auxname in self.fscan.auxillary_counters:
-            if hasattr(self.fscan, auxname):
-                cntr = getattr(self.fscan, auxname)
-                if cntr is not None:
-                    auxcounters[auxname] = cntr
-
-        if hasattr(self.fscan, "title"):
-            title = str(self.fscan.title)
-        else:
-            title = f"{self.fscan.axisname}-scan"
-
-        mu, om = self.getMuOm()
-        if len(np.asarray(om).shape) == 0:
-            om = np.full_like(mu, om)
-        if len(np.asarray(mu).shape) == 0:
-            mu = np.full_like(om, mu)
-        gamma_arm, delta_arm = self.getArmAngles()
-        gamma_arm = np.broadcast_to(
-            np.asarray(gamma_arm, dtype=np.float64), (len(self.fscan),)
-        ).copy()
-        delta_arm = np.broadcast_to(
-            np.asarray(delta_arm, dtype=np.float64), (len(self.fscan),)
-        ).copy()
-
-        config_snapshot = ConfigData.from_gui(self)
-        data = {
-            self.activescanname: {  # legacy, to be removed!
-                "instrument": {
-                    "@NX_class": "NXinstrument",
-                    "positioners": {
-                        "@NX_class": "NXcollection",
-                        self.fscan.axisname: self.fscan.axis,
-                    },
-                },
-                "auxillary": auxcounters,
-                "measurement": {
-                    "@NX_class": "NXentry",
-                    "@default": name,
-                    name: {
-                        "@NX_class": "NXentry",
-                        "@default": "rois",
-                        "@orgui_meta": "rocking",
-                        "rois": {
-                            "@NX_class": "NXcollection",
-                            "@default": None,
-                            "@orgui_meta": "roi rocking",
-                        },
-                    },
-                },
-                "title": f"{title}",
-                "configuration": config_snapshot.to_nxdict(
-                    role="scan", source="scan_import"
-                ),
-                "@NX_class": "NXentry",
-                "@default": f"measurement/{name}",
-                "@orgui_meta": "scan",
-            }
-        }
-
-        croibg1_bgimg_a = None
-        croibg1_bgimg_err_a = None
-
-        # plot and save data in database
-        for d in range(croi1_all.shape[1]):
-            roi_d = rois["center"][d]
-            roi_size = (roi_d[0].stop - roi_d[0].start) * (
-                roi_d[1].stop - roi_d[1].start
-            )
-
-            hkl_del_gam_1 = hkl_del_gam[d]
-
-            croi1_a = croi1_all[..., d]
-            cpixel1_a = cpixel1_all[..., d]
-            bgroi1_a = bgroi1_all[..., d]
-            bgpixel1_a = bgpixel1_all[..., d]
-
-            Corr_croi1_a = Corr_croi1_all[..., d]
-            Corr_cpixel1_a = Corr_cpixel1_all[..., d]
-            # NOTE: Corr_bgroi1_a is stored as Cfactors_bgroi but is not applied.
-            # The background is corrected with the center ROI's mean factor; see
-            # the audit note in the changelog.
-            Corr_bgroi1_a = Corr_bgroi1_all[..., d]
-
-            bgimg_croi1_a = bgimg_croi1_all[..., d]
-            bgimg_cpixel1_a = bgimg_cpixel1_all[..., d]
-            bgimg_bgroi1_a = bgimg_bgroi1_all[..., d]
-            bgimg_bgpixel1_a = bgimg_bgpixel1_all[..., d]
-
-            # Mean correction over the valid pixels of the center ROI; see
-            # the stationary path for why the ROI area must not appear here.
-            Corr1 = integration_corrections.roi_mean_correction(
-                Corr_croi1_a, Corr_cpixel1_a
-            )
-
-            if np.any(
-                bgimg_cpixel1_a
-            ):  # assume the background image has no errors (would need a separate error image for that)  # noqa: E501
-                bgimg_croi1_norm = bgimg_croi1_a * (cpixel1_a / bgimg_cpixel1_a)
-                if np.any(bgpixel1_a):
-                    bgimg_bgroi1_norm = bgimg_bgroi1_a * (bgpixel1_a / bgimg_bgpixel1_a)
-
-                    # method 1: simply subtract bg image from data and then subtract the remaining background  # noqa: E501
-                    croibg1_a = (
-                        (croi1_a - bgimg_croi1_norm)
-                        - (cpixel1_a / bgpixel1_a) * (bgroi1_a - bgimg_bgroi1_norm)
-                    ) * (roi_size / cpixel1_a)
-                    croibg1_err_a = np.sqrt(
-                        croi1_a + ((cpixel1_a / bgpixel1_a) ** 2) * bgroi1_a
-                    ) * (roi_size / cpixel1_a)
-
-                    # method 2: scale bg image croi and subtract scaled bg image croi. Use ratio of bgroi of image and bg image as scale factor.  # noqa: E501
-                    factor = bgroi1_a / bgimg_bgroi1_norm
-                    croibg1_bgimg_a = (croi1_a - factor * bgimg_croi1_norm) * (
-                        roi_size / cpixel1_a
-                    )
-                    # NOTE: this error term reuses the unscaled method-1 formula and
-                    # does not propagate `factor`. It is only exact when the
-                    # background image is spatially flat across both the center and
-                    # background ROI footprints; for a structured background image it
-                    # underestimates or overestimates the true error.
-                    croibg1_bgimg_err_a = np.sqrt(
-                        croi1_a + ((cpixel1_a / bgpixel1_a) ** 2) * bgroi1_a
-                    ) * (roi_size / cpixel1_a)
-
-                else:  # not possible if no bgroi is set.
-                    croibg1_a = (croi1_a - bgimg_croi1_norm) * (roi_size / cpixel1_a)
-                    croibg1_err_a = np.sqrt(croi1_a) * (roi_size / cpixel1_a)
-
-            else:  # no background image
-                if np.any(bgpixel1_a):
-                    croibg1_a = (croi1_a - (cpixel1_a / bgpixel1_a) * bgroi1_a) * (
-                        roi_size / cpixel1_a
-                    )
-                    croibg1_err_a = np.sqrt(
-                        croi1_a + ((cpixel1_a / bgpixel1_a) ** 2) * bgroi1_a
-                    ) * (roi_size / cpixel1_a)
-                else:
-                    croibg1_a = croi1_a * (roi_size / cpixel1_a)
-                    croibg1_err_a = np.sqrt(croi1_a) * (roi_size / cpixel1_a)
-
-            base_croibg1 = np.asarray(croibg1_a, dtype=np.float64).copy()
-            base_croibg1_err = np.asarray(croibg1_err_a, dtype=np.float64).copy()
-            pol_arm1 = np.ones_like(base_croibg1)
-            if use_polarization:
-                # Corr1 carries the polarization of the calibrated geometry;
-                # move it onto the arm position of each frame (finding F5).
-                # Exactly 1 for a detector whose arm does not move.
-                pol_arm1 = self._polarizationArmFactor(
-                    dc,
-                    xylist[d][1],
-                    xylist[d][0],
-                    roi_d[1].stop - roi_d[1].start,
-                    roi_d[0].stop - roi_d[0].start,
-                    mu,
-                )
-
-            (
-                croibg1_a,
-                croibg1_err_a,
-                ctr_croibg1_a,
-                ctr_croibg1_err_a,
-            ) = integration_corrections.pixel_correction_branches(
-                base_croibg1,
-                base_croibg1_err,
-                Corr1,
-                P_croi[d],
-                pol_arm1,
-            )
-            combined_croi_factor = Corr1 * pol_arm1
-            combined_bgroi_factor = (
-                integration_corrections.roi_mean_correction(
-                    Corr_bgroi1_a, Corr_bgpixel1_all[..., d]
-                )
-                * pol_arm1
-            )
-            polarization_croi_factor = P_croi[d] * pol_arm1
-            polarization_bgroi_factor = P_bgroi[d] * pol_arm1
-            if croibg1_bgimg_a is not None:
-                croibg1_bgimg_a = croibg1_bgimg_a * combined_croi_factor
-                croibg1_bgimg_err_a = (
-                    croibg1_bgimg_err_a * combined_croi_factor
-                )
-
-            rod_mask1 = np.isfinite(croibg1_a)
-
-            axis_masked = hkl_del_gam_1[:, 5][rod_mask1]
-
-            croibg1_a_masked = croibg1_a[rod_mask1]
-
-            croibg1_err_a_masked = croibg1_err_a[rod_mask1]
-
-            # save data
-
-            x, y = xylist[d]
-            name1 = f"rocking_{d}"
-            if "angles" in refldict:
-                alpha1, delta1, gamma1, omega1, chi1, phi1 = refldict["angles"][d]
-                sixc_angles_hkl = {
-                    "@NX_class": "NXpositioner",
-                    "alpha": np.rad2deg(alpha1),
-                    "omega": np.rad2deg(omega1),
-                    "theta": np.rad2deg(-1 * omega1),
-                    "delta": np.rad2deg(delta1),
-                    "gamma": np.rad2deg(gamma1),
-                    "chi": np.rad2deg(chi1),
-                    "phi": np.rad2deg(phi1),
-                    "@unit": "deg",
-                }
-                traj1 = {
-                    # "@direction" : u"Rocking scan at fixed pixel location along H_1*s + H_0 in reciprocal space",  # noqa: E501
-                    "@NX_class": "NXcollection",
-                    "axis": hkl_del_gam_1[:, 5],
-                    "HKL_sixc_angles": sixc_angles_hkl,
-                }
-                # determine the type of rocking scan:
-                if "H_1" in refldict:  # H_1 * s H_0 -like rocking scan (CTR scan)
-                    traj1["s"] = refldict["s_masked"][d]
-                    traj1["H_1"] = refldict["H_1"]
-                    traj1["H_0"] = refldict["H_0"]
-                    # equal refldict['hkl_masked']?
-                    traj1["HKL_pk"] = (
-                        refldict["H_1"] * refldict["s_masked"][d] + refldict["H_0"]
-                    )
-                elif "s_masked" in refldict:
-                    traj1["s"] = refldict["s_masked"][d]
-                    traj1["HKL_pk"] = refldict["hkl_masked"][d]
-            else:
-                traj1 = {
-                    # "@direction" : u"Rocking scan at fixed pixel location along H_1*s + H_0 in reciprocal space",  # noqa: E501
-                    "@NX_class": "NXcollection",
-                    "axis": hkl_del_gam_1[:, 5],
-                }
-
-            suffix = ""
-            i = 0
-
-            while (
-                self.activescanname + "/measurement/" + name + "/" + name1 + suffix
-                in self.database.nxfile
-            ):
-                suffix = f"_{i}"
-                i += 1
-
-            availname1 = name1 + suffix
-
-            x, y = xylist[d]  #
-            # x_coord1_a = xylist[:,0]
-            # y_coord1_a = xylist[:,1]
-
-            datas1 = {
-                "@NX_class": "NXdata",
-                "sixc_angles": {
-                    "@NX_class": "NXpositioner",
-                    "alpha": np.rad2deg(mu),
-                    "omega": np.rad2deg(om),
-                    "theta": np.rad2deg(-1 * om),
-                    "delta": np.rad2deg(hkl_del_gam_1[:, 3]),
-                    "gamma": np.rad2deg(hkl_del_gam_1[:, 4]),
-                    "chi": np.rad2deg(self.ubcalc.chi),
-                    "phi": np.rad2deg(self.ubcalc.phi),
-                    "@unit": "deg",
-                },
-                "hkl": {
-                    "@NX_class": "NXcollection",
-                    "h": hkl_del_gam_1[:, 0],
-                    "k": hkl_del_gam_1[:, 1],
-                    "l": hkl_del_gam_1[:, 2],
-                },
-                "counters": {
-                    "@NX_class": "NXdetector",
-                    "croibg": croibg1_a,
-                    "croibg_errors": croibg1_err_a,
-                    "ctr_croibg": ctr_croibg1_a,
-                    "ctr_croibg_errors": ctr_croibg1_err_a,
-                    "croibg_bgimg": croibg1_bgimg_a,  # when None, will not create data set  # noqa: E501
-                    "croibg_bgimg_errors": croibg1_bgimg_err_a,  # when None, will not create data set  # noqa: E501
-                    "croi": croi1_a,
-                    "bgroi": bgroi1_a,
-                    "croi_pix": cpixel1_a,
-                    "bgroi_pix": bgpixel1_a,
-                    "Cfactors_croi": Corr_croi1_a,
-                    "Cfactors_bgroi": Corr_bgroi1_a,
-                    "Cfactor_croi": combined_croi_factor,
-                    "Cfactor_bgroi": combined_bgroi_factor,
-                    "Pfactor_croi": polarization_croi_factor,
-                    "Pfactor_bgroi": polarization_bgroi_factor,
-                    "bgimg_croi": bgimg_croi1_a,
-                    "bgimg_bgroi": bgimg_bgroi1_a,
-                },
-                "pixelcoord": {
-                    "@NX_class": "NXdetector",
-                    "x": x,
-                    "y": y,
-                    "vsize": (roi_d[1].stop - roi_d[1].start),
-                    "hsize": (roi_d[0].stop - roi_d[0].start),
-                },
-                "trajectory": traj1,
-                "@signal": "counters/croibg",
-                "@axes": "trajectory/axis",
-                "@title": self.activescanname + "_" + availname1,
-                "@orgui_meta": "roi rocking",
-                "configuration": config_snapshot.to_nxdict(
-                    role="integration", source="integration_save"
-                ),
-            }
-
-            data[self.activescanname]["measurement"][name]["rois"]["@default"] = (
-                availname1
-            )
-            if np.any(cpixel1_a > 0.0):
-                data[self.activescanname]["measurement"][name]["rois"][availname1] = (
-                    datas1
-                )
-                if d % plotOnlyNth == 0 and not min(croibg1_a_masked) == max(
-                    croibg1_a_masked
-                ):
-                    self.integrdataPlot.addCurve(
-                        axis_masked,
-                        croibg1_a_masked,
-                        legend=self.activescanname + "_" + availname1,
-                        xlabel=f"trajectory/{self.fscan.axisname}",
-                        ylabel="counters/croibg",
-                        yerror=croibg1_err_a_masked,
-                    )
-
-        # lets keep legacy data structure for now
-
-        data_2d_structured = {
-            self.activescanname: {
-                "instrument": {
-                    "@NX_class": "NXinstrument",
-                    "positioners": {
-                        "@NX_class": "NXcollection",
-                        self.fscan.axisname: self.fscan.axis,
-                    },
-                },
-                "auxillary": auxcounters,
-                "measurement": {
-                    "@NX_class": "NXentry",
-                    "@default": name,
-                    name: {
-                        "@NX_class": "NXentry",
-                        "@default": "rois",
-                        "@orgui_meta": "rocking",
-                        "configuration": config_snapshot.to_nxdict(
-                            role="integration", source="integration_save"
-                        ),
-                    },
-                },
-                "title": f"{title}",
-                "configuration": config_snapshot.to_nxdict(
-                    role="scan", source="scan_import"
-                ),
-                "@NX_class": "NXentry",
-                "@default": f"measurement/{name}",
-                "@orgui_meta": "scan",
-            }
-        }
-        alpha = []
-        theta = []
-        delta = []
-        gamma = []
-        chi = []
-        phi = []
-        omega = []
-        alpha_pk = []
-        theta_pk = []
-        delta_pk = []
-        gamma_pk = []
-        chi_pk = []
-        phi_pk = []
-        omega_pk = []
-        x = []
-        y = []
-        h = []
-        k = []
-        l = []  # noqa: E741
-        croibg = []
-        croibg_errors = []
-        ctr_croibg = []
-        ctr_croibg_errors = []
-        croi = []
-        bgroi = []
-        croi_pix = []
-        bgroi_pix = []
-        croibg_bgimg = []
-        croibg_bgimg_errors = []
-        Cfactors_croi = []
-        Cfactors_bgroi = []
-        Cfactor_croi = []
-        Cfactor_bgroi = []
-        Pfactor_croi = []
-        Pfactor_bgroi = []
-        bgimg_croi = []
-        bgimg_bgroi = []
-        axis = []
-        s = []
-        H_0 = []
-        H_1 = []
-        HKL_pk = []
-        vsize = []
-        hsize = []
-
-        # from IPython import embed; embed()
-
-        optional_labels = {"s": s, "H_1": H_1, "H_0": H_0, "HKL_pk": HKL_pk}
-
-        for sc in data[self.activescanname]["measurement"][name]["rois"]:
-            if sc.startswith("@"):
-                continue
-            try:
-                dsc = data[self.activescanname]["measurement"][name]["rois"][sc]
-
-                # 2D arrays
-                alpha.append(dsc["sixc_angles"]["alpha"])
-                theta.append(dsc["sixc_angles"]["theta"])
-                delta.append(dsc["sixc_angles"]["delta"])
-                gamma.append(dsc["sixc_angles"]["gamma"])
-                chi.append(dsc["sixc_angles"]["chi"])
-                phi.append(dsc["sixc_angles"]["phi"])
-                omega.append(dsc["sixc_angles"]["omega"])
-
-                # 2D arrays
-                h.append(dsc["hkl"]["h"])
-                k.append(dsc["hkl"]["k"])
-                l.append(dsc["hkl"]["l"])
-
-                # 2D arrays
-                croibg.append(dsc["counters"]["croibg"])
-                croibg_errors.append(dsc["counters"]["croibg_errors"])
-                ctr_croibg.append(dsc["counters"]["ctr_croibg"])
-                ctr_croibg_errors.append(dsc["counters"]["ctr_croibg_errors"])
-                croi.append(dsc["counters"]["croi"])
-                bgroi.append(dsc["counters"]["bgroi"])
-                croi_pix.append(dsc["counters"]["croi_pix"])
-                bgroi_pix.append(dsc["counters"]["bgroi_pix"])
-                if dsc["counters"]["croibg_bgimg"] is not None:
-                    croibg_bgimg.append(dsc["counters"]["croibg_bgimg"])
-                    croibg_bgimg_errors.append(dsc["counters"]["croibg_bgimg_errors"])
-                Cfactors_croi.append(dsc["counters"]["Cfactors_croi"])
-                Cfactors_bgroi.append(dsc["counters"]["Cfactors_bgroi"])
-                Cfactor_croi.append(dsc["counters"]["Cfactor_croi"])
-                Cfactor_bgroi.append(dsc["counters"]["Cfactor_bgroi"])
-                Pfactor_croi.append(dsc["counters"]["Pfactor_croi"])
-                Pfactor_bgroi.append(dsc["counters"]["Pfactor_bgroi"])
-                bgimg_croi.append(dsc["counters"]["bgimg_croi"])
-                bgimg_bgroi.append(dsc["counters"]["bgimg_bgroi"])
-
-                # 1D arrays
-                x.append(dsc["pixelcoord"]["x"])
-                y.append(dsc["pixelcoord"]["y"])
-
-                # 1D arrays
-                vsize.append(dsc["pixelcoord"]["vsize"])
-                hsize.append(dsc["pixelcoord"]["hsize"])
-
-                axis.append(dsc["trajectory"]["axis"])
-
-                for lbl in optional_labels:
-                    if lbl in dsc["trajectory"]:
-                        optional_labels[lbl].append(dsc["trajectory"][lbl])
-
-                # 1d Array
-                if "HKL_sixc_angles" in dsc["trajectory"]:
-                    alpha_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["alpha"])
-                    theta_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["theta"])
-                    delta_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["delta"])
-                    gamma_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["gamma"])
-                    chi_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["chi"])
-                    phi_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["phi"])
-                    omega_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["omega"])
-            except Exception:
-                logger.exception(
-                    "Unexpected exception while creating data sets to save"
-                )
-                # from IPython import embed; embed()
-                # sys.exit(0)
-
-        rois = {
-            "@NX_class": "NXcollection",
-            "@default": "croibg",
-            "@orgui_meta": "roi rocking",
-            "alpha": np.vstack(alpha),
-            "theta": np.vstack(theta),
-            "delta": np.vstack(delta),
-            "gamma": np.vstack(gamma),
-            "chi": np.vstack(chi),
-            "phi": np.vstack(phi),
-            "omega": np.vstack(omega),
-            "h": np.vstack(h),
-            "k": np.vstack(k),
-            "l": np.vstack(l),
-            "croibg": np.vstack(croibg),
-            "croibg_errors": np.vstack(croibg_errors),
-            "ctr_croibg": np.vstack(ctr_croibg),
-            "ctr_croibg_errors": np.vstack(ctr_croibg_errors),
-            "croi": np.vstack(croi),
-            "bgroi": np.vstack(bgroi),
-            "croi_pix": np.vstack(croi_pix),
-            "bgroi_pix": np.vstack(bgroi_pix),
-            "Cfactors_croi": np.vstack(Cfactors_croi),
-            "Cfactors_bgroi": np.vstack(Cfactors_bgroi),
-            "Cfactor_croi": np.vstack(Cfactor_croi),
-            "Cfactor_bgroi": np.vstack(Cfactor_bgroi),
-            "Pfactor_croi": np.vstack(Pfactor_croi),
-            "Pfactor_bgroi": np.vstack(Pfactor_bgroi),
-            "bgimg_croi": np.vstack(bgimg_croi),
-            "bgimg_bgroi": np.vstack(bgimg_bgroi),
-            "x": np.array(x),
-            "y": np.array(y),
-            "vsize": np.array(vsize),
-            "hsize": np.array(hsize),
-            "axis": np.vstack(axis),
-            # True scattering angles are repeated for each extracted curve
-            # because its peak can occur at a different source frame.
-            **_rocking_arm_snapshot(
-                gamma_arm, delta_arm, np.vstack(alpha).shape
-            ),
-        }
-        if alpha_pk:
-            rois["alpha_pk"] = np.array(alpha_pk)
-            rois["theta_pk"] = np.array(theta_pk)
-            rois["delta_pk"] = np.array(delta_pk)
-            rois["gamma_pk"] = np.array(gamma_pk)
-            rois["chi_pk"] = np.array(chi_pk)
-            rois["phi_pk"] = np.array(phi_pk)
-            rois["omega_pk"] = np.array(omega_pk)
-
-        if croibg_bgimg:
-            rois["croibg_bgimg"] = np.vstack(croibg_bgimg)
-            rois["croibg_bgimg_errors"] = np.vstack(croibg_bgimg_errors)
-
-        for lbl in optional_labels:
-            if optional_labels[lbl]:
-                rois[lbl] = np.squeeze(np.vstack(optional_labels[lbl]))
-
-        scsize = rois["axis"].shape[0]
-        for t in rois:
-            if t.startswith("@"):
-                continue
-            if rois[t].shape[0] != scsize:
-                logger.error(
-                    "Error during ro integration: roi %s does not match scan size %s. "
-                    "This is likely a coding error",
-                    t,
-                    scsize,
-                )
-                return {
-                    "status": "error",
-                    "message": "Error during ro integration: size mismatch",
-                    "traceback": "",
-                }
-
-        data_2d_structured[self.activescanname]["measurement"][name]["rois"] = rois
-        options = self.scanSelector.get_integration_options()
-        beam_profile = sample_length = None
-        if options["footprint"]:
-            footprint_dialog = (
-                self.scanSelector.correctionsDialog.footprintOptions_shared()
-            )
-            beam_profile = footprint_dialog.beamProfile()
-            sample_length = footprint_dialog.sampleLength()
-        frame_policy = integration_corrections.frame_correction_policy(
-            self.fscan,
-            config_snapshot.corrections,
-            rois["axis"].shape[1],
-            use_normalization=options["normalization"],
-            use_illumination=options["footprint"],
-            alpha=np.deg2rad(rois["alpha"]),
-            beam_profile=beam_profile,
-            sample_length=sample_length,
-        )
-        profile_provenance = _curve_profile_provenance(
-            config_snapshot.corrections
-        )
-        profile_provenance.update(
-            {
-                "wavelength_angstrom": config_snapshot.ub_calculator.getLambda(),
-                "unitcell_area_angstrom2": config_snapshot.unit_cell.uc_area,
-                "detector_efficiency_assumed": 1.0,
-                "external_transmission_assumed": 1.0,
-            }
-        )
-        # The preserved ``rois`` group remains legacy-compatible. An explicit
-        # primary-monitor/total-flux setup activates the sibling framewise
-        # contract; its Q/H arrays are applied by the rocking reducer before
-        # angular aggregation.
-        curve_record = CurveCorrectionRecord(
-            algorithm=(
-                "framewise_ctr_total_flux_v1"
-                if frame_policy.new_contract
-                else "legacy_rocking_roi_v2"
-            ),
-            output_quantity=(
-                "rocking_ctr_photon_curve"
-                if frame_policy.new_contract
-                else "rocking_roi_curve"
-            ),
-            scale_convention=(
-                frame_policy.scale_convention
-                if frame_policy.new_contract
-                else "legacy_unnormalized"
-            ),
-            normalization_status=(
-                frame_policy.normalization_status
-                if frame_policy.new_contract
-                else "not_applied"
-            ),
-            illumination_status=(
-                frame_policy.illumination_status
-                if frame_policy.new_contract
-                else "not_applied"
-            ),
-            pixel_correction_status=("applied" if corr else "not_applied"),
-            normalization_divisor=(
-                frame_policy.normalization_divisor
-                if frame_policy.new_contract
-                else None
-            ),
-            normalization_unit=(
-                frame_policy.normalization_unit
-                if frame_policy.new_contract
-                else None
-            ),
-            normalization_components=(
-                frame_policy.normalization_components
-                if frame_policy.new_contract
-                else ()
-            ),
-            illumination_divisor=(
-                frame_policy.illumination_divisor
-                if frame_policy.new_contract
-                else None
-            ),
-            illumination_convention=(
-                frame_policy.illumination_convention
-                if frame_policy.new_contract
-                else None
-            ),
-            vertical_intercepted_fraction=(
-                frame_policy.vertical_intercepted_fraction
-                if frame_policy.new_contract
-                else None
-            ),
-            horizontal_intercepted_fraction=(
-                frame_policy.horizontal_intercepted_fraction
-                if frame_policy.new_contract
-                else None
-            ),
-            intercepted_fraction=(
-                frame_policy.intercepted_fraction
-                if frame_policy.new_contract
-                else None
-            ),
-            alpha=np.deg2rad(rois["alpha"]),
-            base_croi=rois["croi"],
-            base_croi_variance=rois["croi"],
-            base_bgroi=rois["bgroi"],
-            base_bgroi_variance=rois["bgroi"],
-            base_croibg=rois["ctr_croibg"],
-            base_croibg_variance=np.square(rois["ctr_croibg_errors"]),
-            combined_croi_factor=rois["Cfactor_croi"],
-            combined_bgroi_factor=rois["Cfactor_bgroi"],
-            polarization_croi_factor=rois["Pfactor_croi"],
-            polarization_bgroi_factor=rois["Pfactor_bgroi"],
-            gamma_arm=rois["gamma_arm"],
-            delta_arm=rois["delta_arm"],
-            roi_x=rois["x"],
-            roi_y=rois["y"],
-            roi_width=rois["hsize"],
-            roi_height=rois["vsize"],
-            roi_x_start=rocking_roi_edges["x_start"],
-            roi_x_stop=rocking_roi_edges["x_stop"],
-            roi_y_start=rocking_roi_edges["y_start"],
-            roi_y_stop=rocking_roi_edges["y_stop"],
-            profile_provenance=profile_provenance,
-        )
-        data_2d_structured[self.activescanname]["measurement"][name][
-            CURVE_CORRECTIONS_GROUP
-        ] = curve_correction_record_to_nxdict(curve_record)
-
-        error = self._saveIntegrationResult(
-            data_2d_structured, f"the rocking scan integration {name}"
-        )
-        if error is not None:
-            return error
-        logger.info(f"Rocking integration succeeded and data saved with name {name}")
-        return {"status": "success"}
 
     def updatePlotItems(self, recalculate=True):
         """Refresh displayed ROI and reflection overlays.
@@ -4065,6 +2999,9 @@ ub : gui for UB matrix and angle calculations
     def imageNoToOmega(self, imageno):
         """Return omega for an image index.
 
+        Scan omega is stored in degrees, either as a fixed scalar (or
+        single-element array) or as one value per image.
+
         :param int imageno:
             Image index in the active scan.
         :returns:
@@ -4080,7 +3017,13 @@ ub : gui for UB matrix and angle calculations
                 raise IndexError(
                     f"Image number {imageno} is outside the active scan range."
                 )
-            return np.deg2rad(self.fscan.omega[int(imageno)])
+            omega = np.asarray(self.fscan.omega)
+            if omega.size == 1:
+                # Fixed theta/omega is shared by all images, e.g. a mu scan.
+                omega = omega.reshape(-1)[0]
+            else:
+                omega = omega[int(imageno)]
+            return np.deg2rad(omega)
         else:
             return 0.0
 
@@ -5835,63 +4778,22 @@ ub : gui for UB matrix and angle calculations
         :param xy:
             ROI center coordinates in detector pixels.
         :returns:
-            Array containing hkl in r.l.u., detector angles in rad, trajectory
-            coordinate, pixel coordinates, and detector mask flag.
+            Array of shape ``(ROI, frame, 6)``: h, k, l in r.l.u., delta
+            and gamma in radians, and the stored scan axis.
         :rtype: numpy.ndarray
 
         .. note::
            CLI-safe when scan and UB state are loaded.
         """
-        if self.fscan is None:
-            raise Exception("No scan loaded!")
-        mu, om = self.getMuOm()
-        # mu_cryst = HKLVlieg.crystalAngles_singleArray(mu, self.ubcalc.n)
-
-        if "mask" in kwargs:
-            mask = kwargs["mask"]
-            xy = xy[mask]
-
-        if len(np.asarray(om).shape) == 0:
-            om = np.full(len(self.fscan), om)
-
-        count = len(self.fscan)
-        mu_frames = np.broadcast_to(np.asarray(mu, dtype=np.float64), (count,))
-        # A fixed pixel looks in a different direction on every frame once the
-        # detector arm moves, so the conversion follows the arm frame by frame.
-        arm_groups = self.armFrameGroups(count)
-
-        hkl_del_gam = np.empty((xy.shape[0], count, 6), dtype=np.float64)
-        for i, xy_i in enumerate(xy):
-            x = np.full(count, xy_i[0])
-            y = np.full(count, xy_i[1])
-            gamma = np.empty(count, dtype=np.float64)
-            delta = np.empty(count, dtype=np.float64)
-            alpha = np.empty(count, dtype=np.float64)
-            for selection, gamma_arm, delta_arm in arm_groups:
-                gamma_s, delta_s, alpha_s = (
-                    self.ubcalc.detectorCal.crystalAnglesPoint(
-                        np.atleast_1d(y[selection]),
-                        np.atleast_1d(x[selection]),
-                        mu_frames[selection],
-                        self.ubcalc.n,
-                        gamma_arm,
-                        delta_arm,
-                    )
-                )
-                gamma[selection] = gamma_s
-                delta[selection] = delta_s
-                alpha[selection] = alpha_s
-
-            hkl = self.ubcalc.angles.anglesToHkl(
-                alpha, delta, gamma, om, self.ubcalc.chi, self.ubcalc.phi
-            )
-            # for i in range(len(self.fscan)):
-
-            hkl_del_gam[i, :, :3] = np.array(hkl).T
-            hkl_del_gam[i, :, 3] = delta
-            hkl_del_gam[i, :, 4] = gamma
-            hkl_del_gam[i, :, 5] = self.fscan.axis
-        return hkl_del_gam
+        context = SimpleNamespace(
+            fscan=self.fscan, getMuOm=self.getMuOm,
+            armFrameGroups=self.armFrameGroups,
+            ubcalc=SimpleNamespace(
+                detectorCal=self.ubcalc.detectorCal, n=self.ubcalc.n,
+                angles=self.ubcalc.angles, chi=self.ubcalc.chi, phi=self.ubcalc.phi,
+            ),
+        )
+        return scan_integration.fixed_roi_geometry(context, xy, **kwargs)
 
     def getROIloc(self, imageno=None, H_0=None, H_1=None, **kwargs):
         """Calculate detector ROI locations for a reciprocal-space line.
@@ -6145,1382 +5047,7 @@ ub : gui for UB matrix and angle calculations
         .. note::
            CLI-capable when scan, database, and ROI state are preconfigured.
         """
-
-        if self.scanSelector.scanstab.currentIndex() == 2:
-            return self.rocking_extraction()
-        elif self.scanSelector.scanstab.currentIndex() == 3:
-            return self.rocking_Bragg_extraction()
-
-        try:
-            image = self.fscan.get_raw_img(0)
-        except Exception:
-            logger.exception(
-                "Cannot perform stationary scan integration: no images found.",
-                extra={
-                    "title": "Cannot integrate scan",
-                    "description": "Cannot perform stationary scan integration: no images found.",  # noqa: E501
-                    "show_dialog": False,
-                    "dialog_level": logging.WARNING,
-                    "parent": self,
-                },
-            )
-            # print("no images found! %s" % e)
-            return {
-                "status": "error",
-                "message": "No image found in current scan",
-                "traceback": traceback.format_exc(),
-            }
-        if not self.database.isOpen():
-            logger.error(
-                "Cannot perform stationary scan integration: no database available.",
-                extra={
-                    "title": "Cannot integrate scan",
-                    "description": "Cannot perform stationary scan integration: no database available.",  # noqa: E501
-                    "show_dialog": False,
-                    "dialog_level": logging.WARNING,
-                    "parent": self,
-                },
-            )
-            # print("No database available")
-            return {"status": "error", "message": "No database available"}
-
-        logger.info("Start integration of stationary scan")
-        dc = self.ubcalc.detectorCal
-        # mu = self.ubcalc.mu
-
-        H_1 = np.array([h.value() for h in self.scanSelector.H_1])
-        H_0 = np.array([h.value() for h in self.scanSelector.H_0])
-
-        vsize = int(self.scanSelector.vsize.value())
-        hsize = int(self.scanSelector.hsize.value())
-        vsize * hsize  # as set in GUI, no corrections
-
-        imgmask = None
-
-        if self.scanSelector.useMaskBox.isChecked():
-            imgmask = self.get_detector_mask(image.img.shape)
-            if imgmask is None:
-                if logger_utils.get_logging_context() == "gui":
-                    btn = qt.QMessageBox.question(
-                        self,
-                        "No mask available",
-                        """No mask was selected with the masking tool.
-        Do you want to continue without mask?""",
-                    )
-                    if btn != qt.QMessageBox.Yes:
-                        return {
-                            "status": "cancelled",
-                            "message": "Reason: no mask selected",
-                        }
-                logger.warn(
-                    "No mask was selected with the masking tool. Continue without mask."
-                )
-
-        use_solid_angle = self.scanSelector.useSolidAngleBox.isChecked()
-        use_polarization = self.scanSelector.usePolarizationBox.isChecked()
-        corr = use_solid_angle or use_polarization
-
-        # One definition of the per-pixel factors, shared with the rocking
-        # integration and the reciprocal-space reconstruction. It returns None
-        # when neither correction is enabled, so that the reconstruction can
-        # skip its multiplication; here the array of ones is required, because
-        # the branch below that rebuilds it runs only under HAS_ACCEL and the
-        # NumPy-only path would otherwise be handed None.
-        C_arr = detector_corrections.pixel_factors(
-            dc,
-            solid_angle=use_solid_angle,
-            polarization=use_polarization,
-        )
-        if C_arr is None:
-            C_arr = np.ones(dc.detector.shape, dtype=np.float64)
-        P_arr = detector_corrections.pixel_factors(
-            dc, polarization=use_polarization
-        )
-        if P_arr is None:
-            P_arr = np.ones(dc.detector.shape, dtype=np.float64)
-
-        hkl_del_gam_s1, hkl_del_gam_s2 = self.getROIloc()
-
-        nodatapoints = len(self.fscan)
-        # print(hkl_del_gam_1s.shape)
-
-        if hkl_del_gam_s1.shape[0] == 1:
-            hkl_del_gam_1 = np.zeros(
-                (nodatapoints, hkl_del_gam_s1.shape[1]), dtype=np.float64
-            )
-            hkl_del_gam_2 = np.zeros(
-                (nodatapoints, hkl_del_gam_s1.shape[1]), dtype=np.float64
-            )
-            hkl_del_gam_1[:] = hkl_del_gam_s1[0]
-            hkl_del_gam_2[:] = hkl_del_gam_s2[0]
-        else:
-            hkl_del_gam_1, hkl_del_gam_2 = hkl_del_gam_s1, hkl_del_gam_s2
-
-        dataavail = np.logical_or(hkl_del_gam_1[:, -1], hkl_del_gam_2[:, -1])
-
-        croi1_a = np.zeros_like(dataavail, dtype=np.float64)
-        cpixel1_a = np.zeros_like(dataavail, dtype=np.float64)
-        bgroi1_a = np.zeros_like(dataavail, dtype=np.float64)
-        bgpixel1_a = np.zeros_like(dataavail, dtype=np.float64)
-        x_coord1_a = hkl_del_gam_1[:, 6]
-        y_coord1_a = hkl_del_gam_1[:, 7]
-        roi_hsize1_a = np.full_like(dataavail, hsize, dtype=int)
-        roi_vsize1_a = np.full_like(dataavail, vsize, dtype=int)
-        roi_x_start1_a = np.zeros_like(dataavail, dtype=int)
-        roi_x_stop1_a = np.zeros_like(dataavail, dtype=int)
-        roi_y_start1_a = np.zeros_like(dataavail, dtype=int)
-        roi_y_stop1_a = np.zeros_like(dataavail, dtype=int)
-
-        croi2_a = np.zeros_like(dataavail, dtype=np.float64)
-        cpixel2_a = np.zeros_like(dataavail, dtype=np.float64)
-        bgroi2_a = np.zeros_like(dataavail, dtype=np.float64)
-        bgpixel2_a = np.zeros_like(dataavail, dtype=np.float64)
-
-        bgimg_croi1_a = np.zeros_like(dataavail, dtype=np.float64)
-        bgimg_cpixel1_a = np.zeros_like(dataavail, dtype=np.float64)
-        bgimg_bgroi1_a = np.zeros_like(dataavail, dtype=np.float64)
-        bgimg_bgpixel1_a = np.zeros_like(dataavail, dtype=np.float64)
-
-        Corr_croi1_a = np.zeros_like(dataavail, dtype=np.float64)
-        Corr_cpixel1_a = np.zeros_like(dataavail, dtype=np.float64)
-        Corr_bgroi1_a = np.zeros_like(dataavail, dtype=np.float64)
-        Corr_bgpixel1_a = np.zeros_like(dataavail, dtype=np.float64)
-
-        bgimg_croi2_a = np.zeros_like(dataavail, dtype=np.float64)
-        bgimg_cpixel2_a = np.zeros_like(dataavail, dtype=np.float64)
-        bgimg_bgroi2_a = np.zeros_like(dataavail, dtype=np.float64)
-        bgimg_bgpixel2_a = np.zeros_like(dataavail, dtype=np.float64)
-
-        Corr_croi2_a = np.zeros_like(dataavail, dtype=np.float64)
-        Corr_cpixel2_a = np.zeros_like(dataavail, dtype=np.float64)
-        Corr_bgroi2_a = np.zeros_like(dataavail, dtype=np.float64)
-        Corr_bgpixel2_a = np.zeros_like(dataavail, dtype=np.float64)
-
-        x_coord2_a = hkl_del_gam_2[:, 6]
-        y_coord2_a = hkl_del_gam_2[:, 7]
-        roi_hsize2_a = np.full_like(dataavail, hsize, dtype=int)
-        roi_vsize2_a = np.full_like(dataavail, vsize, dtype=int)
-        roi_x_start2_a = np.zeros_like(dataavail, dtype=int)
-        roi_x_stop2_a = np.zeros_like(dataavail, dtype=int)
-        roi_y_start2_a = np.zeros_like(dataavail, dtype=int)
-        roi_y_stop2_a = np.zeros_like(dataavail, dtype=int)
-
-        progress = logger_utils.create_progress_logger(
-            self, len(self.fscan), "Integrating stationary scan"
-        )
-
-        has_bg_img = False
-        roioptions = self.scanSelector.roioptions.get_parameters()
-        use_fitted_background = bool(roioptions.get("fitted_background", False))
-        fitted_background_order = int(roioptions.get("fitted_background_order", 1))
-        if use_fitted_background and not HAS_ACCEL:
-            logger.warning(
-                "Fitted local background requires the compiled ROI accelerator; "
-                "using summed background ROIs instead."
-            )
-        if use_fitted_background and fitted_background_order >= 1:
-            logger.warning(
-                "Fitted local background order %d underestimates the "
-                "background error: the saved uncertainty still assumes an "
-                "unweighted flat-background sample and does not propagate "
-                "the polynomial fit's covariance.",
-                fitted_background_order,
-            )
-        repair_enabled, repair, row_gaps, col_gaps = self._repair_config_for_image(
-            image.img.shape
-        )
-        if repair_enabled and use_fitted_background:
-            logger.warning(
-                "Pixel repair is disabled for fitted local background; "
-                "using the original mask for this integration."
-            )
-            repair_enabled = False
-
-        if imgmask is not None:
-            mask = np.ascontiguousarray(imgmask, dtype=bool)
-        else:
-            mask = np.zeros(image.img.shape, dtype=bool)
-        if corr:
-            C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
-        else:
-            C_arr = np.ones(image.img.shape, dtype=np.float64)
-        if not repair_enabled:
-            C_arr[mask] = 0.0
-
-        for i in range(len(self.fscan)):
-            key = self.intkey(hkl_del_gam_1[i, 6:8])
-            croi_key = np.array(
-                [[key[0].start, key[0].stop], [key[1].start, key[1].stop]]
-            )
-            roi_hsize1_a[i] = int(np.abs(np.diff(croi_key[0])[0]))
-            roi_vsize1_a[i] = int(np.abs(np.diff(croi_key[1])[0]))
-            roi_x_start1_a[i], roi_x_stop1_a[i] = croi_key[0]
-            roi_y_start1_a[i], roi_y_stop1_a[i] = croi_key[1]
-            key = self.intkey(hkl_del_gam_2[i, 6:8])
-            croi_key = np.array(
-                [[key[0].start, key[0].stop], [key[1].start, key[1].stop]]
-            )
-            roi_hsize2_a[i] = int(np.abs(np.diff(croi_key[0])[0]))
-            roi_vsize2_a[i] = int(np.abs(np.diff(croi_key[1])[0]))
-            roi_x_start2_a[i], roi_x_stop2_a[i] = croi_key[0]
-            roi_y_start2_a[i], roi_y_stop2_a[i] = croi_key[1]
-
-        if HAS_ACCEL:
-            roi_lists_accel = []
-            for i in range(len(self.fscan)):
-                roi_lists = [[], [], [], [], []]
-                if hkl_del_gam_1[i, -1]:
-                    key = self.intkey(hkl_del_gam_1[i, 6:8])
-                    croi_key = np.array(
-                        [[key[0].start, key[0].stop], [key[1].start, key[1].stop]]
-                    )
-                    roi_lists[0].append(croi_key)  # center
-                    bkgkey = self.bkgkeys(hkl_del_gam_1[i, 6:8])
-                    for r, l in zip(bkgkey, roi_lists[1:]):  # noqa: E741
-                        l.append(
-                            np.array([[r[0].start, r[0].stop], [r[1].start, r[1].stop]])
-                        )
-                else:
-                    [
-                        l.append(np.array([[0, 0], [0, 0]]))
-                        for l in roi_lists[1:]  # noqa: E741
-                    ]  # will result in zeros, convert to np.nan later
-                    roi_lists[0].append(np.array([[0, 0], [0, 0]]))
-                if hkl_del_gam_2[i, -1]:
-                    key = self.intkey(hkl_del_gam_2[i, 6:8])
-                    croi_key = np.array(
-                        [[key[0].start, key[0].stop], [key[1].start, key[1].stop]]
-                    )
-                    roi_lists[0].append(croi_key)  # center
-                    bkgkey = self.bkgkeys(hkl_del_gam_2[i, 6:8])
-                    for r, l in zip(bkgkey, roi_lists[1:]):  # noqa: E741
-                        l.append(
-                            np.array([[r[0].start, r[0].stop], [r[1].start, r[1].stop]])
-                        )
-                else:
-                    [
-                        l.append(np.array([[0, 0], [0, 0]]))
-                        for l in roi_lists[1:]  # noqa: E741
-                    ]  # will result in zeros, convert to np.nan later
-                    roi_lists[0].append(np.array([[0, 0], [0, 0]]))
-                roi_lists = [
-                    np.ascontiguousarray(np.stack(l), dtype=np.int64)
-                    for l in roi_lists  # noqa: E741
-                ]
-                roi_lists_accel.append(roi_lists)
-
-            if (
-                self.background_image is not None
-                and self.background_image.shape == image.img.shape
-            ):
-                if use_fitted_background:
-                    logger.warning(
-                        "Fitted local background is ignored when a background "
-                        "image is selected."
-                    )
-                has_bg_img = True
-                background_image = self.background_image.astype(
-                    np.float64, order="C", copy=True
-                )
-                background_image[mask] = 0.0
-
-                def sumImage(i):
-                    """CLI-safe worker: integrate one stationary image with background."""  # noqa: E501
-                    all_counters = np.zeros(
-                        (roi_lists_accel[i][0].shape[0],) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    Carr_counters = np.zeros(
-                        (roi_lists_accel[i][0].shape[0],) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    BgImg_counters = np.zeros(
-                        (roi_lists_accel[i][0].shape[0],) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    if not dataavail[i]:
-                        return all_counters, Carr_counters, BgImg_counters
-                    image = self.fscan.get_raw_img(i).img.astype(
-                        np.float64, order="C", copy=True
-                    )  # unlocks gil during file read
-                    if repair_enabled:
-                        _roi_sum_accel.processImage_repair_bg_Carr(
-                            image,
-                            background_image,
-                            mask,
-                            C_arr,
-                            *roi_lists_accel[i],
-                            row_gaps,
-                            col_gaps,
-                            all_counters,
-                            Carr_counters,
-                            BgImg_counters,
-                            repair.max_component_pixels,
-                            repair.max_span,
-                            repair.radius,
-                            repair.min_valid_neighbors,
-                        )  # compiled accelerator releases the GIL
-                    else:
-                        _roi_sum_accel.processImage_bg_Carr(
-                            image,
-                            background_image,
-                            mask,
-                            C_arr,
-                            *roi_lists_accel[i],
-                            all_counters,
-                            Carr_counters,
-                            BgImg_counters,
-                        )  # compiled accelerator releases the GIL
-                    return all_counters, Carr_counters, BgImg_counters
-            else:
-
-                def sumImage(i):
-                    """CLI-safe worker: integrate one stationary image."""
-                    all_counters = np.zeros(
-                        (roi_lists_accel[i][0].shape[0],) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    Carr_counters = np.zeros(
-                        (roi_lists_accel[i][0].shape[0],) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    if not dataavail[i]:
-                        return all_counters, Carr_counters
-                    image = self.fscan.get_raw_img(i).img.astype(
-                        np.float64, order="C", copy=True
-                    )  # unlocks gil during file read
-                    if use_fitted_background:
-                        _roi_sum_accel.processImage_polybg_Carr(
-                            image,
-                            mask,
-                            C_arr,
-                            *roi_lists_accel[i],
-                            all_counters,
-                            Carr_counters,
-                            fitted_background_order,
-                        )  # compiled accelerator releases the GIL
-                    elif repair_enabled:
-                        _roi_sum_accel.processImage_repair_Carr(
-                            image,
-                            mask,
-                            C_arr,
-                            *roi_lists_accel[i],
-                            row_gaps,
-                            col_gaps,
-                            all_counters,
-                            Carr_counters,
-                            repair.max_component_pixels,
-                            repair.max_span,
-                            repair.radius,
-                            repair.min_valid_neighbors,
-                        )  # compiled accelerator releases the GIL
-                    else:
-                        _roi_sum_accel.processImage_Carr(
-                            image,
-                            mask,
-                            C_arr,
-                            *roi_lists_accel[i],
-                            all_counters,
-                            Carr_counters,
-                        )  # compiled accelerator releases the GIL
-                    return all_counters, Carr_counters
-
-        else:  # not HAS_ACCEL
-            if (
-                self.background_image is not None
-                and self.background_image.shape == image.img.shape
-            ):
-                has_bg_img = True
-                background_image = self.background_image.astype(
-                    np.float64, order="C", copy=True
-                )
-                background_image[mask] = 0.0
-
-                def sumImage(i):
-                    """CLI-safe worker: integrate one image with background."""
-                    all_counters = np.zeros(
-                        (2,) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    Carr_counters = np.zeros(
-                        (2,) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    BgImg_counters = np.zeros(
-                        (2,) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    if not dataavail[i]:
-                        return all_counters, Carr_counters, BgImg_counters
-                    else:
-                        image = self.fscan.get_raw_img(i).img.astype(
-                            np.float64, order="C", copy=True
-                        )
-                        if imgmask is not None:
-                            image[imgmask] = np.nan
-                            pixelavail = (~imgmask).astype(np.float64)
-                        else:
-                            pixelavail = np.ones_like(image)
-
-                        for intersect, hkl_del_gam_current in zip(
-                            range(2), [hkl_del_gam_1, hkl_del_gam_2]
-                        ):
-                            if hkl_del_gam_current[i, -1]:
-                                key = self.intkey(hkl_del_gam_current[i, 6:8])
-                                bkgkey = self.bkgkeys(hkl_del_gam_current[i, 6:8])
-
-                                all_counters[intersect, 0] = np.nansum(image[key[::-1]])
-                                Carr_counters[intersect, 0] = np.nansum(
-                                    C_arr[key[::-1]]
-                                )
-                                BgImg_counters[intersect, 0] = np.nansum(
-                                    background_image[key[::-1]]
-                                )
-
-                                cpixel1 = np.nansum(pixelavail[key[::-1]])
-                                all_counters[intersect, 1] = cpixel1
-                                Carr_counters[intersect, 1] = cpixel1
-                                BgImg_counters[intersect, 1] = cpixel1
-
-                                bgpixel1 = 0.0
-                                for bg in bkgkey:
-                                    image[bg[::-1]]
-                                    all_counters[intersect, 2] += np.nansum(
-                                        image[bg[::-1]]
-                                    )
-                                    Carr_counters[intersect, 2] += np.nansum(
-                                        C_arr[bg[::-1]]
-                                    )
-                                    BgImg_counters[intersect, 2] += np.nansum(
-                                        background_image[bg[::-1]]
-                                    )
-                                    bgpixel1 += np.nansum(pixelavail[bg[::-1]])
-
-                                all_counters[intersect, 3] = bgpixel1
-                                Carr_counters[intersect, 3] = bgpixel1
-                                BgImg_counters[intersect, 3] = bgpixel1
-                        return all_counters, Carr_counters, BgImg_counters
-            else:
-
-                def sumImage(i):
-                    """CLI-safe worker: integrate one image without acceleration."""
-                    all_counters = np.zeros(
-                        (2,) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    Carr_counters = np.zeros(
-                        (2,) + (4,), dtype=np.float64
-                    )  # need gil for python object creation
-                    if not dataavail[i]:
-                        return all_counters, Carr_counters
-                    else:
-                        image = self.fscan.get_raw_img(i).img.astype(
-                            np.float64, order="C", copy=True
-                        )
-                        if imgmask is not None:
-                            image[imgmask] = np.nan
-                            pixelavail = (~imgmask).astype(np.float64)
-                        else:
-                            pixelavail = np.ones_like(image)
-
-                        for intersect, hkl_del_gam_current in zip(
-                            range(2), [hkl_del_gam_1, hkl_del_gam_2]
-                        ):
-                            if hkl_del_gam_current[i, -1]:
-                                key = self.intkey(hkl_del_gam_current[i, 6:8])
-                                bkgkey = self.bkgkeys(hkl_del_gam_current[i, 6:8])
-
-                                all_counters[intersect, 0] = np.nansum(image[key[::-1]])
-                                Carr_counters[intersect, 0] = np.nansum(
-                                    C_arr[key[::-1]]
-                                )
-
-                                cpixel1 = np.nansum(pixelavail[key[::-1]])
-                                all_counters[intersect, 1] = cpixel1
-                                Carr_counters[intersect, 1] = cpixel1
-
-                                bgpixel1 = 0.0
-                                for bg in bkgkey:
-                                    image[bg[::-1]]
-                                    all_counters[intersect, 2] += np.nansum(
-                                        image[bg[::-1]]
-                                    )
-                                    Carr_counters[intersect, 2] += np.nansum(
-                                        C_arr[bg[::-1]]
-                                    )
-                                    bgpixel1 += np.nansum(pixelavail[bg[::-1]])
-
-                                all_counters[intersect, 3] = bgpixel1
-                                Carr_counters[intersect, 3] = bgpixel1
-                        return all_counters, Carr_counters
-
-        cancelled = False
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.numberthreads
-        ) as executor:  # speedup only for the file reads
-            futures = {}
-            for i in range(len(self.fscan)):
-                futures[executor.submit(sumImage, i)] = i
-
-            for f in concurrent.futures.as_completed(futures):
-                try:
-                    i = futures[f]
-                    # (croi1, cpixel1, bgroi1, bgpixel1), (croi2, cpixel2, bgroi2, bgpixel2) = f.result()  # noqa: E501
-                    if has_bg_img:
-                        all_counters, Carr_counters, BgImg_counters = f.result()
-                        bgimg_croi1_a[i] = BgImg_counters[0, 0]
-                        bgimg_cpixel1_a[i] = BgImg_counters[0, 1]
-                        bgimg_bgroi1_a[i] = BgImg_counters[0, 2]
-                        bgimg_bgpixel1_a[i] = BgImg_counters[0, 3]
-                        bgimg_croi2_a[i] = BgImg_counters[1, 0]
-                        bgimg_cpixel2_a[i] = BgImg_counters[1, 1]
-                        bgimg_bgroi2_a[i] = BgImg_counters[1, 2]
-                        bgimg_bgpixel2_a[i] = BgImg_counters[1, 3]
-
-                    else:
-                        all_counters, Carr_counters = f.result()
-                        bgimg_croi1_a[i] = 0.0
-                        bgimg_cpixel1_a[i] = 0.0
-                        bgimg_bgroi1_a[i] = 0.0
-                        bgimg_bgpixel1_a[i] = 0.0
-                        bgimg_croi2_a[i] = 0.0
-                        bgimg_cpixel2_a[i] = 0.0
-                        bgimg_bgroi2_a[i] = 0.0
-                        bgimg_bgpixel2_a[i] = 0.0
-
-                    croi1_a[i] = all_counters[0, 0]
-                    cpixel1_a[i] = all_counters[0, 1]
-                    bgroi1_a[i] = all_counters[0, 2]
-                    bgpixel1_a[i] = all_counters[0, 3]
-                    croi2_a[i] = all_counters[1, 0]
-                    cpixel2_a[i] = all_counters[1, 1]
-                    bgroi2_a[i] = all_counters[1, 2]
-                    bgpixel2_a[i] = all_counters[1, 3]
-
-                    Corr_croi1_a[i] = Carr_counters[0, 0]
-                    Corr_cpixel1_a[i] = Carr_counters[0, 1]
-                    Corr_bgroi1_a[i] = Carr_counters[0, 2]
-                    Corr_bgpixel1_a[i] = Carr_counters[0, 3]
-                    Corr_croi2_a[i] = Carr_counters[1, 0]
-                    Corr_cpixel2_a[i] = Carr_counters[1, 1]
-                    Corr_bgroi2_a[i] = Carr_counters[1, 2]
-                    Corr_bgpixel2_a[i] = Carr_counters[1, 3]
-
-                    progress.update(futures[f])
-                except concurrent.futures.CancelledError:
-                    pass
-                except Exception:
-                    logger.warn(f"Cannot read image:\n{traceback.format_exc()}")
-
-                if progress.wasCanceled():
-                    [f.cancel() for f in futures]
-                    cancelled = True
-                    break
-
-        progress.finish()
-
-        if cancelled:
-            return {
-                "status": "cancelled",
-                "message": "Reason: Cancelled during integration",
-            }
-
-        roi_size1 = roi_hsize1_a * roi_vsize1_a
-        roi_size2 = roi_hsize2_a * roi_vsize2_a
-
-        # Polarization-only factors must be accumulated over the same valid
-        # pixels as the combined correction. This creates the direct CTR
-        # photon branch and avoids estimating it later as mean(S*P)/mean(S).
-        polarization_counters = np.zeros((nodatapoints, 2, 4), dtype=np.float64)
-        if use_polarization and HAS_ACCEL and repair_enabled:
-            for i in range(nodatapoints):
-                if not dataavail[i]:
-                    continue
-                dummy_counters = np.zeros((2, 4), dtype=np.float64)
-                _roi_sum_accel.processImage_repair_Carr(
-                    np.ones(image.img.shape, dtype=np.float64),
-                    mask,
-                    np.ascontiguousarray(P_arr, dtype=np.float64),
-                    *roi_lists_accel[i],
-                    row_gaps,
-                    col_gaps,
-                    dummy_counters,
-                    polarization_counters[i],
-                    repair.max_component_pixels,
-                    repair.max_span,
-                    repair.radius,
-                    repair.min_valid_neighbors,
-                )
-        else:
-            for i in range(nodatapoints):
-                for intersect, hkl_del_gam_current in enumerate(
-                    (hkl_del_gam_1, hkl_del_gam_2)
-                ):
-                    if not hkl_del_gam_current[i, -1]:
-                        continue
-                    coordinates = hkl_del_gam_current[i, 6:8]
-                    polarization_counters[i, intersect] = (
-                        _correction_region_counters(
-                            P_arr,
-                            mask,
-                            self.intkey(coordinates),
-                            self.bkgkeys(coordinates),
-                        )
-                    )
-
-        P_croi1 = integration_corrections.roi_mean_correction(
-            polarization_counters[:, 0, 0], polarization_counters[:, 0, 1]
-        )
-        P_bgroi1 = integration_corrections.roi_mean_correction(
-            polarization_counters[:, 0, 2], polarization_counters[:, 0, 3]
-        )
-        P_croi2 = integration_corrections.roi_mean_correction(
-            polarization_counters[:, 1, 0], polarization_counters[:, 1, 1]
-        )
-        P_bgroi2 = integration_corrections.roi_mean_correction(
-            polarization_counters[:, 1, 2], polarization_counters[:, 1, 3]
-        )
-        _warn_masked_peak_scaling(
-            cpixel1_a,
-            np.where(hkl_del_gam_1[:, -1], roi_size1, 0),
-            "Stationary S1 extraction",
-        )
-        _warn_masked_peak_scaling(
-            cpixel2_a,
-            np.where(hkl_del_gam_2[:, -1], roi_size2, 0),
-            "Stationary S2 extraction",
-        )
-
-        # Mean correction over the valid pixels of the center ROI. The ROI sum
-        # of the correction array must not be rescaled to the nominal ROI area
-        # here: croibg already carries that (roi_size / cpixel) factor, so
-        # including it again multiplied every corrected intensity by the ROI
-        # area. Because the projected ROI size varies over the detector, that
-        # scaled two measurements of one rod differently.
-        Corr1 = integration_corrections.roi_mean_correction(
-            Corr_croi1_a, Corr_cpixel1_a
-        )
-        Corr2 = integration_corrections.roi_mean_correction(
-            Corr_croi2_a, Corr_cpixel2_a
-        )
-        croibg1_bgimg_a = None
-        croibg1_bgimg_err_a = None
-
-        if np.any(
-            bgimg_cpixel1_a
-        ):  # assume the background image has no errors (would need a separate error image for that)  # noqa: E501
-            bgimg_croi1_norm = bgimg_croi1_a * (cpixel1_a / bgimg_cpixel1_a)
-            if np.any(bgpixel1_a):
-                bgimg_bgroi1_norm = bgimg_bgroi1_a * (bgpixel1_a / bgimg_bgpixel1_a)
-
-                # method 1: simply subtract bg image from data and then subtract the remaining background  # noqa: E501
-                croibg1_a = (
-                    (croi1_a - bgimg_croi1_norm)
-                    - (cpixel1_a / bgpixel1_a) * (bgroi1_a - bgimg_bgroi1_norm)
-                ) * (roi_size1 / cpixel1_a)
-                croibg1_err_a = np.sqrt(
-                    croi1_a + ((cpixel1_a / bgpixel1_a) ** 2) * bgroi1_a
-                ) * (roi_size1 / cpixel1_a)
-
-                # method 2: scale bg image croi and subtract scaled bg image croi. Use ratio of bgroi of image and bg image as scale factor.  # noqa: E501
-                factor = bgroi1_a / bgimg_bgroi1_norm
-                croibg1_bgimg_a = (croi1_a - factor * bgimg_croi1_norm) * (
-                    roi_size1 / cpixel1_a
-                )
-                # NOTE: this error term reuses the unscaled method-1 formula and
-                # does not propagate `factor`. It is only exact when the
-                # background image is spatially flat across both the center and
-                # background ROI footprints; for a structured background image it
-                # underestimates or overestimates the true error.
-                croibg1_bgimg_err_a = np.sqrt(
-                    croi1_a + ((cpixel1_a / bgpixel1_a) ** 2) * bgroi1_a
-                ) * (roi_size1 / cpixel1_a)
-
-            else:  # not possible if no bgroi is set.
-                croibg1_a = (croi1_a - bgimg_croi1_norm) * (roi_size1 / cpixel1_a)
-                croibg1_err_a = np.sqrt(croi1_a) * (roi_size1 / cpixel1_a)
-
-        else:  # no background image
-            if np.any(bgpixel1_a):
-                croibg1_a = (croi1_a - (cpixel1_a / bgpixel1_a) * bgroi1_a) * (
-                    roi_size1 / cpixel1_a
-                )
-                croibg1_err_a = np.sqrt(
-                    croi1_a + ((cpixel1_a / bgpixel1_a) ** 2) * bgroi1_a
-                ) * (roi_size1 / cpixel1_a)
-            else:
-                croibg1_a = croi1_a * (roi_size1 / cpixel1_a)
-                croibg1_err_a = np.sqrt(croi1_a) * (roi_size1 / cpixel1_a)
-
-        croibg2_bgimg_a = None
-        croibg2_bgimg_err_a = None
-        if np.any(
-            bgimg_cpixel2_a
-        ):  # assume the background image has no errors (would need a separate error image for that)  # noqa: E501
-            bgimg_croi2_norm = bgimg_croi2_a * (cpixel2_a / bgimg_cpixel2_a)
-            if np.any(bgpixel2_a):
-                bgimg_bgroi2_norm = bgimg_bgroi2_a * (bgpixel2_a / bgimg_bgpixel2_a)
-
-                # method 1: simply subtract bg image from data and then subtract the remaining background  # noqa: E501
-                croibg2_a = (
-                    (croi2_a - bgimg_croi2_norm)
-                    - (cpixel2_a / bgpixel2_a) * (bgroi2_a - bgimg_bgroi2_norm)
-                ) * (roi_size2 / cpixel2_a)
-                croibg2_err_a = np.sqrt(
-                    croi2_a + ((cpixel2_a / bgpixel2_a) ** 2) * bgroi2_a
-                ) * (roi_size2 / cpixel2_a)
-
-                # method 2: scale bg image croi and subtract scaled bg image croi. Use ratio of bgroi of image and bg image as scale factor.  # noqa: E501
-                factor = bgroi2_a / bgimg_bgroi2_norm
-                croibg2_bgimg_a = (croi2_a - factor * bgimg_croi2_norm) * (
-                    roi_size2 / cpixel2_a
-                )
-                croibg2_bgimg_err_a = np.sqrt(
-                    croi2_a + ((cpixel2_a / bgpixel2_a) ** 2) * bgroi2_a
-                ) * (roi_size2 / cpixel2_a)
-
-            else:  # not possible if no bgroi is set.
-                croibg2_a = (croi2_a - bgimg_croi2_norm) * (roi_size2 / cpixel2_a)
-                croibg2_err_a = np.sqrt(croi2_a) * (roi_size2 / cpixel2_a)
-
-        else:  # no background image
-            if np.any(bgpixel2_a):
-                croibg2_a = (croi2_a - (cpixel2_a / bgpixel2_a) * bgroi2_a) * (
-                    roi_size2 / cpixel2_a
-                )
-                croibg2_err_a = np.sqrt(
-                    croi2_a + ((cpixel2_a / bgpixel2_a) ** 2) * bgroi2_a
-                ) * (roi_size2 / cpixel2_a)
-            else:
-                croibg2_a = croi2_a * (roi_size2 / cpixel2_a)
-                croibg2_err_a = np.sqrt(croi2_a) * (roi_size2 / cpixel2_a)
-
-        base_signal1 = np.asarray(croibg1_a, dtype=np.float64).copy()
-        base_error1 = np.asarray(croibg1_err_a, dtype=np.float64).copy()
-        base_signal2 = np.asarray(croibg2_a, dtype=np.float64).copy()
-        base_error2 = np.asarray(croibg2_err_a, dtype=np.float64).copy()
-
-        # Geometrical, footprint and normalization corrections. The numerical
-        # active area and normalization are intensity divisors. The
-        # intercepted-flux fraction is stored only as the numerator from which
-        # the active area was constructed, not divided out a second time.
-        # Stationary F2 divides by 1/sin(gamma) and has no rod-interception
-        # factor (Vlieg 1997, equation 54).
-        mu_all, om_all = self.getMuOm()
-        alpha_all = np.broadcast_to(
-            np.atleast_1d(np.asarray(mu_all, dtype=np.float64)), (nodatapoints,)
-        )
-        options = self.scanSelector.get_integration_options()
-        config_snapshot = ConfigData.from_gui(self)
-        beam_profile = None
-        sample_size = None
-        if options["footprint"]:
-            footprint_dialog = (
-                self.scanSelector.correctionsDialog.footprintOptions_shared()
-            )  # noqa: E501
-            beam_profile = footprint_dialog.beamProfile()
-            sample_size = footprint_dialog.sampleLength()  # m
-        frame_policy = integration_corrections.frame_correction_policy(
-            self.fscan,
-            config_snapshot.corrections,
-            nodatapoints,
-            use_normalization=options["normalization"],
-            use_illumination=options["footprint"],
-            alpha=alpha_all,
-            beam_profile=beam_profile,
-            sample_length=sample_size,
-        )
-        normalization = (
-            frame_policy.normalization_divisor
-            if frame_policy.normalization_status == "applied"
-            else None
-        )
-        normalization_applied = list(frame_policy.normalization_components)
-
-        pol_arm1 = np.ones(nodatapoints, dtype=np.float64)
-        pol_arm2 = np.ones(nodatapoints, dtype=np.float64)
-        if use_polarization:
-            # Corr1/Corr2 carry the polarization of the calibrated geometry;
-            # move it onto the arm position of each frame (finding F5). This is
-            # exactly 1 for a detector whose arm does not move, and it is the
-            # reflectivity case -- where the arm follows 2*alpha -- that needs
-            # it most.
-            pol_arm1 = self._polarizationArmFactor(
-                dc, y_coord1_a, x_coord1_a, roi_vsize1_a, roi_hsize1_a, alpha_all
-            )
-            pol_arm2 = self._polarizationArmFactor(
-                dc, y_coord2_a, x_coord2_a, roi_vsize2_a, roi_hsize2_a, alpha_all
-            )
-
-        (
-            croibg1_a,
-            croibg1_err_a,
-            ctr_croibg1_a,
-            ctr_croibg1_err_a,
-        ) = integration_corrections.pixel_correction_branches(
-            base_signal1, base_error1, Corr1, P_croi1, pol_arm1
-        )
-        (
-            croibg2_a,
-            croibg2_err_a,
-            ctr_croibg2_a,
-            ctr_croibg2_err_a,
-        ) = integration_corrections.pixel_correction_branches(
-            base_signal2, base_error2, Corr2, P_croi2, pol_arm2
-        )
-        combined_croi_factor1 = Corr1 * pol_arm1
-        combined_croi_factor2 = Corr2 * pol_arm2
-        combined_bgroi_factor1 = (
-            integration_corrections.roi_mean_correction(
-                Corr_bgroi1_a, Corr_bgpixel1_a
-            )
-            * pol_arm1
-        )
-        combined_bgroi_factor2 = (
-            integration_corrections.roi_mean_correction(
-                Corr_bgroi2_a, Corr_bgpixel2_a
-            )
-            * pol_arm2
-        )
-        polarization_croi_factor1 = P_croi1 * pol_arm1
-        polarization_croi_factor2 = P_croi2 * pol_arm2
-        polarization_bgroi_factor1 = P_bgroi1 * pol_arm1
-        polarization_bgroi_factor2 = P_bgroi2 * pol_arm2
-        if croibg1_bgimg_a is not None:
-            croibg1_bgimg_a *= combined_croi_factor1
-            croibg1_bgimg_err_a *= combined_croi_factor1
-        if croibg2_bgimg_a is not None:
-            croibg2_bgimg_a *= combined_croi_factor2
-            croibg2_bgimg_err_a *= combined_croi_factor2
-
-        correction_factors = []
-        for hkl_del_gam in (hkl_del_gam_1, hkl_del_gam_2):
-            correction_factors.append(
-                integration_corrections.stationary_correction_factors(
-                    alpha_all,
-                    hkl_del_gam[:, 3],
-                    hkl_del_gam[:, 4],
-                    use_lorentz=options["lorentz"],
-                    use_footprint=(
-                        options["footprint"] and not frame_policy.new_contract
-                    ),
-                    beam_profile=beam_profile,
-                    sample_size=sample_size,
-                    normalization=normalization,
-                    illumination_divisor=(
-                        frame_policy.illumination_divisor
-                        if frame_policy.new_contract
-                        and frame_policy.illumination_status == "applied"
-                        else None
-                    ),
-                )
-            )
-        factors1, factors2 = correction_factors
-        if factors1.applied:
-            logger.info(
-                "Stationary scan corrections applied: %s%s",
-                ", ".join(factors1.applied),
-                (
-                    f" (normalization: {', '.join(normalization_applied)})"
-                    if normalization_applied
-                    else ""
-                ),
-            )
-
-        # Reversible photon-counting base, after polarization but before the
-        # framewise normalization and illumination divisors. Detector solid
-        # angle remains confined to the diagnostic intensity branch.
-        base_croibg1 = np.asarray(ctr_croibg1_a, dtype=np.float64).copy()
-        base_croibg1_variance = np.square(
-            np.asarray(ctr_croibg1_err_a, dtype=np.float64)
-        )
-        base_croibg2 = np.asarray(ctr_croibg2_a, dtype=np.float64).copy()
-        base_croibg2_variance = np.square(
-            np.asarray(ctr_croibg2_err_a, dtype=np.float64)
-        )
-
-        croibg1_a, croibg1_err_a = integration_corrections.apply_stationary_corrections(
-            croibg1_a, croibg1_err_a, factors1
-        )
-        croibg2_a, croibg2_err_a = integration_corrections.apply_stationary_corrections(
-            croibg2_a, croibg2_err_a, factors2
-        )
-        ctr_croibg1_a, ctr_croibg1_err_a = (
-            integration_corrections.apply_stationary_corrections(
-                ctr_croibg1_a, ctr_croibg1_err_a, factors1
-            )
-        )
-        ctr_croibg2_a, ctr_croibg2_err_a = (
-            integration_corrections.apply_stationary_corrections(
-                ctr_croibg2_a, ctr_croibg2_err_a, factors2
-            )
-        )
-        if croibg1_bgimg_a is not None:
-            croibg1_bgimg_a, croibg1_bgimg_err_a = (
-                integration_corrections.apply_stationary_corrections(
-                    croibg1_bgimg_a, croibg1_bgimg_err_a, factors1
-                )
-            )
-        if croibg2_bgimg_a is not None:
-            croibg2_bgimg_a, croibg2_bgimg_err_a = (
-                integration_corrections.apply_stationary_corrections(
-                    croibg2_bgimg_a, croibg2_bgimg_err_a, factors2
-                )
-            )
-
-        F2_hkl1 = F2_hkl1_err = F2_hkl2 = F2_hkl2_err = None
-        if options["lorentz"]:
-            try:
-                common_scale = {
-                    "wavelength": config_snapshot.ub_calculator.getLambda(),
-                    "unitcell_area": config_snapshot.unit_cell.uc_area,
-                }
-                F2_hkl1, F2_hkl1_err = (
-                    integration_corrections.structure_factor_from_policy(
-                        ctr_croibg1_a,
-                        ctr_croibg1_err_a,
-                        factors1,
-                        frame_policy,
-                        **common_scale,
-                    )
-                )
-                F2_hkl2, F2_hkl2_err = (
-                    integration_corrections.structure_factor_from_policy(
-                        ctr_croibg2_a,
-                        ctr_croibg2_err_a,
-                        factors2,
-                        frame_policy,
-                        **common_scale,
-                    )
-                )
-            except ValueError:
-                if not frame_policy.new_contract:
-                    raise
-                logger.warning(
-                    "The explicit CTR normalization is incomplete; saving "
-                    "diagnostic intensity without labeling it F2_hkl.",
-                    exc_info=True,
-                )
-
-        rod_mask1 = np.isfinite(croibg1_a)
-        rod_mask2 = np.isfinite(croibg2_a)
-
-        s1_masked = hkl_del_gam_1[:, 5][rod_mask1]
-        s2_masked = hkl_del_gam_2[:, 5][rod_mask2]
-
-        croibg1_a_masked = croibg1_a[rod_mask1]
-        croibg2_a_masked = croibg2_a[rod_mask2]
-
-        croibg1_err_a_masked = croibg1_err_a[rod_mask1]
-        croibg2_err_a_masked = croibg2_err_a[rod_mask2]
-
-        # name = str(H_1) + "*s+" + str(H_0)
-        if self.scanSelector.scanstab.currentIndex() == 1:
-            x = self.scanSelector.xy_static[0].value()
-            y = self.scanSelector.xy_static[1].value()
-            name1 = f"pixloc[{x:.2f} {y:.2f}]"
-            name2 = (
-                f"pixloc[{x:.2f} {y:.2f}]_2"  # does not exist, Just for compatibility
-            )
-            traj1 = {
-                "@NX_class": "NXcollection",
-                "@direction": "Fixed pixel coordinates",
-                "s": hkl_del_gam_1[:, 5],
-            }
-            traj2 = {
-                "@NX_class": "NXcollection",
-                "@direction": "Fixed pixel coordinates",
-                "s": hkl_del_gam_2[:, 5],
-            }
-        else:
-            name1 = str(H_1) + "*s1+" + str(H_0)
-            name2 = str(H_1) + "*s2+" + str(H_0)
-            traj1 = {
-                "@NX_class": "NXcollection",
-                "@direction": "Intergrated along H_1*s + H_0 in reciprocal space",
-                "H_1": H_1,
-                "H_0": H_0,
-                "s": hkl_del_gam_1[:, 5],
-            }
-            traj2 = {
-                "@NX_class": "NXcollection",
-                "@direction": "Intergrated along H_1*s + H_0 in reciprocal space",
-                "H_1": H_1,
-                "H_0": H_0,
-                "s": hkl_del_gam_2[:, 5],
-            }
-
-        defaultS1 = croibg1_a_masked.size > croibg2_a_masked.size
-
-        if hasattr(self.fscan, "title"):
-            title = str(self.fscan.title)
-        else:
-            title = f"{self.fscan.axisname}-scan"
-
-        mu, om = self.getMuOm()
-        if len(np.asarray(om).shape) == 0:
-            om = np.full_like(mu, om)
-        if len(np.asarray(mu).shape) == 0:
-            mu = np.full_like(om, mu)
-        gamma_arm_all, delta_arm_all = self.getArmAngles()
-        gamma_arm_all = np.broadcast_to(
-            np.asarray(gamma_arm_all, dtype=np.float64), (nodatapoints,)
-        ).copy()
-        delta_arm_all = np.broadcast_to(
-            np.asarray(delta_arm_all, dtype=np.float64), (nodatapoints,)
-        ).copy()
-
-        suffix = ""
-        i = 0
-
-        while (
-            self.activescanname + "/measurement/" + name1 + suffix
-            in self.database.nxfile
-        ):
-            suffix = f"_{i}"
-            i += 1
-        availname1 = name1 + suffix
-
-        suffix = ""
-        i = 0
-        while (
-            self.activescanname + "/measurement/" + name2 + suffix
-            in self.database.nxfile
-        ):
-            suffix = f"_{i}"
-            i += 1
-
-        availname2 = name2 + suffix
-
-        auxcounters = {"@NX_class": "NXcollection"}
-        for auxname in self.fscan.auxillary_counters:
-            if hasattr(self.fscan, auxname):
-                cntr = getattr(self.fscan, auxname)
-                if cntr is not None:
-                    auxcounters[auxname] = cntr
-
-        datas1 = {
-            "@NX_class": "NXdata",
-            "sixc_angles": {
-                "@NX_class": "NXpositioner",
-                "alpha": np.rad2deg(mu),
-                "omega": np.rad2deg(om),
-                "theta": np.rad2deg(-1 * om),
-                "delta": np.rad2deg(hkl_del_gam_1[:, 3]),
-                "gamma": np.rad2deg(hkl_del_gam_1[:, 4]),
-                "chi": np.rad2deg(self.ubcalc.chi),
-                "phi": np.rad2deg(self.ubcalc.phi),
-                "@unit": "deg",
-            },
-            "hkl": {
-                "@NX_class": "NXcollection",
-                "h": hkl_del_gam_1[:, 0],
-                "k": hkl_del_gam_1[:, 1],
-                "l": hkl_del_gam_1[:, 2],
-            },
-            "counters": {
-                "@NX_class": "NXdetector",
-                "croibg": croibg1_a,
-                "croibg_errors": croibg1_err_a,
-                "ctr_croibg": ctr_croibg1_a,
-                "ctr_croibg_errors": ctr_croibg1_err_a,
-                "croibg_bgimg": croibg1_bgimg_a,  # when None, will not create data set
-                "croibg_bgimg_errors": croibg1_bgimg_err_a,  # when None, will not create data set  # noqa: E501
-                "croi": croi1_a,
-                "bgroi": bgroi1_a,
-                "croi_pix": cpixel1_a,
-                "bgroi_pix": bgpixel1_a,
-                "Cfactors_croi": Corr_croi1_a,
-                "Cfactors_bgroi": Corr_bgroi1_a,
-                "Cfactor_croi": combined_croi_factor1,
-                "Cfactor_bgroi": combined_bgroi_factor1,
-                "Pfactor_croi": polarization_croi_factor1,
-                "Pfactor_bgroi": polarization_bgroi_factor1,
-                "bgimg_croi": bgimg_croi1_a,
-                "bgimg_bgroi": bgimg_bgroi1_a,
-                # None entries do not create a data set, so only the
-                # corrections that were enabled are stored.
-                "F2_hkl": F2_hkl1,
-                "F2_hkl_errors": F2_hkl1_err,
-                "C_Lorentz": factors1.get("C_Lorentz"),
-                "C_flux_on_sample": factors1.get("C_flux_on_sample"),
-                "C_illum_area": factors1.get("C_illum_area"),
-                "C_illumination": factors1.get("C_illumination"),
-                "C_norm": factors1.get("C_norm"),
-            },
-            "pixelcoord": {
-                "@NX_class": "NXdetector",
-                "x": x_coord1_a,
-                "y": y_coord1_a,
-                "vsize": vsize,
-                "hsize": hsize,
-                "vsize_corr": roi_vsize1_a,
-                "hsize_corr": roi_hsize1_a,
-            },
-            "trajectory": traj1,
-            "@signal": (
-                "counters/F2_hkl" if F2_hkl1 is not None else "counters/croibg"
-            ),
-            "@axes": "trajectory/s",
-            "@title": self.activescanname + "_" + availname1,
-            "@orgui_meta": "roi",
-        }
-
-        datas2 = {
-            "@NX_class": "NXdata",
-            "sixc_angles": {
-                "@NX_class": "NXpositioner",
-                "alpha": np.rad2deg(mu),
-                "omega": np.rad2deg(om),
-                "theta": np.rad2deg(-1 * om),
-                "delta": np.rad2deg(hkl_del_gam_2[:, 3]),
-                "gamma": np.rad2deg(hkl_del_gam_2[:, 4]),
-                "chi": np.rad2deg(self.ubcalc.chi),
-                "phi": np.rad2deg(self.ubcalc.phi),
-                "@unit": "deg",
-            },
-            "hkl": {
-                "@NX_class": "NXcollection",
-                "h": hkl_del_gam_2[:, 0],
-                "k": hkl_del_gam_2[:, 1],
-                "l": hkl_del_gam_2[:, 2],
-            },
-            "counters": {
-                "@NX_class": "NXdetector",
-                "croibg": croibg2_a,
-                "croibg_errors": croibg2_err_a,
-                "ctr_croibg": ctr_croibg2_a,
-                "ctr_croibg_errors": ctr_croibg2_err_a,
-                "croibg_bgimg": croibg2_bgimg_a,
-                "croibg_bgimg_errors": croibg2_bgimg_err_a,
-                "croi": croi2_a,
-                "bgroi": bgroi2_a,
-                "croi_pix": cpixel2_a,
-                "bgroi_pix": bgpixel2_a,
-                "Cfactors_croi": Corr_croi2_a,
-                "Cfactors_bgroi": Corr_bgroi2_a,
-                "Cfactor_croi": combined_croi_factor2,
-                "Cfactor_bgroi": combined_bgroi_factor2,
-                "Pfactor_croi": polarization_croi_factor2,
-                "Pfactor_bgroi": polarization_bgroi_factor2,
-                "bgimg_croi": bgimg_croi2_a,
-                "bgimg_bgroi": bgimg_bgroi2_a,
-                # None entries do not create a data set, so only the
-                # corrections that were enabled are stored.
-                "F2_hkl": F2_hkl2,
-                "F2_hkl_errors": F2_hkl2_err,
-                "C_Lorentz": factors2.get("C_Lorentz"),
-                "C_flux_on_sample": factors2.get("C_flux_on_sample"),
-                "C_illum_area": factors2.get("C_illum_area"),
-                "C_illumination": factors2.get("C_illumination"),
-                "C_norm": factors2.get("C_norm"),
-            },
-            "pixelcoord": {
-                "@NX_class": "NXdetector",
-                "x": x_coord2_a,
-                "y": y_coord2_a,
-                "vsize": vsize,
-                "hsize": hsize,
-                "vsize_corr": roi_vsize2_a,
-                "hsize_corr": roi_hsize2_a,
-            },
-            "trajectory": traj2,
-            "@signal": (
-                "counters/F2_hkl" if F2_hkl2 is not None else "counters/croibg"
-            ),
-            "@axes": "trajectory/s",
-            "@title": self.activescanname + "_" + availname2,
-            "@orgui_meta": "roi",
-        }
-
-        profile_provenance = _curve_profile_provenance(
-            config_snapshot.corrections
-        )
-        profile_provenance.update(
-            {
-                "wavelength_angstrom": config_snapshot.ub_calculator.getLambda(),
-                "unitcell_area_angstrom2": config_snapshot.unit_cell.uc_area,
-                "detector_efficiency_assumed": 1.0,
-                "external_transmission_assumed": 1.0,
-            }
-        )
-
-        def versioned_stationary_curve(
-            factors,
-            base_croibg,
-            base_croibg_variance,
-            croi,
-            bgroi,
-            combined_croi,
-            combined_bgroi,
-            polarization_croi,
-            polarization_bgroi,
-            x,
-            y,
-            width,
-            height,
-            x_start,
-            x_stop,
-            y_start,
-            y_stop,
-        ):
-            """Build the non-legacy sibling branch for one trajectory."""
-            record = CurveCorrectionRecord(
-                algorithm=(
-                    "framewise_ctr_total_flux_v1"
-                    if frame_policy.new_contract
-                    else "legacy_stationary_roi_v2"
-                ),
-                output_quantity=(
-                    "stationary_ctr_photon_curve"
-                    if frame_policy.new_contract
-                    else "stationary_roi_intensity"
-                ),
-                scale_convention=(
-                    frame_policy.scale_convention
-                    if frame_policy.new_contract
-                    else (
-                        "legacy_density_area"
-                        if options["footprint"]
-                        else "legacy_relative"
-                    )
-                ),
-                normalization_status=frame_policy.normalization_status,
-                illumination_status=frame_policy.illumination_status,
-                pixel_correction_status=("applied" if corr else "not_applied"),
-                normalization_divisor=frame_policy.normalization_divisor,
-                normalization_unit=frame_policy.normalization_unit,
-                normalization_components=frame_policy.normalization_components,
-                illumination_divisor=frame_policy.illumination_divisor,
-                illumination_convention=frame_policy.illumination_convention,
-                vertical_intercepted_fraction=(
-                    frame_policy.vertical_intercepted_fraction
-                ),
-                horizontal_intercepted_fraction=(
-                    frame_policy.horizontal_intercepted_fraction
-                ),
-                intercepted_fraction=frame_policy.intercepted_fraction,
-                alpha=alpha_all,
-                base_croi=croi,
-                base_croi_variance=croi,
-                base_bgroi=bgroi,
-                base_bgroi_variance=bgroi,
-                base_croibg=base_croibg,
-                base_croibg_variance=base_croibg_variance,
-                combined_croi_factor=combined_croi,
-                combined_bgroi_factor=combined_bgroi,
-                polarization_croi_factor=polarization_croi,
-                polarization_bgroi_factor=polarization_bgroi,
-                gamma_arm=gamma_arm_all,
-                delta_arm=delta_arm_all,
-                roi_x=x,
-                roi_y=y,
-                roi_width=width,
-                roi_height=height,
-                roi_x_start=x_start,
-                roi_x_stop=x_stop,
-                roi_y_start=y_start,
-                roi_y_stop=y_stop,
-                lorentz_mode=("stationary" if options["lorentz"] else None),
-                profile_provenance=profile_provenance,
-            )
-            return curve_correction_record_to_nxdict(record)
-
-        datas1[CURVE_CORRECTIONS_GROUP] = versioned_stationary_curve(
-            factors1,
-            base_croibg1,
-            base_croibg1_variance,
-            croi1_a,
-            bgroi1_a,
-            combined_croi_factor1,
-            combined_bgroi_factor1,
-            polarization_croi_factor1,
-            polarization_bgroi_factor1,
-            x_coord1_a,
-            y_coord1_a,
-            roi_hsize1_a,
-            roi_vsize1_a,
-            roi_x_start1_a,
-            roi_x_stop1_a,
-            roi_y_start1_a,
-            roi_y_stop1_a,
-        )
-        datas2[CURVE_CORRECTIONS_GROUP] = versioned_stationary_curve(
-            factors2,
-            base_croibg2,
-            base_croibg2_variance,
-            croi2_a,
-            bgroi2_a,
-            combined_croi_factor2,
-            combined_bgroi_factor2,
-            polarization_croi_factor2,
-            polarization_bgroi_factor2,
-            x_coord2_a,
-            y_coord2_a,
-            roi_hsize2_a,
-            roi_vsize2_a,
-            roi_x_start2_a,
-            roi_x_stop2_a,
-            roi_y_start2_a,
-            roi_y_stop2_a,
-        )
-        data = {
-            self.activescanname: {
-                "instrument": {
-                    "@NX_class": "NXinstrument",
-                    "positioners": {
-                        "@NX_class": "NXcollection",
-                        self.fscan.axisname: self.fscan.axis,
-                    },
-                },
-                "auxillary": auxcounters,
-                "measurement": {
-                    "@NX_class": "NXentry",
-                    "@default": availname1 if defaultS1 else availname2,
-                },
-                "title": f"{title}",
-                "configuration": config_snapshot.to_nxdict(
-                    role="scan", source="scan_import"
-                ),
-                "@NX_class": "NXentry",
-                "@default": "measurement/%s"
-                % (availname1 if defaultS1 else availname2),
-                "@orgui_meta": "scan",
-            }
-        }
-
-        names_to_log = ""
-
-        if np.any(cpixel1_a > 0.0):
-            self.integrdataPlot.addCurve(
-                s1_masked,
-                croibg1_a_masked,
-                legend=self.activescanname + "_" + availname1,
-                xlabel="trajectory/s",
-                ylabel="counters/croibg",
-                yerror=croibg1_err_a_masked,
-            )
-
-            data[self.activescanname]["measurement"][availname1] = datas1
-            data[self.activescanname]["measurement"][availname1]["configuration"] = (
-                config_snapshot.to_nxdict(role="integration", source="integration_save")
-            )
-            names_to_log += availname1
-        if np.any(cpixel2_a > 0.0):
-            self.integrdataPlot.addCurve(
-                s2_masked,
-                croibg2_a_masked,
-                legend=self.activescanname + "_" + availname2,
-                xlabel="trajectory/s",
-                ylabel="counters/croibg",
-                yerror=croibg2_err_a_masked,
-            )
-
-            data[self.activescanname]["measurement"][availname2] = datas2
-            data[self.activescanname]["measurement"][availname2]["configuration"] = (
-                config_snapshot.to_nxdict(role="integration", source="integration_save")
-            )
-
-            names_to_log += availname2
-
-        error = self._saveIntegrationResult(
-            data, f"the scan integration {names_to_log}"
-        )
-        if error is not None:
-            return error
-        logger.info(f"stationary scan integrated and saved with name(s) {names_to_log}")
-        return {"status": "success"}
+        return self._dispatch_scan_integration()
 
     def _graphCallback(self, eventdict):
         """GUI-only: handle plot mouse and marker events."""
@@ -7796,6 +5323,9 @@ ub : gui for UB matrix and angle calculations
         A database file which cannot be closed properly, e.g. on a
         disconnected drive, must not prevent orGUI from closing.
         """
+        if getattr(self, "_scan_integration_active", False):
+            event.ignore()
+            return
         self.database.closeSafe(show_dialog=True)
         super().closeEvent(event)
 

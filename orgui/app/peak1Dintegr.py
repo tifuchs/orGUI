@@ -56,6 +56,8 @@ from silx.utils.weakref import WeakMethodProxy
 import traceback
 
 from . import qutils
+from .scan_integration import BatchOptions, IntegrationCancelled
+from .rocking_tiles import _RowGroup, _read_roi_tile, _join_reduced_tiles
 from .config_data import (
     CURVE_CORRECTIONS_GROUP,
     CURVE_CORRECTIONS_SCHEMA_VERSION,
@@ -554,6 +556,12 @@ def _compute_rocking_integration(
     return result
 
 
+def _raise_if_cancelled(progress):
+    if progress.wasCanceled():
+        raise IntegrationCancelled("Cancelled before rocking reduction was saved")
+    return False
+
+
 class RockingPeakIntegrator(qt.QMainWindow):
     def __init__(self, database, parent=None):
         qt.QMainWindow.__init__(self, parent)
@@ -565,6 +573,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self._idx = 0
         self.footprint_action = FOOTPRINT_KEEP
         self.replacement_illumination = None
+        self._replacement_beam = None
         self.replacement_illumination_convention = None
         self.allow_illumination_convention_change = False
 
@@ -1098,7 +1107,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             f"Next reduction: {action_text}; output {quantity}.{warning}"
         )
 
-    def _prepareFootprintAction(self, h5_obj):
+    def _prepareFootprintAction(self, h5_obj, *, lazy=False):
         """Resolve any live illumination divisor before reading the curve."""
         action = self.footprintAction.currentData() or FOOTPRINT_KEEP
         self.footprint_action = action
@@ -1121,12 +1130,20 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     "The stored curve has no incidence angles; re-extract "
                     "images before changing its footprint."
                 )
-            self.replacement_illumination = framewise_illumination_divisor(
-                np.asarray(record.alpha),
+            beam = (
                 self.integrationCorrection.sampleLength(),
                 self.integrationCorrection.beamProfile(),
-                horizontal_fraction=horizontal,
-            )[0]
+                horizontal,
+            )
+            if lazy:
+                self._replacement_beam = beam
+            else:
+                self.replacement_illumination = framewise_illumination_divisor(
+                    np.asarray(record.alpha),
+                    beam[0],
+                    beam[1],
+                    horizontal_fraction=beam[2],
+                )[0]
             self.replacement_illumination_convention = "total_flux_H"
         elif action != FOOTPRINT_KEEP and record is None:
             raise ValueError(
@@ -2044,22 +2061,11 @@ class RockingPeakIntegrator(qt.QMainWindow):
             )
             return None, None
 
-    def integrate(self):
-        """Integrate rocking-scan ROIs.
-
-        This shared path must stay safe in both GUI and CLI startup modes.
-        Progress reporting is routed through :mod:`orgui.logger_utils` so CLI
-        mode logs progress instead of opening modal dialogs.
-        """
-        if not self._currentRoInfo:
-            raise ValueError("No rocking scan selected.")
-        name = self._currentRoInfo["name"]
-        h5_obj = self.database.nxfile[name]
-        self._prepareFootprintAction(h5_obj)
-        curves = self.get_all_ro_curves()
+    def _integrate_curve_tile(self, h5_obj, rows, progress):
+        curves = self.get_all_ro_curves(rows=rows)
         correction_record = curves.get("correction_record")
         versioned_total_flux = correction_record is not None
-        cnters = h5_obj["rois"]
+        cnters = _RowGroup(h5_obj["rois"], rows)
         footprint_action = self.footprint_action
         apply_legacy_footprint = (
             not versioned_total_flux and footprint_action == FOOTPRINT_APPLY
@@ -2147,13 +2153,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     "divisor and cannot be reduced to a CTR structure factor."
                 )
             C_norm = np.ones_like(curves["croibg"], dtype=np.float64)
-            normalization_applied = tuple(
-                correction_record.normalization_components
-            )
+            normalization_applied = tuple(correction_record.normalization_components)
         else:
-            C_norm, normalization_applied = self._rocking_normalization(
-                aux, axis.size
-            )
+            C_norm, normalization_applied = self._rocking_normalization(aux, axis.size)
             C_norm = np.broadcast_to(C_norm, np.shape(curves["croibg"])).copy()
 
         # Only F2_hkl is divided by these, so asking for them with the
@@ -2170,19 +2172,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
             # retained only for legacy database files that lack that branch.
             if "ctr_croibg" not in curves and not versioned_total_flux:
                 solid_angle_mean, solid_angle_compensated = (
-                    self._rocking_solid_angle_mean(
-                        detector, scangroup, cnters, x, y
-                    )
+                    self._rocking_solid_angle_mean(detector, scangroup, cnters, x, y)
                 )
 
-        self.database.nxfile[self._currentRoInfo["name"] + "/integration/"]
-        roi_info = h5todict(
-            self.database.nxfile, self._currentRoInfo["name"] + "/integration/"
-        )
-
-        progress = logger_utils.create_progress_logger(
-            self, s_array.size, "Integrating rocking scans"
-        )
+        roi_info = _read_roi_tile(h5_obj["integration"], rows)
 
         result = _compute_rocking_integration(
             s_array,
@@ -2203,10 +2196,71 @@ class RockingPeakIntegrator(qt.QMainWindow):
             ctr_croibg_curves=curves.get("ctr_croibg"),
             ctr_croibg_errors_curves=curves.get("ctr_croibg_errors"),
             angle_unit="deg",
-            progress_callback=progress.update,
-            should_cancel=progress.wasCanceled,
+            progress_callback=lambda i: progress.update(rows.start + i + 1),
+            should_cancel=lambda: _raise_if_cancelled(progress),
         )
-        progress.finish()
+
+        return result, {
+            "curves": curves,
+            "correction_record": correction_record,
+            "versioned_total_flux": versioned_total_flux,
+            "apply_legacy_footprint": apply_legacy_footprint,
+            "normalization_applied": normalization_applied,
+            "detector_acceptance": detector_acceptance,
+            "acceptance_applied": acceptance_applied,
+            "solid_angle_compensated": solid_angle_compensated,
+            "mode": locals().get("mode"),
+            "L": locals().get("L"),
+        }
+
+    def integrate(self):
+        """Integrate rocking-scan ROIs.
+
+        This shared path must stay safe in both GUI and CLI startup modes.
+        Progress reporting is routed through :mod:`orgui.logger_utils` so CLI
+        mode logs progress instead of opening modal dialogs.
+        """
+        if not self._currentRoInfo:
+            raise ValueError("No rocking scan selected.")
+        name = self._currentRoInfo["name"]
+        h5_obj = self.database.nxfile[name]
+        self._prepareFootprintAction(h5_obj, lazy=True)
+        cnters = h5_obj["rois"]
+        s_array = cnters["s"][()]
+        count = s_array.size
+        if not count:
+            raise ValueError("No rocking curves selected")
+        options = getattr(self, "rocking_batch_options", BatchOptions())
+        _, tile_size = options.sizes(len(self._currentRoInfo["axis"]), count)
+        progress = logger_utils.create_progress_logger(
+            self, count, "Integrating rocking scans"
+        )
+        results, acceptances = [], []
+        try:
+            for start in range(0, count, tile_size):
+                _raise_if_cancelled(progress)
+                tile, metadata = self._integrate_curve_tile(
+                    h5_obj, slice(start, min(start + tile_size, count)), progress
+                )
+                results.append(tile)
+                if metadata["detector_acceptance"] is not None:
+                    acceptances.append(metadata["detector_acceptance"])
+            _raise_if_cancelled(progress)
+        finally:
+            progress.finish()
+        result = _join_reduced_tiles(results)
+        curves = metadata["curves"]
+        correction_record = metadata["correction_record"]
+        versioned_total_flux = metadata["versioned_total_flux"]
+        apply_legacy_footprint = metadata["apply_legacy_footprint"]
+        normalization_applied = metadata["normalization_applied"]
+        acceptance_applied = metadata["acceptance_applied"]
+        solid_angle_compensated = metadata["solid_angle_compensated"]
+        detector_acceptance = np.concatenate(acceptances) if acceptances else None
+        mode, L = metadata["mode"], metadata["L"]
+        x, y = cnters["x"][()], cnters["y"][()]
+        if x.ndim > 1:
+            x, y = x[:, 0], y[:, 0]
 
         int_data = result["int_data"]
         croi = result["croi"]
@@ -2499,7 +2553,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         """Return one rocking curve under its stored correction contract."""
         return self.get_all_ro_curves(idx)
 
-    def get_all_ro_curves(self, idx=None):
+    def get_all_ro_curves(self, idx=None, *, rows=None):
         """Return rocking curves without silently changing their scale.
 
         New total-flux records are reconstructed from the immutable base
@@ -2507,10 +2561,15 @@ class RockingPeakIntegrator(qt.QMainWindow):
         historical ``rois`` path and are normalized later by
         :meth:`_rocking_normalization`.
 
+        :param slice or None rows: Read a bounded block and apply the pending
+            footprint action. Shared per-frame divisors remain shared.
         :param int or None idx: Read only this curve. It is shown in its
             stored footprint state; a pending footprint action is applied
             only by :meth:`integrate`.
         """
+        if idx is not None and rows is not None:
+            raise ValueError("Use idx or rows, not both")
+        selection = rows if rows is not None else idx
         name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
         if CURVE_CORRECTIONS_GROUP in h5_obj:
@@ -2518,36 +2577,41 @@ class RockingPeakIntegrator(qt.QMainWindow):
             if record is not None and record.algorithm.startswith(
                 "framewise_ctr_total_flux_"
             ):
+                if selection is not None:
+                    record = dataclasses.replace(
+                        record,
+                        **{
+                            field.name: getattr(record, field.name)[selection]
+                            for field in dataclasses.fields(record)
+                            if np.ndim(getattr(record, field.name)) >= 2
+                        },
+                    )
+                if rows is not None and getattr(self, "_replacement_beam", None):
+                    length, profile, horizontal = self._replacement_beam
+                    replacement = framewise_illumination_divisor(
+                        np.asarray(record.alpha),
+                        length,
+                        profile,
+                        horizontal_fraction=horizontal,
+                    )[0]
+                else:
+                    replacement = getattr(self, "replacement_illumination", None)
+                    if rows is not None and np.ndim(replacement) == 2:
+                        replacement = replacement[rows]
                 if idx is None:
                     footprint = {
                         "footprint_action": getattr(
                             self, "footprint_action", FOOTPRINT_KEEP
                         ),
-                        "replacement_illumination": getattr(
-                            self, "replacement_illumination", None
-                        ),
+                        "replacement_illumination": replacement,
                         "replacement_convention": getattr(
                             self, "replacement_illumination_convention", None
                         ),
                         "allow_convention_change": bool(
-                            getattr(
-                                self, "allow_illumination_convention_change", False
-                            )
+                            getattr(self, "allow_illumination_convention_change", False)
                         ),
                     }
                 else:
-                    # (curve, frame) arrays: read one row; 1-D divisors are
-                    # shared per frame and broadcast unchanged.
-                    record = dataclasses.replace(record, **{
-                        field: getattr(record, field)[idx]
-                        for field in (
-                            "base_croibg",
-                            "base_croibg_variance",
-                            "normalization_divisor",
-                            "illumination_divisor",
-                        )
-                        if np.ndim(getattr(record, field)) == 2
-                    })
                     footprint = {}
                 curve, errors, action, convention = corrected_curve_from_record(
                     record, **footprint
@@ -2563,7 +2627,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 }
 
         cnters = self._legacy_rocking_curve_group(h5_obj)
-        rows = () if idx is None else idx
+        rows = () if selection is None else selection
         curve = {
             "axisname": self._currentRoInfo["axisname"],
             "axis": self._currentRoInfo["axis"],
@@ -3034,6 +3098,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
             return
 
     def get_rocking_scan_info(self, name):
+        if name.lstrip("/").startswith("_orgui_integration_work/"):
+            raise ValueError("Temporary integration data is not a rocking scan")
         if name not in self.database.nxfile:
             raise ValueError(f"scan {name} is not in the database")
 

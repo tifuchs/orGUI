@@ -432,7 +432,7 @@ def test_an_absent_region_group_is_empty_not_fatal():
     assert state.region == {}
     assert roi_to_nxdict(state) == {
         "@NX_class": "NXcollection",
-        "@orgui_schema_version": 1,
+        "@orgui_schema_version": 2,
     }
 
 

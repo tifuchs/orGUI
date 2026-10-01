@@ -47,7 +47,7 @@ CORRECTION_STATUSES = frozenset(
 )
 
 #: Layout version of the roi_integration group.
-ROI_SCHEMA_VERSION = 1
+ROI_SCHEMA_VERSION = 2
 
 
 def _json_value(value):
@@ -963,6 +963,14 @@ def roi_to_nxdict(state):
         values = getattr(state, name)
         if values:
             nxdict[name] = _nx_group(dict(values), _ROI_UNITS[name])
+    if state.lines:
+        from .scan_integration import normalize_lines
+        modes = {"@NX_class": "NXcollection"}
+        for mode, definitions in state.lines.items():
+            modes[mode] = {"@NX_class": "NXcollection", "@unit": "rlu"}
+            for index, line in enumerate(normalize_lines(definitions)):
+                modes[mode][f"line_{index:06d}"] = _nx_group(line)
+        nxdict["lines"] = modes
     return nxdict
 
 
@@ -974,10 +982,22 @@ def roi_from_nxdict(nxdict):
     :rtype: ROIState
     """
     nxdict = nxdict or {}
+    from .scan_integration import normalize_lines
+    lines = {}
+    for mode, definitions in (nxdict.get("lines") or {}).items():
+        if mode.startswith("@"):
+            continue
+        if mode not in ("stationary", "rocking"):
+            continue
+        lines[mode] = normalize_lines([
+            _read_group(definitions, name)
+            for name in sorted(definitions) if not name.startswith("@")
+        ])
     return ROIState(
         region=_read_group(nxdict, "region"),
         advanced=_read_group(nxdict, "advanced"),
         rocking_scan=_read_group(nxdict, "rocking_scan"),
+        lines=lines,
     )
 
 
@@ -1005,10 +1025,12 @@ class ROIState:
     #: the value is unused -- so do not read it as an effective sampling
     #: without checking which mode wrote it.
     rocking_scan: dict = field(default_factory=dict)
+    #: Ordered mode-specific id/H_0/H_1 line definitions, vectors in r.l.u.
+    lines: dict = field(default_factory=dict)
 
     def is_empty(self):
         """True when nothing was recorded, so nothing should be restored."""
-        return not (self.region or self.advanced or self.rocking_scan)
+        return not (self.region or self.advanced or self.rocking_scan or self.lines)
 
 
 @dataclass
@@ -1240,6 +1262,7 @@ class ConfigData:
                 region=dict(options.get("region", {})),
                 advanced=dict(options.get("advanced", {})),
                 rocking_scan=dict(options.get("rocking_scan", {})),
+                lines=dict(options.get("lines", {})),
             )
         return cls(
             detector=ub_widget.detectorCal,
@@ -1305,6 +1328,7 @@ class ConfigData:
                 "mask": self.corrections.use_mask,
                 "solid_angle": self.corrections.use_solid_angle,
                 "polarization": self.corrections.use_polarization,
+                "lines": self.roi.lines,
             }
             # Only switches this configuration actually recorded. A file
             # written before they were stored leaves them as the user has

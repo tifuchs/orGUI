@@ -44,6 +44,10 @@ import json
 import os
 import traceback
 import time
+import uuid
+from collections.abc import Mapping
+
+import numpy as np
 
 from .. import resources
 from .config_data import ConfigData, ConfigHandler
@@ -73,7 +77,170 @@ class DBCloseError(IOError):
 class DBUnavailableError(IOError):
     """Raised if an operation requires a database file, but none is open."""
 
-    pass
+
+class RockingBatchWriter:
+    """Stage bounded counters and publish complete ordinary rocking groups.
+
+    All methods run on the collecting thread. Removing temporary datasets
+    does not guarantee that HDF5 releases their space to the filesystem.
+    """
+
+    WORK_ROOT = "_orgui_integration_work"
+
+    def __init__(self, database, frames, rois, *, background=False):
+        if frames < 1 or rois < 1:
+            raise ValueError("Rocking staging requires frames and ROIs")
+        self.database = database
+        self.file = database._requireOpenFile()
+        self.job_id = uuid.uuid4().hex
+        self.path = f"/{self.WORK_ROOT}/{self.job_id}"
+        self.group = self.file.require_group(self.path)
+        self.group.attrs["state"] = "extracting"
+        self.group.attrs["frames"] = frames
+        self.group.attrs["rois"] = rois
+        self.frames = frames
+        self.rois = rois
+        self.published = []
+        compression = getattr(database, "compression", None)
+        self.filters = (
+            dict(compression)
+            if isinstance(compression, Mapping)
+            else {"compression": compression}
+        )
+        try:
+            self.counts = [
+                self.group.create_dataset(
+                    f"counters/{i}",
+                    shape=(rois, frames),
+                    dtype=np.float64,
+                    chunks=(min(rois, 32), min(frames, 64)),
+                    **self.filters,
+                )
+                for i in range(12 if background else 8)
+            ]
+            self.group.create_dataset("committed_frames", shape=(frames,), dtype=bool)
+        except Exception:
+            try:
+                del self.file[self.path]
+                if not len(self.file[self.WORK_ROOT]):
+                    del self.file[self.WORK_ROOT]
+                self._flush()
+            except Exception:
+                logger.warning("Cannot clean failed integration setup", exc_info=True)
+            raise
+        self._rows = {}
+
+    def _flush(self):
+        try:
+            self.file.flush()
+        except Exception:
+            if hasattr(self.database, "closeSafe"):
+                self.database.closeSafe()
+            raise
+
+    def write_frames(self, start, buffer):
+        """Write a ``(counter-group, frame, ROI, 4)`` batch and commit it."""
+        stop = start + buffer.shape[1]
+        for field, dataset in enumerate(self.counts):
+            for row in range(0, self.rois, 32):
+                tile = buffer[field // 4, :, row : row + 32, field % 4]
+                dataset[row : row + 32, start:stop] = np.ascontiguousarray(tile.T)
+        self._flush()
+        self.group["committed_frames"][start:stop] = True
+        self._flush()
+
+    def read_curves(self, start, stop):
+        """Read bounded counters as twelve ``(frame, ROI)`` arrays."""
+        arrays = [np.asarray(d[start:stop]).T for d in self.counts]
+        arrays.extend(np.zeros_like(arrays[0]) for _ in range(12 - len(arrays)))
+        return arrays
+
+    def _is_row_field(self, path, value):
+        if path.startswith("rois/"):
+            return True
+        if not path.startswith("ctr_curve_v3/"):
+            return False
+        parts = path.split("/")
+        return (
+            parts[1] in ("base", "pixel_corrections", "geometry") or np.ndim(value) >= 2
+        )
+
+    def append_tile(self, name, data):
+        """Append curve rows while preserving existing NeXus metadata."""
+        group = self.group.require_group(f"results/{name}")
+        offset = self._rows.get(name, 0)
+        size = np.asarray(data["rois"]["croibg"]).shape[0]
+
+        def write(parent, mapping, prefix=""):
+            for key, value in mapping.items():
+                path = prefix + key
+                if value is None:
+                    continue
+                if key.startswith("@"):
+                    parent.attrs[key[1:]] = value
+                elif isinstance(value, dict):
+                    write(parent.require_group(key), value, path + "/")
+                elif self._is_row_field(path, value) and not isinstance(value, str):
+                    value = np.atleast_1d(value)
+                    if value.shape[0] != size:
+                        raise ValueError(f"Curve row mismatch in {path}")
+                    if key not in parent:
+                        parent.create_dataset(
+                            key,
+                            shape=(0,) + value.shape[1:],
+                            maxshape=(None,) + value.shape[1:],
+                            dtype=value.dtype,
+                            chunks=True,
+                            **self.filters,
+                        )
+                    dataset = parent[key]
+                    dataset.resize(offset + size, axis=0)
+                    dataset[offset : offset + size] = value
+                elif key not in parent:
+                    dicttonx({key: value}, parent, update_mode="add")
+
+        write(group, data)
+        self._rows[name] = offset + size
+        self._flush()
+
+    def publish(self, scan_name, name, *, line_id=None):
+        """Publish a finished line at the reader's existing measurement path."""
+        if not np.all(self.group["committed_frames"][()]):
+            raise ValueError("Cannot publish incomplete frame extraction")
+        if not self._rows.get(name):
+            return None
+        source = f"{self.path}/results/{name}"
+        target = f"/{scan_name}/measurement/{name}"
+        if target in self.file:
+            raise ValueError(f"Result path already exists: {target}")
+        group = self.file[source]
+        group.attrs["orgui_batch_job"] = self.job_id
+        for key in ("frame_batch", "curve_batch", "memory_mib", "workers"):
+            if key in self.group.attrs:
+                group.attrs[f"orgui_{key}"] = self.group.attrs[key]
+        if line_id is not None:
+            group.attrs["orgui_line_id"] = line_id
+        self._flush()
+        self.file.move(source, target)
+        self.published.append(target)
+        self.file[scan_name].attrs["default"] = f"measurement/{name}"
+        self.file[f"/{scan_name}/measurement"].attrs["default"] = name
+        self._flush()
+        return target
+
+    def close(self, state="complete"):
+        """Clean only this job's unpublished datasets and refresh results."""
+        if not self.file.id.valid:
+            return
+        self.group.attrs["state"] = state
+        self._flush()
+        del self.file[self.path]
+        root = self.file[self.WORK_ROOT]
+        if not len(root):
+            del self.file[self.WORK_ROOT]
+        self._flush()
+        if self.published and hasattr(self.database, "sync_integration_results"):
+            self.database.sync_integration_results()
 
 
 DEFAULT_FILTERS = {  # Filters available with h5py/libhdf5
@@ -279,6 +446,8 @@ class DataBase(qt.QMainWindow):
     def get_roinode(self, obj):
         if silx.io.utils.get_h5_class(obj) is None:
             return None
+        if obj.name.startswith("/_orgui_integration_work/"):
+            return None
 
         while obj.name != "/":
             meta = obj.attrs.get("orgui_meta", False)
@@ -288,6 +457,8 @@ class DataBase(qt.QMainWindow):
 
     def get_scannode(self, obj):
         if silx.io.utils.get_h5_class(obj) is None:
+            return None
+        if obj.name.startswith("/_orgui_integration_work/"):
             return None
 
         while obj.name != "/":
@@ -323,6 +494,8 @@ class DataBase(qt.QMainWindow):
         if not objects:
             return
         obj = objects[0]  # for single selection
+        if obj.h5py_object.name.startswith("/_orgui_integration_work"):
+            return
         menu = event.menu()
         action = qt.QAction("Refresh", menu)
         action.triggered.connect(lambda: self.onRefreshNode(obj))
@@ -748,6 +921,17 @@ class DataBase(qt.QMainWindow):
         self.hdf5model.synchronizeH5pyObject(nxfile)
         self.view.expandToDepth(0)
 
+    def sync_integration_results(self):
+        """Flush completed batch results and refresh the database tree."""
+        nxfile = self._requireOpenFile()
+        try:
+            nxfile.flush()
+        except Exception:
+            self.closeSafe()
+            raise
+        self._waitForPendingOperations()
+        self.hdf5model.synchronizeH5pyObject(nxfile)
+
     def register_external_result(
         self, path, checksum, grids, status, job_digest
     ):
@@ -851,6 +1035,8 @@ class DataBase(qt.QMainWindow):
 
     def _findRockingScanGroup(self, obj):
         """Return the rocking scan group of a database entry, or None."""
+        if obj.h5py_object.name.startswith("/_orgui_integration_work/"):
+            return None
         meta = obj.h5py_object.attrs.get("orgui_meta", False)
         h5_obj = obj.h5py_object
         while h5_obj.name != "/":  # search for rocking scan group

@@ -25,6 +25,7 @@ from orgui.app.QUBCalculator import (
     QUBFitDialog,
     _DeprecatedFitOption,
 )
+from orgui.backend.scans import SimulationScan
 from orgui.datautils.xrayutils import DetectorCalibration, HKLVlieg
 
 
@@ -303,6 +304,37 @@ def test_image_number_converters_reject_stale_indices():
         gui.imageNoToOmega(3)
     with pytest.raises(IndexError):
         gui.getMuOm(3)
+
+
+@pytest.mark.parametrize(
+    "omega", [-12.5, np.float64(-12.5), np.array(-12.5), np.array([-12.5])]
+)
+def test_image_number_to_omega_accepts_fixed_motor_values(omega):
+    """A fixed omega in degrees applies to every valid image in a scan."""
+    gui = make_gui()
+    gui.fscan.omega = omega
+
+    for imageno in range(len(gui.fscan)):
+        assert gui.imageNoToOmega(imageno) == pytest.approx(np.deg2rad(-12.5))
+    for imageno in [-1, len(gui.fscan)]:
+        with pytest.raises(IndexError):
+            gui.imageNoToOmega(imageno)
+
+
+def test_get_reflections_accepts_scalar_omega_from_mu_scan():
+    """UB reference rows retain fixed omega while the incidence motor scans."""
+    reflections = [
+        SimpleNamespace(hkl=np.array(hkl), xy=np.array([10.0, 20.0]), imageno=i)
+        for i, hkl in enumerate([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    ]
+    gui = make_gui(reflections)
+    gui.fscan = SimulationScan((2, 2), 0.1, 0.3, 3, axis="mu", fixed=12.5)
+
+    hkls, angles = gui.getReflections()
+
+    np.testing.assert_array_equal(hkls, [refl.hkl for refl in reflections])
+    assert angles.shape == (2, 6)
+    np.testing.assert_allclose(angles[:, 3], np.deg2rad(-12.5))
 
 
 def test_get_reflections_skips_stale_image_numbers(caplog):

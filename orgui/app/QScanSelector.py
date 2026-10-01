@@ -796,6 +796,17 @@ class QScanSelector(qt.QMainWindow):
         self.roiIntegrateTabLayout.addWidget(optionsGroup)
 
         self.integrateROIBtn = qt.QPushButton("ROI integrate scan")
+        self.integrationLinesBtn = qt.QPushButton("Integration lines…")
+        self.integrationLinesBtn.setToolTip(
+            "Integrate multiple reciprocal-space lines in stationary "
+            "or rocking hklscan."
+        )
+        self.integrationLinesBtn.clicked.connect(self._edit_integration_lines)
+        self.integrationLinesBtn.setEnabled(self.scanstab.currentIndex() in (0, 2))
+        self.scanstab.currentChanged.connect(
+            lambda index: self.integrationLinesBtn.setEnabled(index in (0, 2))
+        )
+        self.roiIntegrateTabLayout.addWidget(self.integrationLinesBtn)
         self.integrateROIBtn.clicked.connect(lambda: self.sigROIintegrate.emit())
         self.roiIntegrateTabLayout.addWidget(self.integrateROIBtn)
 
@@ -805,6 +816,98 @@ class QScanSelector(qt.QMainWindow):
         self.roiIntegrateTab.setLayout(self.roiIntegrateTabLayout)
 
         maintab.addTab(self.roiIntegrateTab, "ROI integration")
+
+    def get_integration_lines(self, mode):
+        """Return ordered line definitions for stationary or rocking hklscan.
+
+        An empty list selects the existing single line controls. Vectors use
+        r.l.u.; fixed-pixel and Bragg modes do not consume these definitions.
+        """
+        import copy
+
+        return copy.deepcopy(getattr(self, "_integration_lines", {}).get(mode, []))
+
+    def set_integration_lines(self, mode, lines):
+        """Set validated id/H_0/H_1 definitions in r.l.u. for one scan mode."""
+        from .scan_integration import normalize_lines
+
+        if mode not in ("stationary", "rocking"):
+            raise ValueError("Line mode must be stationary or rocking")
+        if not hasattr(self, "_integration_lines"):
+            self._integration_lines = {}
+        self._integration_lines[mode] = normalize_lines(lines)
+        self.sigROIChanged.emit()
+
+    # GUI-only: edits the selected workflow's ordered reciprocal-space lines.
+    def _edit_integration_lines(self):
+        mode = {0: "stationary", 2: "rocking"}.get(self.scanstab.currentIndex())
+        if mode is None:
+            return
+        dialog = qt.QDialog(self)
+        dialog.setWindowTitle("Integration lines (r.l.u.)")
+        layout = qt.QVBoxLayout(dialog)
+        layout.addWidget(
+            qt.QLabel("Empty table uses the existing single line controls.")
+        )
+        table = qt.QTableWidget(0, 7, dialog)
+        table.setHorizontalHeaderLabels(
+            ["ID", "H0 h", "H0 k", "H0 l", "H1 h", "H1 k", "H1 l"]
+        )
+        layout.addWidget(table)
+
+        def add(line):
+            row = table.rowCount()
+            table.insertRow(row)
+            for column, value in enumerate([line["id"], *line["H_0"], *line["H_1"]]):
+                table.setItem(row, column, qt.QTableWidgetItem(str(value)))
+
+        for line in self.get_integration_lines(mode):
+            add(line)
+        controls = qt.QHBoxLayout()
+        add_button = qt.QPushButton("Add current line")
+        remove_button = qt.QPushButton("Remove selected")
+
+        def add_current():
+            if mode == "stationary":
+                h0 = [v.value() for v in self.H_0]
+                h1 = [v.value() for v in self.H_1]
+            else:
+                h0 = self.ro_H_0_dialog.get_hkl()
+                h1 = self.ro_H_1_dialog.get_hkl()
+            add({"id": f"line_{table.rowCount() + 1}", "H_0": h0, "H_1": h1})
+
+        add_button.clicked.connect(add_current)
+        remove_button.clicked.connect(lambda: table.removeRow(table.currentRow()))
+        controls.addWidget(add_button)
+        controls.addWidget(remove_button)
+        layout.addLayout(controls)
+        buttons = qt.QDialogButtonBox(
+            qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
+        )
+        layout.addWidget(buttons)
+        buttons.rejected.connect(dialog.reject)
+
+        def accept():
+            try:
+                lines = []
+                for row in range(table.rowCount()):
+                    values = [table.item(row, col).text() for col in range(7)]
+                    lines.append(
+                        {
+                            "id": values[0],
+                            "H_0": list(map(float, values[1:4])),
+                            "H_1": list(map(float, values[4:7])),
+                        }
+                    )
+                self.set_integration_lines(mode, lines)
+            except (ValueError, AttributeError) as error:
+                qt.QMessageBox.warning(dialog, "Invalid integration line", str(error))
+                return
+            dialog.accept()
+
+        buttons.accepted.connect(accept)
+        dialog.resize(700, 350)
+        dialog.exec()
 
     def onRoSChanged(self):
         """validate that delta S is not too small for the detector resolution.
@@ -950,6 +1053,9 @@ class QScanSelector(qt.QMainWindow):
                 self._set_region_options(value)
             elif key == "rocking_scan":
                 self._set_rocking_options(value)
+            elif key == "lines":
+                for mode in ("stationary", "rocking"):
+                    self.set_integration_lines(mode, value.get(mode, []))
 
     def _set_region_options(self, ddict):
         """Restore the region sizes and the automatic-sizing switches."""
@@ -989,6 +1095,8 @@ class QScanSelector(qt.QMainWindow):
         :returns: The switches as flat booleans, plus ``advanced`` (the
             region-of-interest options dialog), ``region`` (sizes and
             automatic sizing) and ``rocking_scan`` (the ``s`` sampling).
+            ``lines`` holds ordered stationary and rocking line collections
+            with vectors in r.l.u.; an empty collection uses the existing controls.
             Reading a legacy key off the result still works, with a
             deprecation warning.
         :rtype: LegacyKeyDict
@@ -1006,6 +1114,10 @@ class QScanSelector(qt.QMainWindow):
             (name, control.value())
             for name, control in self._rocking_controls.items()
         )
+        ddict["lines"] = {
+            mode: self.get_integration_lines(mode)
+            for mode in ("stationary", "rocking")
+        }
         return ddict
 
     #: Enabled corrections, as ``(checkbox attribute, abbreviation, color,
