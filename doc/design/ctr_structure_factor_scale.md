@@ -30,6 +30,57 @@
 > available, with detector efficiency, external transmission and in-plane
 > acceptance retained as explicit experimental limitations.
 
+## Reciprocal-map follow-up to issue #82
+
+The third integration route is now an explicit scripting reduction in
+`corrections.measurement.reciprocal_map_structure_factor_squared`, tested in
+`test_reciprocal_scan_mode_equivalence.py`. This supersedes section 7's status
+of the reciprocal-space route as unimplemented, for fully measured HKL rod
+volumes with constant illumination. Existing map-generation defaults are
+preserved; the mapper's voxel means are not themselves structure factors.
+
+Drnec equation 14 has the prefactor `Phi_0 A r_e^2 / A_u`, unlike the angular
+prefactor `Phi_0 A r_e^2 lambda^2 / A_u^2`. Integrate the polarization- and
+solid-angle-corrected differential intensity with `dh dk dl`, and divide by
+the selected rod length `n_l dl`. Neither a second Lorentz correction nor a
+second wavelength-squared factor belongs here. Reconstruction weights are
+sampling totals, which grow on repeat acquisition, not target voxel volumes.
+pyFAI's default solid-angle array is relative: the remaining reference scale
+`pixel1 pixel2 / dist^2` is in steradians, with pyFAI PONI distance in meters.
+The API explicitly requires this scale and rejects missing/nonfinite voxels.
+
+The independent simulation is a normalized Gaussian transverse rod density
+in HKL, evaluated on calibrated detector rays. Photon counts include literal
+SI `r_e^2/A_u`, absolute flat-pixel solid angles, polarization, varying
+exposure/flux, and finite rocking-exposure quadrature. Those same images feed
+stationary ROI integration, rocking aggregation and the production correction,
+native mapping, checkpoint and HDF5 finalization pipeline. Representative
+reciprocal-volume results on a 0.0002-r.l.u. transverse grid are:
+
+| l | Input F² | Stationary | Rocking | HKL map |
+|---|---:|---:|---:|---:|
+| 2 | 420 | 420.010774 | 420.025175 | 420.000744 |
+| 3 | 130 | 130.000553 | 130.000467 | 130.000173 |
+| 4 | 900 | 900.001020 | 899.837390 | 900.018614 |
+
+All three agree within 0.1%, without a fitted scale. This detector-level
+tolerance includes distinct finite-resolution quadratures and the angular
+ROI's center-ray approximation, rather than the 1e-6 tolerance of the earlier
+scalar fixture. At l=3, transverse grid widths 0.0006, 0.0003 and 0.00015
+r.l.u. recover 130.010164, 130.014917 and 130.014381: the two refined results
+change by about 4.1e-6 relatively. Regression cases also cover integrated
+versus rate monitors, reversed sweeps, repeat acquisition and parameter-space
+averaging.
+
+The reduction currently accepts a constant illumination divisor H after
+mapping, or the legacy explicit flux-density/active-area scale. A varying H
+must be divided out per frame before voxel averaging; automatic reconstruction
+illumination remains outside this change. Incomplete peak capture, backgrounds,
+detector efficiency and transmission still need experimental treatment. No
+error estimate is synthesized from marginal variances that omit splitting
+covariance. See the user-facing contract in
+[`reciprocal_space_reconstruction.rst`](../source/reciprocal_space_reconstruction.rst).
+
 ## 1. What the two papers require
 
 **Follow-up to PR #87 (issue #82).** The joint angular mean implemented there

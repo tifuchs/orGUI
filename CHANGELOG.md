@@ -26,6 +26,14 @@ Other user-visible changes:
 
 Scientific and analysis additions:
 
+- **HKL maps can now be reduced to CTR structure factors through
+  `corrections.measurement.reciprocal_map_structure_factor_squared`.** The
+  scripting API integrates voxel means across the rod and averages over its
+  selected length, with explicit pixel solid angle and illumination scales.
+  Detector-level simulations verify agreement with stationary and rocking
+  integration, including repeated acquisitions and both map weighting modes.
+  Missing voxels are rejected instead of silently counted as zero signal.
+
 - **Rocking CTR reduction now applies the joint Lorentz and rod-interception
   divisor per frame.** Averaging that divisor over the signal window biased
   peaked curves when incidence varied during a ``mu`` scan. The corrected

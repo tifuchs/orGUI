@@ -973,6 +973,89 @@ All scientific arrays default to float64 except the contributor count. The
 file is conventional HDF5 and can be read with h5py, silx, and NeXus-aware
 tools.
 
+CTR Structure Factors from HKL Maps
+-----------------------------------
+
+The scripting function
+:func:`orgui.datautils.xrayutils.corrections.measurement.reciprocal_map_structure_factor_squared`
+reduces a complete rod cross-section in a uniform HKL grid to the same
+:math:`|F|^2` scale as stationary and rocking integration. This is an explicit
+reduction of a selected volume; the mapper continues to save voxel means.
+
+After background subtraction, polarization correction and frame normalization,
+Drnec et al. (2014), `equation 14 <https://doi.org/10.1107/S1600576713032342>`_,
+gives
+
+.. math::
+
+   \left\langle |F|^2 \right\rangle_{\Delta l}
+     = \frac{A_u}{r_e^2 S\,\Omega_{\mathrm{ref}}}
+       \frac{\sum_{h,k,l} I(h,k,l)\,\Delta h\,\Delta k\,\Delta l}
+            {n_l\,\Delta l}.
+
+Here ``I`` is the saved ``intensity`` dataset, with inverse **relative** pixel
+solid-angle correction applied; :math:`A_u` is in square meters in this
+equation, and :math:`r_e` is in meters. The API accepts :math:`A_u` in square
+Angstrom and performs the conversion. The reference solid angle
+:math:`\Omega_{\mathrm{ref}} = \mathrm{pixel1}\,\mathrm{pixel2}/\mathrm{dist}^2`
+is in steradians, with pixel sizes and pyFAI PONI distance in meters. pyFAI's
+default solid-angle array is relative, so dividing by it alone does not
+produce intensity per steradian. For input already corrected by absolute
+solid angle, pass ``reference_solid_angle=1``.
+
+With legacy exposure/monitor normalization, :math:`S=\Phi_0 A`: pass the same
+flux density and illuminated active area as for the angular integrations.
+With calibrated total-photon normalization :math:`Q`, :math:`S=H`: pass the
+dimensionless illumination divisor and leave flux density and active area at
+one. Reconstruction normalizes by :math:`Q`, but does not currently apply
+:math:`H` itself. A constant :math:`H` can be divided out here; if illumination
+varies between frames, it must be corrected before voxel averaging.
+
+For example, for a map normalized by total photons:
+
+.. code-block:: python
+
+   import h5py
+   from orgui.datautils.xrayutils.corrections import measurement
+
+   with h5py.File("map.h5", "r") as source:
+       rod = source["entry/reconstruction/results/hkl"]
+       # Choose a fully measured, background-subtracted rod volume.
+       intensity = rod["intensity"][h_slice, k_slice, l_slice]
+       f2 = measurement.reciprocal_map_structure_factor_squared(
+           intensity, (dh, dk, dl),  # saved grid widths in r.l.u.
+           unitcell_area=surface_cell_area_angstrom2,
+           reference_solid_angle=pixel1_m * pixel2_m / poni_distance_m**2,
+           illumination_divisor=H,
+       )
+
+The integration measure is :math:`\Delta h\,\Delta k\,\Delta l`, and the rod
+length is :math:`n_l\Delta l`, including when only one l plane is selected.
+The saved ``weight`` and ``contributors`` describe sampling and must not be
+used as voxel integration volumes: repeated acquisition changes them while
+leaving the structure factor unchanged. HKL uses the crystallographic
+reciprocal basis including :math:`2\pi`; Cartesian Q volumes require a
+different measure and are not accepted by this contract. No additional
+Lorentz, rod-interception, angular-acceptance or wavelength-squared factor
+belongs in the HKL reduction.
+
+Include the entire transverse peak and remove its background before reduction.
+Missing/nonfinite voxels raise ``ValueError``; treating missing coverage as
+zero loses unmeasured scattering. The result is an average along the selected
+rod interval and over finite instrumental resolution. Comparing modes requires
+equivalent resolution or a structure factor constant across that interval.
+The API does not estimate an uncertainty from marginal voxel variances, which
+omit covariance introduced by footprint splitting and pixel repair.
+
+``test_reciprocal_scan_mode_equivalence.py`` generates physical detector
+frames from a Gaussian HKL rod and runs detector correction, native mapping,
+checkpointing and HDF5 finalization. All three reductions recover the known
+structure factors within 0.1%, without fitting a scale. The checks include
+rate/integrated monitors, varying exposure and flux, reversed sweeps, repeated
+frames, two voxel weighting modes and grid refinement. This tests the
+kinematic, fully captured rod case; detector efficiency, transmission and
+incomplete peak capture still require experimental corrections.
+
 Diagnostic Environment Variables
 --------------------------------
 

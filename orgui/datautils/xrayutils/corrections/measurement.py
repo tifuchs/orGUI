@@ -148,6 +148,7 @@ __all__ = [
     "mode_components",
     "normalized_intensity",
     "photon_yield_from_structure_factor",
+    "reciprocal_map_structure_factor_squared",
     "reflectivity_from_structure_factor",
     "scale_factor",
     "structure_factor_from_reflectivity",
@@ -178,6 +179,76 @@ SPECULAR = "specular"
 _ROCKING_MODES = (ROCKING, REFLECTIVITY_ROCKING)
 
 _ANGSTROM = 1e-10
+
+
+def reciprocal_map_structure_factor_squared(
+    intensity, voxel_widths, *, unitcell_area, reference_solid_angle,
+    illumination_divisor=1.0, active_area=1.0, flux_density=1.0,
+):
+    r"""Integrate a complete HKL rod cross-section and average along ``l``.
+
+    Drnec et al. (2014), equation 14, gives
+    :math:`\int I(h,k,l)\,dh\,dk\,dl =
+    \Phi_0 A r_e^2 |F|^2 \Delta l/A_u` for polarization-corrected
+    differential intensity. Integration in HKL supplies the change of
+    measure; no Lorentz, rod-interception or angular-acceptance factor is
+    applied here. HKL coordinates use the crystallographic reciprocal basis
+    including ``2*pi``; this API does not accept Cartesian Q maps.
+
+    :param intensity: Background-subtracted voxel **means**, shape
+        ``(n_h, n_k, n_l)``, corrected for polarization, exposure/monitor and
+        solid angle. Use the reconstruction's ``intensity`` dataset, not
+        accumulated weights, contributor counts or weighted intensity sums.
+    :param voxel_widths: Positive ``(dh, dk, dl)`` in r.l.u., on a uniform
+        grid. The selected rod length is ``n_l * dl``; the result is its
+        uniform mean, including when only one l voxel is selected.
+    :param unitcell_area: Surface unit-cell area in square Angstrom.
+    :param reference_solid_angle: In steradians. For pyFAI's relative
+        solid-angle correction, ``pixel1 * pixel2 / dist**2`` (m, m, m).
+        Use ``1`` if the input was divided by absolute pixel solid angles.
+    :param illumination_divisor: Constant dimensionless illumination ``H``
+        when the map has been normalized by total incident photons ``Q``.
+        In this convention leave ``active_area`` and ``flux_density`` at
+        one. If H varies between frames, divide by it **before** mapping.
+    :param active_area: Legacy illuminated active area in square meters.
+    :param flux_density: Legacy incident flux density in photons/s/m^2,
+        after the same monitor convention used to normalize the map.
+    :returns: Mean :math:`|F|^2` in electron units squared on a calibrated
+        scale, or a common arbitrary scale with legacy unit flux and area.
+    :rtype: float
+    :raises ValueError: If the ROI is empty, has missing/nonfinite voxels,
+        or a divisor or voxel width is not finite and positive. Missing
+        coverage must be resolved explicitly, never treated as zero signal.
+
+    The ROI must contain the whole transverse peak, with background already
+    removed. Finite resolution and a varying F along l produce a resolution
+    average. Reconstruction marginal variances omit splitting covariance;
+    this function makes no independent-voxel uncertainty assumption.
+    """
+    intensity = np.asarray(intensity, dtype=np.float64)
+    if intensity.ndim != 3 or intensity.size == 0:
+        raise ValueError("intensity must be a nonempty (h, k, l) volume")
+    if not np.all(np.isfinite(intensity)):
+        raise ValueError("the selected rod volume has missing/nonfinite voxels")
+    widths = np.asarray(voxel_widths, dtype=np.float64)
+    if (widths.shape != (3,) or not np.all(np.isfinite(widths))
+            or np.any(widths <= 0)):
+        raise ValueError("voxel_widths must be three finite positive r.l.u. widths")
+    divisors = np.asarray([
+        unitcell_area, reference_solid_angle, illumination_divisor,
+        active_area, flux_density,
+    ], dtype=np.float64)
+    if divisors.shape != (5,) or not np.all(np.isfinite(divisors)) or np.any(
+        divisors <= 0
+    ):
+        raise ValueError("map scale divisors must be finite positive scalars")
+    area_m2 = float(unitcell_area) * _ANGSTROM**2
+    scale = (CLASSICAL_ELECTRON_RADIUS**2 / area_m2
+             * float(active_area) * float(flux_density)
+             * float(illumination_divisor) * float(reference_solid_angle))
+    # sum(I) dh dk dl / (n_l dl): dl cancels, so even a one-plane ROI works.
+    return float(np.sum(intensity) * widths[0] * widths[1]
+                 / intensity.shape[2] / scale)
 
 
 def _reflectivity_prefactor(wavelength, unitcell_area):

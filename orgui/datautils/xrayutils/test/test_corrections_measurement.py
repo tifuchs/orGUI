@@ -30,6 +30,64 @@ WAVELENGTH = 0.70047
 UC_AREA = 2.7748 * 2.7748 * np.sin(np.deg2rad(120.0))
 
 
+@pytest.mark.parametrize("n_l, dl", [(1, 0.02), (5, 0.004), (5, 0.3)])
+def test_reciprocal_rod_reduction_uses_hkl_area_and_mean_rod_length(n_l, dl):
+    """HKL differential intensity has r_e^2/A_u, with no wavelength factor."""
+    dh, dk = 0.00025, 0.0002
+    h = (np.arange(64) - 31.5) * dh
+    k = (np.arange(80) - 39.5) * dk
+    sigma = 0.001
+    density = np.exp(-(h[:, None]**2 + k[None, :]**2) / (2 * sigma**2))
+    density /= 2 * np.pi * sigma**2
+    target = np.linspace(121.0, 900.0, n_l)
+    hbeam, omega_ref = 1.7, 4.2e-7
+    scale = 2.8179403262e-15**2 / (UC_AREA * 1e-20)
+    volume = scale * omega_ref * hbeam * density[:, :, None] * target
+    actual = ii.reciprocal_map_structure_factor_squared(
+        volume, (dh, dk, dl), unitcell_area=UC_AREA,
+        reference_solid_angle=omega_ref, illumination_divisor=hbeam,
+    )
+    np.testing.assert_allclose(actual, np.mean(target), rtol=1e-12)
+    # The same map on the legacy counts/s/monitor convention has an explicit
+    # Phi_0 A instead of QH. Neither convention adds another wavelength^2.
+    legacy = volume * 8.1e15 * 3.2e-7 / hbeam
+    legacy_f2 = ii.reciprocal_map_structure_factor_squared(
+        legacy, (dh, dk, dl), unitcell_area=UC_AREA,
+        reference_solid_angle=omega_ref, flux_density=8.1e15, active_area=3.2e-7,
+    )
+    np.testing.assert_allclose(legacy_f2, actual, rtol=1e-14)
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_reciprocal_rod_reduction_refuses_missing_coverage(bad):
+    """An unmeasured voxel cannot be silently integrated as zero signal."""
+    volume = np.ones((2, 3, 4))
+    volume[1, 2, 3] = bad
+    with pytest.raises(ValueError, match="missing/nonfinite"):
+        ii.reciprocal_map_structure_factor_squared(
+            volume, (0.01, 0.01, 0.01), unitcell_area=UC_AREA,
+            reference_solid_angle=4e-7,
+        )
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"voxel_widths": (0, 1, 1)}, {"voxel_widths": (1, np.nan, 1)},
+    {"voxel_widths": (1, 1)}, {"reference_solid_angle": 0},
+    {"unitcell_area": np.inf}, {"illumination_divisor": -1},
+    {"active_area": 0}, {"flux_density": np.nan},
+    {"intensity": np.ones((2, 3))}, {"intensity": np.empty((0, 2, 3))},
+])
+def test_reciprocal_rod_reduction_rejects_invalid_scale_or_grid(kwargs):
+    """Malformed scales and non-volume inputs fail before producing a number."""
+    arguments = dict(
+        intensity=np.ones((2, 3, 4)), voxel_widths=(0.01, 0.01, 0.01),
+        unitcell_area=UC_AREA, reference_solid_angle=4e-7,
+    )
+    arguments.update(kwargs)
+    with pytest.raises(ValueError):
+        ii.reciprocal_map_structure_factor_squared(**arguments)
+
+
 def test_normalized_intensity_divides_by_time_and_monitor():
     """Both published expressions carry ``Phi_0 T``; both must come out."""
     got = ii.normalized_intensity(

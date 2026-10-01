@@ -28,6 +28,8 @@ flat background is included only so that the real aggregation code path is
 exercised.
 
 ``doc/design/ctr_structure_factor_scale.md`` records the analysis.
+``test_reciprocal_scan_mode_equivalence.py`` extends this invariant to a
+detector-level simulated data set mapped through the native HKL pipeline.
 """
 
 import numpy as np
