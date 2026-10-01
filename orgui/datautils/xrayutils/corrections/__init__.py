@@ -83,6 +83,7 @@ from . import (  # noqa: F401
     measurement,
     normalization,
     roi,
+    sample_interception,
 )
 
 __all__ = [
@@ -94,4 +95,5 @@ __all__ = [
     "measurement",
     "normalization",
     "roi",
+    "sample_interception",
 ]

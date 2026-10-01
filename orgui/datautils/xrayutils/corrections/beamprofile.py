@@ -112,12 +112,51 @@ else:
 _FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 
 
+def _normal_interval(lower, upper, sigma):
+    """Stable normal probability in an interval, including tiny widths."""
+    lo, hi = np.broadcast_arrays(np.asarray(lower) / sigma, np.asarray(upper) / sigma)
+    if np.any(hi < lo):
+        raise ValueError("interval upper bound must not precede lower bound")
+    mass = np.where(
+        lo > 0, special.ndtr(-lo) - special.ndtr(-hi),
+        special.ndtr(hi) - special.ndtr(lo),
+    )
+    with np.errstate(invalid="ignore", over="ignore"):
+        midpoint = (hi + lo) / 2
+        return np.where(
+            (hi - lo) * (1 + np.abs(midpoint)) < 1e-7,
+            (hi - lo) * np.exp(-midpoint**2 / 2) / np.sqrt(2 * np.pi), mass,
+        )
+
+
 class BeamProfile(ABC):
     """Vertical intensity profile of the incident beam.
 
     Subclasses provide the applied active-area factor and its intercepted-flux
     diagnostic for arbitrarily shaped arrays of incidence angles.
     """
+
+    def density_at(self, position):
+        """Normalized density [1/m] at positions [m] relative to the sample centre.
+
+        Old custom subclasses remain usable for 1D corrections. Exact 2D
+        interception additionally requires this method and ``interval_mass``.
+        """
+        raise NotImplementedError("this profile does not support 2D interception")
+
+    def interval_mass(self, lower, upper):
+        """Normalized probability between bounds [m] relative to the centre."""
+        raise NotImplementedError("this profile does not support 2D interception")
+
+    @property
+    def peak_density(self):
+        """Maximum normalized density, in inverse metres, for 2D integration."""
+        raise NotImplementedError("this profile does not support 2D interception")
+
+    @property
+    def integration_points(self):
+        """Density transitions/characteristic positions [m], not support limits."""
+        raise NotImplementedError("this profile does not support 2D interception")
 
     @abstractmethod
     def flux_on_sample(self, alpha, L):
@@ -233,6 +272,22 @@ class _CenteredProfile(BeamProfile):
     threshold below which the ``alpha -> 0`` limit is used.
     """
 
+    def density_at(self, position):
+        """Normalized density [1/m], relative to the configured sample centre."""
+        return self._density_at(position)
+
+    def interval_mass(self, lower, upper):
+        """Probability in a centred-coordinate interval [m]."""
+        lower, upper = np.broadcast_arrays(lower, upper)
+        if np.any(upper < lower):
+            raise ValueError("interval upper bound must not precede lower bound")
+        return self._cumulative(upper) - self._cumulative(lower)
+
+    @property
+    def peak_density(self):
+        """Maximum normalized density, in inverse metres."""
+        return self._pmax
+
     def _set_center(self, center, offset, centroid, peak_position, median):
         """Resolve the requested centering into :attr:`sample_center`.
 
@@ -331,6 +386,24 @@ class GaussianBeamProfile(BeamProfile):
             raise ValueError(f"beam FWHM must be positive, got {fwhm:g}")
         self.fwhm = fwhm
         self.sigma = fwhm * _FWHM_TO_SIGMA
+
+    def density_at(self, position):
+        """Normalized Gaussian density [1/m] at centred positions [m]."""
+        return stats.norm.pdf(position, scale=self.sigma)
+
+    def interval_mass(self, lower, upper):
+        """Gaussian interval probability, with stable differences in the tails."""
+        return _normal_interval(lower, upper, self.sigma)
+
+    @property
+    def peak_density(self):
+        """Maximum normalized Gaussian density, in inverse metres."""
+        return 1.0 / (np.sqrt(2 * np.pi) * self.sigma)
+
+    @property
+    def integration_points(self):
+        """Characteristic Gaussian positions [m]; tails are not truncated."""
+        return self.sigma * np.array([-8, -4, -1, 0, 1, 4, 8])
 
     def flux_on_sample(self, alpha, L):
         """Fraction of the incident flux intercepted by the sample.
@@ -494,6 +567,29 @@ class MeasuredBeamProfile(_CenteredProfile):
         return np.interp(
             np.asarray(x, dtype=float) + self.sample_center, self._z_raw, self._p
         )
+
+    def density_at(self, position):
+        """Piecewise-linear density [1/m], zero outside measured support.
+
+        Negative measured densities cannot define probability overlap. This
+        check deliberately leaves historical 1D preprocessing unchanged.
+        """
+        if np.any(self._p < 0):
+            raise ValueError("2D interception requires non-negative measured density")
+        return np.interp(
+            np.asarray(position) + self.sample_center,
+            self._z_raw, self._p, left=0.0, right=0.0,
+        )
+
+    def interval_mass(self, lower, upper):
+        """Exact measured-profile interval probability, with zero exterior density."""
+        self.density_at(0.0)
+        return super().interval_mass(lower, upper)
+
+    @property
+    def integration_points(self):
+        """Measured interpolation knots [m] relative to the configured centre."""
+        return self.z
 
     def _cumulative(self, x):
         """Integral of the normalized profile from ``-inf`` up to ``x``.
@@ -690,6 +786,46 @@ class DistributionBeamProfile(_CenteredProfile):
     def _density_at(self, x):
         """Profile density at ``x``, relative to the sample center."""
         return self._dist.pdf(np.asarray(x, dtype=float) + self.sample_center)
+
+    def interval_mass(self, lower, upper):
+        """Distribution interval probability, using survival differences in tails."""
+        if getattr(getattr(self._dist, "dist", None), "name", None) == "norm":
+            return _normal_interval(
+                np.asarray(lower) + self.sample_center - self._dist.mean(),
+                np.asarray(upper) + self.sample_center - self._dist.mean(),
+                self.rms_width,
+            )
+        lo, hi = np.broadcast_arrays(
+            np.asarray(lower) + self.sample_center,
+            np.asarray(upper) + self.sample_center,
+        )
+        if np.any(hi < lo):
+            raise ValueError("interval upper bound must not precede lower bound")
+        def cumulative(x):
+            value = self._dist.cdf(np.where(np.isfinite(x), x, 0))
+            return np.where(x == -np.inf, 0, np.where(x == np.inf, 1, value))
+
+        result = cumulative(hi) - cumulative(lo)
+        sf = getattr(self._dist, "sf", None)
+        if sf is not None:
+            result = np.where(
+                cumulative(lo) > 0.5, sf(lo) - sf(hi), result
+            )
+        return result
+
+    @property
+    def integration_points(self):
+        """Distribution quantiles/support edges [m], without cutting off tails."""
+        points = [self._dist.ppf(q) for q in
+                  [1e-6, 1e-3, .01, .1, .25, .5, .75, .9, .99, .999, 1-1e-6]]
+        for q in (0, 1):
+            try:
+                points.append(self._dist.ppf(q))
+            except ValueError:
+                # Some analytical distributions expose only open quantiles.
+                # Interior quantiles guide quadrature; they never cut tails.
+                pass
+        return np.asarray(points)[np.isfinite(points)] - self.sample_center
 
     def profile_curve(self, n=512):
         """Sample the distribution over its central range."""
