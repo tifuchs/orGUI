@@ -1056,6 +1056,20 @@ frames, two voxel weighting modes and grid refinement. This tests the
 kinematic, fully captured rod case; detector efficiency, transmission and
 incomplete peak capture still require experimental corrections.
 
+An unused native ``backproject_coefficients`` prototype is retained as a
+reminder of the missing integration-error propagation. It is not called by
+the default reconstruction workflow or by the diagnostic notebook. It returns
+``b[p] = sum_v c[v] * w[p,v]`` for supplied voxel coefficients ``c`` and the
+same footprint weights ``w`` used during mapping. For voxel means, ``c``
+includes division by the accumulated voxel weight, the voxel integration
+measure and the structure-factor scale. Applying the pixel correction gain
+then gives the original-count coefficients ``a`` and
+``variance = sum_p a[p]**2 * N[p]``. This sums all pieces of each original
+count before squaring, retaining its cross-voxel covariance. Production wiring
+and validation remain necessary before this can supply integration errors.
+Exposure-angle bounds remain in radians; grid integration measures remain
+in r.l.u.
+
 Diagnostic Environment Variables
 --------------------------------
 

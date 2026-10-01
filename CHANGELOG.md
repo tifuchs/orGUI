@@ -43,6 +43,10 @@ Scientific and analysis additions:
   divisor; diagnostic intensity counters and saved factor means retain their
   existing meanings. Constant-geometry results are unchanged.
 
+- An experimental native back-projection prototype retains pixel contributions
+  before squaring for covariance-aware volume errors. It is not used by the
+  production workflow; integrated map uncertainty remains unavailable.
+
 - **Integration and reciprocal-space reconstruction now share frame
   normalization controls.** New reconstruction jobs follow the integration
   normalization switch and its rate or integrated primary-monitor convention.

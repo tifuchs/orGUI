@@ -1528,6 +1528,92 @@ public:
         return output;
     }
 
+    FloatArray backproject_coefficients(
+        const FloatArray &coefficients,
+        const BoolArray &mask,
+        const FloatArray &corner_rays,
+        const FloatArray &angles_start,
+        const FloatArray &angles_end
+    ) const {
+        const auto ci = coefficients.request();
+        const auto mi = mask.request();
+        if (ci.ndim != 3 || mi.ndim != 2) {
+            throw py::value_error("coefficients must be a 3D grid and mask a 2D detector tile");
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            if (ci.shape[axis] != grid_.shape[axis]) {
+                throw py::value_error("coefficient shape must match the reciprocal grid");
+            }
+        }
+        const auto *coefficient = static_cast<const double *>(ci.ptr);
+        for (py::ssize_t index = 0; index < ci.size; ++index) {
+            if (!std::isfinite(coefficient[index])) {
+                throw py::value_error("coefficients must be finite");
+            }
+        }
+        FloatArray output({mi.shape[0], mi.shape[1]});
+        validate_inputs(output.request(), output.request(), mi,
+                        corner_rays.request(), angles_start.request(), angles_end.request());
+        auto *result = static_cast<double *>(output.request().ptr);
+        const auto *masked = static_cast<const bool *>(mi.ptr);
+        const auto *rays = static_cast<const double *>(corner_rays.request().ptr);
+        const auto *start = static_cast<const double *>(angles_start.request().ptr);
+        const auto *end = static_cast<const double *>(angles_end.request().ptr);
+        bool stationary = true;
+        for (int axis = 0; axis < 4; ++axis) {
+            stationary = stationary && start[axis] == end[axis];
+        }
+        if (stationary && weighting_mode_ == WeightingMode::ReciprocalVolumeAverage) {
+            throw py::value_error("reciprocal_volume_average requires a continuous exposure");
+        }
+        std::vector<CoordinateTransform> transforms;
+        for (const auto &rotation : frame_rotations(start, end)) {
+            transforms.push_back(coordinate_transform(rotation));
+        }
+        const auto &centre = transforms[transforms.size() / 2];
+        const auto reach = stationary ? stationary_reach(centre) : moving_reach(transforms);
+        const std::size_t columns = static_cast<std::size_t>(mi.shape[1]);
+        const auto value = [&](const std::uint64_t voxel) {
+            const auto x = (voxel >> grid_.voxel_shift[0]) & grid_.voxel_mask[0];
+            const auto y = (voxel >> grid_.voxel_shift[1]) & grid_.voxel_mask[1];
+            const auto z = voxel & grid_.voxel_mask[2];
+            return coefficient[(x * grid_.shape[1] + y) * grid_.shape[2] + z];
+        };
+        {
+            py::gil_scoped_release release;
+            std::vector<VoxelWeight> weights;
+            for (std::size_t flat = 0; flat < static_cast<std::size_t>(mi.size); ++flat) {
+                result[flat] = 0.0;
+                if (masked[flat]) {
+                    continue;
+                }
+                const auto prepared = pixel_rays(flat / columns, flat % columns, columns, rays);
+                if (max_depth_ == 0) {
+                    std::uint64_t voxel = 0;
+                    if (voxel_id(coordinate_at(prepared, 0.5, 0.5, centre), voxel)) {
+                        result[flat] = value(voxel);
+                    }
+                    continue;
+                }
+                weights.clear();
+                if (stationary && max_depth_ == 2) {
+                    split_pixel_stationary_depth2(prepared, centre, reach, weights, nullptr);
+                } else if (stationary) {
+                    split_pixel_stationary(prepared, centre, reach, weights, nullptr);
+                } else {
+                    split_pixel_moving(prepared, transforms, reach, weights, nullptr);
+                }
+                // Sum all pieces from this *same* detector count before squaring
+                // its coefficient in variance propagation. This retains the
+                // covariance between the voxels into which the pixel was split.
+                for (const auto &part : weights) {
+                    result[flat] += part.weight * value(part.voxel);
+                }
+            }
+        }
+        return output;
+    }
+
 private:
 
     Grid grid_;
@@ -3795,6 +3881,30 @@ PYBIND11_MODULE(_reciprocal_reconstruction_cpp, module) {
             py::arg("work_block_pixels") = 4096,
             py::arg("memory_budget_bytes") = 512ULL * 1024ULL * 1024ULL,
             py::arg("weighting_mode") = "parameter_average"
+        )
+        .def(
+            "backproject_coefficients",
+            &ReconstructionKernel::backproject_coefficients,
+            py::arg("coefficients"), py::arg("mask"), py::arg("corner_rays"),
+            py::arg("angles_start"), py::arg("angles_end"),
+            R"doc(Back-project a linear voxel functional onto detector pixels.
+
+For the same footprint weights w[p,v] as accumulate(), return
+b[p] = sum_v coefficients[v] * w[p,v]. For voxel means, pass each
+functional coefficient divided by the accumulated voxel weight first.
+Then its value is sum_p b[p]*intensity[p] and its variance is
+sum_p b[p]**2*variance[p] for independent detector pixels. Squaring
+after summing preserves covariance from splitting one count among voxels.
+
+:param coefficients: Finite 3D array matching the grid, including any
+    desired physical integration scale and voxel-weight normalization.
+:param mask: Boolean 2D detector-tile mask; True excludes a pixel.
+:param corner_rays: The same calibrated corner rays used by accumulate().
+:param angles_start: Exposure-start (alpha, omega, chi, phi) in radians.
+:param angles_end: Exposure-end angles in radians.
+:returns: 2D pixel coefficients in the supplied coefficient units times
+    the footprint weight units. No detector or angular correction is added.
+)doc"
         )
         .def(
             "frames_reach_grid",
