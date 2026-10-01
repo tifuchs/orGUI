@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 try:
     from . import _roi_sum_accel
 
-    HAS_ACCEL = True
+    HAS_ACCEL = _roi_sum_accel.HAS_ACCEL_BACKEND
 except ImportError:
     _roi_sum_accel = None
     HAS_ACCEL = False
@@ -242,6 +242,36 @@ def _rectangle_key(rectangle):
 def _validate_context(context):
     if context.validate is not None:
         context.validate()
+
+
+def _frame_policy_with_progress(context, scan, state, size, **kwargs):
+    """Resolve shape overlap with collector-side progress and cancellation."""
+    if not (
+        kwargs.get("use_illumination")
+        and state.sample_interception.get("enabled", False)
+    ):
+        return integration_corrections.frame_correction_policy(
+            scan, state, size, **kwargs
+        )
+    total = np.size(kwargs["alpha"])
+    progress = logger_utils.create_progress_logger(
+        context.owner, total, "Calculating sample interception"
+    )
+
+    def update(completed, count):
+        """Validate captured state whenever GUI progress processes events."""
+        progress.update(completed)
+        _validate_context(context)
+        if progress.wasCanceled():
+            raise IntegrationCancelled()
+        return True
+
+    try:
+        return integration_corrections.frame_correction_policy(
+            scan, state, size, progress=update, **kwargs
+        )
+    finally:
+        progress.finish()
 
 
 def _resolve_mask(context):
@@ -1825,7 +1855,8 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
         footprint_dialog = self.scanSelector.correctionsDialog.footprintOptions_shared()  # noqa: E501
         beam_profile = footprint_dialog.beamProfile()
         sample_size = footprint_dialog.sampleLength()  # m
-    frame_policy = integration_corrections.frame_correction_policy(
+    frame_policy = _frame_policy_with_progress(
+        self,
         self.fscan,
         config_snapshot.corrections,
         nodatapoints,
@@ -1834,6 +1865,9 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
         alpha=alpha_all,
         beam_profile=beam_profile,
         sample_length=sample_size,
+    )
+    versioned_policy = frame_policy.new_contract or bool(
+        frame_policy.interception_provenance
     )
     normalization = (
         frame_policy.normalization_divisor
@@ -1902,16 +1936,18 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
                 hkl_del_gam[:, 3],
                 hkl_del_gam[:, 4],
                 use_lorentz=options["lorentz"],
-                use_footprint=(options["footprint"] and not frame_policy.new_contract),
+                use_footprint=(options["footprint"] and not versioned_policy),
                 beam_profile=beam_profile,
                 sample_size=sample_size,
                 normalization=normalization,
                 illumination_divisor=(
                     frame_policy.illumination_divisor
-                    if frame_policy.new_contract
+                    if versioned_policy
                     and frame_policy.illumination_status == "applied"
                     else None
                 ),
+                illumination_convention=frame_policy.illumination_convention
+                or "total_flux_H",
             )
         )
     factors1, factors2 = correction_factors
@@ -1985,7 +2021,7 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
                 **common_scale,
             )
         except ValueError:
-            if not frame_policy.new_contract:
+            if not versioned_policy:
                 raise
             logger.warning(
                 "The explicit CTR normalization is incomplete; saving "
@@ -2216,7 +2252,11 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
         "@orgui_meta": "roi",
     }
 
+    versioned_policy = frame_policy.new_contract or bool(
+        frame_policy.interception_provenance
+    )
     profile_provenance = _curve_profile_provenance(config_snapshot.corrections)
+    profile_provenance.update(frame_policy.interception_provenance)
     profile_provenance.update(
         {
             "wavelength_angstrom": config_snapshot.ub_calculator.getLambda(),
@@ -2248,18 +2288,30 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
         """Build the non-legacy sibling branch for one trajectory."""
         record = CurveCorrectionRecord(
             algorithm=(
-                "framewise_ctr_total_flux_v1"
+                (
+                    "shape_interception_total_flux_v1"
+                    if frame_policy.interception_provenance
+                    else "framewise_ctr_total_flux_v1"
+                )
                 if frame_policy.new_contract
-                else "legacy_stationary_roi_v2"
+                else (
+                    "shape_interception_legacy_v1"
+                    if versioned_policy
+                    else "legacy_stationary_roi_v2"
+                )
             ),
             output_quantity=(
                 "stationary_ctr_photon_curve"
                 if frame_policy.new_contract
-                else "stationary_roi_intensity"
+                else (
+                    "stationary_shape_density_curve"
+                    if versioned_policy
+                    else "stationary_roi_intensity"
+                )
             ),
             scale_convention=(
                 frame_policy.scale_convention
-                if frame_policy.new_contract
+                if versioned_policy
                 else (
                     "legacy_density_area" if options["footprint"] else "legacy_relative"
                 )
@@ -3373,7 +3425,8 @@ def _assemble_rocking_tile(
         footprint_dialog = self.scanSelector.correctionsDialog.footprintOptions_shared()
         beam_profile = footprint_dialog.beamProfile()
         sample_length = footprint_dialog.sampleLength()
-    frame_policy = integration_corrections.frame_correction_policy(
+    frame_policy = _frame_policy_with_progress(
+        self,
         self.fscan,
         config_snapshot.corrections,
         rois["axis"].shape[1],
@@ -3383,7 +3436,11 @@ def _assemble_rocking_tile(
         beam_profile=beam_profile,
         sample_length=sample_length,
     )
+    versioned_policy = frame_policy.new_contract or bool(
+        frame_policy.interception_provenance
+    )
     profile_provenance = _curve_profile_provenance(config_snapshot.corrections)
+    profile_provenance.update(frame_policy.interception_provenance)
     profile_provenance.update(
         {
             "wavelength_angstrom": config_snapshot.ub_calculator.getLambda(),
@@ -3398,58 +3455,61 @@ def _assemble_rocking_tile(
     # angular aggregation.
     curve_record = CurveCorrectionRecord(
         algorithm=(
-            "framewise_ctr_total_flux_v1"
+            ("shape_interception_total_flux_v1" if frame_policy.interception_provenance
+             else "framewise_ctr_total_flux_v1")
             if frame_policy.new_contract
-            else "legacy_rocking_roi_v2"
+            else ("shape_interception_legacy_v1" if versioned_policy
+                  else "legacy_rocking_roi_v2")
         ),
         output_quantity=(
             "rocking_ctr_photon_curve"
             if frame_policy.new_contract
-            else "rocking_roi_curve"
+            else ("rocking_shape_density_curve" if versioned_policy
+                  else "rocking_roi_curve")
         ),
         scale_convention=(
             frame_policy.scale_convention
-            if frame_policy.new_contract
+            if versioned_policy
             else "legacy_unnormalized"
         ),
         normalization_status=(
             frame_policy.normalization_status
-            if frame_policy.new_contract
+            if versioned_policy
             else "not_applied"
         ),
         illumination_status=(
             frame_policy.illumination_status
-            if frame_policy.new_contract
+            if versioned_policy
             else "not_applied"
         ),
         pixel_correction_status=("applied" if corr else "not_applied"),
         normalization_divisor=(
-            frame_policy.normalization_divisor if frame_policy.new_contract else None
+            frame_policy.normalization_divisor if versioned_policy else None
         ),
         normalization_unit=(
-            frame_policy.normalization_unit if frame_policy.new_contract else None
+            frame_policy.normalization_unit if versioned_policy else None
         ),
         normalization_components=(
-            frame_policy.normalization_components if frame_policy.new_contract else ()
+            frame_policy.normalization_components if versioned_policy else ()
         ),
         illumination_divisor=(
-            frame_policy.illumination_divisor if frame_policy.new_contract else None
+            frame_policy.illumination_divisor if versioned_policy else None
         ),
         illumination_convention=(
-            frame_policy.illumination_convention if frame_policy.new_contract else None
+            frame_policy.illumination_convention if versioned_policy else None
         ),
         vertical_intercepted_fraction=(
             frame_policy.vertical_intercepted_fraction
-            if frame_policy.new_contract
+            if versioned_policy
             else None
         ),
         horizontal_intercepted_fraction=(
             frame_policy.horizontal_intercepted_fraction
-            if frame_policy.new_contract
+            if versioned_policy
             else None
         ),
         intercepted_fraction=(
-            frame_policy.intercepted_fraction if frame_policy.new_contract else None
+            frame_policy.intercepted_fraction if versioned_policy else None
         ),
         alpha=np.deg2rad(rois["alpha"]),
         base_croi=rois["croi"],

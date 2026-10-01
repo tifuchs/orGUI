@@ -21,7 +21,6 @@ import pytest
 from silx.io.dictdump import dicttonx, nxtodict
 
 from orgui.app.config_data import (
-    CORRECTIONS_SCHEMA_VERSION,
     CURVE_CORRECTIONS_GROUP,
     CURVE_CORRECTIONS_SCHEMA_VERSION,
     CorrectionState,
@@ -91,6 +90,7 @@ def _populated_corrections():
         beam_profile_offset_um=-12.5,
         beam_profile_positions_m=(-1e-4, 0.0, 1e-4),
         beam_profile_density_per_m=(1000.0, 8000.0, 1000.0),
+        sample_interception={"version": 1, "enabled": False},
     )
 
 
@@ -199,7 +199,7 @@ def test_the_layout_is_browsable_and_versioned(tmp_path):
         corrections_to_nxdict(_populated_corrections()), tmp_path
     )
 
-    assert nxdict["@orgui_schema_version"] == CORRECTIONS_SCHEMA_VERSION
+    assert nxdict["@orgui_schema_version"] == 4
     assert "json" not in nxdict
     assert bool(nxdict["switches"]["use_solid_angle"]) is True
     assert int(nxdict["pixel_repair"]["radius"]) == 2

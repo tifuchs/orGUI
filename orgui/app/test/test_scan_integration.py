@@ -178,6 +178,146 @@ def _prepared_line(ctx, x=3, identifier="first"):
     }
 
 
+@pytest.mark.parametrize("total_flux", [False, True])
+def test_shape_extraction_and_bounded_curve_replacement(context, total_flux):
+    """Both conventions save actual angles and re-read/rebuild shape divisors."""
+    from orgui.app.config_data import (
+        CURVE_CORRECTIONS_GROUP, curve_correction_record_from_nxdict,
+    )
+    from orgui.app.sample_interception_config import shape_frame_factors
+    from orgui.datautils.xrayutils.corrections.beamprofile import gaussian_profile
+
+    ctx, scan, file = context
+    settings = {
+        "version": 1, "enabled": True,
+        "shape": {"kind": "rectangle", "dimensions_m": [.01, .01]},
+        "reference_incidence_deg": .36, "normal_rotation_confirmed": True,
+        "azimuth_source": "phi", "horizontal": {
+            "analytical": True, "shape": "Top hat", "shape_values": [20000],
+        },
+    }
+    scan.phi = np.linspace(0, 90, len(scan))
+    scan.exposure_time = np.ones(len(scan))
+    profile = gaussian_profile(160e-6)
+    footprint = SimpleNamespace(beamProfile=lambda: profile, sampleLength=lambda: .01)
+    options = ctx.scanSelector.get_integration_options()
+    options["footprint"] = options["normalization"] = True
+    ctx.config_snapshot.corrections = CorrectionState(
+        sample_interception=settings,
+        total_flux_calibrated=False if total_flux else None,
+    )
+    ctx = replace(
+        ctx,
+        getMuOm=lambda: (np.full(len(scan), np.deg2rad(0.36)), -np.deg2rad(scan.axis)),
+        scanSelector=integration.prepared_selector(
+            options,
+            0,
+            [0, 0, 0],
+            [0, 0, 1],
+            [3, 3],
+            footprint,
+        ),
+    )
+    result = integration.integrate_rocking_scan(ctx, lines=[_prepared_line(ctx)])
+    assert result["status"] == "success", result
+    group = file["scan/measurement/first"]
+    record = curve_correction_record_from_nxdict(group[CURVE_CORRECTIONS_GROUP])
+    assert record.algorithm == (
+        "shape_interception_total_flux_v1"
+        if total_flux
+        else "shape_interception_legacy_v1"
+    )
+    np.testing.assert_allclose(
+        record.profile_provenance["sample_azimuth_rad"], np.deg2rad(scan.phi)
+    )
+    driver = ReductionDriver()
+    driver._currentRoInfo = {"name": group.name, "axisname": "th", "axis": scan.axis}
+    driver.database = SimpleNamespace(nxfile=file)
+    driver.footprintAction = SimpleNamespace(currentData=lambda: "apply")
+    replacement_settings = dict(settings, orientation_deg=45)
+    driver.integrationCorrection = SimpleNamespace(
+        sampleInterceptionSettings=lambda: replacement_settings,
+        beamProfile=lambda: profile,
+    )
+    driver._prepareFootprintAction(group, lazy=True)
+    curve = driver.get_all_ro_curves(rows=slice(0, 1))
+    factors = shape_frame_factors(
+        replacement_settings, profile, record.alpha[0:1], np.deg2rad(scan.phi)
+    )
+    divisor = factors[0 if total_flux else 2]
+    np.testing.assert_allclose(curve["croibg"], record.base_croibg[0:1]/divisor)
+    np.testing.assert_allclose(
+        curve["croibg_errors"], np.sqrt(record.base_croibg_variance[0:1]) / divisor
+    )
+
+
+@pytest.mark.parametrize("total_flux", [False, True])
+def test_stationary_shape_divisor_is_applied_once(context, total_flux):
+    """Saved stationary signal/errors and record agree under either convention."""
+    from orgui.app.config_data import (
+        CURVE_CORRECTIONS_GROUP, curve_correction_record_from_nxdict,
+    )
+    from orgui.app.integration_corrections import corrected_curve_from_record
+    from orgui.datautils.xrayutils.corrections.beamprofile import gaussian_profile
+
+    ctx, scan, file = context
+    scan.phi = np.linspace(0, 90, len(scan))
+    scan.exposure_time = np.arange(1., len(scan)+1)
+    ctx.config_snapshot.corrections = CorrectionState(
+        sample_interception={
+            "version": 1, "enabled": True,
+            "shape": {"kind": "rectangle", "dimensions_m": [.01, .01]},
+            "reference_incidence_deg": .36, "normal_rotation_confirmed": True,
+            "azimuth_source": "phi", "horizontal": {
+                "analytical": True, "shape": "Top hat", "shape_values": [20000],
+            },
+        },
+        total_flux_calibrated=False if total_flux else None,
+    )
+    profile = gaussian_profile(160e-6)
+    options = ctx.scanSelector.get_integration_options()
+    options["footprint"] = options["normalization"] = True
+    ctx = replace(
+        ctx,
+        getMuOm=lambda: (np.full(len(scan), np.deg2rad(0.36)), -np.deg2rad(scan.axis)),
+        scanSelector=integration.prepared_selector(
+            options,
+            0,
+            [0, 0, 0],
+            [0, 0, 1],
+            [3, 3],
+            SimpleNamespace(beamProfile=lambda: profile, sampleLength=lambda: 0.01),
+        ),
+    )
+
+    def geometry(line):
+        array = np.zeros((len(scan), 9))
+        array[:, 0] = 3
+        array[:, 2] = array[:, 5] = scan.axis
+        array[:, 3:5] = .1
+        array[:, 6:8] = [3, 3]
+        array[:, -1] = 1
+        other = array.copy()
+        other[:, -1] = 0
+        return array, other
+
+    result = integration.integrate_stationary_scan(
+        ctx, lines=[{"id": "first", "H_0": [3, 0, 0], "H_1": [0, 0, 1]}],
+        geometry_provider=geometry,
+    )
+    assert result["status"] == "success", result
+    group = next(
+        group for group in file["scan/measurement"].values()
+        if CURVE_CORRECTIONS_GROUP in group
+    )
+    record = curve_correction_record_from_nxdict(group[CURVE_CORRECTIONS_GROUP])
+    signal, errors, _, _ = corrected_curve_from_record(record)
+    np.testing.assert_allclose(group["counters/ctr_croibg"][()], signal)
+    np.testing.assert_allclose(group["counters/ctr_croibg_errors"][()], errors)
+    name = "C_illumination" if total_flux else "C_illum_area"
+    np.testing.assert_allclose(group["counters"][name][()], record.illumination_divisor)
+
+
 @pytest.mark.parametrize("accelerator", [False, True])
 @pytest.mark.parametrize("frames", [1, 3, 64])
 def test_rocking_batch_routing_and_singleton_shapes(
@@ -256,6 +396,8 @@ def test_rocking_writer_keeps_normalization_names_as_shared_metadata(context):
 def test_stationary_lines_read_once_and_route(context, monkeypatch, accelerator):
     """Pin stationary multi-line routing and one read per source frame."""
     ctx, scan, file = context
+    if accelerator and not integration._roi_sum_accel.HAS_ACCEL_BACKEND:
+        pytest.skip("Compiled ROI accelerator unavailable")
     monkeypatch.setattr(integration, "HAS_ACCEL", accelerator)
     lines = [
         {"id": "first", "H_0": [3, 0, 0], "H_1": [0, 0, 1]},
@@ -462,6 +604,8 @@ def test_mask_and_background_image_across_rocking_tiles(
 ):
     """Masked signal scaling and background-image subtraction retain their formula."""
     ctx, scan, file = context
+    if accelerator and not integration._roi_sum_accel.HAS_ACCEL_BACKEND:
+        pytest.skip("Compiled ROI accelerator unavailable")
     monkeypatch.setattr(integration, "HAS_ACCEL", accelerator)
     options = ctx.scanSelector.get_integration_options()
     options["mask"] = True

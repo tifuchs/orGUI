@@ -62,7 +62,7 @@ safe in CLI and batch use.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -126,6 +126,7 @@ class FrameCorrectionPolicy:
     horizontal_intercepted_fraction: object = None
     intercepted_fraction: object = None
     calibrated: bool = False
+    interception_provenance: dict = field(default_factory=dict)
 
     @property
     def ctr_scale_ready(self):
@@ -242,6 +243,7 @@ def frame_correction_policy(
     alpha=None,
     beam_profile=None,
     sample_length=None,
+    progress=None,
 ):
     r"""Resolve the exact framewise :math:`Q` and :math:`H` policy.
 
@@ -258,10 +260,41 @@ def frame_correction_policy(
     :param alpha: Incidence angle(s), radian; required for illumination.
     :param beam_profile: Vertical beam profile; required for illumination.
     :param sample_length: Sample length along the beam, meter.
+    :param progress: Optional numerical overlap progress/cancellation callback.
     :returns: Fully resolved policy with the arrays actually applied.
     :rtype: FrameCorrectionPolicy
     """
     new_contract = _explicit_total_flux_contract(state)
+    shape_settings = getattr(state, "sample_interception", {}) or {}
+    shape_factors = None
+    shape_provenance = {}
+    if use_illumination and shape_settings.get("enabled", False):
+        import json
+        from .sample_interception_config import (
+            embed_profile, profile_from_settings, shape_frame_factors,
+            shape_policy_inputs, vertical_settings,
+        )
+        if alpha is None:
+            raise ValueError("2D interception requires actual frame incidence")
+        if beam_profile is None:
+            beam_profile = profile_from_settings(vertical_settings(state))
+        azimuth, settings = shape_policy_inputs(scan, state, alpha, count=size)
+        if not settings.get("horizontal"):
+            raise ValueError("exact 2D interception requires a horizontal beam profile")
+        settings["horizontal"] = embed_profile(
+            settings["horizontal"], profile_from_settings(settings["horizontal"])
+        )
+        shape_factors = shape_frame_factors(
+            settings, beam_profile, alpha, azimuth, progress=progress
+        )
+        shape_provenance = {
+            "sample_interception_json": json.dumps(settings, allow_nan=False),
+            "sample_azimuth_rad": azimuth,
+            "interception_valid": shape_factors[3],
+            "interception_error_H": shape_factors[4],
+            "interception_method": "surface_chord_quadrature_v1",
+            "density_reference": "peak",
+        }
     if not new_contract:
         divisor = None
         components = ()
@@ -279,14 +312,16 @@ def frame_correction_policy(
         illumination = vertical = None
         illum_status = "not_applied"
         if use_illumination:
-            if alpha is None or beam_profile is None or sample_length is None:
+            if shape_factors is not None:
+                vertical = None
+                illumination = shape_factors[2]
+            elif alpha is None or beam_profile is None or sample_length is None:
                 raise ValueError(
                     "legacy footprint correction needs alpha, beam profile "
                     "and sample length"
                 )
-            vertical, illumination = beam_profile.corrections(
-                alpha, sample_length
-            )
+            else:
+                vertical, illumination = beam_profile.corrections(alpha, sample_length)
             illum_status = "applied"
         return FrameCorrectionPolicy(
             new_contract=False,
@@ -303,6 +338,10 @@ def frame_correction_policy(
                 "legacy_C_illum_area" if illumination is not None else None
             ),
             vertical_intercepted_fraction=vertical,
+            intercepted_fraction=shape_factors[1]
+            if shape_factors is not None
+            else None,
+            interception_provenance=shape_provenance,
         )
 
     calibrated = bool(getattr(state, "total_flux_calibrated", False))
@@ -366,22 +405,22 @@ def frame_correction_policy(
     horizontal = None
     illum_status = "not_applied"
     if use_illumination:
-        if alpha is None or beam_profile is None or sample_length is None:
+        if shape_factors is not None:
+            illumination, intercepted = shape_factors[:2]
+        elif alpha is None or beam_profile is None or sample_length is None:
             raise ValueError(
                 "total-flux illumination needs alpha, beam profile and "
                 "sample length"
             )
-        horizontal = _horizontal_fraction(state)
-        illumination, intercepted, valid = framewise_illumination_divisor(
-            alpha,
-            sample_length,
-            beam_profile,
-            horizontal_fraction=horizontal,
-        )
-        vertical = np.asarray(
-            beam_profile.flux_on_sample(alpha, sample_length), dtype=np.float64
-        )
-        vertical = np.where(valid, vertical, np.nan)
+        else:
+            horizontal = _horizontal_fraction(state)
+            illumination, intercepted, valid = framewise_illumination_divisor(
+                alpha, sample_length, beam_profile, horizontal_fraction=horizontal,
+            )
+            vertical = np.asarray(
+                beam_profile.flux_on_sample(alpha, sample_length), dtype=np.float64
+            )
+            vertical = np.where(valid, vertical, np.nan)
         illum_status = "applied"
 
     if calibrated:
@@ -406,6 +445,7 @@ def frame_correction_policy(
         horizontal_intercepted_fraction=horizontal,
         intercepted_fraction=intercepted,
         calibrated=calibrated,
+        interception_provenance=shape_provenance,
     )
 
 
@@ -637,6 +677,7 @@ def stationary_correction_factors(
     normalization=None,
     solid_angle_mean=None,
     illumination_divisor=None,
+    illumination_convention="total_flux_H",
 ):
     r"""Correction divisors for one stationary-scan trajectory.
 
@@ -666,6 +707,8 @@ def stationary_correction_factors(
         integral and must not carry it (finding F6).
     :param illumination_divisor: Optional explicit total-flux illumination
         :math:`H`. Mutually exclusive with the legacy ``use_footprint`` path.
+    :param str illumination_convention: ``total_flux_H`` or a shape-based
+        ``legacy_C_illum_area`` dimensionless area fraction.
     :returns: The factors, each broadcast to the shape of ``alpha``.
     :rtype: CorrectionFactors
     :raises ValueError: If the footprint correction is requested without a
@@ -693,10 +736,19 @@ def stationary_correction_factors(
                 "explicit total-flux illumination and legacy footprint are "
                 "mutually exclusive"
             )
-        factors["C_illumination"] = np.broadcast_to(
+        if illumination_convention not in {"total_flux_H", "legacy_C_illum_area"}:
+            raise ValueError("unknown explicit illumination convention")
+        key = (
+            "C_illumination"
+            if illumination_convention == "total_flux_H"
+            else "C_illum_area"
+        )
+        factors[key] = np.broadcast_to(
             np.asarray(illumination_divisor, dtype=np.float64), alpha.shape
         ).copy()
-        applied.append("total_flux_illumination")
+        applied.append(
+            "total_flux_illumination" if key == "C_illumination" else "shape_area"
+        )
 
     if use_footprint:
         if beam_profile is None:

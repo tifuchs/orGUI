@@ -2532,6 +2532,7 @@ class IntegrationOptionsDialog(qt.QDialog):
         if self.footprintOptions is None:
             return
         state = self._correctionState()
+        state.sample_interception = self.footprintOptions.sampleInterceptionSettings()
         if self.scaleModeCombo.currentData() != "legacy":
             state.horizontal_interception = (
                 self.footprintOptions.horizontalInterceptionMode()
@@ -2611,7 +2612,8 @@ class IntegrationOptionsDialog(qt.QDialog):
                 )
             ):
                 missing.append("positive reference exposure")
-        if mode != "legacy" and state.horizontal_interception is None:
+        if (mode != "legacy" and state.horizontal_interception is None
+                and not state.sample_interception.get("enabled", False)):
             missing.append("horizontal interception")
 
         calibrated = mode == "calibrated" and not missing

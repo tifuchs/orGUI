@@ -297,7 +297,7 @@ def test_stationary_reduction_recovers_the_pixel_ray_resolution_average(
         assert np.max(np.abs(actual / point_f2 - 1.0)) > 0.05
 
 
-def _rocking_result(sample_count, roi_size):
+def _rocking_result(sample_count, roi_size, shape_interception=False):
     """Forward-simulate and reduce one rocking curve."""
     detector = _detector()
     center = (154.0, 171.0)
@@ -339,6 +339,25 @@ def _rocking_result(sample_count, roi_size):
     length = 3.8e-3
     profile = _profile(58e-6, -13e-6)
     state = _state(flux, "rate", reference, reference_exposure, horizontal)
+    if shape_interception:
+        profile = beamprofile.gaussian_profile(58e-6, offset=-13e-6)
+        # The source motor is independent of the integration axis/solver angles.
+        scan.phi = np.linspace(-45, 95, sample_count)
+        state.sample_interception = {
+            "version": 1,
+            "enabled": True,
+            "shape": {"kind": "rectangle", "dimensions_m": [0.0038, 0.0025]},
+            "offset_m": [0.0002, 0.0004],
+            "reference_incidence_deg": np.rad2deg(alpha),
+            "normal_rotation_confirmed": True,
+            "azimuth_source": "phi",
+            "horizontal": {
+                "analytical": True,
+                "shape": "Gaussian",
+                "shape_values": [2000],
+                "profile_offset": 300,
+            },
+        }
     policy = frame_correction_policy(
         scan,
         state,
@@ -352,9 +371,15 @@ def _rocking_result(sample_count, roi_size):
     q_forward = _independent_fluence(
         flux, exposure, monitor, "rate", reference, reference_exposure
     )
-    h_forward = _independent_illumination(
-        profile, np.full(sample_count, alpha), length, horizontal
-    )
+    if shape_interception:
+        h_forward = _independent_shape_h(alpha, np.deg2rad(scan.phi), 80)
+        refined = _independent_shape_h(alpha, np.deg2rad(scan.phi), 120)
+        np.testing.assert_allclose(h_forward, refined, rtol=1e-11)
+        assert np.ptp(h_forward)/np.mean(h_forward) > .05
+    else:
+        h_forward = _independent_illumination(
+            profile, np.full(sample_count, alpha), length, horizontal
+        )
     lorentz = 1.0 / (
         np.sin(delta0) * np.cos(alpha) * np.cos(gamma0)
     )
@@ -370,7 +395,8 @@ def _rocking_result(sample_count, roi_size):
         * polarization_correction
     )
     record = CurveCorrectionRecord(
-        algorithm="framewise_ctr_total_flux_v1",
+        algorithm=("shape_interception_total_flux_v1" if shape_interception
+                   else "framewise_ctr_total_flux_v1"),
         output_quantity="ctr_photon_curve",
         scale_convention="total_flux_calibrated",
         normalization_status="applied",
@@ -421,6 +447,35 @@ def _rocking_result(sample_count, roi_size):
         / detector_acceptance
     )
     return actual, expected
+
+
+def _independent_shape_h(alpha, azimuth, order):
+    """Tensor surface integral of explicit Gaussian PDFs in sample coordinates."""
+    from numpy.polynomial.legendre import leggauss
+
+    nodes, weights = leggauss(order)
+    u, v = np.meshgrid(nodes * 0.0019 + 0.0002, nodes * 0.00125 + 0.0004, indexing="ij")
+    sigma_z, sigma_h = np.array([58e-6, 0.002]) / np.sqrt(8 * np.log(2))
+    result = []
+    for psi in azimuth:
+        x = u * np.cos(psi) - v * np.sin(psi)
+        y = u * np.sin(psi) + v * np.cos(psi)
+        z = (x - 0.0002) * np.sin(alpha) - 13e-6
+        transverse = y - 0.0004 + 0.0003
+        density = np.exp(-0.5 * ((z / sigma_z) ** 2 + (transverse / sigma_h) ** 2))
+        result.append(
+            0.0019
+            * 0.00125
+            / (2 * np.pi * sigma_z * sigma_h)
+            * np.einsum("i,j,ij", weights, weights, density)
+        )
+    return np.asarray(result)
+
+
+def test_rotating_shape_recovers_calibrated_rocking_structure_factor():
+    """Framewise joint overlap is removed before calibrated F² aggregation."""
+    actual, expected = _rocking_result(65, (31, 31), shape_interception=True)
+    np.testing.assert_allclose(actual, expected, rtol=3e-10)
 
 
 @pytest.mark.parametrize("roi_size", [(41, 41), (11, 7)])

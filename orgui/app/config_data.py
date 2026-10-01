@@ -142,6 +142,10 @@ class CorrectionState:
     # provenance once the source file moves or changes.
     beam_profile_positions_m: tuple[float, ...] = ()
     beam_profile_density_per_m: tuple[float, ...] = ()
+    # Explicit versioned shape model; SI geometry, dialog-unit profile settings.
+    # Empty means historical 1D interception. Nested model state is stored as
+    # JSON separately, leaving every existing typed dataset's meaning intact.
+    sample_interception: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible correction-state dictionary."""
@@ -584,6 +588,16 @@ def corrections_to_nxdict(state):
         nxdict["uncertainty_provenance"] = _nx_group(
             dict(state.uncertainty_provenance)
         )
+    if state.sample_interception:
+        nxdict["@orgui_schema_version"] = 4
+        nxdict["sample_interception"] = _nx_group(
+            {
+                "settings_json": json.dumps(
+                    _json_value(state.sample_interception), allow_nan=False
+                ),
+                "model_version": 1,
+            }
+        )
     return nxdict
 
 
@@ -602,6 +616,9 @@ def corrections_from_nxdict(nxdict):
     assets = _read_group(nxdict, "assets")
     excluded = _plain(nxdict.get("excluded_frames"))
     values = {
+        "sample_interception": json.loads(
+            _read_group(nxdict, "sample_interception").get("settings_json", "{}")
+        ),
         "use_mask": bool(switches.get("use_mask", False)),
         "use_background": bool(switches.get("use_background", False)),
         "use_solid_angle": bool(switches.get("use_solid_angle", False)),
@@ -1128,6 +1145,9 @@ class ConfigData:
             delta_arm=np.deg2rad(float(detarm.get("delta_arm", 0.0))),
             arm_angle_frame=str(detarm.get("angle_frame", "prim")),
             refraction_index=1.0 - lattice.getfloat("refractionindex", 0.0),
+            corrections=CorrectionState(sample_interception=json.loads(
+                config.get("SampleInterception", "settings", fallback="{}")
+            )),
         )
 
     readConfig = from_ini
@@ -1249,6 +1269,7 @@ class ConfigData:
                 beam_profile_offset_um=beam_shape.get("profile_offset"),
                 beam_profile_positions_m=beam_profile_positions_m,
                 beam_profile_density_per_m=beam_profile_density_per_m,
+                sample_interception=beam_shape.get("sample_interception", {}),
             )
             # Stage 5 has a numerical total-flux path before Stage 6 adds its
             # widgets. Preserve explicitly loaded/programmatic version-3
@@ -1258,6 +1279,10 @@ class ConfigData:
             if total_flux_state is not None:
                 for name in _TOTAL_FLUX_STATE_FIELDS:
                     setattr(corrections, name, getattr(total_flux_state, name))
+                if footprint_dialog is None:
+                    corrections.sample_interception = dict(
+                        total_flux_state.sample_interception
+                    )
             roi = ROIState(
                 region=dict(options.get("region", {})),
                 advanced=dict(options.get("advanced", {})),
@@ -1355,6 +1380,7 @@ class ConfigData:
                 or self.corrections.beam_shape_name is not None
                 or self.corrections.beam_profile_file is not None
                 or self.corrections.horizontal_interception is not None
+                or self.corrections.sample_interception
             ):
                 corrections_dialog = getattr(
                     gui.scanSelector, "correctionsDialog", None
@@ -1382,7 +1408,16 @@ class ConfigData:
                     # units; only the keys this configuration actually
                     # recorded are passed, so the rest of the dialog is left
                     # alone (setSettings()'s own contract).
-                    beam_shape = {}
+                    beam_shape = {
+                        "sample_interception": self.corrections.sample_interception
+                    }
+                    if self.corrections.beam_profile_positions_m:
+                        beam_shape["positions_m"] = (
+                            self.corrections.beam_profile_positions_m
+                        )
+                        beam_shape["density_per_m"] = (
+                            self.corrections.beam_profile_density_per_m
+                        )
                     for key, value in (
                         ("analytical", self.corrections.beam_shape_analytical),
                         ("shape", self.corrections.beam_shape_name),

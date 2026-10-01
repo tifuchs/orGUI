@@ -310,6 +310,33 @@ def _frame_values(values, count, name):
     raise ValueError(f"{name} must be scalar or contain one value per frame")
 
 
+def sample_azimuth(scan, settings, count):
+    """Resolve an explicitly declared normal-rotation source, in radians.
+
+    :param scan: Scan with scalar/per-frame motor readbacks in the declared unit.
+    :param dict settings: ``azimuth_source`` (motor name or ``fixed``),
+        ``azimuth_unit`` (``deg``/``rad``), or ``fixed_azimuth_deg``.
+    :param int count: Frame count; ordering follows the scan's counter arrays.
+    :raises ValueError: For a missing source, wrong unit or mismatched frame count.
+    """
+    source = settings.get("azimuth_source")
+    if source == "fixed":
+        if "fixed_azimuth_deg" not in settings:
+            raise ValueError("fixed azimuth must be explicitly configured")
+        return np.deg2rad(
+            _frame_values(settings["fixed_azimuth_deg"], count, "azimuth")
+        )
+    if not source or not hasattr(scan, source):
+        raise ValueError(f"scan has no configured sample azimuth source {source!r}")
+    unit = settings.get("azimuth_unit", "deg")
+    values = _frame_values(getattr(scan, source), count, "sample azimuth")
+    if unit == "deg":
+        return np.deg2rad(values)
+    if unit == "rad":
+        return values
+    raise ValueError("sample azimuth unit must be deg or rad")
+
+
 def _alpha_centers(scan, config, count):
     """Per-frame incidence angle, in radians."""
     if hasattr(scan, "mu"):

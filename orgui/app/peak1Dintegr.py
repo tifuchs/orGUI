@@ -932,7 +932,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 "known_total_flux": False,
             }
 
-        if record.algorithm.startswith("framewise_ctr_total_flux_"):
+        if record.algorithm.startswith(
+            ("framewise_ctr_total_flux_", "shape_interception_")
+        ):
             reversible = (
                 record.base_croibg is not None
                 and record.base_croibg_variance is not None
@@ -972,7 +974,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
                     f"illumination convention "
                     f"{record.illumination_convention or 'none'}.{extra}"
                 ),
-                "known_total_flux": True,
+                "known_total_flux": record.scale_convention.startswith("total_flux_"),
             }
 
         return {
@@ -1068,10 +1070,14 @@ class RockingPeakIntegrator(qt.QMainWindow):
             if action == FOOTPRINT_KEEP:
                 f2_ready = f2_ready and record.illumination_status == "applied"
             elif action == FOOTPRINT_APPLY:
-                f2_ready = (
-                    f2_ready
-                    and self.integrationCorrection.horizontalInterceptedFraction()
+                f2_ready = f2_ready and (
+                    self.integrationCorrection.horizontalInterceptedFraction()
                     is not None
+                    or getattr(
+                        self.integrationCorrection,
+                        "sampleInterceptionSettings",
+                        lambda: {},
+                    )().get("enabled", False)
                 )
             else:
                 f2_ready = False
@@ -1097,12 +1103,49 @@ class RockingPeakIntegrator(qt.QMainWindow):
         self.footprint_action = action
         self.replacement_illumination = None
         self.replacement_illumination_convention = None
+        self._replacement_shape = None
+        self._replacement_beam = None
         record = self._storedCurveCorrectionRecord(h5_obj)
         if (
             action == FOOTPRINT_APPLY
             and record is not None
-            and record.algorithm.startswith("framewise_ctr_total_flux_")
+            and record.algorithm.startswith(
+                ("framewise_ctr_total_flux_", "shape_interception_")
+            )
         ):
+            shape_settings = getattr(
+                self.integrationCorrection, "sampleInterceptionSettings", lambda: {}
+            )()
+            if shape_settings.get("enabled", False):
+                from .sample_interception_config import (
+                    embed_profile, profile_from_settings, replacement_shape_divisor,
+                )
+                shape_settings["horizontal"] = embed_profile(
+                    shape_settings["horizontal"],
+                    profile_from_settings(shape_settings["horizontal"]),
+                )
+                profile = self.integrationCorrection.beamProfile()
+                self._replacement_shape = (shape_settings, profile)
+                if not lazy:
+                    self.replacement_illumination = replacement_shape_divisor(
+                        shape_settings, profile, record
+                    )
+                self.replacement_illumination_convention = (
+                    "total_flux_H" if record.scale_convention.startswith("total_flux_")
+                    else "legacy_C_illum_area"
+                )
+                return record
+            if record.algorithm.startswith("shape_interception_legacy_"):
+                beam = (self.integrationCorrection.sampleLength(),
+                        self.integrationCorrection.beamProfile(), None)
+                if lazy:
+                    self._replacement_beam = beam
+                else:
+                    self.replacement_illumination = beam[1].corrections(
+                        np.asarray(record.alpha), beam[0]
+                    )[1]
+                self.replacement_illumination_convention = "legacy_C_illum_area"
+                return record
             horizontal = self.integrationCorrection.horizontalInterceptedFraction()
             if horizontal is None:
                 raise ValueError(
@@ -2126,7 +2169,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             y = cnters["y"][()]
 
         if versioned_total_flux:
-            if (
+            if correction_record.scale_convention.startswith("total_flux_") and (
                 correction_record.normalization_status != "applied"
                 or curves["illumination_action"]
                 not in ("applied", "replaced", "applied_here")
@@ -2412,7 +2455,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
                         curves["illumination_convention"] or "none"
                     ),
                     "@normalization_source": "stored_frame_divisor",
-                    "@illumination_source": "stored_frame_divisor",
+                    "@illumination_source": (
+                        "current_settings" if curves["illumination_action"]
+                        in {"replaced", "applied_here"} else "stored_frame_divisor"
+                    ),
                 })
             if detector_acceptance is not None:
                 reduction["detector_acceptance"] = detector_acceptance
@@ -2421,6 +2467,27 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 reduction["sample_size"] = L
                 reduction["@sample_size_unit"] = "m"
             measurement[availname1]["reduction"] = reduction
+
+        if versioned_total_flux:
+            illumination_metadata = {
+                "@NX_class": "NXcollection",
+                "@action": curves["illumination_action"],
+                "@convention": curves["illumination_convention"] or "none",
+                "@source_curve": self._currentRoInfo["name"],
+                "@source_angles": "source_curve/ctr_curve_v3/illumination/alpha",
+            }
+            if curves["illumination_action"] in {"replaced", "applied_here"}:
+                from .sample_interception_config import embed_profile
+                settings = getattr(self.integrationCorrection, "settings", lambda: {})()
+                if self._replacement_shape is not None:
+                    settings["sample_interception"] = self._replacement_shape[0]
+                illumination_metadata["requested_settings_json"] = json.dumps(
+                    embed_profile(settings, self.integrationCorrection.beamProfile()),
+                    allow_nan=False,
+                )
+            elif curves["illumination_action"] == "applied":
+                illumination_metadata["@divisor_source"] = "source_curve/ctr_curve_v3"
+            measurement[availname1]["illumination"] = illumination_metadata
 
         self.database.add_nxdict(
             measurement,
@@ -2560,25 +2627,36 @@ class RockingPeakIntegrator(qt.QMainWindow):
         if CURVE_CORRECTIONS_GROUP in h5_obj:
             record = RockingPeakIntegrator._storedCurveCorrectionRecord(h5_obj)
             if record is not None and record.algorithm.startswith(
-                "framewise_ctr_total_flux_"
+                ("framewise_ctr_total_flux_", "shape_interception_")
             ):
                 if selection is not None:
                     record = dataclasses.replace(
                         record,
+                        profile_provenance={
+                            key: value[selection] if np.ndim(value) >= 2 else value
+                            for key, value in record.profile_provenance.items()
+                        },
                         **{
                             field.name: getattr(record, field.name)[selection]
                             for field in dataclasses.fields(record)
                             if np.ndim(getattr(record, field.name)) >= 2
                         },
                     )
-                if rows is not None and getattr(self, "_replacement_beam", None):
+                if rows is not None and getattr(self, "_replacement_shape", None):
+                    from .sample_interception_config import replacement_shape_divisor
+                    settings, profile = self._replacement_shape
+                    replacement = replacement_shape_divisor(settings, profile, record)
+                elif rows is not None and getattr(self, "_replacement_beam", None):
                     length, profile, horizontal = self._replacement_beam
-                    replacement = framewise_illumination_divisor(
-                        np.asarray(record.alpha),
-                        length,
-                        profile,
-                        horizontal_fraction=horizontal,
-                    )[0]
+                    if horizontal is None:
+                        replacement = profile.corrections(
+                            np.asarray(record.alpha), length
+                        )[1]
+                    else:
+                        replacement = framewise_illumination_divisor(
+                            np.asarray(record.alpha), length, profile,
+                            horizontal_fraction=horizontal,
+                        )[0]
                 else:
                     replacement = getattr(self, "replacement_illumination", None)
                     if rows is not None and np.ndim(replacement) == 2:
@@ -3243,8 +3321,10 @@ class IntegrationCorrectionsDialog(qt.QDialog):
     CONTENT_HEIGHT_SCAN = "height scan (-dI/dz)"
     settingsChanged = qt.Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, profile_only=False):
         qt.QDialog.__init__(self, parent)
+        self._sample_interception = {}
+        self._embedded_alignment = None
         verticalLayout = qt.QVBoxLayout(self)
         verticalLayout.setContentsMargins(0, 0, 0, 0)
         img = qutils.AspectRatioPixmapLabel(self)
@@ -3378,12 +3458,25 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         columns.addLayout(rightColumn, 1)
         verticalLayout.addLayout(columns)
 
+        self.sampleShapeButton = qt.QPushButton("Sample shape and horizontal profile…")
+        self.sampleShapeButton.clicked.connect(self._editSampleShape)
+        verticalLayout.addWidget(self.sampleShapeButton)
+        if profile_only:
+            self.sampleShapeButton.hide()
+            img.hide()
+            for index in range(sizesLayout.count()):
+                widget = sizesLayout.itemAt(index).widget()
+                if widget is not None:
+                    widget.hide()
+
         buttons = qt.QDialogButtonBox(
             qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
         )
         buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.onOk)
         buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.onCancel)
         verticalLayout.addWidget(buttons)
+        if profile_only:
+            buttons.hide()
 
         self.setLayout(verticalLayout)
 
@@ -3406,6 +3499,19 @@ class IntegrationCorrectionsDialog(qt.QDialog):
     def _settingsChanged(self, *args):
         """Notify owners that the effective beam settings changed."""
         self.settingsChanged.emit()
+
+    def _editSampleShape(self):
+        """Open the sample-shape editor (GUI-only user-triggered dialog)."""
+        from .sample_interception_dialog import SampleInterceptionDialog
+        dialog = SampleInterceptionDialog(self, self._sample_interception)
+        if dialog.exec() == qt.QDialog.Accepted:
+            self._sample_interception = dialog.settings()
+            self.settingsChanged.emit()
+
+    def sampleInterceptionSettings(self):
+        """Return versioned shape settings, with SI geometry and embedded profiles."""
+        import copy
+        return copy.deepcopy(self._sample_interception)
 
     def _onHorizontalInterceptionChanged(self, *args):
         """Enable the fraction editor only for the explicit fraction mode."""
@@ -3704,6 +3810,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         path = self.profileFileEdit.text().strip()
         self._profile_z = None
         self._profile_intensity = None
+        self._embedded_alignment = None
         if not path:
             self._updatePreview()
             return False
@@ -3788,11 +3895,18 @@ class IntegrationCorrectionsDialog(qt.QDialog):
                 "the footprint correction options, or switch back to an "
                 "analytical beam shape."
             )
+        offset = self.profileOffset.value() * 1e-6
+        if self._embedded_alignment is not None:
+            old_center, old_offset = self._embedded_alignment
+            reference = beamprofile.MeasuredBeamProfile(
+                self._profile_z, self._profile_intensity, center=old_center
+            ).sample_center
+            offset -= reference + old_offset * 1e-6
         return beamprofile.MeasuredBeamProfile(
             self._profile_z,
             self._profile_intensity,
             center=self.profileCenter.currentText(),
-            offset=self.profileOffset.value() * 1e-6,  # microns -> m
+            offset=offset,
         )
 
     def analyticalProfile(self):
@@ -3858,7 +3972,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         """
         self.W.setValue(value * 1e3)
 
-    def activeArea(self, alpha):
+    def activeArea(self, alpha, azimuth=None):
         """Illuminated sample area at incidence angle ``alpha``, in m^2.
 
         The dimensionless active-area correction applied to an integrated
@@ -3868,10 +3982,33 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         structure factor needs (issue #15). It assumes open post-sample
         slits, and the horizontal extent of :meth:`sampleWidth`.
 
+        With an enabled 2D shape, this returns ``H / (pz_peak * ph_peak)``.
+        The horizontal profile and transformed sample shape then define the
+        transverse extent. Peak density is the explicit absolute-scale
+        reference; the shape's geometric area defines its relative divisor.
+
         :param alpha: Incidence angle(s) in radian, any array shape.
+        :param azimuth: Actual source readback(s) in radians for the shape
+            model. Required for moving readbacks; an explicit fixed source
+            uses its configured angle when omitted.
         :returns: The active area in square meter, broadcast over ``alpha``.
         :rtype: numpy.ndarray
         """
+        if self._sample_interception.get("enabled", False):
+            from .sample_interception_config import (
+                shape_frame_factors,
+                shape_from_settings,
+            )
+
+            if azimuth is None:
+                if self._sample_interception.get("azimuth_source") != "fixed":
+                    raise ValueError(
+                        "shape active area requires the actual sample azimuth"
+                    )
+                azimuth = np.deg2rad(self._sample_interception["fixed_azimuth_deg"])
+            return shape_frame_factors(
+                self._sample_interception, self.beamProfile(), alpha, azimuth
+            )[2] * shape_from_settings(self._sample_interception).area
         return activearea_corrections.beam_limited_area(
             alpha, self.sampleWidth(), self.sampleLength(), self.beamProfile()
         )
@@ -3902,6 +4039,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         """
         shape = self.currentShape()
         return {
+            "sample_interception": self.sampleInterceptionSettings(),
             "L": self.L.value(),
             "W": self.W.value(),
             "beam_flux": self.beamFlux.value(),
@@ -3924,6 +4062,9 @@ class IntegrationCorrectionsDialog(qt.QDialog):
 
         :param dict settings: State to apply. Missing keys are left alone.
         """
+        if "sample_interception" in settings:
+            import copy
+            self._sample_interception = copy.deepcopy(settings["sample_interception"])
         widgets = [
             self.profileFileEdit,
             self.profileContent,
@@ -3978,6 +4119,14 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         self._onModeChanged()
         self._onHorizontalInterceptionChanged()
         self.loadProfile()
+        if settings.get("positions_m") is not None:
+            self._profile_z = np.asarray(settings["positions_m"], dtype=float)
+            self._profile_intensity = np.asarray(settings["density_per_m"], dtype=float)
+            self._embedded_alignment = (
+                self.profileCenter.currentText(),
+                self.profileOffset.value(),
+            )
+            self._updatePreview()
 
     def onOk(self):
         self._settings_save = self.settings()
