@@ -32,6 +32,21 @@
 
 ## 1. What the two papers require
 
+**Follow-up to PR #87 (issue #82).** The joint angular mean implemented there
+does remove the covariance of separately averaged Lorentz and rod terms, but
+it still assumes the angular factor is constant over the peak. The original
+equivalence fixture has fixed geometry and cannot detect that assumption.
+The additional independent forward regression in `test_scan_mode_equivalence.py`
+rocks incidence (`mu`) at a fixed specular detector arm, with
+`alpha + gamma = 2 alpha_0`, changing exposure/monitor values and a Gaussian
+profile normalized in radians. The window mean fails even without background
+(maximum relative error 8.82 % in the new fixture, reduced to less than
+`3e-7` by framewise correction on its nonuniform grid);
+the local `L * C_rod` divisor must instead be applied before the signal and
+background integrals and their variance propagation. Saved factor means remain
+diagnostics. The stationary reduction, per-curve acceptance in radians,
+complete in-plane collection and open-slit active-area conventions are retained.
+
 E. Vlieg, *J. Appl. Cryst.* **30** (1997) 532 gives the integrated intensity
 for each measurement mode of a six-circle/z-axis diffractometer. J. Drnec
 *et al.*, *J. Appl. Cryst.* **47** (2014) 365 rewrites the same expressions

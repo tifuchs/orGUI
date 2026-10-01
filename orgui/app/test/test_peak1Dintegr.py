@@ -428,8 +428,8 @@ def test_the_acceptance_divides_f2_and_only_f2():
     )
 
 
-def test_joint_lorentz_rod_factor_uses_the_count_quadrature():
-    """Correlated factors are averaged as a product on a nonuniform axis."""
+def test_joint_lorentz_rod_factor_divides_counts_and_errors_per_frame():
+    """Use the local joint divisor on a nonuniform axis in either direction."""
     axis = np.array([-0.5, -0.2, 0.0, 0.1, 0.5])
     curve = np.full(axis.shape, 10.0)
     lorentz = np.array([[1.0, 1.4, 2.0, 2.5, 4.0]])
@@ -455,7 +455,19 @@ def test_joint_lorentz_rod_factor_uses_the_count_quadrature():
         / (axis[-1] - axis[0]) ** 2
     )
     assert not np.isclose(joint, separate)
-    np.testing.assert_allclose(result["F2_hkl"], result["croibg"] / joint)
+    # Independent trapezoidal weights for this particular axis. Dividing
+    # counts and their errors by the local joint factor is not equivalent
+    # to dividing the finished integral by its angular mean.
+    weights = np.array([0.15, 0.25, 0.15, 0.25, 0.2])
+    divisor = np.array([4.0, 3.5, 4.0, 3.5, 4.0])
+    expected = np.sum(10.0 * weights / divisor)
+    expected_error = np.sqrt(np.sum(10.0 * (weights / divisor)**2))
+    np.testing.assert_allclose(result["croibg"], 10.0)
+    np.testing.assert_allclose(result["F2_hkl"], expected)
+    np.testing.assert_allclose(result["F2_hkl_errors"], expected_error)
+    assert not np.isclose(expected, result["croibg"][0] / joint)
+    # Factor means remain diagnostics in the existing saved layout.
+    np.testing.assert_allclose(result["int_data"]["sig_1"]["C_Lorentz_rod"], joint)
 
     reversed_result = _compute_rocking_integration(
         np.array([0.0]),

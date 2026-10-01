@@ -14,8 +14,9 @@ counts are then reduced twice: through
 :mod:`orgui.datautils.xrayutils.corrections.measurement`, which must recover the
 input, and through the two correction paths orGUI ships today
 (:func:`orgui.app.peak1Dintegr._compute_rocking_integration` and
-:mod:`orgui.app.integration_corrections`), whose disagreement is pinned to the
-exact factor it is.
+:mod:`orgui.app.integration_corrections`). A separate forward calculation
+writes out the angular factors to test changing geometry within a rocking
+curve without sharing the production angular-factor implementation.
 
 Everything that is not under test is left out deliberately. The polarization
 factor and the footprint correction are absent from the simulation because
@@ -40,7 +41,7 @@ from orgui.datautils.xrayutils.corrections import measurement as ii
 #: Fixed incidence angle of the simulated z-axis scans, in radian.
 ALPHA_IN = np.deg2rad(0.6)
 
-#: Per-frame counting time and monitor of the two simulated measurements.
+#: Per-frame counting time (s) and dimensionless relative monitor rate.
 ROCKING_EXPOSURE, ROCKING_MONITOR = 0.4, 3.0
 STATIONARY_EXPOSURE, STATIONARY_MONITOR = 2.0, 7.0
 
@@ -328,6 +329,102 @@ def test_rocking_and_stationary_paths_agree(rod):
     historical = _orgui_rocking_f2(rod, acceptance, reduce=False)
     gap = ROCKING_EXPOSURE * ROCKING_MONITOR * np.rad2deg(acceptance)
     np.testing.assert_allclose(historical / stationary, gap, rtol=1e-6)
+
+
+@pytest.mark.parametrize("mode", [ii.ROCKING, ii.REFLECTIVITY_ROCKING])
+@pytest.mark.parametrize("angle_unit", ["deg", "rad"])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("direct_photons", [False, True])
+@pytest.mark.parametrize("background", [0.0, BACKGROUND])
+def test_framewise_geometry_recovers_the_stationary_structure_factor(
+    rod, mode, angle_unit, reverse, direct_photons, background
+):
+    """Recover the input despite changing fluence and a peaked rocking curve.
+
+    A ``th`` scan has fixed z-axis geometry. A specular ``mu`` scan rocks
+    incidence at a fixed detector arm: ``alpha + gamma = 2 * alpha_0``.
+    The local measurement model is ``N = T M S |F|^2 L C_rod Delta_gamma p``
+    with ``p`` a Gaussian of unit integral in radians. Its angular divisor
+    must be removed per frame; the mean over a signal window includes tails
+    with almost no signal and is not the factor experienced by the peak.
+
+    Open post-sample slits and complete in-plane collection are assumed.
+    ``S`` is written independently in SI units; the returned arbitrary-scale
+    ``F2_hkl / S`` must recover electron units squared in both modes.
+    """
+    ell, alpha0, delta0, gamma0, f2, wavelength, uc_area = rod
+    if mode == ii.REFLECTIVITY_ROCKING:
+        # Reuse the known F2 values on a specular trajectory; these angles
+        # replace the off-specular geometry of the Pt rod fixture.
+        alpha0 = np.deg2rad(np.linspace(0.6, 2.0, ell.size))
+        gamma0 = alpha0.copy()
+        delta0 = np.zeros_like(alpha0)
+    stationary_rod = ell, alpha0, delta0, gamma0, f2, wavelength, uc_area
+
+    # A nonuniform motor grid, dense enough that Gaussian quadrature rather
+    # than correction averaging sets the remaining numerical tolerance.
+    grid = np.linspace(-1.0, 1.0, 2401)
+    axis_deg = 0.45 * (0.7 * grid + 0.3 * grid**3)
+    if reverse:
+        axis_deg = axis_deg[::-1]
+    omega = np.deg2rad(axis_deg)
+    shape = (ell.size, axis_deg.size)
+    if mode == ii.REFLECTIVITY_ROCKING:
+        alpha = alpha0[:, None] + omega
+        gamma = gamma0[:, None] - omega
+        lorentz_forward = 1.0 / np.sin(2.0 * alpha)
+    else:
+        alpha = np.broadcast_to(alpha0[:, None], shape)
+        gamma = np.broadcast_to(gamma0[:, None], shape)
+        lorentz_forward = 1.0 / (
+            np.sin(delta0[:, None]) * np.cos(alpha) * np.cos(gamma)
+        )
+    joint_forward = lorentz_forward * np.cos(gamma)
+    acceptance = np.deg2rad(0.35) * np.linspace(0.7, 1.6, ell.size)
+    exposure = ROCKING_EXPOSURE * (1.0 + 0.3 * axis_deg / 0.45)
+    monitor = ROCKING_MONITOR * (1.0 + 0.2 * np.cos(axis_deg / 0.04))
+    normalization = np.broadcast_to(exposure * monitor, shape)
+    sigma = np.deg2rad(0.025)
+    profile = np.exp(-0.5 * (omega / sigma) ** 2) / (
+        sigma * np.sqrt(2.0 * np.pi)
+    )
+    scale = (
+        FLUX_DENSITY * ACTIVE_AREA * (2.8179403262e-15)**2
+        * (wavelength * 1e-10)**2 / (uc_area * 1e-20)**2
+    )
+    # A flat background in the angularly corrected curve, also present in
+    # the background window, exercises subtraction under the same divisors.
+    photons = normalization * joint_forward * (
+        scale * f2[:, None] * acceptance[:, None] * profile + background
+    )
+    solid_angle = 1.0 + 0.07 * np.linspace(0.0, 1.0, ell.size)
+    curves = photons * solid_angle[:, None]
+    components = ii.mode_components(
+        mode, alpha=alpha, delta=delta0[:, None], gamma=gamma
+    )
+    unit = 1.0 if angle_unit == "deg" else np.deg2rad(1.0)
+    roi_info = {
+        "sig_1": {"from": np.full(ell.size, -0.3 * unit),
+                  "to": np.full(ell.size, 0.3 * unit)},
+        "bg_1": {"from": np.full(ell.size, -0.45 * unit),
+                 "to": np.full(ell.size, -0.36 * unit)},
+    }
+    extra = (
+        dict(ctr_croibg_curves=photons,
+             ctr_croibg_errors_curves=np.sqrt(photons))
+        if direct_photons else dict(solid_angle_mean=solid_angle)
+    )
+    result = _compute_rocking_integration(
+        ell, axis_deg * unit, curves, np.sqrt(photons) * solid_angle[:, None],
+        roi_info, {}, True, False,
+        C_Lor=components["C_Lorentz"], C_rod=components["C_rod"],
+        C_norm=normalization, detector_acceptance=acceptance,
+        angle_unit=angle_unit, **extra,
+    )
+    stationary = _orgui_stationary_f2(stationary_rod)
+    np.testing.assert_allclose(stationary / scale, f2, rtol=1e-12)
+    np.testing.assert_allclose(result["F2_hkl"] / scale, f2, rtol=1e-6)
+    np.testing.assert_allclose(result["F2_hkl"], stationary, rtol=1e-6)
 
 
 def test_a_resized_region_of_interest_no_longer_distorts_the_rocking_rod(rod):

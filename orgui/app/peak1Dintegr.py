@@ -177,6 +177,9 @@ def _compute_rocking_integration(
         intensities.
     :param C_Lor:
         Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, Lorentz factor.
+        The dimensionless product ``C_Lor * C_rod`` divides the CTR curve
+        per frame before angular integration and background subtraction.
+        Dividing by its window mean is equivalent only for constant geometry.
     :param C_rod:
         Scalar ``1.0`` or array of shape ``(n_s, n_pts)``, rod-intersection
         factor.
@@ -384,9 +387,6 @@ def _compute_rocking_integration(
     raw_croi = np.zeros(s_array.size, dtype=float)
     raw_croi_errors = np.zeros(s_array.size, dtype=float)
     sig_interval = np.zeros(s_array.size, dtype=float)
-    C_Lorentz = np.zeros(s_array.size, dtype=float)
-    C_rod_intersect = np.zeros(s_array.size, dtype=float)
-    C_Lorentz_rod = np.zeros(s_array.size, dtype=float)
     aux_cnts_integral = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
     aux_cnts_integral_mean = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
     aux_cnts_sum = dict((a, np.zeros(s_array.size, dtype=float)) for a in aux)
@@ -411,16 +411,6 @@ def _compute_rocking_integration(
                 aux_cnts_integral[a] += int_data[roikey]["auxillary_int"][a]
                 aux_cnts_integral_mean[a] += (
                     int_data[roikey]["auxillary_int"][a] / sig_interval
-                )
-            if use_lorentz:
-                C_Lorentz += int_data[roikey]["C_Lor"] * (
-                    int_data[roikey]["int_interval"] / sig_interval
-                )
-                C_rod_intersect += int_data[roikey]["C_rod"] * (
-                    int_data[roikey]["int_interval"] / sig_interval
-                )
-                C_Lorentz_rod += int_data[roikey]["C_Lorentz_rod"] * (
-                    int_data[roikey]["int_interval"] / sig_interval
                 )
 
     raw_croi_errors = np.sqrt(raw_croi_errors)
@@ -504,54 +494,48 @@ def _compute_rocking_integration(
     result["auxil"] = auxil
 
     if use_lorentz:
+        # Reuse the same signal/background quadrature and variance propagation
+        # on the CTR branch, with the local dimensionless L * C_rod divisor
+        # inside the integral. A window mean includes empty peak tails and
+        # cannot undo geometry that varies across a nonuniform rocking curve.
+        # The outer aggregation retains the diagnostic intensity and stored
+        # factor means. New extractions supply polarization-only photons;
+        # legacy curves still use their scalar solid-angle compensation below.
+        if ctr_croibg_curves is None:
+            ctr_curve, ctr_errors = croibg_curves, croibg_errors_curves
+        else:
+            ctr_curve, ctr_errors = ctr_croibg_curves, ctr_croibg_errors_curves
+        ctr_result = _compute_rocking_integration(
+            s_array,
+            axis,
+            ctr_curve,
+            ctr_errors,
+            roi_info,
+            {},
+            False,
+            use_footprint,
+            C_flux_on_sample=C_flux_on_sample,
+            C_illum_area=C_illum_area,
+            C_norm=(np.asarray(C_norm) * np.asarray(C_Lor) * np.asarray(C_rod)),
+            angle_unit=angle_unit,
+        )
         # The rocking angle is the integration variable and must be in radian
         # (Vlieg eq. 42, Drnec eq. 2). The exposure and monitor divisor is
-        # already inside croibg, applied per frame above, so only the angle
+        # already inside the CTR integral, so only the angle
         # conversion is left for normalized_intensity to do here.
         intensity = measurement_corrections.normalized_intensity(
-            croibg, angle_unit=angle_unit
+            ctr_result["croibg"], angle_unit=angle_unit
         )
         intensity_errors = measurement_corrections.normalized_intensity(
-            croibg_errors, angle_unit=angle_unit
+            ctr_result["croibg_errors"], angle_unit=angle_unit
         )
-        # The joint factor is integrated with the same trapezoidal angular
-        # quadrature as the counts. Multiplying independently averaged
-        # Lorentz and rod terms leaves a covariance residual whenever both
-        # vary through the rocking window.
-        denominator = C_Lorentz_rod
+        denominator = 1.0
         if detector_acceptance is not None:
             denominator = denominator * np.asarray(detector_acceptance, dtype=float)
-        if solid_angle_mean is not None:
+        if ctr_croibg_curves is None and solid_angle_mean is not None:
             denominator = denominator * np.asarray(solid_angle_mean, dtype=float)
         result["F2_hkl"] = intensity / denominator
         result["F2_hkl_errors"] = intensity_errors / denominator
-
-        if ctr_croibg_curves is not None:
-            # New extractions carry a polarization-only curve made from the
-            # same base signal. Re-run the pure aggregation on that branch so
-            # signal/background windows, nonuniform or reversed angular
-            # quadrature and error propagation stay identical. No separately
-            # estimated solid-angle mean enters this path.
-            ctr_result = _compute_rocking_integration(
-                s_array,
-                axis,
-                ctr_croibg_curves,
-                ctr_croibg_errors_curves,
-                roi_info,
-                aux,
-                use_lorentz,
-                use_footprint,
-                C_Lor=C_Lor,
-                C_rod=C_rod,
-                C_flux_on_sample=C_flux_on_sample,
-                C_illum_area=C_illum_area,
-                C_norm=C_norm,
-                detector_acceptance=detector_acceptance,
-                solid_angle_mean=None,
-                angle_unit=angle_unit,
-            )
-            result["F2_hkl"] = ctr_result["F2_hkl"]
-            result["F2_hkl_errors"] = ctr_result["F2_hkl_errors"]
 
     return result
 
@@ -2407,6 +2391,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
                 "@NX_class": "NXcollection",
                 "@mode": mode,
                 "@angle_unit": "rad",
+                "@angular_correction": "framewise_lorentz_rod_v1",
                 "@normalization_applied": ",".join(normalization_applied) or "none",
                 "@acceptance_applied": bool(acceptance_applied),
                 "@solid_angle_compensated": bool(solid_angle_compensated),

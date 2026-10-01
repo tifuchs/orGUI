@@ -238,7 +238,7 @@ stationary expression (equation 54) does not, and all three are applied:
   that lists ``exposure_time`` among its auxiliary counters; a counter that is
   not there is skipped, and what was applied is recorded with the result.
 * the **unit of the rocking angle**. The published expressions integrate in
-  radian; the motor axis is in degrees, and the factor :math:`180/\pi` is
+  radian; the motor axis is in degrees, and the factor :math:`\pi/180` is
   applied when ``F2_hkl`` is formed. The stored ``croibg`` and the integration
   interval stay in degrees, the unit they were measured in.
 * the **out-of-plane angular acceptance** :math:`\Delta\gamma` of the region
@@ -277,13 +277,35 @@ rather than guessing.
 
 The Lorentz and rod-intersection terms can both vary through a rocking window.
 They are therefore multiplied point by point and averaged with the same
-trapezoidal angular quadrature as the counts, rather than multiplying two
-separately averaged factors. This remains the explicit region-mean
-approximation used by extraction; it does not claim a signal-weighted
-per-pixel correction.
+trapezoidal angular quadrature for the saved diagnostic factor means.
+To form ``F2_hkl``, their dimensionless product divides the CTR photon curve
+and its errors **per frame before integration and background subtraction**:
+
+.. math::
+
+   F^2_{hkl} \propto \frac{1}{\Delta\gamma}
+       \int \frac{N(\omega)}{T(\omega) M(\omega)
+          C_\mathrm{illum}(\omega) L(\omega) C_\mathrm{rod}(\omega)}
+          \,\mathrm{d}\omega .
+
+Here :math:`N` is the polarization-corrected photon count per frame,
+:math:`T` is exposure in seconds, :math:`M` is the legacy relative monitor
+reading and :math:`C_\mathrm{illum}` is its numerical illumination divisor.
+For total-flux curves, the stored :math:`QH` replaces that fluence/illumination
+product and is already divided out when the curve is reconstructed; it is
+applied only once.
+
+Both :math:`\omega` and :math:`\Delta\gamma` are in radians. A peaked
+rocking curve and its nearly empty tails do not sample the same geometry;
+dividing the integrated counts by a window mean gives a window-dependent
+structure factor when incidence varies during a ``mu`` scan. Constant
+geometry gives the same result as before. This correction uses the local
+z-axis angular factors; extraction retains its existing ROI-mean
+polarization approximation and assumes complete in-plane peak collection.
 
 Each integrated rocking scan stores a ``reduction`` group beside ``F2_hkl``
-recording the mode, the angle unit, which normalizations were applied, the
+recording the mode, the angle unit, the ``framewise_lorentz_rod_v1`` angular
+correction, which normalizations were applied, the
 acceptance that was divided out, whether the direct photon curve or legacy
 solid-angle compensation was used, and the active-area assumption, so that a
 saved rod can be placed on a common scale after the fact.

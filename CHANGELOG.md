@@ -26,6 +26,15 @@ Other user-visible changes:
 
 Scientific and analysis additions:
 
+- **Rocking CTR reduction now applies the joint Lorentz and rod-interception
+  divisor per frame.** Averaging that divisor over the signal window biased
+  peaked curves when incidence varied during a ``mu`` scan. The corrected
+  reduction recovers the stationary structure factor in independent simulated
+  measurements, including changing exposure and monitor values, nonuniform
+  and reversed axes, and degrees or radians. Errors follow the same framewise
+  divisor; diagnostic intensity counters and saved factor means retain their
+  existing meanings. Constant-geometry results are unchanged.
+
 - **Integration and reciprocal-space reconstruction now share frame
   normalization controls.** New reconstruction jobs follow the integration
   normalization switch and its rate or integrated primary-monitor convention.
