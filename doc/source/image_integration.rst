@@ -41,6 +41,121 @@ continuous CTR, so the residual plots isolate photon noise from L resolution.
    backgrounds. Stationary and rocking show their saved one-standard-deviation
    errors; the current map integration API supplies no integrated error.
 
+Sample-shape interception
+-------------------------
+
+In the shared beam-profile editor, open ``Sample shape / 2D interception…``
+and enable the exact shape overlap. Select a rectangle, circle (diameter), or
+simple polygon. Dimensions, polygon coordinates and sample-origin displacement
+are in mm; orientation and reference angles are degrees. Polygon rows accept
+``x y`` or ``x,y`` pairs, with optional ``#`` comments. The supplied polygon
+origin is preserved. Self-intersections, repeated vertices, overlapping edges,
+zero area and nonpositive dimensions are rejected.
+
+The existing beam-profile controls provide the vertical beam. Configure an
+independent horizontal beam on the shape editor's second tab. Both support
+Gaussian, top-hat, trapezoidal, smoothed top-hat, generalized-normal, skew-normal
+and measured density profiles. Analytical width parameters and profile offsets
+are micrometres; flatness and skew are dimensionless. Measured file coordinates
+use the selected mm or micrometre unit. Each density is normalized independently;
+the imported absolute count scale cancels. Measured data have zero density
+outside their saved table support and negative density values are rejected.
+
+Enter the exact loaded motor/counter name, its deg/rad unit, sign, and reference
+readback. Confirm that this source represents rotation about the surface normal.
+For a stationary orientation, explicitly enter ``fixed`` and its fixed angle.
+A beamline motor called ``phi`` is suitable only if that declaration is physically
+correct for the measurement. Acquisition order is retained. A scalar readback
+broadcasts; an array must contain one value per frame. Missing readbacks fail
+with an explanatory error.
+
+At the reference incidence/readback, the profile centre/offset aligns the shape
+origin. The displacement from the rotation axis is fixed to the sample and
+rotates with it. The resulting axis alignment is fixed in laboratory beam
+coordinates as incidence changes; no unrecorded translation is inferred.
+
+The diagnostics tab shows intercepted fraction and illumination versus readback
+angle. ``Preview loaded source frames`` uses the actual frame incidence and
+declared readback; choose a frame for the beam-density image and sample outline.
+Calculation progress can be cancelled. Overspill exceeding the selected
+threshold produces an aggregated warning during correction. Frames with invalid
+incidence or zero overlap receive NaN divisors and propagate as excluded data;
+an entirely unusable scan fails. Very small positive incidence is evaluated
+directly on the surface.
+
+Normalization and scientific convention
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Let x follow beam propagation projected onto the flat sample, y be transverse,
+and x cross y be the surface normal. Positive azimuth is right-handed about that
+normal. Internal lengths are metres, angles radians, and beam densities have
+units m\ :sup:`-1`. For normalized independent profiles :math:`p_z,p_h`,
+
+.. math::
+
+   H(\alpha,\psi) = \int_{S(\psi)}
+       p_z(z_{axis} + x\sin\alpha)\,p_h(y_{axis}+y)\,dx\,dy,
+   \qquad f_{hit}=\sin\alpha\,H.
+
+The total-flux convention divides each frame by H and its incident fluence Q
+before angular aggregation. Selecting a shape preserves the selected flux
+normalization convention. Calibration still requires the explicit total-flux
+reference. For the legacy density/area convention, the effective area is
+:math:`A_{eff}=H/(p_{z,max}p_{h,max})` and the applied dimensionless divisor is
+:math:`A_{eff}/A_{sample}`. ``activeArea(alpha, azimuth)`` exposes the effective
+area in m\ :sup:`2`; moving samples require the actual readback azimuth in radians.
+The legacy beam-flux input denotes peak density for this effective-area contract.
+
+The overlap is evaluated over transformed polygon sections or exact circle
+chords with controlled quadrature. Independent separable beam profiles still
+require a joint clipped overlap over a rotated shape. A 10 mm square at 0.36 deg
+incidence with a 160 micrometre FWHM vertical Gaussian and a normalized 20 mm
+horizontal top hat intercepts 0.178090128539 at edge orientation and
+0.178155252900 at 45 deg. With a narrow centred horizontal beam, the limiting
+fractions are 0.356180257078 and 0.486812529405.
+
+Saved settings and curve replacement
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Configuration snapshots retain versioned shape settings and normalized measured
+data, so relocated profile files remain usable. INI files can supply optional
+``[SampleInterception] settings`` JSON; see the commented example in
+``examples/config_minimal``. Its geometry fields use metres, profile width/offset
+fields micrometres, and angle fields explicitly ending in ``_deg`` use degrees.
+The vertical profile and correction enablement remain the shared controls.
+
+Extraction saves the applied divisor, intercepted fraction, physical incidence,
+raw readback in radians, validity, estimated numerical error, method, alignment,
+and profile provenance alongside an immutable base curve and variance.
+``Keep stored``, ``Remove stored`` and ``Apply / replace with current settings``
+rebuild from that base, preserving normalization and propagating errors by the
+same divisor. Repeating replacement is idempotent. Changing a moving readback
+source or its unit requires re-extraction; changing geometry, sign or reference
+may reuse the recorded source. Replacing a 1D correction with a moving shape
+also requires source angles that the earlier record may not contain.
+
+The curve container retains schema 3 with distinct
+``shape_interception_total_flux_v1`` / ``shape_interception_legacy_v1`` algorithms.
+The previous rocking reducer rejects these algorithm names. Requested settings
+use layout version 4 when shape settings exist. Existing settings and 1D curves
+retain their previous conventions and layout. Reconstruction continues its
+existing illumination policy.
+
+This model assumes a flat sample, separable beam densities and representative
+angles per frame. It does not integrate unmeasured motion within an exposure or
+model exit absorption, scattering from sample sides or a nonseparable 2D beam.
+
+Diagnostic notebook
+~~~~~~~~~~~~~~~~~~~
+
+The runnable notebook compares beam profiles for a 10 mm square in mu and th
+scans, including the applied multiplier and the effect of transverse clipping.
+
+.. toctree::
+   :maxdepth: 1
+
+   sample_interception_diagnostics
+
 Stationary Reciprocal-Space Integration
 ---------------------------------------
 

@@ -57,6 +57,15 @@ Scientific and analysis additions:
   divisor; diagnostic intensity counters and saved factor means retain their
   existing meanings. Constant-geometry results are unchanged.
 
+- **Stationary and rocking integration offer explicit 2D sample interception.**
+  Rectangles, circles and simple polygons rotate about a declared surface-normal
+  readback and overlap independent vertical/horizontal beam profiles. The editor
+  previews overlap and source-frame footprints. Saved curves retain the applied
+  factors, angles and embedded measured profiles for safe keep, remove and
+  replace operations. Existing configurations retain the 1D correction. A
+  diagnostic notebook compares beam profiles and correction factors for a
+  10 mm square in mu and th scans.
+
 - **Integration and reciprocal-space reconstruction now share frame
   normalization controls.** New reconstruction jobs follow the integration
   normalization switch and its rate or integrated primary-monitor convention.
