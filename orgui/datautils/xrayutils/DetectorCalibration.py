@@ -70,6 +70,16 @@ def _nx_to_python(value):
     return value
 
 
+def _nx_config_to_python(value):
+    """Remove NeXus attributes, retaining pyFAI settings and their units."""
+    if isinstance(value, dict):
+        return {
+            key: _nx_config_to_python(item)
+            for key, item in value.items() if not key.startswith("@")
+        }
+    return _nx_to_python(value)
+
+
 """
 
 Attention!!!!
@@ -424,10 +434,9 @@ class Detector2D_SXRD(geometry.Geometry):
             detdict = nxdict["detector_SXRD"]
         else:
             detdict = nxdict
-        config = _nx_to_python(dict(detdict["config"]))
-        for entry in list(config):
-            if entry.startswith("@"):
-                del config[entry]
+        # nxtodict includes attributes in nested detector/sensor groups too.
+        # They describe the NeXus storage, not pyFAI calibration parameters.
+        config = _nx_config_to_python(dict(detdict["config"]))
         shape = config.pop("shape", None)
         max_shape = config.pop("max_shape", None)
         if "detector" in config:

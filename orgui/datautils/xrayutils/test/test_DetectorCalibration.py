@@ -136,6 +136,35 @@ class TestRWDetector2D_SXRD(unittest.TestCase):
             os.remove(self._nxfilename)
 
 
+@pytest.mark.skipif(not silx_avail, reason="silx not available")
+@pytest.mark.parametrize("attribute", ["@NX_class", "@nx_class"])
+def test_nested_nexus_attributes_are_not_detector_parameters(
+    tmp_path, caplog, attribute,
+):
+    """HDF5 group metadata must not alter or invalidate the calibration."""
+    detector = DetectorCalibration.Detector2D_SXRD()
+    detector.detector = pyFAI.detector_factory("Pilatus6M")
+    detector.dist = 0.78  # pyFAI distance and pixel sizes are in metres.
+    detector.poni1 = 0.02
+    detector.poni2 = 0.03
+    detector.rot1 = 0.01
+    detector.set_energy(77.0)  # keV
+    nxdict = detector.toNXdict()
+    config = nxdict["detector_SXRD"]["config"]
+    config[attribute] = "NXcollection"
+    config["detector_config"][attribute] = "NXcollection"
+    filename = tmp_path / "detector.h5"
+    dictdump.dicttonx(nxdict, filename)
+    stored = dictdump.nxtodict(filename)
+    caplog.clear()
+    restored = DetectorCalibration.loadNXdict(stored)
+    assert not any("Left-over config" in record.message for record in caplog.records)
+    assert restored.getPyFAI() == detector.getPyFAI()
+    assert restored.detector.get_config() == detector.detector.get_config()
+    # Removing storage attributes must not mutate the caller's dictionary.
+    assert attribute in config["detector_config"]
+
+
 class TestAnglePixelConversion(unittest.TestCase):
     def setUp(self):
         self.sxrddet = DetectorCalibration.Detector2D_SXRD()
