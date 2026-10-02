@@ -3323,7 +3323,18 @@ class IntegrationCorrectionsDialog(qt.QDialog):
 
     def __init__(self, parent=None, *, profile_only=False):
         qt.QDialog.__init__(self, parent)
-        self._sample_interception = {}
+        self._profile_only = profile_only
+        self._restoringSettings = True
+        self.sampleEditor = None
+        self.setWindowTitle("Beam and sample corrections")
+        if profile_only:
+            self.setWindowFlags(qt.Qt.Widget)
+        else:
+            # Keep this preview hierarchy on its own native surface. Qt 6
+            # otherwise includes its OpenGL widgets in the parent corrections
+            # dialog's RHI setup when that raster-backed window reopens.
+            # Embedded horizontal controls remain part of this window.
+            self.setAttribute(qt.Qt.WA_NativeWindow, True)
         self._embedded_alignment = None
         verticalLayout = qt.QVBoxLayout(self)
         verticalLayout.setContentsMargins(0, 0, 0, 0)
@@ -3334,7 +3345,10 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         # cannot by itself push the dialog past a normal screen's height.
         img.setMaximumHeight(110)
 
-        verticalLayout.addWidget(img)
+        if not profile_only:
+            verticalLayout.addWidget(img)
+        else:
+            img.hide()
 
         self._settings_save = None
         # Tabulated measured profile, in meters and arbitrary intensity units.
@@ -3345,11 +3359,9 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             shape.name: [p.default for p in shape.parameters] for shape in BEAM_SHAPES
         }
 
-        sizesLayout = qt.QGridLayout()
-        sizesLayout.addWidget(qt.QLabel("Sample size L:"), 0, 0)
-        self.L = qt.QDoubleSpinBox()
+        self.L = qt.QDoubleSpinBox(self)
         self.L.setRange(0.00001, 1000000)
-        self.L.setDecimals(4)
+        self.L.setDecimals(6)
         self.L.setSuffix(" mm")
         self.L.setValue(5)
         self.L.setToolTip(
@@ -3357,12 +3369,9 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             "illuminated fraction of the projected footprint, which is the "
             "active-area correction for open post-sample slits."
         )
-        sizesLayout.addWidget(self.L, 0, 1)
-
-        sizesLayout.addWidget(qt.QLabel("Sample size W:"), 1, 0)
-        self.W = qt.QDoubleSpinBox()
+        self.W = qt.QDoubleSpinBox(self)
         self.W.setRange(0.00001, 1000000)
-        self.W.setDecimals(4)
+        self.W.setDecimals(6)
         self.W.setSuffix(" mm")
         self.W.setValue(5)
         self.W.setToolTip(
@@ -3374,11 +3383,9 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             "structure factor on a relative scale is unaffected."
         )
         self._legacyWidthToolTip = self.W.toolTip()
-        sizesLayout.addWidget(self.W, 1, 1)
 
-        self.legacyFluxLabel = qt.QLabel("Legacy flux density:")
-        sizesLayout.addWidget(self.legacyFluxLabel, 2, 0)
-        self.beamFlux = qt.QDoubleSpinBox()
+        self.legacyFluxLabel = qt.QLabel("Legacy flux density:", self)
+        self.beamFlux = qt.QDoubleSpinBox(self)
         self.beamFlux.setRange(0.0, 1e30)
         self.beamFlux.setDecimals(3)
         self.beamFlux.setSuffix(" ph/(s·mm²)")
@@ -3390,10 +3397,9 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             "the parent corrections dialog."
         )
         self._legacyFluxToolTip = self.beamFlux.toolTip()
-        sizesLayout.addWidget(self.beamFlux, 2, 1)
 
-        sizesLayout.addWidget(qt.QLabel("Horizontal interception:"), 3, 0)
-        self.horizontalInterception = qt.QComboBox()
+        self.horizontalInterceptionLabel = qt.QLabel("Horizontal interception:", self)
+        self.horizontalInterception = qt.QComboBox(self)
         self.horizontalInterception.addItem("Not specified", "")
         self.horizontalInterception.addItem("Full beam intercepted", "full")
         self.horizontalInterception.addItem(
@@ -3404,11 +3410,9 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             "is intercepted horizontally. New total-flux corrections require "
             "this choice to be explicit."
         )
-        sizesLayout.addWidget(self.horizontalInterception, 3, 1)
 
-        self.horizontalFractionLabel = qt.QLabel("Horizontal fraction:")
-        sizesLayout.addWidget(self.horizontalFractionLabel, 4, 0)
-        self.horizontalFraction = qt.QDoubleSpinBox()
+        self.horizontalFractionLabel = qt.QLabel("Horizontal fraction:", self)
+        self.horizontalFraction = qt.QDoubleSpinBox(self)
         self.horizontalFraction.setRange(0.000001, 1.0)
         self.horizontalFraction.setDecimals(6)
         self.horizontalFraction.setSingleStep(0.01)
@@ -3417,7 +3421,6 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             "Known fraction of the full incident beam intercepted in the "
             "horizontal direction. Must be greater than zero and at most one."
         )
-        sizesLayout.addWidget(self.horizontalFraction, 4, 1)
 
         modeLayout = qt.QHBoxLayout()
         self.analyticalButton = qt.QRadioButton("analytical beam shape")
@@ -3438,7 +3441,6 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         # than one long stack, so the dialog fits a normal screen instead of
         # running off the bottom of it.
         leftColumn = qt.QVBoxLayout()
-        leftColumn.addLayout(sizesLayout)
         leftColumn.addLayout(modeLayout)
         # Only the active beam model's settings take up space; the other is
         # hidden rather than merely disabled, which used to reserve room for
@@ -3456,29 +3458,43 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         columns = qt.QHBoxLayout()
         columns.addLayout(leftColumn, 1)
         columns.addLayout(rightColumn, 1)
-        verticalLayout.addLayout(columns)
-
-        self.sampleShapeButton = qt.QPushButton("Sample shape and horizontal profile…")
-        self.sampleShapeButton.clicked.connect(self._editSampleShape)
-        verticalLayout.addWidget(self.sampleShapeButton)
+        profile_page = qt.QWidget()
+        profile_page.setLayout(columns)
         if profile_only:
-            self.sampleShapeButton.hide()
-            img.hide()
-            for index in range(sizesLayout.count()):
-                widget = sizesLayout.itemAt(index).widget()
-                if widget is not None:
-                    widget.hide()
+            verticalLayout.addWidget(profile_page)
+            self.L.hide()
+            self.W.hide()
+            # Profile-only embedded pages have no sample, flux or action rows.
+            for widget in (self.legacyFluxLabel, self.beamFlux,
+                           self.horizontalInterceptionLabel,
+                           self.horizontalInterception,
+                           self.horizontalFractionLabel, self.horizontalFraction):
+                widget.hide()
+        else:
+            from .sample_interception_dialog import SampleInterceptionWidget
 
-        buttons = qt.QDialogButtonBox(
-            qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
-        )
-        buttons.button(qt.QDialogButtonBox.Ok).clicked.connect(self.onOk)
-        buttons.button(qt.QDialogButtonBox.Cancel).clicked.connect(self.onCancel)
-        verticalLayout.addWidget(buttons)
-        if profile_only:
-            buttons.hide()
-
-        self.setLayout(verticalLayout)
+            self.sampleEditor = SampleInterceptionWidget(self)
+            self.tabs = self.sampleEditor.tabs
+            self.tabs.insertTab(1, profile_page, "Vertical beam")
+            self.legacyGeometry = qt.QGroupBox("1D horizontal interception")
+            interception_layout = qt.QFormLayout(self.legacyGeometry)
+            interception_layout.addRow(self.horizontalInterceptionLabel,
+                                       self.horizontalInterception)
+            interception_layout.addRow(self.horizontalFractionLabel,
+                                       self.horizontalFraction)
+            self.sampleEditor.form.addRow(self.legacyGeometry)
+            self.legacyDensity = qt.QGroupBox("Legacy flux calibration")
+            density_layout = qt.QFormLayout(self.legacyDensity)
+            density_layout.addRow(self.legacyFluxLabel, self.beamFlux)
+            self.sampleEditor.form.addRow(self.legacyDensity)
+            verticalLayout.addWidget(self.sampleEditor)
+            self.resize(950, 750)
+            buttons = qt.QDialogButtonBox(
+                qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
+            )
+            buttons.accepted.connect(self.onOk)
+            buttons.rejected.connect(self.onCancel)
+            verticalLayout.addWidget(buttons)
 
         self.analyticalButton.toggled.connect(self._onModeChanged)
         self.horizontalInterception.currentIndexChanged.connect(
@@ -3494,24 +3510,27 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         self._onShapeChanged()
         self._onModeChanged()
         self._onHorizontalInterceptionChanged()
+        self._restoringSettings = False
         self._settings_save = self.settings()
 
     def _settingsChanged(self, *args):
-        """Notify owners that the effective beam settings changed."""
+        """Notify owners only after complete, parseable editor updates."""
+        if self._restoringSettings:
+            return
+        if self.sampleEditor is not None:
+            try:
+                self.sampleInterceptionSettings()
+            except (ValueError, NotImplementedError) as error:
+                self.sampleEditor.status.setText(str(error))
+                return
         self.settingsChanged.emit()
 
-    def _editSampleShape(self):
-        """Open the sample-shape editor (GUI-only user-triggered dialog)."""
-        from .sample_interception_dialog import SampleInterceptionDialog
-        dialog = SampleInterceptionDialog(self, self._sample_interception)
-        if dialog.exec() == qt.QDialog.Accepted:
-            self._sample_interception = dialog.settings()
-            self.settingsChanged.emit()
-
     def sampleInterceptionSettings(self):
-        """Return versioned shape settings, with SI geometry and embedded profiles."""
-        import copy
-        return copy.deepcopy(self._sample_interception)
+        """Return shared shape settings with SI geometry and embedded profiles."""
+        editor = self.sampleEditor
+        if editor is None or not (editor.configured or editor.enabled.isChecked()):
+            return {}
+        return editor.settings()
 
     def _onHorizontalInterceptionChanged(self, *args):
         """Enable the fraction editor only for the explicit fraction mode."""
@@ -3558,8 +3577,17 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         enabled = bool(getattr(self, "_totalFluxMode", False))
         self.beamFlux.setEnabled(not enabled)
         self.legacyFluxLabel.setEnabled(not enabled)
+        exact = (self.sampleEditor is not None
+                 and self.sampleEditor.enabled.isChecked())
+        if hasattr(self, "legacyGeometry"):
+            self.legacyGeometry.setHidden(exact)
+            self.legacyDensity.setHidden(enabled)
+        self.horizontalInterception.setEnabled(not exact)
+        self.horizontalFraction.setEnabled(
+            not exact and self.horizontalInterceptionMode() == "fraction"
+        )
         full_horizontal = (
-            enabled and self.horizontalInterceptionMode() == "full"
+            enabled and not exact and self.horizontalInterceptionMode() == "full"
         )
         self.W.setEnabled(not full_horizontal)
         if full_horizontal:
@@ -3568,6 +3596,8 @@ class IntegrationCorrectionsDialog(qt.QDialog):
                 "explicitly the full beam."
             )
             self.W.setToolTip(reason)
+        elif exact:
+            self.W.setToolTip("Sample width in the reference surface plane.")
         elif enabled:
             self.W.setToolTip(
                 "Retained for geometry and legacy density calculations; it "
@@ -3757,6 +3787,8 @@ class IntegrationCorrectionsDialog(qt.QDialog):
            GUI-only. Everything the corrections need is available without
            the preview, so headless use never builds a plot widget.
         """
+        if self.sampleEditor is not None:
+            self.sampleEditor.refreshSourceFrames()
         if self.profilePlot is None:
             self.profilePlot = silx.gui.plot.Plot1D(self)
             self.profilePlot.setGraphXLabel("position rel. to sample center / microns")
@@ -3871,14 +3903,21 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             summary += f", centroid at {centroid * 1e6:+.1f} microns"
         else:
             summary += ", centroid undefined (the profile has no center of mass)"
-        mode = self.horizontalInterceptionMode()
-        if mode == "full":
-            summary += "; horizontal fraction 1 (full beam intercepted)"
-        elif mode == "fraction":
-            summary += f"; horizontal fraction {self.horizontalFraction.value():.6g}"
-        else:
-            summary += "; horizontal interception not specified"
-        summary += "; vertical fraction is evaluated per frame from L and incidence"
+        exact = (self.sampleEditor is not None
+                 and self.sampleEditor.enabled.isChecked())
+        if exact:
+            summary += "; exact sample overlap is shown in Diagnostics"
+        elif not self._profile_only:
+            mode = self.horizontalInterceptionMode()
+            if mode == "full":
+                summary += "; horizontal fraction 1 (full beam intercepted)"
+            elif mode == "fraction":
+                summary += (
+                    f"; horizontal fraction {self.horizontalFraction.value():.6g}"
+                )
+            else:
+                summary += "; horizontal interception not specified"
+            summary += "; vertical fraction is evaluated per frame from L and incidence"
         self.profileInfo.setText(summary)
 
     def measuredProfile(self):
@@ -3994,21 +4033,22 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         :returns: The active area in square meter, broadcast over ``alpha``.
         :rtype: numpy.ndarray
         """
-        if self._sample_interception.get("enabled", False):
+        sample_settings = self.sampleInterceptionSettings()
+        if sample_settings.get("enabled", False):
             from .sample_interception_config import (
                 shape_frame_factors,
                 shape_from_settings,
             )
 
             if azimuth is None:
-                if self._sample_interception.get("azimuth_source") != "fixed":
+                if sample_settings.get("azimuth_source") != "fixed":
                     raise ValueError(
                         "shape active area requires the actual sample azimuth"
                     )
-                azimuth = np.deg2rad(self._sample_interception["fixed_azimuth_deg"])
+                azimuth = np.deg2rad(sample_settings["fixed_azimuth_deg"])
             return shape_frame_factors(
-                self._sample_interception, self.beamProfile(), alpha, azimuth
-            )[2] * shape_from_settings(self._sample_interception).area
+                sample_settings, self.beamProfile(), alpha, azimuth
+            )[2] * shape_from_settings(sample_settings).area
         return activearea_corrections.beam_limited_area(
             alpha, self.sampleWidth(), self.sampleLength(), self.beamProfile()
         )
@@ -4038,7 +4078,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         :rtype: dict
         """
         shape = self.currentShape()
-        return {
+        result = {
             "sample_interception": self.sampleInterceptionSettings(),
             "L": self.L.value(),
             "W": self.W.value(),
@@ -4057,15 +4097,36 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             "profile_offset": self.profileOffset.value(),
         }
 
+        if self._profile_only:
+            for key in ("sample_interception", "L", "W", "beam_flux",
+                        "horizontal_interception", "horizontal_intercepted_fraction"):
+                result.pop(key)
+        return result
+
+    def _settingsSnapshot(self):
+        settings = self.settings()
+        if not self.analyticalButton.isChecked() and self._profile_z is not None:
+            from .sample_interception_config import embed_profile
+
+            settings = embed_profile(settings, self.beamProfile())
+        return settings
+
     def setSettings(self, settings):
         """Restore the dialog state from :meth:`settings`.
 
         :param dict settings: State to apply. Missing keys are left alone.
         """
-        if "sample_interception" in settings:
-            import copy
-            self._sample_interception = copy.deepcopy(settings["sample_interception"])
+        self._restoringSettings = True
+        try:
+            self._restoreSettings(settings)
+        finally:
+            self._restoringSettings = False
+        self._settings_save = self._settingsSnapshot()
+        self._settingsChanged()
+
+    def _restoreSettings(self, settings):
         widgets = [
+            self.L, self.W, self.beamFlux,
             self.profileFileEdit,
             self.profileContent,
             self.profileUnit,
@@ -4128,14 +4189,31 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             )
             self._updatePreview()
 
+        if self.sampleEditor is not None and "sample_interception" in settings:
+            self.sampleEditor.setSettings(settings["sample_interception"])
+        self._updateLegacyControlState()
+
     def onOk(self):
-        self._settings_save = self.settings()
+        """Accept all tabs together after validating enabled shape settings."""
+        try:
+            if self.sampleEditor is not None:
+                self.sampleEditor.validate()
+            saved = self._settingsSnapshot()
+        except (ValueError, NotImplementedError) as error:
+            self.sampleEditor.status.setText(str(error))
+            return
+        self._settings_save = saved
         self.accept()
 
     def onCancel(self):
+        """Restore all tabs to the last accepted settings."""
+        self.reject()
+
+    def reject(self):
+        """Restore all tabs on Cancel, Escape, or the window close action."""
         if self._settings_save is not None:
             self.setSettings(self._settings_save)
-        self.reject()
+        qt.QDialog.reject(self)
 
 
 class IntegrationEstimator(qt.QDialog):

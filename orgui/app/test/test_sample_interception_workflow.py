@@ -230,11 +230,10 @@ def test_old_reader_refuses_shape_record_and_new_reader_keeps_lazy_arrays(tmp_pa
 
 def test_shape_editor_units_and_embedded_horizontal_restore():
     """UI dimensions cross to SI once; saved profiles work after relocation."""
-    from orgui.app.sample_interception_dialog import SampleInterceptionDialog
-
     app = qt.QApplication.instance() or qt.QApplication([])
     parent = IntegrationCorrectionsDialog()
-    dialog = SampleInterceptionDialog(parent, _settings())
+    parent.setSettings({"sample_interception": _settings()})
+    dialog = parent.sampleEditor
     dialog.values["offset_x"].setValue(2)
     model = dialog.settings()
     assert model["offset_m"] == [0.002, 0]
@@ -308,8 +307,6 @@ def test_ini_json_old_defaults_and_headless_profile(tmp_path):
 
 def test_source_frame_preview_uses_acquisition_angles():
     """Source-frame diagnostics use declared readbacks and selected frame incidence."""
-    from orgui.app.sample_interception_dialog import SampleInterceptionDialog
-
     app = qt.QApplication.instance() or qt.QApplication([])
     host = qt.QWidget()
     host._mainWindow = lambda: SimpleNamespace(
@@ -317,8 +314,11 @@ def test_source_frame_preview_uses_acquisition_angles():
         getMuOm=lambda: (np.deg2rad([0.36, 0.5]), 0),
     )
     parent = IntegrationCorrectionsDialog(host)
-    parent.setSettings({"analytical": True, "shape": "Gaussian", "shape_values": [160]})
-    dialog = SampleInterceptionDialog(parent, _settings())
+    parent.setSettings({
+        "analytical": True, "shape": "Gaussian", "shape_values": [160],
+        "sample_interception": _settings(),
+    })
+    dialog = parent.sampleEditor
     dialog.scan_preview.setChecked(True)
     dialog.frame_index.setValue(1)
     dialog._preview()

@@ -7,6 +7,15 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Correction dialogs reopen with their controls intact when OpenGL plotting
+  is enabled, while retaining the selected plotting backend. Loading HDF5
+  calibrations also strips nested NeXus attributes before passing settings to
+  pyFAI, avoiding the spurious detector-configuration error.
+
+- Beam profile and sample-shape corrections now share one tabbed editor.
+  Rectangular sample dimensions are entered once, and both beam profiles,
+  geometry and diagnostics use the same settings. Cancel restores all tabs.
+
 - UB calculation accepts fixed scalar omega values from scans with constant
   theta, avoiding an indexing error when using their reference reflections.
 

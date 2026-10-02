@@ -9,6 +9,10 @@ Unreleased (2026-07-19)
 
 Other user-visible changes:
 
+- Correction dialogs reopen with their controls intact when OpenGL plotting is enabled, while retaining the selected plotting backend. Loading HDF5 calibrations also strips nested NeXus attributes before passing settings to pyFAI, avoiding the spurious detector-configuration error.
+
+- Beam profile and sample-shape corrections now share one tabbed editor. Rectangular sample dimensions are entered once, and both beam profiles, geometry and diagnostics use the same settings. Cancel restores all tabs.
+
 - UB calculation accepts fixed scalar omega values from scans with constant theta, avoiding an indexing error when using their reference reflections.
 
 - Stationary and rocking hklscan integration can process several named reciprocal-space lines in one pass through the images. Line definitions survive configuration save/reload. Stationary counters stay in RAM; rocking extraction and later curve reduction use bounded batches, retaining the existing per-line results and correction conventions.

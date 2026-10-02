@@ -2229,7 +2229,7 @@ class IntegrationOptionsDialog(qt.QDialog):
             "interception once per frame."
         )
         self.footprintBtn = qt.QPushButton(
-            "Beam profile, sample size and horizontal interception ..."
+            "Beam and sample corrections ..."
         )
         self.footprintBtn.clicked.connect(self._openFootprintOptions)
         incidentLayout.addWidget(self.footprintBtn)

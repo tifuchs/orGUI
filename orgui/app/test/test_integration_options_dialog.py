@@ -1,12 +1,17 @@
 """Lifecycle regressions for the integration-correction options dialog."""
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import numpy as np
 import pytest
+import silx
 from silx.gui import qt
+from silx.gui.plot import Plot2D
+from silx.gui.plot.backends.BackendMatplotlib import BackendMatplotlib
+from silx.io.dictdump import dicttonx, nxtodict
 
-from orgui.app.config_data import CorrectionState
+from orgui.app.config_data import ConfigData, CorrectionState
 from orgui.app.QScanSelector import IntegrationOptionsDialog
 
 
@@ -81,6 +86,122 @@ def test_close_and_reopen_preserves_contents_and_settings(qapp):
     finally:
         dialog.deleteLater()
         main_window.deleteLater()
+
+
+@pytest.mark.parametrize("backend", ["matplotlib", "opengl"])
+def test_hdf5_load_and_preview_reopen(qapp, tmp_path, monkeypatch, backend):
+    """A preview retains its backend without changing its parent's surface."""
+    if backend == "opengl":
+        if qapp.platformName() in {"offscreen", "minimal"}:
+            pytest.skip("OpenGL widget rendering requires a native Qt platform")
+        context = qt.QOpenGLContext()
+        if not context.create():
+            pytest.skip("No OpenGL context available on this Qt platform")
+        from silx.gui.plot.backends.BackendOpenGL import BackendOpenGL
+        backend_class = BackendOpenGL
+    else:
+        backend_class = BackendMatplotlib
+    monkeypatch.setattr(silx.config, "DEFAULT_PLOT_BACKEND", backend)
+    config = ConfigData.from_ini(
+        str(Path(__file__).resolve().parents[3] / "examples" / "config_minimal")
+    )
+    config.corrections = CorrectionState(
+        sample_length_m=0.01, sample_width_m=0.01,
+        beam_shape_analytical=True, beam_shape_name="Gaussian",
+        beam_shape_values=(160.0,), use_footprint=True,
+        sample_interception={
+            "version": 1, "enabled": True,
+            "shape": {"kind": "rectangle", "dimensions_m": [0.01, 0.01]},
+            "azimuth_source": "fixed", "fixed_azimuth_deg": 0.0,
+            "normal_rotation_confirmed": True,
+            "reference_incidence_deg": 0.36,
+            "horizontal": {
+                "analytical": True, "shape": "Top hat", "shape_values": [20000],
+            },
+        },
+    )
+    filename = tmp_path / "database.h5"
+    dicttonx({"configuration": config.to_nxdict(role="scan")}, filename)
+    loaded = ConfigData.from_nxdict(nxtodict(filename)["configuration"])
+    main = qt.QMainWindow()
+    main.setAttribute(qt.Qt.WA_DontShowOnScreen, True)
+    main.setCentralWidget(Plot2D(main))
+    main.ubcalc = SimpleNamespace()
+    selector = _selector(main)
+    selector.set_integration_options = lambda values: (
+        selector.useFootprintBox.setChecked(values["footprint"])
+    )
+    main.scanSelector = selector
+    dialog = selector.correctionsDialog = IntegrationOptionsDialog(
+        selector, parent=main
+    )
+    dialog.setAttribute(qt.Qt.WA_DontShowOnScreen, True)
+    messages = []
+    previous_handler = qt.qInstallMessageHandler(
+        lambda kind, context, message: messages.append(message)
+    )
+    try:
+        main.show()
+        qapp.processEvents()
+        dialog.show()
+        qapp.processEvents()
+        groups = tuple(dialog.findChildren(qt.QGroupBox))
+        dialog.close()
+        loaded.apply_to_gui(main)
+        beam = dialog.footprintOptions_shared()
+        assert beam.testAttribute(qt.Qt.WA_NativeWindow)
+        assert not beam.sampleEditor.horizontal.testAttribute(qt.Qt.WA_NativeWindow)
+        beam.setAttribute(qt.Qt.WA_DontShowOnScreen, True)
+        beam.show()
+        for index in range(beam.tabs.count()):
+            beam.tabs.setCurrentIndex(index)
+            qapp.processEvents()
+        beam.sampleEditor._preview()
+        qapp.processEvents()
+        assert len(beam.sampleEditor.overlap_plot.getAllCurves()) == 2
+        image = beam.sampleEditor.footprint_plot.getImage("Beam density (1/m²)")
+        assert image is not None
+        for plot in (
+            beam.profilePlot, beam.sampleEditor.horizontal.profilePlot,
+            beam.sampleEditor.overlap_plot, beam.sampleEditor.footprint_plot,
+        ):
+            assert isinstance(plot.getBackend(), backend_class)
+            if backend == "opengl":
+                gl_widgets = plot.findChildren(qt.QOpenGLWidget)
+                assert gl_widgets and all(widget.isValid() for widget in gl_widgets[:1])
+        colormap_action = beam.sampleEditor.footprint_plot.getColormapAction()
+        colormap_dialog = colormap_action.getColormapDialog()
+        colormap_dialog.setAttribute(qt.Qt.WA_DontShowOnScreen, True)
+        colormap_action.trigger()
+        qapp.processEvents()
+        assert colormap_dialog.isVisible()
+        assert colormap_dialog.getColormap() is image.getColormap()
+        colormap_dialog.hide()
+        beam.close()
+        qapp.processEvents()
+        for _ in range(2):
+            dialog.show()
+            qapp.processEvents()
+            assert tuple(dialog.findChildren(qt.QGroupBox))[:3] == groups
+            assert all(group.isVisibleTo(dialog) for group in groups)
+            assert selector.useFootprintBox.isChecked()
+            assert beam.L.value() == pytest.approx(10.0)
+            assert beam.W.value() == pytest.approx(10.0)
+            assert silx.config.DEFAULT_PLOT_BACKEND == backend
+            if hasattr(qt, "QSurface"):
+                assert dialog.windowHandle().surfaceType() == qt.QSurface.RasterSurface
+            dialog.close()
+        assert not any(
+            "non-opengl surface" in message or "Failed to create QRhi" in message
+            or "Failed to make context current" in message
+            for message in messages
+        )
+    finally:
+        qt.qInstallMessageHandler(previous_handler)
+        dialog.deleteLater()
+        main.deleteLater()
+        qapp.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+        qapp.processEvents()
 
 
 def test_new_session_uses_relative_total_flux_and_requires_horizontal_choice(qapp):

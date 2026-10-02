@@ -8,7 +8,7 @@ decides whether an integration runs against an analytical beam shape or a
 measured profile.
 
 These tests pin that boundary. They construct the dialog directly, without
-showing it, so no user interaction is involved and no plot widget is built.
+showing it, so no user interaction is involved.
 """
 
 import numpy as np
@@ -101,6 +101,7 @@ def test_every_shape_builds_a_usable_profile(dialog):
 
 def test_only_the_selected_shapes_parameters_are_shown(dialog):
     """The numeric controls follow the selected shape."""
+    dialog.tabs.setCurrentIndex(1)
     for shape in BEAM_SHAPES:
         _select_shape(dialog, shape.name)
 
@@ -541,3 +542,168 @@ def test_the_area_fraction_is_the_open_slit_area_correction(dialog):
 
     grazing = profile.illuminated_area_fraction(np.deg2rad(0.02), 10e-3)
     assert 0.99 < float(grazing) <= 1.0
+
+
+def _square_settings():
+    return {
+        "version": 1,
+        "enabled": True,
+        "shape": {"kind": "rectangle", "dimensions_m": [0.01, 0.01]},
+        "azimuth_source": "fixed",
+        "fixed_azimuth_deg": 0,
+        "normal_rotation_confirmed": True,
+        "reference_incidence_deg": 0.36,
+        "horizontal": {
+            "analytical": True, "shape": "Top hat", "shape_values": [20000],
+        },
+    }
+
+
+def test_unified_editor_uses_active_shape_dimensions_and_one_action_row(dialog):
+    """Loading conflicting legacy size copies preserves active shape geometry."""
+    dialog.setSettings({"L": 2, "W": 3, "sample_interception": _square_settings()})
+    assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == [
+        "Sample", "Vertical beam", "Horizontal beam", "Diagnostics",
+    ]
+    assert len(dialog.findChildren(qt.QDialogButtonBox)) == 1
+    assert not dialog.sampleEditor.isWindow()
+    assert not dialog.sampleEditor.horizontal.isWindow()
+    assert dialog.sampleEditor.overlap_plot is None
+    assert "exact sample overlap is shown in Diagnostics" in dialog.profileInfo.text()
+    assert "horizontal interception" not in (
+        dialog.sampleEditor.horizontal.profileInfo.text()
+    )
+    assert dialog.sampleLength() == pytest.approx(0.01)
+    assert dialog.sampleWidth() == pytest.approx(0.01)
+    dialog.L.setValue(12.123456)
+    dialog.W.setValue(7)
+    saved = dialog.settings()
+    assert saved["L"] == pytest.approx(12.123456)
+    assert saved["sample_interception"]["shape"]["dimensions_m"] == pytest.approx(
+        [0.012123456, 0.007]
+    )
+    assert not {"L", "W", "beam_flux", "horizontal_interception"}.intersection(
+        saved["sample_interception"]["horizontal"]
+    )
+    # The live calculation must consume those same edited dimensions.
+    from orgui.app.sample_interception_config import (
+        shape_frame_factors, shape_from_settings,
+    )
+    model = dialog.sampleInterceptionSettings()
+    expected = shape_frame_factors(model, dialog.beamProfile(), ALPHAS, 0)[2]
+    np.testing.assert_allclose(
+        dialog.activeArea(ALPHAS), expected * shape_from_settings(model).area
+    )
+
+
+def test_legacy_editor_keeps_dimensions_and_1d_correction(dialog):
+    """Legacy dimensions remain authoritative until exact overlap is enabled."""
+    dialog.setSettings({"L": 2.25, "W": 7.5})
+    assert dialog.sampleInterceptionSettings() == {}
+    old_area = dialog.activeArea(ALPHAS)
+    inactive = _square_settings()
+    inactive["enabled"] = False
+    dialog.setSettings({"sample_interception": inactive})
+    assert dialog.sampleLength() == pytest.approx(0.00225)
+    assert dialog.sampleWidth() == pytest.approx(0.0075)
+    np.testing.assert_allclose(dialog.activeArea(ALPHAS), old_area)
+    dialog.sampleEditor.enabled.setChecked(True)
+    assert dialog.sampleInterceptionSettings()["shape"]["dimensions_m"] == (
+        pytest.approx([0.00225, 0.0075])
+    )
+
+
+def test_shape_switch_shows_only_relevant_size_entries(dialog):
+    """Circle diameter and polygon vertices replace rectangular dimensions."""
+    dialog.setSettings({"sample_interception": _square_settings()})
+    editor = dialog.sampleEditor
+    dialog.setTotalFluxMode(True)
+    dialog.setHorizontalInterception("full")
+    assert dialog.W.isEnabled()  # Exact transverse clipping still uses width.
+    editor.kind.setCurrentText("circle")
+    assert editor.length_label.text() == "Circle diameter"
+    assert dialog.W.isHidden()
+    assert editor.settings()["shape"]["dimensions_m"] == [0.01]
+    editor.kind.setCurrentText("polygon")
+    editor.vertices.setPlainText("-5 -5\n5 -5\n5 5\n-5 5")
+    assert dialog.L.isHidden() and dialog.W.isHidden()
+    assert not editor.vertices.isHidden()
+    assert editor.settings()["shape"]["vertices_m"][0] == [-0.005, -0.005]
+    editor.kind.setCurrentText("rectangle")
+    assert not dialog.L.isHidden() and not dialog.W.isHidden()
+    assert editor.vertices.isHidden()
+
+
+@pytest.mark.parametrize("action", ["onCancel", "reject", "close"])
+def test_cancel_restores_geometry_and_both_beam_tabs(dialog, action):
+    """Cancel, Escape and close all roll back the whole shared editor."""
+    dialog.setSettings({
+        "sample_interception": _square_settings(), "shape_values": [160],
+    })
+    dialog.onOk()
+    saved = dialog.settings()
+    dialog.show()
+    dialog.L.setValue(15)
+    dialog.sampleEditor.values["offset_x"].setValue(1.5)
+    dialog.sampleEditor.source.setText("different")
+    dialog.shapeParameters[0].setValue(240)
+    dialog.sampleEditor.horizontal.shapeParameters[0].setValue(4000)
+    getattr(dialog, action)()
+    assert dialog.settings() == saved
+
+
+def test_invalid_geometry_stays_in_editor_until_fixed(dialog):
+    """A bad polygon is rejected without accepting or crashing other tabs."""
+    dialog.setSettings({"sample_interception": _square_settings()})
+    editor = dialog.sampleEditor
+    editor.kind.setCurrentText("polygon")
+    editor.vertices.setPlainText("-5 -5\n5 5\n-5 5\n5 -5")
+    dialog.show()
+    dialog.onOk()
+    assert dialog.isVisible()
+    assert editor.status.text()
+    editor.vertices.setPlainText("-5 -5\n5 -5\n5 5\n-5 5")
+    dialog.onOk()
+    assert dialog.result() == qt.QDialog.Accepted
+
+
+def test_cancel_keeps_embedded_vertical_profile_after_file_relocation(dialog):
+    """Closing the shared editor cannot discard a saved measured beam table."""
+    from orgui.app.sample_interception_config import embed_profile
+
+    profile = MeasuredBeamProfile(
+        [-0.0002, 0, 0.0002], [1, 4, 1], center="peak", offset=0.00003
+    )
+    saved_profile = embed_profile({
+        "analytical": False, "profile_file": "not-present.dat",
+        "profile_center": "peak", "profile_offset": 30,
+    }, profile)
+    dialog.setSettings(saved_profile)
+    dialog.show()
+    dialog.profileOffset.setValue(90)
+    dialog.reject()
+    np.testing.assert_allclose(dialog.measuredProfile().z, profile.z)
+    np.testing.assert_allclose(dialog.measuredProfile().density, profile.density)
+
+
+def test_reopening_editor_refreshes_newly_loaded_source_frames(qapp):
+    """A lifetime-shared editor must discover scans loaded after construction."""
+    from types import SimpleNamespace
+
+    host = qt.QWidget()
+    main = SimpleNamespace(fscan=None)
+    host._mainWindow = lambda: main
+    dialog = IntegrationCorrectionsDialog(host)
+    try:
+        assert not dialog.sampleEditor.scan_preview.isEnabled()
+        main.fscan = [0, 1, 2]
+        dialog.show()
+        assert dialog.sampleEditor.scan_preview.isEnabled()
+        assert dialog.sampleEditor.frame_index.maximum() == 2
+        dialog.close()
+        main.fscan = None
+        dialog.show()
+        assert not dialog.sampleEditor.scan_preview.isEnabled()
+    finally:
+        dialog.close()
+        host.close()

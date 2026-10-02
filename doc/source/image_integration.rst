@@ -44,16 +44,25 @@ continuous CTR, so the residual plots isolate photon noise from L resolution.
 Sample-shape interception
 -------------------------
 
-In the shared beam-profile editor, open ``Sample shape / 2D interception…``
-and enable the exact shape overlap. Select a rectangle, circle (diameter), or
+Open ``Beam and sample corrections ...`` for a single editor with ``Sample``,
+``Vertical beam``, ``Horizontal beam`` and ``Diagnostics`` tabs. In ``Sample``,
+enable the exact shape overlap. Select a rectangle, circle (diameter), or
 simple polygon. Dimensions, polygon coordinates and sample-origin displacement
 are in mm; orientation and reference angles are degrees. Polygon rows accept
 ``x y`` or ``x,y`` pairs, with optional ``#`` comments. The supplied polygon
 origin is preserved. Self-intersections, repeated vertices, overlapping edges,
 zero area and nonpositive dimensions are rejected.
 
-The existing beam-profile controls provide the vertical beam. Configure an
-independent horizontal beam on the shape editor's second tab. Both support
+Rectangle length and width are shared with the existing 1D footprint settings;
+there is one size entry per dimension. An enabled shape's saved dimensions take
+precedence over conflicting legacy size copies on load. With exact overlap
+disabled, legacy dimensions and numerical conventions are retained. Circles
+show one diameter; polygons use their vertices. OK validates and accepts all
+tabs together; Cancel, Escape and window close restore the previous settings.
+
+Configure the vertical and horizontal beam profiles on their respective tabs.
+The explicit 1D horizontal-interception choice is shown only when exact shape
+overlap is disabled. Both profiles support
 Gaussian, top-hat, trapezoidal, smoothed top-hat, generalized-normal, skew-normal
 and measured density profiles. Analytical width parameters and profile offsets
 are micrometres; flatness and skew are dimensionless. Measured file coordinates

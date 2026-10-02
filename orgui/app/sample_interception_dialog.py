@@ -1,4 +1,4 @@
-"""Optional sample-shape editor; scientific calculations remain in datautils."""
+"""Sample and overlap pages embedded in the shared correction editor."""
 
 import copy
 import logging
@@ -20,8 +20,8 @@ from .sample_interception_config import (
 logger = logging.getLogger(__name__)
 
 
-class SampleInterceptionDialog(qt.QDialog):
-    """Edit shape geometry [mm/degrees] and an independent horizontal profile."""
+class SampleInterceptionWidget(qt.QWidget):
+    """Edit shape geometry [mm/degrees] using the owner's size controls."""
 
     def __init__(self, footprint, settings=None):
         super().__init__(footprint)
@@ -29,28 +29,32 @@ class SampleInterceptionDialog(qt.QDialog):
 
         self.footprint = footprint
         self.original = copy.deepcopy(settings or {})
-        self.setWindowTitle("2D sample interception")
-        self.resize(950, 750)
+        self.configured = bool(self.original)
         layout = qt.QVBoxLayout(self)
         self.enabled = qt.QCheckBox(
             "Use exact 2D shape overlap (requires both beam profiles)"
         )
         self.enabled.setChecked(self.original.get("enabled", False))
-        layout.addWidget(self.enabled)
         self.tabs = qt.QTabWidget()
         layout.addWidget(self.tabs)
         geometry = qt.QWidget()
+        self.geometry = geometry
         form = qt.QFormLayout(geometry)
+        self.form = form
+        form.addRow(self.enabled)
         self.kind = qt.QComboBox()
         self.kind.addItems(["rectangle", "circle", "polygon"])
         self.kind.setCurrentText(
             self.original.get("shape", {}).get("kind", "rectangle")
         )
         form.addRow("Sample shape", self.kind)
-        self.values = {}
+        # These are the very same controls exposed by the legacy API.
+        self.values = {"length": footprint.L, "width": footprint.W}
+        self.length_label = qt.QLabel("Sample length L")
+        self.width_label = qt.QLabel("Sample width W")
+        form.addRow(self.length_label, footprint.L)
+        form.addRow(self.width_label, footprint.W)
         for key, label, unit, default in (
-            ("length", "Rectangle length / circle diameter", " mm", 10),
-            ("width", "Rectangle width", " mm", 10),
             ("offset_x", "Origin offset from axis, sample x", " mm", 0),
             ("offset_y", "Origin offset from axis, sample y", " mm", 0),
             ("orientation_deg", "Shape orientation at reference azimuth", " deg", 0),
@@ -71,17 +75,6 @@ class SampleInterceptionDialog(qt.QDialog):
             spin.setValue(self.original.get(key, default))
             self.values[key] = spin
             form.addRow(label, spin)
-        dimensions = self.original.get("shape", {}).get("dimensions_m", [0.01, 0.01])
-        if dimensions:
-            self.values["length"].setValue(dimensions[0] * 1e3)
-        if len(dimensions) > 1:
-            self.values["width"].setValue(dimensions[1] * 1e3)
-        offset = self.original.get("offset_m", [0, 0])
-        for key, value in zip(("offset_x", "offset_y"), offset):
-            self.values[key].setValue(value * 1e3)
-        self.values["overspill_threshold"].setValue(
-            self.original.get("overspill_threshold", 0.01) * 100
-        )
         self.source = qt.QLineEdit(self.original.get("azimuth_source", ""))
         self.source.setPlaceholderText("Exact motor/counter name, or fixed")
         form.addRow("Actual sample azimuth source", self.source)
@@ -110,7 +103,9 @@ class SampleInterceptionDialog(qt.QDialog):
             )
         )
         form.addRow("Polygon (supplied coordinate origin is retained)", self.vertices)
-        import_button = qt.QPushButton("Import polygon text / CSV…")
+        self.import_button = import_button = qt.QPushButton(
+            "Import polygon text / CSV…"
+        )
         import_button.clicked.connect(self._importPolygon)
         form.addRow(import_button)
         note = qt.QLabel(
@@ -120,16 +115,19 @@ class SampleInterceptionDialog(qt.QDialog):
             "Legacy shape area uses peak flux density and geometric sample "
             "area as its reference."
         )
+        self.alignment_note = note
         note.setWordWrap(True)
         form.addRow(note)
-        self.tabs.addTab(geometry, "Shape and alignment")
+        self.sample_page = qt.QScrollArea()
+        self.sample_page.setWidgetResizable(True)
+        self.sample_page.setFrameShape(qt.QFrame.NoFrame)
+        self.sample_page.setWidget(geometry)
+        self.tabs.addTab(self.sample_page, "Sample")
         self.horizontal = IntegrationCorrectionsDialog(self, profile_only=True)
         self.horizontal.setWindowFlags(qt.Qt.Widget)
-        if self.original.get("horizontal"):
-            self.horizontal.setSettings(self.original["horizontal"])
-        self.tabs.addTab(self.horizontal, "Horizontal beam profile")
-        preview = qt.QWidget()
-        preview_layout = qt.QVBoxLayout(preview)
+        self.tabs.addTab(self.horizontal, "Horizontal beam")
+        self.preview = preview = qt.QWidget()
+        self.preview_layout = preview_layout = qt.QVBoxLayout(preview)
         frame_controls = qt.QHBoxLayout()
         self.scan_preview = qt.QCheckBox("Preview loaded source frames")
         self.frame_index = qt.QSpinBox()
@@ -157,26 +155,127 @@ class SampleInterceptionDialog(qt.QDialog):
         refresh.clicked.connect(self._preview)
         preview_controls.addWidget(refresh)
         preview_layout.addLayout(preview_controls)
+        self.overlap_plot = None
+        self.footprint_plot = None
+        self.tabs.addTab(preview, "Diagnostics")
+        self.status = qt.QLabel()
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self._horizontal_defaults = self.horizontal.settings()
+        self.setSettings(settings or {})
+        self.enabled.toggled.connect(self._geometryChanged)
+        self.kind.currentIndexChanged.connect(self._geometryChanged)
+        for key, spin in self.values.items():
+            if key not in {"length", "width"}:
+                spin.valueChanged.connect(self._changed)
+        for widget in (self.source, self.vertices):
+            widget.textChanged.connect(self._changed)
+        self.unit.currentIndexChanged.connect(self._changed)
+        self.sign.currentIndexChanged.connect(self._changed)
+        self.confirm.toggled.connect(self._changed)
+        self.horizontal.settingsChanged.connect(self._changed)
+        self.tabs.currentChanged.connect(self._diagnosticsSelected)
+
+    def _diagnosticsSelected(self, index):
+        if self.tabs.widget(index) is self.preview:
+            self._ensurePreviewPlots()
+
+    def _ensurePreviewPlots(self):
+        # GUI-only: plots are needed only for the diagnostics tab/preview.
+        if self.overlap_plot is not None:
+            return
         self.overlap_plot = Plot1D()
         self.overlap_plot.setGraphXLabel("Readback azimuth (deg)")
         self.overlap_plot.setGraphYLabel("f_hit (fraction)")
         self.overlap_plot.setGraphYLabel("H (dimensionless)", axis="right")
-        preview_layout.addWidget(self.overlap_plot)
+        self.preview_layout.addWidget(self.overlap_plot)
         self.footprint_plot = Plot2D()
         self.footprint_plot.setKeepDataAspectRatio(True)
         self.footprint_plot.setGraphXLabel("Along beam x (mm)")
         self.footprint_plot.setGraphYLabel("Transverse y (mm)")
-        preview_layout.addWidget(self.footprint_plot)
-        self.tabs.addTab(preview, "Overlap diagnostics")
-        self.status = qt.QLabel()
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
-        buttons = qt.QDialogButtonBox(
-            qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
-        )
-        buttons.accepted.connect(self._acceptValidated)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        self.preview_layout.addWidget(self.footprint_plot)
+
+    def setSettings(self, settings):
+        """Restore shape state; enabled dimensions override legacy size copies.
+
+        Geometry lengths are metres in saved settings and millimetres in the
+        shared controls. An empty model retains the legacy rectangular sizes.
+        """
+        self._restoring = True
+        try:
+            self.original = copy.deepcopy(settings)
+            self.configured = bool(settings)
+            self.enabled.setChecked(settings.get("enabled", False))
+            shape = settings.get("shape", {})
+            self.kind.setCurrentText(shape.get("kind", "rectangle"))
+            dimensions = shape.get("dimensions_m", [])
+            if settings.get("enabled", False) and dimensions:
+                self.values["length"].setValue(dimensions[0] * 1e3)
+                if len(dimensions) > 1:
+                    self.values["width"].setValue(dimensions[1] * 1e3)
+            defaults = {
+                "offset_x": 0, "offset_y": 0, "orientation_deg": 0,
+                "reference_incidence_deg": 0.36, "reference_azimuth_deg": 0,
+                "fixed_azimuth_deg": 0, "overspill_threshold": 1,
+            }
+            for key, default in defaults.items():
+                self.values[key].setValue(settings.get(key, default))
+            for key, value in zip(
+                ("offset_x", "offset_y"), settings.get("offset_m", [0, 0])
+            ):
+                self.values[key].setValue(value * 1e3)
+            self.values["overspill_threshold"].setValue(
+                settings.get("overspill_threshold", 0.01) * 100
+            )
+            self.source.setText(settings.get("azimuth_source", ""))
+            self.unit.setCurrentText(settings.get("azimuth_unit", "deg"))
+            self.sign.setCurrentText(f"{int(settings.get('azimuth_sign', 1)):+d}")
+            self.confirm.setChecked(settings.get("normal_rotation_confirmed", False))
+            self.vertices.setPlainText("\n".join(
+                f"{x * 1e3:g} {y * 1e3:g}" for x, y in shape.get("vertices_m", [])
+            ))
+            self.horizontal.setSettings(
+                settings.get("horizontal", self._horizontal_defaults)
+            )
+            self._updateGeometryControls()
+        finally:
+            self._restoring = False
+
+    def _changed(self, *args):
+        if getattr(self, "_restoring", False):
+            return
+        self.configured = True
+        self.footprint._settingsChanged()
+
+    def _geometryChanged(self, *args):
+        self._updateGeometryControls()
+        self.footprint._updatePreview()
+        self._changed()
+
+    def _updateGeometryControls(self):
+        exact = self.enabled.isChecked()
+        kind = self.kind.currentText() if exact else "rectangle"
+        self.kind.setEnabled(exact)
+        for widget in (self.kind, self.source, self.unit, self.sign, self.confirm,
+                       self.alignment_note):
+            widget.setVisible(exact)
+            label = self.form.labelForField(widget)
+            if label is not None:
+                label.setVisible(exact)
+        for key, widget in self.values.items():
+            if key not in {"length", "width"}:
+                widget.setVisible(exact)
+                self.form.labelForField(widget).setVisible(exact)
+        self.length_label.setText("Circle diameter" if kind == "circle"
+                                  else "Sample length L")
+        for widget in (self.length_label, self.values["length"]):
+            widget.setVisible(kind != "polygon")
+        for widget in (self.width_label, self.values["width"]):
+            widget.setVisible(kind == "rectangle")
+        for widget in (self.vertices, self.form.labelForField(self.vertices),
+                       self.import_button):
+            widget.setVisible(exact and kind == "polygon")
+        self.footprint._updateLegacyControlState()
 
     def settings(self):
         """Return SI shape geometry and dialog-unit/embedded horizontal profile."""
@@ -227,24 +326,22 @@ class SampleInterceptionDialog(qt.QDialog):
             result["horizontal"] = horizontal
         return result
 
-    def _acceptValidated(self):
-        try:
-            settings = self.settings()
-            if settings["enabled"]:
-                if not settings["azimuth_source"]:
-                    raise ValueError(
-                        "provide an actual azimuth source or explicitly select fixed"
-                    )
-                shape_frame_factors(
-                    settings,
-                    self.footprint.beamProfile(),
-                    np.deg2rad(self.preview_alpha.value()),
-                    np.deg2rad(self.preview_azimuth.value()),
+    def validate(self):
+        """Validate the enabled shape and both profiles without opening a dialog.
+
+        :raises ValueError: For invalid geometry, missing sources or profiles.
+        """
+        settings = self.settings()
+        if settings["enabled"]:
+            if not settings["azimuth_source"]:
+                raise ValueError(
+                    "provide an actual azimuth source or explicitly select fixed"
                 )
-        except (ValueError, NotImplementedError) as error:
-            self.status.setText(str(error))
-            return
-        self.accept()
+            shape_frame_factors(
+                settings, self.footprint.beamProfile(),
+                np.deg2rad(self.preview_alpha.value()),
+                np.deg2rad(self.preview_azimuth.value()),
+            )
 
     def _importPolygon(self):
         # GUI-only: explicitly invoked file dialog.
@@ -258,6 +355,12 @@ class SampleInterceptionDialog(qt.QDialog):
             except OSError as error:
                 self.status.setText(str(error))
 
+    def refreshSourceFrames(self):
+        """Refresh source-frame availability from the currently loaded scan."""
+        scan = getattr(self.main_window, "fscan", None)
+        self.scan_preview.setEnabled(scan is not None)
+        self.frame_index.setRange(0, max(0, len(scan) - 1) if scan is not None else 0)
+
     # GUI-only: explicitly requested preview, with cancellable progress.
     def _preview(self):
         if getattr(self, "_preview_running", False):
@@ -265,6 +368,8 @@ class SampleInterceptionDialog(qt.QDialog):
         self._preview_running = True
         progress = None
         try:
+            self._ensurePreviewPlots()
+            self.refreshSourceFrames()
             settings = self.settings()
             shape = shape_from_settings(settings)
             vertical = self.footprint.beamProfile()
