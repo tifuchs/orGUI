@@ -254,6 +254,8 @@ def _frame_policy_with_progress(context, scan, state, size, **kwargs):
             scan, state, size, **kwargs
         )
     total = np.size(kwargs["alpha"])
+    # Captured acquisition angles, including the fixed theta of a mu scan.
+    kwargs["omega"] = context.getMuOm()[1]
     progress = logger_utils.create_progress_logger(
         context.owner, total, "Calculating sample interception"
     )

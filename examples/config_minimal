@@ -56,11 +56,21 @@ compression = Raw
 ## SI: dimensions_m / vertices_m / offset_m in metres. Angle fields ending in
 ## _deg are degrees. Horizontal shape_values / profile_offset are micrometres;
 ## generalized-normal flatness and skew-normal skew are dimensionless.
-## azimuth_source is an actual loaded counter name or explicitly "fixed".
-## azimuth_unit is the declared counter unit (deg/rad), not a solver convention.
-## Confirm normal rotation only after checking the instrument geometry.
+## azimuth_source defaults to "auto": acquisition omega = -theta.
+## incidence_source defaults to "auto": acquisition mu / configured alpha.
+## Override either source with an exact counter name (unit deg/rad) or "fixed"
+## with fixed_azimuth_deg / fixed_incidence_deg. Overrides affect footprint only.
+## orientation_deg is the shape rotation offset at reference_azimuth_deg.
+## The centred UI alignment (omega reading for an edge parallel to the beam) is
+## reference_azimuth_deg - azimuth_sign * orientation_deg, with sign +/-1.
+## For a rectangle with W > L, add 90 deg to orientation_deg in this formula
+## because the actual long edge follows the local y direction.
+## The saved pair is retained; for off-centre samples the placement reference
+## also controls the orbit of offset_m and must not be replaced by that reading.
+## Optional reference_incidence_deg fixes profile alignment for off-axis samples;
+## otherwise the first valid frame incidence is used and saved with corrections.
 ## This example uses a centred 10 mm square and a normalized 20 mm top hat.
-#settings = {"version": 1, "enabled": true, "shape": {"kind": "rectangle", "dimensions_m": [0.01, 0.01]}, "offset_m": [0, 0], "orientation_deg": 0, "reference_incidence_deg": 0.36, "reference_azimuth_deg": 0, "azimuth_source": "fixed", "fixed_azimuth_deg": 0, "azimuth_unit": "deg", "azimuth_sign": 1, "normal_rotation_confirmed": true, "horizontal": {"analytical": true, "shape": "Top hat", "shape_values": [20000], "profile_center": "centroid", "profile_offset": 0}, "overspill_threshold": 0.01, "rtol": 1e-9}
+#settings = {"version": 1, "enabled": true, "shape": {"kind": "rectangle", "dimensions_m": [0.01, 0.01]}, "offset_m": [0, 0], "orientation_deg": 0, "reference_azimuth_deg": 0, "azimuth_source": "auto", "incidence_source": "auto", "azimuth_sign": 1, "horizontal": {"analytical": true, "shape": "Top hat", "shape_values": [20000], "profile_center": "centroid", "profile_offset": 0}, "overspill_threshold": 0.01, "rtol": 1e-9}
 
 #[Mask]
 ## Optional invalid/dead-pixel mask.

@@ -70,23 +70,86 @@ use the selected mm or micrometre unit. Each density is normalized independently
 the imported absolute count scale cancels. Measured data have zero density
 outside their saved table support and negative density values are rejected.
 
-Enter the exact loaded motor/counter name, its deg/rad unit, sign, and reference
-readback. Confirm that this source represents rotation about the surface normal.
-For a stationary orientation, explicitly enter ``fixed`` and its fixed angle.
-A beamline motor called ``phi`` is suitable only if that declaration is physically
-correct for the measurement. Acquisition order is retained. A scalar readback
-broadcasts; an array must contain one value per frame. Missing readbacks fail
-with an explanatory error.
+The normal workflow is sample shape and dimensions, then azimuth, then angular
+alignment. A centred rectangle has one alignment field: ``Omega reading when
+the sample's long edge is parallel to the beam (deg)``. Parallel means a 0-degree
+edge angle; perpendicular means 90 degrees. For polygons the field refers to
+the supplied polygon x axis rather than a long edge. A centred circle needs
+no orientation field. Alignment readings are degrees even if an override
+counter supplies radians.
+
+By default, incidence and azimuth use the acquisition
+angles returned by ``getMuOm()``: mu/configured alpha and omega (minus theta),
+in radians internally. A ``mu`` scan varies incidence at fixed azimuth; a
+``th`` scan varies azimuth at configured incidence. This flat-surface overlap
+model treats azimuth as rotation about the surface normal, without a separate
+confirmation checkbox.
+
+``Manual angle overrides`` names the default source for each angle:
+``mu (scan axis)`` during a mu scan, otherwise ``mu (configuration)``, and
+``omega = -th (scan axis)`` during a th scan, otherwise the th scan readback.
+These labels refresh when the loaded scan changes. Counter and fixed choices
+are available for either angle. A counter override uses its exact loaded name
+and declared deg/rad unit; fixed angles are entered in degrees. Overrides affect
+footprint overlap, while diffraction geometry retains its acquisition angles.
+The controls also specify the sign mapping increasing azimuth readings to
+right-handed geometric rotation about the surface normal (``+1`` or ``-1``).
+Acquisition order is retained. A scalar readback broadcasts; an array must
+contain one value per frame. Missing override counters fail with an explanatory
+error. Existing saved counter sources, signs and numeric references are retained.
+
+For centred samples the edge angle uses the single parallel reading
+:math:`\omega_\parallel`:
+
+.. math::
+
+   \theta_{edge} = s\,(\omega-\omega_\parallel), \qquad s=\pm1.
+
+Existing saved settings use ``reference_azimuth_deg`` and ``orientation_deg``.
+The editor derives :math:`\omega_\parallel=\omega_{ref}-s\,\theta_{offset}`
+without changing the saved pair on load or wrapping the angle. This conversion
+also holds for negative signs and asymmetric polygons. Editing the single field
+keeps the placement reference and sets
+:math:`\theta_{offset}=s\,(\omega_{ref}-\omega_\parallel)`. Reversing the sign
+for a centred sample keeps its parallel reading fixed. The saved representation
+remains compatible with existing configurations.
+For a rectangle whose width W exceeds its length L, the long edge follows the
+local y direction: the conversion adds 90 degrees to the saved x-axis
+orientation, and its inverse subtracts 90 degrees. Equal dimensions use the
+L direction. Dimension changes update the displayed alignment direction
+without changing the stored mounting orientation.
+
+``Off-centre sample`` contains the origin displacement in reference beam x/y
+coordinates (mm), placement reference azimuth, shape orientation at that
+reference, and profile-alignment incidence. It is collapsed for centred samples
+and opens automatically when loading nonzero offsets. Collapsing changes
+visibility only: offsets, both angular controls and the calculation are retained.
+With nonzero offsets, these separate placement controls replace the single
+centred alignment field, even when the section is collapsed.
+
+For an off-centre sample, :math:`\psi=s\,(\omega-\omega_{ref})` rotates its
+origin displacement and :math:`\theta_{shape}=\theta_{offset}+\psi` rotates
+its outline. Changing the placement reference changes the origin's orbit as
+well as its orientation, so replacing this reference by the parallel reading
+would change the geometry. Changing the sign retains the separate placement
+parameters. These footprint references are independent of the diffractometer's
+``azimuthal_reference`` setting.
 
 At the reference incidence/readback, the profile centre/offset aligns the shape
 origin. The displacement from the rotation axis is fixed to the sample and
 rotates with it. The resulting axis alignment is fixed in laboratory beam
 coordinates as incidence changes; no unrecorded translation is inferred.
+Alignment incidence defaults to the first valid source-frame
+incidence and is saved with the applied correction. An explicit reference
+incidence is useful when an off-axis sample was aligned at a different incidence;
+it only affects the vertical axis alignment for nonzero x displacement.
 
 The diagnostics tab shows intercepted fraction and illumination versus readback
 angle. ``Preview loaded source frames`` uses the actual frame incidence and
-declared readback; choose a frame for the beam-density image and sample outline.
-Calculation progress can be cancelled. Overspill exceeding the selected
+resolved readback, including manual overrides; choose a frame for the
+beam-density image and sample outline.
+Calculation progress can be cancelled. The diagnostics tab also contains the
+overspill warning threshold. Overspill exceeding the selected
 threshold produces an aggregated warning during correction. Frames with invalid
 incidence or zero overlap receive NaN divisors and propagate as excluded data;
 an entirely unusable scan fails. Very small positive incidence is evaluated

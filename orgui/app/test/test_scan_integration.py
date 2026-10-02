@@ -179,7 +179,10 @@ def _prepared_line(ctx, x=3, identifier="first"):
 
 
 @pytest.mark.parametrize("total_flux", [False, True])
-def test_shape_extraction_and_bounded_curve_replacement(context, total_flux):
+@pytest.mark.parametrize("angle_mode", ["counter", "auto", "fixed_incidence"])
+def test_shape_extraction_and_bounded_curve_replacement(
+    context, total_flux, angle_mode,
+):
     """Both conventions save actual angles and re-read/rebuild shape divisors."""
     from orgui.app.config_data import (
         CURVE_CORRECTIONS_GROUP, curve_correction_record_from_nxdict,
@@ -197,6 +200,10 @@ def test_shape_extraction_and_bounded_curve_replacement(context, total_flux):
         },
     }
     scan.phi = np.linspace(0, 90, len(scan))
+    if angle_mode == "auto":
+        settings["azimuth_source"] = "auto"
+    elif angle_mode == "fixed_incidence":
+        settings.update(incidence_source="fixed", fixed_incidence_deg=0.6)
     scan.exposure_time = np.ones(len(scan))
     profile = gaussian_profile(160e-6)
     footprint = SimpleNamespace(beamProfile=lambda: profile, sampleLength=lambda: .01)
@@ -228,7 +235,12 @@ def test_shape_extraction_and_bounded_curve_replacement(context, total_flux):
         else "shape_interception_legacy_v1"
     )
     np.testing.assert_allclose(
-        record.profile_provenance["sample_azimuth_rad"], np.deg2rad(scan.phi)
+        record.profile_provenance["sample_azimuth_rad"],
+        -np.deg2rad(scan.axis) if angle_mode == "auto" else np.deg2rad(scan.phi),
+    )
+    np.testing.assert_allclose(
+        record.profile_provenance["sample_incidence_rad"],
+        np.deg2rad(0.6 if angle_mode == "fixed_incidence" else 0.36),
     )
     driver = ReductionDriver()
     driver._currentRoInfo = {"name": group.name, "axisname": "th", "axis": scan.axis}
@@ -242,7 +254,9 @@ def test_shape_extraction_and_bounded_curve_replacement(context, total_flux):
     driver._prepareFootprintAction(group, lazy=True)
     curve = driver.get_all_ro_curves(rows=slice(0, 1))
     factors = shape_frame_factors(
-        replacement_settings, profile, record.alpha[0:1], np.deg2rad(scan.phi)
+        replacement_settings, profile,
+        np.deg2rad(0.6) if angle_mode == "fixed_incidence" else record.alpha[0:1],
+        -np.deg2rad(scan.axis) if angle_mode == "auto" else np.deg2rad(scan.phi),
     )
     divisor = factors[0 if total_flux else 2]
     np.testing.assert_allclose(curve["croibg"], record.base_croibg[0:1]/divisor)

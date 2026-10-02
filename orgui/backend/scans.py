@@ -310,16 +310,27 @@ def _frame_values(values, count, name):
     raise ValueError(f"{name} must be scalar or contain one value per frame")
 
 
-def sample_azimuth(scan, settings, count):
-    """Resolve an explicitly declared normal-rotation source, in radians.
+def sample_azimuth(scan, settings, count, *, omega=None):
+    """Resolve the sample azimuth from acquisition metadata, in radians.
 
     :param scan: Scan with scalar/per-frame motor readbacks in the declared unit.
-    :param dict settings: ``azimuth_source`` (motor name or ``fixed``),
+    :param dict settings: ``azimuth_source`` (``auto``, motor name or ``fixed``),
         ``azimuth_unit`` (``deg``/``rad``), or ``fixed_azimuth_deg``.
     :param int count: Frame count; ordering follows the scan's counter arrays.
+    :param omega: Optional acquisition omega from ``getMuOm()``, in radians.
+        Otherwise automatic mode uses ``-th`` in degrees, including a fixed
+        theta during a mu scan. The additional geometric sign is applied later.
     :raises ValueError: For a missing source, wrong unit or mismatched frame count.
     """
-    source = settings.get("azimuth_source")
+    source = settings.get("azimuth_source", "auto")
+    if source == "auto":
+        if omega is not None:
+            return _frame_values(omega, count, "sample azimuth")
+        theta = (scan.axis if getattr(scan, "axisname", None) == "th"
+                 else getattr(scan, "th", None))
+        if theta is None:
+            raise ValueError("scan has no automatic sample azimuth (theta) source")
+        return -np.deg2rad(_frame_values(theta, count, "sample azimuth"))
     if source == "fixed":
         if "fixed_azimuth_deg" not in settings:
             raise ValueError("fixed azimuth must be explicitly configured")
@@ -335,6 +346,36 @@ def sample_azimuth(scan, settings, count):
     if unit == "rad":
         return values
     raise ValueError("sample azimuth unit must be deg or rad")
+
+
+def sample_incidence(scan, settings, count, alpha):
+    """Resolve footprint incidence [rad], with optional counter/fixed override.
+
+    Automatic mode retains the supplied acquisition/config incidence. Counter
+    units default to degrees; fixed values use ``fixed_incidence_deg``.
+    """
+    source = settings.get("incidence_source", "auto")
+    if source == "auto":
+        values = np.asarray(alpha, dtype=np.float64)
+        # Rocking extraction repeats the frame angles for each ROI curve.
+        if values.ndim > 1 and values.shape[-1] == count:
+            return values
+        return _frame_values(alpha, count, "sample incidence")
+    if source == "fixed":
+        if "fixed_incidence_deg" not in settings:
+            raise ValueError("fixed incidence must be explicitly configured")
+        return np.deg2rad(_frame_values(
+            settings["fixed_incidence_deg"], count, "sample incidence"
+        ))
+    if not source or not hasattr(scan, source):
+        raise ValueError(f"scan has no configured sample incidence source {source!r}")
+    unit = settings.get("incidence_unit", "deg")
+    values = _frame_values(getattr(scan, source), count, "sample incidence")
+    if unit == "deg":
+        return np.deg2rad(values)
+    if unit == "rad":
+        return values
+    raise ValueError("sample incidence unit must be deg or rad")
 
 
 def _alpha_centers(scan, config, count):

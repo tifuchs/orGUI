@@ -7,6 +7,17 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Sample-shape footprint settings now follow shape, azimuth and angular
+  alignment. Centred rectangles and polygons use one parallel omega reading;
+  circles need no orientation. A collapsible Off-centre sample section retains
+  the separate placement references and opens when nonzero offsets are loaded.
+  Incidence and azimuth default to acquisition/config
+  angles named explicitly as mu and omega = -th in the dialog, with counter or
+  fixed-value overrides behind a manual override button.
+  Existing angle representations and numerical conventions are preserved;
+  the surface-normal confirmation checkbox is removed. Applied footprint angles
+  and alignment references are saved for correction replacement.
+
 - Correction dialogs reopen with their controls intact when OpenGL plotting
   is enabled, while retaining the selected plotting backend. Loading HDF5
   calibrations also strips nested NeXus attributes before passing settings to

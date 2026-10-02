@@ -31,9 +31,18 @@ from orgui.app.sample_interception_config import (
     profile_from_settings,
     replacement_shape_divisor,
     shape_frame_factors,
+    sample_angle_inputs,
+    parallel_omega_reading,
+    orientation_for_parallel_reading,
 )
 from orgui.backend.scans import sample_azimuth
 from orgui.datautils.xrayutils.corrections import beamprofile as bp
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    """Keep the shared Qt application alive for widget regression checks."""
+    return qt.QApplication.instance() or qt.QApplication([])
 
 
 def _settings():
@@ -339,3 +348,419 @@ class SimpleScan:
 
     def __len__(self):
         return 2
+
+
+@pytest.mark.parametrize("axisname", ["mu", "th"])
+def test_automatic_angles_follow_acquisition_convention(axisname):
+    """Mu varies incidence; theta varies omega with the established minus sign."""
+    settings = _settings()
+    settings.pop("azimuth_source")
+    settings.pop("reference_incidence_deg")
+    settings.pop("normal_rotation_confirmed")
+    scan = SimpleNamespace(axisname=axisname, axis=np.array([1., 2.]), th=30.)
+    mu = np.deg2rad(scan.axis if axisname == "mu" else 0.36)
+    alpha, omega, resolved = sample_angle_inputs(scan, settings, mu, count=2)
+    np.testing.assert_allclose(alpha, mu if axisname == "mu" else [mu, mu])
+    expected = -np.deg2rad(scan.axis if axisname == "th" else [30., 30.])
+    np.testing.assert_allclose(omega, expected)
+    assert resolved["reference_incidence_deg"] == pytest.approx(
+        1. if axisname == "mu" else 0.36
+    )
+    assert "reference_incidence_deg" not in settings
+    # Supplied getMuOm values take precedence over backend fallback metadata.
+    _, omega, _ = sample_angle_inputs(scan, settings, mu, count=2, omega=[0.1, 0.2])
+    np.testing.assert_allclose(omega, [0.1, 0.2])
+
+
+def test_automatic_policy_preserves_rocking_curve_angle_arrays():
+    """Multiple ROI curves retain their per-frame incidence and overlap arrays."""
+    settings = _settings()
+    settings["azimuth_source"] = "auto"
+    alpha = np.deg2rad([[0.36, 0.5], [0.36, 0.5]])
+    policy = frame_correction_policy(
+        SimpleNamespace(), CorrectionState(sample_interception=settings), 2,
+        use_normalization=False, use_illumination=True,
+        alpha=alpha, omega=np.deg2rad([0, 45]),
+        beam_profile=bp.gaussian_profile(160e-6),
+    )
+    assert policy.illumination_divisor.shape == (2, 2)
+    np.testing.assert_array_equal(policy.interception_provenance["sample_incidence_rad"],
+                                  alpha)
+
+
+@pytest.mark.parametrize("unit", ["deg", "rad"])
+def test_manual_counter_overrides_and_saved_incidence_replacement(unit):
+    """Footprint overrides are saved separately from diffraction incidence."""
+    settings = _settings()
+    settings.pop("reference_incidence_deg")
+    settings["incidence_source"] = "measured_alpha"
+    settings["incidence_unit"] = unit
+    settings["azimuth_unit"] = unit
+    settings["offset_m"] = [0.001, 0.002]
+    incidence = np.deg2rad([0.5, 0.8])
+    azimuth = np.deg2rad([5, 40])
+    scan = SimpleNamespace(
+        measured_alpha=np.rad2deg(incidence) if unit == "deg" else incidence,
+        phi=np.rad2deg(azimuth) if unit == "deg" else azimuth,
+    )
+    original_alpha = np.deg2rad([0.36, 0.36])
+    vertical = bp.gaussian_profile(160e-6)
+    policy = frame_correction_policy(
+        scan, CorrectionState(sample_interception=settings), 2,
+        use_normalization=False, use_illumination=True,
+        alpha=original_alpha, beam_profile=vertical,
+    )
+    np.testing.assert_allclose(policy.interception_provenance["sample_incidence_rad"],
+                               incidence)
+    np.testing.assert_allclose(policy.interception_provenance["sample_azimuth_rad"],
+                               azimuth)
+    resolved = json.loads(policy.interception_provenance["sample_interception_json"])
+    assert resolved["reference_incidence_deg"] == pytest.approx(0.5)
+    record = CurveCorrectionRecord(
+        algorithm="shape_interception_legacy_v1", output_quantity="curve",
+        alpha=original_alpha, scale_convention=policy.scale_convention,
+        profile_provenance=policy.interception_provenance,
+    )
+    np.testing.assert_allclose(replacement_shape_divisor(settings, vertical, record),
+                               policy.illumination_divisor)
+    settings["incidence_source"] = "other_counter"
+    with pytest.raises(ValueError, match="incidence source requires re-extraction"):
+        replacement_shape_divisor(settings, vertical, record)
+    settings["incidence_source"] = "fixed"
+    settings["fixed_incidence_deg"] = 1
+    assert np.all(np.isfinite(replacement_shape_divisor(settings, vertical, record)))
+
+
+def test_fixed_overrides_do_not_require_scan_counters():
+    """Fixed incidence and azimuth are degrees regardless of counter units."""
+    settings = _settings()
+    settings.update(incidence_source="fixed", fixed_incidence_deg=0.7,
+                    azimuth_source="fixed", fixed_azimuth_deg=32,
+                    incidence_unit="rad", azimuth_unit="rad")
+    alpha, azimuth, _ = sample_angle_inputs(SimpleNamespace(), settings, 0.01, count=3)
+    np.testing.assert_allclose(alpha, np.deg2rad([0.7] * 3))
+    np.testing.assert_allclose(azimuth, np.deg2rad([32] * 3))
+
+
+def test_reference_and_rotation_offset_preserve_distinct_off_axis_geometry():
+    """An angular mounting offset does not rotate the sample centre's orbit."""
+    from orgui.app.sample_interception_config import shape_from_settings
+
+    settings = _settings()
+    settings.update(reference_azimuth_deg=20, orientation_deg=30,
+                    offset_m=[0.002, 0.001])
+    shape = shape_from_settings(settings)
+    reference = shape.outline(0, settings["offset_m"], np.deg2rad(30))
+    np.testing.assert_allclose(reference.mean(axis=0), settings["offset_m"])
+    # Centre rotates by the readback difference (90 deg), not by mounting offset.
+    moved = shape.outline(np.deg2rad(110 - 20), settings["offset_m"], np.deg2rad(30))
+    np.testing.assert_allclose(moved.mean(axis=0), [-0.001, 0.002], atol=1e-18)
+    settings["normal_rotation_confirmed"] = False  # Obsolete UI acknowledgement.
+    vertical = bp.gaussian_profile(160e-6)
+    before = shape_frame_factors(settings, vertical, 0.01, np.deg2rad(50))[0]
+    settings["normal_rotation_confirmed"] = True
+    np.testing.assert_array_equal(
+        before, shape_frame_factors(settings, vertical, 0.01, np.deg2rad(50))[0]
+    )
+
+
+def test_editor_auto_defaults_overrides_and_cancel(qapp):
+    """Angle overrides are optional and Cancel restores both angle modes."""
+    parent = IntegrationCorrectionsDialog()
+    try:
+        editor = parent.sampleEditor
+        editor.enabled.setChecked(True)
+        assert editor.settings()["azimuth_source"] == "auto"
+        assert editor.settings()["incidence_source"] == "auto"
+        assert "reference_incidence_deg" not in editor.settings()
+        assert editor.override_panel.isHidden()
+        assert editor.off_centre_panel.isHidden()
+        assert not editor.parallel_reading.isHidden()
+        parent.onOk()
+        saved = parent.settings()
+        parent.show()
+        editor.override_button.click()
+        editor.angle_modes["incidence"].setCurrentText("Counter")
+        editor.angle_sources["incidence"].setText("alpha_readback")
+        editor.angle_modes["azimuth"].setCurrentText("Fixed")
+        editor.fixed_angles["azimuth"].setValue(17)
+        assert not editor.override_panel.isHidden()
+        assert editor.settings()["incidence_source"] == "alpha_readback"
+        assert editor.settings()["fixed_azimuth_deg"] == 17
+        parent.reject()
+        assert parent.settings() == saved
+        assert editor.override_panel.isHidden()
+    finally:
+        parent.close()
+
+
+def test_automatic_source_frame_preview_matches_policy(qapp):
+    """Loaded-frame diagnostics resolve automatic and overridden angles alike."""
+    host = qt.QWidget()
+    main = SimpleNamespace(
+        fscan=SimpleScan(),
+        getMuOm=lambda: (np.deg2rad([0.36, 0.5]), np.deg2rad([10, 20])),
+    )
+    host._mainWindow = lambda: main
+    parent = IntegrationCorrectionsDialog(host)
+    settings = _settings()
+    settings.pop("reference_incidence_deg")
+    settings["azimuth_source"] = "auto"
+    try:
+        parent.setSettings({"sample_interception": settings, "shape_values": [160]})
+        editor = parent.sampleEditor
+        editor.scan_preview.setChecked(True)
+        editor.frame_index.setValue(1)
+        editor._preview()
+        assert "0.5 deg" in editor.status.text()
+        assert "20 deg" in editor.status.text()
+        editor.angle_modes["incidence"].setCurrentText("Fixed")
+        editor.fixed_angles["incidence"].setValue(0.8)
+        editor._preview()
+        assert "0.8 deg" in editor.status.text()
+    finally:
+        parent.close()
+        host.close()
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+@pytest.mark.parametrize("kind", ["rectangle", "polygon"])
+def test_centred_alignment_conversion_preserves_old_angles_and_overlap(
+    qapp, sign, kind,
+):
+    """Unwrapped parallel readings preserve either sign and asymmetric shapes."""
+    settings = _settings()
+    settings.update(azimuth_sign=sign, reference_azimuth_deg=713.123456789123,
+                    orientation_deg=-431.234567891234)
+    if kind == "polygon":
+        settings["shape"] = {
+            "kind": kind,
+            "vertices_m": [[-0.004, -0.003], [0.005, -0.003],
+                           [0.005, 0.003], [-0.004, 0.002]],
+        }
+    else:
+        settings["shape"]["dimensions_m"] = [0.01, 0.006]
+    expected = settings["reference_azimuth_deg"] - sign * settings["orientation_deg"]
+    assert parallel_omega_reading(settings) == expected
+    assert orientation_for_parallel_reading(settings, expected) == pytest.approx(
+        settings["orientation_deg"]
+    )
+    canonical = dict(settings, reference_azimuth_deg=expected, orientation_deg=0)
+    # Avoid the old quadrature's degenerate almost-axis-aligned sections after
+    # floating-point cancellation of large angles; the conversion is unwrapped.
+    omega = np.deg2rad([expected + 7, expected + 30, expected + 73])
+    alpha = np.deg2rad([0.36, 0.5, 0.7])
+    vertical = bp.gaussian_profile(160e-6)
+    old_factors = shape_frame_factors(settings, vertical, alpha, omega)
+    centred_factors = shape_frame_factors(canonical, vertical, alpha, omega)
+    for old, centred in zip(old_factors, centred_factors):
+        np.testing.assert_allclose(old, centred, rtol=1e-10, atol=1e-13)
+    parent = IntegrationCorrectionsDialog()
+    try:
+        parent.setSettings({"sample_interception": settings})
+        editor = parent.sampleEditor
+        assert editor.parallel_reading.value() == pytest.approx(expected, abs=1e-10)
+        assert not editor.off_centre_button.isChecked()
+        assert editor.off_centre_panel.isHidden()
+        assert not editor.parallel_reading.isHidden()
+        assert ("polygon's x axis" if kind == "polygon" else "long edge") in (
+            editor.parallel_label.text()
+        )
+        assert "0°" in editor.alignment_note.text() and "90°" in (
+            editor.alignment_note.text()
+        )
+        saved = editor.settings()
+        assert saved["reference_azimuth_deg"] == settings["reference_azimuth_deg"]
+        assert saved["orientation_deg"] == settings["orientation_deg"]
+        restored_state = corrections_from_nxdict(corrections_to_nxdict(
+            CorrectionState(sample_interception=saved)
+        ))
+        assert restored_state.sample_interception == saved
+        for old, restored in zip(old_factors,
+                                 shape_frame_factors(saved, vertical, alpha, omega)):
+            np.testing.assert_array_equal(old, restored)
+        parent.setSettings({"sample_interception": saved})
+        assert editor.settings()["orientation_deg"] == settings["orientation_deg"]
+    finally:
+        parent.close()
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+def test_centred_alignment_edits_and_sign_keep_placement_reference(qapp, sign):
+    """Editing alignment changes orientation without redefining future offsets."""
+    settings = _settings()
+    settings.update(azimuth_sign=sign, reference_azimuth_deg=37, orientation_deg=23)
+    parent = IntegrationCorrectionsDialog()
+    try:
+        parent.setSettings({"sample_interception": settings})
+        editor = parent.sampleEditor
+        editor.parallel_reading.setValue(12)
+        saved = editor.settings()
+        assert saved["reference_azimuth_deg"] == 37
+        assert saved["orientation_deg"] == sign * 25
+        for reading, expected_edge_angle in [(12, 0), (12 + sign * 90, 90)]:
+            edge_angle = sign * (reading - saved["reference_azimuth_deg"])
+            edge_angle += saved["orientation_deg"]
+            assert edge_angle == expected_edge_angle
+        # Reversing direction retains the centred field's physical anchor.
+        editor.sign.setCurrentText(f"{-sign:+d}")
+        assert editor.parallel_reading.value() == 12
+        assert editor.settings()["orientation_deg"] == -sign * 25
+        editor.off_centre_button.click()
+        editor.values["offset_x"].setValue(2)
+        off_centre = editor.settings()
+        assert editor.parallel_reading.isHidden()
+        assert off_centre["reference_azimuth_deg"] == 37
+        assert off_centre["orientation_deg"] == -sign * 25
+        assert off_centre["offset_m"] == [0.002, 0]
+        # Off-centre direction changes preserve both placement parameters.
+        editor.sign.setCurrentText(f"{sign:+d}")
+        assert editor.settings()["orientation_deg"] == off_centre["orientation_deg"]
+    finally:
+        parent.close()
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+@pytest.mark.parametrize("kind", ["rectangle", "polygon", "circle"])
+def test_off_centre_collapse_keeps_saved_placement_and_results(qapp, sign, kind):
+    """Section visibility cannot canonicalize the offset orbit or the mounting."""
+    settings = _settings()
+    settings.update(azimuth_sign=sign, reference_azimuth_deg=21.234567891234,
+                    orientation_deg=31.345678912345,
+                    reference_incidence_deg=0.364567891234567,
+                    offset_m=[0.001234567891234, -0.000987654321098])
+    if kind == "circle":
+        settings["shape"] = {"kind": kind, "dimensions_m": [0.01]}
+    elif kind == "polygon":
+        settings["shape"] = {
+            "kind": kind, "vertices_m": [[-0.004, -0.003], [0.005, -0.003],
+                                         [0.005, 0.003], [-0.004, 0.002]],
+        }
+    parent = IntegrationCorrectionsDialog()
+    try:
+        parent.setSettings({"sample_interception": settings})
+        editor = parent.sampleEditor
+        assert editor.off_centre_button.isChecked()
+        assert not editor.off_centre_panel.isHidden()
+        assert editor.parallel_reading.isHidden()
+        before = editor.settings()
+        for key in ("reference_azimuth_deg", "orientation_deg",
+                    "reference_incidence_deg", "offset_m"):
+            assert before[key] == settings[key]
+        alpha, omega = np.deg2rad([0.36, 0.5]), np.deg2rad([21, 61])
+        vertical = bp.gaussian_profile(160e-6)
+        factors = shape_frame_factors(settings, vertical, alpha, omega)
+        for old, loaded in zip(factors, shape_frame_factors(
+            before, vertical, alpha, omega
+        )):
+            np.testing.assert_array_equal(old, loaded)
+        editor.off_centre_button.click()
+        assert editor.off_centre_panel.isHidden()
+        assert editor.parallel_reading.isHidden()
+        assert editor.settings() == before
+        for old, collapsed in zip(factors, shape_frame_factors(
+            editor.settings(), vertical, alpha, omega
+        )):
+            np.testing.assert_array_equal(old, collapsed)
+        editor.off_centre_button.click()
+        assert editor.settings() == before
+        parent.setSettings({"sample_interception": before})
+        assert editor.off_centre_button.isChecked()
+        assert editor.settings() == before
+    finally:
+        parent.close()
+
+
+def test_centred_circle_hides_orientation_and_restores_other_shapes(qapp):
+    """Circle symmetry hides alignment without discarding the stored mounting."""
+    settings = _settings()
+    settings.update(reference_azimuth_deg=12, orientation_deg=5)
+    parent = IntegrationCorrectionsDialog()
+    try:
+        parent.setSettings({"sample_interception": settings})
+        editor = parent.sampleEditor
+        editor.kind.setCurrentText("circle")
+        assert editor.parallel_reading.isHidden()
+        assert "needs no angular alignment" in editor.alignment_note.text()
+        editor.off_centre_button.click()
+        assert editor.values["orientation_deg"].isHidden()
+        assert editor.settings()["orientation_deg"] == 5
+        editor.kind.setCurrentText("rectangle")
+        assert not editor.parallel_reading.isHidden()
+        assert editor.parallel_reading.value() == 7
+    finally:
+        parent.close()
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+def test_alignment_uses_actual_long_edge_when_rectangle_width_is_larger(qapp, sign):
+    """A wide rectangle's long edge is local y, leaving old x placement intact."""
+    settings = _settings()
+    settings["shape"]["dimensions_m"] = [0.006, 0.01]
+    settings.update(azimuth_sign=sign, reference_azimuth_deg=20, orientation_deg=30)
+    expected = 20 - sign * (30 + 90)
+    assert parallel_omega_reading(settings) == expected
+    assert orientation_for_parallel_reading(settings, expected) == 30
+    parent = IntegrationCorrectionsDialog()
+    try:
+        parent.setSettings({"sample_interception": settings})
+        editor = parent.sampleEditor
+        assert editor.parallel_reading.value() == expected
+        assert editor.settings()["orientation_deg"] == 30
+        editor.parallel_reading.setValue(15)
+        assert editor.settings()["orientation_deg"] == sign * (20 - 15) - 90
+        editor.values["length"].setValue(12)
+        # Changing which dimension is longer updates only the displayed reading.
+        assert editor.parallel_reading.value() == 15 + sign * 90
+        assert editor.settings()["orientation_deg"] == sign * 5 - 90
+    finally:
+        parent.close()
+
+
+@pytest.mark.parametrize("axis", ["mu", "th"])
+def test_default_motor_labels_refresh_without_changing_saved_sources(qapp, axis):
+    """Scan-dependent motor labels must not change mode selection or persistence."""
+    host = qt.QWidget()
+    scan = SimpleScan()
+    scan.axisname = axis
+    main = SimpleNamespace(fscan=scan, getMuOm=lambda: (
+        np.deg2rad([0.4, 0.5]) if scan.axisname == "mu" else np.deg2rad(0.4),
+        np.deg2rad(-30) if scan.axisname == "mu" else np.deg2rad([-30, -31]),
+    ))
+    host._mainWindow = lambda: main
+    parent = IntegrationCorrectionsDialog(host)
+    try:
+        model = _settings()
+        model.update(incidence_source="auto", azimuth_source="auto")
+        parent.setSettings({"sample_interception": model})
+        editor = parent.sampleEditor
+        before = editor.settings()
+        for scan_axis in (axis, "th" if axis == "mu" else "mu"):
+            scan.axisname = scan_axis
+            editor.refreshSourceFrames()
+            incidence = ("mu (scan axis)" if scan_axis == "mu" else
+                         "mu (configuration)")
+            azimuth = ("omega = -th (scan axis)" if scan_axis == "th" else
+                       "omega = -th (scan readback)")
+            assert editor.angle_modes["incidence"].currentText() == incidence
+            assert editor.angle_modes["azimuth"].currentText() == azimuth
+            assert incidence in editor.angle_summary.text()
+            assert azimuth in editor.angle_summary.text()
+            assert editor.settings() == before
+            # Restoring auto uses its stable ID, not the scan-dependent label.
+            editor.setSettings(before)
+            assert editor.angle_modes["incidence"].currentText() == incidence
+            assert editor.angle_modes["azimuth"].currentText() == azimuth
+        editor.angle_modes["incidence"].setCurrentText("Counter")
+        editor.angle_sources["incidence"].setText("alpha_counter")
+        editor.angle_modes["azimuth"].setCurrentText("Fixed")
+        editor.fixed_angles["azimuth"].setValue(17)
+        overridden = editor.settings()
+        scan.axisname = axis
+        editor.refreshSourceFrames()
+        assert editor.angle_modes["incidence"].currentText() == "Counter"
+        assert editor.angle_modes["azimuth"].currentText() == "Fixed"
+        assert editor.settings() == overridden
+    finally:
+        parent.close()
+        host.close()

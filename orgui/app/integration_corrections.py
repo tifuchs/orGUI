@@ -241,6 +241,7 @@ def frame_correction_policy(
     use_normalization,
     use_illumination,
     alpha=None,
+    omega=None,
     beam_profile=None,
     sample_length=None,
     progress=None,
@@ -258,6 +259,7 @@ def frame_correction_policy(
     :param bool use_normalization: Apply the requested frame normalization.
     :param bool use_illumination: Apply the requested footprint correction.
     :param alpha: Incidence angle(s), radian; required for illumination.
+    :param omega: Acquisition azimuth(s), radian, for automatic shape settings.
     :param beam_profile: Vertical beam profile; required for illumination.
     :param sample_length: Sample length along the beam, meter.
     :param progress: Optional numerical overlap progress/cancellation callback.
@@ -272,24 +274,27 @@ def frame_correction_policy(
         import json
         from .sample_interception_config import (
             embed_profile, profile_from_settings, shape_frame_factors,
-            shape_policy_inputs, vertical_settings,
+            sample_angle_inputs, vertical_settings,
         )
         if alpha is None:
             raise ValueError("2D interception requires actual frame incidence")
         if beam_profile is None:
             beam_profile = profile_from_settings(vertical_settings(state))
-        azimuth, settings = shape_policy_inputs(scan, state, alpha, count=size)
+        shape_alpha, azimuth, settings = sample_angle_inputs(
+            scan, shape_settings, alpha, count=size, omega=omega
+        )
         if not settings.get("horizontal"):
             raise ValueError("exact 2D interception requires a horizontal beam profile")
         settings["horizontal"] = embed_profile(
             settings["horizontal"], profile_from_settings(settings["horizontal"])
         )
         shape_factors = shape_frame_factors(
-            settings, beam_profile, alpha, azimuth, progress=progress
+            settings, beam_profile, shape_alpha, azimuth, progress=progress
         )
         shape_provenance = {
             "sample_interception_json": json.dumps(settings, allow_nan=False),
             "sample_azimuth_rad": azimuth,
+            "sample_incidence_rad": shape_alpha,
             "interception_valid": shape_factors[3],
             "interception_error_H": shape_factors[4],
             "interception_method": "surface_chord_quadrature_v1",

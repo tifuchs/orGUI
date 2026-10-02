@@ -1,7 +1,7 @@
 """Resolve saved shape/profile settings at the application unit boundary.
 
-Settings explicitly declare a motor as rotation about the surface normal; no
-SPEC name or six-circle solver angle is inferred to mean that rotation.
+Automatic angles use acquisition mu/omega, with explicit overrides available.
+The flat-surface model treats azimuth as rotation about the surface normal.
 Profile offsets align the shape origin at the configured reference incidence.
 The resulting rotation-axis alignment is fixed in laboratory beam coordinates.
 """
@@ -11,11 +11,52 @@ import logging
 
 import numpy as np
 
-from ..backend.scans import sample_azimuth
+from ..backend.scans import sample_azimuth, sample_incidence
 from ..datautils.xrayutils.corrections import beamprofile as bp
 from ..datautils.xrayutils.corrections.sample_interception import SampleShape, overlap
 
 logger = logging.getLogger(__name__)
+
+
+def _alignment_axis_offset(settings):
+    shape = settings.get("shape", {})
+    dimensions = shape.get("dimensions_m", ())
+    if (shape.get("kind") == "rectangle" and len(dimensions) == 2
+            and dimensions[1] > dimensions[0]):
+        return 90
+    return 0
+
+
+def parallel_omega_reading(settings):
+    """Return omega [deg] when the long edge/polygon x axis is parallel.
+
+    For ``edge_angle = sign * (omega - reference) + orientation``, the
+    parallel reading is ``reference - sign * orientation`` (sign is +/-1).
+    Do not replace the placement reference with this value for off-centre
+    samples: their origin displacement rotates about the original reference.
+    No periodic wrapping is applied, preserving polygon and motor conventions.
+    If rectangle width exceeds length, its long edge is the local y direction;
+    add 90 degrees to the old x-axis orientation before converting.
+    """
+    sign = settings.get("azimuth_sign", 1)
+    if sign not in {-1, 1}:
+        raise ValueError("azimuth sign must be +1 or -1")
+    return (settings.get("reference_azimuth_deg", 0)
+            - sign * (settings.get("orientation_deg", 0)
+                      + _alignment_axis_offset(settings)))
+
+
+def orientation_for_parallel_reading(settings, reading):
+    """Return mounting orientation [deg] for a parallel omega reading [deg].
+
+    Keep the existing placement reference and offset coordinates unchanged.
+    This is the inverse of :func:`parallel_omega_reading` for either sign.
+    """
+    sign = settings.get("azimuth_sign", 1)
+    if sign not in {-1, 1}:
+        raise ValueError("azimuth sign must be +1 or -1")
+    return (sign * (settings.get("reference_azimuth_deg", 0) - reading)
+            - _alignment_axis_offset(settings))
 
 
 def profile_from_settings(settings):
@@ -111,13 +152,12 @@ def shape_frame_factors(settings, vertical, alpha, azimuth, *, progress=None):
 
     ``alpha`` and raw ``azimuth`` are radians. Profile offsets align the shape
     origin at ``reference_incidence_deg``; the laboratory axis stays fixed.
+    The shape angle is ``orientation_deg + sign * (azimuth - reference)``;
+    ``orientation_deg`` is the UI rotation offset. Only the readback difference
+    rotates the sample-fixed origin displacement, preserving its orbit.
     Invalid angles/zero overlap are recorded as NaN divisors, never as unity.
     """
     shape = shape_from_settings(settings)
-    if not settings.get("normal_rotation_confirmed", False):
-        raise ValueError(
-            "declare the azimuth source to be rotation about the surface normal"
-        )
     horizontal_settings = settings.get("horizontal")
     if not horizontal_settings:
         raise ValueError("exact 2D interception requires a horizontal beam profile")
@@ -131,6 +171,10 @@ def shape_frame_factors(settings, vertical, alpha, azimuth, *, progress=None):
     if len(offset) != 2:
         raise ValueError("shape offset must have two coordinates, in metres")
     reference_alpha = np.deg2rad(settings.get("reference_incidence_deg", 0))
+    if "reference_incidence_deg" not in settings:
+        candidates = alpha[np.isfinite(alpha) & (alpha > 0) & (alpha <= np.pi / 2)]
+        if candidates.size:
+            reference_alpha = candidates.flat[0]
     if not np.isfinite(reference_alpha) or not 0 < reference_alpha <= np.pi / 2:
         raise ValueError("reference incidence must be in (0, 90] degrees")
     valid = np.isfinite(alpha) & (alpha > 0) & (alpha <= np.pi / 2) & np.isfinite(psi)
@@ -178,13 +222,30 @@ def shape_frame_factors(settings, vertical, alpha, azimuth, *, progress=None):
     return illumination, fraction, area / shape.area, valid, error
 
 
-def shape_policy_inputs(scan, state, alpha, *, count=None):
+def shape_policy_inputs(scan, state, alpha, *, count=None, omega=None):
     """Return measured frame azimuth [rad] and self-contained shape settings."""
-    settings = copy.deepcopy(state.sample_interception)
+    _, azimuth, settings = sample_angle_inputs(
+        scan, state.sample_interception, alpha, count=count, omega=omega
+    )
+    return azimuth, settings
+
+
+def sample_angle_inputs(scan, settings, alpha, *, count=None, omega=None):
+    """Return footprint incidence/azimuth [rad] and resolved shape settings.
+
+    Automatic alignment uses the first valid frame incidence, saved explicitly
+    for later replacement. Existing numeric reference incidences are retained.
+    """
+    settings = copy.deepcopy(settings)
     if count is None:
         count = np.asarray(alpha).shape[-1] if np.ndim(alpha) else len(scan)
-    azimuth = sample_azimuth(scan, settings, count)
-    return azimuth, settings
+    alpha = sample_incidence(scan, settings, count, alpha)
+    azimuth = sample_azimuth(scan, settings, count, omega=omega)
+    if "reference_incidence_deg" not in settings:
+        valid = alpha[np.isfinite(alpha) & (alpha > 0) & (alpha <= np.pi / 2)]
+        if valid.size:
+            settings["reference_incidence_deg"] = float(np.rad2deg(valid.flat[0]))
+    return alpha, azimuth, settings
 
 
 def replacement_shape_divisor(settings, vertical, record):
@@ -197,17 +258,32 @@ def replacement_shape_divisor(settings, vertical, record):
 
     if record.alpha is None:
         raise ValueError("saved incidence is required for shape replacement")
-    alpha = np.asarray(record.alpha)
-    source = settings.get("azimuth_source")
+    old = json.loads(
+        record.profile_provenance.get("sample_interception_json", "{}")
+    )
+    alpha = np.asarray(record.profile_provenance.get(
+        "sample_incidence_rad", record.alpha
+    ))
+    incidence_source = settings.get("incidence_source", "auto")
+    if incidence_source == "fixed":
+        alpha = np.deg2rad(settings["fixed_incidence_deg"])
+    elif (incidence_source != old.get("incidence_source", "auto")
+          or (incidence_source != "auto"
+              and settings.get("incidence_unit", "deg")
+              != old.get("incidence_unit", "deg"))):
+        raise ValueError("changing a moving incidence source requires re-extraction")
+    settings = copy.deepcopy(settings)
+    if "reference_incidence_deg" not in settings:
+        if "reference_incidence_deg" in old:
+            settings["reference_incidence_deg"] = old["reference_incidence_deg"]
+    source = settings.get("azimuth_source", "auto")
     if source == "fixed":
         azimuth = np.deg2rad(settings["fixed_azimuth_deg"])
     else:
-        old = json.loads(
-            record.profile_provenance.get("sample_interception_json", "{}")
-        )
         if (
-            source != old.get("azimuth_source")
-            or settings.get("azimuth_unit", "deg") != old.get("azimuth_unit", "deg")
+            source != old.get("azimuth_source", "auto")
+            or (source != "auto" and settings.get("azimuth_unit", "deg")
+                != old.get("azimuth_unit", "deg"))
             or "sample_azimuth_rad" not in record.profile_provenance
         ):
             raise ValueError("changing a moving azimuth source requires re-extraction")
