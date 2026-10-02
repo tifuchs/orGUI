@@ -247,17 +247,25 @@ def _frame_overlap(
         )
         value = float(vertical_h * horizontal_mass)
         return value, abs(value) * np.finfo(float).eps * 8
-    vertices = shape.outline(azimuth, offset, orientation)
     center = _rotation(azimuth) @ np.asarray(offset)
-    lo, hi = np.min(vertices[:, 0]), np.max(vertices[:, 0])
     if shape.kind == "circle":
         radius = shape.dimensions[0] / 2
         lo, hi = center[0] - radius, center[0] + radius
+        span = 2 * radius
 
-        def intervals(x):
-            half = np.sqrt(max(0.0, radius**2 - (x - center[0]) ** 2))
-            return [(center[1] - half, center[1] + half)]
+        def _section(t):
+            # x = cx + R sin(theta), theta = pi(t - 1/2). The exact
+            # half-chord R cos(theta) avoids cancellation at circle edges.
+            # dx/dt / span = (pi/2) cos(theta) preserves surface area [m²].
+            theta = np.pi * (t - 0.5)
+            cosine = np.cos(theta)
+            x = center[0] + radius * np.sin(theta)
+            half = radius * cosine
+            return x, [(center[1] - half, center[1] + half)], np.pi / 2 * cosine
     else:
+        vertices = shape.outline(azimuth, offset, orientation)
+        lo, hi = np.min(vertices[:, 0]), np.max(vertices[:, 0])
+        span = hi - lo
         ends = np.roll(vertices, -1, axis=0)
         edges = ends - vertices
 
@@ -271,34 +279,45 @@ def _frame_overlap(
                 raise ValueError("polygon section has an odd number of intersections")
             return list(zip(hits[::2], hits[1::2]))
 
+        def _section(t):
+            x = lo + span * t
+            return x, intervals(x), 1.0
+
     peak = vertical.peak_density
 
     def integrand(t):
-        x = lo + (hi - lo) * t
+        x, intervals_y, jacobian = _section(t)
         mass = sum(
-            float(horizontal.interval_mass(yh + a, yh + b)) for a, b in intervals(x)
+            float(horizontal.interval_mass(yh + a, yh + b)) for a, b in intervals_y
         )
-        return float(vertical.density_at(zv + x * sine)) / peak * mass
+        return float(vertical.density_at(zv + x * sine)) / peak * mass * jacobian
 
     # Break at shape vertices and vertical knots/scales. Horizontal transitions
     # across polygon edges are also explicit, so a narrow beam cannot be missed.
-    points = list(vertices[:, 0]) + list((vertical.integration_points - zv) / sine)
+    points = list((vertical.integration_points - zv) / sine)
+    horizontal_points = horizontal.integration_points
     if shape.kind != "circle":
+        points.extend(vertices[:, 0])
         for a, edge in zip(vertices, edges):
             if edge[1] != 0:
-                for position in horizontal.integration_points:
+                for position in horizontal_points:
                     t = (position - yh - a[1]) / edge[1]
                     if 0 < t < 1:
                         points.append(a[0] + t * edge[0])
+        points = [(p - lo) / span for p in points if lo < p < hi]
     else:
-        for position in horizontal.integration_points:
+        # Exact circular chords need no vertices from the display outline.
+        # Only beam transitions supply interior quadrature breakpoints.
+        points = [
+            0.5 + np.arcsin((p - center[0]) / radius) / np.pi
+            for p in points if abs(p - center[0]) < radius
+        ]
+        for position in horizontal_points:
             height = position - yh - center[1]
             if abs(height) < radius:
-                half = np.sqrt(radius**2 - height**2)
-                points.extend([center[0] - half, center[0] + half])
-    points = np.unique(
-        [0.0, 1.0, *[(p - lo) / (hi - lo) for p in points if lo < p < hi]]
-    )
+                theta = np.arccos(abs(height) / radius)
+                points.extend([0.5 - theta / np.pi, 0.5 + theta / np.pi])
+    points = np.unique([0.0, 1.0, *points])
     total = error = 0.0
     for a, b in zip(points[:-1], points[1:]):
         value = quad(
@@ -316,5 +335,5 @@ def _frame_overlap(
         error += value[1]
     if error > max(1e-11, abs(total) * rtol * 5):
         raise ValueError("sample overlap quadrature exceeded its error tolerance")
-    scale = (hi - lo) * peak
+    scale = span * peak
     return total * scale, error * scale

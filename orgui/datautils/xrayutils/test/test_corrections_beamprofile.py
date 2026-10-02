@@ -43,6 +43,76 @@ ALPHAS = np.deg2rad(np.array([0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 20.0, 90
 L = 5e-3
 
 
+@pytest.mark.parametrize("center", ["centroid", "peak", "median"])
+@pytest.mark.parametrize("family", ["normal", "uniform"])
+def test_direct_density_and_interval_probability_match_scipy(family, center):
+    """SI offsets, broadcasting, support edges and tails retain their meaning."""
+    dist = (
+        stats.norm(loc=1.3e-4, scale=7e-4) if family == "normal"
+        else stats.uniform(loc=-2e-4, scale=1.4e-3)
+    )
+    profile = DistributionBeamProfile(dist, center=center, offset=2.3e-4)
+    raw = np.array([
+        [-np.inf, -0.01, -2e-4, 0, 1.2e-3],
+        [np.nextafter(-2e-4, -np.inf), np.nextafter(1.2e-3, np.inf),
+         0.01, np.inf, np.nan],
+    ])
+    positions = raw - profile.sample_center
+    np.testing.assert_allclose(
+        profile.density_at(positions), dist.pdf(positions + profile.sample_center),
+        rtol=3e-15, atol=0,
+    )
+    lower = np.array([-np.inf, -0.01, -2e-4, 0, 1.2e-3])[:, None]
+    upper = np.array([1.2e-3, 0.01, np.inf])[None, :]
+    raw_lo = lower + profile.sample_center
+    raw_hi = upper + profile.sample_center
+    expected = np.where(
+        dist.cdf(raw_lo) > 0.5,
+        dist.sf(raw_lo) - dist.sf(raw_hi),
+        dist.cdf(raw_hi) - dist.cdf(raw_lo),
+    )
+    np.testing.assert_allclose(
+        profile.interval_mass(lower, upper), expected, rtol=5e-14, atol=1e-16,
+    )
+    assert profile.interval_mass(-np.inf, np.inf) == 1
+    assert np.isnan(profile.interval_mass(np.nan, 0))
+    with pytest.raises(ValueError, match="upper bound"):
+        profile.interval_mass([0, 1e-3], [1e-3, 0])
+
+
+def test_direct_profiles_preserve_tiny_intervals_and_gaussian_tails():
+    """Nonzero overlap survives cancellation-prone widths and far tails."""
+    uniform = top_hat_profile(1e-3)
+    assert uniform.interval_mass(0, 1e-20) == pytest.approx(1e-17, rel=1e-14)
+    normal = DistributionBeamProfile(stats.norm(loc=1e-3, scale=2e-4))
+    assert normal.interval_mass(0, 1e-20) == pytest.approx(
+        1e-20 * stats.norm.pdf(0, scale=2e-4), rel=1e-14,
+    )
+    lo, hi = 8 * normal.rms_width, 9 * normal.rms_width
+    expected = stats.norm.sf(8) - stats.norm.sf(9)
+    assert normal.interval_mass(lo, hi) == pytest.approx(expected, rel=1e-13)
+    reference = GaussianBeamProfile(160e-6)
+    positions = np.array([-np.inf, -8, 0, 8, np.inf, np.nan]) * reference.sigma
+    np.testing.assert_allclose(
+        reference.density_at(positions),
+        stats.norm.pdf(positions, scale=reference.sigma),
+        rtol=3e-15,
+    )
+
+
+def test_cached_profile_knots_follow_placement_without_exposing_cache():
+    """Frozen-distribution quantiles stay in metres under placement changes."""
+    dist = stats.norm(loc=1.3e-4, scale=7e-4)
+    profile = DistributionBeamProfile(dist, offset=2.3e-4)
+    quantiles = [1e-6, 1e-3, .01, .1, .25, .5, .75, .9, .99, .999, 1-1e-6]
+    expected = dist.ppf(quantiles) - profile.sample_center
+    first = profile.integration_points
+    np.testing.assert_allclose(first, expected, rtol=1e-15)
+    first[:] = 0  # A caller's display edits cannot change integration knots.
+    profile.sample_center += 2e-4
+    np.testing.assert_allclose(profile.integration_points, expected - 2e-4, rtol=1e-14)
+
+
 def _sampled_gaussian(fwhm, half_width=8.0, n=20001):
     """Tabulate a normalized Gaussian of ``fwhm`` over +- ``half_width`` sigma."""
     sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))

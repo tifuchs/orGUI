@@ -51,6 +51,7 @@ def test_the_package_exposes_every_correction_module():
         "measurement",
         "normalization",
         "roi",
+        "sample_interception",
     }
     for name in corrections.__all__:
         assert getattr(corrections, name) is not None

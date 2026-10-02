@@ -73,7 +73,10 @@ Scientific and analysis additions:
   factors, angles and embedded measured profiles for safe keep, remove and
   replace operations. Existing configurations retain the 1D correction. A
   diagnostic notebook compares beam profiles and correction factors for a
-  10 mm square in mu and th scans.
+  10 mm square in mu and th scans. Sequential footprint evaluation reuses beam
+  quantiles and evaluates Gaussian and top-hat profiles directly. Circular
+  overlap uses exact angular chords, reducing integration work and retaining
+  accuracy at narrow beam edges.
 
 - **Integration and reciprocal-space reconstruction now share frame
   normalization controls.** New reconstruction jobs follow the integration

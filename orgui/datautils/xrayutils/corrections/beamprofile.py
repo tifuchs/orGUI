@@ -112,6 +112,12 @@ else:
 _FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 
 
+def _normal_density(position, sigma):
+    """Gaussian density [1/m] at mean-relative positions [m]."""
+    x = np.asarray(position, dtype=float) / sigma
+    return np.exp(-0.5 * x**2) / (np.sqrt(2 * np.pi) * sigma)
+
+
 def _normal_interval(lower, upper, sigma):
     """Stable normal probability in an interval, including tiny widths."""
     lo, hi = np.broadcast_arrays(np.asarray(lower) / sigma, np.asarray(upper) / sigma)
@@ -389,7 +395,7 @@ class GaussianBeamProfile(BeamProfile):
 
     def density_at(self, position):
         """Normalized Gaussian density [1/m] at centred positions [m]."""
-        return stats.norm.pdf(position, scale=self.sigma)
+        return _normal_density(position, self.sigma)
 
     def interval_mass(self, lower, upper):
         """Gaussian interval probability, with stable differences in the tails."""
@@ -681,6 +687,15 @@ class DistributionBeamProfile(_CenteredProfile):
             center, offset, self._finite_moment(dist.mean), peak_position, dist.ppf(0.5)
         )
         self.rms_width = self._finite_moment(dist.std)
+        # Frozen SciPy normal/uniform parameters are constant. Keep the
+        # general distribution interface for custom and other beam families.
+        family = getattr(dist, "dist", None)
+        self._normal_distribution = isinstance(family, type(stats.norm))
+        self._uniform_support = (
+            tuple(float(v) for v in dist.support())
+            if isinstance(family, type(stats.uniform)) else None
+        )
+        self._integration_points_raw = None
 
     @staticmethod
     def _central_range(dist):
@@ -785,14 +800,26 @@ class DistributionBeamProfile(_CenteredProfile):
 
     def _density_at(self, x):
         """Profile density at ``x``, relative to the sample center."""
+        if self._normal_distribution:
+            return _normal_density(
+                np.asarray(x, dtype=float) + (self.sample_center - self.centroid),
+                self.rms_width,
+            )
+        if self._uniform_support is not None:
+            lo, hi = self._uniform_support
+            position = np.asarray(x, dtype=float) + self.sample_center
+            return np.where(
+                np.isnan(position), np.nan,
+                np.where((position >= lo) & (position <= hi), 1 / (hi - lo), 0),
+            )
         return self._dist.pdf(np.asarray(x, dtype=float) + self.sample_center)
 
     def interval_mass(self, lower, upper):
         """Distribution interval probability, using survival differences in tails."""
         if getattr(getattr(self._dist, "dist", None), "name", None) == "norm":
             return _normal_interval(
-                np.asarray(lower) + self.sample_center - self._dist.mean(),
-                np.asarray(upper) + self.sample_center - self._dist.mean(),
+                np.asarray(lower) + (self.sample_center - self.centroid),
+                np.asarray(upper) + (self.sample_center - self.centroid),
                 self.rms_width,
             )
         lo, hi = np.broadcast_arrays(
@@ -801,6 +828,14 @@ class DistributionBeamProfile(_CenteredProfile):
         )
         if np.any(hi < lo):
             raise ValueError("interval upper bound must not precede lower bound")
+        if self._uniform_support is not None:
+            left, right = self._uniform_support
+            # Intersection length / full beam width, including infinite
+            # interval bounds. Subtract endpoints before normalizing to
+            # retain tiny nonzero intervals that CDF differences can lose.
+            return np.maximum(
+                0.0, np.minimum(hi, right) - np.maximum(lo, left)
+            ) / (right - left)
         def cumulative(x):
             value = self._dist.cdf(np.where(np.isfinite(x), x, 0))
             return np.where(x == -np.inf, 0, np.where(x == np.inf, 1, value))
@@ -816,16 +851,20 @@ class DistributionBeamProfile(_CenteredProfile):
     @property
     def integration_points(self):
         """Distribution quantiles/support edges [m], without cutting off tails."""
-        points = [self._dist.ppf(q) for q in
-                  [1e-6, 1e-3, .01, .1, .25, .5, .75, .9, .99, .999, 1-1e-6]]
-        for q in (0, 1):
-            try:
-                points.append(self._dist.ppf(q))
-            except ValueError:
-                # Some analytical distributions expose only open quantiles.
-                # Interior quantiles guide quadrature; they never cut tails.
-                pass
-        return np.asarray(points)[np.isfinite(points)] - self.sample_center
+        if self._integration_points_raw is None:
+            points = [self._dist.ppf(q) for q in
+                      [1e-6, 1e-3, .01, .1, .25, .5, .75, .9, .99, .999, 1-1e-6]]
+            for q in (0, 1):
+                try:
+                    points.append(self._dist.ppf(q))
+                except ValueError:
+                    # Some distributions expose only open quantiles.
+                    # Interior quantiles guide quadrature; never cut tails.
+                    pass
+            self._integration_points_raw = np.asarray(points)[np.isfinite(points)]
+        # Return a fresh centred array: changing placement or mutating a
+        # caller's array must not invalidate the cached distribution knots.
+        return self._integration_points_raw - self.sample_center
 
     def profile_curve(self, n=512):
         """Sample the distribution over its central range."""

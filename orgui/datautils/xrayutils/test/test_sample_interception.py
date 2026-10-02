@@ -134,6 +134,80 @@ def test_circle_polygon_containment_and_concavity():
     assert empty.illumination == 0
 
 
+@pytest.mark.parametrize("alpha", [1e-12, 0.03, 1.2])
+def test_circle_gaussian_matches_radial_probability(alpha):
+    """Isotropic surface Gaussian integrates to the exact disk probability."""
+    radius, sigma = 0.005, 0.002
+    fwhm_factor = np.sqrt(8 * np.log(2))
+    result = overlap(
+        SampleShape("circle", (2 * radius,)),
+        bp.gaussian_profile(sigma * np.sin(alpha) * fwhm_factor),
+        bp.gaussian_profile(sigma * fwhm_factor),
+        alpha, np.deg2rad([0, 17, 45, 89]),
+    )
+    probability = -np.expm1(-radius**2 / (2 * sigma**2))
+    np.testing.assert_allclose(result.fraction, probability, rtol=1e-10)
+    np.testing.assert_allclose(result.illumination, probability / np.sin(alpha),
+                               rtol=1e-10)
+
+
+@pytest.mark.parametrize("width", [1e-7, 0.003, 0.01])
+def test_circle_top_hat_matches_disk_strip_area(width):
+    """Beam edges cutting a circular surface retain the exact stripe area."""
+    radius, vertical_width, alpha = 0.005, 0.1, 0.03
+    half = width / 2
+    strip_area = 2 * (
+        half * np.sqrt(max(0, radius**2 - half**2))
+        + radius**2 * np.arcsin(half / radius)
+    )
+    result = overlap(
+        SampleShape("circle", (2 * radius,)),
+        bp.top_hat_profile(vertical_width), bp.top_hat_profile(width), alpha, 0,
+    )
+    expected_h = strip_area / (vertical_width * width)
+    assert result.illumination == pytest.approx(expected_h, rel=1e-9)
+    assert result.fraction == pytest.approx(np.sin(alpha) * expected_h, rel=1e-9)
+
+
+def test_displaced_circle_matches_independent_polar_surface_integral():
+    """Rotation and laboratory alignment retain the exact circular surface."""
+    radius, sigma_z, sigma_y = 0.005, 160e-6 / np.sqrt(8 * np.log(2)), 0.0012
+    offset = (0.002, -0.001)
+    zv, yh = 20e-6, -0.0003
+    alpha = np.array([np.deg2rad(0.36), 0.04, 0.04])
+    azimuth = np.array([0.17, 0.8, 1.7])
+
+    def _reference(order):
+        nodes, weights = leggauss(order)
+        radial = (nodes[:, None] + 1) / 2
+        theta = np.pi * (nodes[None, :] + 1)
+        area_weights = weights[:, None] * weights[None, :] * np.pi / 2
+        values = []
+        for incidence, angle in zip(alpha, azimuth):
+            cx = offset[0] * np.cos(angle) - offset[1] * np.sin(angle)
+            cy = offset[0] * np.sin(angle) + offset[1] * np.cos(angle)
+            x = cx + radius * radial * np.cos(theta)
+            y = cy + radius * radial * np.sin(theta)
+            density = np.exp(-0.5 * (
+                ((x * np.sin(incidence) + zv + 20e-6) / sigma_z)**2
+                + ((y + yh - 0.0005) / sigma_y)**2
+            )) / (2 * np.pi * sigma_z * sigma_y)
+            values.append(np.sum(area_weights * radius**2 * radial * density))
+        return np.asarray(values)
+
+    expected = _reference(80)
+    np.testing.assert_allclose(expected, _reference(120), rtol=1e-11)
+    result = overlap(
+        SampleShape("circle", (2 * radius,)),
+        bp.gaussian_profile(160e-6, offset=20e-6),
+        bp.gaussian_profile(sigma_y * np.sqrt(8 * np.log(2)), offset=-0.0005),
+        alpha, azimuth, offset=offset, orientation=0.4,
+        axis_vertical=zv, axis_horizontal=yh,
+    )
+    np.testing.assert_allclose(result.illumination, expected, rtol=1e-10)
+    np.testing.assert_allclose(result.fraction, np.sin(alpha) * expected, rtol=1e-10)
+
+
 @pytest.mark.parametrize(
     "vertices",
     [

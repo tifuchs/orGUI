@@ -97,3 +97,50 @@ timings, not a cross-machine guarantee. Large measured tables or polygons cost
 more; collector-side progress/cancellation is available for extraction and
 preview. The UI preview was rendered and inspected, and a focused widget test
 checks source-frame selection, radian/degree boundaries and plot API behavior.
+
+## Sequential performance follow-up (2026-10-01)
+
+Gaussian density now uses its normalized exponential directly, and Gaussian
+interval probabilities reuse the frozen mean and standard deviation. Uniform
+profiles use the exact clipped interval length divided by beam width. Other
+analytical families and custom profiles retain their general distribution
+path. Frozen distribution quantiles are cached in raw profile coordinates;
+each access returns a fresh array shifted by the current sample centre.
+Horizontal breakpoints are fetched once per frame rather than once per edge.
+
+Circular quadrature no longer uses the vertices of the display outline. It
+uses `x = cx + R sin(theta)`, with `theta = pi (t - 1/2)` and exact half-chord
+`R cos(theta)`. Its normalized Jacobian is `(pi/2) cos(theta)`; multiplying by
+the final `2 R pz_peak` scale preserves the original surface integral and H
+units. This removes the square-root endpoint singularity and cancellation
+for narrow horizontal beams. Physical profile transitions still split the
+quadrature, and integration tolerance/convergence checks remain unchanged.
+No multiprocessing or threaded frame execution was added.
+
+The paired Windows/Ryzen AI 9 HX 370 benchmark uses 37 synthetic frames,
+three warmed repetitions, Python 3.14.7, NumPy 2.5.3 and SciPy 1.18.0, with
+`rtol=1e-9`. Median application-policy elapsed time divided by frame count
+excludes image I/O, normalization and ROI integration:
+
+| Case | Before (ms/frame) | After (ms/frame) | Speedup |
+| --- | ---: | ---: | ---: |
+| Aligned square | 0.2465 | 0.0786 | 3.1x |
+| Rotating square | 28.7072 | 2.3769 | 12.1x |
+| Rotating displaced rectangle | 32.6564 | 8.0198 | 4.1x |
+| Circle | 175.4348 | 4.2098 | 41.7x |
+| Rotating concave polygon | 67.3011 | 17.7160 | 3.8x |
+| Square, 101-point measured vertical profile | 42.5613 | 4.5230 | 9.4x |
+| Square, 501-point measured vertical profile | 121.3759 | 13.3423 | 9.1x |
+| Identical rotated geometry repeated | 0.8770 | 0.1228 | 7.1x |
+
+The reproducible driver is `benchmarks/benchmark_sample_interception.py`;
+machine-specific JSON captures live in ignored `benchmarks/baselines/`.
+The correction/integration validation passed 319 tests with the optional
+Numba ROI backend enabled only for that test process, and Ruff passed.
+New independent references cover Gaussian disk probability, narrow uniform
+strips through a disk, displaced circles integrated in polar coordinates,
+profile offsets, support edges, broadcasting and tail/tiny probabilities.
+All benchmark geometries were also compared with the original HEAD source;
+the maximum relative change in H was `1e-15`.
+The package-export assertion was also brought up to date with the existing
+public `sample_interception` module.
