@@ -46,6 +46,10 @@ Other user-visible changes:
 
 Scientific and analysis additions:
 
+- Sample-shape footprint corrections handle nearly coincident integration
+  breakpoints at rotated edges, avoiding spurious quadrature failures near
+  right-angle alignment while retaining their contribution and error bound.
+
 - Reciprocal-space mapping now applies the shared beam-profile or sample-shape
   illumination/footprint correction, including angle overrides and squared
   variance scaling. Applied divisors are saved in output provenance; undefined

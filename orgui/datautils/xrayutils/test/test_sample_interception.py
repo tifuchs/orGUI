@@ -44,6 +44,27 @@ def test_rectangle_product_and_grazing_limit():
     )
 
 
+@pytest.mark.parametrize("direction", [0.0, np.inf])
+def test_near_right_angle_rectangle_retains_product_reference(direction):
+    """Roundoff-sized edge sections preserve overlap and its error estimate."""
+    shape = SampleShape("rectangle", (0.01, 0.006))
+    vertical = bp.gaussian_profile(160e-6)
+    horizontal = bp.top_hat_profile(0.02)
+    alpha = np.deg2rad(0.36)
+    angle = np.nextafter(np.pi / 2, direction)
+    result = overlap(shape, vertical, horizontal, alpha, angle)
+    # A quarter-turn exchanges length and width; this reference uses beam
+    # interval probabilities rather than the polygon section integrator.
+    expected = (
+        vertical.interval_mass(-0.003 * np.sin(alpha), 0.003 * np.sin(alpha))
+        / np.sin(alpha)
+        * horizontal.interval_mass(-0.005, 0.005)
+    )
+    assert result.illumination == pytest.approx(expected, rel=1e-12)
+    assert abs(result.illumination - expected) <= result.error
+    assert result.error < abs(expected) * 1e-9
+
+
 def _square_reference(alpha, azimuth, offset, n=100):
     """Independent tensor integration in sample coordinates, not chord sections."""
     points, weights = leggauss(n)

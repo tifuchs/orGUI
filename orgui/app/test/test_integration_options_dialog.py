@@ -1,7 +1,6 @@
 """Lifecycle regressions for the integration-correction options dialog."""
 
 from types import SimpleNamespace
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -102,9 +101,19 @@ def test_hdf5_load_and_preview_reopen(qapp, tmp_path, monkeypatch, backend):
     else:
         backend_class = BackendMatplotlib
     monkeypatch.setattr(silx.config, "DEFAULT_PLOT_BACKEND", backend)
-    config = ConfigData.from_ini(
-        str(Path(__file__).resolve().parents[3] / "examples" / "config_minimal")
+    # Installed-package tests cannot resolve examples relative to __file__.
+    config_path = tmp_path / "config.ini"
+    config_path.write_text(
+        "[Machine]\nE = 77\nSDD = 0.78\npixelsize = 172e-6\n"
+        "sizex = 1475\nsizey = 1679\ncpx = 731\ncpy = 1587.856\n"
+        "[Lattice]\na1 = 2.774\na2 = 2.774\na3 = 6.796\n"
+        "alpha1 = 90\nalpha2 = 90\nalpha3 = 120\n"
+        "refractionindex = 1.1415e-6\n"
+        "[Diffractometer]\nazimuthal_reference = 90\n"
+        "polarization_axis = 0\npolarization_factor = 1\nmu = 0.1\n",
+        encoding="utf-8",
     )
+    config = ConfigData.from_ini(config_path)
     config.corrections = CorrectionState(
         sample_length_m=0.01, sample_width_m=0.01,
         beam_shape_analytical=True, beam_shape_name="Gaussian",

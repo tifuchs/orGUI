@@ -320,6 +320,15 @@ def _frame_overlap(
     points = np.unique([0.0, 1.0, *points])
     total = error = 0.0
     for a, b in zip(points[:-1], points[1:]):
+        if b - a <= 8 * np.finfo(float).eps:
+            # Rotated edges can produce knots only a few ULPs apart in the
+            # unit interval. QUADPACK cannot resolve their interior nodes.
+            # Density/peak and transverse mass are at most one; the largest
+            # section Jacobian is pi/2 (circle). Retain the interval's area
+            # and bound its entire contribution as error, in normalized units.
+            total += integrand((a + b) / 2) * (b - a)
+            error += (b - a) * (np.pi / 2 if shape.kind == "circle" else 1.0)
+            continue
         value = quad(
             integrand,
             a,
