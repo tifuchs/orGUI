@@ -655,6 +655,13 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
                 use_polarization=True,
                 normalize_exposure=False,
                 monitor_corrections=("monitor", "ring"),
+                use_footprint=True,
+                shared_frame_illumination=True,
+                sample_length_m=0.012,
+                sample_width_m=0.006,
+                beam_shape_analytical=True,
+                beam_shape_name="Top hat",
+                beam_shape_values=(160.0,),
             )
         ),
         grids=[
@@ -683,9 +690,13 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
         "solid_angle": False,
         "polarization": False,
     }
+    footprint = Mock()
     dialog.orgui.scanSelector = SimpleNamespace(
         get_integration_options=lambda: dict(shared_options),
         set_integration_options=lambda values: shared_options.update(values),
+        correctionsDialog=SimpleNamespace(
+            footprintOptions_shared=lambda: footprint, refresh=Mock(),
+        ),
     )
     monkeypatch.setattr(dialog, "_show_execution_settings", Mock())
 
@@ -704,7 +715,12 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
         "mask": True,
         "solid_angle": True,
         "polarization": True,
+        "footprint": True,
     }
+    footprint.setSampleLength.assert_called_once_with(0.012)
+    footprint.setSampleWidth.assert_called_once_with(0.006)
+    assert footprint.setSettings.call_args.args[0]["shape"] == "Top hat"
+    assert dialog.orgui.ctr_correction_state.shared_frame_illumination
     assert not dialog.orgui.ctr_correction_state.normalize_exposure
     assert dialog.orgui.ctr_correction_state.monitor_corrections == (
         "monitor",

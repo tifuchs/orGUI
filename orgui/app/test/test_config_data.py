@@ -279,6 +279,7 @@ def test_from_gui_captures_the_footprint_dialogs_inputs(qapp):
         ),
     )
     unopened = ConfigData.from_gui(unopened_gui)
+    assert unopened.corrections.shared_frame_illumination
     assert unopened.corrections.sample_length_m is None
     assert unopened.corrections.sample_width_m is None
     assert unopened.corrections.beam_flux_density is None

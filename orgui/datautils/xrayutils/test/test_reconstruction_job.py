@@ -11,7 +11,7 @@ import h5py
 import numpy as np
 import pytest
 
-from orgui.app.config_data import ConfigData
+from orgui.app.config_data import ConfigData, CorrectionState
 from orgui.app.database import config_data_to_json
 from orgui.backend.scans import ScanReference, SimulationScan
 from orgui.datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
@@ -109,6 +109,68 @@ def _two_frame_job(tmp_path, output_name):
         frame_batch=1,
     )
     return scan, job
+
+
+@pytest.mark.parametrize("cluster", [False, True])
+def test_saved_map_illumination_scales_output_and_survives_resume(tmp_path, cluster):
+    """Local/cluster output applies H once, preserves coverage and saves factors."""
+    results = []
+    h = 0.01 / 160e-6
+    for enabled in (False, True):
+        root = tmp_path / str(enabled)
+        root.mkdir()
+        scan, job = _two_frame_job(root, "map.h5")
+        scan.mu = 0.36
+        job.scan_reference = ScanReference.from_scan(scan).to_dict()
+        job.source_fingerprint_sha256 = sha256(
+            json.dumps(job.scan_reference, sort_keys=True, separators=(",", ":"))
+            .encode()
+        ).hexdigest()
+        config = _config()
+        config.corrections = CorrectionState(
+            shared_frame_normalization=True, use_normalization=False,
+            shared_frame_illumination=enabled, use_footprint=True,
+            total_flux_calibrated=False, horizontal_interception="full",
+            sample_length_m=0.01, beam_shape_analytical=True,
+            beam_shape_name="Top hat", beam_shape_values=(160.0,),
+        )
+        job.config = config_data_to_json(config)
+        if not enabled:
+            # An actual old descriptor has no illumination opt-in at all.
+            del job.config["orgui"]["integration_corrections"]["footprint"][
+                "shared_frame_illumination"
+            ]
+        path = root / "job.json"
+        if cluster:
+            job.checkpoint_plan = {}
+            job.cluster_settings = {"array_task_count": 2}
+        write_job(job, path)
+        if cluster:
+            for index in range(2):
+                run_cluster_map_task(path, index, total_tasks=2, cpus=1,
+                                     memory_bytes=64 * 1024**2)
+            result = run_cluster_finalize(path, total_tasks=2, cpus=1,
+                                          memory_bytes=64 * 1024**2)
+        else:
+            result = run_job(path)
+            assert run_job(path) == result
+        assert result["status"] == "complete"
+        with h5py.File(result["output_path"], "r") as file:
+            process = file["entry/reconstruction"]
+            group = process["results/q_lab"]
+            results.append({name: group[name][()] for name in (
+                "intensity", "variance", "weight", "contributors",
+            )})
+            provenance = json.loads(process["provenance_json"][()])
+            if enabled:
+                assert provenance["illumination"]["divisor"] == pytest.approx([h, h])
+                assert provenance["illumination"]["convention"] == "total_flux_H"
+            else:
+                assert "illumination" not in provenance
+    for name, divisor in (("intensity", h), ("variance", h**2)):
+        np.testing.assert_allclose(results[1][name], results[0][name] / divisor)
+    for name in ("weight", "contributors"):
+        np.testing.assert_array_equal(results[1][name], results[0][name])
 
 
 def test_central_job_runs_resumes_and_cleans_verified_scratch(

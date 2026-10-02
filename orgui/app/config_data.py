@@ -94,6 +94,9 @@ class CorrectionState:
     # Older prepared reconstruction jobs ignored use_normalization and the
     # primary-monitor contract. Missing means their original legacy behavior.
     shared_frame_normalization: bool = False
+    # Missing in older prepared maps, which never applied illumination.
+    # New GUI snapshots opt in so resuming those maps preserves their scale.
+    shared_frame_illumination: bool = False
     excluded_frames: tuple[int, ...] = ()
     mask_asset: str | None = None
     background_asset: str | None = None
@@ -530,6 +533,7 @@ def corrections_to_nxdict(state):
         }),
         "footprint": _nx_group(
             {
+                "shared_frame_illumination": state.shared_frame_illumination,
                 "sample_length": state.sample_length_m,
                 "sample_width": state.sample_width_m,
                 "beam_flux_density": state.beam_flux_density,
@@ -674,6 +678,9 @@ def corrections_from_nxdict(nxdict):
         if key in assets:
             values[name] = str(assets[key])
     footprint = _read_group(nxdict, "footprint")
+    values["shared_frame_illumination"] = bool(
+        footprint.get("shared_frame_illumination", False)
+    )
     for name, key in (
         ("sample_length_m", "sample_length"),
         ("sample_width_m", "sample_width"),
@@ -1249,6 +1256,7 @@ class ConfigData:
                     )
                 ),
                 shared_frame_normalization=True,
+                shared_frame_illumination=True,
                 excluded_frames=tuple(
                     sorted(
                         int(value)

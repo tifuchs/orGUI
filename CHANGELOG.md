@@ -46,6 +46,12 @@ Other user-visible changes:
 
 Scientific and analysis additions:
 
+- Reciprocal-space mapping now applies the shared beam-profile or sample-shape
+  illumination/footprint correction, including angle overrides and squared
+  variance scaling. Applied divisors are saved in output provenance; undefined
+  illumination contributes no pixels. Older prepared jobs keep their original
+  scale when resumed; newly prepared jobs honor the footprint switch.
+
 - **HKL maps can now be reduced to CTR structure factors through
   `corrections.measurement.reciprocal_map_structure_factor_squared`.** The
   scripting API integrates voxel means across the rod and averages over its

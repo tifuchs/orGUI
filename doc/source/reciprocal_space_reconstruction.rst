@@ -120,7 +120,7 @@ settings are refreshed.
 ``User note``
    Optional free text stored in the job descriptor and final provenance.
 
-``Frame normalization``
+``Normalization and illumination``
    Opens the shared ``Corrections and normalization`` dialog. Its frame
    normalization switch and monitor convention apply to both ROI/CTR
    integration and new reconstruction jobs. A rate monitor is multiplied by
@@ -128,6 +128,19 @@ settings are refreshed.
    and is used once. Imported configurations retaining the legacy convention
    still use exposure times the listed monitor product. Prepared jobs retain
    their saved correction selections when resumed.
+
+   New jobs also apply the shared footprint switch, using the selected vertical
+   beam profile or two-dimensional sample-shape interception model. With the
+   total-flux convention, each frame is divided by the dimensionless illumination
+   divisor :math:`H=f_{\mathrm{hit}}/\sin\alpha`; legacy settings retain their
+   numerical active-area divisor. Variance is divided by the divisor squared.
+   Automatic incidence uses scan mu readbacks in degrees or fixed configuration
+   mu in radians; automatic shape azimuth uses acquisition omega = -theta.
+   The sample-shape editor's incidence and azimuth overrides are honored.
+   Undefined illumination masks the frame's pixels, so they contribute no weight
+   or intensity. Applied divisors and shape-angle provenance are saved with the
+   result. Older prepared jobs without ``shared_frame_illumination`` retain
+   their original scale on resume; prepare a new job to apply illumination.
 
 Output Grid Parameters
 ----------------------
@@ -1005,13 +1018,16 @@ solid angle, pass ``reference_solid_angle=1``.
 
 With legacy exposure/monitor normalization, :math:`S=\Phi_0 A`: pass the same
 flux density and illuminated active area as for the angular integrations.
-With calibrated total-photon normalization :math:`Q`, :math:`S=H`: pass the
-dimensionless illumination divisor and leave flux density and active area at
-one. Reconstruction normalizes by :math:`Q`, but does not currently apply
-:math:`H` itself. A constant :math:`H` can be divided out here; if illumination
-varies between frames, it must be corrected before voxel averaging.
+With calibrated total-photon normalization :math:`Q` and the footprint switch
+enabled in a newly prepared job, reconstruction already divides each frame by
+:math:`H` before voxel averaging. Use :math:`S=1`: leave the scripting helper's
+``illumination_divisor``, flux density and active area at one. Applying
+:math:`H` again would double-correct the map. For older prepared jobs or maps
+with the footprint switch disabled, :math:`S=H`: a constant illumination
+divisor can be applied here. If illumination varies between frames, prepare
+a new job with the footprint correction enabled instead.
 
-For example, for a map normalized by total photons:
+For example, for a new map normalized by total photons and illumination:
 
 .. code-block:: python
 
@@ -1026,7 +1042,7 @@ For example, for a map normalized by total photons:
            intensity, (dh, dk, dl),  # saved grid widths in r.l.u.
            unitcell_area=surface_cell_area_angstrom2,
            reference_solid_angle=pixel1_m * pixel2_m / poni_distance_m**2,
-           illumination_divisor=H,
+           # Illumination H was already applied to each source frame.
        )
 
 The integration measure is :math:`\Delta h\,\Delta k\,\Delta l`, and the rod

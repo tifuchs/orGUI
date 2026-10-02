@@ -21,14 +21,15 @@ import warnings
 import h5py
 import numpy as np
 
-from .app.config_data import ConfigData
+from .app.config_data import ConfigData, _json_value
 from .app.database import FILTERS, config_data_from_json, config_data_to_json
 from .app.integration_corrections import (
     _explicit_total_flux_contract,
     frame_correction_policy,
 )
 from .app.mask_config import create_pixel_repair_plan
-from .backend.scans import ScanReference
+from .app.sample_interception_config import profile_from_settings, vertical_settings
+from .backend.scans import ScanReference, _alpha_centers
 from .datautils.xrayutils.corrections import detector as detector_corrections
 from .datautils.xrayutils.reconstruction import (
     _CHECKPOINT_BYTES_PER_ROW,
@@ -1101,21 +1102,18 @@ def prepare_job(
         _GridSpec(**values)
     config = ConfigData.from_gui(gui)
     shared_normalization = config.corrections.shared_frame_normalization
-    if (
-        shared_normalization
-        and config.corrections.use_normalization
-        and _explicit_total_flux_contract(config.corrections)
-    ):
-        frame_correction_policy(
-            gui.fscan,
-            config.corrections,
-            len(gui.fscan),
-            use_normalization=True,
-            use_illumination=False,
+    policy = _reconstruction_frame_policy(config, gui.fscan)
+    if policy is not None and policy.interception_provenance:
+        # Freeze resolved alignment and embedded horizontal measured data.
+        config.corrections.sample_interception = json.loads(
+            policy.interception_provenance["sample_interception_json"]
         )
-    elif (
-        not shared_normalization
-        or config.corrections.use_normalization
+    if (
+        (not shared_normalization or config.corrections.use_normalization)
+        and not (
+            shared_normalization
+            and _explicit_total_flux_contract(config.corrections)
+        )
     ):
         for monitor in config.corrections.monitor_corrections:
             if not hasattr(gui.fscan, monitor):
@@ -1268,6 +1266,44 @@ def _correction_extension():
         return None
 
 
+def _reconstruction_frame_policy(config, scan):
+    """Resolve shared frame factors from frozen settings and acquisition angles.
+
+    Scan incidence is degrees; fixed config incidence is radians. Beam profile
+    display widths are micrometres and sample length is metres. Old prepared
+    jobs without the illumination opt-in keep their original intensity scale.
+    """
+    correction = config.corrections
+    normalize = (
+        correction.shared_frame_normalization and correction.use_normalization
+        and _explicit_total_flux_contract(correction)
+    )
+    illuminate = (
+        correction.shared_frame_illumination and correction.use_footprint
+    )
+    if not (normalize or illuminate):
+        return None
+    inputs = {}
+    if illuminate:
+        inputs = {
+            "alpha": _alpha_centers(scan, config, len(scan)),
+            "beam_profile": profile_from_settings(vertical_settings(correction)),
+            "sample_length": correction.sample_length_m,
+        }
+    policy = frame_correction_policy(
+        scan, correction, len(scan), use_normalization=bool(normalize),
+        use_illumination=bool(illuminate), **inputs,
+    )
+    if illuminate:
+        divisor = np.broadcast_to(
+            np.asarray(policy.illumination_divisor, dtype=np.float64), (len(scan),)
+        )
+        if (np.any(divisor <= 0) or np.any(np.isinf(divisor))
+                or not np.any(np.isfinite(divisor))):
+            raise ValueError("Illumination divisor must be positive where defined")
+    return policy
+
+
 def _correction_pipeline(config, scan, assets, provenance):
     correction = config.corrections
     normalize = (
@@ -1280,17 +1316,27 @@ def _correction_pipeline(config, scan, assets, provenance):
         and _explicit_total_flux_contract(correction)
     )
     frame_divisor = None
+    policy = _reconstruction_frame_policy(config, scan)
+    illumination_divisor = None
     if total_flux_normalization:
-        policy = frame_correction_policy(
-            scan,
-            correction,
-            len(scan),
-            use_normalization=True,
-            use_illumination=False,
-        )
         frame_divisor = policy.normalization_divisor
         provenance["normalization_convention"] = policy.scale_convention
         provenance["normalization_unit"] = policy.normalization_unit
+    if policy is not None and policy.illumination_status == "applied":
+        illumination_divisor = np.broadcast_to(
+            np.asarray(policy.illumination_divisor, dtype=np.float64), (len(scan),)
+        )
+        provenance["illumination"] = _json_value({
+            "status": policy.illumination_status,
+            "convention": policy.illumination_convention,
+            "divisor": illumination_divisor,
+            "intercepted_fraction": policy.intercepted_fraction,
+            "vertical_intercepted_fraction": policy.vertical_intercepted_fraction,
+            "horizontal_intercepted_fraction": (
+                policy.horizontal_intercepted_fraction
+            ),
+            **policy.interception_provenance,
+        })
     detector = config.detector
     background = (
         np.asarray(assets["background"], dtype=np.float64)
@@ -1390,7 +1436,7 @@ def _correction_pipeline(config, scan, assets, provenance):
             else "deterministic-no-uncertainty"
         )
 
-    def scalar_factors(frame_index):
+    def normalization_factors(frame_index):
         """This frame's exposure and monitor factors, in application order.
 
         :returns:
@@ -1469,6 +1515,14 @@ def _correction_pipeline(config, scan, assets, provenance):
             factor = 1.0 / value
             found.append((factor, factor**2, factor_variance, f"monitor:{name}"))
         return found
+
+    def scalar_factors(frame_index):
+        """Apply illumination after normalization and its propagated variance."""
+        factors = normalization_factors(frame_index)
+        if illumination_divisor is not None:
+            factor = 1.0 / float(illumination_divisor[frame_index])
+            factors.append((factor, factor**2, None, "illumination"))
+        return factors
 
     def apply_scaling(intensity, variance, mask, factors):
         """Scale, propagate and mask off non-finite pixels.

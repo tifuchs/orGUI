@@ -39,6 +39,7 @@ from ..reconstruction_selection import (
 )
 from .config_data import ConfigData, CorrectionState
 from .database import FILTERS
+from .sample_interception_config import vertical_settings
 from .HDF5SettingsDialog import (
     HDF5SettingsDialog,
     compression_filter_name,
@@ -707,12 +708,13 @@ class ReconstructionDialog(qt.QDialog):
         )
         layout.addWidget(metadata_group)
 
-        normalization_group = qt.QGroupBox("Frame normalization")
+        normalization_group = qt.QGroupBox("Normalization and illumination")
         normalization_form = qt.QVBoxLayout(normalization_group)
         normalization_form.addWidget(qt.QLabel(
             "Reconstruction uses the frame normalization selected for "
             "integration, including the primary monitor or legacy monitor "
-            "product."
+            "product, and the selected beam-profile or sample-shape footprint "
+            "correction."
         ))
         self.normalization_settings = qt.QPushButton(
             "Corrections and normalization ..."
@@ -2552,25 +2554,36 @@ class ReconstructionDialog(qt.QDialog):
             if state is None:
                 state = CorrectionState()
                 self.orgui.ctr_correction_state = state
-            state.normalize_exposure = corrections.normalize_exposure
-            state.monitor_corrections = corrections.monitor_corrections
-            for name in (
-                "total_incident_flux", "total_flux_calibrated",
-                "primary_monitor", "primary_monitor_kind",
-                "primary_monitor_unit", "monitor_reference_reading",
-                "monitor_reference_exposure_s",
-            ):
-                setattr(state, name, getattr(corrections, name))
+            state.__dict__.update(
+                CorrectionState.from_dict(corrections.to_dict()).__dict__
+            )
             if corrections.use_normalization is not None:
                 self._set_integration_option(
                     "normalization", corrections.use_normalization
                 )
+            if corrections.use_footprint is not None:
+                self._set_integration_option("footprint", corrections.use_footprint)
             selector = getattr(self.orgui, "scanSelector", None)
-            refresh = getattr(
-                getattr(selector, "correctionsDialog", None), "refresh", None
-            )
+            corrections_dialog = getattr(selector, "correctionsDialog", None)
+            refresh = getattr(corrections_dialog, "refresh", None)
             if refresh is not None:
+                # Restore the scale mode before footprint edits emit signals.
                 refresh()
+            if corrections_dialog is not None and (
+                corrections.sample_length_m is not None
+                or corrections.sample_width_m is not None
+                or corrections.beam_shape_name is not None
+                or corrections.beam_profile_file is not None
+                or corrections.sample_interception
+            ):
+                footprint = corrections_dialog.footprintOptions_shared()
+                if corrections.sample_length_m is not None:
+                    footprint.setSampleLength(corrections.sample_length_m)
+                if corrections.sample_width_m is not None:
+                    footprint.setSampleWidth(corrections.sample_width_m)
+                settings = vertical_settings(corrections)
+                settings["sample_interception"] = corrections.sample_interception
+                footprint.setSettings(settings)
             self.checkpoint_count.setValue(job.checkpoint_count)
             self._set_optional_value(
                 self.thread_override, job.thread_override
