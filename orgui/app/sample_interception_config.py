@@ -8,6 +8,9 @@ The resulting rotation-axis alignment is fixed in laboratory beam coordinates.
 
 import copy
 import logging
+from hashlib import sha256
+from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 
@@ -59,11 +62,48 @@ def orientation_for_parallel_reading(settings, reading):
             - _alignment_axis_offset(settings))
 
 
-def profile_from_settings(settings):
+def _profile_file_data(settings, base_path=None):
+    path = settings.get("profile_file")
+    if not path:
+        raise ValueError("a measured beam requires embedded data or a profile file")
+    path = Path(path)
+    base = settings.get("profile_base")
+    if base is not None and not path.is_absolute():
+        base = Path(base)
+        if not base.is_absolute():
+            base = Path(base_path or Path.cwd()) / base
+        path = base / path
+    try:
+        content = path.read_bytes()
+    except OSError as error:
+        raise ValueError(
+            f"Cannot read measured beam profile {path}: {error}"
+        ) from error
+    expected = settings.get("profile_sha256")
+    if expected is not None and sha256(content).hexdigest() != expected:
+        raise ValueError(f"Measured beam profile content changed: {path}")
+    return content
+
+
+def profile_file_identity(settings, *, base_path=None):
+    """Return SHA-256 of a measured profile, verifying any saved identity.
+
+    :param dict settings: File settings with optional ``profile_base``.
+    :param base_path: Directory relative bases resolve against (job JSON parent).
+        Without an explicit base, historical working-directory resolution stays.
+    :raises ValueError: If the source is missing or its saved identity differs.
+    """
+    return sha256(_profile_file_data(settings, base_path)).hexdigest()
+
+
+def profile_from_settings(settings, *, base_path=None):
     """Build a normalized profile from dialog-unit settings and embedded data.
 
     Widths/offsets are micrometres; dimensionless shape values stay dimensionless.
     Embedded coordinates are metres relative to the configured sample centre.
+    ``profile_base`` resolves relative to ``base_path`` (the job JSON parent),
+    or the working directory outside a job. ``profile_sha256`` checks the exact
+    bytes consumed. Embedded data take precedence over display-only filenames.
     """
     center = settings.get("profile_center", "centroid")
     offset = float(settings.get("profile_offset", 0) or 0) * 1e-6
@@ -93,14 +133,11 @@ def profile_from_settings(settings):
         # that exact origin instead of centering the same data a second time.
         profile = bp.MeasuredBeamProfile(positions, density)
         return bp.MeasuredBeamProfile(positions, density, offset=-profile.sample_center)
-    path = settings.get("profile_file")
-    if not path:
-        raise ValueError("a measured beam requires embedded data or a profile file")
     unit = settings.get("profile_unit", "mm")
     if unit not in {"mm", "microns", "micron", "um"}:
         raise ValueError("profile coordinates must be mm or micrometres")
     positions, density = bp.read_profile_file(
-        path,
+        BytesIO(_profile_file_data(settings, base_path)),
         z_scale=1e-3 if unit == "mm" else 1e-6,
         height_scan="scan" in settings.get("profile_content", "").lower(),
     )
@@ -114,6 +151,9 @@ def vertical_settings(state):
         "shape": state.beam_shape_name,
         "shape_values": list(state.beam_shape_values),
         "profile_file": state.beam_profile_file,
+        "profile_base": getattr(state, "beam_profile_base", None),
+        "profile_sha256": getattr(state, "beam_profile_sha256", None),
+        "profile_storage": getattr(state, "beam_profile_storage", None),
         "profile_content": state.beam_profile_content,
         "profile_unit": state.beam_profile_unit,
         "profile_center": state.beam_profile_center,

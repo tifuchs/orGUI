@@ -9,6 +9,8 @@ Unreleased (2026-07-19)
 
 Other user-visible changes:
 
+- Prepared reciprocal-space maps preserve custom azimuth counters and embed measured footprint profiles, including their saved alignment. Explicit file-backed profiles support a relative base and content checksum. Preview and saved-job status distinguish requested, resolved and recorded illumination and explain why older jobs retain their original scale.
+
 - Sample-shape footprint settings now follow shape, azimuth and angular alignment. Centred rectangles and polygons use one parallel omega reading; circles need no orientation. A collapsible Off-centre sample section retains the separate placement references and opens when nonzero offsets are loaded. Incidence and azimuth default to acquisition/config angles named explicitly as mu and omega = -th in the dialog, with counter or fixed-value overrides behind a manual override button. Existing angle representations and numerical conventions are preserved; the surface-normal confirmation checkbox is removed. Applied footprint angles and alignment references are saved for correction replacement.
 
 - Correction dialogs reopen with their controls intact when OpenGL plotting is enabled, while retaining the selected plotting backend. Loading HDF5 calibrations also strips nested NeXus attributes before passing settings to pyFAI, avoiding the spurious detector-configuration error.

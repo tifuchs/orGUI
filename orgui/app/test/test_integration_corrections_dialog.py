@@ -13,6 +13,7 @@ showing it, so no user interaction is involved.
 
 import numpy as np
 import pytest
+from hashlib import sha256
 from silx.gui import qt
 
 from orgui.app.peak1Dintegr import BEAM_SHAPES, IntegrationCorrectionsDialog
@@ -667,7 +668,9 @@ def test_invalid_geometry_stays_in_editor_until_fixed(dialog):
     assert dialog.result() == qt.QDialog.Accepted
 
 
-def test_cancel_keeps_embedded_vertical_profile_after_file_relocation(dialog):
+def test_cancel_keeps_embedded_vertical_profile_after_file_relocation(
+    dialog, monkeypatch,
+):
     """Closing the shared editor cannot discard a saved measured beam table."""
     from orgui.app.sample_interception_config import embed_profile
 
@@ -678,12 +681,37 @@ def test_cancel_keeps_embedded_vertical_profile_after_file_relocation(dialog):
         "analytical": False, "profile_file": "not-present.dat",
         "profile_center": "peak", "profile_offset": 30,
     }, profile)
+    monkeypatch.setattr(
+        dialog, "loadProfile", lambda: pytest.fail("read original path"),
+    )
     dialog.setSettings(saved_profile)
     dialog.show()
     dialog.profileOffset.setValue(90)
     dialog.reject()
     np.testing.assert_allclose(dialog.measuredProfile().z, profile.z)
     np.testing.assert_allclose(dialog.measuredProfile().density, profile.density)
+
+
+def test_explicit_profile_reference_survives_dialog_edits(dialog, tmp_path):
+    """Relative references use the saved root and keep their content identity."""
+    path = tmp_path / "profile.dat"
+    path.write_text("-0.1 1\n0 4\n0.1 1\n")
+    identity = sha256(path.read_bytes()).hexdigest()
+    dialog.setSettings({
+        "analytical": False, "profile_file": "profile.dat", "profile_base": ".",
+        "profile_root": str(tmp_path), "profile_sha256": identity,
+        "profile_storage": "file", "profile_unit": "mm",
+    })
+    assert dialog.measuredProfile().z.size == 3
+    dialog.setSettings({"profile_offset": 23})
+    settings = dialog.settings()
+    assert settings["profile_base"] == "."
+    assert settings["profile_sha256"] == identity
+    assert settings["profile_storage"] == "file"
+    path.write_text("-0.1 1\n0.1 1\n")
+    assert not dialog.loadProfile()
+    with pytest.raises(ValueError, match="No beam profile loaded"):
+        dialog.measuredProfile()
 
 
 def test_reopening_editor_refreshes_newly_loaded_source_frames(qapp):

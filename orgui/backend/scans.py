@@ -313,6 +313,10 @@ def _frame_values(values, count, name):
 def sample_azimuth(scan, settings, count, *, omega=None):
     """Resolve the sample azimuth from acquisition metadata, in radians.
 
+    Prepared jobs may include ``azimuth_snapshot`` with raw values in the
+    selected source unit and ordered frame indices. It takes precedence over
+    a reopened counter and must match the source and scan.
+
     :param scan: Scan with scalar/per-frame motor readbacks in the declared unit.
     :param dict settings: ``azimuth_source`` (``auto``, motor name or ``fixed``),
         ``azimuth_unit`` (``deg``/``rad``), or ``fixed_azimuth_deg``.
@@ -323,6 +327,32 @@ def sample_azimuth(scan, settings, count, *, omega=None):
     :raises ValueError: For a missing source, wrong unit or mismatched frame count.
     """
     source = settings.get("azimuth_source", "auto")
+    snapshot = settings.get("azimuth_snapshot")
+    if snapshot is not None:
+        if not isinstance(snapshot, dict):
+            raise ValueError("Saved sample azimuth must be a versioned snapshot")
+        unit = settings.get("azimuth_unit", "deg")
+        start = int(getattr(scan, "offsetindex", 0))
+        if (snapshot.get("version") != 1
+                or snapshot.get("source") != source
+                or snapshot.get("unit") != unit
+                or snapshot.get("frame_count") != count
+                or snapshot.get("frame_indices") != list(range(start, start + count))):
+            raise ValueError(
+                "Saved sample azimuth does not match its source, unit or frame "
+                "ordering; prepare a new job from the selected scan"
+            )
+        identity = getattr(scan, "_orgui_scan_reference_sha256", None)
+        if identity is not None and snapshot.get("scan_reference_sha256") != identity:
+            raise ValueError(
+                "Saved sample azimuth belongs to a different scan reference"
+            )
+        values = np.asarray(snapshot.get("values", ()), dtype=np.float64)
+        if values.shape != (count,):
+            raise ValueError("Saved sample azimuth must contain one value per frame")
+        if unit not in {"deg", "rad"}:
+            raise ValueError("sample azimuth unit must be deg or rad")
+        return np.deg2rad(values) if unit == "deg" else values
     if source == "auto":
         if omega is not None:
             return _frame_values(omega, count, "sample azimuth")
@@ -338,7 +368,11 @@ def sample_azimuth(scan, settings, count, *, omega=None):
             _frame_values(settings["fixed_azimuth_deg"], count, "azimuth")
         )
     if not source or not hasattr(scan, source):
-        raise ValueError(f"scan has no configured sample azimuth source {source!r}")
+        raise ValueError(
+            f"scan has no configured sample azimuth source {source!r}. "
+            "Supply the selected scalar/per-frame counter on the loaded scan "
+            "or recreate it in its backend, then prepare a new job"
+        )
     unit = settings.get("azimuth_unit", "deg")
     values = _frame_values(getattr(scan, source), count, "sample azimuth")
     if unit == "deg":

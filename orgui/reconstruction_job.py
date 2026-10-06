@@ -28,8 +28,10 @@ from .app.integration_corrections import (
     frame_correction_policy,
 )
 from .app.mask_config import create_pixel_repair_plan
-from .app.sample_interception_config import profile_from_settings, vertical_settings
-from .backend.scans import ScanReference, _alpha_centers
+from .app.sample_interception_config import (
+    profile_file_identity, profile_from_settings, vertical_settings,
+)
+from .backend.scans import ScanReference, _alpha_centers, _frame_values
 from .datautils.xrayutils.corrections import detector as detector_corrections
 from .datautils.xrayutils.reconstruction import (
     _CHECKPOINT_BYTES_PER_ROW,
@@ -283,12 +285,16 @@ class ReconstructionJob:
     @property
     def config_data(self):
         """Return the central configuration snapshot."""
-        return config_data_from_json(self.config)
+        config = config_data_from_json(self.config)
+        config.corrections._profile_root = getattr(self, "_job_directory", None)
+        return config
 
     @property
     def scan(self):
         """Reopen and verify the referenced scan."""
-        return ScanReference.from_dict(self.scan_reference).open()
+        scan = ScanReference.from_dict(self.scan_reference).open()
+        scan._orgui_scan_reference_sha256 = self.source_fingerprint_sha256
+        return scan
 
     def internal_spec(self):
         """Build the internal native/storage specification."""
@@ -317,14 +323,17 @@ class ReconstructionJob:
 
 def read_job(path):
     """Read a reconstruction job JSON file."""
-    return ReconstructionJob.from_dict(
+    job = ReconstructionJob.from_dict(
         json.loads(Path(path).read_text(encoding="utf-8"))
     )
+    job._job_directory = Path(path).absolute().parent
+    return job
 
 
 def write_job(job, path):
     """Atomically write a reconstruction job JSON file."""
     _atomic_json(path, job.to_dict())
+    job._job_directory = Path(path).absolute().parent
     return str(Path(path).absolute())
 
 
@@ -1054,7 +1063,15 @@ def prepare_job(
     checkpoint_count=10,
     cluster_settings=None,
 ):
-    """Freeze current orGUI state into an immutable reconstruction job."""
+    """Freeze current orGUI state into an immutable reconstruction job.
+
+    Explicit footprint azimuth counters are frozen in their declared deg/rad
+    unit and loaded frame order; optional ``azimuth_derivation`` records their
+    origin. Measured vertical profiles embed normalized, aligned SI data by
+    default. ``beam_profile_storage='file'`` instead freezes a SHA-256 identity;
+    an explicit relative ``beam_profile_base`` resolves beside ``job_path``.
+    Re-preparation requires the selected source on the current live scan.
+    """
     if gui.fscan is None:
         raise RuntimeError("Load a scan before preparing reconstruction")
     if accuracy not in ACCURACY_DEPTHS:
@@ -1101,6 +1118,61 @@ def prepare_job(
     for values in grid_values:
         _GridSpec(**values)
     config = ConfigData.from_gui(gui)
+    correction = config.corrections
+    # Preparation always resolves from the selected live scan. A snapshot from
+    # an opened job must not silently supply another scan's derived angles.
+    correction.sample_interception.pop("azimuth_snapshot", None)
+    if correction.shared_frame_illumination and correction.use_footprint:
+        settings = vertical_settings(correction)
+        if not settings.get("analytical", True):
+            storage = settings.get("profile_storage", "embedded")
+            if storage not in {"embedded", "file"}:
+                raise ValueError("Beam profile storage must be embedded or file")
+            if storage == "file":
+                correction.beam_profile_sha256 = profile_file_identity(
+                    settings, base_path=Path(job_path).absolute().parent
+                )
+                correction.beam_profile_positions_m = ()
+                correction.beam_profile_density_per_m = ()
+                settings = vertical_settings(correction)
+            profile = profile_from_settings(
+                settings, base_path=Path(job_path).absolute().parent
+            )
+            if storage == "embedded":
+                positions, density = profile.profile_curve()
+                correction.beam_profile_positions_m = tuple(positions)
+                correction.beam_profile_density_per_m = tuple(density)
+    correction._profile_root = Path(job_path).absolute().parent
+    shape = correction.sample_interception
+    source = shape.get("azimuth_source", "auto")
+    reference = None
+    if (correction.shared_frame_illumination and correction.use_footprint
+            and shape.get("enabled", False) and source not in {"auto", "fixed"}):
+        # Read derived/guarded attributes once. The policy and saved job must
+        # consume the same values even if a property recalculates on access.
+        try:
+            values = _frame_values(getattr(gui.fscan, source), len(gui.fscan), source)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(
+                f"Cannot preserve sample azimuth source {source!r}: {error}. "
+                "Supply a scalar or one ordered value per loaded frame on the "
+                "scan (or recreate it in the backend), then prepare a new job"
+            ) from error
+        reference = ScanReference.from_scan(gui.fscan)
+        identity = sha256(json.dumps(
+            reference.to_dict(), sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest()
+        start = int(getattr(gui.fscan, "offsetindex", 0))
+        shape["azimuth_snapshot"] = {
+            "version": 1, "source": source,
+            "unit": shape.get("azimuth_unit", "deg"),
+            "values": [float(v) if np.isfinite(v) else None for v in values],
+            "frame_count": len(gui.fscan),
+            "frame_indices": list(range(start, start + len(gui.fscan))),
+            "scan_reference_sha256": identity,
+            "derivation": shape.get("azimuth_derivation", "not supplied"),
+            "method": "selected_scan_attribute_v1",
+        }
     shared_normalization = config.corrections.shared_frame_normalization
     policy = _reconstruction_frame_policy(config, gui.fscan)
     if policy is not None and policy.interception_provenance:
@@ -1120,7 +1192,7 @@ def prepare_job(
                 raise ValueError(
                     f"Active scan has no monitor counter named {monitor!r}"
                 )
-    reference = ScanReference.from_scan(gui.fscan)
+    reference = reference or ScanReference.from_scan(gui.fscan)
     scratch = Path(scratch_path).absolute()
     for component in (scratch, *scratch.parents):
         if component.exists() and not component.is_dir():
@@ -1287,7 +1359,10 @@ def _reconstruction_frame_policy(config, scan):
     if illuminate:
         inputs = {
             "alpha": _alpha_centers(scan, config, len(scan)),
-            "beam_profile": profile_from_settings(vertical_settings(correction)),
+            "beam_profile": profile_from_settings(
+                vertical_settings(correction),
+                base_path=getattr(correction, "_profile_root", None),
+            ),
             "sample_length": correction.sample_length_m,
         }
     policy = frame_correction_policy(
@@ -2185,6 +2260,53 @@ def _cluster_status_counts(job, *, total_tasks):
     return total_checkpoints, completed_checkpoints
 
 
+def illumination_summary(config, scan=None, *, provenance=None):
+    """Describe requested, resolved and recorded RS-map illumination.
+
+    :param ConfigData config: Saved or live correction selections.
+    :param scan: Matching scan, required only to resolve an enabled correction.
+    :param dict provenance: Execution provenance, if already recorded. A
+        resolved policy is a prediction and does not imply completed mapping.
+    :returns: JSON-compatible status, reason, convention and resolved divisors.
+        Resolution failures are reported without changing the saved job.
+    """
+    correction = config.corrections
+    requested = bool(correction.use_footprint)
+    opted_in = bool(correction.shared_frame_illumination)
+    recorded = (provenance or {}).get("illumination", {})
+    result = {
+        "footprint_requested": requested,
+        "shared_frame_illumination": opted_in,
+        "effective": requested and opted_in,
+        "applied_status": recorded.get("status", "not_recorded"),
+        "resolved_status": "not_applied",
+        "convention": recorded.get("convention"),
+    }
+    if not opted_in:
+        result["reason"] = (
+            "Saved illumination opt-in is missing or false; compatibility "
+            "preserves the original scale. Prepare a new job to enable it."
+        )
+    elif not requested:
+        result["reason"] = "The footprint correction is disabled."
+    else:
+        try:
+            if scan is None:
+                raise ValueError("Load the matching scan to resolve illumination")
+            policy = _reconstruction_frame_policy(config, scan)
+            result.update({
+                "resolved_status": policy.illumination_status,
+                "convention": policy.illumination_convention,
+                "divisor": policy.illumination_divisor,
+                "interception_provenance": policy.interception_provenance,
+                "reason": "Saved settings enable illumination before mapping.",
+            })
+        except (ValueError, OSError, RuntimeError) as error:
+            result["resolved_status"] = "unavailable"
+            result["reason"] = str(error)
+    return _json_value(result)
+
+
 def job_status(path):
     """Return verified completion state for a job JSON."""
     job = read_job(path)
@@ -2232,6 +2354,27 @@ def job_status(path):
         ],
         "cleanup_errors": job.cleanup_errors,
     }
+    config = job.config_data
+    # Completed jobs can outlive their scan files and scratch assets. Their
+    # recorded factors remain authoritative and do not require reopening data.
+    if job.status == "complete":
+        result["illumination"] = illumination_summary(
+            config, provenance=job.correction_provenance
+        )
+        if job.correction_provenance.get("illumination"):
+            result["illumination"].update(job.correction_provenance["illumination"])
+            result["illumination"]["resolved_status"] = "recorded"
+            result["illumination"]["reason"] = "Illumination recorded during execution."
+    else:
+        try:
+            scan = (job.scan if config.corrections.shared_frame_illumination
+                    and config.corrections.use_footprint else None)
+            result["illumination"] = illumination_summary(
+                config, scan, provenance=job.correction_provenance
+            )
+        except (ValueError, OSError, RuntimeError) as error:
+            result["illumination"] = illumination_summary(config)
+            result["illumination"]["reason"] = str(error)
     return result
 
 

@@ -3849,8 +3849,17 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         height_scan = self.profileContent.currentText() == self.CONTENT_HEIGHT_SCAN
         z_scale = 1e-3 if self.profileUnit.currentText() == "mm" else 1e-6
         try:
+            from io import BytesIO
+            from .sample_interception_config import _profile_file_data
+
+            reference = getattr(self, "_profile_reference", {})
+            if reference.get("profile_file") != path:
+                reference = {}
             z, intensity = beamprofile.read_profile_file(
-                path, z_scale=z_scale, height_scan=height_scan
+                BytesIO(_profile_file_data(
+                    {**reference, "profile_file": path},
+                    getattr(self, "_profile_root", None),
+                )), z_scale=z_scale, height_scan=height_scan
             )
             # Construct once here so a malformed profile is reported while
             # the dialog is open rather than in the middle of an integration.
@@ -4096,6 +4105,12 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             "profile_center": self.profileCenter.currentText(),
             "profile_offset": self.profileOffset.value(),
         }
+        reference = getattr(self, "_profile_reference", {})
+        if reference.get("profile_file") == result["profile_file"]:
+            result.update({
+                key: value for key, value in reference.items()
+                if key != "profile_file"
+            })
 
         if self._profile_only:
             for key in ("sample_interception", "L", "W", "beam_flux",
@@ -4116,6 +4131,18 @@ class IntegrationCorrectionsDialog(qt.QDialog):
 
         :param dict settings: State to apply. Missing keys are left alone.
         """
+        reference = dict(getattr(self, "_profile_reference", {}))
+        if ("profile_file" in settings
+                and settings["profile_file"] != reference.get("profile_file")):
+            reference.clear()
+        for key in (
+            "profile_file", "profile_base", "profile_sha256", "profile_storage"
+        ):
+            if key in settings:
+                reference[key] = settings[key]
+        self._profile_reference = reference
+        if "profile_root" in settings:
+            self._profile_root = settings["profile_root"]
         self._restoringSettings = True
         try:
             self._restoreSettings(settings)
@@ -4179,8 +4206,9 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         self._onShapeChanged()
         self._onModeChanged()
         self._onHorizontalInterceptionChanged()
-        self.loadProfile()
-        if settings.get("positions_m") is not None:
+        if settings.get("positions_m") is None:
+            self.loadProfile()
+        else:
             self._profile_z = np.asarray(settings["positions_m"], dtype=float)
             self._profile_intensity = np.asarray(settings["density_per_m"], dtype=float)
             self._embedded_alignment = (

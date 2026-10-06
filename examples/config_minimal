@@ -60,6 +60,9 @@ compression = Raw
 ## incidence_source defaults to "auto": acquisition mu / configured alpha.
 ## Override either source with an exact counter name (unit deg/rad) or "fixed"
 ## with fixed_azimuth_deg / fixed_incidence_deg. Overrides affect footprint only.
+## Prepared RS-map jobs freeze explicit azimuth counter values in loaded frame
+## order. Optional azimuth_derivation describes how a custom counter was derived.
+## Re-preparation requires that counter on the current loaded scan again.
 ## orientation_deg is the shape rotation offset at reference_azimuth_deg.
 ## The centred UI alignment (omega reading for an edge parallel to the beam) is
 ## reference_azimuth_deg - azimuth_sign * orientation_deg, with sign +/-1.

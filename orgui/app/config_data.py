@@ -137,6 +137,12 @@ class CorrectionState:
     beam_shape_name: str | None = None
     beam_shape_values: tuple[float, ...] = ()
     beam_profile_file: str | None = None
+    # Explicit file-backed profiles resolve this base relative to the job JSON.
+    # None retains legacy path resolution; prepared measured profiles embed
+    # their numerical data unless storage is explicitly "file".
+    beam_profile_base: str | None = None
+    beam_profile_sha256: str | None = None
+    beam_profile_storage: str | None = None
     beam_profile_content: str | None = None
     beam_profile_unit: str | None = None
     beam_profile_center: str | None = None
@@ -152,7 +158,10 @@ class CorrectionState:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible correction-state dictionary."""
-        result = _json_value(self.__dict__)
+        result = _json_value({
+            name: value for name, value in self.__dict__.items()
+            if not name.startswith("_")
+        })
         result["monitor_corrections"] = list(self.monitor_corrections)
         result["excluded_frames"] = list(self.excluded_frames)
         return result
@@ -556,6 +565,9 @@ def corrections_to_nxdict(state):
                 "analytical": state.beam_shape_analytical,
                 "shape": state.beam_shape_name,
                 "profile_file": state.beam_profile_file,
+                "profile_base": state.beam_profile_base,
+                "profile_sha256": state.beam_profile_sha256,
+                "profile_storage": state.beam_profile_storage,
                 "profile_content": state.beam_profile_content,
                 "profile_unit": state.beam_profile_unit,
                 "profile_center": state.beam_profile_center,
@@ -704,6 +716,9 @@ def corrections_from_nxdict(nxdict):
     for name, key in (
         ("beam_shape_name", "shape"),
         ("beam_profile_file", "profile_file"),
+        ("beam_profile_base", "profile_base"),
+        ("beam_profile_sha256", "profile_sha256"),
+        ("beam_profile_storage", "profile_storage"),
         ("beam_profile_content", "profile_content"),
         ("beam_profile_unit", "profile_unit"),
         ("beam_profile_center", "profile_center"),
@@ -1271,6 +1286,9 @@ class ConfigData:
                 beam_shape_name=beam_shape.get("shape"),
                 beam_shape_values=tuple(beam_shape.get("shape_values", ())),
                 beam_profile_file=beam_shape.get("profile_file"),
+                beam_profile_base=beam_shape.get("profile_base"),
+                beam_profile_sha256=beam_shape.get("profile_sha256"),
+                beam_profile_storage=beam_shape.get("profile_storage"),
                 beam_profile_content=beam_shape.get("profile_content"),
                 beam_profile_unit=beam_shape.get("profile_unit"),
                 beam_profile_center=beam_shape.get("profile_center"),
@@ -1419,6 +1437,9 @@ class ConfigData:
                     beam_shape = {
                         "sample_interception": self.corrections.sample_interception
                     }
+                    profile_root = getattr(self.corrections, "_profile_root", None)
+                    if profile_root is not None:
+                        beam_shape["profile_root"] = str(profile_root)
                     if self.corrections.beam_profile_positions_m:
                         beam_shape["positions_m"] = (
                             self.corrections.beam_profile_positions_m
@@ -1430,6 +1451,9 @@ class ConfigData:
                         ("analytical", self.corrections.beam_shape_analytical),
                         ("shape", self.corrections.beam_shape_name),
                         ("profile_file", self.corrections.beam_profile_file),
+                        ("profile_base", self.corrections.beam_profile_base),
+                        ("profile_sha256", self.corrections.beam_profile_sha256),
+                        ("profile_storage", self.corrections.beam_profile_storage),
                         ("profile_content", self.corrections.beam_profile_content),
                         ("profile_unit", self.corrections.beam_profile_unit),
                         ("profile_center", self.corrections.beam_profile_center),

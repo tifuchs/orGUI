@@ -13,6 +13,7 @@ from orgui.app.config_data import CorrectionState
 from orgui.app.database import FILTERS
 from orgui.app.HDF5SettingsDialog import HDF5SettingsDialog
 from orgui.reconstruction_job import ReconstructionGrid
+from orgui.backend.scans import SimulationScan
 
 
 def _dialog(tmp_path):
@@ -448,6 +449,36 @@ def test_json_output_has_its_own_tab_and_is_selected_when_updated(tmp_path):
     dialog._test_parent.close()
 
 
+def test_preview_reports_effective_illumination(tmp_path, monkeypatch):
+    """Live preview distinguishes a resolved divisor from recorded application."""
+    dialog = _dialog(tmp_path)
+    scan = SimulationScan((2, 2), 10, 12, 3, fixed=0.5)
+    dialog.orgui.fscan = scan
+    dialog.orgui.ubcalc = SimpleNamespace(
+        detectorCal=SimpleNamespace(detector=SimpleNamespace(shape=(2, 2))),
+    )
+    config = SimpleNamespace(corrections=CorrectionState(
+        shared_frame_illumination=True, use_footprint=True,
+        shared_frame_normalization=True, use_normalization=False,
+        total_flux_calibrated=False, horizontal_interception="full",
+        sample_length_m=0.01, beam_shape_analytical=True,
+        beam_shape_name="Top hat", beam_shape_values=(160,),
+    ))
+    monkeypatch.setattr(
+        reconstruction_dialog_module.ConfigData, "from_gui", lambda gui: config,
+    )
+    monkeypatch.setattr(dialog, "_grids", lambda: [ReconstructionGrid(
+        minimum=(0, 0, 0), maximum=(1, 1, 1), step=(1, 1, 1), frame="lab",
+    )])
+    dialog.preview()
+    text = dialog.preview_output.toPlainText()
+    assert '"resolved_status": "applied"' in text
+    assert '"applied_status": "not_recorded"' in text
+    assert '"convention": "total_flux_H"' in text
+    dialog.close()
+    dialog._test_parent.close()
+
+
 def test_grid_numbers_are_compact_without_losing_values_and_chunks_are_global(
     tmp_path,
 ):
@@ -683,7 +714,9 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(
         reconstruction_dialog_module,
         "job_status",
-        lambda path: {"status": "prepared"},
+        lambda path: {"status": "prepared", "illumination": {
+            "effective": True, "applied_status": "not_recorded",
+        }},
     )
     shared_options = {
         "mask": False,
@@ -702,6 +735,8 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
 
     dialog.open_job()
 
+    assert '"illumination"' in dialog.preview_output.toPlainText()
+    assert '"applied_status": "not_recorded"' in dialog.preview_output.toPlainText()
     assert dialog.accuracy.currentData() == "high", (
         dialog.preview_output.toPlainText()
     )

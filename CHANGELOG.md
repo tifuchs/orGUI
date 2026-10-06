@@ -7,6 +7,12 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Prepared reciprocal-space maps preserve custom azimuth counters and embed
+  measured footprint profiles, including their saved alignment. Explicit
+  file-backed profiles support a relative base and content checksum. Preview
+  and saved-job status distinguish requested, resolved and recorded illumination
+  and explain why older jobs retain their original scale.
+
 - Sample-shape footprint settings now follow shape, azimuth and angular
   alignment. Centred rectangles and polygons use one parallel omega reading;
   circles need no orientation. A collapsible Off-centre sample section retains

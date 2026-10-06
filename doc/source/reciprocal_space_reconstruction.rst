@@ -142,6 +142,68 @@ settings are refreshed.
    result. Older prepared jobs without ``shared_frame_illumination`` retain
    their original scale on resume; prepare a new job to apply illumination.
 
+Saved footprint inputs and status
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``Open Job`` and the status shown before ``Resume`` report footprint requested,
+saved ``shared_frame_illumination`` opt-in, effective correction, resolved divisor
+convention, and application recorded during execution. ``Preview`` resolves the
+live selections. A resolved policy predicts the correction; ``applied_status``
+is ``not_recorded`` until execution provenance exists. Missing or false saved
+opt-in keeps the original scale and displays the compatibility reason. Changes
+to that scale require a newly prepared job; changed configuration has a different
+checkpoint identity and cannot reuse the old job's checkpoints.
+
+An explicitly selected azimuth counter may be a scalar or one ordered value
+per loaded frame, in ``azimuth_unit`` degrees or radians. Preparation freezes
+these values in ``sample_interception.azimuth_snapshot`` with source name,
+unit, frame count/indices, scan-reference identity and capture method. Supply
+optional ``azimuth_derivation`` in the shape settings to describe a calibration
+or derivation. For example, attach ``scan.derived_azimuth_deg`` and select
+``azimuth_source="derived_azimuth_deg", azimuth_unit="deg"`` in the sample-shape
+settings before preparation. Reopened jobs use the frozen values, including for
+sliced scans, without accessing a transient or guarded counter again. Invalid
+angle entries are saved as JSON null and retain the undefined-frame mask.
+Preparation reports unavailable or mismatched counters before mapping. To
+prepare again, supply/recalculate the selected counter on the loaded scan;
+previous snapshots are discarded rather than reused for a different scan.
+Automatic and fixed-source angle conventions are unchanged.
+
+Measured vertical profiles embed normalized positions in metres and densities
+in m\ :sup:`-1` by default, even when the configuration initially supplies only
+a filename. The embedded positions already include centering and offset;
+reload preserves this origin and does not apply those operations twice. The
+saved filename is display provenance and is not read when numerical data are
+available. Moving or deleting the original profile file therefore does not
+change the correction.
+
+For an explicitly file-backed vertical profile, set these ``CorrectionState``
+fields through the scripting/configuration API before preparing:
+
+.. code-block:: python
+
+   config.corrections.beam_shape_analytical = False
+   config.corrections.beam_profile_storage = "file"
+   config.corrections.beam_profile_file = "fixture/profile.dat"
+   config.corrections.beam_profile_base = "."
+   config.corrections.beam_profile_unit = "mm"
+   config.corrections.beam_profile_center = "median"
+   config.corrections.beam_profile_offset_um = 23.0
+   config.apply_to_gui(gui)
+
+Preparation saves ``beam_profile_sha256`` and omits embedded vertical data for
+this option. An explicit relative base resolves against the job JSON directory,
+so copying ``fixture/profile.dat`` beside the copied job preserves resolution.
+Missing files and changed bytes fail clearly. To deliberately accept a new file
+at the same location, clear the saved checksum and prepare a new job. Without an
+explicit base, older file references retain working-directory resolution.
+Normalized embedded arrays always take precedence on reload. The resolver
+``profile_from_settings`` also accepts ``profile_base``, ``profile_sha256`` and
+an optional ``base_path`` directory for standalone use.
+
+This portability applies to footprint inputs. Scan sources, job assets, scratch
+directories and output locations retain their existing path requirements.
+
 Output Grid Parameters
 ----------------------
 

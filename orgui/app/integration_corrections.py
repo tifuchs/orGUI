@@ -286,7 +286,9 @@ def frame_correction_policy(
         if not settings.get("horizontal"):
             raise ValueError("exact 2D interception requires a horizontal beam profile")
         settings["horizontal"] = embed_profile(
-            settings["horizontal"], profile_from_settings(settings["horizontal"])
+            settings["horizontal"], profile_from_settings(
+                settings["horizontal"], base_path=getattr(state, "_profile_root", None)
+            )
         )
         shape_factors = shape_frame_factors(
             settings, beam_profile, shape_alpha, azimuth, progress=progress

@@ -548,6 +548,10 @@ class SampleInterceptionWidget(qt.QWidget):
             )
             result[f"{name}_unit"] = self.angle_units[name].currentText()
             result[f"fixed_{name}_deg"] = self.fixed_angles[name].value()
+        if (result["azimuth_source"] == self.original.get("azimuth_source")
+                and result["azimuth_unit"] == self.original.get("azimuth_unit", "deg")
+                and "azimuth_derivation" in self.original):
+            result["azimuth_derivation"] = self.original["azimuth_derivation"]
         kind = self.kind.currentText()
         result["shape"] = {"kind": kind}
         if kind == "polygon":

@@ -24,6 +24,7 @@ from ..reconstruction_job import (
     estimate_checkpoint_plan,
     estimate_geometry_steps,
     job_status,
+    illumination_summary,
     prepare_job,
     read_job,
     reconstruction_execution_settings,
@@ -2399,7 +2400,8 @@ class ReconstructionDialog(qt.QDialog):
                 final_bytes += voxels * 32
                 chunk_count += chunks
                 grid_rows.append({**grid.__dict__, "shape": shape})
-            corrections = ConfigData.from_gui(self.orgui).corrections
+            config = ConfigData.from_gui(self.orgui)
+            corrections = config.corrections
             included_frames = len(self.orgui.fscan) - len(
                 {
                     frame
@@ -2411,6 +2413,7 @@ class ReconstructionDialog(qt.QDialog):
                 np.prod(self.orgui.ubcalc.detectorCal.detector.shape)
             )
             result = {
+                "illumination": illumination_summary(config, self.orgui.fscan),
                 "grids": grid_rows,
                 "frames": included_frames,
                 "threads": self._optional_value(self.thread_override)
@@ -2453,6 +2456,7 @@ class ReconstructionDialog(qt.QDialog):
         path = str(path).strip()
         if not path:
             raise ValueError("Select a prepared job JSON path")
+        self._show_output(json.dumps(job_status(path), indent=2, sort_keys=True))
         progress = None
 
         def update(value, maximum, message):
@@ -2582,6 +2586,7 @@ class ReconstructionDialog(qt.QDialog):
                 if corrections.sample_width_m is not None:
                     footprint.setSampleWidth(corrections.sample_width_m)
                 settings = vertical_settings(corrections)
+                settings["profile_root"] = str(Path(job_path).absolute().parent)
                 settings["sample_interception"] = corrections.sample_interception
                 footprint.setSettings(settings)
             self.checkpoint_count.setValue(job.checkpoint_count)
