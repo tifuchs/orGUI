@@ -186,6 +186,11 @@ horizontal top hat intercepts 0.178090128539 at edge orientation and
 0.178155252900 at 45 deg. With a narrow centred horizontal beam, the limiting
 fractions are 0.356180257078 and 0.486812529405.
 
+Rectangle and polygon sections use a local unit interval for each quadrature
+piece, with edge heights interpolated directly in that interval. This resolves
+thin corner sections near beam alignment without rounding the sample azimuth
+or replacing the shape by an aligned rectangle.
+
 Saved settings and curve replacement
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

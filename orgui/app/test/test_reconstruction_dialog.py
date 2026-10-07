@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
+import pytest
 from silx.gui import qt
 
 import orgui.app.ReconstructionDialog as reconstruction_dialog_module
@@ -450,7 +451,11 @@ def test_json_output_has_its_own_tab_and_is_selected_when_updated(tmp_path):
 
 
 def test_preview_reports_effective_illumination(tmp_path, monkeypatch):
-    """Live preview distinguishes a resolved divisor from recorded application."""
+    """Live preview reports pending factors without evaluating the footprint."""
+    import orgui.reconstruction_job as jobs
+
+    monkeypatch.setattr(jobs, "_reconstruction_frame_policy",
+                        lambda *a, **kw: pytest.fail("quadrature during preview"))
     dialog = _dialog(tmp_path)
     scan = SimulationScan((2, 2), 10, 12, 3, fixed=0.5)
     dialog.orgui.fscan = scan
@@ -472,9 +477,10 @@ def test_preview_reports_effective_illumination(tmp_path, monkeypatch):
     )])
     dialog.preview()
     text = dialog.preview_output.toPlainText()
-    assert '"resolved_status": "applied"' in text
+    assert '"resolved_status": "pending"' in text
     assert '"applied_status": "not_recorded"' in text
     assert '"convention": "total_flux_H"' in text
+    assert '"divisor"' not in text
     dialog.close()
     dialog._test_parent.close()
 

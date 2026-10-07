@@ -7,6 +7,12 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Preparing reciprocal-space reconstruction jobs, previewing settings and
+  checking status no longer evaluate the full-scan footprint correction.
+  Preparation validates and freezes its inputs; execution computes the factors
+  with progress and cancellation. Status distinguishes pending evaluation from
+  recorded factors.
+
 - Prepared reciprocal-space maps preserve custom azimuth counters and embed
   measured footprint profiles, including their saved alignment. Explicit
   file-backed profiles support a relative base and content checksum. Preview
@@ -52,9 +58,10 @@ Other user-visible changes:
 
 Scientific and analysis additions:
 
-- Sample-shape footprint corrections handle nearly coincident integration
-  breakpoints at rotated edges, avoiding spurious quadrature failures near
-  right-angle alignment while retaining their contribution and error bound.
+- Sample-shape footprint corrections integrate thin rectangle and polygon
+  sections in local coordinates, avoiding roundoff-driven quadrature failures
+  near beam alignment without rounding the angles. Nearly coincident rotated
+  edge breakpoints retain their contribution and error bound.
 
 - Reciprocal-space mapping now applies the shared beam-profile or sample-shape
   illumination/footprint correction, including angle overrides and squared

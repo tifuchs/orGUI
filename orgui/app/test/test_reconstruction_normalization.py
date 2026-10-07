@@ -346,3 +346,35 @@ def test_map_rejects_scan_without_any_physical_incidence():
     config = SimpleNamespace(corrections=_footprint_state(), mu=0.0)
     with pytest.raises(ValueError, match="at least one frame"):
         _reconstruction_frame_policy(config, _Scan())
+
+
+def test_execution_footprint_reports_progress_and_can_cancel():
+    """Execution evaluates unchanged factors while exposing per-frame progress."""
+    class Scan:
+        th = np.array([0.0, -7.0, -30.0])
+        mu = np.full(3, 0.36)
+
+        def __len__(self):
+            return 3
+
+    state = _footprint_state(use_normalization=False, sample_interception={
+        "version": 1, "enabled": True,
+        "shape": {"kind": "rectangle", "dimensions_m": [0.01, 0.006]},
+        "horizontal": {"analytical": True, "shape": "Top hat",
+                       "shape_values": [20000]},
+    })
+    config = SimpleNamespace(corrections=state, detector=object(), mu=0.0)
+    expected = _reconstruction_frame_policy(config, Scan()).illumination_divisor
+    events = []
+    provenance = {}
+    _correction_pipeline(config, Scan(), {}, provenance,
+                         progress=lambda *event: events.append(event))
+    np.testing.assert_array_equal(provenance["illumination"]["divisor"], expected)
+    assert events[0] == (0, 4, "Evaluating footprint correction")
+    assert events[-1] == (3, 4, "Evaluating footprint correction")
+    assert any(event[0] == 1 for event in events)
+    cancelled_provenance = {}
+    with pytest.raises(InterruptedError, match="cancelled"):
+        _correction_pipeline(config, Scan(), {}, cancelled_provenance,
+                             progress=lambda completed, total, msg: completed < 1)
+    assert "illumination" not in cancelled_provenance

@@ -25,11 +25,13 @@ from .app.config_data import ConfigData, _json_value
 from .app.database import FILTERS, config_data_from_json, config_data_to_json
 from .app.integration_corrections import (
     _explicit_total_flux_contract,
+    _horizontal_fraction,
     frame_correction_policy,
 )
 from .app.mask_config import create_pixel_repair_plan
 from .app.sample_interception_config import (
-    profile_file_identity, profile_from_settings, vertical_settings,
+    profile_file_identity, profile_from_settings, resolve_shape_inputs,
+    validate_beam_profile, vertical_settings,
 )
 from .backend.scans import ScanReference, _alpha_centers, _frame_values
 from .datautils.xrayutils.corrections import detector as detector_corrections
@@ -1071,6 +1073,8 @@ def prepare_job(
     default. ``beam_profile_storage='file'`` instead freezes a SHA-256 identity;
     an explicit relative ``beam_profile_base`` resolves beside ``job_path``.
     Re-preparation requires the selected source on the current live scan.
+    Preparation validates and freezes correction inputs without computing
+    footprint factors; numerical overlap is evaluated at execution start.
     """
     if gui.fscan is None:
         raise RuntimeError("Load a scan before preparing reconstruction")
@@ -1174,11 +1178,17 @@ def prepare_job(
             "method": "selected_scan_attribute_v1",
         }
     shared_normalization = config.corrections.shared_frame_normalization
-    policy = _reconstruction_frame_policy(config, gui.fscan)
-    if policy is not None and policy.interception_provenance:
-        # Freeze resolved alignment and embedded horizontal measured data.
+    _convention, settings = _prepare_illumination_inputs(config, gui.fscan)
+    if settings is not None:
         config.corrections.sample_interception = json.loads(
-            policy.interception_provenance["sample_interception_json"]
+            json.dumps(settings, allow_nan=False)
+        )
+    if (shared_normalization and correction.use_normalization
+            and _explicit_total_flux_contract(correction)):
+        # Monitor/exposure validation is vectorized and needs no footprint.
+        frame_correction_policy(
+            gui.fscan, correction, len(gui.fscan),
+            use_normalization=True, use_illumination=False,
         )
     if (
         (not shared_normalization or config.corrections.use_normalization)
@@ -1338,7 +1348,41 @@ def _correction_extension():
         return None
 
 
-def _reconstruction_frame_policy(config, scan):
+def _prepare_illumination_inputs(config, scan):
+    """Validate/freeze illumination inputs [m/rad] without frame quadrature."""
+    correction = config.corrections
+    if not (correction.shared_frame_illumination and correction.use_footprint):
+        return None, None
+    total_flux = _explicit_total_flux_contract(correction)
+    convention = "total_flux_H" if total_flux else "legacy_C_illum_area"
+    vertical = profile_from_settings(
+        vertical_settings(correction),
+        base_path=getattr(correction, "_profile_root", None),
+    )
+    validate_beam_profile(vertical)
+    alpha = _alpha_centers(scan, config, len(scan))
+    settings = correction.sample_interception
+    if settings.get("enabled", False):
+        _alpha, _azimuth, settings = resolve_shape_inputs(
+            scan, settings, alpha, count=len(scan),
+            base_path=getattr(correction, "_profile_root", None),
+        )
+        return convention, settings
+    if not np.any(np.isfinite(alpha) & (alpha > 0) & (alpha <= np.pi / 2)):
+        raise ValueError(
+            "illumination needs at least one frame with physical incidence"
+        )
+    length = correction.sample_length_m
+    if length is None or not np.isfinite(length) or length <= 0:
+        raise ValueError("sample_length must be finite and positive, in meter")
+    if total_flux:
+        horizontal = _horizontal_fraction(correction)
+        if not np.isfinite(horizontal) or not 0 < horizontal <= 1:
+            raise ValueError("horizontal_fraction must be finite and in (0, 1]")
+    return convention, None
+
+
+def _reconstruction_frame_policy(config, scan, *, progress=None):
     """Resolve shared frame factors from frozen settings and acquisition angles.
 
     Scan incidence is degrees; fixed config incidence is radians. Beam profile
@@ -1367,7 +1411,7 @@ def _reconstruction_frame_policy(config, scan):
         }
     policy = frame_correction_policy(
         scan, correction, len(scan), use_normalization=bool(normalize),
-        use_illumination=bool(illuminate), **inputs,
+        use_illumination=bool(illuminate), progress=progress, **inputs,
     )
     if illuminate:
         divisor = np.broadcast_to(
@@ -1379,7 +1423,7 @@ def _reconstruction_frame_policy(config, scan):
     return policy
 
 
-def _correction_pipeline(config, scan, assets, provenance):
+def _correction_pipeline(config, scan, assets, provenance, *, progress=None):
     correction = config.corrections
     normalize = (
         correction.use_normalization
@@ -1391,7 +1435,22 @@ def _correction_pipeline(config, scan, assets, provenance):
         and _explicit_total_flux_contract(correction)
     )
     frame_divisor = None
-    policy = _reconstruction_frame_policy(config, scan)
+    illuminate = correction.shared_frame_illumination and correction.use_footprint
+
+    def footprint_progress(completed, total):
+        if progress is not None:
+            # Leave the overall progress dialog open for the mapping phase.
+            return progress(completed, total + 1, "Evaluating footprint correction")
+
+    if illuminate:
+        logger.info("Evaluating footprint correction for %d frame(s)", len(scan))
+        if footprint_progress(0, len(scan)) is False:
+            raise InterruptedError("sample interception cancelled")
+    policy = _reconstruction_frame_policy(
+        config, scan, progress=footprint_progress if progress is not None else None,
+    )
+    if illuminate and footprint_progress(len(scan), len(scan)) is False:
+        raise InterruptedError("sample interception cancelled")
     illumination_divisor = None
     if total_flux_normalization:
         frame_divisor = policy.normalization_divisor
@@ -2261,13 +2320,14 @@ def _cluster_status_counts(job, *, total_tasks):
 
 
 def illumination_summary(config, scan=None, *, provenance=None):
-    """Describe requested, resolved and recorded RS-map illumination.
+    """Describe configured or recorded RS-map illumination without quadrature.
 
     :param ConfigData config: Saved or live correction selections.
-    :param scan: Matching scan, required only to resolve an enabled correction.
-    :param dict provenance: Execution provenance, if already recorded. A
-        resolved policy is a prediction and does not imply completed mapping.
-    :returns: JSON-compatible status, reason, convention and resolved divisors.
+    :param scan: Optional matching scan for inexpensive input validation.
+    :param dict provenance: Execution provenance, if already recorded.
+        Recorded factors describe execution, not merely configured inputs.
+    :returns: JSON-compatible status, reason, convention and recorded factors.
+        Uncomputed factors have ``resolved_status='pending'``.
         Resolution failures are reported without changing the saved job.
     """
     correction = config.corrections
@@ -2289,18 +2349,20 @@ def illumination_summary(config, scan=None, *, provenance=None):
         )
     elif not requested:
         result["reason"] = "The footprint correction is disabled."
+    elif recorded:
+        result.update(recorded)
+        result["resolved_status"] = "recorded"
+        result["reason"] = "Illumination recorded during execution."
     else:
+        result.update({
+            "resolved_status": "pending",
+            "convention": ("total_flux_H" if _explicit_total_flux_contract(correction)
+                           else "legacy_C_illum_area"),
+            "reason": "Footprint evaluation is deferred until execution starts.",
+        })
         try:
-            if scan is None:
-                raise ValueError("Load the matching scan to resolve illumination")
-            policy = _reconstruction_frame_policy(config, scan)
-            result.update({
-                "resolved_status": policy.illumination_status,
-                "convention": policy.illumination_convention,
-                "divisor": policy.illumination_divisor,
-                "interception_provenance": policy.interception_provenance,
-                "reason": "Saved settings enable illumination before mapping.",
-            })
+            if scan is not None:
+                _prepare_illumination_inputs(config, scan)
         except (ValueError, OSError, RuntimeError) as error:
             result["resolved_status"] = "unavailable"
             result["reason"] = str(error)
@@ -2355,26 +2417,11 @@ def job_status(path):
         "cleanup_errors": job.cleanup_errors,
     }
     config = job.config_data
-    # Completed jobs can outlive their scan files and scratch assets. Their
-    # recorded factors remain authoritative and do not require reopening data.
-    if job.status == "complete":
-        result["illumination"] = illumination_summary(
-            config, provenance=job.correction_provenance
-        )
-        if job.correction_provenance.get("illumination"):
-            result["illumination"].update(job.correction_provenance["illumination"])
-            result["illumination"]["resolved_status"] = "recorded"
-            result["illumination"]["reason"] = "Illumination recorded during execution."
-    else:
-        try:
-            scan = (job.scan if config.corrections.shared_frame_illumination
-                    and config.corrections.use_footprint else None)
-            result["illumination"] = illumination_summary(
-                config, scan, provenance=job.correction_provenance
-            )
-        except (ValueError, OSError, RuntimeError) as error:
-            result["illumination"] = illumination_summary(config)
-            result["illumination"]["reason"] = str(error)
+    # Report illumination without reopening the scan or calculating factors.
+    # Completed jobs can outlive their inputs; recorded factors are authoritative.
+    result["illumination"] = illumination_summary(
+        config, provenance=job.correction_provenance
+    )
     return result
 
 
@@ -4869,7 +4916,7 @@ def run_cluster_map_task(
     )
 
     provenance = _base_provenance(job, config)
-    correct = _correction_pipeline(config, scan, assets, provenance)
+    correct = _correction_pipeline(config, scan, assets, provenance, progress=progress)
 
     ranges, tiles = _execution_layout(
         job, scan, config, extra_excluded_frames=node_excluded
@@ -5216,7 +5263,7 @@ def run_job(
         resumed=resumed,
     )
     provenance = _base_provenance(job, config)
-    correct = _correction_pipeline(config, scan, assets, provenance)
+    correct = _correction_pipeline(config, scan, assets, provenance, progress=progress)
 
     pending_ranges = [
         frame_range

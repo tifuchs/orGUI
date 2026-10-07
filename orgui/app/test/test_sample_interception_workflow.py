@@ -546,15 +546,19 @@ def test_centred_alignment_conversion_preserves_old_angles_and_overlap(
         settings["orientation_deg"]
     )
     canonical = dict(settings, reference_azimuth_deg=expected, orientation_deg=0)
-    # Avoid the old quadrature's degenerate almost-axis-aligned sections after
-    # floating-point cancellation of large angles; the conversion is unwrapped.
-    omega = np.deg2rad([expected + 7, expected + 30, expected + 73])
-    alpha = np.deg2rad([0.36, 0.5, 0.7])
+    # Include near alignment after cancellation of large unwrapped angles;
+    # section-local quadrature must preserve the equivalent representation.
+    omega = np.deg2rad(expected + np.array([0, 1e-6, 7, 30, 73]))
+    alpha = np.deg2rad([0.36, 0.36, 0.36, 0.5, 0.7])
     vertical = bp.gaussian_profile(160e-6)
     old_factors = shape_frame_factors(settings, vertical, alpha, omega)
     centred_factors = shape_frame_factors(canonical, vertical, alpha, omega)
-    for old, centred in zip(old_factors, centred_factors):
+    for old, centred in zip(old_factors[:-1], centred_factors[:-1]):
         np.testing.assert_allclose(old, centred, rtol=1e-10, atol=1e-13)
+    # Equivalent angles can yield different roundoff-sized corner pieces and
+    # hence different conservative error estimates, especially at exact zero.
+    for factors in (old_factors, centred_factors):
+        assert np.all(factors[-1] <= np.abs(factors[0]) * 1e-9)
     parent = IntegrationCorrectionsDialog()
     try:
         parent.setSettings({"sample_interception": settings})

@@ -24,6 +24,25 @@ in measured beam profiles and geometry. Exact duplicate angle/alignment tuples
 are cached within one call, without rounding. A callback permits cancellation
 between frames; no UI enters the numerical module.
 
+Reconstruction preparation now resolves and validates inputs without evaluating
+H. It freezes reference incidence, horizontal measured data and selected custom
+azimuth snapshots as before. Preview validates inputs and reports pending
+evaluation; job status uses settings or recorded provenance without reopening
+the scan to resolve factors. Full quadrature, zero-overlap checks and application
+remain at execution start, with progress/cancellation callbacks. No prepared
+job schema or correction convention changes. This removes the per-frame
+quadrature cost from configuration iterations on large scans; asset snapshots
+and bounded checkpoint estimation still run during preparation.
+
+Polygon quadrature retains physical x breakpoints and maps each piece onto a
+separate unit interval. The crossing-edge pairs are fixed within a piece;
+their transverse heights are interpolated directly in its local parameter.
+This avoids repeatedly subtracting almost equal global x coordinates and
+dividing by a tiny edge x span near beam alignment. Merely rescaling QUADPACK's
+integration interval would leave that ill-conditioned intersection calculation
+in place. No acquisition angle is snapped to an aligned value, and the surface
+Jacobian, probability definitions and geometry conventions are unchanged.
+
 Total-flux uses Q and H framewise. Legacy shape density uses peak reference
 `Aeff = H/(pz_peak ph_peak)`, divided by geometric sample area for the relative
 correction. It is distinct from the total-flux fraction. Existing 1D functions

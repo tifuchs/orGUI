@@ -13,6 +13,7 @@ from orgui.app.config_data import ConfigData, CorrectionState
 from orgui.app.sample_interception_config import (
     profile_from_settings, vertical_settings,
 )
+import orgui.app.sample_interception_config as interception_config
 from orgui.backend.scans import Scan, SimulationScan, h5_Image, sample_azimuth
 from orgui.datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
 import orgui.reconstruction_job as jobs
@@ -125,7 +126,10 @@ def test_preparation_freezes_custom_source_values_and_divisors(
                        "shape_values": [20000]},
     }
     before = jobs._reconstruction_frame_policy(config, scan)
-    prepared = _prepare(monkeypatch, tmp_path, config, scan)
+    with monkeypatch.context() as preparing:
+        preparing.setattr(jobs, "_reconstruction_frame_policy",
+                          lambda *a, **kw: pytest.fail("evaluated during preparation"))
+        prepared = _prepare(preparing, tmp_path, config, scan)
     saved = jobs.read_job(tmp_path / "job.json")
     jobs.verify_job(saved)
     reopened = saved.scan
@@ -285,11 +289,16 @@ def test_legacy_status_and_recorded_status_preserve_saved_jobs(tmp_path, monkeyp
     config = _config()
     scan = SimulationScan((2, 2), 10, 12, 3, fixed=0.5)
     job = _prepare(monkeypatch, tmp_path, config, scan)
+    monkeypatch.setattr(jobs, "_reconstruction_frame_policy",
+                        lambda *a, **kw: pytest.fail("evaluated during status"))
+    monkeypatch.setattr(jobs.ScanReference, "open",
+                        lambda self: pytest.fail("scan reopened during status"))
     path = tmp_path / "job.json"
     new = jobs.job_status(path)["illumination"]
-    assert new["effective"] and new["resolved_status"] == "applied"
+    assert new["effective"] and new["resolved_status"] == "pending"
     assert new["applied_status"] == "not_recorded"
     assert new["convention"] == "total_flux_H"
+    assert "divisor" not in new
     values = job.to_dict()
     del values["config"]["orgui"]["integration_corrections"]["footprint"][
         "shared_frame_illumination"
@@ -314,6 +323,90 @@ def test_legacy_status_and_recorded_status_preserve_saved_jobs(tmp_path, monkeyp
     assert recorded["applied_status"] == "applied"
     assert recorded["resolved_status"] == "recorded"
     assert recorded["divisor"] == [2, 3, 4]
+
+
+def test_large_preparation_freezes_inputs_without_quadrature(tmp_path, monkeypatch):
+    """Ten thousand frames retain measured origins and first valid alignment."""
+    config = _config()
+    scan = SimulationScan((2, 2), 0, 3.6, 10000, axis="mu", fixed=0)
+    scan.derived = np.linspace(0, 90, 10000)
+    horizontal = {
+        "analytical": False, "positions_m": [-0.003, -0.001, 0.002, 0.004],
+        "density_per_m": [1, 3, 2, 1],
+    }
+    expected_profile = profile_from_settings(horizontal)
+    config.corrections.sample_interception = {
+        "version": 1, "enabled": True, "azimuth_source": "derived",
+        "shape": {"kind": "rectangle", "dimensions_m": [0.01, 0.005]},
+        "horizontal": horizontal,
+    }
+    monkeypatch.setattr(interception_config, "overlap",
+                        lambda *a, **kw: pytest.fail("quadrature during preparation"))
+    monkeypatch.setattr(jobs, "_reconstruction_frame_policy",
+                        lambda *a, **kw: pytest.fail("policy during preparation"))
+    _prepare(monkeypatch, tmp_path, config, scan)
+    saved = jobs.read_job(tmp_path / "job.json")
+    settings = saved.config_data.corrections.sample_interception
+    assert settings["reference_incidence_deg"] == pytest.approx(scan.mu[1])
+    assert settings["azimuth_snapshot"]["frame_count"] == 10000
+    np.testing.assert_array_equal(settings["azimuth_snapshot"]["values"], scan.derived)
+    np.testing.assert_allclose(
+        profile_from_settings(settings["horizontal"]).profile_curve(),
+        expected_profile.profile_curve(), rtol=1e-14, atol=1e-17,
+    )
+    assert saved.correction_provenance == {}
+    summary = jobs.illumination_summary(saved.config_data, saved.scan)
+    assert summary["resolved_status"] == "pending", summary
+    assert "divisor" not in summary
+
+
+@pytest.mark.parametrize("changes,match", [
+    ({"shape": {"kind": "rectangle", "dimensions_m": [-0.01, 0.005]}},
+     "positive"),
+    ({"offset_m": [np.nan, 0]}, "finite placement"),
+    ({"azimuth_sign": 0}, "sign"),
+    ({"rtol": 1e-15}, "rtol"),
+    ({"overspill_threshold": 2}, "overspill"),
+    ({"horizontal": {}}, "horizontal beam profile"),
+    ({"horizontal": {"analytical": False, "positions_m": [-0.003, 0, 0.003],
+                     "density_per_m": [-1, 4, 1]}}, "non-negative"),
+])
+def test_preparation_checks_shape_inputs_before_assets(
+    tmp_path, monkeypatch, changes, match,
+):
+    """Deferring quadrature retains inexpensive scientific input validation."""
+    config = _config()
+    config.corrections.sample_interception = {
+        "version": 1, "enabled": True,
+        "shape": {"kind": "rectangle", "dimensions_m": [0.01, 0.005]},
+        "horizontal": {"analytical": True, "shape": "Top hat",
+                       "shape_values": [20000]},
+        **changes,
+    }
+    monkeypatch.setattr(interception_config, "overlap",
+                        lambda *a, **kw: pytest.fail("quadrature during validation"))
+    with pytest.raises(ValueError, match=match):
+        _prepare(monkeypatch, tmp_path, config,
+                 SimulationScan((2, 2), 10, 12, 3, fixed=0.5))
+    assert not (tmp_path / "scratch").exists()
+
+
+def test_no_overlap_is_checked_at_execution(tmp_path, monkeypatch):
+    """A configured distant sample prepares, then fails numerical evaluation."""
+    config = _config()
+    config.corrections.sample_interception = {
+        "version": 1, "enabled": True,
+        "shape": {"kind": "rectangle", "dimensions_m": [0.01, 0.005]},
+        "offset_m": [1, 0], "reference_incidence_deg": 0.5,
+        "reference_azimuth_deg": 0, "azimuth_source": "fixed",
+        "fixed_azimuth_deg": 90,
+        "horizontal": {"analytical": True, "shape": "Top hat",
+                       "shape_values": [20000]},
+    }
+    job = _prepare(monkeypatch, tmp_path, config,
+                   SimulationScan((2, 2), 10, 12, 3, fixed=0.5))
+    with pytest.raises(ValueError, match="positive sample/beam overlap"):
+        jobs._reconstruction_frame_policy(job.config_data, job.scan)
 
 
 def test_profile_reference_fields_round_trip_without_runtime_base():

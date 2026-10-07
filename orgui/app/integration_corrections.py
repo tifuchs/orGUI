@@ -273,22 +273,16 @@ def frame_correction_policy(
     if use_illumination and shape_settings.get("enabled", False):
         import json
         from .sample_interception_config import (
-            embed_profile, profile_from_settings, shape_frame_factors,
-            sample_angle_inputs, vertical_settings,
+            profile_from_settings, resolve_shape_inputs, shape_frame_factors,
+            vertical_settings,
         )
         if alpha is None:
             raise ValueError("2D interception requires actual frame incidence")
         if beam_profile is None:
             beam_profile = profile_from_settings(vertical_settings(state))
-        shape_alpha, azimuth, settings = sample_angle_inputs(
-            scan, shape_settings, alpha, count=size, omega=omega
-        )
-        if not settings.get("horizontal"):
-            raise ValueError("exact 2D interception requires a horizontal beam profile")
-        settings["horizontal"] = embed_profile(
-            settings["horizontal"], profile_from_settings(
-                settings["horizontal"], base_path=getattr(state, "_profile_root", None)
-            )
+        shape_alpha, azimuth, settings = resolve_shape_inputs(
+            scan, shape_settings, alpha, count=size, omega=omega,
+            base_path=getattr(state, "_profile_root", None),
         )
         shape_factors = shape_frame_factors(
             settings, beam_profile, shape_alpha, azimuth, progress=progress

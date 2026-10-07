@@ -269,24 +269,34 @@ def _frame_overlap(
         ends = np.roll(vertices, -1, axis=0)
         edges = ends - vertices
 
-        def intervals(x):
+        def _section_for_interval(a, b):
+            # Vertex/beam breakpoints delimit fixed pairs of crossing edges.
+            # Interpolate their heights in a local unit interval: recovering
+            # an edge parameter from a global x at every node amplifies x
+            # roundoff by 1/edge[0] for almost beam-perpendicular edges.
             hits = []
-            for a, b, edge in zip(vertices, ends, edges):
-                if min(a[0], b[0]) <= x < max(a[0], b[0]):
-                    hits.append(a[1] + (x - a[0]) * edge[1] / edge[0])
-            hits.sort()
+            for start, end, edge in zip(vertices, ends, edges):
+                if (edge[0] != 0 and min(start[0], end[0]) <= a
+                        and b <= max(start[0], end[0])):
+                    y0 = start[1] + ((a - start[0]) / edge[0]) * edge[1]
+                    dy = ((b - a) / edge[0]) * edge[1]
+                    hits.append((y0, dy))
+            hits.sort(key=lambda hit: hit[0] + hit[1] / 2)
             if len(hits) % 2:
                 raise ValueError("polygon section has an odd number of intersections")
-            return list(zip(hits[::2], hits[1::2]))
 
-        def _section(t):
-            x = lo + span * t
-            return x, intervals(x), 1.0
+            def _local_section(t):
+                heights = [y0 + dy * t for y0, dy in hits]
+                return a + (b - a) * t, list(zip(
+                    heights[::2], heights[1::2]
+                )), 1.0
+
+            return _local_section
 
     peak = vertical.peak_density
 
     def integrand(t):
-        x, intervals_y, jacobian = _section(t)
+        x, intervals_y, jacobian = section(t)
         mass = sum(
             float(horizontal.interval_mass(yh + a, yh + b)) for a, b in intervals_y
         )
@@ -304,7 +314,9 @@ def _frame_overlap(
                     t = (position - yh - a[1]) / edge[1]
                     if 0 < t < 1:
                         points.append(a[0] + t * edge[0])
-        points = [(p - lo) / span for p in points if lo < p < hi]
+        # Keep physical x breakpoints; normalizing and reconstructing them
+        # loses precision in the narrow corner sections near alignment.
+        points = [lo, hi, *[p for p in points if lo < p < hi]]
     else:
         # Exact circular chords need no vertices from the display outline.
         # Only beam transitions supply interior quadrature breakpoints.
@@ -317,31 +329,40 @@ def _frame_overlap(
             if abs(height) < radius:
                 theta = np.arccos(abs(height) / radius)
                 points.extend([0.5 - theta / np.pi, 0.5 + theta / np.pi])
-    points = np.unique([0.0, 1.0, *points])
+        points = [0.0, 1.0, *points]
+    points = np.unique(points)
     total = error = 0.0
     for a, b in zip(points[:-1], points[1:]):
-        if b - a <= 8 * np.finfo(float).eps:
+        if shape.kind == "circle":
+            def section(t):
+                return _section(a + (b - a) * t)
+
+            weight = b - a
+        else:
+            section = _section_for_interval(a, b)
+            weight = (b - a) / span
+        if weight <= 8 * np.finfo(float).eps:
             # Rotated edges can produce knots only a few ULPs apart in the
             # unit interval. QUADPACK cannot resolve their interior nodes.
             # Density/peak and transverse mass are at most one; the largest
             # section Jacobian is pi/2 (circle). Retain the interval's area
             # and bound its entire contribution as error, in normalized units.
-            total += integrand((a + b) / 2) * (b - a)
-            error += (b - a) * (np.pi / 2 if shape.kind == "circle" else 1.0)
+            total += integrand(0.5) * weight
+            error += weight * (np.pi / 2 if shape.kind == "circle" else 1.0)
             continue
         value = quad(
             integrand,
-            a,
-            b,
-            epsabs=1e-12 * (b - a),
+            0.0,
+            1.0,
+            epsabs=1e-12,
             epsrel=rtol,
             limit=200,
             full_output=1,
         )
         if len(value) != 3:
             raise ValueError("sample overlap quadrature did not converge: " + value[3])
-        total += value[0]
-        error += value[1]
+        total += value[0] * weight
+        error += value[1] * weight
     if error > max(1e-11, abs(total) * rtol * 5):
         raise ValueError("sample overlap quadrature exceeded its error tolerance")
     scale = span * peak

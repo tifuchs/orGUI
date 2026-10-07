@@ -9,6 +9,8 @@ Unreleased (2026-07-19)
 
 Other user-visible changes:
 
+- Preparing reciprocal-space reconstruction jobs, previewing settings and checking status no longer evaluate the full-scan footprint correction. Preparation validates and freezes its inputs; execution computes the factors with progress and cancellation. Status distinguishes pending evaluation from recorded factors.
+
 - Prepared reciprocal-space maps preserve custom azimuth counters and embed measured footprint profiles, including their saved alignment. Explicit file-backed profiles support a relative base and content checksum. Preview and saved-job status distinguish requested, resolved and recorded illumination and explain why older jobs retain their original scale.
 
 - Sample-shape footprint settings now follow shape, azimuth and angular alignment. Centred rectangles and polygons use one parallel omega reading; circles need no orientation. A collapsible Off-centre sample section retains the separate placement references and opens when nonzero offsets are loaded. Incidence and azimuth default to acquisition/config angles named explicitly as mu and omega = -th in the dialog, with counter or fixed-value overrides behind a manual override button. Existing angle representations and numerical conventions are preserved; the surface-normal confirmation checkbox is removed. Applied footprint angles and alignment references are saved for correction replacement.
@@ -27,7 +29,7 @@ Other user-visible changes:
 
 Scientific and analysis additions:
 
-- Sample-shape footprint corrections handle nearly coincident integration breakpoints at rotated edges, avoiding spurious quadrature failures near right-angle alignment while retaining their contribution and error bound.
+- Sample-shape footprint corrections integrate thin rectangle and polygon sections in local coordinates, avoiding roundoff-driven quadrature failures near beam alignment without rounding the angles. Nearly coincident rotated edge breakpoints retain their contribution and error bound.
 
 - Reciprocal-space mapping now applies the shared beam-profile or sample-shape illumination/footprint correction, including angle overrides and squared variance scaling. Applied divisors are saved in output provenance; undefined illumination contributes no pixels. Older prepared jobs keep their original scale when resumed; newly prepared jobs honor the footprint switch.
 

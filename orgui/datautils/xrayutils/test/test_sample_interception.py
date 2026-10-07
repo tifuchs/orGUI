@@ -84,6 +84,81 @@ def _square_reference(alpha, azimuth, offset, n=100):
     )
 
 
+@pytest.mark.parametrize("kind", ["rectangle", "polygon"])
+@pytest.mark.parametrize("quarter_turn", [0, 1, 2, 3])
+def test_nearly_aligned_sections_match_surface_integral(kind, quarter_turn):
+    """Resolve thin corner sections without snapping acquisition angles."""
+    length, width = 0.01, 0.006
+    shape = SampleShape("rectangle", (length, width))
+    if kind == "polygon":
+        # The same geometry in reversed winding bypasses the product shortcut.
+        shape = SampleShape("polygon", vertices=tuple(map(tuple,
+                            shape.outline()[::-1])))
+    base = quarter_turn * np.pi / 2
+    angles = np.concatenate((
+        base + np.deg2rad(np.array([
+            -0.02, -0.01, -1e-4, -1e-6, -1e-8, -1e-10,
+            0, 1e-10, 1e-8, 1e-6, 1e-4, 0.01, 0.02,
+        ])),
+        [np.nextafter(base, -np.inf), np.nextafter(base, np.inf)],
+    ))
+    alpha = np.deg2rad(0.36)
+    orientation = 0.27
+    offset = (0.002, -0.001)
+    zv, yh = 20e-6, -0.0003
+    vertical = bp.gaussian_profile(160e-6, offset=10e-6)
+    horizontal = bp.gaussian_profile(0.004, offset=-0.0005)
+
+    def _reference(order):
+        nodes, weights = leggauss(order)
+        x, y = np.meshgrid(nodes * length / 2, nodes * width / 2,
+                           indexing="ij")
+        values = []
+        for angle in angles:
+            azimuth = angle - orientation
+            cx = np.cos(azimuth) * offset[0] - np.sin(azimuth) * offset[1]
+            cy = np.sin(azimuth) * offset[0] + np.cos(azimuth) * offset[1]
+            u = cx + np.cos(angle) * x - np.sin(angle) * y
+            v = cy + np.sin(angle) * x + np.cos(angle) * y
+            density = (vertical.density_at(zv + u * np.sin(alpha))
+                       * horizontal.density_at(yh + v))
+            values.append(length * width / 4 * np.einsum(
+                "i,j,ij", weights, weights, density
+            ))
+        return np.asarray(values)
+
+    expected = _reference(40)
+    np.testing.assert_allclose(expected, _reference(64), rtol=1e-13)
+    result = overlap(shape, vertical, horizontal, alpha, angles - orientation,
+                     offset=offset, orientation=orientation,
+                     axis_vertical=zv, axis_horizontal=yh, rtol=1e-12)
+    np.testing.assert_allclose(result.illumination, expected, rtol=1e-12)
+    np.testing.assert_allclose(result.fraction, np.sin(alpha) * expected,
+                               rtol=1e-12)
+    assert np.all(result.error < np.abs(expected) * 1e-9)
+
+
+@pytest.mark.parametrize("quarter_turn", [0, 1])
+def test_nearly_aligned_narrow_strip_and_uniform_area(quarter_turn):
+    """Explicit beam knots resolve narrow strips and conserve corner area."""
+    shape = SampleShape("rectangle", (0.01, 0.006))
+    angles = quarter_turn * np.pi / 2 + np.deg2rad(
+        [-0.02, -1e-6, -1e-8, 0, 1e-8, 1e-6, 0.02]
+    )
+    vertical = bp.top_hat_profile(0.1)
+    narrow = overlap(shape, vertical, bp.top_hat_profile(1e-7), 0.03,
+                     angles, rtol=1e-12)
+    # The central strip crosses two opposite long edges. Its chord length
+    # is constant throughout the strip, even at nonzero small rotations.
+    length = shape.dimensions[quarter_turn]
+    expected = length / (0.1 * np.abs(np.cos(angles - quarter_turn * np.pi / 2)))
+    np.testing.assert_allclose(narrow.illumination, expected, rtol=1e-12)
+    wide = overlap(shape, vertical, bp.top_hat_profile(0.1), 0.03,
+                   angles, rtol=1e-12)
+    np.testing.assert_allclose(wide.illumination, shape.area / 0.1**2,
+                               rtol=1e-12)
+
+
 def test_offset_rotation_and_square_symmetry():
     """Offset belongs to the rotating sample; it is not a fixed lab translation."""
     shape = SampleShape("rectangle", (0.01, 0.01))

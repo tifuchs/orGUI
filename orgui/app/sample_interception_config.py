@@ -187,16 +187,20 @@ def shape_from_settings(settings):
     )
 
 
-def shape_frame_factors(settings, vertical, alpha, azimuth, *, progress=None):
-    """Resolve shape H, f_hit and peak-referenced area fraction per frame.
+def validate_beam_profile(profile):
+    """Validate normalized density [1/m] without evaluating sample overlap.
 
-    ``alpha`` and raw ``azimuth`` are radians. Profile offsets align the shape
-    origin at ``reference_incidence_deg``; the laboratory axis stays fixed.
-    The shape angle is ``orientation_deg + sign * (azimuth - reference)``;
-    ``orientation_deg`` is the UI rotation offset. Only the readback difference
-    rotates the sample-fixed origin displacement, preserving its orbit.
-    Invalid angles/zero overlap are recorded as NaN divisors, never as unity.
+    :raises ValueError: For a nonpositive peak or negative/nonfinite density.
     """
+    if not np.isfinite(profile.peak_density) or profile.peak_density <= 0:
+        raise ValueError("beam profile must have finite positive peak density")
+    density = profile.density_at(profile.integration_points)
+    if np.any(density < 0) or not np.all(np.isfinite(density)):
+        raise ValueError("beam density must be finite and non-negative")
+
+
+def _shape_frame_inputs(settings, alpha, azimuth):
+    """Validate surface geometry [m/rad] without computing frame factors."""
     shape = shape_from_settings(settings)
     horizontal_settings = settings.get("horizontal")
     if not horizontal_settings:
@@ -222,6 +226,60 @@ def shape_frame_factors(settings, vertical, alpha, azimuth, *, progress=None):
         raise ValueError(
             "shape interception needs at least one frame with valid angles"
         )
+    geometry = {
+        "offset": offset,
+        "orientation": np.deg2rad(settings.get("orientation_deg", 0)),
+        "axis_vertical": -offset[0] * np.sin(reference_alpha),
+        "axis_horizontal": -offset[1],
+        "rtol": float(settings.get("rtol", 1e-9)),
+    }
+    if not np.all(np.isfinite([*offset, geometry["orientation"],
+                               settings.get("reference_azimuth_deg", 0)])):
+        raise ValueError("finite angles and finite placement are required")
+    if not 1e-12 <= geometry["rtol"] <= 1e-3:
+        raise ValueError("integration rtol must be between 1e-12 and 1e-3")
+    if not 0 <= float(settings.get("overspill_threshold", 0.01)) <= 1:
+        raise ValueError("overspill threshold must be between zero and one")
+    return shape, horizontal, alpha, psi, valid, geometry
+
+
+def resolve_shape_inputs(scan, settings, alpha, *, count=None, omega=None,
+                         base_path=None):
+    """Validate and freeze shape inputs without footprint quadrature.
+
+    Acquisition ``alpha`` and optional ``omega`` are radians. Returned settings
+    retain SI shape dimensions, the first physical reference incidence in
+    degrees, and embedded horizontal measured data with its aligned origin.
+
+    :param base_path: Job directory for explicitly relative profile references.
+    :returns: Resolved incidence/azimuth arrays [rad] and copied shape settings.
+    :raises ValueError: For invalid profiles, geometry or unavailable angles.
+    """
+    alpha, azimuth, settings = sample_angle_inputs(
+        scan, settings, alpha, count=count, omega=omega
+    )
+    if not settings.get("horizontal"):
+        raise ValueError("exact 2D interception requires a horizontal beam profile")
+    horizontal = profile_from_settings(settings["horizontal"], base_path=base_path)
+    validate_beam_profile(horizontal)
+    settings["horizontal"] = embed_profile(settings["horizontal"], horizontal)
+    _shape_frame_inputs(settings, alpha, azimuth)
+    return alpha, azimuth, settings
+
+
+def shape_frame_factors(settings, vertical, alpha, azimuth, *, progress=None):
+    """Resolve shape H, f_hit and peak-referenced area fraction per frame.
+
+    ``alpha`` and raw ``azimuth`` are radians. Profile offsets align the shape
+    origin at ``reference_incidence_deg``; the laboratory axis stays fixed.
+    The shape angle is ``orientation_deg + sign * (azimuth - reference)``;
+    ``orientation_deg`` is the UI rotation offset. Only the readback difference
+    rotates the sample-fixed origin displacement, preserving its orbit.
+    Invalid angles/zero overlap are recorded as NaN divisors, never as unity.
+    """
+    shape, horizontal, alpha, psi, valid, geometry = _shape_frame_inputs(
+        settings, alpha, azimuth
+    )
     illumination = np.full(alpha.shape, np.nan)
     fraction = np.full(alpha.shape, np.nan)
     area = np.full(alpha.shape, np.nan)
@@ -232,12 +290,8 @@ def shape_frame_factors(settings, vertical, alpha, azimuth, *, progress=None):
         horizontal,
         alpha[valid],
         psi[valid],
-        offset=offset,
-        orientation=np.deg2rad(settings.get("orientation_deg", 0)),
-        axis_vertical=-offset[0] * np.sin(reference_alpha),
-        axis_horizontal=-offset[1],
-        rtol=float(settings.get("rtol", 1e-9)),
         progress=progress,
+        **geometry,
     )
     illumination[valid], fraction[valid] = result.illumination, result.fraction
     area[valid], error[valid] = result.effective_area, result.error
@@ -246,8 +300,6 @@ def shape_frame_factors(settings, vertical, alpha, azimuth, *, progress=None):
     if not valid.any():
         raise ValueError("no frame has positive sample/beam overlap")
     threshold = float(settings.get("overspill_threshold", 0.01))
-    if not 0 <= threshold <= 1:
-        raise ValueError("overspill threshold must be between zero and one")
     if np.any(~valid):
         logger.warning(
             "Shape interception excludes %d frame values (NaN divisors)",

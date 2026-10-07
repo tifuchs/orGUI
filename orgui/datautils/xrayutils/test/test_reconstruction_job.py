@@ -146,14 +146,20 @@ def test_saved_map_illumination_scales_output_and_survives_resume(tmp_path, clus
             job.cluster_settings = {"array_task_count": 2}
         write_job(job, path)
         if cluster:
+            events = []
             for index in range(2):
                 run_cluster_map_task(path, index, total_tasks=2, cpus=1,
-                                     memory_bytes=64 * 1024**2)
+                                     memory_bytes=64 * 1024**2,
+                                     progress=lambda *event: events.append(event))
             result = run_cluster_finalize(path, total_tasks=2, cpus=1,
                                           memory_bytes=64 * 1024**2)
         else:
-            result = run_job(path)
+            events = []
+            result = run_job(path, progress=lambda *event: events.append(event))
             assert run_job(path) == result
+        footprint_events = [event for event in events
+                            if event[2] == "Evaluating footprint correction"]
+        assert bool(footprint_events) == enabled
         assert result["status"] == "complete"
         with h5py.File(result["output_path"], "r") as file:
             process = file["entry/reconstruction"]

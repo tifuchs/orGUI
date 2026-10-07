@@ -147,9 +147,12 @@ Saved footprint inputs and status
 
 ``Open Job`` and the status shown before ``Resume`` report footprint requested,
 saved ``shared_frame_illumination`` opt-in, effective correction, resolved divisor
-convention, and application recorded during execution. ``Preview`` resolves the
-live selections. A resolved policy predicts the correction; ``applied_status``
-is ``not_recorded`` until execution provenance exists. Missing or false saved
+convention, and application recorded during execution. Preparation and
+``Preview`` validate correction inputs without computing per-frame footprint
+factors. Status reports ``resolved_status="pending"`` until execution records
+the factors, then ``resolved_status="recorded"``. ``applied_status`` is
+``not_recorded`` until execution provenance exists. Opening a job or checking
+its status does not evaluate the footprint. Missing or false saved
 opt-in keeps the original scale and displays the compatibility reason. Changes
 to that scale require a newly prepared job; changed configuration has a different
 checkpoint identity and cannot reuse the old job's checkpoints.
@@ -168,6 +171,14 @@ Preparation reports unavailable or mismatched counters before mapping. To
 prepare again, supply/recalculate the selected counter on the loaded scan;
 previous snapshots are discarded rather than reused for a different scan.
 Automatic and fixed-source angle conventions are unchanged.
+
+Preparation still validates shape dimensions, profiles, placement, angle sources
+and normalization inputs, and freezes the first physical reference incidence
+and aligned horizontal measured profile. At execution start, full-scan footprint
+evaluation reports progress and supports cancellation between frames. Numerical
+quadrature failures and absence of positive sample/beam overlap are checked then,
+before mapping starts. Checkpoint planning and asset snapshots remain part of
+preparation.
 
 Measured vertical profiles embed normalized positions in metres and densities
 in m\ :sup:`-1` by default, even when the configuration initially supplies only
