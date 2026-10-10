@@ -91,6 +91,8 @@ class CorrectionState:
     repair_gap_size_px: int = 1
     normalize_exposure: bool = True
     monitor_corrections: tuple[str, ...] = ()
+    # Deprecated compatibility fields above: hidden in the GUI.
+    # TODO: Remove after legacy configs, curves and prepared jobs are retired.
     # Older prepared reconstruction jobs ignored use_normalization and the
     # primary-monitor contract. Missing means their original legacy behavior.
     shared_frame_normalization: bool = False

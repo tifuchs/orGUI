@@ -35,6 +35,9 @@ from .app.sample_interception_config import (
 )
 from .backend.scans import ScanReference, _alpha_centers, _frame_values
 from .datautils.xrayutils.corrections import detector as detector_corrections
+from .datautils.xrayutils.corrections.normalization import (
+    _warn_legacy_normalization,
+)
 from .datautils.xrayutils.reconstruction import (
     _CHECKPOINT_BYTES_PER_ROW,
     _CheckpointRouter,
@@ -1436,6 +1439,11 @@ def _correction_pipeline(config, scan, assets, provenance, *, progress=None):
     )
     frame_divisor = None
     illuminate = correction.shared_frame_illumination and correction.use_footprint
+    # Deprecated prepared-job compatibility; TODO: Remove after job migration.
+    # Illumination warns through the shared policy; otherwise warn here once
+    # per pipeline, never once per detector frame.
+    if normalize and not total_flux_normalization and not illuminate:
+        _warn_legacy_normalization()
 
     def footprint_progress(completed, total):
         if progress is not None:

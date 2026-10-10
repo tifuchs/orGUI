@@ -411,7 +411,9 @@ def test_total_flux_mode_disables_density_and_full_mode_width_input(dialog):
     assert "Not a total-flux scale input" in dialog.W.toolTip()
 
     dialog.setTotalFluxMode(False)
-    assert dialog.beamFlux.isEnabled()
+    assert not dialog.beamFlux.isEnabled()
+    assert dialog.beamFlux.isHidden()
+    assert dialog.legacyFluxLabel.isHidden()
     assert dialog.W.isEnabled()
 
 

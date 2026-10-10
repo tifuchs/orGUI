@@ -30,6 +30,19 @@ WAVELENGTH = 0.70047
 UC_AREA = 2.7748 * 2.7748 * np.sin(np.deg2rad(120.0))
 
 
+def test_density_prefactor_warns_but_keeps_its_scale(caplog):
+    expected = (3.0 * 2.0 * 2.8179403262e-15**2
+                * (WAVELENGTH * 1e-10)**2 / (UC_AREA * 1e-20)**2)
+    actual = ii.scale_factor(WAVELENGTH, UC_AREA, active_area=2.0, flux_density=3.0)
+    assert actual == pytest.approx(expected)
+    assert "deprecated and scheduled for removal" in caplog.text
+
+
+def test_total_flux_prefactor_does_not_warn_about_legacy(caplog):
+    ii.total_flux_prefactor(WAVELENGTH, UC_AREA)
+    assert "deprecated" not in caplog.text
+
+
 @pytest.mark.parametrize("n_l, dl", [(1, 0.02), (5, 0.004), (5, 0.3)])
 def test_reciprocal_rod_reduction_uses_hkl_area_and_mean_rod_length(n_l, dl):
     """HKL differential intensity has r_e^2/A_u, with no wavelength factor."""

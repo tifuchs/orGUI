@@ -35,6 +35,8 @@ beamline's scan is a data-format question and belongs to
 attribute name appears here.
 """
 
+import logging
+
 import numpy as np
 
 __all__ = [
@@ -48,6 +50,17 @@ __all__ = [
 
 MONITOR_RATE = "rate"
 MONITOR_INTEGRATED = "integrated"
+
+
+def _warn_legacy_normalization():
+    """Report use of the deprecated compatibility normalization."""
+    logging.getLogger(__name__).warning(
+        "Legacy exposure/monitor-product and density/area normalization is "
+        "deprecated and scheduled for removal. Existing settings and results "
+        "are preserved for compatibility. Use an explicit total-flux "
+        "convention with one rate-like or integrated primary monitor for "
+        "new processing."
+    )
 
 
 def broadcast_counter(value, size, name):
@@ -74,6 +87,10 @@ def broadcast_counter(value, size, name):
 def normalization_divisor(size, exposure_time=None, monitors=None):
     """Per-frame divisor from the counting time and the monitor counters.
 
+    .. deprecated:: 1.5
+       Retained for legacy counter-product compatibility; scheduled for
+       removal. Use :func:`relative_frame_fluence` or :func:`frame_fluence`.
+
     :param int size: Number of frames.
     :param exposure_time: Counting time of every frame, in seconds; a scalar
         or one value per frame. ``None`` leaves the counting time out, which
@@ -90,6 +107,8 @@ def normalization_divisor(size, exposure_time=None, monitors=None):
         value that would make the normalization undefined, or the wrong
         number of values.
     """
+    # TODO: Remove once legacy configs, saved curves and jobs are retired.
+    _warn_legacy_normalization()
     divisor = np.ones(int(size), dtype=np.float64)
     applied = []
 

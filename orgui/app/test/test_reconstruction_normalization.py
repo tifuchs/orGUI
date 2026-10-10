@@ -106,7 +106,7 @@ def test_reconstruction_uses_calibrated_primary_monitor_reference():
     assert intensity[0, 0] == pytest.approx(1.0)
 
 
-def test_legacy_job_keeps_exposure_times_monitor_product():
+def test_legacy_job_keeps_exposure_times_monitor_product(caplog):
     state = CorrectionState(
         use_normalization=False,
         normalize_exposure=True,
@@ -125,6 +125,7 @@ def test_legacy_job_keeps_exposure_times_monitor_product():
     )
 
     assert intensity[0, 0] == pytest.approx(10.0)
+    assert caplog.text.count("deprecated and scheduled for removal") == 1
 
 
 def _footprint_state(**kwargs):

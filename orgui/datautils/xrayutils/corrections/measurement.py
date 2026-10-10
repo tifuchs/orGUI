@@ -136,6 +136,7 @@ the legacy active-area APIs.
 import numpy as np
 
 from . import geometry
+from .normalization import _warn_legacy_normalization
 
 __all__ = [
     "CLASSICAL_ELECTRON_RADIUS",
@@ -213,6 +214,8 @@ def reciprocal_map_structure_factor_squared(
     :param active_area: Legacy illuminated active area in square meters.
     :param flux_density: Legacy incident flux density in photons/s/m^2,
         after the same monitor convention used to normalize the map.
+        Deprecated, together with ``active_area``; scheduled for removal.
+        Use total-flux-normalized maps and ``illumination_divisor`` instead.
     :returns: Mean :math:`|F|^2` in electron units squared on a calibrated
         scale, or a common arbitrary scale with legacy unit flux and area.
     :rtype: float
@@ -243,6 +246,9 @@ def reciprocal_map_structure_factor_squared(
     ):
         raise ValueError("map scale divisors must be finite positive scalars")
     area_m2 = float(unitcell_area) * _ANGSTROM**2
+    # TODO: Remove density/area arguments after legacy map support is retired.
+    if active_area != 1.0 or flux_density != 1.0:
+        _warn_legacy_normalization()
     scale = (CLASSICAL_ELECTRON_RADIUS**2 / area_m2
              * float(active_area) * float(flux_density)
              * float(illumination_divisor) * float(reference_solid_angle))
@@ -464,6 +470,10 @@ def scale_factor(wavelength, unitcell_area, active_area=1.0, flux_density=1.0):
     r"""Mode-independent prefactor
     :math:`\Phi_0 r_e^2 A \lambda^2 / A_u^2`, in 1/s.
 
+    .. deprecated:: 1.5
+       Density/area compatibility prefactor, scheduled for removal. Use
+       :func:`total_flux_prefactor` with frame fluence and illumination.
+
     Leaving ``flux_density`` and ``active_area`` at ``1`` gives the relative
     scale factor, which is all that is needed to put different scan modes of
     one experiment on a *common* scale. Supplying the measured flux density
@@ -483,6 +493,8 @@ def scale_factor(wavelength, unitcell_area, active_area=1.0, flux_density=1.0):
     :raises ValueError: If the wavelength or the unit-cell area is not
         positive.
     """
+    # TODO: Remove after legacy density/area reduction APIs are retired.
+    _warn_legacy_normalization()
     wavelength = np.asarray(wavelength, dtype=np.float64)
     unitcell_area = np.asarray(unitcell_area, dtype=np.float64)
     if np.any(wavelength <= 0):
@@ -640,6 +652,9 @@ def structure_factor_squared(
 ):
     r"""Turn a normalized integrated intensity into :math:`|F_{hkl}|^2`.
 
+    Deprecated density/area compatibility API, scheduled for removal. Use
+    :func:`structure_factor_squared_from_photon_yield` for new processing.
+
     Inverts the master equation of this module. ``intensity`` must already be
     the output of :func:`normalized_intensity` and must already be divided by
     the polarization factor :math:`P`; everything else is divided out here.
@@ -699,6 +714,9 @@ def integrated_intensity(
 ):
     r"""Forward model: the normalized intensity a given :math:`|F_{hkl}|^2`
     produces.
+
+    Deprecated density/area compatibility API, scheduled for removal. Use
+    :func:`photon_yield_from_structure_factor` for new processing.
 
     The exact inverse of :func:`structure_factor_squared`, kept as a public
     function because it is how a simulated measurement -- and therefore a

@@ -9,6 +9,10 @@ Unreleased (2026-07-19)
 
 Other user-visible changes:
 
+- Legacy flux normalization is deprecated and scheduled for removal. Its density and monitor-product controls are hidden and disabled in the GUI; only relative and calibrated total-flux modes can be selected. Imported configurations, saved curves and prepared jobs retain their numerical behavior and log a deprecation warning when legacy normalization runs. Frame normalization remains unchecked by default.
+
+- Opening a prepared reciprocal-space reconstruction job in a fresh session preserves its primary monitor and normalization mode in the correction editor when restoring the saved correction switches.
+
 - Startup checks pyFAI's strided detector-coordinate equations against an independent calculation. If the check fails, a warning recommends reinstalling numexpr and appears as a popup in GUI mode. orGUI attempts a best-effort workaround with contiguous inputs; correct results are not guaranteed.
 
 - Preparing reciprocal-space reconstruction jobs, previewing settings and checking status no longer evaluate the full-scan footprint correction. Preparation validates and freezes its inputs; execution computes the factors with progress and cancellation. Status distinguishes pending evaluation from recorded factors.

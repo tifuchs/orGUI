@@ -578,8 +578,8 @@ not infer monitor kind from a counter name.
 Without a flux calibration, the same exposure rule produces a relative
 fluence and the saved scale remains explicitly relative. The legacy
 normalization continues to divide by exposure and by every selected monitor
-counter, matching reciprocal-space reconstruction, but it is labeled as a
-counter product rather than photons.
+counter, matching reciprocal-space reconstruction. This compatibility path
+is deprecated and scheduled for removal, and logs a warning when used.
 
 In the legacy path, a scan backend that provides no exposure time skips that
 part of the normalization. In the total-flux path, missing inputs required by

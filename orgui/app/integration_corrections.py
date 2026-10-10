@@ -68,6 +68,7 @@ import numpy as np
 
 from ..datautils.xrayutils.corrections import activearea, measurement
 from ..datautils.xrayutils.corrections.normalization import (
+    _warn_legacy_normalization,
     frame_fluence,
     normalization_divisor as _divisor_from_counters,
     relative_frame_fluence,
@@ -297,6 +298,9 @@ def frame_correction_policy(
             "density_reference": "peak",
         }
     if not new_contract:
+        # Deprecated compatibility branch; TODO: Remove with legacy configs.
+        if use_illumination and not use_normalization:
+            _warn_legacy_normalization()
         divisor = None
         components = ()
         norm_status = "not_applied"
@@ -630,6 +634,10 @@ def monitor_counter_candidates(scan):
 
 def normalization_divisor(scan, normalize_exposure, monitor_corrections, size):
     """Exposure and monitor divisor for every image of a scan.
+
+    Deprecated compatibility API, scheduled for removal. New processing
+    should use :func:`frame_correction_policy` with an explicit total-flux
+    convention.
 
     Pulls the counters off the scan object and hands them to
     :func:`~orgui.datautils.xrayutils.corrections.normalization.normalization_divisor`,

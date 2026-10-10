@@ -586,7 +586,7 @@ def test_a_missing_detector_leaves_the_acceptance_out_rather_than_failing():
     assert applied is False
 
 
-def test_the_rocking_normalization_uses_the_stored_counters():
+def test_the_rocking_normalization_uses_the_stored_counters(caplog):
     """Exposure and the configured monitors multiply into one divisor."""
     aux = {
         "exposure_time": np.array([2.0, 4.0]),
@@ -600,6 +600,7 @@ def test_the_rocking_normalization_uses_the_stored_counters():
 
     np.testing.assert_allclose(divisor, [20.0, 20.0], rtol=1e-12)
     assert applied == ["exposure", "monitor:mondio"]
+    assert "deprecated and scheduled for removal" in caplog.text
 
 
 def test_a_missing_exposure_counter_is_skipped_and_recorded():

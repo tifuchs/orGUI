@@ -145,7 +145,9 @@ The correction core and both integration paths provide an explicit alternative
 to the legacy peak-flux-density times effective-area convention. New sessions
 default to a relative total-flux contract; calibrated output is opt-in and is
 labeled separately. Legacy saved configurations retain their old numerical
-meaning.
+meaning. This compatibility normalization is deprecated and scheduled for
+removal, warns when used, and is no longer selectable in the GUI. Imported
+settings remain unchanged until a total-flux mode is explicitly selected.
 
 ``corrections.normalization.frame_fluence`` calculates incident photons
 :math:`Q_f` in a frame. A rate-like monitor is multiplied by that frame's

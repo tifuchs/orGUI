@@ -6,6 +6,21 @@ import pytest
 from orgui.datautils.xrayutils.corrections import normalization
 
 
+def test_legacy_counter_product_warns_without_changing_values(caplog):
+    divisor, applied = normalization.normalization_divisor(
+        2, exposure_time=[2.0, 4.0], monitors={"mon": [10.0, 5.0]}
+    )
+    np.testing.assert_array_equal(divisor, [20.0, 20.0])
+    assert applied == ["exposure", "monitor:mon"]
+    assert "deprecated and scheduled for removal" in caplog.text
+
+
+def test_total_flux_helpers_do_not_warn_about_legacy_normalization(caplog):
+    normalization.frame_fluence(100.0, exposure_time=2.0)
+    normalization.relative_frame_fluence(exposure_time=2.0)
+    assert "deprecated" not in caplog.text
+
+
 def test_constant_total_flux_uses_each_frame_exposure():
     exposure = np.array([0.1, 0.25, 0.8])
 

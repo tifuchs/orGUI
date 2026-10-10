@@ -2168,11 +2168,11 @@ class IntegrationOptionsDialog(qt.QDialog):
         self.scaleModeCombo = qt.QComboBox()
         self.scaleModeCombo.addItem("Total flux — relative scale", "relative")
         self.scaleModeCombo.addItem("Total flux — calibrated", "calibrated")
-        self.scaleModeCombo.addItem("Legacy density/area", "legacy")
+        self.scaleModeCombo.setPlaceholderText("Choose a total-flux convention")
         self.scaleModeCombo.setToolTip(
-            "New sessions use total incident flux. Legacy density/area is "
-            "retained only for imported configurations and is never converted "
-            "without a known horizontal beam profile."
+            "Choose relative or calibrated total incident flux. Imported "
+            "deprecated settings are preserved until you explicitly choose "
+            "a total-flux convention."
         )
         scaleRow.addWidget(self.scaleModeCombo, 1)
         incidentLayout.addLayout(scaleRow)
@@ -2199,8 +2199,21 @@ class IntegrationOptionsDialog(qt.QDialog):
         monitorRow.addWidget(self.primaryMonitorCombo, 0, 1)
         monitorRow.addWidget(qt.QLabel("Monitor records:"), 1, 0)
         self.monitorKindCombo = qt.QComboBox()
-        self.monitorKindCombo.addItem("Rate", "rate")
-        self.monitorKindCombo.addItem("Integrated per frame", "integrated")
+        self.monitorKindCombo.addItem("Rate (counts/s)", "rate")
+        self.monitorKindCombo.addItem("Integrated (counts)", "integrated")
+        rate_tooltip = (
+            "Rate (counts/s): will calculate total incident fluence by "
+            "multiplying with exposure time"
+        )
+        integrated_tooltip = (
+            "Integrated (counts): Will use this counter directly as total "
+            "incident fluence"
+        )
+        self.monitorKindCombo.setItemData(0, rate_tooltip, qt.Qt.ToolTipRole)
+        self.monitorKindCombo.setItemData(1, integrated_tooltip, qt.Qt.ToolTipRole)
+        self.monitorKindCombo.setToolTip(
+            rate_tooltip + "\n\n" + integrated_tooltip
+        )
         monitorRow.addWidget(self.monitorKindCombo, 1, 1)
         monitorRow.addWidget(qt.QLabel("Counter unit:"), 2, 0)
         self.monitorUnitEdit = qt.QLineEdit()
@@ -2209,12 +2222,22 @@ class IntegrationOptionsDialog(qt.QDialog):
         monitorRow.addWidget(qt.QLabel("Reference reading:"), 3, 0)
         self.referenceMonitorEdit = qt.QLineEdit()
         self.referenceMonitorEdit.setValidator(fluxValidator)
+        self.referenceMonitorEdit.setToolTip(
+            "The reference reading is the monitor value recorded when the "
+            "beam flux was calibrated."
+        )
         monitorRow.addWidget(self.referenceMonitorEdit, 3, 1)
         self.referenceExposureLabel = qt.QLabel("Reference exposure:")
         monitorRow.addWidget(self.referenceExposureLabel, 4, 0)
         self.referenceExposureEdit = qt.QLineEdit()
         self.referenceExposureEdit.setValidator(fluxValidator)
         self.referenceExposureEdit.setPlaceholderText("seconds")
+        self.referenceExposureEdit.setToolTip(
+            "Exposure time used to acquire the integrated reference reading, "
+            "in seconds. Calibrated frame fluence is total incident flux × "
+            "reference exposure × frame reading / reference reading. "
+            "The frame exposure is already included in its reading."
+        )
         monitorRow.addWidget(self.referenceExposureEdit, 4, 1)
         incidentLayout.addLayout(monitorRow)
 
@@ -2260,6 +2283,10 @@ class IntegrationOptionsDialog(qt.QDialog):
         legacyLayout.addWidget(self.monitorInfo)
         legacy.setLayout(legacyLayout)
         incidentLayout.addWidget(legacy)
+        # Deprecated compatibility widgets: preserve loaded values only.
+        # TODO: Remove after legacy configuration support is retired.
+        legacy.hide()
+        legacy.setEnabled(False)
         incident.setLayout(incidentLayout)
         layout.addWidget(incident)
 
@@ -2420,7 +2447,7 @@ class IntegrationOptionsDialog(qt.QDialog):
             else:
                 mode = "relative"
             self.scaleModeCombo.setCurrentIndex(
-                max(self.scaleModeCombo.findData(mode), 0)
+                self.scaleModeCombo.findData(mode)
             )
         self._syncFootprintState()
         self._updateCtrStatus()
@@ -2449,32 +2476,21 @@ class IntegrationOptionsDialog(qt.QDialog):
             self.monitorInfo.setText("<i>This scan provides no usable counters.</i>")
 
     def _onNormalizationChanged(self):
-        """Write the normalization settings back to the shared state."""
-        main = self._mainWindow()
-        if main is None:
-            return
-        state = self._correctionState()
-        state.normalize_exposure = bool(self.normalizeExposureBox.isChecked())
-        state.monitor_corrections = tuple(
-            value.strip()
-            for value in self.monitorEdit.text().split(",")
-            if value.strip()
-        )
+        """Ignore edits to deprecated, hidden compatibility widgets."""
+        # TODO: Remove with the legacy widgets and configuration support.
+
+    def _fluxMode(self):
+        """Resolve the mode, preserving imported compatibility settings."""
+        return self.scaleModeCombo.currentData() or "legacy"
 
     def _onTotalFluxChanged(self, *args):
         """Write total-flux widgets to the typed correction state."""
         state = self._correctionState()
-        mode = self.scaleModeCombo.currentData()
+        mode = self._fluxMode()
         if mode == "legacy":
-            state.total_incident_flux = None
-            state.total_flux_calibrated = None
-            state.primary_monitor = None
-            state.primary_monitor_kind = None
-            state.primary_monitor_unit = None
-            state.monitor_reference_reading = None
-            state.monitor_reference_exposure_s = None
-            state.horizontal_interception = None
-            state.horizontal_intercepted_fraction = None
+            # No selection means an imported deprecated configuration, not
+            # a GUI-selectable mode. Never reinterpret it on widget refresh.
+            return
         else:
             state.total_flux_calibrated = mode == "calibrated"
             state.total_incident_flux = (
@@ -2519,7 +2535,7 @@ class IntegrationOptionsDialog(qt.QDialog):
         if self.footprintOptions is None:
             return
         state = self._correctionState()
-        total_flux = self.scaleModeCombo.currentData() != "legacy"
+        total_flux = self._fluxMode() != "legacy"
         self.footprintOptions.setTotalFluxMode(total_flux)
         if total_flux:
             self.footprintOptions.setHorizontalInterception(
@@ -2533,7 +2549,7 @@ class IntegrationOptionsDialog(qt.QDialog):
             return
         state = self._correctionState()
         state.sample_interception = self.footprintOptions.sampleInterceptionSettings()
-        if self.scaleModeCombo.currentData() != "legacy":
+        if self._fluxMode() != "legacy":
             state.horizontal_interception = (
                 self.footprintOptions.horizontalInterceptionMode()
             )
@@ -2545,8 +2561,7 @@ class IntegrationOptionsDialog(qt.QDialog):
     def _updateCtrStatus(self, *args):
         """Show the next extraction's mode, formula, and scale completeness."""
         state = self._correctionState()
-        mode = self.scaleModeCombo.currentData()
-        self.legacyNormalization.setEnabled(mode == "legacy")
+        mode = self._fluxMode()
         monitor = self.primaryMonitorCombo.currentData() or None
         kind = self.monitorKindCombo.currentData() if monitor else None
         if mode == "legacy":
@@ -2618,7 +2633,10 @@ class IntegrationOptionsDialog(qt.QDialog):
 
         calibrated = mode == "calibrated" and not missing
         if mode == "legacy":
-            status = "Legacy density/area convention"
+            status = (
+                "Deprecated normalization preserved for compatibility. "
+                "Choose a total-flux convention to update these settings."
+            )
         elif missing:
             scale = "Calibrated scale" if mode == "calibrated" else "Relative scale"
             status = f"{scale} pending — missing " + ", ".join(missing)

@@ -222,6 +222,11 @@ def test_new_session_uses_relative_total_flux_and_requires_horizontal_choice(qap
     try:
         assert dialog.scaleModeCombo.currentData() == "relative"
         assert main.ctr_correction_state.total_flux_calibrated is False
+        assert not selector.useNormalizationBox.isChecked()
+        assert dialog.scaleModeCombo.count() == 2
+        assert dialog.scaleModeCombo.findData("legacy") == -1
+        assert dialog.legacyNormalization.isHidden()
+        assert not dialog.legacyNormalization.isEnabled()
         assert "Relative scale pending" in dialog.scaleStatus.text()
         assert "horizontal interception" in dialog.scaleStatus.text()
         assert "No primary monitor" == dialog.primaryMonitorCombo.currentText()
@@ -293,7 +298,7 @@ def test_integrated_monitor_formula_does_not_apply_frame_exposure_twice(qapp):
         main.deleteLater()
 
 
-def test_legacy_multi_monitor_settings_remain_separate_and_labeled(qapp):
+def test_legacy_multi_monitor_settings_are_preserved_but_hidden(qapp):
     """Opening an old configuration does not reinterpret its monitor product."""
     main = qt.QMainWindow()
     main.fscan = _Scan()
@@ -306,38 +311,83 @@ def test_legacy_multi_monitor_settings_remain_separate_and_labeled(qapp):
     selector = _selector(main)
     dialog = IntegrationOptionsDialog(selector, parent=main)
     try:
-        assert dialog.scaleModeCombo.currentData() == "legacy"
+        assert dialog.scaleModeCombo.currentIndex() == -1
+        assert dialog.scaleModeCombo.findData("legacy") == -1
+        assert dialog.legacyNormalization.isHidden()
+        assert not dialog.legacyNormalization.isEnabled()
         assert dialog.monitorEdit.text() == "ic2, temperature"
-        assert "Legacy density/area convention" in dialog.scaleStatus.text()
+        assert "Deprecated normalization preserved" in dialog.scaleStatus.text()
         assert dialog.primaryMonitorCombo.currentData() == ""
+        dialog._onTotalFluxChanged()
+        dialog.refresh()
+        state = main.ctr_correction_state
+        assert state.total_flux_calibrated is None
+        assert state.monitor_corrections == ("ic2", "temperature")
+        assert state.normalize_exposure is True
+        footprint = dialog.footprintOptions_shared()
+        assert footprint.beamFlux.isHidden()
+        assert not footprint.beamFlux.isEnabled()
+        assert footprint.legacyDensity.isHidden()
     finally:
         dialog.deleteLater()
         main.deleteLater()
 
 
-def test_monitor_editor_updates_the_shared_correction_state(qapp):
-    """The one editor owns the monitor selection captured by mapping."""
+def test_hidden_legacy_editor_cannot_change_settings_or_select_legacy(qapp):
+    """Deprecated controls retain state without allowing GUI edits."""
     main = qt.QMainWindow()
     main.fscan = _Scan()
     selector = _selector(main)
     dialog = IntegrationOptionsDialog(selector, parent=main)
     try:
         assert not dialog.legacyNormalization.isEnabled()
-        dialog.scaleModeCombo.setCurrentIndex(
-            dialog.scaleModeCombo.findData("legacy")
-        )
-        assert dialog.legacyNormalization.isEnabled()
+        assert dialog.legacyNormalization.isHidden()
         dialog.normalizeExposureBox.setChecked(False)
         dialog.monitorEdit.setText("ic2, temperature")
         dialog._onNormalizationChanged()
 
         state = main.ctr_correction_state
-        assert state.normalize_exposure is False
-        assert state.monitor_corrections == ("ic2", "temperature")
+        assert state.normalize_exposure is True
+        assert state.monitor_corrections == ()
         assert not hasattr(main, "reconstruction_monitor_corrections")
         dialog.monitorEdit.setText("stale")
         dialog.refresh()
-        assert dialog.monitorEdit.text() == "ic2, temperature"
+        assert dialog.monitorEdit.text() == ""
+        assert dialog.scaleModeCombo.currentData() == "relative"
+
+        dialog.scaleModeCombo.setCurrentIndex(
+            dialog.scaleModeCombo.findData("calibrated")
+        )
+        dialog.scaleModeCombo.setCurrentIndex(
+            dialog.scaleModeCombo.findData("relative")
+        )
+        assert state.total_flux_calibrated is False
+    finally:
+        dialog.deleteLater()
+        main.deleteLater()
+
+
+def test_imported_legacy_settings_can_explicitly_switch_to_total_flux(qapp):
+    """An explicit mode selection migrates without reusing legacy monitors."""
+    main = qt.QMainWindow()
+    main.fscan = _Scan()
+    main.ctr_correction_state = CorrectionState(
+        normalize_exposure=False, monitor_corrections=("ic2", "temperature")
+    )
+    selector = _selector(main)
+    dialog = IntegrationOptionsDialog(selector, parent=main)
+    try:
+        dialog.scaleModeCombo.setCurrentIndex(
+            dialog.scaleModeCombo.findData("relative")
+        )
+        state = main.ctr_correction_state
+        assert state.total_flux_calibrated is False
+        assert state.primary_monitor is None
+        assert state.monitor_corrections == ("ic2", "temperature")
+        assert state.normalize_exposure is False
+        assert not selector.useNormalizationBox.isChecked()
+        assert not dialog.legacyNormalization.isEnabled()
+        assert "Deprecated" not in dialog.scaleStatus.text()
     finally:
         dialog.deleteLater()
         main.deleteLater()

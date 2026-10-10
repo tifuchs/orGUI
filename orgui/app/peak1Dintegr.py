@@ -1780,6 +1780,9 @@ class RockingPeakIntegrator(qt.QMainWindow):
     def _rocking_normalization(self, aux, size):
         """Per-frame exposure and monitor divisor of the rocking scan.
 
+        Deprecated compatibility reducer, scheduled for removal. Versioned
+        total-flux curves instead use their stored frame-fluence divisors.
+
         Unlike the stationary path this cannot ask a live scan object: a
         rocking integration runs off the database, so the counters are read
         from the ``auxillary`` group that
@@ -1800,6 +1803,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             ``(size,)``.
         :rtype: tuple
         """
+        # TODO: Remove after legacy rocking curves can be migrated/re-extracted.
         config_target = self.database.config_target
         correction_state = getattr(config_target, "ctr_correction_state", None)
         monitor_names = tuple(
@@ -3575,13 +3579,18 @@ class IntegrationCorrectionsDialog(qt.QDialog):
     def _updateLegacyControlState(self):
         """Apply total-flux/legacy enablement without changing stored values."""
         enabled = bool(getattr(self, "_totalFluxMode", False))
-        self.beamFlux.setEnabled(not enabled)
-        self.legacyFluxLabel.setEnabled(not enabled)
+        # Deprecated storage-only controls; never offer new density settings.
+        # TODO: Remove after legacy configuration support is retired.
+        self.beamFlux.setEnabled(False)
+        self.beamFlux.hide()
+        self.legacyFluxLabel.setEnabled(False)
+        self.legacyFluxLabel.hide()
         exact = (self.sampleEditor is not None
                  and self.sampleEditor.enabled.isChecked())
         if hasattr(self, "legacyGeometry"):
             self.legacyGeometry.setHidden(exact)
-            self.legacyDensity.setHidden(enabled)
+            self.legacyDensity.hide()
+            self.legacyDensity.setEnabled(False)
         self.horizontalInterception.setEnabled(not exact)
         self.horizontalFraction.setEnabled(
             not exact and self.horizontalInterceptionMode() == "fraction"

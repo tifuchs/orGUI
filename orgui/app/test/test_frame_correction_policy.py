@@ -137,7 +137,7 @@ def test_total_flux_illumination_needs_one_physical_frame():
         )
 
 
-def test_legacy_policy_preserves_counter_product_and_active_area():
+def test_legacy_policy_preserves_counter_product_and_active_area(caplog):
     """Absent version-3 fields retain the established numerical convention."""
     exposure = np.array([0.5, 1.0, 2.0])
     monitor = np.array([10.0, 20.0, 40.0])
@@ -158,6 +158,7 @@ def test_legacy_policy_preserves_counter_product_and_active_area():
         beam_profile=profile,
         sample_length=5e-3,
     )
+    assert "deprecated and scheduled for removal" in caplog.text
 
     vertical, area = profile.corrections(alpha, 5e-3)
     np.testing.assert_allclose(policy.normalization_divisor, exposure * monitor)
