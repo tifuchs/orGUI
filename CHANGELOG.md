@@ -7,6 +7,10 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Opening a prepared reciprocal-space reconstruction job in a fresh session
+  preserves its primary monitor and normalization mode in the correction
+  editor when restoring the saved correction switches.
+
 - Startup checks pyFAI's strided detector-coordinate equations against an
   independent calculation. If the check fails, a warning recommends
   reinstalling numexpr and appears as a popup in GUI mode. orGUI attempts a

@@ -2561,18 +2561,19 @@ class ReconstructionDialog(qt.QDialog):
             state.__dict__.update(
                 CorrectionState.from_dict(corrections.to_dict()).__dict__
             )
+            selector = getattr(self.orgui, "scanSelector", None)
+            corrections_dialog = getattr(selector, "correctionsDialog", None)
+            refresh = getattr(corrections_dialog, "refresh", None)
+            if refresh is not None:
+                # Switch signals write editor values back to shared state.
+                # Load the saved monitor/scale before emitting those signals.
+                refresh()
             if corrections.use_normalization is not None:
                 self._set_integration_option(
                     "normalization", corrections.use_normalization
                 )
             if corrections.use_footprint is not None:
                 self._set_integration_option("footprint", corrections.use_footprint)
-            selector = getattr(self.orgui, "scanSelector", None)
-            corrections_dialog = getattr(selector, "correctionsDialog", None)
-            refresh = getattr(corrections_dialog, "refresh", None)
-            if refresh is not None:
-                # Restore the scale mode before footprint edits emit signals.
-                refresh()
             if corrections_dialog is not None and (
                 corrections.sample_length_m is not None
                 or corrections.sample_width_m is not None

@@ -13,6 +13,7 @@ from orgui.app.ReconstructionDialog import ReconstructionDialog
 from orgui.app.config_data import CorrectionState
 from orgui.app.database import FILTERS
 from orgui.app.HDF5SettingsDialog import HDF5SettingsDialog
+from orgui.app.QScanSelector import IntegrationOptionsDialog
 from orgui.reconstruction_job import ReconstructionGrid
 from orgui.backend.scans import SimulationScan
 
@@ -692,6 +693,11 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
                 use_polarization=True,
                 normalize_exposure=False,
                 monitor_corrections=("monitor", "ring"),
+                use_normalization=True,
+                shared_frame_normalization=True,
+                primary_monitor="ic2",
+                primary_monitor_kind="integrated",
+                total_flux_calibrated=False,
                 use_footprint=True,
                 shared_frame_illumination=True,
                 sample_length_m=0.012,
@@ -730,13 +736,36 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
         "polarization": False,
     }
     footprint = Mock()
-    dialog.orgui.scanSelector = SimpleNamespace(
+    selector = dialog.orgui.scanSelector = SimpleNamespace(
+        parentmainwindow=dialog.orgui,
+        useMaskBox=qt.QCheckBox(),
+        useSolidAngleBox=qt.QCheckBox(),
+        usePolarizationBox=qt.QCheckBox(),
+        useLorentzBox=qt.QCheckBox(),
+        useFootprintBox=qt.QCheckBox(),
+        useNormalizationBox=qt.QCheckBox(),
         get_integration_options=lambda: dict(shared_options),
-        set_integration_options=lambda values: shared_options.update(values),
-        correctionsDialog=SimpleNamespace(
-            footprintOptions_shared=lambda: footprint, refresh=Mock(),
-        ),
     )
+    correction_editor = selector.correctionsDialog = IntegrationOptionsDialog(
+        selector, parent=dialog._test_parent,
+    )
+    monkeypatch.setattr(
+        correction_editor, "footprintOptions_shared", lambda: footprint,
+    )
+
+    def restore_switches(values):
+        """Restore real checkboxes and emit their fresh-session signals."""
+        shared_options.update(values)
+        for key, checked in values.items():
+            getattr(selector, {
+                "mask": "useMaskBox",
+                "solid_angle": "useSolidAngleBox",
+                "polarization": "usePolarizationBox",
+                "normalization": "useNormalizationBox",
+                "footprint": "useFootprintBox",
+            }[key]).setChecked(checked)
+
+    selector.set_integration_options = restore_switches
     monkeypatch.setattr(dialog, "_show_execution_settings", Mock())
 
     dialog.open_job()
@@ -757,7 +786,13 @@ def test_open_job_restores_all_editable_job_settings(tmp_path, monkeypatch):
         "solid_angle": True,
         "polarization": True,
         "footprint": True,
+        "normalization": True,
     }
+    assert selector.useNormalizationBox.isChecked()
+    assert correction_editor.primaryMonitorCombo.currentData() == "ic2"
+    assert correction_editor.monitorKindCombo.currentData() == "integrated"
+    assert dialog.orgui.ctr_correction_state.primary_monitor == "ic2"
+    assert dialog.orgui.ctr_correction_state.primary_monitor_kind == "integrated"
     footprint.setSampleLength.assert_called_once_with(0.012)
     footprint.setSampleWidth.assert_called_once_with(0.006)
     assert footprint.setSettings.call_args.args[0]["shape"] == "Top hat"
