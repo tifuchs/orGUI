@@ -7,6 +7,12 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Startup checks pyFAI's strided detector-coordinate equations against an
+  independent calculation. If the check fails, a warning recommends
+  reinstalling numexpr and appears as a popup in GUI mode. orGUI attempts a
+  best-effort workaround with contiguous inputs; correct results are not
+  guaranteed.
+
 - Preparing reciprocal-space reconstruction jobs, previewing settings and
   checking status no longer evaluate the full-scan footprint correction.
   Preparation validates and freezes its inputs; execution computes the factors

@@ -9,6 +9,8 @@ Unreleased (2026-07-19)
 
 Other user-visible changes:
 
+- Startup checks pyFAI's strided detector-coordinate equations against an independent calculation. If the check fails, a warning recommends reinstalling numexpr and appears as a popup in GUI mode. orGUI attempts a best-effort workaround with contiguous inputs; correct results are not guaranteed.
+
 - Preparing reciprocal-space reconstruction jobs, previewing settings and checking status no longer evaluate the full-scan footprint correction. Preparation validates and freezes its inputs; execution computes the factors with progress and cancellation. Status distinguishes pending evaluation from recorded factors.
 
 - Prepared reciprocal-space maps preserve custom azimuth counters and embed measured footprint profiles, including their saved alignment. Explicit file-backed profiles support a relative base and content checksum. Preview and saved-job status distinguish requested, resolved and recorded illumination and explain why older jobs retain their original scale.

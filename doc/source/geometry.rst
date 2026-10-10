@@ -35,6 +35,14 @@ distance, and the detector rotations. The detector calibration therefore
 provides the mapping between detector pixel coordinates and the scattering
 angles observed by the area detector.
 
+.. warning::
+
+   Some numexpr versions cause numerical artifacts. A warning will be shown if
+   orGUI detects this environment error. Try reinstalling numexpr in the Python
+   environment used by orGUI, then restart orGUI; reinstalling may fix the
+   problem. orGUI attempts a best-effort workaround, but correct results are
+   not guaranteed.
+
 For surface diffraction, orGUI converts the detector scattering direction into
 the in-plane and out-of-plane detector angles ``delta`` and ``gamma``. The
 conversion accounts for the azimuthal reference direction of the surface normal

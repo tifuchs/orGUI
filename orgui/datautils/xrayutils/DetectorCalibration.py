@@ -38,6 +38,10 @@ from scipy.spatial.transform import Rotation
 # import pyFAI.azimuthalIntegrator
 import copy
 import warnings
+from functools import partial
+
+from ._pyfai_compat import _contiguous_equation, _ensure_pyfai_array_safety
+
 
 from .HKLVlieg import (
     calcDELTA,
@@ -46,6 +50,11 @@ from .HKLVlieg import (
     primBeamAngles,
     vacAngles_singleArray,
 )
+
+
+# Runs as the detector module loads at GUI/CLI startup, including direct
+# library use and spawned reconstruction workers. No full detector is needed.
+_PYFAI_STRIDED_ARRAYS_SAFE = _ensure_pyfai_array_safety()
 
 
 def load(ponifile):
@@ -693,6 +702,25 @@ class Detector2D_SXRD(geometry.Geometry):
             factor=2.0 * self._polFactor - 1.0,
             axis_offset=self._deltaChi - self._polAxis,
         )
+
+    def center_array(self, shape=None, unit="2th_deg", scale=True):
+        """Evaluate pixel centers with safe pyFAI coordinate-array strides.
+
+        :param shape: Detector array shape, or ``None`` for its native shape.
+        :param unit: A pyFAI unit or unit name; its conventions are preserved.
+        :param bool scale: Apply the unit's output scale, as in pyFAI.
+        :returns: The cached center array in the requested units.
+
+        A startup probe checks interleaved coordinate views against NumPy.
+        On affected pyFAI/NumExpr installations, only the equation inputs
+        are made contiguous. The unit object, geometry and cache semantics
+        remain those of pyFAI; shared unit definitions are never modified.
+        """
+        if _PYFAI_STRIDED_ARRAYS_SAFE:
+            return super().center_array(shape, unit=unit, scale=scale)
+        safe_unit = copy.copy(pyFAI.units.to_unit(unit))
+        safe_unit.equation = partial(_contiguous_equation, safe_unit.equation)
+        return super().center_array(shape, unit=safe_unit, scale=scale)
 
     def primBeamAngles(self, shape=None):
         """gives angles in laboratory reference frame."""

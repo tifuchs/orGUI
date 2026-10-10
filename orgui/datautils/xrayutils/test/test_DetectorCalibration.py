@@ -1054,6 +1054,52 @@ def _sxrd_detector(azimuth_deg, pol_axis_deg, fraction):
     return sxrddet
 
 
+@pytest.mark.parametrize("force_workaround", [False, True])
+@pytest.mark.parametrize("fraction,pol_axis", [(1.0, 0.0), (0.75, 27.0)])
+def test_angle_arrays_and_polarization_match_independent_pixel_positions(
+    monkeypatch, force_workaround, fraction, pol_axis
+):
+    """Detect array artifacts without reusing cached angles in the reference.
+
+    The old surface-angle reference uses center_array too, so both sides
+    share the same corruption. Here geometry positions in metres determine
+    the electric-field projection directly, bypassing unit equations and
+    the angle/polarization caches. Odd dimensions expose interleaved strides.
+    """
+    if force_workaround:
+        monkeypatch.setattr(DetectorCalibration, "_PYFAI_STRIDED_ARRAYS_SAFE", False)
+    detector = _sxrd_detector(90.0, pol_axis, fraction)
+    detector.rot1 = 0.17
+    detector.rot2 = -0.23
+    detector.rot3 = 0.11
+    shape = (37, 53)
+    rows, columns = np.indices(shape, dtype=np.float64)
+    z, y, x = detector.calc_pos_zyx(d1=rows, d2=columns)
+    norm = np.sqrt(x*x + y*y + z*z)
+    angle = detector._deltaChi - detector._polAxis
+    horizontal = (np.cos(angle)*x - np.sin(angle)*y) / norm
+    vertical = (np.sin(angle)*x + np.cos(angle)*y) / norm
+    reference = 1.0 - fraction*horizontal**2 - (1.0-fraction)*vertical**2
+    original_equation = pyFAI.units.TTH_RAD.equation
+    np.testing.assert_allclose(
+        detector.center_array(shape, unit="2th_rad", scale=False),
+        np.arctan2(np.hypot(x, y), z), atol=1e-12, rtol=0,
+    )
+    np.testing.assert_allclose(
+        detector.center_array(shape, unit="chi_rad", scale=False),
+        np.arctan2(y, x), atol=1e-12, rtol=0,
+    )
+    np.testing.assert_allclose(
+        detector.center_array(shape, unit="2th_deg"),
+        np.rad2deg(np.arctan2(np.hypot(x, y), z)), atol=1e-10, rtol=0,
+    )
+    for _ in range(2):  # Check both initial evaluation and cache reuse.
+        np.testing.assert_allclose(
+            detector.polarizationArray(shape), reference, atol=6e-8, rtol=0,
+        )
+    assert pyFAI.units.TTH_RAD.equation is original_equation
+
+
 @pytest.mark.parametrize("azimuth_deg", [0.0, 30.0, 90.0, -40.0])
 @pytest.mark.parametrize("fraction", [1.0, 0.95, 0.5, 0.0])
 def test_polarization_array_matches_the_z_axis_expression(azimuth_deg, fraction):
