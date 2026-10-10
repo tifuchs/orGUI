@@ -154,6 +154,14 @@ def test_hdf5_load_and_preview_reopen(qapp, tmp_path, monkeypatch, backend):
         qapp.processEvents()
         dialog.show()
         qapp.processEvents()
+        if hasattr(qt, "QSurface"):
+            initial_surface = dialog.windowHandle().surfaceType()
+            raster_surfaces = {qt.QSurface.RasterSurface}
+            if qt.qVersion().startswith("5."):
+                # Qt5 can create ordinary widget windows as RasterGLSurface
+                # before any preview exists, depending on the platform plugin.
+                raster_surfaces.add(qt.QSurface.RasterGLSurface)
+            assert initial_surface in raster_surfaces
         groups = tuple(dialog.findChildren(qt.QGroupBox))
         dialog.close()
         loaded.apply_to_gui(main)
@@ -198,7 +206,7 @@ def test_hdf5_load_and_preview_reopen(qapp, tmp_path, monkeypatch, backend):
             assert beam.W.value() == pytest.approx(10.0)
             assert silx.config.DEFAULT_PLOT_BACKEND == backend
             if hasattr(qt, "QSurface"):
-                assert dialog.windowHandle().surfaceType() == qt.QSurface.RasterSurface
+                assert dialog.windowHandle().surfaceType() == initial_surface
             dialog.close()
         assert not any(
             "non-opengl surface" in message or "Failed to create QRhi" in message
