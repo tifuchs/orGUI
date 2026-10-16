@@ -612,10 +612,18 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
     occupancy and shared by both material additions. Intermediate strain
     coupling linearly interpolates between those endpoint geometries.
 
-    The semi-infinite lower bulk remains on its unstrained lattice. Generated
-    lower-material domains therefore add the distributed material at its
-    strain-coupling-dependent positions and separately subtract the sharp bulk
-    at its original positions.
+    The underlying crystal remains on its original lattice. Generated
+    lower-material domains add the distributed material at its
+    strain-coupling-dependent positions and separately subtract the actual
+    underlying domains. Neither their registry nor their membership is
+    selected by the statistical mean or an occupancy threshold.
+
+    Stacking continues the structural-layer cycle of the component below,
+    including cyclic rotations and explicit ``layer_transition`` mappings.
+    The ideal upper anchor interpolates the actual ordered layer intervals;
+    layer identifiers do not specify distances. The Film above measures its
+    nominal width from :attr:`stacking_loc_absolute` and starts its remaining
+    layers at :attr:`stacking_height_absolute`, both in Angstrom.
 
     New interfaces default to ``strain_coupling = 1`` and ``offset = 0``.
     Text models and HDF5 fit settings written by orGUI v1.5.0 contained only
@@ -651,16 +659,17 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
     }
 
     def __init__(self, uc_top, uc_bottom, type="skellam", **kwargs):
+        """Initialize an interface and its support policy.
+
+        :param float sigma_calc:
+            Legacy support radius in standard deviations, when no profile or
+            fixed support is supplied.
+        :param int fixed_ucs:
+            Initial support half-width in structural intervals. Each side is
+            rounded outward to complete layer cycles. Support also includes
+            the sharp lower boundary, even when a large skew moves the initial
+            window wholly to one side of it.
         """
-        sigma_calc : automatic selection of number of unitcells for calculation of interface
-                     this will shift the location of the interface.
-        fixed_ucs : create interface with fixed number of unitcells. Location of interface
-                    will only change if skew != 0
-                    total number of uc will be fixed_ucs*2 +1
-
-
-
-        """  # noqa: E501
         super().__init__()
         profile = kwargs.pop("profile", None)
         if isinstance(type, SkellamProfile):
@@ -689,6 +698,8 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         self.below_H = 0.0
         self.below_layer = -1.0
         self._strain_coupling_displacement = 0.0
+        self._underlying_components = ()
+        self._reference_layers = []
         self._initialize_layer_stacking(kwargs)
 
     def set_ucs(self, uc_top, uc_bottom, **kwargs):
@@ -755,6 +766,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         for layer in self._bottom_layers_base:
             layer.setReferenceUnitCell(uc, rotMatrix)
         self.reference_uc = uc
+        self._basis_created[:] = np.nan
 
     def setEnergy(self, E):
         """Set X-ray energy for the source and generated unit cells.
@@ -769,12 +781,172 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             layer.setEnergy(E)
         for layer in self._bottom_layers_base:
             layer.setEnergy(E)
+        self._basis_created[:] = np.nan
 
     def set_below(self, loc, height):
-        """Place the interface at the generated height of the object below."""
+        """Place the interface above lower support, with locations in Angstrom.
+
+        Crystal stacking binds the actual underlying components first. For a
+        standalone interface, ``height`` defines structural boundary zero of
+        a sharp lower lattice occupying all negative structural indices.
+        """
         self.below_loc = loc
         self.below_H = height
         self.createInterfaceCells()
+
+    def _bind_underlying_components(self, components):
+        """Bind live (component, weight) pairs, bulk first, before stacking.
+
+        This derived context is rebuilt by SXRDCrystal, not persisted in model
+        files. Standalone interfaces use a sharp lower lattice ending at the
+        structural boundary zero supplied by ``set_below``.
+        """
+        self._underlying_components = tuple(components)
+        self._basis_created[:] = np.nan
+
+    def _lower_reference_origin(self):
+        """Return the fixed lower cycle origin relative to below_H, in Angstrom.
+
+        A direct bulk sum includes native repeat zero. Continue its selected
+        layer cycle above that repeat, rather than assuming its native layer
+        coordinates end at zero. Finite components already pass their actual
+        upper boundary and next cyclic layer through the stacking protocol.
+        An explicit transition can select a later layer of that same lattice;
+        include its forward phase offset, rather than moving the lattice.
+        """
+        first = self.layer_order[0]
+        if not self._underlying_components:
+            return 0.0
+        if len(self._underlying_components) > 1:
+            component = self._underlying_components[-1][0]
+            if isinstance(component, Film):
+                source = component.unitcell
+                next_index = component._layers_to_create % len(component.layer_order)
+                next_layer = component.layer_order[next_index]
+                first_position = source.layerpos.get(
+                    first, self.uc_bottom.layerpos[first],
+                )
+                phase = (first_position - source.layerpos[next_layer]) % 1.0
+                return phase * source.a[2] * source.coherentDomainMatrix[0][2, 2]
+            if isinstance(component, EpitaxyInterface):
+                source = component.uc_top
+                first_position = source.layerpos.get(
+                    first, self.uc_bottom.layerpos[first],
+                )
+                next_layer = component.layer_order[0]
+                return ((first_position - source.layerpos[next_layer]) % 1.0
+                        * source.a[2])
+            if isinstance(component, UnitCell):
+                matrix = component.coherentDomainMatrix[-1]
+                native = component.layerpos.get(first, self.uc_bottom.layerpos[first])
+                origin = (matrix[2, 2] * native + matrix[2, 3]) * component.a[2]
+                phase = (origin - self.below_H) / component.a[2]
+                if np.isclose(phase, round(phase), rtol=0, atol=1e-12):
+                    return 0.0
+                return (phase % 1.0) * component.a[2]
+            return 0.0
+        bulk = self._underlying_components[0][0]
+        # Explicit transitions can rename the lower cycle. Native lower-cell
+        # coordinates still define its registry; labels are not distances.
+        origin = (bulk.layerpos[first] if first in bulk.layers
+                  else self.uc_bottom.layerpos[first])
+        last = max(bulk.layerpos[layer] for layer in bulk.layers)
+        origin += np.floor(last - origin) + 1.0
+        matrix = bulk.coherentDomainMatrix[0]
+        return (matrix[2, 2] * origin + matrix[2, 3]) * bulk.a[2] - self.below_H
+
+    def _create_reference_layers(self, low, high):
+        """Subtract actual underlying domains in the half-open support window.
+
+        ``low`` and ``high`` are absolute layer-boundary heights in Angstrom.
+        Copy the source material and affine matrices so the correction removes
+        the same atoms, occupancies, and in-plane registry supplied below.
+        The bulk is enumerated only over repeats intersecting this window;
+        its native repeat zero is included, as in UnitCell.F_bulk.
+        """
+        self._reference_layers = []
+        for component_index, (component, weight) in enumerate(
+            self._underlying_components
+        ):
+            if isinstance(component, UnitCell):
+                sources = list(component.split_in_layers().values())
+                if component.layer_behavior == "select":
+                    selected = component.build_selected_basis()[0]
+                    selected_layers = set(selected[:, 7])
+                    sources = [source for source in sources
+                               if source.layers[0] in selected_layers]
+                for source in sources:
+                    source.layerpos = component.layerpos
+                    source.coherentDomainMatrix = component.coherentDomainMatrix
+                    source.coherentDomainOccupancy = component.coherentDomainOccupancy
+                    source.R_mat = component.R_mat
+                    source.R_mat_inv = component.R_mat_inv
+            elif isinstance(component, Film):
+                sources = [copy.copy(layer) for layer in component.layer_ucs]
+                for source in sources:
+                    source.layerpos = component.unitcell.layerpos
+            elif isinstance(component, EpitaxyInterface):
+                sources = []
+                for layers, parent in ((component.top_layers, component.uc_top),
+                                       (component.bottom_layers, component.uc_bottom)):
+                    for layer in layers:
+                        source = copy.copy(layer)
+                        source.layerpos = parent.layerpos
+                        sources.append(source)
+                sources.extend(component._reference_layers)
+            else:
+                raise ValueError(
+                    "EpitaxyInterface lower reference requires UnitCell, Film, "
+                    "or EpitaxyInterface components"
+                )
+            for source in sources:
+                layer_id = source.layers[0]
+                native_origin = source.layerpos[layer_id]
+                matrices, occupancies = [], []
+                for matrix, occupancy in zip(
+                    source.coherentDomainMatrix, source.coherentDomainOccupancy
+                ):
+                    origin = (matrix[2, 2] * native_origin
+                              + matrix[2, 3]) * source.a[2]
+                    if component_index == 0:
+                        # The bulk lattice sum repeats along native z, after
+                        # the coherent-domain transform, in whole unit cells.
+                        start = max(0, int(np.floor((origin - high) / source.a[2])))
+                        stop = max(0, int(np.ceil((origin - low) / source.a[2])))
+                        repeats = range(start, stop + 1)
+                    else:
+                        repeats = (0,)
+                    for repeat in repeats:
+                        z = origin - repeat * source.a[2]
+                        # Roundoff at a geometrically identical boundary must
+                        # not add/remove an entire occupied layer.
+                        tolerance = 1e-10 * source.a[2]
+                        if z < low - tolerance or z >= high - tolerance:
+                            continue
+                        fixed = np.copy(matrix)
+                        fixed[2, 3] -= repeat
+                        matrices.append(fixed)
+                        occupancies.append(-weight * occupancy)
+                if matrices:
+                    # Keep equal-material additions and removals together.
+                    # DWBA can then cancel their atomic and optical reference
+                    # terms within the same signed record at a sharp interface.
+                    matching = next((layer for layer in self.bottom_layers
+                                     if all(np.array_equal(getattr(layer, attr, None),
+                                                           getattr(source, attr, None))
+                                            for attr in ("basis", "names", "a",
+                                                         "alpha", "refHKLTransform",
+                                                         "R_mat", "f"))), None)
+                    if matching is not None:
+                        matching.coherentDomainMatrix.extend(matrices)
+                        matching.coherentDomainOccupancy = np.concatenate((
+                            matching.coherentDomainOccupancy, occupancies,
+                        ))
+                        continue
+                    correction = copy.copy(source)
+                    correction.coherentDomainMatrix = matrices
+                    correction.coherentDomainOccupancy = np.asarray(occupancies)
+                    self._reference_layers.append(correction)
 
     @property
     def loc_absolute(self):
@@ -815,6 +987,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         delta_height = pos - self.pos_absolute
         _move_domains(self.top_layers, delta_height)
         _move_domains(self.bottom_layers, delta_height)
+        _move_domains(self._reference_layers, delta_height)
         self.below_H = pos
         self._loc_absolute = self._loc_absolute_ref + self.below_H
 
@@ -837,8 +1010,9 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
     def stacking_loc_absolute(self):
         """Return the translated film-side boundary in Angstrom.
 
-        The statistical boundary and lower bulk remain at
-        :attr:`loc_absolute`. The strain displacement accumulated upward from
+        The statistical reference remains at :attr:`loc_absolute`; lower
+        lattice registration is derived separately from the underlying stack.
+        The strain displacement accumulated upward from
         the fixed bulk and the explicit film offset translate the film-side
         boundary. A Film uses this location as the origin of its requested
         total width, while
@@ -863,7 +1037,48 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         """Return the terminal layer state of the physical upper support."""
         return super().layer_state
 
+    def _ideal_top_anchor(self, coordinate, domains, layer_space):
+        """Interpolate the ideal upper boundary in Angstrom from support start.
+
+        ``coordinate`` counts structural-layer intervals, while native layer
+        origins, ``layer_space``, and the affine domains use upper fractional
+        repeat coordinates. Intervals are half-open; the final support endpoint
+        is evaluated using the last interval's upper boundary. Coordinates
+        outside the generated support are rejected, never clipped or wrapped.
+        ``layer_space`` is the validated, positive ordered interval geometry
+        used to generate ``domains``.
+        """
+        n_layers = len(self.layer_order)
+        if (len(domains) != n_layers or not domains[0]
+                or any(len(layer) != len(domains[0]) for layer in domains)):
+            raise ValueError("Upper anchor requires complete support cycles")
+        interval_count = n_layers * len(domains[0])
+        if not np.isfinite(coordinate) or not 0 <= coordinate <= interval_count:
+            raise ValueError("Upper anchor is outside the generated support")
+        if coordinate == interval_count:
+            structural_index = interval_count - 1
+            fraction = 1.0
+        else:
+            structural_index = int(np.floor(coordinate))
+            fraction = coordinate - structural_index
+        cycle_index, order_index = divmod(structural_index, n_layers)
+        matrix = domains[order_index][cycle_index]
+        native_z = self.uc_top.layerpos[self.layer_order[order_index]]
+        return self.top_layers[0].a[2] * (
+            matrix[2, 3]
+            + matrix[2, 2] * (native_z + fraction * layer_space[order_index])
+        )
+
     def createInterfaceCells(self):
+        """Generate interface domains and absolute boundaries in Angstrom.
+
+        The ideal upper anchor follows physical cyclic layer intervals. The
+        separate integer-repeat lower-bulk registration is retained.
+
+        :raises ValueError:
+            If upper layer intervals are invalid or the statistical anchor
+            lies outside the generated support.
+        """
         # `uc_layers_top`/`uc_layers_bottom` hold, per structural layer, a
         # numpy *view* into `uc_top.basis`/`uc_bottom.basis`, built once in
         # `set_ucs` via `UnitCell.split_in_layers`. `copy.deepcopy` -- used
@@ -899,7 +1114,9 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
             if self.fixed_ucs:
                 uc_number = self.fixed_ucs
-                unitcells = np.arange(-uc_number, uc_number) + loc_int
+                first = (-uc_number // n_layers) * n_layers + loc_int
+                stop = -(-uc_number // n_layers) * n_layers + loc_int
+                unitcells = np.arange(first, stop)
             elif self.profile is not None:
                 support_low, support_high = profile.support(n_layers)
                 first = (support_low // n_layers) * n_layers
@@ -913,24 +1130,25 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 ) * n_layers
                 uc_number = int(uc_number)
                 unitcells = np.arange(-uc_number, uc_number) + loc_int
+            # Replace the union of statistical support and the sharp boundary.
+            # A large skew can move the entire statistical window above/below
+            # zero; the intervening fully occupied material still belongs to
+            # the interface correction, even though it is not a profile tail.
+            first = min(int(unitcells[0]), 0)
+            stop = max(int(unitcells[-1]) + 1, n_layers)
+            unitcells = np.arange(first, stop)
             assert unitcells.size % len(self.top_layers) == 0
 
             probability_top = profile.occupancy(unitcells, n_layers).reshape(
                 (-1, n_layers)
             )
             probability_bottom = 1.0 - probability_top
-            # Classify each generated cell by its own smooth occupancy, not by
-            # comparing its integer index against the continuous distribution
-            # mean `loc`. The two agree only when `loc` sits exactly on a cell
-            # boundary (the symmetric asymmetry=0 case); any nonzero asymmetry
-            # moves `loc` off that boundary, so a cell straddling it flipped
-            # from "fully sharp bulk" to "fully transitional" (or back)
-            # although its actual occupancy barely changed -- subtracting a
-            # full unit of already-counted bulk at a cell that is only
-            # partially bulk, which collapsed the interface density to near
-            # zero for any nonzero asymmetry.
-            sharp_top = (probability_top >= 0.5).astype(np.float64)
-            sharp_bottom = 1.0 - sharp_top
+            # A standalone interface replaces a sharp lattice below structural
+            # boundary zero. In a crystal, subtract the actual underlying
+            # domains separately; statistical occupancy never selects them.
+            sharp_bottom = (unitcells < 0).astype(float).reshape((-1, n_layers))
+            if self._underlying_components:
+                sharp_bottom = np.zeros_like(probability_top)
             strain_coupling = self.basis[2]
             if (
                 not np.isfinite(strain_coupling)
@@ -976,6 +1194,12 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 self.layerpos,
                 append=self.layerpos[0] + 1.0,
             )
+            if (not np.all(np.isfinite(top_layer_space))
+                    or np.any(top_layer_space <= 0.0)):
+                raise ValueError(
+                    "EpitaxyInterface upper layer intervals must be finite "
+                    "and positive within one repeat"
+                )
             bottom_layerpos = _unwrapped_layer_positions(
                 np.array(
                     [
@@ -989,6 +1213,12 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 bottom_layerpos,
                 append=bottom_layerpos[0] + 1.0,
             )
+            if (not np.all(np.isfinite(bottom_layer_space))
+                    or np.any(bottom_layer_space <= 0.0)):
+                raise ValueError(
+                    "EpitaxyInterface lower layer intervals must be finite "
+                    "and positive within one repeat"
+                )
 
             for cycle_index, (p_t, p_b) in enumerate(
                 zip(probability_top, probability_bottom)
@@ -1055,42 +1285,17 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                     coupled_height += physical_layer_heights[i]
 
             loc_rescaled = loc - unitcells[0]
-            uc_no_loc = int(np.floor(loc_rescaled)) // n_layers
-            layer_no_loc = int(np.floor(loc_rescaled)) % n_layers
-            # `ideal_top[layer_no_loc][uc_no_loc][2, 3]` (== uc_no_loc; see
-            # ideal_top_i above, since top_layer_offset is 0 for every
-            # generated layer) is in unit-cell units, where one full unit
-            # cell spans n_layers structural layers. Dividing by n_layers
-            # converts the structural-layer remainder into that same
-            # unit-cell scale; the previous `% 1` instead returned the
-            # structural-layer fractional part directly, which is off by a
-            # factor of n_layers and additionally drops the integer
-            # `layer_no_loc` contribution entirely. That made this anchor
-            # discontinuous every time `loc` crossed a structural-layer
-            # boundary rather than only every full unit cell, rigidly
-            # misregistering the whole interface against the semi-infinite
-            # bulk by up to one structural layer.
-            loc_remainder = (loc_rescaled % n_layers) / n_layers
-            ideal_top_loc_mat = ideal_top[layer_no_loc][uc_no_loc]
-            ideal_top_loc = (
-                ideal_top_loc_mat[2, 3]
-                + loc_remainder * ideal_top_loc_mat[2, 2]
-            ) * a3_top
-            # Unlike ideal_top_loc, this anchor must land on an exact integer
-            # number of bottom unit cells: the "fixed bulk" domains built
-            # from it below are a like-for-like replica of the semi-infinite
-            # bulk sum (UnitCell.F_bulk/zDensity_G_asbulk), which only has
-            # material at those exact integer repeats. A fractional shift
-            # here (this used the same continuous ideal_top_loc-style
-            # formula until this fix) leaves the fixed-bulk subtraction
-            # registered between two real bulk repeats instead of on one,
-            # so it cancels neither and the interface density collapses
-            # near the transition for whichever asymmetries push the
-            # nearby structural-layer remainder far enough from a unit-cell
-            # boundary. Rounding to the nearest unit cell keeps this anchor
-            # close to loc (bounded numerical error away from the
-            # transition) while guaranteeing exact bulk registration.
-            ideal_bottom_loc = round(loc_rescaled / n_layers) * a3_bottom
+            # A domain translation already includes its layer-dependent
+            # registry offset. Transform a native point within that layer,
+            # not the whole-cycle remainder, to avoid counting it twice.
+            ideal_top_loc = self._ideal_top_anchor(
+                loc_rescaled, ideal_top, top_layer_space,
+            )
+            # Support indices are absolute structural indices on a fixed
+            # lower lattice. Moving the support start by a complete cycle
+            # therefore only changes the local origin, never the registry.
+            lower_origin = self._lower_reference_origin()
+            ideal_bottom_loc = -unitcells[0] / n_layers * a3_bottom - lower_origin
 
             offset_absolute = self._offset_absolute
             occupancy_low = np.min(probability_top)
@@ -1190,6 +1395,11 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             self._loc_absolute = self.below_H
             _translate_domains(self.top_layers, self.below_H)
             _translate_domains(self.bottom_layers, self.below_H)
+            self._create_reference_layers(
+                self.below_H - ideal_bottom_loc,
+                self.below_H - ideal_bottom_loc
+                + len(unitcells) / n_layers * a3_bottom,
+            )
             self._end_layer_number = self.layer_order[-1]
 
             self._basis_created = np.copy(self.basis)
@@ -1222,6 +1432,8 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         for uc_t, uc_b in zip(self.top_layers, self.bottom_layers):
             F += self.uc_area * uc_t.F_uc(h, k, l) / uc_t.uc_area
             F += self.uc_area * uc_b.F_uc(h, k, l) / uc_b.uc_area
+        for layer in self._reference_layers:
+            F += self.uc_area * layer.F_uc(h, k, l) / layer.uc_area
         return F
 
     def zDensity_G(self, z, h, k):
@@ -1231,6 +1443,8 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         for uc_t, uc_b in zip(self.top_layers, self.bottom_layers):
             rho += uc_t.zDensity_G(z, h, k)
             rho += uc_b.zDensity_G(z, h, k)
+        for layer in self._reference_layers:
+            rho += layer.zDensity_G(z, h, k)
         return rho
 
     def optical_profile(self):
@@ -1245,6 +1459,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             self.createInterfaceCells()
         profiles = [uc.optical_profile() for uc in self.top_layers]
         profiles.extend(uc.optical_profile() for uc in self.bottom_layers)
+        profiles.extend(uc.optical_profile() for uc in self._reference_layers)
         return combine_profiles(*profiles)
 
     def addFitParameter(self, indexarray, limits=(-np.inf, np.inf), **kwarg):
@@ -1766,6 +1981,11 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         The Film width in :attr:`basis` is measured from ``below_loc``. When
         the component below has already generated support up to ``below_H``,
         only the remaining width is represented by Film layers.
+
+        Width remains nominal structural layers: consumed support in Angstrom
+        is converted using the average spacing ``a[2] / n_layers``, and the
+        remainder is rounded to an integer layer count. Unequally spaced
+        cycles therefore do not interpret width as an exact physical height.
         """
         # `self.layer_ucs[i].basis` is built once, in `set_ucs`, as a numpy
         # *view* into `self.unitcell.basis` (via `UnitCell.split_in_layers`).

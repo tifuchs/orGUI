@@ -524,6 +524,92 @@ subtraction is deliberately *not* strained: it removes the density already
 present in the sharp, semi-infinite bulk before the distributed replacement
 is added.
 
+Cyclic layer anchors and Film width
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Stacking continues the structural-layer cycle after the lower component's
+terminal layer.  Cyclic rotations are supported; an explicit
+``LayerTransition`` maps between different cycles.  A later interface may
+therefore start with any permitted layer, including after an odd-layer registry
+Film.  Layer identifiers are labels: changing them consistently with the cycle,
+layer coordinates, and transition mappings does not change the geometry.
+
+The ideal upper-material anchor is a physical point inside the selected layer
+interval.  If :math:`x` counts structural intervals from generated support
+start, select interval :math:`j=\lfloor x\rfloor` and its fractional progress
+:math:`f=x-j`.  For that interval's native fractional origin :math:`p`, actual
+fractional width :math:`d`, domain normal scale :math:`s`, and translation
+:math:`t`, the anchor in Angstrom is
+
+.. math::
+
+   z_{\mathrm{anchor}} = a_{3,\mathrm{upper}}\,[t+s(p+fd)].
+
+The widths come from the unwrapped layer positions in stacking order, including
+the interval to the next cycle.  Exact interior boundaries belong to the next
+interval; the final support endpoint uses the last interval's upper boundary.
+Coordinates outside generated support and nonpositive or nonfinite layer
+interval widths are rejected.
+
+``stacking_loc_absolute`` is the Film-side nominal origin, including strain
+displacement and offset.  ``stacking_height_absolute`` is the physical top of
+interface support.  Both are in Angstrom.  Film starts at the latter so it does
+not regenerate interface-owned layers.  Its ``W`` remains a nominal width in
+structural layers: consumed support height is converted using the average
+spacing :math:`a_3/N`, and the remaining count is rounded to an integer.  For
+unequally spaced cycles, ``W`` is not an exact physical-height specification.
+
+The upper-anchor correction removes the artificial zero-skew Film-layer loss
+for rotated cycles.  Affected geometries and complex amplitudes can change;
+previously saved fit parameters remain historical records and should be
+explicitly reevaluated before reusing a fit.  Default uniformly spaced cycles
+with a zero native origin retain their existing anchor convention.
+
+The lower reference is also fixed independently of skew.  Write :math:`R` for
+its absolute cycle origin, :math:`j_0` for the first structural support index,
+and :math:`N` for the layer count.  The lower support begins at
+
+.. math::
+
+   z_{\mathrm{lower,start}} = R + (j_0/N)\,a_{3,\mathrm{lower}}.
+
+Moving the support window by a complete cycle changes its local origin but
+leaves retained ideal lower sites at the same absolute coordinates.  The
+coupled displacement field starts at this lower support boundary.  Its small
+tail-truncation error converges as support grows.
+
+For a direct bulk interface, :math:`R` continues the selected lower cycle above
+the native bulk repeat zero, which is included in ``UnitCell.F_bulk``.  Native
+bulk cells whose atoms lie between zero and one therefore differ from cells
+already placed below zero.  Above a finite Film, its actual upper boundary
+and next layer provide :math:`R`; an explicit transition selecting another
+layer includes that layer's forward phase offset on the same lattice.
+A standalone interface without bound lower components
+assumes sharp material at negative structural indices relative to
+``set_below(..., height)``.
+
+Crystal stacking supplies the underlying UnitCell, Film, and earlier interface
+components.  Subtraction copies their actual atoms, occupancies, and domain
+matrices within the half-open lower support window.  Crossing 50% statistical
+occupancy never changes which underlying atoms are removed.  Equal-material
+signed domains share a record for sharp-interface cancellation in DWBA; other
+reference material retains separate atomic and optical records.  Finite
+corrections retain the existing unattenuated component convention; bulk
+attenuation is unchanged.
+
+Support includes both the statistical tails and the sharp boundary.  This also
+applies to ``fixed_ucs``, whose initial half-width is rounded outward to complete
+cycles: at large skew it may need to grow to reach the sharp boundary.  Tail
+convergence assumes the interface's lower template represents the underlying
+material in the deep lower tail; changing that material is a physical model
+change, not a truncation error.
+
+These changes remove the former lower-reference rounding jumps, including the
+three-layer, width-0.5 case near skew 2/3.  They also correct subtraction and
+direct-bulk origins, so affected predictions can change even away from a
+threshold.  Model parameter values and persistence formats are unchanged;
+recompute affected predictions and reassess saved fits.
+
 Coordinate model
 ^^^^^^^^^^^^^^^^
 

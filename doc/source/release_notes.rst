@@ -35,6 +35,10 @@ Other user-visible changes:
 
 Scientific and analysis additions:
 
+- Epitaxy interfaces reconstruct upper anchors from the actual cyclic layer intervals, removing the artificial zero-skew Film-layer loss in rotated stacks. Interpolation uses native layer origins and unequal physical intervals. Affected geometries and amplitudes change; recompute predictions and reassess affected saved fits.
+
+- Epitaxy lower references stay fixed across skew and 50% occupancy thresholds. Bulk and registry-Film subtraction uses the actual underlying atoms and domains, including the native bulk repeat zero. Support spans both the statistical transition and sharp boundary, including at large skew, and signed corrections participate in DWBA. Affected predictions change; recompute them and reassess saved fits. Parameter formats are unchanged.
+
 - Sample-shape footprint corrections integrate thin rectangle and polygon sections in local coordinates, avoiding roundoff-driven quadrature failures near beam alignment without rounding the angles. Nearly coincident rotated edge breakpoints retain their contribution and error bound.
 
 - Reciprocal-space mapping now applies the shared beam-profile or sample-shape illumination/footprint correction, including angle overrides and squared variance scaling. Applied divisors are saved in output provenance; undefined illumination contributes no pixels. Older prepared jobs keep their original scale when resumed; newly prepared jobs honor the footprint switch.

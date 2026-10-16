@@ -356,13 +356,17 @@ class SXRDCrystal:
         layer_number_new = layer_state_new.layer if layer_state_new is not None else -1
         loc_new = 0.0
         component_new = self.uc_bulk
+        lower_components = [(self.uc_bulk, 1.0)]
         for stacking_level in np.unique(self.uc_stacking_ordered):
             below_height = height_new
             below_layer = layer_number_new
             below_loc = loc_new
             below_component = component_new
+            completed_components = []
             while self.uc_stacking_ordered[i] == stacking_level:
                 uc = self.uc_surface_list_ordered[i]
+                if isinstance(uc, EpitaxyInterface):
+                    uc._bind_underlying_components(lower_components)
                 if hasattr(uc, "stack_on"):
                     stack_kwargs = {"below_state": layer_state_new}
                     if isinstance(uc, PoissonSurface):
@@ -387,9 +391,12 @@ class SXRDCrystal:
                 layer_number_new = uc.end_layer_number
                 layer_state_new = getattr(uc, "layer_state", None)
                 component_new = uc
+                component_index = self.uc_surface_list.index(uc)
+                completed_components.append((uc, self.weights[component_index]))
                 i += 1
                 if i == len(self.uc_stacking_ordered):
                     return
+            lower_components.extend(completed_components)
 
     def F(self, harray, karray, Larray):
         """Return the complete crystal structure factor in electrons.

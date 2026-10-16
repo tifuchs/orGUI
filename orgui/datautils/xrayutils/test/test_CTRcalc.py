@@ -2704,7 +2704,7 @@ class TestLayerStacking(unittest.TestCase):
         self.assertAlmostEqual(film.pos_absolute, interface.height_absolute)
         self.assertGreater(film.pos_absolute, interface.loc_absolute)
         self.assertAlmostEqual(
-            film.height_absolute - interface.loc_absolute,
+            film.height_absolute - interface.stacking_loc_absolute,
             film.basis[0] * film.unitcell.a[2] / len(film.layers),
         )
         layer_cycle = interface.layer_cycle.layers
@@ -2886,7 +2886,8 @@ class TestLayerStacking(unittest.TestCase):
         semi-infinite bulk). Two issues stacked here:
 
         1. ``ideal_top[layer_no_loc][uc_no_loc][2, 3]`` is ``uc_no_loc`` in
-           unit-cell units (``top_layer_offset`` is always 0), so converting
+           unit-cell units (``top_layer_offset`` is 0 in this uniform,
+           default-order fixture), so converting
            the ``loc_rescaled % n_layers`` structural-layer remainder into
            that same unit-cell scale requires dividing by ``n_layers``. A
            previous ``% 1`` returned the structural-layer fractional part
@@ -2895,11 +2896,10 @@ class TestLayerStacking(unittest.TestCase):
            time ``loc`` crossed a structural-layer boundary rather than only
            a full unit-cell boundary -- ``n_layers`` times more often than
            intended.
-        2. ``ideal_bottom_loc`` additionally has to land on an *exact*
-           integer number of unit cells (see
-           ``test_epitaxy_small_asymmetry_perturbation_does_not_void_density``'s
-           sibling test below for why); a merely continuous but fractional
-           anchor still misregisters the fixed-bulk cancellation.
+        2. The lower reference must stay on the actual underlying lattice,
+           independently of the statistical mean. Stage 2 replaces rounded
+           mean registration with a fixed cyclic reference and subtracts the
+           actual occupied source domains.
 
         ``asymmetry`` is chosen so ``loc`` crosses an integer (a
         structural-layer boundary) while staying within the same unit cell

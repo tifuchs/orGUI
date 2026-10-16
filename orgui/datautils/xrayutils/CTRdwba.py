@@ -126,6 +126,7 @@ def _component_record_cells(component):
         return [
             *(("interface_top", cell) for cell in component.top_layers),
             *(("interface_bottom", cell) for cell in component.bottom_layers),
+            *(("interface_reference", cell) for cell in component._reference_layers),
         ]
     if isinstance(component, PoissonSurface):
         if np.any(component._basis_created != component.basis):

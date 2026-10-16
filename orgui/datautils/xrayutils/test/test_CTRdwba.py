@@ -1329,6 +1329,32 @@ def test_generated_model_records_preserve_the_prepared_optical_profile(
     assert np.isfinite(np.abs(result.F_h) ** 2)
 
 
+def test_epitaxy_actual_reference_records_preserve_optical_decomposition():
+    """Different source atom parameters must survive lower-reference subtraction."""
+    bulk = _layered_cell("bulk")
+    bulk.basis[:, 4:6] *= 1.1
+    interface = CTRfilm.EpitaxyInterface(
+        _layered_cell("top"), _layered_cell("bottom"),
+        profile=SkellamProfile(0.35, 0.7), name="interface",
+    )
+    crystal = CTRcalc.SXRDCrystal(bulk, interface, stacking=np.array([1]))
+    prepared = crystal.dwba.prepare_from_glancing(0.0, 0.0, 0.04, 0.04)
+    records = crystal.dwba._live_records()
+    references = [record.cell for record in records
+                  if record.role == "interface_reference"]
+    assert len(references) == 2
+    for cell in references:
+        expected = bulk.basis[bulk.basis[:, 7] == cell.layers[0]]
+        np.testing.assert_array_equal(cell.basis, expected)
+        assert np.all(cell.coherentDomainOccupancy < 0)
+    np.testing.assert_allclose(
+        prepared._atomic_model.reference_shares.sum(axis=0),
+        prepared.reference.profile.values[::-1, 1:], rtol=2e-14, atol=1e-18,
+    )
+    result = crystal.dwba.evaluate_prepared(prepared)
+    assert np.isfinite(np.abs(result.F_h) ** 2)
+
+
 def test_zero_width_epitaxy_bottom_correction_cancels_in_dwba():
     """A sharp interface adds and removes the same lower-material planes."""
     bulk = _layered_cell("bulk")
