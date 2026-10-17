@@ -923,6 +923,223 @@ def test_multi_grid_reach_keeps_a_grid_if_any_frame_in_group_reaches_it(
     }
 
 
+def test_tile_reach_is_packed_across_byte_boundaries(tmp_path, monkeypatch):
+    """Keep frame/tile identities and bit order past the first eight tiles."""
+    spec = _spec()
+    name = spec.grids[0].grid_name
+    tiles = [(index, index + 1, 0, 1) for index in range(9)]
+
+    class _ReachKernel:
+        def frames_reach_grid(self, rays, angles_start, angles_end):
+            """Report different reachable tiles for the two scan frames."""
+            index = int(rays[0, 0, 0])
+            return np.array([index == 0, index == 8], dtype=bool)
+
+    monkeypatch.setattr(
+        reconstruction_job_module, "_build_kernels",
+        lambda *args, **kwargs: {name: _ReachKernel()},
+    )
+    packed = {}
+    kept, completed = reconstruction_job_module._retire_unreachable_groups(
+        [(0, 1)], spec, _FakeConfig(), np.zeros((2, 2, 4)), tiles,
+        {tile: np.full((2, 2, 3), index) for index, tile in enumerate(tiles)},
+        _router({name: [(0, 2)]}, tmp_path=tmp_path), [name],
+        completed_images=0, total_images=2, progress=None,
+        packed_tile_reach_by_grid=packed,
+    )
+    assert kept == [(0, 1)]
+    assert completed == 0
+    np.testing.assert_array_equal(packed[name], [[1, 0], [0, 1]])
+    assert packed[name].dtype == np.uint8
+    assert not packed[name].flags.writeable
+
+
+def test_grouped_tile_reach_uses_every_frame_and_preserves_unknown_grids():
+    """OR tile proofs over scan frames; missing proofs must never skip data."""
+    from types import SimpleNamespace
+    from orgui.datautils.xrayutils.reconstruction import (
+        _empty_batch, _map_frame_group,
+    )
+
+    first = dataclasses.replace(_spec().grids[0], name="first")
+    unknown = dataclasses.replace(first, name="unknown")
+    empty = dataclasses.replace(first, name="empty")
+    spec = dataclasses.replace(_spec(), grids=(first, unknown, empty))
+    tiles = [(index, index + 1, 0, 1) for index in range(9)]
+    calls, routed = [], []
+
+    class _Kernel:
+        def __init__(self, name):
+            self.name = name
+
+        def accumulate_group_tile(self, *args):
+            """Record the selected detector row and return an empty batch."""
+            calls.append((self.name, args[6]))
+            return _empty_batch()
+
+    values = np.ones((9, 1))
+    _map_frame_group(
+        spec, {grid.grid_name: _Kernel(grid.grid_name) for grid in spec.grids},
+        {tile: np.zeros((2, 2, 3)) for tile in tiles}, tiles,
+        None, None, [2, 3], np.zeros((2, 4)), np.zeros((2, 4)),
+        SimpleNamespace(route=lambda name, frame, batch, **kw:
+                        routed.append((name, frame, kw["frames"]))),
+        corrected_frames=[(values, values, np.zeros_like(values, dtype=bool))] * 2,
+        packed_tile_reach_by_grid={
+            "first": np.array([[0, 0], [0, 0], [1, 0], [0, 1]], dtype=np.uint8),
+            "empty": np.zeros((4, 2), dtype=np.uint8),
+        },
+    )
+    assert [row for name, row in calls if name == "first"] == [0, 8]
+    assert [row for name, row in calls if name == "unknown"] == list(range(9))
+    assert not any(name == "empty" for name, row in calls)
+    assert routed == [("first", 2, 2), ("unknown", 2, 2), ("empty", 2, 2)]
+
+
+def test_tile_reach_cache_falls_back_when_it_exceeds_memory_share(
+    tmp_path, monkeypatch,
+):
+    """A large reach cache must not consume a small frame pipeline budget."""
+    monkeypatch.delenv("ORGUI_NO_FRAME_SKIP", raising=False)
+    spec = dataclasses.replace(_spec(), frames_per_group=1)
+    observed = []
+
+    def _retire(groups, *args, **kwargs):
+        observed.append(kwargs["packed_tile_reach_by_grid"])
+        return groups, kwargs["completed_images"]
+
+    monkeypatch.setattr(
+        reconstruction_job_module, "_retire_unreachable_groups", _retire,
+    )
+    _map_pending_ranges(
+        spec, _SlowScan(40000, delay=0), _FakeConfig(),
+        np.zeros((40000, 2, 4)), [(0, 1, 0, 1)], [(0, 2)],
+        _router({spec.grids[0].grid_name: [(0, 2)]}, tmp_path=tmp_path),
+        correction_pipeline=_correction, effective_memory=1024**2,
+        threads_per_image=1, accumulation_budget_bytes=None,
+        total_images=2, completed_images=0, progress=None,
+    )
+    assert observed == [None]
+
+
+@pytest.mark.parametrize("frames_per_group", [1, 2])
+@pytest.mark.parametrize("whole_frame_correction", [False, True])
+def test_tile_reach_skips_empty_calls_without_changing_checkpoints(
+    tmp_path, monkeypatch, frames_per_group, whole_frame_correction,
+):
+    """Skip tiles within active grids in both schedulers and correction paths."""
+    from orgui.datautils.xrayutils.reconstruction import _read_checkpoint
+    import h5py
+
+    class _Detector:
+        detector = type("Detector", (), {"shape": (1, 9)})()
+
+        def primBeamPoints(self, rows, columns):
+            """Return synthetic gamma/delta angles in radians."""
+            return np.zeros_like(rows), (columns - 4) * 0.2
+
+    class _Scan:
+        def __len__(self):
+            return frame_count
+
+        def get_raw_img(self, index):
+            """Return one synthetic nine-pixel detector image."""
+            return h5_Image(np.arange(1, 10, dtype=float)[None, :] + index)
+
+    center = _GridSpec(
+        minimum=(-0.08, -0.06, -0.1), maximum=(0.08, 0.04, 0.1),
+        step=(0.04, 0.05, 0.1), frame="lab", name="center",
+    )
+    left = dataclasses.replace(
+        center, minimum=(-0.76, -0.4, -0.1), maximum=(-0.67, -0.2, 0.1),
+        name="left",
+    )
+    far = dataclasses.replace(
+        center, minimum=(100.0, 100.0, 100.0), maximum=(101.0, 101.0, 101.0),
+        name="far",
+    )
+    spec = dataclasses.replace(
+        _spec(), grids=(center, left, far), frames_per_group=frames_per_group,
+    )
+    config = _FakeConfig()
+    config.detector = _Detector()
+    frame_count = 4
+    bounds = np.zeros((frame_count, 2, 4))
+    tiles = [(0, 1, column, column + 1) for column in range(9)]
+    calls = []
+    real_build = reconstruction_job_module._build_kernels
+
+    class _RecordingKernel:
+        def __init__(self, name, kernel):
+            self.name = name
+            self.kernel = kernel
+
+        def frames_reach_grid(self, *args):
+            """Forward the native conservative reach test unchanged."""
+            return self.kernel.frames_reach_grid(*args)
+
+        def accumulate_group_tile(self, *args):
+            """Record whole-frame native calls and forward their arguments."""
+            calls.append(self.name)
+            return self.kernel.accumulate_group_tile(*args)
+
+        def accumulate_group(self, *args):
+            """Record per-tile native calls and forward their arguments."""
+            calls.append(self.name)
+            return self.kernel.accumulate_group(*args)
+
+    def _build(*args, **kwargs):
+        return {
+            name: _RecordingKernel(name, kernel)
+            for name, kernel in real_build(*args, **kwargs).items()
+        }
+
+    monkeypatch.setattr(reconstruction_job_module, "_build_kernels", _build)
+
+    def _correct(payload, raw, frame, tile):
+        return _correction(payload, raw, frame, tile)
+
+    if whole_frame_correction:
+        _correct.correct_frame = lambda payload, raw, frame: _correction(
+            payload, raw, frame, (0, 1, 0, 9)
+        )
+
+    def _run(filtered):
+        if filtered:
+            monkeypatch.delenv("ORGUI_NO_FRAME_SKIP", raising=False)
+        else:
+            monkeypatch.setenv("ORGUI_NO_FRAME_SKIP", "1")
+        router = _router(
+            {grid.grid_name: [(0, frame_count)] for grid in spec.grids},
+            tmp_path=tmp_path / ("filtered" if filtered else "baseline"),
+        )
+        _map_pending_ranges(
+            spec, _Scan(), config, bounds, tiles, [(0, frame_count)], router,
+            correction_pipeline=_correct, effective_memory=256 * 1024**2,
+            threads_per_image=1, accumulation_budget_bytes=None,
+            total_images=frame_count, completed_images=0, progress=None,
+        )
+        return router
+
+    filtered = _run(True)
+    filtered_calls = list(calls)
+    calls.clear()
+    baseline = _run(False)
+    assert set(filtered_calls) == {"center", "left"}
+    assert len(filtered_calls) < len(calls)
+    assert len(calls) == 9 * 3 * (frame_count // frames_per_group)
+    for grid in spec.grids:
+        filtered_path = next(path for path in filtered.written
+                             if path.parent.name == grid.grid_name)
+        baseline_path = next(path for path in baseline.written
+                             if path.parent.name == grid.grid_name)
+        baseline_batch = _read_checkpoint(baseline_path)
+        for column, values in _read_checkpoint(filtered_path).items():
+            np.testing.assert_array_equal(values, baseline_batch[column])
+        with h5py.File(filtered_path, "r") as saved:
+            assert saved.attrs["frames_covered"] == frame_count
+
+
 @pytest.mark.parametrize("frames_per_group", [1, 2])
 @pytest.mark.parametrize("whole_frame_correction", [False, True])
 def test_multi_grid_reach_skips_only_proven_empty_grid_calls(

@@ -11,6 +11,9 @@ units.  All diffractometer angles accepted here are in radians.
 
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from hashlib import sha256
@@ -320,6 +323,7 @@ def _kernel_for_grid(
     *,
     threads=None,
     memory_budget_bytes=None,
+    native_execution=None,
 ):
     """Build one grid's native kernel.
 
@@ -335,6 +339,16 @@ def _kernel_for_grid(
     """
     ub = np.asarray(ub_calculator.getUB(), dtype=np.float64)
     u = np.asarray(ub_calculator.getU(), dtype=np.float64)
+    execution_kwargs = {}
+    if native_execution is not None:
+        execution_kwargs = {
+            "fine_task_samples": native_execution.fine_task_samples,
+            "execution_context": native_execution.context,
+        }
+        memory_budget_bytes = (
+            spec.memory_budget_bytes
+            if memory_budget_bytes is None else memory_budget_bytes
+        ) // native_execution.max_inflight_calls
     return _native_module().ReconstructionKernel(
         np.asarray(grid.minimum, dtype=np.float64),
         np.asarray(grid.step, dtype=np.float64),
@@ -353,6 +367,7 @@ def _kernel_for_grid(
             else memory_budget_bytes
         ),
         spec.weighting_mode,
+        **execution_kwargs,
     )
 
 
@@ -1595,14 +1610,16 @@ def _tile_ray_arrays(detector, detector_tiles, corner_rays=None):
     return ray_arrays
 
 
-def _build_kernels(spec, ub_calculator, *, threads=None, memory_budget_bytes=None):
+def _build_kernels(
+    spec, ub_calculator, *, threads=None, memory_budget_bytes=None,
+    native_execution=None,
+):
     """One kernel per grid, for one compute worker's exclusive use.
 
-    Each compute worker in the Sec7 pipeline builds and owns its own
-    kernel set (kernels are not safe to call concurrently from multiple
-    Python threads -- each call spawns its own native worker threads
-    already, per ``kernel_threads``); this is the shared construction
-    logic every worker calls once at start-up.
+    Legacy compute workers own separate kernel sets and native thread budgets.
+    With ``native_execution``, all kernels share one persistent native pool;
+    the job reserves its retained scratch storage and divides the per-call
+    memory guard across the maximum number of overlapping calls.
     """
     return {
         grid.grid_name: _kernel_for_grid(
@@ -1611,12 +1628,112 @@ def _build_kernels(spec, ub_calculator, *, threads=None, memory_budget_bytes=Non
             ub_calculator,
             threads=threads,
             memory_budget_bytes=memory_budget_bytes,
+            **(
+                {"native_execution": native_execution}
+                if native_execution is not None else {}
+            ),
         )
         for grid in spec.grids
     }
 
 
-def _map_frame_group(
+class _NativeExecution:
+    """Job-owned native CPU budget and bounded tile/grid submission threads."""
+
+    def __init__(
+        self, threads, *, fine_task_samples=64, max_inflight_calls=2,
+        scratch_bytes=32 * 1024**2,
+    ):
+        for name, value in (
+            ("threads", threads), ("fine_task_samples", fine_task_samples),
+            ("max_inflight_calls", max_inflight_calls),
+            ("scratch_bytes", scratch_bytes),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"{name} must be an integer")
+        if (
+            threads < 1 or max_inflight_calls < 1
+            or fine_task_samples < 0 or scratch_bytes < 0
+        ):
+            raise ValueError(
+                "Execution limits must be positive; fine tasks and scratch may be zero"
+            )
+        self.fine_task_samples = fine_task_samples
+        self.max_inflight_calls = min(max_inflight_calls, threads)
+        self.scratch_bytes = scratch_bytes
+        self.context = _native_module().NativeExecutionContext(
+            threads, self.max_inflight_calls, scratch_bytes
+        )
+        self._group_lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(
+            max_workers=self.max_inflight_calls, thread_name_prefix="orgui-rsmap-submit"
+        )
+
+    def close(self):
+        """Drain Python submissions before releasing the native workers."""
+        self._executor.shutdown(wait=True, cancel_futures=True)
+        self.context.close()
+
+    @contextmanager
+    def group(self):
+        """Bound one group's calls and retain its inputs until every call retires."""
+        with self._group_lock:
+            calls = _BoundedNativeCalls(self)
+            try:
+                yield calls
+                calls.finish()
+            except BaseException:
+                self.context.cancel()
+                calls.drain_after_failure()
+                raise
+
+
+class _BoundedNativeCalls:
+    def __init__(self, execution):
+        self.execution = execution
+        self.pending = deque()
+
+    def submit(self, function, *args):
+        """Admit at most the configured number of unfinished native calls."""
+        if len(self.pending) >= self.execution.max_inflight_calls:
+            self.pending.popleft().result()
+        # Do not admit more work after a peer has already reported failure.
+        for pending in self.pending:
+            if pending.done():
+                pending.result()
+        future = self.execution._executor.submit(function, *args)
+        self.pending.append(future)
+        return future
+
+    def finish(self):
+        """Complete every call before any group result is routed."""
+        while self.pending:
+            self.pending.popleft().result()
+
+    def drain_after_failure(self):
+        """Cancel unstarted submissions and wait for input references to retire."""
+        for future in self.pending:
+            future.cancel()
+        while self.pending:
+            try:
+                self.pending.popleft().result()
+            except BaseException:
+                pass
+
+
+def _map_frame_group(*args, native_execution=None, **kwargs):
+    """Map a group, optionally overlapping bounded calls on one native pool.
+
+    Runtime scheduling does not alter the scientific spec or checkpoint identity.
+    See :func:`_map_frame_group_impl` for the geometry and routing contract.
+    """
+    if native_execution is None:
+        return _map_frame_group_impl(*args, **kwargs)
+    with native_execution.group() as calls:
+        return _map_frame_group_impl(*args, native_calls=calls, **kwargs)
+
+
+def _map_frame_group_impl(
     spec: _ReconstructionSpec,
     kernels: Mapping[str, object],
     ray_arrays: Mapping[tuple[int, int, int, int], np.ndarray],
@@ -1630,6 +1747,8 @@ def _map_frame_group(
     *,
     corrected_frames: Sequence[tuple] | None = None,
     active_grid_names: frozenset[str] | None = None,
+    packed_tile_reach_by_grid: Mapping[str, np.ndarray] | None = None,
+    native_calls=None,
 ) -> None:
     """Process one already-loaded group of frames: correction, per-tile-
     per-grid kernel accumulate, merge, and route.
@@ -1680,6 +1799,12 @@ def _map_frame_group(
         Grids not proved unreachable for this frame group. Omitted grids
         receive an empty batch with the group's full frame count, so their
         checkpoints remain complete and resumable. ``None`` maps every grid.
+    :param packed_tile_reach_by_grid:
+        Optional conservative frame/tile reach proofs for each grid. Arrays
+        contain uint8 rows indexed by scan frame, with tile bits packed in
+        little-endian order matching ``detector_tiles``. A tile is skipped
+        only if no frame in this group can reach it. Missing grids retain
+        the unfiltered behavior; checkpoint frame coverage is unchanged.
     :param angles_start:
         ``(frames, 4)`` exposure-start diffractometer angles, radians.
     :param angles_end:
@@ -1719,6 +1844,18 @@ def _map_frame_group(
     tile_batches: dict[str, list[Mapping[str, np.ndarray]]] = {
         grid.grid_name: [] for grid in active_grids
     }
+    tile_masks = {}
+    if packed_tile_reach_by_grid is not None:
+        for grid in active_grids:
+            packed = packed_tile_reach_by_grid.get(grid.grid_name)
+            if packed is not None:
+                # OR over frames, independently for every tile: different
+                # frames in a group may reach different detector regions.
+                tile_masks[grid.grid_name] = int.from_bytes(
+                    np.bitwise_or.reduce(packed[frame_indices], axis=0).tobytes(),
+                    "little",
+                )
+    empty_tile_batch = _empty_batch()
     if corrected_frames is not None:
         # Checked once for the whole group rather than once per tile, and
         # a no-op on what ``correct_frame`` returns. The kernel reads
@@ -1732,8 +1869,26 @@ def _map_frame_group(
             )
             for intensity, variance, mask in corrected_frames
         ]
-    for detector_tile in detector_tiles:
+
+    def _native_call(function, *args):
+        if native_calls is None:
+            return function(*args)
+        return native_calls.submit(function, *args)
+
+    for tile_index, detector_tile in enumerate(detector_tiles):
         row_start, row_stop, column_start, column_stop = detector_tile
+        tile_grids = [
+            grid for grid in active_grids
+            if grid.grid_name not in tile_masks
+            or tile_masks[grid.grid_name] & (1 << tile_index)
+        ]
+        for grid in active_grids:
+            if grid.grid_name in tile_masks and not (
+                tile_masks[grid.grid_name] & (1 << tile_index)
+            ):
+                # Keep the empty tile's merge-tree slot: removing it could
+                # change floating-point association between populated tiles.
+                tile_batches[grid.grid_name].append(empty_tile_batch)
         if corrected_frames is not None:
             # Whole frames plus the rectangle to map. Detector tiles
             # partition the detector, so gathering each tile into its own
@@ -1742,8 +1897,9 @@ def _map_frame_group(
             # -- purely to give the call a shape it does not need. The
             # kernel already walks rows within a tile, so it reads the
             # rectangle through the frame's own row stride instead.
-            for grid in active_grids:
-                batch = kernels[grid.grid_name].accumulate_group_tile(
+            for grid in tile_grids:
+                batch = _native_call(
+                    kernels[grid.grid_name].accumulate_group_tile,
                     [values[0] for values in corrected_frames],
                     [values[1] for values in corrected_frames],
                     [values[2] for values in corrected_frames],
@@ -1783,8 +1939,9 @@ def _map_frame_group(
             np.stack([values[2] for values in tile_values]), dtype=bool
         )
         del tile_values
-        for grid in active_grids:
-            batch = kernels[grid.grid_name].accumulate_group(
+        for grid in tile_grids:
+            batch = _native_call(
+                kernels[grid.grid_name].accumulate_group,
                 intensity,
                 variance,
                 mask,
@@ -1793,6 +1950,17 @@ def _map_frame_group(
                 angles_end,
             )
             tile_batches[grid.grid_name].append(batch)
+    if native_calls is not None:
+        # No route on a failed group. Preserve every tile's original merge slot,
+        # including known-empty tiles, regardless of completion order.
+        native_calls.finish()
+        tile_batches = {
+            name: [
+                batch.result() if isinstance(batch, Future) else batch
+                for batch in batches
+            ]
+            for name, batches in tile_batches.items()
+        }
     for grid in spec.grids:
         merged = (
             _reduce_batches(tile_batches[grid.grid_name])

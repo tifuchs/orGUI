@@ -43,6 +43,7 @@ from .datautils.xrayutils.reconstruction import (
     _CheckpointRouter,
     _GridSpec,
     _ReconstructionSpec,
+    _NativeExecution,
     _build_kernels,
     _calibration_probe_all_grids,
     _detector_corner_rays,
@@ -3504,6 +3505,7 @@ def _retire_unreachable_groups(
     total_images,
     progress,
     active_grids_by_group=None,
+    packed_tile_reach_by_grid=None,
 ):
     """Drop groups that reach no grid and retain each survivor's active grids.
 
@@ -3539,6 +3541,10 @@ def _retire_unreachable_groups(
         Optional dictionary populated with the active grid names for each
         surviving group that does not need every grid. Keys are the first
         frame indices of groups; no entry means all grids stay active.
+    :param packed_tile_reach_by_grid:
+        Optional output dictionary retaining per-frame detector-tile reach
+        proofs as read-only uint8 arrays, one bit per tile in iteration
+        order. No additional native reach calculations are needed.
     :returns:
         ``(groups_to_map, completed_images)`` with the retired groups'
         frames added to ``completed_images``.
@@ -3558,10 +3564,22 @@ def _retire_unreachable_groups(
     for grid_name in grid_names:
         kernel = kernels[grid_name]
         reaches = np.zeros(bounds.shape[0], dtype=bool)
-        for detector_tile in detector_tiles:
-            reaches |= kernel.frames_reach_grid(
+        packed = (
+            np.zeros((bounds.shape[0], (len(detector_tiles) + 7) // 8), dtype=np.uint8)
+            if packed_tile_reach_by_grid is not None else None
+        )
+        for tile_index, detector_tile in enumerate(detector_tiles):
+            tile_reaches = kernel.frames_reach_grid(
                 ray_arrays[detector_tile], angles_start, angles_end
             )
+            reaches |= tile_reaches
+            if packed is not None:
+                packed[:, tile_index // 8] |= (
+                    np.asarray(tile_reaches, dtype=np.uint8) << (tile_index % 8)
+                )
+        if packed is not None:
+            packed.flags.writeable = False
+            packed_tile_reach_by_grid[grid_name] = packed
         reaches_by_grid[grid_name] = reaches
 
     kept = []
@@ -3635,6 +3653,8 @@ def _map_frame_groups_streamed(
     completed_images,
     progress,
     active_grids_by_group,
+    packed_tile_reach_by_grid=None,
+    native_execution=None,
 ):
     """Map frame groups with one all-threads native call at a time.
 
@@ -3814,6 +3834,10 @@ def _map_frame_groups_streamed(
                     config.ub_calculator,
                     threads=kernel_threads,
                     memory_budget_bytes=kernel_memory_budget,
+                    **(
+                        {"native_execution": native_execution}
+                        if native_execution is not None else {}
+                    ),
                 )
                 while True:
                     if retire.is_set() or cancellation.is_set():
@@ -3877,6 +3901,11 @@ def _map_frame_groups_streamed(
                                     else None
                                 ),
                                 active_grid_names=active_grids_by_group.get(group[0]),
+                                packed_tile_reach_by_grid=packed_tile_reach_by_grid,
+                                **(
+                                    {"native_execution": native_execution}
+                                    if native_execution is not None else {}
+                                ),
                             )
                     except BaseException as exc:  # noqa: BLE001
                         record_exception(exc)
@@ -4010,6 +4039,41 @@ def _map_frame_groups_streamed(
 
 
 def _map_pending_ranges(
+    spec, scan, config, bounds, tiles, pending_ranges, router,
+    *, native_execution=None, **kwargs,
+):
+    """Map ranges with an optional job-scoped native execution policy.
+
+    ``native_execution`` is a runtime-only dictionary: ``fine_task_samples``,
+    ``max_inflight_calls`` and ``scratch_bytes``. It never changes saved job
+    identity. The default keeps the existing scheduler. Shared execution uses
+    one compute group at a time and bypasses the per-image thread sweep.
+    """
+    if native_execution is None or not pending_ranges:
+        return _map_pending_ranges_impl(
+            spec, scan, config, bounds, tiles, pending_ranges, router, **kwargs
+        )
+    options = dict(native_execution)
+    memory = int(kwargs["effective_memory"])
+    options.setdefault("scratch_bytes", min(32 * 1024**2, memory // 16))
+    scratch = options["scratch_bytes"]
+    if not isinstance(scratch, int) or scratch < 0 or memory - scratch < 1024**2:
+        raise ValueError(
+            "Native scratch reservation must leave at least 1 MiB for mapping"
+        )
+    execution = _NativeExecution(int(spec.threads), **options)
+    try:
+        kwargs["effective_memory"] = memory - scratch
+        kwargs["threads_per_image"] = int(spec.threads)
+        return _map_pending_ranges_impl(
+            spec, scan, config, bounds, tiles, pending_ranges, router,
+            native_execution=execution, **kwargs,
+        )
+    finally:
+        execution.close()
+
+
+def _map_pending_ranges_impl(
     spec,
     scan,
     config,
@@ -4025,6 +4089,7 @@ def _map_pending_ranges(
     total_images,
     completed_images,
     progress,
+    native_execution=None,
 ):
     """Map every range in ``pending_ranges`` against ``router``.
 
@@ -4111,6 +4176,20 @@ def _map_pending_ranges(
         1024**2,
         effective_memory - (ray_cache_bytes if cache_detector_rays else 0),
     )
+    # Retain the tile proofs already computed by the reach filter, at one
+    # bit per frame/tile/grid. Reserve this shared cache before sizing the
+    # worker pools. Large caches fall back to frame/grid filtering alone.
+    packed_tile_reach_by_grid = None
+    tile_reach_bytes = (
+        bounds.shape[0] * ((len(detector_tiles) + 7) // 8)
+        + 256  # Conservative array-header and dictionary-entry bytes per grid.
+    ) * len(spec.grids)
+    if (
+        not os.environ.get(FRAME_SKIP_ENV_VAR)
+        and tile_reach_bytes <= scheduler_memory // 32
+    ):
+        packed_tile_reach_by_grid = {}
+        scheduler_memory -= tile_reach_bytes
 
     max_readers = (
         _PREFETCH_POOL_MAX
@@ -4228,6 +4307,7 @@ def _map_pending_ranges(
         total_images=total_images,
         progress=progress,
         active_grids_by_group=active_grids_by_group,
+        packed_tile_reach_by_grid=packed_tile_reach_by_grid,
     )
 
     routed_before = getattr(router, "routed_records", 0)
@@ -4259,7 +4339,7 @@ def _map_pending_ranges(
             router,
             correction_pipeline=correction_pipeline,
             kernel_memory_budget=effective_memory,
-            compute_workers=group_workers,
+            compute_workers=1 if native_execution is not None else group_workers,
             kernel_threads=group_threads,
             pipeline_depth=group_depth,
             prepare_workers=seed_prepare_workers,
@@ -4268,6 +4348,11 @@ def _map_pending_ranges(
             completed_images=completed_images,
             progress=progress,
             active_grids_by_group=active_grids_by_group,
+            packed_tile_reach_by_grid=packed_tile_reach_by_grid,
+            **(
+                {"native_execution": native_execution}
+                if native_execution is not None else {}
+            ),
         )
         _fail_if_nothing_was_routed(
             router, routed_before, total_images, progress
@@ -4451,6 +4536,10 @@ def _map_pending_ranges(
                     config.ub_calculator,
                     threads=current_kernel_threads[0],
                     memory_budget_bytes=kernel_memory_budget,
+                    **(
+                        {"native_execution": native_execution}
+                        if native_execution is not None else {}
+                    ),
                 )
                 while True:
                     if retire.is_set() or pool_cancellation.is_set():
@@ -4483,6 +4572,11 @@ def _map_pending_ranges(
                             np.ascontiguousarray(bounds[group, 1]),
                             router,
                             active_grid_names=active_grids_by_group.get(group[0]),
+                            packed_tile_reach_by_grid=packed_tile_reach_by_grid,
+                            **(
+                                {"native_execution": native_execution}
+                                if native_execution is not None else {}
+                            ),
                         )
                     except BaseException as exc:  # noqa: BLE001
                         record_exception(exc)
@@ -5211,8 +5305,15 @@ def run_job(
     *,
     progress=None,
     execution_memory_bytes=None,
+    native_execution=None,
 ):
-    """Run or resume one prepared reconstruction job."""
+    """Run or resume one prepared reconstruction job.
+
+    :param native_execution:
+        Optional runtime execution dictionary (fine_task_samples,
+        max_inflight_calls, scratch_bytes). Omit to retain legacy scheduling.
+        This does not change saved job or checkpoint identity.
+    """
     stage = "single-node run"
     started = time.monotonic()
     path = Path(path).absolute()
@@ -5317,6 +5418,10 @@ def run_job(
         total_images=total_images,
         completed_images=completed_images,
         progress=progress,
+        **(
+            {"native_execution": native_execution}
+            if native_execution is not None else {}
+        ),
     )
 
     logger.info(

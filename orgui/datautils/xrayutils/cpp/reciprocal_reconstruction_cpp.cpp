@@ -7,6 +7,11 @@
 #include <cmath>
 #include <chrono>
 #include <cstdint>
+#include <condition_variable>
+#include <exception>
+#include <functional>
+#include <list>
+#include <mutex>
 #include <limits>
 #include <iterator>
 #include <map>
@@ -716,6 +721,168 @@ struct BlockProfile {
     std::uint64_t reduction_nanoseconds = 0;
 };
 
+// A job-scoped CPU budget. Workers execute ready bricks only: a worker never
+// waits for another worker, a Python object, or a child task in this pool.
+class NativeExecutionContext {
+public:
+    struct Scratch {
+        std::vector<std::byte> arena_buffer;
+        std::vector<Vec3> centre_rays;
+        std::vector<VoxelWeight> weights;
+
+        void trim(const std::size_t cap) {
+            if (centre_rays.capacity() * sizeof(Vec3) > cap / 4) {
+                std::vector<Vec3>().swap(centre_rays);
+            }
+            if (weights.capacity() * sizeof(VoxelWeight) > cap / 4) {
+                std::vector<VoxelWeight>().swap(weights);
+            }
+        }
+    };
+    using Task = std::function<void(std::size_t, Scratch &)>;
+
+    NativeExecutionContext(
+        const std::size_t threads,
+        const std::size_t max_inflight_calls = 2,
+        const std::size_t scratch_bytes = 32ULL * 1024ULL * 1024ULL
+    ) : max_inflight_calls_(max_inflight_calls),
+        scratch_per_worker_(threads == 0 ? 0 : scratch_bytes / threads) {
+        if (threads == 0 || threads > 1024 || max_inflight_calls == 0) {
+            throw std::invalid_argument("threads must be in [1, 1024] and max_inflight_calls positive");
+        }
+        try {
+            for (std::size_t index = 0; index < threads; ++index) {
+                workers_.emplace_back([this]() { worker_loop(); });
+            }
+        } catch (...) {
+            close();
+            throw;
+        }
+    }
+
+    ~NativeExecutionContext() { close(); }
+
+    void run(const std::size_t count, Task task) {
+        auto batch = std::make_shared<Batch>(count, std::move(task));
+        std::unique_lock<std::mutex> lock(mutex_);
+        changed_.wait(lock, [&]() {
+            return closing_ || active_calls_ < max_inflight_calls_;
+        });
+        if (closing_) {
+            throw std::runtime_error("native execution context is closed");
+        }
+        if (count == 0) {
+            return;
+        }
+        ready_.push_back(batch);
+        ++active_calls_;
+        changed_.notify_all();
+        changed_.wait(lock, [&]() { return batch->remaining == 0; });
+        if (batch->error) {
+            std::rethrow_exception(batch->error);
+        }
+        if (cancelled_) {
+            throw std::runtime_error("native execution context cancelled");
+        }
+    }
+
+    void cancel() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cancelled_ = true;
+        closing_ = true;
+        changed_.notify_all();
+    }
+
+    void close() {
+        // Serialise joins, but never hold the scheduling mutex while joining.
+        std::lock_guard<std::mutex> close_lock(close_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            closing_ = true;
+            changed_.notify_all();
+        }
+        for (auto &worker : workers_) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+    }
+
+    std::size_t threads() const { return workers_.size(); }
+    std::size_t scratch_per_worker() const { return scratch_per_worker_; }
+
+private:
+    struct Batch {
+        Batch(const std::size_t size, Task function)
+            : count(size), remaining(size), task(std::move(function)) {}
+        std::size_t count;
+        std::size_t next = 0;
+        std::size_t remaining;
+        Task task;
+        std::exception_ptr error;
+    };
+    std::mutex mutex_;
+    std::mutex close_mutex_;
+    std::condition_variable changed_;
+    std::list<std::shared_ptr<Batch>> ready_;
+    std::vector<std::thread> workers_;
+    std::size_t max_inflight_calls_;
+    std::size_t scratch_per_worker_;
+    std::size_t active_calls_ = 0;
+    bool closing_ = false;
+    bool cancelled_ = false;
+
+    void worker_loop() {
+        Scratch scratch;
+        while (true) {
+            std::shared_ptr<Batch> batch;
+            std::size_t index;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                changed_.wait(lock, [&]() { return closing_ || !ready_.empty(); });
+                if (ready_.empty()) {
+                    return;
+                }
+                batch = ready_.front();
+                if (cancelled_ || batch->error) {
+                    batch->remaining -= batch->count - batch->next;
+                    ready_.pop_front();
+                    if (batch->remaining == 0) {
+                        --active_calls_;
+                        changed_.notify_all();
+                    }
+                    continue;
+                }
+                index = batch->next++;
+                if (batch->next == batch->count) {
+                    ready_.pop_front();
+                } else {
+                    // Round robin across calls, without allocating queue nodes.
+                    ready_.splice(ready_.end(), ready_, ready_.begin());
+                }
+            }
+            std::exception_ptr error;
+            try {
+                batch->task(index, scratch);
+            } catch (...) {
+                error = std::current_exception();
+            }
+            scratch.trim(scratch_per_worker_);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (error && !batch->error) {
+                    batch->error = error;
+                }
+                if (--batch->remaining == 0) {
+                    --active_calls_;
+                    changed_.notify_all();
+                }
+            }
+        }
+    }
+};
+
+
 class ReconstructionKernel {
 public:
     ReconstructionKernel(
@@ -731,7 +898,9 @@ public:
         int threads = 1,
         const std::size_t work_block_pixels = 4096,
         const std::size_t memory_budget_bytes = 512ULL * 1024ULL * 1024ULL,
-        const std::string &weighting_mode = "parameter_average"
+        const std::string &weighting_mode = "parameter_average",
+        const std::size_t fine_task_samples = 0,
+        std::shared_ptr<NativeExecutionContext> execution_context = nullptr
     )
         : frame_(parse_frame(frame)),
           weighting_mode_(parse_weighting_mode(weighting_mode)),
@@ -741,7 +910,12 @@ public:
           max_depth_(max_depth),
           threads_(threads),
           work_block_pixels_(work_block_pixels),
-          memory_budget_bytes_(memory_budget_bytes) {
+          memory_budget_bytes_(memory_budget_bytes),
+          fine_task_samples_(fine_task_samples),
+          execution_context_(std::move(execution_context)) {
+        if (execution_context_) {
+            threads_ = static_cast<int>(execution_context_->threads());
+        }
         grid_.minimum = triple_from_array(minimum, "minimum", false);
         grid_.step = triple_from_array(step, "step", true);
         grid_.shape = shape_from_array(shape, "shape");
@@ -1273,6 +1447,96 @@ public:
                 });
             }
         }
+        const auto blocks_started = std::chrono::steady_clock::now();
+        const std::size_t coarse_brick_count = bricks.size();
+        std::size_t rejected_coarse_bricks = 0;
+        std::vector<BlockProfile> coarse_profiles;
+        if (fine_task_samples_ != 0) {
+            py::gil_scoped_release release;
+            const auto prepare_tasks = [&]() {
+                // Reject with exactly the existing conservative geometric bound.
+                // Split only survivors; never split an individual pixel's footprint
+                // integration (its variance must be squared after combining weights).
+                const std::size_t fine_plane = std::max<std::size_t>(
+                    1, std::min(fine_task_samples_, samples_per_brick)
+                        / std::max<std::size_t>(frames, 1)
+                );
+                const std::size_t fine_columns = std::min(
+                    brick_columns, std::max<std::size_t>(
+                        1, static_cast<std::size_t>(std::sqrt(
+                            static_cast<double>(fine_plane)
+                        ))
+                    )
+                );
+                const std::size_t fine_rows = std::min(
+                    brick_rows, std::max<std::size_t>(1, fine_plane / fine_columns)
+                );
+                std::vector<PixelReach> reaches;
+                reaches.reserve(frames);
+                for (std::size_t frame = 0; frame < frames; ++frame) {
+                    const auto &lattice = transforms[frame];
+                    reaches.push_back(stationary[frame] != 0
+                        ? stationary_reach(lattice[lattice.size() / 2])
+                        : moving_reach(lattice));
+                }
+                std::vector<BrickExtent> tasks;
+                if (profile) {
+                    coarse_profiles.resize(coarse_brick_count);
+                }
+                for (std::size_t index = 0; index < bricks.size(); ++index) {
+                    const BrickExtent &brick = bricks[index];
+                    const PixelRays patch = cell_rays(
+                        brick.row_begin, brick.row_end,
+                        brick.column_begin, brick.column_end, cols, ray_data
+                    );
+                    BlockProfile *details = profile ? &coarse_profiles[index] : nullptr;
+                    bool misses_all = true;
+                    for (std::size_t frame = 0; frame < frames; ++frame) {
+                        const auto &lattice = transforms[frame];
+                        if (!brick_misses_grid(
+                            patch, lattice, lattice[lattice.size() / 2],
+                            stationary[frame] != 0, reaches[frame], details
+                        )) {
+                            misses_all = false;
+                            break;
+                        }
+                    }
+                    if (misses_all) {
+                        ++rejected_coarse_bricks;
+                        if (details != nullptr) {
+                            const std::size_t skipped = frames
+                                * (brick.row_end - brick.row_begin)
+                                * (brick.column_end - brick.column_begin);
+                            details->pixels_seen += skipped;
+                            details->skipped_pixels += skipped;
+                            details->skipped_bricks += frames;
+                        }
+                        continue;
+                    }
+                    // Canonical coarse-row/fine-row order, independent of workers.
+                    for (std::size_t row = brick.row_begin; row < brick.row_end;
+                         row += fine_rows) {
+                        for (std::size_t col = brick.column_begin; col < brick.column_end;
+                             col += fine_columns) {
+                            tasks.push_back({
+                                row, std::min(row + fine_rows, brick.row_end),
+                                col, std::min(col + fine_columns, brick.column_end),
+                            });
+                        }
+                    }
+                }
+                bricks = std::move(tasks);
+                brick_rows = fine_rows;
+                brick_columns = fine_columns;
+            };
+            if (execution_context_) {
+                execution_context_->run(1, [&](std::size_t, NativeExecutionContext::Scratch &) {
+                    prepare_tasks();
+                });
+            } else {
+                prepare_tasks();
+            }
+        }
         const std::size_t brick_count = bricks.size();
         std::vector<std::vector<Record>> block_results(brick_count);
         std::vector<BlockProfile> block_profiles(profile ? brick_count : 0);
@@ -1286,12 +1550,36 @@ public:
                 * bytes_per_node
             + 4096;
 
-        const auto blocks_started = std::chrono::steady_clock::now();
+        if (execution_context_) {
+            py::gil_scoped_release release;
+            execution_context_->run(brick_count, [&](
+                const std::size_t index, NativeExecutionContext::Scratch &scratch
+            ) {
+                // Retained storage is capped across the job. Larger temporary
+                // PMR allocations are released at this brick's boundary.
+                const std::size_t retained = std::min(
+                    arena_bytes, execution_context_->scratch_per_worker() / 2
+                );
+                if (retained > scratch.arena_buffer.capacity()) {
+                    std::vector<std::byte>(retained).swap(scratch.arena_buffer);
+                } else {
+                    scratch.arena_buffer.resize(retained);
+                }
+                std::pmr::monotonic_buffer_resource arena(
+                    scratch.arena_buffer.data(), scratch.arena_buffer.size()
+                );
+                block_results[index] = accumulate_brick(
+                    bricks[index], frames, cols, pixels, ray_data,
+                    transforms, stationary, scratch.centre_rays, scratch.weights,
+                    profile ? &block_profiles[index] : nullptr, arena
+                );
+            });
+        } else
         {
             py::gil_scoped_release release;
             const int worker_count = static_cast<int>(
                 std::min<std::size_t>(
-                    static_cast<std::size_t>(threads_), std::max<std::size_t>(brick_count, 1)
+                    static_cast<std::size_t>(threads_), brick_count
                 )
             );
             std::vector<std::thread> workers;
@@ -1345,12 +1633,21 @@ public:
         const auto merge_started = std::chrono::steady_clock::now();
         {
             py::gil_scoped_release release;
-            records = merge_sorted_blocks(block_results);
+            if (execution_context_) {
+                execution_context_->run(1, [&](std::size_t, NativeExecutionContext::Scratch &) {
+                    records = merge_sorted_blocks(block_results);
+                });
+            } else {
+                records = merge_sorted_blocks(block_results);
+            }
         }
         const auto merge_finished = std::chrono::steady_clock::now();
         py::dict result = records_to_python(records);
         const auto conversion_finished = std::chrono::steady_clock::now();
         if (profile) {
+            block_profiles.insert(
+                block_profiles.end(), coarse_profiles.begin(), coarse_profiles.end()
+            );
             py::dict details = summarize_profile(
                 block_profiles,
                 record_count,
@@ -1363,6 +1660,9 @@ public:
                 conversion_finished
             );
             details["frames"] = frames;
+            details["coarse_bricks"] = coarse_brick_count;
+            details["rejected_coarse_bricks"] = rejected_coarse_bricks;
+            details["fine_task_samples"] = fine_task_samples_;
             details["bricks"] = brick_count;
             details["brick_rows"] = brick_rows;
             details["brick_columns"] = brick_columns;
@@ -1376,6 +1676,8 @@ public:
         result["max_depth"] = max_depth_;
         result["threads"] = threads_;
         result["work_block_pixels"] = work_block_pixels_;
+        result["fine_task_samples"] = fine_task_samples_;
+        result["shared_pool_threads"] = execution_context_ ? execution_context_->threads() : 0;
         result["memory_budget_bytes"] = memory_budget_bytes_;
         return result;
     }
@@ -1626,6 +1928,8 @@ private:
     int threads_;
     std::size_t work_block_pixels_;
     std::size_t memory_budget_bytes_;
+    std::size_t fine_task_samples_;
+    std::shared_ptr<NativeExecutionContext> execution_context_;
 
     std::size_t bounded_block_size() const {
         // A record is deliberately overestimated to retain headroom for the
@@ -3851,6 +4155,20 @@ PYBIND11_MODULE(_reciprocal_reconstruction_cpp, module) {
         py::arg("right_contributors"),
         "Linearly merge two sorted, already-reduced record batches."
     );
+    py::class_<NativeExecutionContext, std::shared_ptr<NativeExecutionContext>>(
+        module, "NativeExecutionContext",
+        "Persistent native worker pool shared by grouped reconstruction kernels. "
+        "Close drains accepted tasks; cancel rejects admissions and abandons queued bricks."
+    )
+        .def(py::init<std::size_t, std::size_t, std::size_t>(),
+             py::arg("threads"), py::arg("max_inflight_calls") = 2,
+             py::arg("scratch_bytes") = 32ULL * 1024ULL * 1024ULL)
+        .def("close", &NativeExecutionContext::close,
+             py::call_guard<py::gil_scoped_release>(), "Drain accepted tasks and join all workers.")
+        .def("cancel", &NativeExecutionContext::cancel,
+             "Stop admissions and abandon unstarted bricks; running bricks finish safely.")
+        .def_property_readonly("threads", &NativeExecutionContext::threads)
+        .def_property_readonly("scratch_per_worker", &NativeExecutionContext::scratch_per_worker);
     py::class_<ReconstructionKernel>(module, "ReconstructionKernel")
         .def(
             py::init<
@@ -3866,7 +4184,9 @@ PYBIND11_MODULE(_reciprocal_reconstruction_cpp, module) {
                 int,
                 std::size_t,
                 std::size_t,
-                const std::string &
+                const std::string &,
+                std::size_t,
+                std::shared_ptr<NativeExecutionContext>
             >(),
             py::arg("minimum"),
             py::arg("step"),
@@ -3880,7 +4200,9 @@ PYBIND11_MODULE(_reciprocal_reconstruction_cpp, module) {
             py::arg("threads") = 1,
             py::arg("work_block_pixels") = 4096,
             py::arg("memory_budget_bytes") = 512ULL * 1024ULL * 1024ULL,
-            py::arg("weighting_mode") = "parameter_average"
+            py::arg("weighting_mode") = "parameter_average",
+            py::arg("fine_task_samples") = 0,
+            py::arg("execution_context") = nullptr
         )
         .def(
             "backproject_coefficients",

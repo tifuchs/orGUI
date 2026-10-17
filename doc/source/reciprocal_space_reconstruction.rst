@@ -708,6 +708,14 @@ The execution stages are:
 8. Validate the output checksum, register it as an external result, then
    remove the checkpoint files and the asset bundle.
 
+Before loading images, conservative geometry tests identify unreachable
+frames, output grids, and detector-tile/grid combinations. Proven-empty tile
+calls bypass the native mapper while still contributing their frame coverage
+to resumable checkpoints. For a group of frames, a tile is skipped only when
+none of those frames can reach the grid. Tile proofs use a packed cache bounded
+by the runtime memory budget; if it would exceed its allowance, execution
+retains frame/grid filtering and maps tiles normally.
+
 Interrupted jobs retain checkpoint data. Cleanup occurs only after successful
 HDF5 close, validation, and checksum calculation. Cleanup errors are recorded
 but do not invalidate a completed scientific result.
@@ -1220,3 +1228,77 @@ Practical Guidance
 * Use ``status`` before resuming a job copied from another machine.
 * Treat the variance arrays as marginal uncertainties, not a complete
   covariance representation.
+
+Experimental Native Task Sizing
+-------------------------------
+
+The native ``ReconstructionKernel`` constructor accepts an optional
+``fine_task_samples`` execution setting for ``accumulate_group`` and
+``accumulate_group_tile``. Its default, ``0``, retains the existing scheduling.
+A positive value keeps ``work_block_pixels`` as the coarse rejection size,
+then splits surviving detector bricks into smaller tasks. For example,
+``fine_task_samples=64`` targets 64 pixel/frame samples per task. A task always
+contains at least one detector pixel across the whole frame group, so groups
+larger than the target exceed it. The target is capped by the coarse block's
+memory-bounded sample count. The single-frame ``accumulate`` entry point is
+unchanged.
+
+This setting changes task partitioning, not integration depth, geometry,
+pixel weighting, or variance propagation. Task results merge in a fixed order
+independent of worker completion order. Different partitions can change the
+last floating-point bits through summation order. Profile output reports
+``coarse_bricks``, ``rejected_coarse_bricks``, ``fine_task_samples``, and the
+number of submitted tasks in ``bricks``. Existing sample counters include
+samples rejected at the coarse stage.
+
+Shared Native Execution
+~~~~~~~~~~~~~~~~~~~~~~~
+
+``orgui.reconstruction_job.run_job`` accepts an optional runtime-only
+``native_execution`` dictionary. Omit it to retain legacy scheduling. An empty
+dictionary enables fine tasks of 64 samples, a persistent pool using the job's
+native thread budget, and at most two overlapping tile/grid calls::
+
+    run_job(validation_job_path, native_execution={
+        "fine_task_samples": 64,
+        "max_inflight_calls": 2,
+    })
+
+These options are not saved job fields and do not change a job digest or
+checkpoint format. This option does not change the normal resume/cleanup
+policy; use an isolated validation job when existing checkpoint files must
+remain untouched. No production continuation is needed to benchmark cached
+corrected frames through the mapping API.
+
+The pool is shared by every mapping kernel in that job. Coarse preparation,
+fine tasks, and native per-call merging run on the same workers. The old
+per-image thread sweep is bypassed for this execution policy. One frame group
+is mapped at a time; image prefetch and correction retain the existing bounded
+pipeline. Within the group, ready calls overlap across tiles and grids. At most
+``max_inflight_calls`` are unfinished (capped by the thread budget), and native
+per-call memory guards divide the mapping budget by that number. The optional
+``scratch_bytes`` reservation defaults to the smaller of 32 MiB and one
+sixteenth of the mapping budget, and is deducted from that budget before
+pipeline sizing. It caps retained worker scratch, not the entire mapping
+working set; larger temporary allocations remain covered by the native
+per-call guard.
+
+Results retain their original tile order, including known-empty tiles. Every
+call in a group must succeed before routing starts, then each grid is routed
+exactly once with the full group frame count. Failures stop admissions, cancel
+unstarted tasks, and wait for running work before releasing input arrays.
+Setting ``max_inflight_calls=1`` isolates the persistent-pool benefit;
+``fine_task_samples=0`` retains coarse task sizing while using the pool.
+
+The native API also exposes ``NativeExecutionContext(threads,
+max_inflight_calls=2, scratch_bytes=33554432)``. Pass the same object as
+``execution_context`` to each grouped kernel. Kernels retain the context.
+``close()`` drains accepted native tasks and joins workers; it rejects new
+tasks, including subsequent phases of an in-progress kernel call. Therefore
+finish calling futures before closing it for a successful drain. ``cancel()``
+rejects admissions and abandons unstarted tasks; running bricks finish safely.
+The job-owned wrapper handles this lifetime ordering automatically.
+
+Benchmark representative frames before deployment. Validation so far includes
+synthetic checkpoint equivalence and a cached real frame; cached mapping
+timings exclude raw I/O, corrections, checkpoint writes and final output.
