@@ -54,6 +54,7 @@ from .datautils.xrayutils.reconstruction import (
     _kernel_for_grid,
     _kernel_threads_sweep,
     _map_frame_group,
+    _native_module,
     _sample_angle_bounds,
     _tile_ray_arrays,
     _validate_mapping_setup,
@@ -4049,6 +4050,8 @@ def _map_pending_ranges(
     identity. The default keeps the existing scheduler. Shared execution uses
     one compute group at a time and bypasses the per-image thread sweep.
     """
+    if pending_ranges:
+        logger.info("Native reconstruction binary: %s", _native_module().__file__)
     if native_execution is None or not pending_ranges:
         return _map_pending_ranges_impl(
             spec, scan, config, bounds, tiles, pending_ranges, router, **kwargs
@@ -4063,6 +4066,13 @@ def _map_pending_ranges(
         )
     execution = _NativeExecution(int(spec.threads), **options)
     try:
+        logger.info(
+            "Optimized native scheduling: threads=%d, coarse_samples=%d, "
+            "fine_task_samples=%d, max_inflight_calls=%d, scratch_bytes=%d",
+            int(spec.threads), spec.work_block_pixels,
+            execution.fine_task_samples, execution.max_inflight_calls,
+            execution.scratch_bytes,
+        )
         kwargs["effective_memory"] = memory - scratch
         kwargs["threads_per_image"] = int(spec.threads)
         return _map_pending_ranges_impl(

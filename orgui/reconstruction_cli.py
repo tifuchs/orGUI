@@ -199,7 +199,11 @@ def _progress_operation(operation, *args, **kwargs):
 
 def _run(arguments):
     logger.info("Running prepared job %s", arguments.job)
-    _progress_operation(run_job, arguments.job)
+    native_execution = {} if arguments.native_scheduling == "optimized" else None
+    logger.info("Native scheduling policy: %s", arguments.native_scheduling)
+    _progress_operation(
+        run_job, arguments.job, native_execution=native_execution,
+    )
 
 
 def _cluster_map(arguments):
@@ -302,6 +306,11 @@ def build_parser(prog=None):
     ):
         command = commands.add_parser(name, help=help_text)
         command.add_argument("job", help="UI-prepared reconstruction job JSON")
+        command.add_argument(
+            "--native-scheduling", choices=("optimized", "legacy"),
+            default="optimized",
+            help="Native scheduler (default: optimized; legacy disables pooling)",
+        )
         command.set_defaults(handler=_run)
     status = commands.add_parser("status", help="Inspect a prepared job")
     status.add_argument("job")

@@ -72,7 +72,7 @@ def test_cli_exposes_prepared_job_and_cluster_commands():
 def test_cli_reports_progress_on_stderr(capsys):
     """Long-running CLI jobs report progress without corrupting JSON stdout."""
 
-    def fake_run(path, *, progress):
+    def fake_run(path, *, progress, native_execution):
         progress(0, 4, "Mapping images 0/2")
         progress(1, 4, "Mapping images 1/2")
         progress(2, 4, "Reducing 1 mapping task")
@@ -196,3 +196,19 @@ def test_cli_logs_a_failing_command_before_reraising(capsys, monkeypatch):
     err = capsys.readouterr().err
     assert "Command 'status' failed after" in err
     assert "scratch directory is unreadable" in err
+
+
+@pytest.mark.parametrize("command", ["run", "resume"])
+@pytest.mark.parametrize("policy", [None, "optimized", "legacy"])
+def test_cli_selects_native_scheduler(command, policy, capsys):
+    """Both local entry points enable the pool and retain a legacy fallback."""
+    argv = [command, "job.json"]
+    if policy is not None:
+        argv += ["--native-scheduling", policy]
+    with mock.patch.object(reconstruction_cli, "run_job", return_value={}) as run:
+        reconstruction_cli.main(argv)
+    assert run.call_args.kwargs["native_execution"] == (
+        None if policy == "legacy" else {}
+    )
+    expected = "Native scheduling policy: " + (policy or "optimized")
+    assert expected in capsys.readouterr().err

@@ -1254,6 +1254,11 @@ samples rejected at the coarse stage.
 Shared Native Execution
 ~~~~~~~~~~~~~~~~~~~~~~~
 
+The local CLI ``run`` and ``resume`` commands enable shared native execution
+by default. Use ``--native-scheduling legacy`` to restore the old scheduler.
+The log records the policy, loaded native binary path, and effective pool
+settings when mapping starts. Cluster commands are unchanged.
+
 ``orgui.reconstruction_job.run_job`` accepts an optional runtime-only
 ``native_execution`` dictionary. Omit it to retain legacy scheduling. An empty
 dictionary enables fine tasks of 64 samples, a persistent pool using the job's
