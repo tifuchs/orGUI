@@ -330,6 +330,9 @@ because the rocking dimension helps separate the CTR signal from broad or
 environmental background. It is more computationally expensive than stationary
 integration.
 
+Edits in ``Integration lines…`` apply to both stationary and rocking scans by
+default, so the same rods are available when switching modes.
+
 ``Integration lines…`` also accepts several rocking lines. ROI sizing and
 detector-resolution sampling are resolved separately for each line, using the
 shared ROI/background settings and selected intersection. Results remain
@@ -360,8 +363,11 @@ Scripts can set line collections and execution limits explicitly::
     )
     window.roPkIntegrTab.rocking_batch_options = window.rocking_batch_options
 
-Use ``"stationary"`` for stationary line definitions. Line collections
-survive configuration save/reload; old configurations select the existing
+Either ``"stationary"`` or ``"rocking"`` updates both lists by default. Scripts
+can pass ``shared=False`` to update only the named mode. Line collections
+survive configuration save/reload. When only one saved mode has lines, that
+list is restored for both modes; two distinct nonempty saved lists are
+preserved until edited. Configurations without any lines select the existing
 single-line workflow. Batch limits do not change scientific corrections and
 are reduced automatically when the estimated working arrays exceed the
 budget. Detector images, correction maps, application state and HDF5 caches

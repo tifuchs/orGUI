@@ -206,6 +206,61 @@ def test_multiple_lines_round_trip_and_legacy_restore(selector, tmp_path):
     assert selector.get_integration_lines("rocking") == []
 
 
+@pytest.mark.parametrize("mode", ["stationary", "rocking"])
+def test_editing_lines_updates_both_modes(selector, mode):
+    """Edits and clearing propagate to both modes without sharing mutable data."""
+    lines = [{"id": "rod", "H_0": [1, 0, 0], "H_1": [0, 0, 1]}]
+    selector.set_integration_lines(mode, lines)
+    for target in ("stationary", "rocking"):
+        assert selector.get_integration_lines(target) == lines
+    lines[0]["H_0"][0] = 9
+    returned = selector.get_integration_lines(mode)
+    returned[0]["H_0"][0] = 8
+    assert selector.get_integration_lines("stationary")[0]["H_0"] == [1, 0, 0]
+    assert selector.get_integration_lines("rocking")[0]["H_0"] == [1, 0, 0]
+    selector.set_integration_lines(mode, [])
+    assert selector.get_integration_lines("stationary") == []
+    assert selector.get_integration_lines("rocking") == []
+
+
+@pytest.mark.parametrize("mode", ["stationary", "rocking"])
+@pytest.mark.parametrize("empty_other", [False, True])
+def test_saved_single_mode_lines_apply_to_both_modes(
+    selector, tmp_path, mode, empty_other
+):
+    """Reload old one-mode HDF5 lists into both extraction modes."""
+    from silx.io.dictdump import dicttonx, nxtodict
+
+    lines = [
+        {"id": "first", "H_0": [-2, 0, 0], "H_1": [0, 0, 1]},
+        {"id": "second", "H_0": [-3, 0, 0], "H_1": [0, 0, 1]},
+    ]
+    other = "rocking" if mode == "stationary" else "stationary"
+    saved = {mode: lines}
+    if empty_other:
+        saved[other] = []
+    path = tmp_path / "single_mode_lines.h5"
+    dicttonx({"roi": roi_to_nxdict(ROIState(lines=saved))}, path)
+    restored = roi_from_nxdict(nxtodict(path)["roi"])
+    selector.set_integration_options({"lines": restored.lines})
+    expected = {"stationary": lines, "rocking": lines}
+    assert selector.get_integration_options()["lines"] == expected
+    # A subsequent save records both lists, so older readers also see them.
+    path = tmp_path / "shared_lines.h5"
+    options = selector.get_integration_options()
+    dicttonx({"roi": roi_to_nxdict(ROIState(lines=options["lines"]))}, path)
+    assert roi_from_nxdict(nxtodict(path)["roi"]).lines == expected
+
+
+def test_separate_line_lists_can_be_set_explicitly(selector):
+    """Scripts can opt out of sharing without changing the other mode."""
+    lines = [{"id": "rod", "H_0": [1, 0, 0], "H_1": [0, 0, 1]}]
+    selector.set_integration_lines("stationary", lines)
+    selector.set_integration_lines("rocking", [], shared=False)
+    assert selector.get_integration_lines("stationary") == lines
+    assert selector.get_integration_lines("rocking") == []
+
+
 def test_an_unknown_option_is_ignored(selector):
     """What lets an older orGUI open a newer configuration."""
     selector.set_integration_options({"mask": True, "from_the_future": 1})

@@ -7,6 +7,11 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Stationary and rocking scans now share edits to integration lines by default.
+  Loading a configuration with lines saved for only one mode populates both
+  modes, including existing databases with stationary lines and an empty
+  rocking list. Distinct nonempty saved lists remain intact until edited.
+
 - Expanding SPEC measurement groups with empty column labels no longer crashes
   the file browser. Unnamed entries appear as disabled placeholders while named
   counters remain available; the source file is left unchanged.

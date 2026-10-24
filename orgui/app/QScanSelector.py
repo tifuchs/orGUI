@@ -799,7 +799,7 @@ class QScanSelector(qt.QMainWindow):
         self.integrationLinesBtn = qt.QPushButton("Integration lines…")
         self.integrationLinesBtn.setToolTip(
             "Integrate multiple reciprocal-space lines in stationary "
-            "or rocking hklscan."
+            "or rocking hklscan. Editing the list updates both modes."
         )
         self.integrationLinesBtn.clicked.connect(self._edit_integration_lines)
         self.integrationLinesBtn.setEnabled(self.scanstab.currentIndex() in (0, 2))
@@ -827,15 +827,43 @@ class QScanSelector(qt.QMainWindow):
 
         return copy.deepcopy(getattr(self, "_integration_lines", {}).get(mode, []))
 
-    def set_integration_lines(self, mode, lines):
-        """Set validated id/H_0/H_1 definitions in r.l.u. for one scan mode."""
+    def set_integration_lines(self, mode, lines, *, shared=True):
+        """Set validated id/H_0/H_1 definitions in r.l.u.
+
+        :param str mode: ``stationary`` or ``rocking``.
+        :param lines: Ordered line definitions; an empty list clears the lines.
+        :param bool shared: Update both modes by default. Set to ``False`` to
+            explicitly configure only the named mode.
+        """
+        import copy
+
         from .scan_integration import normalize_lines
 
         if mode not in ("stationary", "rocking"):
             raise ValueError("Line mode must be stationary or rocking")
+        definitions = normalize_lines(lines)
         if not hasattr(self, "_integration_lines"):
             self._integration_lines = {}
-        self._integration_lines[mode] = normalize_lines(lines)
+        for target in (("stationary", "rocking") if shared else (mode,)):
+            self._integration_lines[target] = copy.deepcopy(definitions)
+        self.sigROIChanged.emit()
+
+    def _restore_integration_lines(self, lines):
+        """Share a lone saved list while preserving two explicit saved lists."""
+        import copy
+
+        from .scan_integration import normalize_lines
+
+        # Restore together: an empty legacy rocking list must not erase the
+        # stationary definitions, and listeners must see both updated modes.
+        restored = {
+            mode: normalize_lines(lines.get(mode, []))
+            for mode in ("stationary", "rocking")
+        }
+        for mode, other in (("stationary", "rocking"), ("rocking", "stationary")):
+            if not restored[mode]:
+                restored[mode] = copy.deepcopy(restored[other])
+        self._integration_lines = restored
         self.sigROIChanged.emit()
 
     # GUI-only: edits the selected workflow's ordered reciprocal-space lines.
@@ -847,7 +875,10 @@ class QScanSelector(qt.QMainWindow):
         dialog.setWindowTitle("Integration lines (r.l.u.)")
         layout = qt.QVBoxLayout(dialog)
         layout.addWidget(
-            qt.QLabel("Empty table uses the existing single line controls.")
+            qt.QLabel(
+                "Edits apply to stationary and rocking scans.\n"
+                "Empty table uses the existing single line controls."
+            )
         )
         table = qt.QTableWidget(0, 7, dialog)
         table.setHorizontalHeaderLabels(
@@ -1054,8 +1085,7 @@ class QScanSelector(qt.QMainWindow):
             elif key == "rocking_scan":
                 self._set_rocking_options(value)
             elif key == "lines":
-                for mode in ("stationary", "rocking"):
-                    self.set_integration_lines(mode, value.get(mode, []))
+                self._restore_integration_lines(value)
 
     def _set_region_options(self, ddict):
         """Restore the region sizes and the automatic-sizing switches."""
