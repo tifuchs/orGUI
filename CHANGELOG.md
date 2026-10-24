@@ -7,6 +7,10 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Expanding SPEC measurement groups with empty column labels no longer crashes
+  the file browser. Unnamed entries appear as disabled placeholders while named
+  counters remain available; the source file is left unchanged.
+
 - Fixed the integration-curve delete/hide dialog for Qt6.
 
 - Fatal OpenGL paint errors are reported after the failing callback returns, with

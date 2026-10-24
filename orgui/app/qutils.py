@@ -33,13 +33,14 @@ import logging
 from silx.gui import qt
 from silx.gui import icons
 from silx.gui.hdf5.Hdf5TreeModel import Hdf5TreeModel
+from silx.io.spech5 import SpecH5Group
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
 class RobustHdf5TreeModel(Hdf5TreeModel):
-    """HDF5 tree model which tolerates files that cannot be closed.
+    """HDF5 tree model with safeguards for file closure and unnamed SPEC data.
 
     :class:`Hdf5TreeModel` closes the files it owns when the corresponding
     item is removed from the model. h5py raises if the file cannot be written
@@ -49,7 +50,50 @@ class RobustHdf5TreeModel(Hdf5TreeModel):
 
     This model logs the error instead and removes the item, so that the user
     can continue to work with the remaining files.
+
+    Empty SPEC column labels are displayed as disabled placeholders: silx
+    exposes these keys but cannot resolve them through its lazy tree items.
     """
+
+    def _is_unnamed_spec_column(self, index):
+        if not index.isValid():
+            return False
+        node = self.nodeFromIndex(index)
+        return (
+            getattr(node, "basename", None) == ""
+            and node.parent is not None
+            and isinstance(node.parent.obj, SpecH5Group)
+        )
+
+    def data(self, index, role=qt.Qt.DisplayRole):
+        """Display an unavailable placeholder for an empty SPEC column label."""
+        if not self._is_unnamed_spec_column(index):
+            return super().data(index, role)
+
+        # Hdf5Item.obj tests the key's truth value before resolving it, so an
+        # empty key leaves obj=None even though h5Class says it is a dataset.
+        # Do not pass it to silx's icon, value or tooltip formatters. Retain
+        # the item role used by NexusSortFilterProxyModel for sorting.
+        if role == self.H5PY_ITEM_ROLE:
+            return self.nodeFromIndex(index)
+        if role == qt.Qt.DisplayRole:
+            if index.column() == self.NAME_COLUMN:
+                return "Unnamed SPEC column"
+            if index.column() == self.DESCRIPTION_COLUMN:
+                return "Unavailable: empty column label"
+        if role == qt.Qt.ToolTipRole:
+            return (
+                "This SPEC column has an empty label and cannot be opened in "
+                "the tree. Named columns remain available. The file has not "
+                "been modified."
+            )
+        return None
+
+    def flags(self, index):
+        """Prevent selecting or dragging an unresolved, unnamed SPEC column."""
+        if self._is_unnamed_spec_column(index):
+            return qt.Qt.NoItemFlags
+        return super().flags(index)
 
     def _closeFileIfOwned(self, node):
         try:

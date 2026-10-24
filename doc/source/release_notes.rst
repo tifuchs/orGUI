@@ -9,6 +9,8 @@ Unreleased (2026-07-19)
 
 Other user-visible changes:
 
+- Expanding SPEC measurement groups with empty column labels no longer crashes the file browser. Unnamed entries appear as disabled placeholders while named counters remain available; the source file is left unchanged.
+
 - Fixed the integration-curve delete/hide dialog for Qt6.
 
 - Fatal OpenGL paint errors are reported after the failing callback returns, with OpenGL redraws paused so the error and database-save dialogs do not trigger recursive paint failures. Use ``--no-opengl`` to launch with matplotlib despite a saved OpenGL preference; the saved selection is left unchanged.

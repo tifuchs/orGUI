@@ -55,6 +55,10 @@ separately stored detector images. The file browser on the left side of the
 main window displays the scans found in the selected file, and a scan is opened
 by double-clicking it.
 
+SPEC columns with empty labels appear as disabled ``Unnamed SPEC column`` rows
+in the file tree. Measurement groups can still be expanded and their named
+counters inspected; this workaround does not rewrite the source file.
+
 Beamlines often use different counter names, metadata conventions, and image
 locations. orGUI therefore uses backend modules for beamline-specific loading.
 Current backends support ID31 at ESRF and P21.2 at DESY. Support for another
