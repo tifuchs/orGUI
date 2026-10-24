@@ -144,11 +144,24 @@ incidence and is saved with the applied correction. An explicit reference
 incidence is useful when an off-axis sample was aligned at a different incidence;
 it only affects the vertical axis alignment for nonzero x displacement.
 
-The diagnostics tab shows intercepted fraction and illumination versus readback
-angle. ``Preview loaded source frames`` uses the actual frame incidence and
-resolved readback, including manual overrides; choose a frame for the
-beam-density image and sample outline.
-Calculation progress can be cancelled. The diagnostics tab also contains the
+The ``Live diagnostics`` panel on the right shows the 2D beam density and sample
+outline beside every settings tab. Incidence and azimuth each offer ``Scan
+readout`` or ``Manual override`` in degrees. Scan readout follows the angle
+sources configured on the Sample tab; choose a source frame or change the
+selected scan/frame in the main window. Manual preview angles do not change
+the applied correction settings. Edits to either beam profile, sample geometry
+or alignment redraw the image after a short debounce. Automatic updates run
+only while the dialog is visible and either it or the main orGUI window is
+active. Image navigation in the main window therefore updates the preview
+without an extra click in the dialog. Returning to either window refreshes
+pending changes. Invalid inputs clear the image and show an inline explanation.
+
+The diagnostics tab retains the explicitly calculated intercepted-fraction and
+illumination curves. ``Calculate preview`` sweeps azimuth about the preview
+angle. ``Preview loaded source frames`` instead uses the actual frame incidence
+and resolved readback, including correction overrides. Live image updates do
+not run this full-scan calculation. Calculation progress can be cancelled.
+The diagnostics tab also contains the
 overspill warning threshold. Overspill exceeding the selected
 threshold produces an aggregated warning during correction. Frames with invalid
 incidence or zero overlap receive NaN divisors and propagate as excluded data;

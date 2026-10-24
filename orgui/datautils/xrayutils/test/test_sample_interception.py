@@ -6,10 +6,102 @@ from numpy.polynomial.legendre import leggauss
 from scipy.special import erf
 
 from orgui.datautils.xrayutils.corrections import beamprofile as bp
+from orgui.datautils.xrayutils.corrections import sample_interception as interception
 from orgui.datautils.xrayutils.corrections.sample_interception import (
     SampleShape,
     overlap,
 )
+
+
+@pytest.mark.parametrize("kind", ["rectangle", "circle", "polygon"])
+@pytest.mark.parametrize("profiles", ["gaussian", "measured", "smooth", "skew"])
+def test_vector_panels_match_adaptive_reference(kind, profiles, monkeypatch):
+    """Batching nodes preserves displaced shapes and both measured profiles."""
+    vertical = bp.gaussian_profile(160e-6, offset=20e-6)
+    horizontal = bp.gaussian_profile(0.0028, offset=-0.0003)
+    if profiles == "measured":
+        z = np.linspace(-0.0004, 0.0004, 41)
+        y = np.linspace(-0.006, 0.006, 51)
+        vertical = bp.MeasuredBeamProfile(z, vertical.density_at(z))
+        horizontal = bp.MeasuredBeamProfile(y, horizontal.density_at(y))
+    elif profiles == "smooth":
+        vertical = bp.smoothed_top_hat_profile(160e-6, 20e-6)
+        horizontal = bp.trapezoid_profile(0.004, 0.001)
+    elif profiles == "skew":
+        vertical = bp.skew_normal_profile(160e-6, 3)
+        horizontal = bp.generalized_normal_profile(0.0028, 4)
+    if kind == "polygon":
+        shape = SampleShape(kind, vertices=(
+            (-0.005, -0.005), (0.005, -0.005), (0.005, -0.002),
+            (-0.002, -0.002), (-0.002, 0.002), (0.005, 0.002),
+            (0.005, 0.005), (-0.005, 0.005),
+        ))
+    else:
+        shape = SampleShape(kind, (0.01, 0.006) if kind == "rectangle" else (0.01,))
+    args = (shape, vertical, horizontal, [1e-12, 0.006, 0.1, 0.02],
+            [1e-10, 0.4, 1.2, np.pi / 2 + 1e-10])
+    kwargs = dict(offset=(0.002, -0.001), axis_vertical=10e-6,
+                  axis_horizontal=0.0002, rtol=1e-10)
+    actual = overlap(*args, **kwargs)
+
+    def _adaptive(integrand, rtol):
+        return interception.quad(integrand, 0, 1, epsabs=1e-12,
+                                 epsrel=rtol, limit=200, full_output=1)
+
+    monkeypatch.setattr(interception, "_vector_quad", _adaptive)
+    expected = overlap(*args, **kwargs)
+    for field in ("illumination", "fraction", "effective_area"):
+        np.testing.assert_allclose(getattr(actual, field), getattr(expected, field),
+                                   rtol=1e-10, atol=1e-14)
+    assert np.all(np.abs(actual.illumination - expected.illumination)
+                  <= actual.error + expected.error)
+
+
+def test_vector_panel_batches_nodes_and_retains_error_bound():
+    """A smooth panel uses one profile evaluation and the embedded error rule."""
+    calls = []
+
+    def _density(t):
+        calls.append(np.shape(t))
+        return np.exp(t)
+
+    value, error, _ = interception._vector_quad(_density, 1e-12)
+    assert calls == [(21,)]
+    assert abs(value - np.expm1(1)) <= error
+    assert 0 < error < 1e-12
+
+
+def test_vector_panel_falls_back_for_unresolved_peak(monkeypatch):
+    """A narrow peak still triggers adaptive subdivision at strict tolerance."""
+    quad = interception.quad
+    calls = []
+
+    def _record(*args, **kwargs):
+        calls.append(kwargs)
+        return quad(*args, **kwargs)
+
+    monkeypatch.setattr(interception, "quad", _record)
+    value, error, _ = interception._vector_quad(
+        lambda t: np.exp(-((t - 0.37) / 0.01)**2), 1e-12,
+    )
+    assert len(calls) == 1
+    assert calls[0]["epsrel"] == 1e-12
+    assert abs(value - np.sqrt(np.pi) * 0.01) <= error
+
+
+def test_custom_scalar_interval_profile_remains_supported():
+    """Overriding profiles need not implement the new internal vector path."""
+    class ScalarProfile(bp.GaussianBeamProfile):
+        def interval_mass(self, lower, upper):
+            """Accept only scalar bounds, as permitted before batching."""
+            assert np.ndim(lower) == np.ndim(upper) == 0
+            return super().interval_mass(lower, upper)
+
+    shape = SampleShape("rectangle", (0.01, 0.006))
+    vertical = bp.gaussian_profile(160e-6)
+    actual = overlap(shape, vertical, ScalarProfile(0.0028), 0.006, 0.4)
+    expected = overlap(shape, vertical, bp.GaussianBeamProfile(0.0028), 0.006, 0.4)
+    np.testing.assert_allclose(actual.illumination, expected.illumination, rtol=1e-12)
 
 
 def test_gaussian_and_wide_beam_references():

@@ -3492,7 +3492,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
             density_layout.addRow(self.legacyFluxLabel, self.beamFlux)
             self.sampleEditor.form.addRow(self.legacyDensity)
             verticalLayout.addWidget(self.sampleEditor)
-            self.resize(950, 750)
+            self.resize(1200, 750)
             buttons = qt.QDialogButtonBox(
                 qt.QDialogButtonBox.Ok | qt.QDialogButtonBox.Cancel
             )
@@ -3522,6 +3522,7 @@ class IntegrationCorrectionsDialog(qt.QDialog):
         if self._restoringSettings:
             return
         if self.sampleEditor is not None:
+            self.sampleEditor._requestLivePreview()
             try:
                 self.sampleInterceptionSettings()
             except (ValueError, NotImplementedError) as error:

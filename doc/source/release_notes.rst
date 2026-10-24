@@ -25,7 +25,7 @@ Other user-visible changes:
 
 - Correction dialogs reopen with their controls intact when OpenGL plotting is enabled, while retaining the selected plotting backend. Loading HDF5 calibrations also strips nested NeXus attributes before passing settings to pyFAI, avoiding the spurious detector-configuration error.
 
-- Beam profile and sample-shape corrections now share one tabbed editor. Rectangular sample dimensions are entered once, and both beam profiles, geometry and diagnostics use the same settings. Cancel restores all tabs.
+- Beam profile and sample-shape corrections now share one tabbed editor. Rectangular sample dimensions are entered once, and both beam profiles, geometry and diagnostics use the same settings. Cancel restores all tabs. A live 2D beam-density/sample-outline preview stays on the right, with independent scan-readout or manual incidence/azimuth controls. Settings and scan/frame changes refresh it while the dialog is visible and either it or the main orGUI window is active, without requiring a click back into the dialog after image navigation. Preview overrides do not alter the applied correction settings.
 
 - UB calculation accepts fixed scalar omega values from scans with constant theta, avoiding an indexing error when using their reference reflections.
 
@@ -41,7 +41,7 @@ Scientific and analysis additions:
 
 - Epitaxy lower references stay fixed across skew and 50% occupancy thresholds. Bulk and registry-Film subtraction uses the actual underlying atoms and domains, including the native bulk repeat zero. Support spans both the statistical transition and sharp boundary, including at large skew, and signed corrections participate in DWBA. Affected predictions change; recompute them and reassess saved fits. Parameter formats are unchanged.
 
-- Sample-shape footprint corrections integrate thin rectangle and polygon sections in local coordinates, avoiding roundoff-driven quadrature failures near beam alignment without rounding the angles. Nearly coincident rotated edge breakpoints retain their contribution and error bound.
+- Sample-shape footprint corrections integrate thin rectangle and polygon sections in local coordinates, avoiding roundoff-driven quadrature failures near beam alignment without rounding the angles. Nearly coincident rotated edge breakpoints retain their contribution and error bound. Built-in beam profiles now evaluate quadrature nodes in batches, accelerating overlap calculations while retaining the integration tolerance and adaptive fallback for unresolved sections.
 
 - Reciprocal-space mapping now applies the shared beam-profile or sample-shape illumination/footprint correction, including angle overrides and squared variance scaling. Applied divisors are saved in output provenance; undefined illumination contributes no pixels. Older prepared jobs keep their original scale when resumed; newly prepared jobs honor the footprint switch.
 

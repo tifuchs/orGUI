@@ -11,6 +11,61 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.integrate import quad
 
+from .beamprofile import (
+    DistributionBeamProfile,
+    GaussianBeamProfile,
+    MeasuredBeamProfile,
+)
+
+
+# QUADPACK's embedded Gauss 10 / Kronrod 21 rule, mapped to [0, 1].
+# Odd entries are the Gauss nodes. Keep the same rule/error estimator as
+# quad's first panel, but evaluate profile arrays once instead of 21 times.
+_GK_ABSCISSA = np.array([
+    0.9956571630258080807, 0.9739065285171717201,
+    0.9301574913557082260, 0.8650633666889845107,
+    0.7808177265864168971, 0.6794095682990244062,
+    0.5627571346686046833, 0.4333953941292471908,
+    0.2943928627014601981, 0.1488743389816312109, 0.0,
+])
+_GK_NODES = (1 + np.r_[_GK_ABSCISSA, -_GK_ABSCISSA[-2::-1]]) / 2
+_GK_HALF_WEIGHTS = np.array([
+    0.0116946388673718743, 0.0325581623079647275,
+    0.0547558965743519960, 0.0750396748109199528,
+    0.0931254545836976055, 0.1093871588022976419,
+    0.1234919762620658511, 0.1347092173114733259,
+    0.1427759385770600808, 0.1477391049013384914,
+    0.1494455540029169057,
+])
+_GK_WEIGHTS = np.r_[_GK_HALF_WEIGHTS, _GK_HALF_WEIGHTS[-2::-1]] / 2
+_GAUSS_HALF_WEIGHTS = np.array([
+    0.0666713443086881376, 0.1494513491505805931,
+    0.2190863625159820440, 0.2692667193099963551,
+    0.2955242247147528702,
+])
+_GAUSS_WEIGHTS = np.r_[_GAUSS_HALF_WEIGHTS, _GAUSS_HALF_WEIGHTS[::-1]] / 2
+
+
+def _vector_quad(integrand, rtol):
+    """Try one vectorized GK21 panel on [0, 1], else retain adaptive quad."""
+    values = integrand(_GK_NODES)
+    result = float(np.sum(_GK_WEIGHTS * values))
+    gauss = float(np.sum(_GAUSS_WEIGHTS * values[1::2]))
+    deviation = float(np.sum(_GK_WEIGHTS * np.abs(values - result)))
+    absolute = float(np.sum(_GK_WEIGHTS * np.abs(values)))
+    error = abs(result - gauss)
+    if deviation != 0 and error != 0:
+        error = deviation * min(1.0, (200 * error / deviation) ** 1.5)
+    error = max(error, 50 * np.finfo(float).eps * absolute)
+    # A saturated error estimate needs subdivision, as in QUADPACK. The
+    # absolute tolerance remains per local panel, before its surface weight.
+    if error <= max(1e-12, rtol * abs(result)) and (
+        error != deviation or error == 0
+    ):
+        return result, error, None
+    return quad(integrand, 0.0, 1.0, epsabs=1e-12, epsrel=rtol,
+                limit=200, full_output=1)
+
 
 def _cross(a, b):
     return a[0] * b[1] - a[1] * b[0]
@@ -294,13 +349,19 @@ def _frame_overlap(
             return _local_section
 
     peak = vertical.peak_density
+    # Custom profiles historically only needed scalar interval_mass. Do not
+    # impose a new array contract on them (including overriding subclasses).
+    vector_profiles = (DistributionBeamProfile, GaussianBeamProfile,
+                       MeasuredBeamProfile)
+    vectorized = (type(vertical) in vector_profiles
+                  and type(horizontal) in vector_profiles)
 
     def integrand(t):
         x, intervals_y, jacobian = section(t)
         mass = sum(
-            float(horizontal.interval_mass(yh + a, yh + b)) for a, b in intervals_y
+            horizontal.interval_mass(yh + a, yh + b) for a, b in intervals_y
         )
-        return float(vertical.density_at(zv + x * sine)) / peak * mass * jacobian
+        return vertical.density_at(zv + x * sine) / peak * mass * jacobian
 
     # Break at shape vertices and vertical knots/scales. Horizontal transitions
     # across polygon edges are also explicit, so a narrow beam cannot be missed.
@@ -350,15 +411,11 @@ def _frame_overlap(
             total += integrand(0.5) * weight
             error += weight * (np.pi / 2 if shape.kind == "circle" else 1.0)
             continue
-        value = quad(
-            integrand,
-            0.0,
-            1.0,
-            epsabs=1e-12,
-            epsrel=rtol,
-            limit=200,
-            full_output=1,
-        )
+        if vectorized:
+            value = _vector_quad(integrand, rtol)
+        else:
+            value = quad(integrand, 0.0, 1.0, epsabs=1e-12, epsrel=rtol,
+                         limit=200, full_output=1)
         if len(value) != 3:
             raise ValueError("sample overlap quadrature did not converge: " + value[3])
         total += value[0] * weight

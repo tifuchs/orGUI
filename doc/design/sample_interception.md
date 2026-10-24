@@ -163,3 +163,42 @@ All benchmark geometries were also compared with the original HEAD source;
 the maximum relative change in H was `1e-15`.
 The package-export assertion was also brought up to date with the existing
 public `sample_interception` module.
+
+## Vectorized quadrature follow-up (2026-10-23)
+
+Profiling 30 displaced rectangle frames found 14,364 scalar integrand calls;
+horizontal interval probabilities dominated the time. Each smooth section
+now evaluates the 21 Gauss-Kronrod nodes together for built-in profiles. The
+embedded 10-point Gauss rule, absolute-deviation rescaling and roundoff floor
+retain QUADPACK's first-panel error estimate. Sections that fail its tolerance
+or saturate the estimate still use adaptive `quad`. Custom profile subclasses
+retain scalar integration, so their interval API need not accept arrays.
+All shape/beam breakpoints, local section coordinates, tiny-section error
+bounds, frame cancellation and the aligned rectangle shortcut are unchanged.
+Surface coordinates remain metres, angles radians, and `f_hit = sin(alpha) H`.
+
+Paired core timings used the existing benchmark cases, 37 frames, three warmed
+repetitions in alternating before/after order, and `rtol=1e-9`. This Windows
+Miniforge run used Python 3.14.9, NumPy 2.5.4 and SciPy 1.18.1. These timings
+exclude application-policy/profile construction, detector I/O and integration:
+
+| Case | Before (ms/frame) | After (ms/frame) | Speedup |
+| --- | ---: | ---: | ---: |
+| Aligned square | 0.0243 | 0.0245 | 1.0x |
+| Rotating square | 1.8506 | 0.3113 | 5.9x |
+| Rotating displaced rectangle | 6.9931 | 0.8871 | 7.9x |
+| Circle | 7.4901 | 0.8909 | 8.4x |
+| Rotating concave polygon | 28.7897 | 4.5104 | 6.4x |
+| Square, 101-point measured vertical profile | 7.1230 | 0.9073 | 7.9x |
+| Square, 501-point measured vertical profile | 20.6070 | 2.9027 | 7.1x |
+| Identical rotated geometry repeated | 0.1004 | 0.0223 | 4.5x |
+
+The maximum relative difference in H against the pre-change scalar code was
+`5.6e-16` across these cases. Regression coverage additionally compares adaptive
+and vectorized integration for measured profiles in both directions, smooth
+and skewed analytical profiles, concave sections, offsets and grazing incidence.
+It verifies adaptive fallback for an unresolved peak and scalar custom-profile
+compatibility, alongside the existing independent surface-integral references.
+The correction, overlap, application workflow, prepared-footprint and
+reconstruction-normalization checks passed 280 tests with four skips. Ruff
+passed across `orgui`; release notes were regenerated from the changelog.

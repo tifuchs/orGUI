@@ -38,7 +38,9 @@ class SampleInterceptionWidget(qt.QWidget):
         )
         self.enabled.setChecked(self.original.get("enabled", False))
         self.tabs = qt.QTabWidget()
-        layout.addWidget(self.tabs)
+        self.splitter = qt.QSplitter(qt.Qt.Horizontal)
+        self.splitter.addWidget(self.tabs)
+        layout.addWidget(self.splitter)
         geometry = qt.QWidget()
         self.geometry = geometry
         form = qt.QFormLayout(geometry)
@@ -209,11 +211,18 @@ class SampleInterceptionWidget(qt.QWidget):
         self.main_window = main_getter()
         scan = getattr(self.main_window, "fscan", None)
         self.scan_preview.setEnabled(scan is not None)
+        self.frame_index.setEnabled(scan is not None and len(scan) > 0)
         self.frame_index.setRange(0, max(0, len(scan) - 1) if scan is not None else 0)
         frame_controls.addWidget(self.scan_preview)
-        frame_controls.addWidget(self.frame_index)
         preview_layout.addLayout(frame_controls)
-        preview_controls = qt.QHBoxLayout()
+        self.live_panel = qt.QGroupBox("Live diagnostics")
+        self.live_layout = qt.QVBoxLayout(self.live_panel)
+        live_form = qt.QFormLayout()
+        self.live_layout.addLayout(live_form)
+        live_form.addRow("Source frame", self.frame_index)
+        self.frame_index.setToolTip(
+            "Select a source frame, or follow frame changes in the main window."
+        )
         self.preview_alpha = qt.QDoubleSpinBox()
         self.preview_alpha.setRange(0.000001, 90)
         self.preview_alpha.setDecimals(6)
@@ -221,9 +230,42 @@ class SampleInterceptionWidget(qt.QWidget):
         self.preview_alpha.setSuffix(" deg incidence")
         self.preview_azimuth = qt.QDoubleSpinBox()
         self.preview_azimuth.setRange(-1e6, 1e6)
+        self.preview_azimuth.setDecimals(6)
         self.preview_azimuth.setSuffix(" deg readback azimuth")
-        preview_controls.addWidget(self.preview_alpha)
-        preview_controls.addWidget(self.preview_azimuth)
+        self.live_angle_modes = {}
+        self.live_readouts = {}
+        for name, spin in (("incidence", self.preview_alpha),
+                           ("azimuth", self.preview_azimuth)):
+            row = qt.QHBoxLayout()
+            mode = qt.QComboBox()
+            mode.addItem("Scan readout", "scan")
+            mode.addItem("Manual override", "manual")
+            mode.setToolTip(
+                "Scan readout uses the angle source configured on the Sample tab. "
+                "Manual override changes this preview only."
+            )
+            mode.setCurrentIndex(0 if scan is not None else 1)
+            readout = qt.QLabel("Unavailable")
+            row.addWidget(mode)
+            row.addWidget(spin)
+            row.addWidget(readout)
+            self.live_angle_modes[name] = mode
+            self.live_readouts[name] = readout
+            live_form.addRow(name.capitalize(), row)
+            mode.currentIndexChanged.connect(self._liveModeChanged)
+            spin.valueChanged.connect(self._requestLivePreview)
+        note = qt.QLabel("Preview angles only; correction settings are unchanged.")
+        note.setWordWrap(True)
+        self.live_layout.addWidget(note)
+        self.live_status = qt.QLabel()
+        self.live_status.setWordWrap(True)
+        self.live_layout.addWidget(self.live_status)
+        self.splitter.addWidget(self.live_panel)
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
+        self.splitter.setSizes([650, 450])
+        self.live_panel.setMinimumWidth(360)
+        preview_controls = qt.QHBoxLayout()
         refresh = qt.QPushButton("Calculate preview")
         refresh.clicked.connect(self._preview)
         preview_controls.addWidget(refresh)
@@ -253,7 +295,127 @@ class SampleInterceptionWidget(qt.QWidget):
         self.parallel_reading.valueChanged.connect(self._parallelChanged)
         self.horizontal.settingsChanged.connect(self._changed)
         self.tabs.currentChanged.connect(self._diagnosticsSelected)
+        self._live_dirty = True
+        self._live_follow_frame = True
+        self._live_timer = qt.QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.setInterval(100)
+        self._live_timer.timeout.connect(self._updateLivePreview)
+        footprint.installEventFilter(self)
+        if isinstance(self.main_window, qt.QWidget):
+            self.main_window.installEventFilter(self)
+        self.frame_index.valueChanged.connect(self._requestLivePreview)
+        selector = getattr(self.main_window, "scanSelector", None)
+        for name in ("sigScanChanged", "sigImageNoChanged"):
+            signal = getattr(selector, name, None)
+            if signal is not None:
+                signal.connect(self._sourceChanged)
+        self._liveModeChanged()
         self.refreshSourceFrames()
+
+    # GUI-only: lifecycle events gate automatic diagnostics work.
+    def eventFilter(self, watched, event):
+        """Track foreground navigation in both the dialog and its main window."""
+        # Qt can deliver final events after the Python instance is torn down.
+        if not hasattr(self, "footprint"):
+            return False
+        if watched is self.footprint or watched is self.main_window:
+            if event.type() in (qt.QEvent.Hide, qt.QEvent.WindowDeactivate):
+                self._live_timer.stop()
+            elif event.type() in (qt.QEvent.Show, qt.QEvent.WindowActivate,
+                                  qt.QEvent.WindowStateChange):
+                self._requestLivePreview()
+        return super().eventFilter(watched, event)
+
+    def _livePreviewActive(self):
+        # Image/scan navigation gives focus to the main window. Keep a visible
+        # preview live there, but suspend work when another window/app is active.
+        main_active = (isinstance(self.main_window, qt.QWidget)
+                       and self.main_window.isActiveWindow()
+                       and not self.main_window.isMinimized())
+        return (self.footprint.isVisible() and not self.footprint.isMinimized()
+                and (self.footprint.isActiveWindow() or main_active))
+
+    def _requestLivePreview(self, *args):
+        self._live_dirty = True
+        if hasattr(self, "_live_timer") and self._livePreviewActive():
+            self._live_timer.start()
+
+    def _sourceChanged(self, *args):
+        # Defer reading the new scan/frame until its load signal has completed.
+        self._live_follow_frame = True
+        self._requestLivePreview()
+
+    def _liveModeChanged(self, *args):
+        for name, spin in (("incidence", self.preview_alpha),
+                           ("azimuth", self.preview_azimuth)):
+            manual = self.live_angle_modes[name].currentData() == "manual"
+            spin.setVisible(manual)
+            self.live_readouts[name].setVisible(not manual)
+        self._requestLivePreview()
+
+    def _liveAngles(self, settings):
+        """Resolve preview-only choices in radians, retaining scan alignment."""
+        selected = dict(incidence=np.deg2rad(self.preview_alpha.value()),
+                        azimuth=np.deg2rad(self.preview_azimuth.value()))
+        scan_modes = [name for name, mode in self.live_angle_modes.items()
+                      if mode.currentData() == "scan"]
+        scan = getattr(self.main_window, "fscan", None)
+        if scan_modes:
+            if scan is None or len(scan) == 0:
+                raise ValueError("Load a scan or select manual preview angles.")
+            mu, omega = self.main_window.getMuOm()
+            # Honor the editor's counter/fixed sources for scan readout. A
+            # manual preview overrides only its chosen angle, without changing
+            # correction settings or requiring the other source to be valid.
+            preview_settings = copy.deepcopy(settings)
+            for name in selected:
+                if name not in scan_modes:
+                    preview_settings[f"{name}_source"] = "fixed"
+                    preview_settings[f"fixed_{name}_deg"] = np.rad2deg(selected[name])
+            alpha, azimuth, resolved = sample_angle_inputs(
+                scan, preview_settings, mu, count=len(scan), omega=omega,
+            )
+            # Use the same fixed laboratory alignment as a scan preview.
+            if "reference_incidence_deg" not in settings:
+                settings["reference_incidence_deg"] = resolved.get(
+                    "reference_incidence_deg", np.rad2deg(selected["incidence"])
+                )
+            for name, values in (("incidence", alpha), ("azimuth", azimuth)):
+                if name in scan_modes:
+                    selected[name] = values[self.frame_index.value()]
+                    self.live_readouts[name].setText(
+                        f"{np.rad2deg(selected[name]):g} deg"
+                    )
+        return selected["incidence"], selected["azimuth"]
+
+    # GUI-only: a debounced single-frame image, never full-scan quadrature.
+    def _updateLivePreview(self):
+        if not self._live_dirty or not self._livePreviewActive():
+            return
+        self._live_dirty = False
+        try:
+            self.refreshSourceFrames()
+            if self._live_follow_frame:
+                blocker = qt.QSignalBlocker(self.frame_index)
+                self.frame_index.setValue(getattr(self.main_window, "imageno", 0))
+                del blocker
+                self._live_follow_frame = False
+            settings = self.settings()
+            alpha, azimuth = self._liveAngles(settings)
+            self._drawFootprint(settings, self.footprint.beamProfile(), alpha, azimuth)
+            note = "" if settings["enabled"] else " Exact 2D correction is off."
+            self.live_status.setText(
+                f"Incidence {np.rad2deg(alpha):g} deg; "
+                f"azimuth readback {np.rad2deg(azimuth):g} deg.{note}"
+            )
+        except (ValueError, NotImplementedError, AttributeError, IndexError) as error:
+            if self.footprint_plot is not None:
+                self.footprint_plot.clear()
+            self.live_status.setText(str(error))
+            for name, mode in self.live_angle_modes.items():
+                if mode.currentData() == "scan":
+                    self.live_readouts[name].setText("Unavailable")
 
     def _diagnosticsSelected(self, index):
         if self.tabs.widget(index) is self.preview:
@@ -268,11 +430,16 @@ class SampleInterceptionWidget(qt.QWidget):
         self.overlap_plot.setGraphYLabel("f_hit (fraction)")
         self.overlap_plot.setGraphYLabel("H (dimensionless)", axis="right")
         self.preview_layout.addWidget(self.overlap_plot)
+        self._ensureFootprintPlot()
+
+    def _ensureFootprintPlot(self):
+        if self.footprint_plot is not None:
+            return
         self.footprint_plot = Plot2D()
         self.footprint_plot.setKeepDataAspectRatio(True)
         self.footprint_plot.setGraphXLabel("Along beam x (mm)")
         self.footprint_plot.setGraphYLabel("Transverse y (mm)")
-        self.preview_layout.addWidget(self.footprint_plot)
+        self.live_layout.insertWidget(2, self.footprint_plot, 1)
 
     def setSettings(self, settings):
         """Restore shape state; enabled dimensions override legacy size copies.
@@ -347,6 +514,7 @@ class SampleInterceptionWidget(qt.QWidget):
             self._updateAngleSummary()
         finally:
             self._restoring = False
+        self._requestLivePreview()
 
     def _changed(self, *args):
         if getattr(self, "_restoring", False):
@@ -611,6 +779,7 @@ class SampleInterceptionWidget(qt.QWidget):
         """Refresh source-frame availability from the currently loaded scan."""
         scan = getattr(self.main_window, "fscan", None)
         self.scan_preview.setEnabled(scan is not None)
+        self.frame_index.setEnabled(scan is not None and len(scan) > 0)
         self.frame_index.setRange(0, max(0, len(scan) - 1) if scan is not None else 0)
         axis = getattr(scan, "axisname", None)
         sources = {
@@ -642,6 +811,54 @@ class SampleInterceptionWidget(qt.QWidget):
                 self._angle_summary_base = f"Scan angles unavailable: {error}"
         self._updateAngleSummary()
 
+    def _drawFootprint(self, settings, vertical, selected_alpha, selected_azimuth,
+                       reference_alpha=None):
+        """Draw the existing surface density [1/m²] in display coordinates [mm]."""
+        if (not np.isfinite(selected_alpha) or not 0 < selected_alpha <= np.pi / 2
+                or not np.isfinite(selected_azimuth)):
+            raise ValueError(
+                "Preview needs incidence in (0, 90] deg and finite azimuth."
+            )
+        self._ensureFootprintPlot()
+        shape = shape_from_settings(settings)
+        if reference_alpha is None:
+            reference_alpha = selected_alpha
+        angle = settings["azimuth_sign"] * np.deg2rad(
+            np.rad2deg(selected_azimuth) - settings["reference_azimuth_deg"]
+        )
+        outline = shape.outline(
+            angle, settings["offset_m"], np.deg2rad(settings["orientation_deg"])
+        )
+        bounds = np.column_stack((outline.min(axis=0), outline.max(axis=0)))
+        span = np.maximum(bounds[:, 1] - bounds[:, 0], 1e-6)
+        lower, upper = bounds[:, 0] - 0.2 * span, bounds[:, 1] + 0.2 * span
+        x, y = (
+            np.linspace(lower[0], upper[0], 161),
+            np.linspace(lower[1], upper[1], 161),
+        )
+        horizontal = profile_from_settings(settings["horizontal"])
+        zv = -settings["offset_m"][0] * np.sin(
+            np.deg2rad(settings.get(
+                "reference_incidence_deg", np.rad2deg(reference_alpha)
+            ))
+        )
+        yh = -settings["offset_m"][1]
+        density = horizontal.density_at(y[:, None] + yh) * vertical.density_at(
+            x[None, :] * np.sin(selected_alpha) + zv
+        )
+        self.footprint_plot.clear()
+        self.footprint_plot.addImage(
+            density,
+            origin=tuple(lower * 1e3),
+            scale=tuple((upper - lower) / 160 * 1e3),
+            legend="Beam density (1/m²)",
+        )
+        closed = np.vstack((outline, outline[0])) * 1e3
+        self.footprint_plot.addCurve(
+            closed[:, 0], closed[:, 1], legend="Sample", color="red"
+        )
+        self.footprint_plot.addMarker(0, 0, legend="Rotation axis", symbol="+")
+
     # GUI-only: explicitly requested preview, with cancellable progress.
     def _preview(self):
         if getattr(self, "_preview_running", False):
@@ -652,14 +869,14 @@ class SampleInterceptionWidget(qt.QWidget):
             self._ensurePreviewPlots()
             self.refreshSourceFrames()
             settings = self.settings()
-            shape = shape_from_settings(settings)
             vertical = self.footprint.beamProfile()
+            preview_settings = copy.deepcopy(settings)
+            selected_alpha, selected_azimuth = self._liveAngles(preview_settings)
             angles = np.linspace(
-                self.preview_azimuth.value() - 90, self.preview_azimuth.value() + 90, 37
+                np.rad2deg(selected_azimuth) - 90,
+                np.rad2deg(selected_azimuth) + 90, 37,
             )
-            alpha = np.deg2rad(self.preview_alpha.value())
-            selected_alpha = alpha
-            selected_azimuth = np.deg2rad(self.preview_azimuth.value())
+            alpha = selected_alpha
             azimuth = np.deg2rad(angles)
             xlabel = "Readback azimuth (deg)"
             if self.scan_preview.isChecked():
@@ -671,8 +888,6 @@ class SampleInterceptionWidget(qt.QWidget):
                     scan, settings, mu,
                     count=len(scan), omega=omega,
                 )
-                index = min(self.frame_index.value(), len(scan) - 1)
-                selected_alpha, selected_azimuth = alpha[index], azimuth[index]
                 angles = np.arange(len(scan))
                 xlabel = "Source frame index"
             count = np.size(azimuth)
@@ -698,41 +913,8 @@ class SampleInterceptionWidget(qt.QWidget):
             self.overlap_plot.setGraphXLabel(xlabel)
             self.overlap_plot.addCurve(angles, fraction, legend="f_hit")
             self.overlap_plot.addCurve(angles, h, legend="H", yaxis="right")
-            angle = settings["azimuth_sign"] * np.deg2rad(
-                np.rad2deg(selected_azimuth) - settings["reference_azimuth_deg"]
-            )
-            outline = shape.outline(
-                angle, settings["offset_m"], np.deg2rad(settings["orientation_deg"])
-            )
-            bounds = np.column_stack((outline.min(axis=0), outline.max(axis=0)))
-            span = np.maximum(bounds[:, 1] - bounds[:, 0], 1e-6)
-            lower, upper = bounds[:, 0] - 0.2 * span, bounds[:, 1] + 0.2 * span
-            x, y = (
-                np.linspace(lower[0], upper[0], 161),
-                np.linspace(lower[1], upper[1], 161),
-            )
-            horizontal = profile_from_settings(settings["horizontal"])
-            zv = -settings["offset_m"][0] * np.sin(
-                np.deg2rad(settings.get(
-                    "reference_incidence_deg", np.rad2deg(np.ravel(alpha)[0])
-                ))
-            )
-            yh = -settings["offset_m"][1]
-            density = horizontal.density_at(y[:, None] + yh) * vertical.density_at(
-                x[None, :] * np.sin(selected_alpha) + zv
-            )
-            self.footprint_plot.clear()
-            self.footprint_plot.addImage(
-                density,
-                origin=tuple(lower * 1e3),
-                scale=tuple((upper - lower) / 160 * 1e3),
-                legend="Beam density (1/m²)",
-            )
-            closed = np.vstack((outline, outline[0])) * 1e3
-            self.footprint_plot.addCurve(
-                closed[:, 0], closed[:, 1], legend="Sample", color="red"
-            )
-            self.footprint_plot.addMarker(0, 0, legend="Rotation axis", symbol="+")
+            self._drawFootprint(preview_settings, vertical, selected_alpha,
+                                selected_azimuth)
             self.status.setText(
                 f"{np.count_nonzero(valid)} valid preview angles. "
                 f"Outline at incidence {np.rad2deg(selected_alpha):g} deg, "
