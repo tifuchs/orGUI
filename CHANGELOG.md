@@ -7,6 +7,12 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- HDF5 database I/O errors reported from native cleanup no longer take the
+  GUI's fatal-exit path. orGUI disables the failed database, clears its views
+  on the GUI thread, and asks the user to reconnect the drive and create or
+  open a database. Integration controls remain usable after an aborted job;
+  database locations and integration calculations are unchanged.
+
 - Legacy flux normalization is deprecated and scheduled for removal. Its
   density and monitor-product controls are hidden and disabled in the GUI;
   only relative and calibrated total-flux modes can be selected. Imported

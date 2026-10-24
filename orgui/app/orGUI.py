@@ -79,7 +79,7 @@ from .HDF5SettingsDialog import HDF5SettingsDialog
 from .StyleDialog import StyleDialog
 from .ReconstructionDialog import ReconstructionDialog
 from .bgroi import RectangleBgROI
-from .database import DataBase, FILTERS
+from .database import DataBase, DBUnavailableError, FILTERS
 from .mask_config import MaskManager
 from .config_data import ConfigData
 from types import SimpleNamespace
@@ -1290,6 +1290,7 @@ ub : gui for UB matrix and angle calculations
 
         def validate():
             """Reject replacement or closure of the captured scan/database."""
+            self.database._requireOpenFile()
             if self.fscan is not scan or self.database.nxfile is not output_file:
                 raise RuntimeError("Scan or output database changed during integration")
             if not output_file.id.valid:
@@ -1728,8 +1729,8 @@ ub : gui for UB matrix and angle calculations
                 extra={
                     "title": "Cannot save integrated data",
                     "description": f"Cannot save {description} into the "
-                    f"database:\n{e}\nCreate a new database at an available "
-                    "location and integrate the scan again.",
+                    f"database:\n{e}\nReconnect the drive if necessary, then "
+                    "create or open a database and integrate the scan again.",
                     "show_dialog": True,
                     "parent": self,
                 },
@@ -5980,7 +5981,7 @@ within the group of Olaf Magnussen.
 
 
 class UncaughtHook(qt.QObject):
-    # _exception_caught = qt.Signal(object)
+    _database_error = qt.Signal(object)
 
     def __init__(self, *args, **kwargs):
         """GUI-only: install the Qt-aware uncaught exception hook."""
@@ -5990,9 +5991,65 @@ class UncaughtHook(qt.QObject):
         sys.excepthook = self.exception_hook
 
         self.orgui = None
+        self._database_error_pending = False
+        self._database_error.connect(
+            self._recover_database, qt.Qt.QueuedConnection
+        )
 
-        # connect signal to execute the message box function always on main thread
-        # self._exception_caught.connect(show_exception_box)
+    def _is_database_io_error(self, exc_value, exc_traceback):
+        """Recognize storage failures, including Cython HDF5 finalizers.
+
+        Do not turn arbitrary programming errors or failures in other HDF5
+        files into database resets. No HDF5 calls are safe in this check.
+        """
+        if self.orgui is None:
+            return False
+        if isinstance(exc_value, DBUnavailableError):
+            return True
+        if not isinstance(exc_value, (OSError, RuntimeError)):
+            return False
+        message = str(exc_value).replace("\\", "/").casefold()
+        if not any(text in message for text in (
+            "file write failed", "file read failed",
+            "write through page buffer failed", "unable to extend file properly",
+        )):
+            return False
+        frames = traceback.extract_tb(exc_traceback)
+        if not any("h5py/" in frame.filename.replace("\\", "/") for frame in frames):
+            return False
+        database = self.orgui.database
+        paths = set(database._failed_filepaths)
+        if getattr(database, "_filepath", None):
+            paths.add(os.fspath(database._filepath))
+        return any(path.replace("\\", "/").casefold() in message for path in paths)
+
+    def _recover_database(self, payload):
+        """GUI-only: detach the failed file outside the HDF5 callback stack."""
+        database, failed_file, details = payload
+        try:
+            # A user action may already have opened a replacement before this
+            # queued callback runs. Never close that replacement.
+            if (
+                failed_file is not None
+                and database.nxfile is failed_file
+                and not database._closing
+            ):
+                database.closeSafe()
+            logger.warning(
+                "The database is unavailable. Create or open a database to continue.",
+                extra={
+                    "title": "Database disconnected",
+                    "description": "The database operation failed. orGUI will "
+                    "remain open. Reconnect the drive if necessary, then create "
+                    "or open a database and repeat the operation.",
+                    "detailed_text": details,
+                    "show_dialog": True,
+                    "dialog_level": logging.ERROR,
+                    "parent": self.orgui,
+                },
+            )
+        finally:
+            self._database_error_pending = False
 
     def set_orgui(self, orgui):
         """Attach the main window used for fatal-error recovery.
@@ -6003,11 +6060,30 @@ class UncaughtHook(qt.QObject):
         self.orgui = orgui
 
     def exception_hook(self, exc_type, exc_value, exc_traceback):
-        """Handle uncaught exceptions through the GUI fatal-error path.
+        """Recover database storage errors; report other uncaught failures.
 
         .. note::
            GUI-only. This path may show modal dialogs and terminate the process.
         """
+        if self._is_database_io_error(exc_value, exc_traceback):
+            database = self.orgui.database
+            failed_file = database.nxfile
+            # An old file's finalizer can report after a replacement is open.
+            path = os.fspath(getattr(database, "_filepath", ""))
+            message = str(exc_value).replace("\\", "/").casefold()
+            if not isinstance(exc_value, DBUnavailableError) and (
+                path and path.replace("\\", "/").casefold() in message
+            ):
+                database._markUnavailable()
+            else:
+                failed_file = None
+            if not self._database_error_pending:
+                self._database_error_pending = True
+                details = "".join(traceback.format_exception(
+                    exc_type, exc_value, exc_traceback
+                ))
+                self._database_error.emit((database, failed_file, details))
+            return
         if issubclass(exc_type, KeyboardInterrupt):
             # ignore keyboard interrupt to support console applications
             sys.__excepthook__(exc_type, exc_value, exc_traceback)

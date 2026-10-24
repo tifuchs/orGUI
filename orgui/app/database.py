@@ -132,7 +132,9 @@ class RockingBatchWriter:
 
     def _flush(self):
         try:
+            self.database._requireOpenFile()
             self.file.flush()
+            self.database._requireOpenFile()
         except Exception:
             if hasattr(self.database, "closeSafe"):
                 self.database.closeSafe()
@@ -314,6 +316,9 @@ class DataBase(qt.QMainWindow):
     def __init__(self, plot, parent=None):
         qt.QMainWindow.__init__(self, parent)
         self.nxfile = None
+        self._io_failed = False
+        self._failed_filepaths = set()
+        self._closing = False
         self.filedialogdir = os.getcwd()
         self.plot = plot
         self.config_target = parent
@@ -779,6 +784,7 @@ class DataBase(qt.QMainWindow):
         self._closePreviousDBFile()
         self.nxfile = silx.io.h5py_utils.File(filename, "a")
         self._filepath = filename
+        self._io_failed = False
         while self.hdf5model.hasPendingOperations():
             qt.QApplication.processEvents()
             time.sleep(0.01)
@@ -810,7 +816,17 @@ class DataBase(qt.QMainWindow):
 
         :rtype: bool
         """
-        return bool(self.nxfile)
+        return not self._io_failed and bool(self.nxfile)
+
+    def _markUnavailable(self):
+        """Reject further access before deferred GUI cleanup can run.
+
+        This only changes Python state: HDF5 can invoke the exception hook
+        from inside object destruction, where closing the file is unsafe.
+        """
+        self._io_failed = True
+        if getattr(self, "_filepath", None):
+            self._failed_filepaths.add(os.fspath(self._filepath))
 
     def _requireOpenFile(self):
         """Return the open database file.
@@ -819,7 +835,7 @@ class DataBase(qt.QMainWindow):
         """
         if not self.isOpen():
             raise DBUnavailableError(
-                "No database file open. Create or open a database first."
+                "No usable database file open. Create or open a database first."
             )
         return self.nxfile
 
@@ -916,6 +932,7 @@ class DataBase(qt.QMainWindow):
             # HDF5 can defer writes until flush or close. Report a failed
             # integration now, while its caller can still handle the error.
             nxfile.flush()
+            self._requireOpenFile()
         except Exception:
             self.closeSafe()
             raise
@@ -930,6 +947,7 @@ class DataBase(qt.QMainWindow):
         nxfile = self._requireOpenFile()
         try:
             nxfile.flush()
+            self._requireOpenFile()
         except Exception:
             self.closeSafe()
             raise
@@ -1128,24 +1146,37 @@ class DataBase(qt.QMainWindow):
         """
         if self.nxfile is None:
             return
-        # keep the file open on timeout, the tree model might still read it.
-        self._waitForPendingOperations()
-
-        nxfile = self.nxfile
-        self.nxfile = None  # the file handle must not be used any longer
+        if self._closing:
+            raise DBCloseError("A database close is already in progress.")
+        self._closing = True
         try:
-            self._detachFromTreeView(nxfile)
+            # Keep the file open on timeout; the tree model might still read it.
             self._waitForPendingOperations()
+
+            nxfile = self.nxfile
+            self.nxfile = None  # the file handle must not be used any longer
             try:
-                nxfile.close()
-            except Exception:
-                logger.error(
-                    "Closing of database file failed. The database file might be corrupted!",  # noqa: E501
-                    exc_info=True,
-                )
-                raise
+                # Release the viewer's dataset before closing its backing file.
+                # Changing the viewer must not touch stale HDF5 IDs later.
+                try:
+                    self.dataviewer.setData(None)
+                except Exception:
+                    logger.warning("Cannot clear the database viewer.", exc_info=True)
+                self._detachFromTreeView(nxfile)
+                self._waitForPendingOperations()
+                try:
+                    nxfile.close()
+                except Exception:
+                    self._markUnavailable()
+                    logger.warning(
+                        "Closing of database file failed. The database file might be corrupted!",  # noqa: E501
+                        exc_info=True,
+                    )
+                    raise
+            finally:
+                self._discardTempDirectory()
         finally:
-            self._discardTempDirectory()
+            self._closing = False
 
     def closeSafe(self, show_dialog=False):
         """Close the database file, without raising on error.
