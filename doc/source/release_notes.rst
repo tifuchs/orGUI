@@ -9,6 +9,8 @@ Unreleased (2026-07-19)
 
 Other user-visible changes:
 
+- Fatal OpenGL paint errors are reported after the failing callback returns, with OpenGL redraws paused so the error and database-save dialogs do not trigger recursive paint failures. Use ``--no-opengl`` to launch with matplotlib despite a saved OpenGL preference; the saved selection is left unchanged.
+
 - Sample-interception batches now use a native C++ kernel for all named analytical and measured beam profiles with rectangular, circular or polygonal samples. Native frame workers run with the Python GIL released; automatic worker selection avoids thread overhead for small or aligned calculations. Progress and cancellation remain available between bounded batches. Native adaptive quadrature handles difficult panels and propagates numerical profile integration errors. Custom and other SciPy distributions, and frames the native calculation cannot resolve, retain the Python/SciPy fallback and its numerical tolerance checks.
 
 - HDF5 database I/O errors reported from native cleanup no longer take the GUI's fatal-exit path. orGUI disables the failed database, clears its views on the GUI thread, and asks the user to reconnect the drive and create or open a database. Integration controls remain usable after an aborted job; database locations and integration calculations are unchanged.

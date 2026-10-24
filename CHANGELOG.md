@@ -7,6 +7,11 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Fatal OpenGL paint errors are reported after the failing callback returns, with
+  OpenGL redraws paused so the error and database-save dialogs do not trigger
+  recursive paint failures. Use `--no-opengl` to launch with matplotlib despite
+  a saved OpenGL preference; the saved selection is left unchanged.
+
 - Sample-interception batches now use a native C++ kernel for all named
   analytical and measured beam profiles with rectangular, circular or polygonal
   samples. Native frame workers run with the Python GIL released; automatic

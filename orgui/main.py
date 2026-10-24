@@ -124,13 +124,19 @@ def main():
         default=False,
         help="set to keep orGUI running after completion of the batch script",
     )
-    parser.add_argument(
+    rendering = parser.add_mutually_exclusive_group()
+    rendering.add_argument(
         "--opengl",
         "--gl",
         dest="opengl",
         action="store_true",
         default=False,
-        help="Enable OpenGL rendering (else matplotlib is used)",
+        help="Enable OpenGL plot rendering, overriding the saved preference",
+    )
+    rendering.add_argument(
+        "--no-opengl",
+        action="store_true",
+        help="Use matplotlib plot rendering, overriding the saved preference",
     )
     parser.add_argument(
         "--logfile",
@@ -390,8 +396,12 @@ def _start_GUI(options, ncpu):
         )
 
         configure_application_identity(app)
-        if apply_saved_ui_preferences(app, force_opengl=options.opengl):
+        if apply_saved_ui_preferences(
+            app, force_opengl=options.opengl, force_matplotlib=options.no_opengl
+        ):
             silx.config.DEFAULT_PLOT_BACKEND = "opengl"
+        else:
+            silx.config.DEFAULT_PLOT_BACKEND = "matplotlib"
         from .resources import getQicon
 
         app.setWindowIcon(getQicon("orguiicon"))

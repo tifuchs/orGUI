@@ -62,3 +62,16 @@ def test_opengl_command_line_override_wins_over_saved_choice(tmp_path):
     assert apply_saved_ui_preferences(
         application, force_opengl=True, settings=settings
     ) is True
+
+
+def test_matplotlib_override_leaves_saved_opengl_preference_intact(tmp_path):
+    """A recovery launch bypasses saved OpenGL without rewriting preferences."""
+    application = qt.QApplication.instance() or qt.QApplication([])
+    settings = _settings(tmp_path)
+    settings.setValue(OPENGL_KEY, True)
+
+    assert apply_saved_ui_preferences(
+        application, force_matplotlib=True, settings=settings
+    ) is False
+    assert settings.value(OPENGL_KEY, False, type=bool) is True
+    assert apply_saved_ui_preferences(application, settings=settings) is True

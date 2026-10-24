@@ -15,13 +15,17 @@ def configure_application_identity(application):
     application.setApplicationName(APPLICATION_NAME)
 
 
-def apply_saved_ui_preferences(application, force_opengl=False, settings=None):
+def apply_saved_ui_preferences(
+    application, force_opengl=False, settings=None, *, force_matplotlib=False
+):
     """Apply saved GUI preferences before the main window is constructed.
 
     :param QApplication application: Qt application receiving the widget style.
     :param bool force_opengl: Whether a command-line request overrides the
         saved OpenGL preference for this launch.
     :param QSettings settings: Optional settings store, used by tests.
+    :param bool force_matplotlib: Disable OpenGL for this launch without changing
+        the saved preference. Takes precedence over ``force_opengl``.
     :returns: Whether newly constructed plots should use OpenGL.
     :rtype: bool
     """
@@ -32,4 +36,6 @@ def apply_saved_ui_preferences(application, force_opengl=False, settings=None):
         if style is not None:
             application.setStyle(style)
 
+    if force_matplotlib:
+        return False
     return force_opengl or settings.value(OPENGL_KEY, False, type=bool)

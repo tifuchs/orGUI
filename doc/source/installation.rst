@@ -32,6 +32,17 @@ argument:
 
    orGUI <configfile>
 
+If OpenGL plotting fails, launch with the matplotlib backend:
+
+.. code-block:: bash
+
+   orGUI --no-opengl <configfile>
+
+This overrides the saved OpenGL preference for this launch without changing it.
+To keep matplotlib on future launches, disable ``OpenGL rendering`` in the
+``Application style`` dialog, select ``remember this selection``, apply and
+restart. Conversely, ``--opengl`` (or ``--gl``) enables OpenGL for one launch.
+
 Machine and crystal parameters are available from the GUI through
 ``Config -> Machine parameters`` and ``Config -> Crystal parameters``.
 Example configuration files are distributed with the source code release.

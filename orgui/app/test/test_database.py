@@ -385,3 +385,88 @@ def test_programming_error_keeps_existing_fatal_policy(
     )
     hook.exception_hook(ValueError, ValueError("unexpected bug"), None)
     sys.exit.assert_called_once_with(1)
+
+
+def test_render_failure_defers_dialogs_and_preserves_database_save(
+    database, exception_hook, monkeypatch, tmp_path
+):
+    """A paint failure cannot recurse through the error or save dialog."""
+    from orgui.app import qutils
+
+    hook, _ = exception_hook
+    database.add_nxdict({"entry": {"counter": 42}})
+    destination = tmp_path / "recovered.h5"
+    # No GL context is needed: the regression concerns Qt callback ordering
+    # and disabling paint events, not the driver-specific access violation.
+    canvas = qt.QOpenGLWidget()
+
+    def paintGL():
+        """Reproduce the traceback boundary without crashing a GL driver."""
+        raise OSError("exception: access violation reading 0x1928")
+
+    try:
+        paintGL()
+    except OSError:
+        error = sys.exc_info()
+
+    def nested_events():
+        assert not canvas.updatesEnabled()
+        hook.exception_hook(*error)
+        qt.QApplication.processEvents()
+
+    def error_dialog(*args):
+        nested_events()
+        return qt.QMessageBox.Save
+
+    def save_dialog(*args):
+        nested_events()
+        return str(destination), "NEXUS Files (*.h5)"
+
+    report = Mock(side_effect=error_dialog)
+    save = Mock(side_effect=save_dialog)
+    monkeypatch.setattr(qutils, "critical_detailed_message", report)
+    monkeypatch.setattr(qt.QFileDialog, "getSaveFileName", save)
+    try:
+        hook.exception_hook(*error)
+        hook.exception_hook(*error)
+        assert canvas.updatesEnabled()
+        report.assert_not_called()
+        save.assert_not_called()
+        sys.exit.assert_not_called()
+
+        qt.QApplication.processEvents()
+        report.assert_called_once()
+        save.assert_called_once()
+        sys.exit.assert_called_once_with(1)
+        with h5py.File(destination, "r") as saved:
+            assert saved["entry/counter"][()] == 42
+        assert database.nxfile is None
+    finally:
+        canvas.deleteLater()
+
+
+def test_fatal_error_from_worker_reports_on_gui_thread(
+    database, exception_hook, monkeypatch
+):
+    """Uncaught worker callbacks queue fatal dialogs on the GUI thread."""
+    from orgui.app import qutils
+
+    hook, _ = exception_hook
+    dialog_threads = []
+
+    def error_dialog(*args):
+        dialog_threads.append(threading.get_ident())
+        return qt.QMessageBox.Discard
+
+    monkeypatch.setattr(qutils, "critical_detailed_message", error_dialog)
+    worker = threading.Thread(
+        target=hook.exception_hook,
+        args=(RuntimeError, RuntimeError("callback failed"), None),
+    )
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert not dialog_threads
+    qt.QApplication.processEvents()
+    assert dialog_threads == [threading.get_ident()]
+    sys.exit.assert_called_once_with(1)

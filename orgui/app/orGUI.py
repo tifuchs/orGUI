@@ -5982,6 +5982,7 @@ within the group of Olaf Magnussen.
 
 class UncaughtHook(qt.QObject):
     _database_error = qt.Signal(object)
+    _fatal_error = qt.Signal(str)
 
     def __init__(self, *args, **kwargs):
         """GUI-only: install the Qt-aware uncaught exception hook."""
@@ -5992,9 +5993,11 @@ class UncaughtHook(qt.QObject):
 
         self.orgui = None
         self._database_error_pending = False
+        self._fatal_error_pending = False
         self._database_error.connect(
             self._recover_database, qt.Qt.QueuedConnection
         )
+        self._fatal_error.connect(self._report_fatal_error, qt.Qt.QueuedConnection)
 
     def _is_database_io_error(self, exc_value, exc_traceback):
         """Recognize storage failures, including Cython HDF5 finalizers.
@@ -6065,6 +6068,10 @@ class UncaughtHook(qt.QObject):
         .. note::
            GUI-only. This path may show modal dialogs and terminate the process.
         """
+        # Modal error/save dialogs run a nested event loop. Report only once,
+        # outside the failing callback (especially QOpenGLWidget.paintGL).
+        if self._fatal_error_pending:
+            return
         if self._is_database_io_error(exc_value, exc_traceback):
             database = self.orgui.database
             failed_file = database.nxfile
@@ -6096,53 +6103,71 @@ class UncaughtHook(qt.QObject):
             )
             print(f"Uncaught exception:\n {log_msg}")  # exc_info=exc_info)
 
-            # trigger message box show
-            # self._exception_caught.emit(log_msg)
-
+            self._fatal_error_pending = True
             if qt.QApplication.instance() is not None:
-                if self.orgui is None:
-                    errorbox = qt.QMessageBox(
-                        qt.QMessageBox.Critical,
-                        "Uncaught Exception",
-                        f"An unexpected error occured. The program will terminate now:\n{log_msg}",  # noqa: E501
-                        qt.QMessageBox.Ok,
-                    )
-                    errorbox.exec()
-                    sys.exit(1)
+                in_paint = any(
+                    frame.name == "paintGL"
+                    for frame in traceback.extract_tb(exc_traceback)
+                )
+                if in_paint or qt.QThread.currentThread() != self.thread():
+                    self._fatal_error.emit(log_msg)
                 else:
-                    resBtn = qutils.critical_detailed_message(
-                        self.orgui,
-                        "Uncaught Exception",
-                        "An unexpected error has occured.\norGUI will terminate now.\nDo you want to try to save the database before terminating?",  # noqa: E501
-                        log_msg,
-                        qt.QMessageBox.Save | qt.QMessageBox.Discard,
-                    )
-                    # errorbox = qt.QMessageBox(qt.QMessageBox.Critical,
-                    #                          "Uncaught Exception",
-                    #                          "An unexpected error occured:\n{0}\nDo you want to try to save the data before terminating?".format(log_msg),  # noqa: E501
-                    #                           qt.QMessageBox.Save | qt.QMessageBox.Discard)  # noqa: E501
-
-                    # resBtn = errorbox.exec()
-
-                    if resBtn == qt.QMessageBox.Save:
-                        try:
-                            self.orgui.database.onSaveDBFile()
-
-                        except Exception:
-                            print(
-                                f"Fatal error: Cannot save database:\n{traceback.format_exc()}"  # noqa: E501
-                            )
-                            qutils.critical_detailed_message(
-                                self.orgui,
-                                "Fatal error",
-                                "Cannot save database.",
-                                traceback.format_exc(),
-                            )
-                    # must not raise again inside the exception hook
-                    self.orgui.database.closeSafe()
+                    # Startup errors can occur before app.exec() starts;
+                    # a queued dialog would never be delivered in that case.
+                    self._report_fatal_error(log_msg)
             else:
                 print("No QApplication instance available.")
-            sys.exit(1)
+                sys.exit(1)
+
+    def _report_fatal_error(self, log_msg):
+        """GUI-only: pause OpenGL painting before reporting and saving.
+
+        For paint failures this is queued until the callback has unwound.
+        Leave the widgets and their native windows intact, but prevent further
+        paint events while the error and file dialogs process Qt events.
+        """
+        application = qt.QApplication.instance()
+        if application is not None:
+            for widget in application.allWidgets():
+                if isinstance(widget, qt.QOpenGLWidget):
+                    widget.setUpdatesEnabled(False)
+
+        if application is not None:
+            if self.orgui is None:
+                errorbox = qt.QMessageBox(
+                    qt.QMessageBox.Critical,
+                    "Uncaught Exception",
+                    f"An unexpected error occured. The program will terminate now:\n{log_msg}",  # noqa: E501
+                    qt.QMessageBox.Ok,
+                )
+                errorbox.exec()
+            else:
+                resBtn = qutils.critical_detailed_message(
+                    self.orgui,
+                    "Uncaught Exception",
+                    "An unexpected error has occured.\norGUI will terminate now.\nDo you want to try to save the database before terminating?",  # noqa: E501
+                    log_msg,
+                    qt.QMessageBox.Save | qt.QMessageBox.Discard,
+                )
+
+                if resBtn == qt.QMessageBox.Save:
+                    try:
+                        self.orgui.database.onSaveDBFile()
+                    except Exception:
+                        print(
+                            f"Fatal error: Cannot save database:\n{traceback.format_exc()}"  # noqa: E501
+                        )
+                        qutils.critical_detailed_message(
+                            self.orgui,
+                            "Fatal error",
+                            "Cannot save database.",
+                            traceback.format_exc(),
+                        )
+                # must not raise again inside the exception hook
+                self.orgui.database.closeSafe()
+        else:
+            print("No QApplication instance available.")
+        sys.exit(1)
 
 
 def main(configfile):
