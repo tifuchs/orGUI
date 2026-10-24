@@ -235,6 +235,14 @@ py.extension_module(
 )
 
 py.extension_module(
+  '_sample_interception_cpp',
+  files('orgui/datautils/xrayutils/cpp/sample_interception_cpp.cpp'),
+  dependencies: [pybind11_dep, dependency('threads')],
+  install: true,
+  subdir: 'orgui/datautils/xrayutils'
+)
+
+py.extension_module(
   '_roi_sum_cpp',
   files('orgui/app/cpp/roi_sum_cpp.cpp'),
   dependencies: [pybind11_dep],

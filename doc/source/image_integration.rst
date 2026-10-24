@@ -217,6 +217,40 @@ The vertical profile and correction enablement remain the shared controls.
 Extraction saves the applied divisor, intercepted fraction, physical incidence,
 raw readback in radians, validity, estimated numerical error, method, alignment,
 and profile provenance alongside an immutable base curve and variance.
+Stationary and rocking extraction evaluate sample interception only for source
+frames with usable ROI data in at least one selected line or intersection, and
+reuse those factors across lines and curve batches within the job. Zero or
+negative background-subtracted intensity still counts as data; no peak-window
+cut is applied to rocking curves. Alignment references are resolved from the
+full scan before selecting frames. The saved ``interception_required`` mask
+identifies the selected frames; unneeded factors remain NaN at their original
+frame indices, with ``interception_valid`` false. Older records without that
+mask retain their existing interpretation.
+
+For all named beam profiles and measured profiles, the installed native kernel
+evaluates batches of up to 256 distinct acquisition geometries with the Python
+GIL released. Rectangle, circle and polygon samples use the same surface-chord
+geometry and quadrature error checks as the Python calculation. Automatic
+worker selection uses native threads for sufficiently large batches and avoids
+their overhead for aligned rectangles with analytical interval probabilities.
+Progress and cancellation are checked
+between batches. Trapezoidal/triangular, smoothed top-hat, generalized-normal
+and skew-normal profiles preserve the configured centering and offsets.
+Native Gauss--Kronrod quadrature adaptively subdivides difficult panels, with
+up to 200 subintervals per integral. Numerical profile interval probabilities
+contribute their estimated error to the overlap error; tails are not cut off.
+Arbitrary other SciPy distributions and custom profile subclasses retain the
+Python path. Frames whose native calculation cannot meet the tolerance are
+retried with the existing adaptive SciPy calculation. Builds
+without the optional native module also retain the Python implementation.
+
+The numerical ``overlap`` API accepts ``workers=1`` for serial native execution
+or a positive worker limit; the default ``workers=0`` selects automatically.
+Compare the reference and native implementations with
+``python -m benchmarks.benchmark_sample_interception_native`` from the source
+checkout. The benchmark checks agreement before reporting timings and counts
+adaptive fallback frames.
+
 ``Keep stored``, ``Remove stored`` and ``Apply / replace with current settings``
 rebuild from that base, preserving normalization and propagating errors by the
 same divisor. Repeating replacement is idempotent. Changing a moving readback

@@ -43,6 +43,16 @@ ALPHAS = np.deg2rad(np.array([0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 20.0, 90
 L = 5e-3
 
 
+@pytest.mark.parametrize("keyword_args", [False, True])
+def test_trapezoid_quadrature_points_include_shoulders(keyword_args):
+    """Every slope change is split explicitly in centred metre coordinates."""
+    dist = (stats.trapezoid(c=.2, d=.75, loc=.003, scale=.004)
+            if keyword_args else stats.trapezoid(.2, .75, .003, .004))
+    profile = DistributionBeamProfile(dist, center="median", offset=.0001)
+    expected = .003 + .004 * np.array([0, .2, .75, 1]) - profile.sample_center
+    assert all(point in profile.integration_points for point in expected)
+
+
 @pytest.mark.parametrize("center", ["centroid", "peak", "median"])
 @pytest.mark.parametrize("family", ["normal", "uniform"])
 def test_direct_density_and_interval_probability_match_scipy(family, center):

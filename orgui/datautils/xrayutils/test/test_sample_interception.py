@@ -45,10 +45,14 @@ def test_vector_panels_match_adaptive_reference(kind, profiles, monkeypatch):
     actual = overlap(*args, **kwargs)
 
     def _adaptive(integrand, rtol):
-        return interception.quad(integrand, 0, 1, epsabs=1e-12,
-                                 epsrel=rtol, limit=200, full_output=1)
+        # The native path also splits at analytical profile transitions.
+        # Use a tighter independent reference so an unsplit trapezoid kink
+        # cannot dominate the comparison of estimated quadrature errors.
+        return interception.quad(integrand, 0, 1, epsabs=1e-14,
+                                 epsrel=min(rtol, 1e-12), limit=200, full_output=1)
 
     monkeypatch.setattr(interception, "_vector_quad", _adaptive)
+    monkeypatch.setattr(interception, "_sample_interception_cpp", None)
     expected = overlap(*args, **kwargs)
     for field in ("illumination", "fraction", "effective_area"):
         np.testing.assert_allclose(getattr(actual, field), getattr(expected, field),

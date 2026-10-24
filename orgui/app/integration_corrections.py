@@ -246,6 +246,7 @@ def frame_correction_policy(
     beam_profile=None,
     sample_length=None,
     progress=None,
+    required_frames=None,
 ):
     r"""Resolve the exact framewise :math:`Q` and :math:`H` policy.
 
@@ -264,6 +265,10 @@ def frame_correction_policy(
     :param beam_profile: Vertical beam profile; required for illumination.
     :param sample_length: Sample length along the beam, meter.
     :param progress: Optional numerical overlap progress/cancellation callback.
+    :param required_frames: Optional boolean mask of source frames with usable
+        ROI data. Only these frames undergo sample-shape overlap quadrature;
+        omitted factors remain NaN at their original frame indices. Acquisition
+        angles and alignment references are still resolved from the full scan.
     :returns: Fully resolved policy with the arrays actually applied.
     :rtype: FrameCorrectionPolicy
     """
@@ -285,9 +290,30 @@ def frame_correction_policy(
             scan, shape_settings, alpha, count=size, omega=omega,
             base_path=getattr(state, "_profile_root", None),
         )
-        shape_factors = shape_frame_factors(
-            settings, beam_profile, shape_alpha, azimuth, progress=progress
-        )
+        if required_frames is None:
+            shape_factors = shape_frame_factors(
+                settings, beam_profile, shape_alpha, azimuth, progress=progress
+            )
+        else:
+            # Resolve alignment above before selecting frames: the first used
+            # ROI frame must not become a different sample-placement reference.
+            required = np.asarray(required_frames, dtype=bool)
+            if required.shape != (int(size),):
+                raise ValueError("required_frames must contain one boolean per frame")
+            incidence, rotation = np.broadcast_arrays(shape_alpha, azimuth)
+            selected = np.broadcast_to(required, incidence.shape)
+            shape_factors = tuple(
+                np.zeros(incidence.shape, dtype=bool) if i == 3
+                else np.full(incidence.shape, np.nan)
+                for i in range(5)
+            )
+            if selected.any():
+                values = shape_frame_factors(
+                    settings, beam_profile, incidence[selected], rotation[selected],
+                    progress=progress,
+                )
+                for target, value in zip(shape_factors, values):
+                    target[selected] = value
         shape_provenance = {
             "sample_interception_json": json.dumps(settings, allow_nan=False),
             "sample_azimuth_rad": azimuth,
@@ -297,6 +323,8 @@ def frame_correction_policy(
             "interception_method": "surface_chord_quadrature_v1",
             "density_reference": "peak",
         }
+        if required_frames is not None:
+            shape_provenance["interception_required"] = selected.copy()
     if not new_contract:
         # Deprecated compatibility branch; TODO: Remove with legacy configs.
         if use_illumination and not use_normalization:

@@ -9,13 +9,110 @@ The incident beam is separable, even when the clipped overlap is not.
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import stats
 from scipy.integrate import quad
 
 from .beamprofile import (
     DistributionBeamProfile,
     GaussianBeamProfile,
     MeasuredBeamProfile,
+    _SmoothedTopHat,
 )
+
+try:
+    from .. import _sample_interception_cpp
+except ImportError:
+    _sample_interception_cpp = None
+
+
+def _native_profile(profile):
+    """Snapshot supported exact profiles in metres and normalized 1/m density.
+
+    Never sample a distribution into an approximate lookup table. Custom
+    profiles and overriding subclasses retain the Python implementation.
+    """
+    if type(profile) is GaussianBeamProfile:
+        descriptor = dict(kind="normal", shift=0.0, scale=profile.sigma)
+    elif type(profile) is MeasuredBeamProfile:
+        descriptor = dict(kind="measured", shift=profile.sample_center,
+                          positions=profile._z_raw, density=profile._p,
+                          cumulative=profile._cum)
+    elif type(profile) is DistributionBeamProfile:
+        if profile._normal_distribution:
+            descriptor = dict(kind="normal", scale=profile.rms_width,
+                              shift=profile.sample_center - profile.centroid)
+        elif profile._uniform_support is not None:
+            descriptor = dict(kind="uniform", shift=profile.sample_center,
+                              bounds=profile._uniform_support)
+        else:
+            descriptor = _native_distribution(profile)
+            if descriptor is None:
+                return None
+    else:
+        return None
+    return dict(descriptor, peak=profile.peak_density,
+                points=profile.integration_points)
+
+
+def _native_distribution(profile):
+    """Copy named distribution parameters; leave arbitrary SciPy families alone."""
+    dist = profile._dist
+    if type(dist) is _SmoothedTopHat:
+        return dict(kind="smoothed", shift=profile.sample_center,
+                    scale=dist.sigma, width=dist.width)
+    family = getattr(dist, "dist", None)
+    for name, parameters in (("trapezoid", ("c", "d")),
+                             ("gennorm", ("beta",)), ("skewnorm", ("a",))):
+        if type(family) is not type(getattr(stats, name)):
+            continue
+        # Frozen distributions allow shape, location and scale both as
+        # positional arguments and keywords. Location is in metres.
+        values = dict(loc=0.0, scale=1.0)
+        values.update(zip((*parameters, "loc", "scale"), dist.args))
+        values.update(dist.kwds)
+        return dict(kind=name, shift=profile.sample_center - values["loc"],
+                    scale=values["scale"],
+                    parameters=[values[key] for key in parameters])
+    return None
+
+
+def _native_overlap(shape, vertical, horizontal, arrays, offset, orientation,
+                    rtol, progress, workers):
+    """Batch exact geometries; retry unresolved panels with adaptive Python."""
+    if _sample_interception_cpp is None:
+        return None
+    profiles = (_native_profile(vertical), _native_profile(horizontal))
+    if any(profile is None for profile in profiles):
+        return None
+    frames = np.column_stack([array.ravel() for array in arrays])
+    unique, inverse = np.unique(frames, axis=0, return_inverse=True)
+    inverse = inverse.reshape(-1)
+    values = np.empty((len(unique), 2))
+    shape_data = dict(kind=shape.kind, dimensions=shape.dimensions,
+                      vertices=shape.outline() if shape.kind != "circle" else [])
+    completed = 0
+    # Count repeated acquisition geometries in the source-frame progress total.
+    multiplicity = np.bincount(inverse, minlength=len(unique))
+    for start in range(0, len(unique), 256):
+        if progress is not None and progress(completed, len(frames)) is False:
+            raise InterruptedError("sample interception cancelled")
+        stop = min(start + 256, len(unique))
+        value, error, resolved = _sample_interception_cpp.overlap_batch(
+            shape_data, *profiles, unique[start:stop], offset, orientation,
+            rtol, workers,
+        )
+        for index in np.flatnonzero(~resolved):
+            if progress is not None and progress(completed, len(frames)) is False:
+                raise InterruptedError("sample interception cancelled")
+            value[index], error[index] = _frame_overlap(
+                shape, vertical, horizontal, *unique[start + index],
+                offset, orientation, rtol,
+            )
+        values[start:stop, 0], values[start:stop, 1] = value, error
+        completed += int(multiplicity[start:stop].sum())
+    if progress is not None and progress(completed, len(frames)) is False:
+        raise InterruptedError("sample interception cancelled")
+    return tuple(values[inverse, i].reshape(arrays[0].shape) for i in range(2))
 
 
 # QUADPACK's embedded Gauss 10 / Kronrod 21 rule, mapped to [0, 1].
@@ -206,6 +303,7 @@ def overlap(
     axis_horizontal=0.0,
     rtol=1e-9,
     progress=None,
+    workers=0,
 ):
     """Integrate separable beam density over the actual transformed shape.
 
@@ -220,13 +318,19 @@ def overlap(
     :param axis_horizontal: Axis origin in horizontal profile coordinates [m].
     :param float rtol: Relative integration tolerance.
     :param progress: Optional ``(completed, total)`` callback; return ``False``
-        to cancel between frames. No GUI objects enter this calculation.
+        to cancel between bounded native batches or Python frames. No GUI
+        objects enter this calculation.
+    :param int workers: Native worker limit; 0 selects workers automatically.
+        1 runs the native batch serially. Unsupported profiles and unresolved
+        quadrature panels retain the Python/SciPy implementation.
     :returns: H, f_hit, estimated H error and peak-referenced effective area [m²].
     :rtype: InterceptionResult
     :raises ValueError: For invalid geometry/probability or unresolved quadrature.
     """
     if len(offset) != 2:
         raise ValueError("sample offset must have two coordinates, in metres")
+    if not isinstance(workers, (int, np.integer)) or workers < 0:
+        raise ValueError("workers must be a non-negative integer")
     alpha, azimuth, zv, yh = np.broadcast_arrays(
         alpha, azimuth, axis_vertical, axis_horizontal
     )
@@ -255,6 +359,30 @@ def overlap(
         density = profile.density_at(profile.integration_points)
         if np.any(density < 0) or not np.all(np.isfinite(density)):
             raise ValueError("beam density must be finite and non-negative")
+    native = _native_overlap(shape, vertical, horizontal, (alpha, azimuth, zv, yh),
+                             offset, orientation, rtol, progress, int(workers))
+    if native is None:
+        illumination, error = _python_overlap(
+            shape, vertical, horizontal, (alpha, azimuth, zv, yh),
+            offset, orientation, rtol, progress,
+        )
+    else:
+        illumination, error = native
+    fraction = np.sin(alpha) * illumination
+    if np.any(fraction < -1e-12) or np.any(fraction > 1 + 1e-10):
+        raise ValueError("overlap integration returned an invalid probability")
+    return InterceptionResult(
+        illumination,
+        fraction,
+        error,
+        illumination / (vertical.peak_density * horizontal.peak_density),
+    )
+
+
+def _python_overlap(shape, vertical, horizontal, arrays, offset, orientation,
+                    rtol, progress):
+    """Reference scalar loop, also supporting user-defined beam profiles."""
+    alpha, azimuth, zv, yh = arrays
     illumination = np.empty(alpha.shape)
     error = np.empty(alpha.shape)
     # Deduplicate exact geometry only: no rounding of acquisition angles.
@@ -268,15 +396,7 @@ def overlap(
                 shape, vertical, horizontal, *key, offset, orientation, rtol
             )
         illumination[index], error[index] = cache[key]
-    fraction = np.sin(alpha) * illumination
-    if np.any(fraction < -1e-12) or np.any(fraction > 1 + 1e-10):
-        raise ValueError("overlap integration returned an invalid probability")
-    return InterceptionResult(
-        illumination,
-        fraction,
-        error,
-        illumination / (vertical.peak_density * horizontal.peak_density),
-    )
+    return illumination, error
 
 
 def _frame_overlap(

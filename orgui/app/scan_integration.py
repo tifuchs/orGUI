@@ -94,6 +94,8 @@ class IntegrationContext:
     _saveIntegrationResult: object
     armFrameGroups: object = None
     validate: object = None
+    _frame_policy_cache: dict | None = None
+    _interception_required_frames: object = None
 
     def intkey(self, coordinates):
         """Return clipped center ROI bounds in pixel (x, y) order."""
@@ -244,8 +246,24 @@ def _validate_context(context):
         context.validate()
 
 
+def _frames_with_roi_data(counters):
+    """Return frames with finite ROI counters and at least one centre pixel.
+
+    Counters are (frame, ROI, [centre sum, pixel count, background sum, count]).
+    Zero signal and negative background-subtracted signal remain usable.
+    """
+    return np.any(
+        (counters[..., 1] > 0) & np.all(np.isfinite(counters), axis=-1), axis=1
+    )
+
+
 def _frame_policy_with_progress(context, scan, state, size, **kwargs):
-    """Resolve shape overlap with collector-side progress and cancellation."""
+    """Reuse scan-wide shape overlap with collector-side cancellation.
+
+    The cache belongs to one integration job with captured correction settings,
+    profiles and scan counters. Acquisition angles [rad] repeat across rocking
+    ROI rows; evaluate them once per frame and restore the existing row shapes.
+    """
     if not (
         kwargs.get("use_illumination")
         and state.sample_interception.get("enabled", False)
@@ -253,7 +271,30 @@ def _frame_policy_with_progress(context, scan, state, size, **kwargs):
         return integration_corrections.frame_correction_policy(
             scan, state, size, **kwargs
         )
-    total = np.size(kwargs["alpha"])
+    alpha = np.asarray(kwargs["alpha"], dtype=np.float64)
+    output_shape = None
+    if alpha.ndim > 1:
+        frame_alpha = alpha.reshape(-1, size)[0]
+        if np.array_equal(
+            alpha, np.broadcast_to(frame_alpha, alpha.shape), equal_nan=True
+        ):
+            if state.sample_interception.get("incidence_source", "auto") == "auto":
+                output_shape = alpha.shape
+            alpha = frame_alpha
+    kwargs["alpha"] = alpha
+    required = context._interception_required_frames
+    if required is None:
+        required = kwargs.get("required_frames")
+    kwargs["required_frames"] = required
+    cache = context._frame_policy_cache
+    # Keep only the latest policy, so cache memory is independent of line count.
+    key = (size, alpha.shape, alpha.tobytes(), kwargs["use_normalization"],
+           None if required is None else np.asarray(required, dtype=bool).tobytes())
+    cached = None if cache is None else cache.get(key)
+    if cached is not None:
+        _validate_context(context)
+        return _shape_policy_rows(cached, output_shape)
+    total = alpha.size if required is None else np.count_nonzero(required)
     # Captured acquisition angles, including the fixed theta of a mu scan.
     kwargs["omega"] = context.getMuOm()[1]
     progress = logger_utils.create_progress_logger(
@@ -269,11 +310,32 @@ def _frame_policy_with_progress(context, scan, state, size, **kwargs):
         return True
 
     try:
-        return integration_corrections.frame_correction_policy(
+        policy = integration_corrections.frame_correction_policy(
             scan, state, size, progress=update, **kwargs
         )
     finally:
         progress.finish()
+    if cache is not None:
+        cache.clear()
+        cache[key] = policy
+    return _shape_policy_rows(policy, output_shape)
+
+
+def _shape_policy_rows(policy, shape):
+    """Restore repeated rocking rows without repeating overlap quadrature."""
+    if shape is None:
+        return policy
+    provenance = dict(policy.interception_provenance)
+    for name in ("sample_incidence_rad", "interception_valid", "interception_error_H",
+                 "interception_required"):
+        if name in provenance:
+            provenance[name] = np.broadcast_to(provenance[name], shape)
+    return replace(
+        policy,
+        illumination_divisor=np.broadcast_to(policy.illumination_divisor, shape),
+        intercepted_fraction=np.broadcast_to(policy.intercepted_fraction, shape),
+        interception_provenance=provenance,
+    )
 
 
 def _resolve_mask(context):
@@ -316,7 +378,9 @@ def integrate_stationary_scan(context, *, lines=None, geometry_provider=None):
     """
     try:
         return _integrate_stationary_job(
-            _resolve_mask(context), lines, geometry_provider
+            replace(_resolve_mask(context), _frame_policy_cache={},
+                    _interception_required_frames=None),
+            lines, geometry_provider,
         )
     except IntegrationCancelled:
         return {"status": "cancelled", "message": "No mask selected"}
@@ -404,6 +468,9 @@ def _integrate_stationary_job(context, lines, geometry_provider):
     finally:
         results.close()
         progress.finish()
+    context = replace(
+        context, _interception_required_frames=_frames_with_roi_data(arrays[0])
+    )
     completed = []
     for index, line in enumerate(lines):
         _validate_context(context)
@@ -505,7 +572,8 @@ def integrate_rocking_scan(
     writer = None
     state = "failed"
     try:
-        context = _resolve_mask(context)
+        context = replace(_resolve_mask(context), _frame_policy_cache={},
+                          _interception_required_frames=None)
         prepared = _prepare_rocking_worker(context, xy, regions)
         if isinstance(prepared, dict):
             return prepared
@@ -530,6 +598,7 @@ def integrate_rocking_scan(
             workers,
         )
         processed = 1
+        required_frames = np.zeros(count, dtype=bool)
         progress.update(processed)
         for start in range(0, count, batch_frames):
             stop = min(start + batch_frames, count)
@@ -552,9 +621,11 @@ def integrate_rocking_scan(
             if progress.wasCanceled():
                 raise IntegrationCancelled()
             _validate_context(context)
+            required_frames[start:stop] = _frames_with_roi_data(buffer[0])
             writer.write_frames(start, buffer)
             del buffer
         del worker, prepared
+        context = replace(context, _interception_required_frames=required_frames)
         writer.group.attrs["state"] = "assembling"
         # Preserve the reader's two-parent scan lookup and scan metadata.
         scan_metadata = {
@@ -1867,6 +1938,10 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
         alpha=alpha_all,
         beam_profile=beam_profile,
         sample_length=sample_size,
+        required_frames=(
+            ((cpixel1_a > 0) & np.isfinite(base_signal1))
+            | ((cpixel2_a > 0) & np.isfinite(base_signal2))
+        ),
     )
     versioned_policy = frame_policy.new_contract or bool(
         frame_policy.interception_provenance

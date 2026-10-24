@@ -9,6 +9,8 @@ Unreleased (2026-07-19)
 
 Other user-visible changes:
 
+- Sample-interception batches now use a native C++ kernel for all named analytical and measured beam profiles with rectangular, circular or polygonal samples. Native frame workers run with the Python GIL released; automatic worker selection avoids thread overhead for small or aligned calculations. Progress and cancellation remain available between bounded batches. Native adaptive quadrature handles difficult panels and propagates numerical profile integration errors. Custom and other SciPy distributions, and frames the native calculation cannot resolve, retain the Python/SciPy fallback and its numerical tolerance checks.
+
 - HDF5 database I/O errors reported from native cleanup no longer take the GUI's fatal-exit path. orGUI disables the failed database, clears its views on the GUI thread, and asks the user to reconnect the drive and create or open a database. Integration controls remain usable after an aborted job; database locations and integration calculations are unchanged.
 
 - Legacy flux normalization is deprecated and scheduled for removal. Its density and monitor-product controls are hidden and disabled in the GUI; only relative and calibrated total-flux modes can be selected. Imported configurations, saved curves and prepared jobs retain their numerical behavior and log a deprecation warning when legacy normalization runs. Frame normalization remains unchecked by default.
@@ -29,7 +31,7 @@ Other user-visible changes:
 
 - UB calculation accepts fixed scalar omega values from scans with constant theta, avoiding an indexing error when using their reference reflections.
 
-- Stationary and rocking hklscan integration can process several named reciprocal-space lines in one pass through the images. Line definitions survive configuration save/reload. Stationary counters stay in RAM; rocking extraction and later curve reduction use bounded batches, retaining the existing per-line results and correction conventions.
+- Stationary and rocking hklscan integration can process several named reciprocal-space lines in one pass through the images. Line definitions survive configuration save/reload. Stationary counters stay in RAM; rocking extraction and later curve reduction use bounded batches, retaining the existing per-line results and correction conventions. Sample interception is now evaluated once per integration job and reused across stationary lines and rocking curve batches. Only frames with usable ROI data in at least one selected line/intersection require the calculation; zero-signal data remain included. Unused factors are marked as not required and saved as NaN, preserving frame indices, angular alignment, and corrected results for usable data.
 
 - Integration saves now flush the HDF5 database before reporting success. If the database drive disconnects during a write, orGUI reports the failed save and detaches the unusable file so a new database can be opened.
 

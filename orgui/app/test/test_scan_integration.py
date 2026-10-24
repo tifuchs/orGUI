@@ -181,7 +181,7 @@ def _prepared_line(ctx, x=3, identifier="first"):
 @pytest.mark.parametrize("total_flux", [False, True])
 @pytest.mark.parametrize("angle_mode", ["counter", "auto", "fixed_incidence"])
 def test_shape_extraction_and_bounded_curve_replacement(
-    context, total_flux, angle_mode,
+    context, monkeypatch, total_flux, angle_mode,
 ):
     """Both conventions save actual angles and re-read/rebuild shape divisors."""
     from orgui.app.config_data import (
@@ -225,8 +225,49 @@ def test_shape_extraction_and_bounded_curve_replacement(
             footprint,
         ),
     )
-    result = integration.integrate_rocking_scan(ctx, lines=[_prepared_line(ctx)])
+    from orgui.app import sample_interception_config
+
+    evaluated_shapes = []
+
+    def evaluate(*args, **kwargs):
+        """Count the frame vectors sent to the real overlap calculation."""
+        evaluated_shapes.append(np.shape(args[2]))
+        return shape_frame_factors(*args, **kwargs)
+
+    monkeypatch.setattr(sample_interception_config, "shape_frame_factors", evaluate)
+    first = _prepared_line(ctx)
+    for key in first["rois"]:
+        first["rois"][key] *= 3
+    first["xy"] = np.repeat(first["xy"], 3, axis=0)
+    first["geometry"] = np.repeat(first["geometry"], 3, axis=0)
+    for key in ("s_masked", "angles", "hkl_masked"):
+        first["reflections"][key] = np.repeat(first["reflections"][key], 3, axis=0)
+    result = integration.integrate_rocking_scan(
+        ctx, lines=[first, _prepared_line(ctx, 8, "second")],
+        batch_options=integration.BatchOptions(curves=2),
+    )
     assert result["status"] == "success", result
+    assert evaluated_shapes == [(len(scan),)]
+    for name, rows in (("first", 3), ("second", 1)):
+        saved = curve_correction_record_from_nxdict(
+            file[f"scan/measurement/{name}"][CURVE_CORRECTIONS_GROUP]
+        )
+        expected = integration.integration_corrections.frame_correction_policy(
+            ctx.fscan, ctx.config_snapshot.corrections, len(scan),
+            use_normalization=True, use_illumination=True,
+            alpha=saved.alpha, omega=ctx.getMuOm()[1],
+            beam_profile=profile, sample_length=.01,
+        )
+        for field in ("illumination_divisor", "intercepted_fraction",
+                      "normalization_divisor"):
+            np.testing.assert_array_equal(
+                getattr(saved, field), getattr(expected, field)
+            )
+        for field in ("sample_incidence_rad", "sample_azimuth_rad",
+                      "interception_valid", "interception_error_H"):
+            np.testing.assert_array_equal(saved.profile_provenance[field],
+                                          expected.interception_provenance[field])
+        assert saved.base_croibg.shape == (rows, len(scan))
     group = file["scan/measurement/first"]
     record = curve_correction_record_from_nxdict(group[CURVE_CORRECTIONS_GROUP])
     assert record.algorithm == (
@@ -266,13 +307,24 @@ def test_shape_extraction_and_bounded_curve_replacement(
 
 
 @pytest.mark.parametrize("total_flux", [False, True])
-def test_stationary_shape_divisor_is_applied_once(context, total_flux):
+def test_stationary_shape_divisor_is_applied_once(context, monkeypatch, total_flux):
     """Saved stationary signal/errors and record agree under either convention."""
     from orgui.app.config_data import (
         CURVE_CORRECTIONS_GROUP, curve_correction_record_from_nxdict,
     )
     from orgui.app.integration_corrections import corrected_curve_from_record
     from orgui.datautils.xrayutils.corrections.beamprofile import gaussian_profile
+    from orgui.app import sample_interception_config
+
+    evaluate = sample_interception_config.shape_frame_factors
+    evaluations = []
+
+    def counted(*args, **kwargs):
+        """Record overlap evaluations across lines and successive jobs."""
+        evaluations.append(np.shape(args[2]))
+        return evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(sample_interception_config, "shape_frame_factors", counted)
 
     ctx, scan, file = context
     scan.phi = np.linspace(0, 90, len(scan))
@@ -306,20 +358,24 @@ def test_stationary_shape_divisor_is_applied_once(context, total_flux):
 
     def geometry(line):
         array = np.zeros((len(scan), 9))
-        array[:, 0] = 3
+        array[:, 0] = line["H_0"][0]
         array[:, 2] = array[:, 5] = scan.axis
         array[:, 3:5] = .1
-        array[:, 6:8] = [3, 3]
+        array[:, 6:8] = [line["H_0"][0], 3]
         array[:, -1] = 1
         other = array.copy()
         other[:, -1] = 0
         return array, other
 
     result = integration.integrate_stationary_scan(
-        ctx, lines=[{"id": "first", "H_0": [3, 0, 0], "H_1": [0, 0, 1]}],
+        ctx, lines=[
+            {"id": "first", "H_0": [3, 0, 0], "H_1": [0, 0, 1]},
+            {"id": "second", "H_0": [8, 0, 0], "H_1": [0, 0, 1]},
+        ],
         geometry_provider=geometry,
     )
     assert result["status"] == "success", result
+    assert evaluations == [(len(scan),)]
     group = next(
         group for group in file["scan/measurement"].values()
         if CURVE_CORRECTIONS_GROUP in group
@@ -330,6 +386,15 @@ def test_stationary_shape_divisor_is_applied_once(context, total_flux):
     np.testing.assert_allclose(group["counters/ctr_croibg_errors"][()], errors)
     name = "C_illumination" if total_flux else "C_illum_area"
     np.testing.assert_allclose(group["counters"][name][()], record.illumination_divisor)
+
+    # A subsequent job must evaluate fresh settings even with the same context.
+    ctx.config_snapshot.corrections.sample_interception["orientation_deg"] = 45
+    result = integration.integrate_stationary_scan(
+        ctx, lines=[{"id": "third", "H_0": [3, 0, 0], "H_1": [0, 0, 1]}],
+        geometry_provider=geometry,
+    )
+    assert result["status"] == "success", result
+    assert evaluations == [(len(scan),), (len(scan),)]
 
 
 @pytest.mark.parametrize("accelerator", [False, True])
@@ -358,6 +423,148 @@ def test_rocking_batch_routing_and_singleton_shapes(
     assert "_orgui_integration_work" not in file
 
 
+@pytest.mark.parametrize("mode", ["stationary", "single", "rocking"])
+@pytest.mark.parametrize("total_flux", [False, True])
+def test_interception_only_for_frames_with_roi_data(
+    context, monkeypatch, mode, total_flux,
+):
+    """Union all lines/intersections, preserving alignment and usable results."""
+    import json
+    from orgui.app import sample_interception_config
+    from orgui.app.config_data import (
+        CURVE_CORRECTIONS_GROUP, curve_correction_record_from_nxdict,
+    )
+    from orgui.app.integration_corrections import corrected_curve_from_record
+    from orgui.datautils.xrayutils.corrections.beamprofile import gaussian_profile
+
+    ctx, scan, file = context
+    scan.exposure_time = np.arange(1., len(scan) + 1)
+    alpha = np.deg2rad(np.linspace(.2, .8, len(scan)))
+    omega = -np.deg2rad(scan.axis)
+    settings = {
+        "version": 1, "enabled": True,
+        "shape": {"kind": "rectangle", "dimensions_m": [.01, .01]},
+        "offset_m": [.001, .002], "azimuth_source": "auto",
+        "horizontal": {
+            "analytical": True, "shape": "Top hat", "shape_values": [20000],
+        },
+    }
+    ctx.config_snapshot.corrections = CorrectionState(
+        sample_interception=settings,
+        total_flux_calibrated=False if total_flux else None,
+    )
+    profile = gaussian_profile(160e-6)
+    options = ctx.scanSelector.get_integration_options()
+    options["footprint"] = options["normalization"] = True
+    usable = np.zeros((len(scan), 2), dtype=bool)
+    usable[[1, 2], 0] = True
+    usable[[2, 4, 5], 1] = True
+
+    def geometry(line):
+        """Include an S2-only frame and frames needed only by the later line."""
+        column = int(line["id"] == "second")
+        array = np.zeros((len(scan), 9))
+        array[:, 0] = line["H_0"][0]
+        array[:, 2] = array[:, 5] = scan.axis
+        array[:, 3:5] = .1
+        array[:, 6:8] = [line["H_0"][0], 3]
+        array[:, -1] = usable[:, column]
+        other = array.copy()
+        other[:, -1] = 0
+        if column:
+            array[5, -1] = 0
+            other[5, -1] = 1
+        return array, other
+
+    lines = [
+        {"id": "first", "H_0": [3, 0, 0], "H_1": [0, 0, 1]},
+        {"id": "second", "H_0": [8, 0, 0], "H_1": [0, 0, 1]},
+    ]
+    ctx = replace(
+        ctx, getMuOm=lambda: (alpha, omega), getROIloc=lambda: geometry(lines[0]),
+        scanSelector=integration.prepared_selector(
+            options, 0, [3, 0, 0], [0, 0, 1], [3, 3],
+            SimpleNamespace(beamProfile=lambda: profile, sampleLength=lambda: .01),
+        ),
+    )
+    overlap = sample_interception_config.overlap
+    evaluated = []
+
+    def counted(*args, **kwargs):
+        """Record the actual acquisition angles entering numerical overlap."""
+        evaluated.append((args[3].copy(), args[4].copy()))
+        return overlap(*args, **kwargs)
+
+    monkeypatch.setattr(sample_interception_config, "overlap", counted)
+    if mode == "rocking":
+        prepare = integration._prepare_rocking_worker
+
+        def prepare_sparse(*args, **kwargs):
+            """Emulate per-frame masked detector ROIs at the worker boundary."""
+            worker, *factors = prepare(*args, **kwargs)
+
+            def read(index):
+                """Leave valid zero-signal frames in the extracted curves."""
+                groups = worker(index)
+                for group in groups:
+                    group[~usable[index]] = 0
+                # Equal peak and background density: zero net signal is data.
+                if index == 1:
+                    groups[0][0, 0] = groups[0][0, 2] * (
+                        groups[0][0, 1] / groups[0][0, 3]
+                    )
+                return groups
+
+            return read, *factors
+
+        monkeypatch.setattr(integration, "_prepare_rocking_worker", prepare_sparse)
+        result = integration.integrate_rocking_scan(
+            ctx, lines=[_prepared_line(ctx), _prepared_line(ctx, 8, "second")],
+            batch_options=integration.BatchOptions(frames=2, curves=1),
+        )
+    else:
+        result = integration.integrate_stationary_scan(
+            ctx, lines=None if mode == "single" else lines,
+            geometry_provider=geometry,
+        )
+    assert result["status"] == "success", result
+    required = usable[:, 0] if mode == "single" else usable.any(axis=1)
+    assert len(evaluated) == 1
+    np.testing.assert_array_equal(evaluated[0][0], alpha[required])
+    np.testing.assert_array_equal(evaluated[0][1], omega[required])
+    monkeypatch.setattr(sample_interception_config, "overlap", overlap)
+    for group in file["scan/measurement"].values():
+        if CURVE_CORRECTIONS_GROUP not in group:
+            continue
+        record = curve_correction_record_from_nxdict(group[CURVE_CORRECTIONS_GROUP])
+        reference = integration.integration_corrections.frame_correction_policy(
+            ctx.fscan, ctx.config_snapshot.corrections, len(scan),
+            use_normalization=True, use_illumination=True, alpha=record.alpha,
+            omega=omega, beam_profile=profile, sample_length=.01,
+        )
+        divisor = np.asarray(record.illumination_divisor)
+        mask = np.broadcast_to(required, divisor.shape)
+        np.testing.assert_array_equal(
+            record.profile_provenance["interception_required"], mask
+        )
+        assert np.isnan(divisor[~mask]).all()
+        np.testing.assert_array_equal(
+            divisor[mask], reference.illumination_divisor[mask]
+        )
+        np.testing.assert_array_equal(
+            record.normalization_divisor, reference.normalization_divisor
+        )
+        alignment = json.loads(record.profile_provenance["sample_interception_json"])
+        assert alignment["reference_incidence_deg"] == pytest.approx(.2)
+        # Unused factors change, but no saved usable intensity or error changes.
+        full_record = replace(
+            record, illumination_divisor=reference.illumination_divisor
+        )
+        for actual, expected in zip(corrected_curve_from_record(record)[:2],
+                                    corrected_curve_from_record(full_record)[:2]):
+            np.testing.assert_array_equal(actual, expected)
+
+
 def test_line_configuration_round_trip():
     """Ordered line identities survive typed config serialization."""
     lines = [
@@ -367,6 +574,59 @@ def test_line_configuration_round_trip():
     restored = roi_from_nxdict(roi_to_nxdict(ROIState(lines={"rocking": lines})))
     assert restored.lines == {"rocking": lines}
     assert roi_from_nxdict({}).lines == {}
+
+
+def test_shape_policy_cache_cancellation_and_validation(context, monkeypatch):
+    """Cancelled overlap is not cached; reuse still validates captured state."""
+    ctx, scan, _ = context
+    cache = {}
+    ctx = replace(ctx, _frame_policy_cache=cache)
+    state = CorrectionState(sample_interception={"enabled": True})
+    cancelled = [True]
+    finished = []
+    calls = []
+    progress = SimpleNamespace(
+        update=lambda value: None,
+        wasCanceled=lambda: cancelled[0],
+        finish=lambda: finished.append(True),
+    )
+    monkeypatch.setattr(
+        logger_utils, "create_progress_logger", lambda *a, **kw: progress
+    )
+
+    def evaluate(*args, **kwargs):
+        """Exercise cancellation before returning a reusable policy."""
+        calls.append(True)
+        kwargs["progress"](1, len(scan))
+        return object()
+
+    monkeypatch.setattr(integration.integration_corrections,
+                        "frame_correction_policy", evaluate)
+    kwargs = dict(use_illumination=True, use_normalization=False,
+                  alpha=np.full(len(scan), 0.01))
+    with pytest.raises(integration.IntegrationCancelled):
+        integration._frame_policy_with_progress(
+            ctx, ctx.fscan, state, len(scan), **kwargs
+        )
+    assert not cache
+    cancelled[0] = False
+    policy = integration._frame_policy_with_progress(
+        ctx, ctx.fscan, state, len(scan), **kwargs
+    )
+    assert integration._frame_policy_with_progress(
+        ctx, ctx.fscan, state, len(scan), **kwargs
+    ) is policy
+    assert len(calls) == len(finished) == 2
+
+    def invalidate():
+        """Reject a stale captured context on a cache hit."""
+        raise integration.IntegrationCancelled()
+
+    with pytest.raises(integration.IntegrationCancelled):
+        integration._frame_policy_with_progress(
+            replace(ctx, validate=invalidate), ctx.fscan, state, len(scan), **kwargs
+        )
+    assert len(calls) == 2
 
 
 def test_rocking_writer_keeps_normalization_names_as_shared_metadata(context):

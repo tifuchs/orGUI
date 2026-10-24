@@ -60,6 +60,35 @@ def _settings():
 
 
 @pytest.mark.parametrize("total_flux", [False, True])
+def test_shape_policy_without_required_frames_skips_quadrature(monkeypatch, total_flux):
+    """No-data selections retain frame indices without inventing unity factors."""
+    from orgui.app import sample_interception_config
+
+    def unexpected(*args, **kwargs):
+        """Fail if empty selections reach the expensive shape calculation."""
+        pytest.fail("No ROI data should require no overlap quadrature")
+
+    monkeypatch.setattr(sample_interception_config, "shape_frame_factors", unexpected)
+    state = CorrectionState(
+        sample_interception=_settings(),
+        total_flux_calibrated=False if total_flux else None,
+    )
+    scan = SimpleNamespace(phi=np.array([0., 45.]), exposure_time=np.array([1., 2.]))
+    policy = frame_correction_policy(
+        scan, state, 2, use_normalization=True, use_illumination=True,
+        alpha=np.deg2rad([.36, .5]), beam_profile=bp.gaussian_profile(160e-6),
+        required_frames=np.zeros(2, dtype=bool),
+    )
+    np.testing.assert_array_equal(policy.normalization_divisor, [1., 2.])
+    for values in (policy.illumination_divisor, policy.intercepted_fraction,
+                   policy.interception_provenance["interception_error_H"]):
+        assert np.shape(values) == (2,)
+        assert np.isnan(values).all()
+    assert not policy.interception_provenance["interception_valid"].any()
+    assert not policy.interception_provenance["interception_required"].any()
+
+
+@pytest.mark.parametrize("total_flux", [False, True])
 def test_shape_policy_reconstructs_known_photon_curve(total_flux):
     """An independently specified square reference recovers signal and variance."""
     settings = _settings()

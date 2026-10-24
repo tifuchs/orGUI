@@ -861,6 +861,16 @@ class DistributionBeamProfile(_CenteredProfile):
                     # Some distributions expose only open quantiles.
                     # Interior quantiles guide quadrature; never cut tails.
                     pass
+            if type(getattr(self._dist, "dist", None)) is type(stats.trapezoid):
+                # Quantiles need not coincide with the two slope changes.
+                # Split there explicitly so an embedded quadrature rule
+                # cannot underestimate its error on a barely sampled kink.
+                values = dict(loc=0.0, scale=1.0)
+                values.update(zip(("c", "d", "loc", "scale"), self._dist.args))
+                values.update(self._dist.kwds)
+                points.extend(values["loc"] + values["scale"] * np.array([
+                    0.0, values["c"], values["d"], 1.0,
+                ]))
             self._integration_points_raw = np.asarray(points)[np.isfinite(points)]
         # Return a fresh centred array: changing placement or mutating a
         # caller's array must not invalidate the cached distribution knots.
