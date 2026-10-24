@@ -7,6 +7,8 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Fixed the integration-curve delete/hide dialog for Qt6.
+
 - Fatal OpenGL paint errors are reported after the failing callback returns, with
   OpenGL redraws paused so the error and database-save dialogs do not trigger
   recursive paint failures. Use `--no-opengl` to launch with matplotlib despite
