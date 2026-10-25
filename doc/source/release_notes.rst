@@ -9,6 +9,8 @@ Unreleased (2026-07-19)
 
 Other user-visible changes:
 
+- Mu/reflectivity-scan ROI trajectories now keep the scan theta fixed instead of imposing equal incident and exit angles. Stationary and rocking overlays therefore agree for tilted rods, including 00L with nonzero phi/chi. The machine-parameter dialog accepts signed chi and phi from -360 to 360 degrees.
+
 - Failed or cancelled rocking integrations remove unpublished data and refresh the database tree even when no line completed, preventing crashes from stale staging entries. Scan metadata is published with the first completed line; existing completed lines remain available. Rocking and stationary integrations validate normalization and footprint inputs before image extraction, so missing exposure/monitor data or invalid correction settings fail before long jobs run.
 
 - Stationary and rocking scans now share edits to integration lines by default. Loading a configuration with lines saved for only one mode populates both modes, including existing databases with stationary lines and an empty rocking list. Distinct nonempty saved lists remain intact until edited.

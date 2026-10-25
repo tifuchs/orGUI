@@ -1529,6 +1529,43 @@ class VliegAngles:
         else:
             return alpha, delta, gamma, omega, chi, phi
 
+    def anglesMuMode(self, hkl, omega, chi=0.0, phi=0.0):
+        """Solve a mu scan at fixed omega, chi and phi.
+
+        :param hkl: Reciprocal coordinates in r.l.u., shape ``(3,)`` or
+            ``(3, N)``, as in :meth:`anglesZmode`.
+        :param float omega: Fixed Vlieg azimuth in rad (minus scan theta).
+        :param float chi: Fixed inner y rotation in rad.
+        :param float phi: Fixed inner x rotation in rad.
+        :returns: ``[alpha, delta, gamma, omega, chi, phi]`` in rad, shape
+            ``(6,)`` or ``(N, 6)``. This selects the grazing-incidence branch;
+            inaccessible reflections have NaN detector/incidence angles.
+
+        Angles are internal crystal-frame angles; refraction is applied by
+        the caller. Unlike equal-incident/exit Z mode, omega stays fixed and
+        alpha need not equal gamma when the rod is tilted.
+        """
+        rotation = calcOMEGA(omega) @ calcCHI(chi) @ calcPHI(phi)
+        q = rotation @ self._ubCalculator.getUB() @ np.asarray(hkl)
+        qx, qy, qz = q
+        K = self._ubCalculator.getK()
+        q_squared = np.sum(q * q, axis=0)
+        # In the alpha frame ki = K * (0, cos(alpha), -sin(alpha)).
+        # |ki + q|^2 = K^2 gives
+        # sin(alpha - atan2(qy, qz)) = |q|^2 / (2*K*hypot(qy, qz)).
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sine = q_squared / (2 * K * np.hypot(qy, qz))
+            sine = np.where(q_squared == 0, 0.0, sine)
+            sine = np.where(np.abs(sine - 1) < 1e-14, 1.0, sine)
+            alpha = np.arctan2(qy, qz) + np.arcsin(sine)
+        delta = np.arctan2(qx, qy + K * np.cos(alpha))
+        gamma = np.arctan2(
+            qz - K * np.sin(alpha), np.hypot(qx, qy + K * np.cos(alpha))
+        )
+        return np.stack(
+            np.broadcast_arrays(alpha, delta, gamma, omega, chi, phi), axis=-1
+        )
+
     def intersectLineEwald(self, H_0, H_1, alpha, omega, phi=0.0, chi=0.0, **keyargs):
         assert len(H_0.shape) == 2 or len(H_0.shape) == 1
         # assert H_0.shape == H_1.shape

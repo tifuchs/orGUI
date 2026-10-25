@@ -26,6 +26,15 @@ axes, but uses a ``phi`` circle around the ``x`` axis. The theta scan axis used
 at some beamlines is mapped to the internal omega angle as
 :math:`\theta = -\omega`.
 
+The machine-parameter dialog accepts signed ``chi`` and ``phi`` in degrees
+from -360 to 360; internal geometry uses radians. For mu/reflectivity scans,
+the calculated reflection and rocking-hklscan ROI positions hold the scan's
+theta (omega) fixed and solve for incidence. Equal incident and exit angles
+are not imposed: a tilted 00L rod generally has unequal ``alpha`` and
+``gamma``. At the corresponding scan frame, its rocking and stationary ROI
+positions therefore agree. The S1 and S2 entries coincide for this mu-scan
+solution because fixed omega leaves no independent mirrored detector solution.
+
 Detector Geometry
 -----------------
 

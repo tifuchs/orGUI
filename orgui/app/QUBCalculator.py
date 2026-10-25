@@ -387,12 +387,13 @@ class QUBCalculator(qt.QSplitter):
                 hkl, mu_cryst, "in", self.chi, self.phi, mirrorx=True
             )
         elif axisname == "mu":
-            pos1 = self.angles.anglesZmode(
-                hkl, mu_cryst, "eq", self.chi, self.phi, mirrorx=False
-            )
-            pos2 = self.angles.anglesZmode(
-                hkl, mu_cryst, "eq", self.chi, self.phi, mirrorx=True
-            )
+            fixed_omega = float(np.asarray(om).flat[0])
+            if not np.allclose(om, fixed_omega, rtol=0, atol=1e-10):
+                raise ValueError("Mu-scan reflection calculation requires fixed theta.")
+            pos1 = self.angles.anglesMuMode(hkl, fixed_omega, self.chi, self.phi)
+            # Fixed azimuth has no independent mirrored-delta solution. Keep
+            # both entries for the existing S1/S2 reflection/ROI interface.
+            pos2 = pos1.copy()
         else:
             raise ValueError("No scan axis given or no scan loaded.")
 
@@ -2134,14 +2135,14 @@ class QMachineParameters(qt.QWidget):
         diffractometerLayout.addWidget(self.mubox, 0, 1)
 
         self.chibox = qt.QDoubleSpinBox()
-        self.chibox.setRange(0, 90)
+        self.chibox.setRange(-360, 360)
         self.chibox.setDecimals(4)
         self.chibox.setSuffix(" °")
 
         diffractometerLayout.addWidget(self.chibox, 1, 1)
 
         self.phibox = qt.QDoubleSpinBox()
-        self.phibox.setRange(0, 90)
+        self.phibox.setRange(-360, 360)
         self.phibox.setDecimals(4)
         self.phibox.setSuffix(" °")
 

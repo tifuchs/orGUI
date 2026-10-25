@@ -7,6 +7,11 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Mu/reflectivity-scan ROI trajectories now keep the scan theta fixed instead
+  of imposing equal incident and exit angles. Stationary and rocking overlays
+  therefore agree for tilted rods, including 00L with nonzero phi/chi. The
+  machine-parameter dialog accepts signed chi and phi from -360 to 360 degrees.
+
 - Failed or cancelled rocking integrations remove unpublished data and refresh
   the database tree even when no line completed, preventing crashes from stale
   staging entries. Scan metadata is published with the first completed line;

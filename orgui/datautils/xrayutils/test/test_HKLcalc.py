@@ -76,6 +76,52 @@ class TestRefractionConversions(unittest.TestCase):
                 self.assertTrue(np.all(np.isfinite(result)))
 
 
+class TestMuScanAngles(unittest.TestCase):
+    """Fixed-azimuth inversion agrees with the forward rotation matrices."""
+
+    def test_round_trip_scalar_and_array(self):
+        """Recover measured angles without assuming equal incidence and exit."""
+        lattice = HKLVlieg.Lattice([3.9, 4.1, 6.8], [90, 95, 120])
+        ub = HKLVlieg.UBCalculator(lattice, 77.0)
+        ub.setU(HKLVlieg.Rotation.from_euler("xyz", [0.1, -0.2, 0.3]).as_matrix())
+        angles = HKLVlieg.VliegAngles(ub)
+        for chi, phi in [(0, 0), (0.03, 0.06), (-0.03, -0.06), (12, -25)]:
+            with self.subTest(chi=chi, phi=phi):
+                positions = np.deg2rad([
+                    [0.2, 2.0, 0.7, 23, chi, phi],
+                    [0.5, -3.0, 1.3, 23, chi, phi],
+                    [3.0, 5.0, 4.0, 23, chi, phi],
+                ])
+                hkls = np.array([
+                    np.linalg.solve(ub.getUB(),
+                                    HKLVlieg.calculate_q_phi(p, ub.getK()))
+                    for p in positions
+                ])
+                solved = angles.anglesMuMode(hkls.T, *positions[0, 3:])
+                np.testing.assert_allclose(solved, positions, atol=1e-12)
+                np.testing.assert_allclose(
+                    np.array(angles.anglesToHkl(*solved.T)).T, hkls, atol=1e-12
+                )
+                for hkl, expected in zip(hkls, positions):
+                    np.testing.assert_allclose(
+                        angles.anglesMuMode(hkl, *expected[3:]),
+                        expected, atol=1e-12,
+                    )
+
+    def test_unreachable_reflection_and_direct_beam(self):
+        """Impossible reflections stay invalid; the direct beam stays finite."""
+        ub = HKLVlieg.UBCalculator(
+            HKLVlieg.Lattice([4, 4, 4], [90, 90, 90]), 77.0
+        )
+        ub.setU(np.eye(3))
+        angles = HKLVlieg.VliegAngles(ub)
+        result = angles.anglesMuMode(
+            np.array([[0, 10000], [0, 0], [0, 0]]), 0.1, 0.2, 0.3
+        )
+        np.testing.assert_allclose(result[0], [0, 0, 0, 0.1, 0.2, 0.3])
+        self.assertTrue(np.all(np.isnan(result[1, :3])))
+
+
 class TestLattice(unittest.TestCase):
     def testCreateLattice(self):
         lat = HKLVlieg.Lattice([3.9242, 3.9242, 3.9242], [90.0000, 90.0000, 120.0000])
