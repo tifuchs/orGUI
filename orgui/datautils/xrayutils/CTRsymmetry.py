@@ -34,17 +34,28 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import itertools
 import math
+from pathlib import Path
 import warnings
 
 import numpy as np
 
 from .HKLVlieg import Lattice
+from ._CTRsource import (
+    _restore_site_properties,
+    _validate_species,
+    structure_from_cif as structure_from_cif,
+)
+from ._CTRsurface import (
+    SurfaceTermination as SurfaceTermination,
+    surface_terminations as surface_terminations,
+)
 
 
 COORDINATE_NAMES = ("x", "y", "z")
 DEFAULT_VARIABLE_NAMES = ("u", "v", "w")
 SYMMETRY_SECTION_HEADERS = {
     "surface_transform:",
+    "bulk_transform:",
     "wyckoff_sites:",
     "wyckoff_atoms:",
     "wyckoff_coupling_matrices:",
@@ -115,7 +126,12 @@ class SurfaceCellSpec:
         atoms are assigned to intervals between successive origins.
     :param translation_range:
         Parent-cell integer translations tested in each direction before the
-        surface cell is wrapped and deduplicated.
+        surface cell is wrapped and deduplicated. ``None`` derives complete
+        per-atom bounds from the transformed surface-cell corners.
+    :param bulk_transform:
+        Optional original periodic basis in parent fractions. When supplied,
+        enumerate its motif before converting to ``transform`` without wrapping
+        lateral coordinates. Its third vector defines the physical repeat.
     """
 
     parent_a: tuple[float, float, float]
@@ -124,7 +140,8 @@ class SurfaceCellSpec:
     origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
     z_bounds: tuple[float, float] = (0.0, 1.0)
     layer_origins: tuple[float, ...] | None = None
-    translation_range: int | tuple[int, int] = 1
+    translation_range: int | tuple[int, int] | None = 1
+    bulk_transform: np.ndarray | None = None
 
     def __post_init__(self):
         transform = np.asarray(self.transform, dtype=np.float64)
@@ -133,6 +150,19 @@ class SurfaceCellSpec:
         if abs(np.linalg.det(transform)) < 1e-12:
             raise ValueError("Surface-cell transform must be invertible.")
         object.__setattr__(self, "transform", transform)
+        if self.bulk_transform is not None:
+            bulk = np.asarray(self.bulk_transform, dtype=np.float64)
+            if (bulk.shape != (3, 3) or not np.all(np.isfinite(bulk))
+                    or abs(np.linalg.det(bulk)) < 1e-12):
+                raise ValueError("bulk_transform must be a finite invertible matrix.")
+            mapping = np.linalg.solve(transform, bulk)
+            if not np.allclose(mapping[:3, :2], np.eye(3)[:, :2], atol=1e-10):
+                raise ValueError("Bulk and surface transforms must share a and b.")
+            if not np.isclose(mapping[2, 2], 1, atol=1e-10):
+                raise ValueError(
+                    "Bulk and surface transforms must share normal height."
+                )
+            object.__setattr__(self, "bulk_transform", bulk.copy())
         object.__setattr__(
             self,
             "parent_a",
@@ -163,15 +193,32 @@ class SurfaceCellSpec:
         """
         return np.linalg.inv(self.transform)
 
-    def parent_translations(self):
+    def parent_translations(self, parent_fractional=None):
         """Generate parent conventional-cell translations to search.
 
+        :param parent_fractional:
+            Parent fractional atom position, required for automatic bounds.
         :returns:
             Iterator over integer translation vectors in parent fractional
             coordinates.
         :rtype:
             iterator
         """
+        if self.translation_range is None:
+            if parent_fractional is None:
+                raise ValueError(
+                    "Automatic translation bounds require an atom position."
+                )
+            corners = np.asarray(list(itertools.product(
+                (0.0, 1.0), (0.0, 1.0), self.z_bounds,
+            )))
+            parent_corners = corners @ self.transform.T + self.origin
+            lower = np.floor(parent_corners.min(axis=0) - parent_fractional).astype(int)
+            upper = np.ceil(parent_corners.max(axis=0) - parent_fractional).astype(int)
+            ranges = [range(lo, hi + 1) for lo, hi in zip(lower, upper)]
+            for translation in itertools.product(*ranges):
+                yield np.asarray(translation, dtype=np.float64)
+            return
         if isinstance(self.translation_range, int):
             lo = -self.translation_range
             hi = self.translation_range
@@ -524,6 +571,11 @@ class SurfaceSymmetryModel:
 
         a, alpha = self.surface_spec.surface_lattice_parameters()
         unitcell = UnitCell(a, alpha, name=name, layer_behavior=layer_behavior)
+        if self.surface_spec.bulk_transform is not None:
+            unitcell.stacking_translation = (
+                self.surface_spec.inverse_transform
+                @ self.surface_spec.bulk_transform[:, 2]
+            )
         if self.atoms and any(not site.coordinates for site in self.sites):
             generated = _reindex_generated_atoms(self.atoms)
         else:
@@ -653,10 +705,13 @@ def sites_from_seed(
     a_tol=5.0,
     backend="pymatgen",
     style="pyxtal",
-    iDW=0.5,
-    oDW=0.5,
-    occ=1.0,
+    iDW=None,
+    oDW=None,
+    occ=None,
     variable_names=DEFAULT_VARIABLE_NAMES,
+    *,
+    displacement=None,
+    fallback_B=0.5,
 ):
     """Assign parent atoms to Wyckoff sites using PyXtal.
 
@@ -683,11 +738,19 @@ def sites_from_seed(
     :param str style:
         PyXtal Wyckoff setting style.
     :param float iDW:
-        In-plane Debye-Waller parameter assigned to generated sites.
+        Explicit in-plane B override in Angstrom squared; otherwise use source.
     :param float oDW:
-        Out-of-plane Debye-Waller parameter assigned to generated sites.
+        Explicit out-of-plane B override in Angstrom squared; otherwise use source.
     :param float occ:
-        Occupancy assigned to generated sites.
+        Explicit occupancy override; otherwise preserve source occupancy.
+    :param displacement:
+        Set to ``"isotropic_equivalent"`` to explicitly reduce anisotropic
+        source data to published Ueq/B or the Cartesian tensor trace.
+    :param fallback_B:
+        B in Angstrom squared when source displacement data are missing.
+        The historical 0.5 default is retained with a warning. ``None`` rejects
+        missing data. CIF paths retain U/B via :func:`structure_from_cif`;
+        Structure inputs may supply ``B_iso``, ``U_iso`` or ``U_cart`` properties.
     :param tuple variable_names:
         Names for Wyckoff free variables in order of PyXtal free coordinates.
     :returns:
@@ -704,18 +767,26 @@ def sites_from_seed(
         crystal.from_seed(seed, tol=tol, a_tol=a_tol, backend=backend, style=style)
         standard_to_seed = np.identity(4)
     else:
+        _validate_species(structure)
         # ``from_seed`` drops ``a_tol`` for pymatgen input and reduces CIF
         # files to a primitive cell; load the seed cell itself instead so the
         # standardization below matches the one PyXtal used.
-        crystal._from_pymatgen(structure, tol, a_tol, style=style)
-        standard_to_seed = _standard_to_seed_matrix(structure, tol, a_tol, style)
+        from pymatgen.core import Structure
+
+        geometry = Structure(
+            structure.lattice,
+            [next(iter(site.species)).symbol for site in structure],
+            structure.frac_coords,
+        )
+        crystal._from_pymatgen(geometry, tol, a_tol, style=style)
+        standard_to_seed = _standard_to_seed_matrix(geometry, tol, a_tol, style)
     sites = _with_unique_site_ids(
         _site_from_pyxtal_site(
             atom_site,
             variable_names=variable_names,
-            iDW=iDW,
-            oDW=oDW,
-            occ=occ,
+            iDW=0.5 if iDW is None else iDW,
+            oDW=0.5 if oDW is None else oDW,
+            occ=1.0 if occ is None else occ,
             standard_to_seed=standard_to_seed,
             seed_structure=structure,
         )
@@ -723,6 +794,14 @@ def sites_from_seed(
     )
     if structure is not None:
         _warn_if_sites_differ_from_seed(sites, structure, max(2.0 * tol, 1e-6))
+        sites = _restore_site_properties(
+            sites, structure, tol, occ, iDW, oDW, displacement, fallback_B,
+        )
+    elif occ is None or iDW is None or oDW is None:
+        raise ValueError(
+            "Cannot preserve properties for this seed/backend; use a pymatgen "
+            "Structure, CIF path or explicit occ, iDW and oDW overrides."
+        )
     return sites, int(crystal.group.number), crystal.group.symbol
 
 
@@ -733,10 +812,13 @@ def model_from_seed(
     a_tol=5.0,
     backend="pymatgen",
     style="pyxtal",
-    iDW=0.5,
-    oDW=0.5,
-    occ=1.0,
+    iDW=None,
+    oDW=None,
+    occ=None,
     variable_names=DEFAULT_VARIABLE_NAMES,
+    *,
+    displacement=None,
+    fallback_B=0.5,
 ):
     """Build a surface symmetry model from a PyXtal-compatible seed.
 
@@ -744,6 +826,12 @@ def model_from_seed(
         Structure seed accepted by PyXtal.
     :param SurfaceCellSpec surface_spec:
         Surface-cell transform and parent lattice.
+    :param displacement:
+        Displacement policy forwarded to :func:`sites_from_seed`.
+    :param fallback_B:
+        Missing-data B fallback in Angstrom squared; ``None`` requires source
+        data or explicit overrides. Other import arguments follow
+        :func:`sites_from_seed`.
     :returns:
         Surface symmetry model ready to build a ``UnitCell``.
     :rtype:
@@ -759,6 +847,8 @@ def model_from_seed(
         oDW=oDW,
         occ=occ,
         variable_names=variable_names,
+        displacement=displacement,
+        fallback_B=fallback_B,
     )
     return SurfaceSymmetryModel(
         surface_spec,
@@ -843,6 +933,13 @@ def generate_surface_atoms(surface_spec, sites, tolerance=1e-8):
     :rtype:
         list
     """
+    coordinate_inverse = surface_spec.inverse_transform
+    projection = None
+    if surface_spec.bulk_transform is not None:
+        projection = coordinate_inverse @ surface_spec.bulk_transform
+        surface_spec = replace(
+            surface_spec, transform=surface_spec.bulk_transform, bulk_transform=None
+        )
     generated = []
     seen = set()
     inverse = surface_spec.inverse_transform
@@ -851,7 +948,10 @@ def generate_surface_atoms(surface_spec, sites, tolerance=1e-8):
 
     for site in sites:
         for coordinate_index, coordinate in enumerate(site.coordinates):
-            for translation in surface_spec.parent_translations():
+            position = np.asarray(
+                [expr.evaluate(site.variables) for expr in coordinate]
+            )
+            for translation in surface_spec.parent_translations(position):
                 parent_exprs = tuple(
                     expression.shifted(translation[index])
                     for index, expression in enumerate(coordinate)
@@ -885,6 +985,9 @@ def generate_surface_atoms(surface_spec, sites, tolerance=1e-8):
                     continue
                 seen.add(key)
 
+                if projection is not None:
+                    wrapped_values = projection @ wrapped_values
+                    wrapped_exprs = _transform_expressions(projection, wrapped_exprs)
                 layer = _assign_layer(wrapped_values[2], surface_spec.layer_origins)
                 atom_index = len(generated)
                 couplings = []
@@ -907,7 +1010,7 @@ def generate_surface_atoms(surface_spec, sites, tolerance=1e-8):
                         site.operation_matrices[coordinate_index],
                         dtype=np.float64,
                     )
-                    site_displacements = inverse @ operation[:3, :3]
+                    site_displacements = coordinate_inverse @ operation[:3, :3]
                     for parent_axis, axis_name in enumerate(COORDINATE_NAMES):
                         for surface_axis, coordinate_name in enumerate(
                             COORDINATE_NAMES
@@ -1011,6 +1114,10 @@ def symmetry_metadata_to_lines(model):
     lines.append("surface_transform:")
     for row in model.surface_spec.transform:
         lines.append("  " + _format_values(row))
+    if model.surface_spec.bulk_transform is not None:
+        lines.append("bulk_transform:")
+        for row in model.surface_spec.bulk_transform:
+            lines.append("  " + _format_values(row))
     lines.append("surface_origin: " + _format_values(model.surface_spec.origin))
     lines.append("wyckoff_sites:")
     lines.append(
@@ -1328,6 +1435,10 @@ def symmetry_metadata_from_lines(lines, unitcell=None):
         transform,
         origin=origin,
         layer_origins=_layer_origins_from_unitcell(unitcell),
+        bulk_transform=(np.asarray([
+            [float(value) for value in row.split()]
+            for row in sections["bulk_transform"]
+        ]) if "bulk_transform" in sections else None),
     )
     return SurfaceSymmetryModel(
         surface_spec,
@@ -1368,8 +1479,12 @@ def _seed_structure(seed, backend):
         return None
     if isinstance(seed, Structure):
         return seed
-    if isinstance(seed, str):
-        return Structure.from_file(seed) if backend == "pymatgen" else None
+    if isinstance(seed, (str, Path)):
+        if backend != "pymatgen":
+            return None
+        if str(seed).lower().endswith((".cif", ".cif.gz", ".mcif")):
+            return structure_from_cif(seed)
+        return Structure.from_file(seed)
     try:
         from ase import Atoms
     except ImportError:

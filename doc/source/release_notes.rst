@@ -11,6 +11,8 @@ Other user-visible changes:
 
 - Stationary and rocking scans now share edits to integration lines by default. Loading a configuration with lines saved for only one mode populates both modes, including existing databases with stationary lines and an empty rocking list. Distinct nonempty saved lists remain intact until edited.
 
+- CTR surface construction can enumerate distinct bulk terminations from Miller indices or a full surface matrix, with inspectable layer sequences, equivalent cuts and automatic translation bounds. CIF import preserves partial occupancy and published displacement values; mixed-species and inconsistent Wyckoff-orbit properties now fail explicitly. Isotropic reduction of anisotropic data requires an explicit choice. Source-preserving defaults can change calculated intensities; explicit occupancy/B overrides remain available for reproducing older uniform assignments. Miller-based construction now defaults to a perpendicular surface c with an explicit lateral stacking translation, supported by bulk/film scattering, interfaces, Poisson height states, density and DWBA. This changes reciprocal indexing: use ``cell_mode="lattice"`` to preserve the old basis, or transform HKL when migrating. Full matrices retain their geometry unless surface mode is requested. Native files preserve the repeat; ROD/SUR export rejects unsupported lateral repeats.
+
 - Expanding SPEC measurement groups with empty column labels no longer crashes the file browser. Unnamed entries appear as disabled placeholders while named counters remain available; the source file is left unchanged.
 
 - Fixed the integration-curve delete/hide dialog for Qt6.

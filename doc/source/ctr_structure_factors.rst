@@ -321,28 +321,57 @@ Semi-infinite bulk amplitude
 -----------------------------
 
 ``UnitCell.F_bulk`` sums ``UnitCell.F_uc_bulk_direct`` over an infinite stack
-of bulk repeats along the out-of-plane direction using a closed-form
+of downward crystal repeats using a closed-form
 geometric series with attenuation:
 
 .. math::
 
    F_{\mathrm{bulk}}(\mathbf{Q})
    = \frac{F_{\mathrm{uc,bulk}}(\mathbf{Q})}
-     {1 - \exp\left(-2\pi i\, l_{\mathrm{bulk}} - \mathrm{atten}\right)},
+     {1 - \exp\left(-i\mathbf{Q}\cdot\mathbf{T} - \eta\right)},
 
-Here ``atten`` is the empirical, dimensionless amplitude-decay exponent per
-reference-cell out-of-plane repeat. The
+Here :math:`\mathbf{T}` is ``UnitCell.repeat_cartesian`` in Angstrom and
+:math:`\mathbf{Q}` is in inverse Angstrom. ``atten`` is the empirical,
+dimensionless amplitude-decay exponent per reference-cell out-of-plane repeat;
+:math:`\eta` is its conversion to this bulk repeat, using
+``atten * abs(refHKLTransform[2, 2])``. The
 :doc:`RuO2/TiO2 kinematical-attenuation tutorial
 <dwba/kinematic_attenuation>` shows how to derive it from the DWBA
 wavevectors at fixed incidence and how to determine the corresponding
 minimum reliable exit angle and :math:`L` range.
 
-where :math:`l_{\mathrm{bulk}}` is the out-of-plane reciprocal index *after*
-conversion from the reference unit cell via ``refHKLTransform``, i.e. the
-third component of ``refHKLTransform @ (h, k, l)``. This is the same index
-used to phase every atom in ``F_uc_bulk_direct``, so the phase advance per
-bulk repeat in the denominator is consistent with the periodicity actually
-being summed.
+For ``stacking_translation=(sx, sy, 1)``, the repeat phase is
+:math:`2\pi(h_{\mathrm{bulk}}s_x+k_{\mathrm{bulk}}s_y+l_{\mathrm{bulk}})`.
+These reciprocal indices are obtained *after* conversion from the reference
+unit cell via ``refHKLTransform @ (h, k, l)``. With the legacy default
+``(0, 0, 1)``, the phase reduces to :math:`2\pi l_{\mathrm{bulk}}`.
+The same coordinate transform phases the motif, so basis conversion and the
+repeat phase are each applied once.
+
+Perpendicular surface cells
+---------------------------
+
+Miller-based ``CTRsymmetry.surface_terminations`` now uses a perpendicular
+coordinate c and a separate physical repeat. See :doc:`wyckoff_fitting` for
+construction, matrix input, and migration of reciprocal indices. Films,
+supercells, layered translations, interfaces, Poisson height states, real-space
+copies, Fourier density profiles, and DWBA use this repeat's lateral registry.
+Normal-only strain stretches its normal component; a rigid normal gap does not
+advance lateral registry. Stack layout passes registry separately from height.
+A Poisson component passes its nominal mean registry to a component above it,
+consistent with its existing mean-height convention; it does not propagate a
+separate upper stack for every roughness realization.
+
+Native unit-cell text files preserve ``stacking_translation`` and the original
+bulk transform. Legacy files default to vertical repeats. ROD/SUR export rejects
+nonvertical repeats because that format cannot preserve the separate state.
+For kinematic ``F_bulk`` with a nonvertical repeat, coherent domains must
+preserve that vector; transformations requiring different bulk repeats raise
+an error and should be represented by separate bulk cells. Existing vertical
+bulk-domain conventions remain unchanged.
+
+This implements crystal stacking geometry. It does not infer terrace widths,
+miscut angle, or coherence from a CIF, or introduce new roughness statistics.
 
 .. warning::
 

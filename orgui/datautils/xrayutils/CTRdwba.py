@@ -117,11 +117,13 @@ def _component_record_cells(component):
             for layer in layers.values()
         ]
     if isinstance(component, Film):
-        if np.any(component._basis_created != component.basis):
+        if (np.any(component._basis_created != component.basis)
+                or component._repeat_state_changed()):
             component.createLayers()
         return [("film_layer", cell) for cell in component.layer_ucs]
     if isinstance(component, EpitaxyInterface):
-        if np.any(component._basis_created != component.basis):
+        if (np.any(component._basis_created != component.basis)
+                or component._repeat_state_changed()):
             component.createInterfaceCells()
         return [
             *(("interface_top", cell) for cell in component.top_layers),
@@ -129,7 +131,8 @@ def _component_record_cells(component):
             *(("interface_reference", cell) for cell in component._reference_layers),
         ]
     if isinstance(component, PoissonSurface):
-        if np.any(component._basis_created != component.basis):
+        if (np.any(component._basis_created != component.basis)
+                or component._repeat_state_changed()):
             component.createLayers()
         records = []
         for surface_cell, film_cell in zip(
@@ -177,6 +180,7 @@ def _hash_record_geometry(records):
                 cell.R_mat_inv,
                 cell.refHKLTransform,
                 cell.refRealTransform,
+                np.asarray(cell.stacking_translation),
                 np.asarray([getattr(cell, "_E", np.nan)], dtype=np.float64),
                 np.asarray(cell.coherentDomainMatrix, dtype=np.float64).reshape(
                     (-1, 3, 4)
@@ -1699,7 +1703,7 @@ class DWBAState:
                     prepared, cell, outer_matrix
                 )
                 if record.component_index == -1:
-                    repeat = position_transform @ np.asarray(cell.R_mat[:, 2])
+                    repeat = position_transform @ cell.repeat_cartesian
                     if bulk_repeat is None:
                         bulk_repeat = repeat
                     elif not np.allclose(bulk_repeat, repeat, rtol=2e-12, atol=2e-13):

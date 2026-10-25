@@ -259,11 +259,13 @@ class _LayerGeometry:
     reference_matrix: np.ndarray
 
 
-def _translate_domains(layers, height):
+def _translate_domains(layers, height, registry=(0, 0, 0)):
     for layer in layers:
         offset = height / layer.a[2]
+        lateral = layer.R_mat_inv @ registry
         for matrix in layer.coherentDomainMatrix:
             matrix[2, 3] += offset
+            matrix[:, 3] += lateral
 
 
 def _move_domains(layers, delta_height):
@@ -274,7 +276,20 @@ def _move_domains(layers, delta_height):
 
 
 class _LayerStackingMixin:
+    def _repeat_signature(self):
+        cells = [getattr(self, name, None) for name in
+                 ("unitcell", "uc_top", "uc_bottom", "_source_unitcell")]
+        cells.extend(getattr(self, "termination_cells", {}).values())
+        film = getattr(self, "underlying_film", None)
+        if film is not None:
+            cells.append(film.unitcell)
+        return tuple(cell.stacking_translation for cell in cells if cell is not None)
+
+    def _repeat_state_changed(self):
+        return getattr(self, "_repeat_created", None) != self._repeat_signature()
+
     def _initialize_layer_stacking(self, kwargs):
+        self._below_registry = (0.0, 0.0, 0.0)
         self.layer_behavior = kwargs.get(
             "layer_behavior",
             kwargs.get("layer_behaviour", "select"),
@@ -494,7 +509,30 @@ class _LayerStackingMixin:
     @property
     def layer_state(self):
         """Return the top structural-layer state of this object."""
-        return LayerState(self.layer_cycle, self.end_layer_number)
+        end = self.end_layer_number
+        source = getattr(self, "uc_top", getattr(self, "unitcell", None))
+        registry = None
+        if source is not None and (
+            source.stacking_translation != (0.0, 0.0, 1.0)
+            or np.any(self._below_registry)
+        ):
+            if getattr(self, "underlying_film", None) is not None:
+                source = self.underlying_film.unitcell
+                advance = (self.basis[0] + self.basis[2]) / len(self._layer_ids)
+                registry = tuple(np.asarray(self._below_registry) +
+                                 advance * np.r_[source.repeat_cartesian[:2], 0])
+            elif getattr(self, "_layers_to_create", None) == 0:
+                registry = self._below_registry
+            else:
+                layers = getattr(self, "top_layers", getattr(self, "layer_ucs", []))
+                layer = next(uc for uc in layers if uc.layers[0] == end)
+                cycle = source.layer_cycle.layers
+                index = cycle.index(end)
+                origins = source._layer_positions_for_cycle(cycle)
+                spacing = (origins[cycle[(index + 1) % len(cycle)]] - origins[end]) % 1
+                boundary = origins[end] + (spacing or 1.0)
+                registry = layer._registry_at_boundary(boundary)
+        return LayerState(self.layer_cycle, end, registry)
 
     @property
     def stacking_height_absolute(self):
@@ -552,6 +590,7 @@ class _LayerStackingMixin:
             bind_underlying(below_component)
         if below_state is None:
             below_state = LayerState(self.layer_cycle, below_layer)
+        self._below_registry = below_state.registry_cartesian or (0.0, 0.0, 0.0)
         if self.layer_behavior == "ignore":
             self.start_layer_number = -1
         else:
@@ -924,7 +963,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                         if z < low - tolerance or z >= high - tolerance:
                             continue
                         fixed = np.copy(matrix)
-                        fixed[2, 3] -= repeat
+                        fixed[:, 3] -= repeat * np.asarray(source.stacking_translation)
                         matrices.append(fixed)
                         occupancies.append(-weight * occupancy)
                 if matrices:
@@ -950,13 +989,13 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
     @property
     def loc_absolute(self):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createInterfaceCells()
         return self._loc_absolute
 
     @property
     def height_absolute(self):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createInterfaceCells()
         upper_layer = self.top_layers[-1]
         pos = upper_layer.coherentDomainMatrix[-1][2, 3]
@@ -970,7 +1009,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
     @property
     def pos_absolute(self):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createInterfaceCells()
         lower_layer = self.top_layers[0]
         matrix = lower_layer.coherentDomainMatrix[0]
@@ -982,7 +1021,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
     @pos_absolute.setter
     def pos_absolute(self, pos):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createInterfaceCells()
         delta_height = pos - self.pos_absolute
         _move_domains(self.top_layers, delta_height)
@@ -993,7 +1032,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
     @property
     def end_layer_number(self):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createInterfaceCells()
         return self._end_layer_number
 
@@ -1019,7 +1058,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         :attr:`stacking_height_absolute` supplies the physical support it must
         not duplicate.
         """
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createInterfaceCells()
         return (
             self.loc_absolute
@@ -1096,8 +1135,10 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         # `Film.createLayers`.
         for layer_id, uc in self.uc_layers_top.items():
             uc.basis[:] = self.uc_top.basis[self.uc_top.basis[:, 7] == layer_id]
+            uc.stacking_translation = self.uc_top.stacking_translation
         for layer_id, uc in self.uc_layers_bottom.items():
             uc.basis[:] = self.uc_bottom.basis[self.uc_bottom.basis[:, 7] == layer_id]
+            uc.stacking_translation = self.uc_bottom.stacking_translation
 
         n_layers = len(self.uc_top.layers)
         if self.type == "skellam":
@@ -1256,6 +1297,8 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                         - top_strain_and_h
                         * self.uc_top.layerpos[self.layer_order[i]]
                     )
+                    mat_top_i[:2, 3] = ((cycle_index + top_layer_offset)
+                        * np.asarray(uc_t.stacking_translation[:2]))
                     coupled_top[i].append(mat_top_i)
 
                     mat_bottom_i = np.copy(mat_0)
@@ -1273,14 +1316,18 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                         - bottom_strain_and_h
                         * self.uc_bottom.layerpos[self.layer_order[i]]
                     )
+                    mat_bottom_i[:2, 3] = ((cycle_index + bottom_layer_offset)
+                        * np.asarray(uc_b.stacking_translation[:2]))
                     coupled_bottom[i].append(mat_bottom_i)
 
                     ideal_top_i = np.copy(mat_0)
-                    ideal_top_i[2, 3] = cycle_index + top_layer_offset
+                    ideal_top_i[:, 3] = ((cycle_index + top_layer_offset)
+                        * np.asarray(uc_t.stacking_translation))
                     ideal_top[i].append(ideal_top_i)
 
                     ideal_bottom_i = np.copy(mat_0)
-                    ideal_bottom_i[2, 3] = cycle_index + bottom_layer_offset
+                    ideal_bottom_i[:, 3] = ((cycle_index + bottom_layer_offset)
+                        * np.asarray(uc_b.stacking_translation))
                     ideal_bottom[i].append(ideal_bottom_i)
                     coupled_height += physical_layer_heights[i]
 
@@ -1357,6 +1404,10 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                     ideal_mat = np.copy(ideal_mat)
                     coupled_mat[2, 3] -= ideal_bottom_loc / a3_top
                     ideal_mat[2, 3] -= ideal_top_loc / a3_top
+                    lateral = (ideal_top_loc / a3_top
+                               * np.asarray(uc_t.stacking_translation[:2]))
+                    coupled_mat[:2, 3] -= lateral
+                    ideal_mat[:2, 3] -= lateral
                     interpolated = ideal_mat + strain_coupling * (
                         coupled_mat - ideal_mat
                     )
@@ -1376,6 +1427,10 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                     ideal_mat = np.copy(ideal_mat)
                     coupled_mat[2, 3] -= ideal_bottom_loc / a3_bottom
                     ideal_mat[2, 3] -= ideal_bottom_loc / a3_bottom
+                    lateral = (ideal_bottom_loc / a3_bottom
+                               * np.asarray(uc_b.stacking_translation[:2]))
+                    coupled_mat[:2, 3] -= lateral
+                    ideal_mat[:2, 3] -= lateral
                     interpolated = ideal_mat + strain_coupling * (
                         coupled_mat - ideal_mat
                     )
@@ -1388,13 +1443,14 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 # same unstrained coordinates used by UnitCell.F_bulk.
                 for ideal_mat in ideal_bottom[i]:
                     fixed_bulk_mat = np.copy(ideal_mat)
-                    fixed_bulk_mat[2, 3] -= ideal_bottom_loc / a3_bottom
+                    fixed_bulk_mat[:, 3] -= (ideal_bottom_loc / a3_bottom
+                        * np.asarray(uc_b.stacking_translation))
                     uc_b.coherentDomainMatrix.append(fixed_bulk_mat)
 
             self._loc_absolute_ref = 0.0
             self._loc_absolute = self.below_H
-            _translate_domains(self.top_layers, self.below_H)
-            _translate_domains(self.bottom_layers, self.below_H)
+            _translate_domains(self.top_layers, self.below_H, self._below_registry)
+            _translate_domains(self.bottom_layers, self.below_H, self._below_registry)
             self._create_reference_layers(
                 self.below_H - ideal_bottom_loc,
                 self.below_H - ideal_bottom_loc
@@ -1403,6 +1459,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             self._end_layer_number = self.layer_order[-1]
 
             self._basis_created = np.copy(self.basis)
+            self._repeat_created = self._repeat_signature()
         else:
             raise NotImplementedError(f"{self.type} is not a valid interface model")
 
@@ -1424,7 +1481,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             Complex interface amplitude in electrons.
         :rtype: numpy.ndarray
         """
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createInterfaceCells()
         if ctr_accel_enabled():
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
@@ -1437,7 +1494,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         return F
 
     def zDensity_G(self, z, h, k):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createInterfaceCells()
         rho = np.zeros_like(z, dtype=np.complex128)
         for uc_t, uc_b in zip(self.top_layers, self.bottom_layers):
@@ -1455,7 +1512,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             ``beta``.
         :rtype: numpy.ndarray
         """
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createInterfaceCells()
         profiles = [uc.optical_profile() for uc in self.top_layers]
         profiles.extend(uc.optical_profile() for uc in self.bottom_layers)
@@ -1933,7 +1990,7 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
 
     @property
     def height_absolute(self):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         if self._layers_to_create == 0:
             return self.below_H
@@ -1949,7 +2006,7 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
 
     @property
     def pos_absolute(self):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         if self._layers_to_create == 0:
             return self.below_H
@@ -1963,7 +2020,7 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
 
     @pos_absolute.setter
     def pos_absolute(self, pos):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         delta_height = pos - self.pos_absolute
         _move_domains(self.layer_ucs, delta_height)
@@ -1971,7 +2028,7 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
 
     @property
     def end_layer_number(self):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         return self._end_layer_number
 
@@ -2002,6 +2059,7 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         # silently broken.
         for layer_id, uc in zip(self._layer_ids, self._layer_ucs_base):
             uc.basis[:] = self.unitcell.basis[self.unitcell.basis[:, 7] == layer_id]
+            uc.stacking_translation = self.unitcell.stacking_translation
 
         n_layers_in_uc = len(self.unitcell.layers)
         scaled_width = self.basis[0] - n_layers_in_uc * (
@@ -2024,6 +2082,7 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         if layers_to_create == 0:
             self._end_layer_number = self.layer_order[-1]
             self._basis_created = np.copy(self.basis)
+            self._repeat_created = self._repeat_signature()
             return
 
         mat_0 = np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
@@ -2043,15 +2102,17 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
 
             mat_i[2, 2] = strain
             mat_i[2, 3] = layer_offset * strain
+            mat_i[:2, 3] = layer_offset * np.asarray(uc.stacking_translation[:2])
 
             uc.coherentDomainMatrix.append(mat_i)
             uc.coherentDomainOccupancy.append(occup)
 
         upper_layer = uc.basis[0, 7]
         self._end_layer_number = upper_layer
-        _translate_domains(self.layer_ucs, self.below_H)
+        _translate_domains(self.layer_ucs, self.below_H, self._below_registry)
 
         self._basis_created = np.copy(self.basis)
+        self._repeat_created = self._repeat_signature()
 
     def F_uc(self, h, k, l):  # noqa: E741
         """Return the Film structure factor in electrons.
@@ -2069,7 +2130,7 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
             Complex Film amplitude in electrons.
         :rtype: numpy.ndarray
         """
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         if ctr_accel_enabled():
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
@@ -2079,7 +2140,7 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         return F
 
     def zDensity_G(self, z, h, k):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         rho = np.zeros_like(z, dtype=np.complex128)
         for uc in self.layer_ucs:
@@ -2094,7 +2155,7 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
             ``beta``.
         :rtype: numpy.ndarray
         """
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         return combine_profiles(*(uc.optical_profile() for uc in self.layer_ucs))
 
@@ -2539,11 +2600,12 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             source_rows = np.rint(tagged.basis[:, 4]).astype(np.intp)
             # Fractional z: z_ref = z_film / repeats_z + (iz / repeats_z +
             # termination layer shift).
-            z_offsets = ref.basis[:, 3] - film_uc.basis[source_rows, 3] / repeats_z
+            offsets = ref.basis[:, 1:4] - (
+                film_uc.basis[source_rows, 1:4] / [1, 1, repeats_z])
             self._film_termination_sources[layer] = (
                 source_rows,
                 repeats_z,
-                z_offsets,
+                offsets,
             )
         if self._reference_unitcell is not None:
             self.setReferenceUnitCell(
@@ -2596,19 +2658,19 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
     @property
     def height_absolute(self):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         return self._height_absolute
 
     @property
     def pos_absolute(self):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         return self.below_H
 
     @pos_absolute.setter
     def pos_absolute(self, pos):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         delta_height = pos - self.pos_absolute
         _move_domains(self.layer_ucs, delta_height)
@@ -2618,7 +2680,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
     @property
     def end_layer_number(self):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         return self._end_layer_number
 
@@ -2815,6 +2877,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         film_matrix = np.copy(mat_0)
         film_matrix[2, 2] = film_strain
         film_matrix[2, 3] = layer_offset * film_strain
+        film_matrix[:2, 3] = layer_offset * np.asarray(film_uc.stacking_translation[:2])
 
         terrace_height = (
             relative_layer_position * self.underlying_film.unitcell.a[2]
@@ -2828,12 +2891,20 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             terrace_height / surface_uc.a[2] - surface_strain * surface_origin
         )
 
+        lateral = (relative_layer_position
+                   * self.underlying_film.unitcell.repeat_cartesian)
+        lateral[2] = 0
+        surface_matrix[:2, 3] = ((surface_uc.R_mat_inv @ lateral)[:2]
+            - surface_origin * np.asarray(surface_uc.stacking_translation[:2]))
+
         reference_matrix = np.copy(mat_0)
         reference_origin = reference_uc.layerpos[float(layer_id)]
         reference_matrix[2, 2] = film_strain
         reference_matrix[2, 3] = (
             terrace_height / reference_uc.a[2] - film_strain * reference_origin
         )
+        reference_matrix[:2, 3] = ((reference_uc.R_mat_inv @ lateral)[:2]
+            - reference_origin * np.asarray(reference_uc.stacking_translation[:2]))
         return _LayerGeometry(
             layer_number=int(layer_number),
             layer_id=float(layer_id),
@@ -2849,6 +2920,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         """Return the matrix carrying the same shift ``_translate_domains`` adds."""
         translated = np.copy(matrix)
         translated[2, 3] += self.below_H / uc.a[2]
+        translated[:, 3] += uc.R_mat_inv @ self._below_registry
         return translated
 
     @staticmethod
@@ -2974,7 +3046,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 "before flat-height corrections can be calculated"
             )
         # Pick up parameter changes through the same path as `F_uc`.
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         if ctr_accel_enabled():
             h, k, l = _ensure_contiguous(  # noqa: E741
@@ -3010,6 +3082,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 "PoissonSurface must be stacked immediately above a Film "
                 "before layers can be created"
             )
+        if (getattr(self, "_repeat_created", None) is not None
+                and self._repeat_state_changed()):
+            start = self.start_layer_number
+            self._bind_underlying_component(self.underlying_film)
+            self._set_start_layer(start)
         # Every cell here is generated from another cell's basis --
         # `split_in_layers` returns views, `generate_surface_termination_cells`
         # returns rotated copies -- and `copy.deepcopy` (which
@@ -3037,14 +3114,15 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             source = sources.get(layer)
             if source is None:
                 continue
-            source_rows, repeats_z, z_offsets = source
+            source_rows, repeats_z, offsets = source
             if (
                 source_rows.shape[0] != ref.basis.shape[0]
                 or source_rows.max(initial=-1) >= film_basis.shape[0]
             ):
                 continue
             ref.basis[:, 1:7] = film_basis[source_rows, 1:7]
-            ref.basis[:, 3] = film_basis[source_rows, 3] / repeats_z + z_offsets
+            ref.basis[:, 1:4] = (film_basis[source_rows, 1:4]
+                                  / [1, 1, repeats_z] + offsets)
 
         n_layers_in_uc = len(self._layer_ids)
         candidates = self._profile_candidates()
@@ -3112,11 +3190,15 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         else:
             self._end_layer_number = self.start_layer_number
             self._height_absolute = self.below_H
-        _translate_domains(self.layer_ucs, self.below_H)
-        _translate_domains(self.film_layer_ucs, self.below_H)
-        _translate_domains(list(self._film_termination_ucs.values()), self.below_H)
+        _translate_domains(self.layer_ucs, self.below_H, self._below_registry)
+        _translate_domains(self.film_layer_ucs, self.below_H, self._below_registry)
+        _translate_domains(
+            list(self._film_termination_ucs.values()), self.below_H,
+            self._below_registry,
+        )
 
         self._basis_created = np.copy(self.basis)
+        self._repeat_created = self._repeat_signature()
 
     def F_uc(self, h, k, l):  # noqa: E741
         """Return the step--Poisson surface correction in electrons.
@@ -3135,7 +3217,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             Complex surface-correction amplitude in electrons.
         :rtype: numpy.ndarray
         """
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         if ctr_accel_enabled():
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
@@ -3151,7 +3233,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         return F
 
     def zDensity_G(self, z, h, k):
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         rho = np.zeros_like(z, dtype=np.complex128)
         for surface_uc, film_uc in zip(self.layer_ucs, self.film_layer_ucs):
@@ -3172,7 +3254,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             ``beta``.
         :rtype: numpy.ndarray
         """
-        if np.any(self._basis_created != self.basis):
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         profiles = []
         for surface_uc, film_uc in zip(self.layer_ucs, self.film_layer_ucs):

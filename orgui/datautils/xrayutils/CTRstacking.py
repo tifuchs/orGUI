@@ -40,10 +40,17 @@ class LayerCycle:
 
 @dataclass(frozen=True)
 class LayerState:
-    """Top structural-layer state propagated during stack layout."""
+    """Top structural-layer state propagated during stack layout.
+
+    ``registry_cartesian`` is the lateral registry at the outgoing boundary,
+    in Angstrom in the stack's common Cartesian frame (third component zero).
+    None retains the legacy unspecified-registry behavior. Normal heights and
+    gaps are passed separately; they do not generate a lateral displacement.
+    """
 
     cycle: LayerCycle
     layer: float
+    registry_cartesian: tuple | None = None
 
 
 @dataclass(frozen=True)

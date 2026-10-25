@@ -1118,6 +1118,38 @@ class UnitCell(Lattice):
         self.dw_increase_constraint = np.array([], dtype=np.bool_)
         self._special_formfactors_present = False
         self.symmetry_metadata = keyargs.get("symmetry_metadata", None)
+        self.stacking_translation = keyargs.get("stacking_translation", (0, 0, 1))
+
+    @property
+    def stacking_translation(self):
+        """Physical upward repeat in cell fractions, with normal component one."""
+        return getattr(self, "_stacking_translation", (0.0, 0.0, 1.0))
+
+    @stacking_translation.setter
+    def stacking_translation(self, value):
+        value = np.asarray(value, dtype=np.float64)
+        if (value.shape != (3,) or not np.all(np.isfinite(value))
+                or not np.isclose(value[2], 1, rtol=0, atol=1e-10)):
+            raise ValueError("stacking_translation must be finite (sx, sy, 1).")
+        if np.any(np.abs(value[:2]) > 1e-12) and not np.allclose(
+            self.alpha[:2], np.pi / 2, rtol=0, atol=1e-10
+        ):
+            raise ValueError("Lateral stacking requires c perpendicular to a and b.")
+        value = np.where(np.abs(value) < 1e-14, 0.0, value)
+        self._stacking_translation = (float(value[0]), float(value[1]), 1.0)
+
+    @property
+    def repeat_cartesian(self):
+        """Return the upward crystal repeat in the cell Cartesian frame, Angstrom."""
+        return self.R_mat @ self.stacking_translation
+
+    def _registry_at_boundary(self, boundary, domain=-1):
+        matrix = self.coherentDomainMatrix[domain]
+        fractional = np.asarray(self.stacking_translation) * boundary
+        cartesian = matrix[:, :3] @ (self.R_mat @ fractional)
+        cartesian += self.R_mat @ matrix[:, 3]
+        cartesian[2] = 0
+        return tuple(cartesian)
 
     def parametersToDict(self):
         d = dict()
@@ -1379,6 +1411,7 @@ class UnitCell(Lattice):
                 uc._formfactor_state = uc._formfactor_state_token()
             uc.refRealTransform = self.refRealTransform
             uc.refHKLTransform = self.refHKLTransform
+            uc.stacking_translation = self.stacking_translation
             layers[l] = uc
         if self._explicit_layer_cycle is not None:
             cycle = tuple(self._explicit_layer_cycle)
@@ -1568,8 +1601,8 @@ class UnitCell(Lattice):
             else:
                 parameter.value = None
 
-    @staticmethod
     def _transform_symmetry_metadata(
+        self,
         metadata,
         old_to_new,
         layer_map,
@@ -1588,6 +1621,7 @@ class UnitCell(Lattice):
                 [xy_translation[0], xy_translation[1], z_shift],
                 dtype=np.float64,
             )
+            coordinate_shift[:2] += z_shift * np.asarray(self.stacking_translation[:2])
             couplings = []
             for coupling in atom.couplings:
                 couplings.append(
@@ -1666,8 +1700,8 @@ class UnitCell(Lattice):
             np.rint(translation[2])
         )
 
-    @staticmethod
     def _shift_layered_basis_values(
+        self,
         values,
         cycle,
         xy_translation,
@@ -1683,6 +1717,9 @@ class UnitCell(Lattice):
             if not np.any(where):
                 continue
             values_new[where, 3] += z_shift_by_layer[layer]
+            values_new[where, 1:3] += (
+                z_shift_by_layer[layer] * np.asarray(self.stacking_translation[:2])
+            )
             if layer_map is not None:
                 values_new[where, 7] = layer_map[layer]
         return values_new
@@ -2078,6 +2115,9 @@ class UnitCell(Lattice):
         transformed.layer_transition = copy.deepcopy(self.layer_transition)
         transformed.refHKLTransform = np.copy(self.refHKLTransform)
         transformed.refRealTransform = np.copy(self.refRealTransform)
+        transformed.stacking_translation = (
+            np.asarray(self.stacking_translation) * repeats[2] / repeats
+        )
         transformed.coherentDomainMatrix = []
         repeats_float = repeats.astype(np.float64)
         for matrix in self.coherentDomainMatrix:
@@ -2103,6 +2143,7 @@ class UnitCell(Lattice):
             for iy in range(int(repeats[1])):
                 for ix in range(int(repeats[0])):
                     cell_offset = np.asarray([ix, iy, iz], dtype=np.float64)
+                    cell_offset[:2] += iz * np.asarray(self.stacking_translation[:2])
                     copy_index = (
                         iz * int(repeats[0]) * int(repeats[1])
                         + iy * int(repeats[0])
@@ -2320,6 +2361,10 @@ class UnitCell(Lattice):
         metadata.surface_spec = dataclasses.replace(
             metadata.surface_spec,
             transform=metadata.surface_spec.transform @ np.diag(repeats),
+            bulk_transform=(
+                metadata.surface_spec.bulk_transform @ np.diag(repeats)
+                if metadata.surface_spec.bulk_transform is not None else None
+            ),
             layer_origins=tuple(
                 (self._layer_positions_for_cycle(self.layer_cycle.layers)[layer] + iz)
                 / repeats[2]
@@ -2386,11 +2431,23 @@ class UnitCell(Lattice):
         else:
             self.start_layer_number = below_layer
         self.pos_absolute = below_height
+        registry = below_state.registry_cartesian or (0, 0, 0)
+        previous = np.asarray(getattr(self, "_below_registry", (0, 0, 0)))
+        delta = self.R_mat_inv @ (np.asarray(registry) - previous)
+        for matrix in self.coherentDomainMatrix:
+            matrix[:, 3] += delta
+        self._below_registry = tuple(registry)
 
     @property
     def layer_state(self):
         """Return the top structural-layer state of this unit cell."""
-        return LayerState(self.layer_cycle, self.end_layer_number)
+        registry = None
+        if (self.stacking_translation != (0.0, 0.0, 1.0)
+                or np.any(getattr(self, "_below_registry", (0, 0, 0)))):
+            origins = self._layer_positions_for_cycle(self.layer_cycle.layers)
+            boundary = min(origins.values()) + 1
+            registry = self._registry_at_boundary(boundary)
+        return LayerState(self.layer_cycle, self.end_layer_number, registry)
 
     @property
     def stacking_height_absolute(self):
@@ -3663,9 +3720,10 @@ class UnitCell(Lattice):
         """Return the semi-infinite bulk structure factor in electrons.
 
         The amplitude represents one lateral bulk unit cell. The geometric
-        lattice sum is applied only along the out-of-plane direction. Its
-        phase and attenuation follow the bulk-cell repeat after conversion
-        from the configured reference unit cell.
+        lattice sum follows ``stacking_translation`` (default ``(0, 0, 1)``).
+        Its phase uses reciprocal coordinates after conversion from the
+        configured reference unit cell. With a lateral repeat, coherent
+        domains must preserve that repeat; use separate bulk cells otherwise.
 
         :param numpy.ndarray h:
             Reference-frame reciprocal coordinate in r.l.u.
@@ -3684,6 +3742,22 @@ class UnitCell(Lattice):
         # The reciprocal transform maps reference r.l.u. to bulk r.l.u.;
         # (2, 2) is the bulk/reference out-of-plane repeat ratio.
         repeat_atten = atten * abs(self.refHKLTransform[2, 2])
+        if self.stacking_translation != (0.0, 0.0, 1.0):
+            repeat = self.repeat_cartesian
+            if any(not np.allclose(matrix[:, :3] @ repeat, repeat,
+                                   rtol=1e-10, atol=1e-10)
+                   for matrix in self.coherentDomainMatrix):
+                raise ValueError(
+                    "Bulk coherent domains must preserve stacking_translation; "
+                    "use separate bulk cells for different repeat vectors."
+                )
+            # Reuse the accelerated motif kernel; only the geometric series
+            # depends on the repeat. This keeps all backends on one convention.
+            hkl = self.refHKLTransform @ np.vstack((h, k, l))
+            phase = np.asarray(self.stacking_translation) @ hkl
+            return self.F_uc_bulk(h, k, l, repeat_atten) / (
+                -np.expm1(-2j * np.pi * phase - repeat_atten)
+            )
         if ctr_accel_enabled():
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
             accel = _ctr_accel_module()
@@ -3844,8 +3918,8 @@ class UnitCell(Lattice):
                 deltaZ2i = basis[i][5] / (8 * (np.pi) ** 2)
                 deltaPara2i = basis[i][4] / (8 * (np.pi) ** 2)
                 z_i = basis[i][3] * self._a[2]
-                y_i_frac = basis[i][2]
-                x_i_frac = basis[i][1]
+                y_i_frac = basis[i][2] - no * self.stacking_translation[1]
+                x_i_frac = basis[i][1] - no * self.stacking_translation[0]
 
                 rho_i[:] = (formf[i][10] + formf[i][11] + 1j * formf[i][12]) / (
                     np.sqrt(2 * np.pi * deltaZ2i)
@@ -4013,6 +4087,8 @@ class UnitCell(Lattice):
                             )
                         if random.random() > occup:
                             positions[no] = np.nan
+                        positions[no, :2] += (signz * (zno - 1)
+                            * np.asarray(self.stacking_translation[:2]))
                         no += 1
             position_cart = self.R_mat @ (
                 domainmatrix @ positions.T + np.atleast_2d(mat[:, -1]).T
@@ -4116,6 +4192,8 @@ class UnitCell(Lattice):
                                 )
                                 + translate
                             )
+                        positions[no, :2] += (signz * (zno - 1)
+                            * np.asarray(self.stacking_translation[:2]))
                         no += 1
             positions_c = self.R_mat @ (
                 domainmatrix @ positions.T + np.atleast_2d(mat[:, -1]).T
@@ -4174,6 +4252,13 @@ class UnitCell(Lattice):
     def atomToStr(self, no, showErrors=True):
         param = self.basis[no][1:]
         name = self.names[no]
+        if self.stacking_translation != (0.0, 0.0, 1.0):
+            if self.errors is not None and showErrors:
+                values = [f"({value:.17g} +- {error:.17g})"
+                          for value, error in zip(param, self.errors[no][1:])]
+            else:
+                values = [format(value, ".17g") for value in param]
+            return name + " " + " ".join(values)
         if (self.errors is not None) and showErrors:
             err = self.errors[no][1:]
             values = [
@@ -4217,6 +4302,10 @@ class UnitCell(Lattice):
         s = ""
         for mat, occu in zip(self.coherentDomainMatrix, self.coherentDomainOccupancy):
             matT = np.vstack((mat[:, :-1], mat[:, -1]))
+            if self.stacking_translation != (0.0, 0.0, 1.0):
+                values = " ".join(format(value, ".17g") for value in matT.flat)
+                s += f"Coherent {occu:.17g} {values}\n"
+                continue
             s += (
                 (f"Coherent {occu:.5f}   ")
                 + np.array2string(
@@ -4230,6 +4319,9 @@ class UnitCell(Lattice):
 
     def latticeRODStr(self):
         a, alpha, _, _ = self.getLatticeParameters()
+        if self.stacking_translation != (0.0, 0.0, 1.0):
+            return " ".join(format(value, ".17g") for value in
+                            (*a, *np.rad2deg(alpha)))
         return "{:.4f} {:.4f} {:.4f} {:.4f} {:.4f} {:.4f}".format(
             *a, *np.rad2deg(alpha)
         )  # noqa: E501
@@ -4249,6 +4341,10 @@ class UnitCell(Lattice):
         layer_positions = ", ".join(f"{p} = {self.layerpos[p]}" for p in self.layerpos)
         st += f"layerpos: {layer_positions}\n"
         st += f"layer_behaviour: {self.layer_behaviour}\n"
+        if self.stacking_translation != (0.0, 0.0, 1.0):
+            st += "stacking_translation: " + " ".join(
+                format(value, ".17g") for value in self.stacking_translation
+            ) + "\n"
         if self._explicit_layer_cycle is not None:
             st += "layer_cycle: {}\n".format(
                 ", ".join(str(layer) for layer in self._explicit_layer_cycle)
@@ -4260,6 +4356,10 @@ class UnitCell(Lattice):
         return st
 
     def parameterStrRod(self):
+        if self.stacking_translation != (0.0, 0.0, 1.0):
+            raise ValueError(
+                "ROD export cannot preserve lateral stacking translations."
+            )
         st = ""
         for i in range(len(self.names)):
             st += self.atomToStr(i, False) + "\n"
@@ -4271,14 +4371,8 @@ class UnitCell(Lattice):
         return st + self.parameterStr()
 
     def writeSURfile(self, filename):
+        st = self.toRODStr()
         with open(filename, "w") as f:
-            st = (
-                "return\n"
-                + self.domainsToStr()
-                + self.latticeRODStr()
-                + "\n"
-                + self.parameterStrRod()
-            )
             f.write(st)
 
     def toRODStr(self):
@@ -4528,11 +4622,17 @@ class UnitCell(Lattice):
             layerpos = dict()
             layer_behaviour = "ignore"
             layer_cycle = None
+            stacking_translation = (0, 0, 1)
             symmetry_lines = []
             reading_symmetry = False
             for l in f:  # noqa: E741
                 line = l.rsplit("//")[0]
                 stripped = line.strip()
+                if stripped.startswith("stacking_translation:"):
+                    stacking_translation = tuple(
+                        float(value) for value in stripped.split(":", 1)[1].split()
+                    )
+                    continue
                 if reading_symmetry or stripped.startswith(
                     (
                         "spacegroup:",
@@ -4694,6 +4794,7 @@ class UnitCell(Lattice):
         uc.layerpos = layerpos
         uc.layer_behaviour = layer_behaviour
         uc._explicit_layer_cycle = layer_cycle
+        uc.stacking_translation = stacking_translation
         # uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
         if len(basis) >= 2:
             basis = np.vstack(basis)

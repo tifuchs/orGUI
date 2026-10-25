@@ -12,6 +12,156 @@ only required when assigning symmetry from a structure seed or querying
 Wyckoff tables. Files that already contain saved symmetry metadata can be
 loaded and fitted without PyXtal.
 
+Enumerating Bulk Surface Terminations
+-------------------------------------
+
+``CTRsymmetry.surface_terminations`` returns inspectable bulk-cut candidates.
+It accepts either Miller indices in the **input CIF setting**, with an optional
+preferred in-plane direction, or an explicit full surface matrix:
+
+.. code-block:: python
+
+   from orgui.datautils.xrayutils import CTRsymmetry
+
+   options = CTRsymmetry.surface_terminations(
+       "TbScO3_published_Pnma.cif",
+       miller=(1, 0, 1),       # (101) Pnma corresponds to (110) Pbnm
+       in_plane=(1, 0, -1),
+       layer_tolerance=0.25,  # Angstrom along the true surface normal
+   )
+
+   # Alternative: keep this exact basis and repeat; no cell reduction.
+   matrix_options = CTRsymmetry.surface_terminations(
+       "TbScO3_published_Pnma.cif",
+       transform=[[1, 0, 1], [0, 1, 0], [-1, 0, 1]],
+       layer_tolerance=0.25,
+   )
+
+   for option in options:
+       print(option.id, option.cut_interval, option.equivalent_cuts)
+       print([layer["composition"] for layer in option.layer_sequence])
+
+   # Select a candidate after inspecting its composition and stacking.
+   substrate = options[0].build_unitcell(
+       "TbScO3_surface",
+       displacement="isotropic_equivalent",
+   )
+   print(substrate.stacking_translation)  # (sx, sy, 1), fractional in this cell
+   print(substrate.repeat_cartesian)       # physical crystal repeat in Angstrom
+
+Miller-index construction defaults to ``cell_mode="surface"``: a and b lie in
+the surface plane and c is perpendicular to both. Alpha and beta are 90 degrees;
+gamma is determined by the in-plane lattice and need not be 90 degrees. This
+changes the coordinate basis without straining the crystal. The physical upward
+repeat is ``a*sx + b*sy + c``, stored as ``stacking_translation=(sx, sy, 1)``.
+The coordinate c alone need not be a crystal lattice translation.
+
+Use ``cell_mode="lattice"`` with Miller indices to retain the original oblique
+periodic cell. Explicit ``transform`` matrices default to lattice mode;
+``cell_mode="surface"`` explicitly projects their third vector onto the normal.
+
+``transform`` columns are direct surface vectors in parent fractional
+coordinates. For this enumeration API it must be an integer 3-by-3 matrix with
+positive determinant. Do not combine it with ``miller`` or ``in_plane``.
+Automatic orientation can choose a different basis or repeat from a previously
+hand-written matrix, so use the matrix form to preserve existing rod indexing.
+
+Reciprocal indices change with the coordinate basis. To compare the same
+physical scattering points in the two modes, convert parent-cell indices using
+``hkl_cell = option.surface_spec.transform.T @ hkl_parent`` (three-row arrays).
+Do not reuse unchanged numeric HKL arrays when migrating an existing fit.
+``refHKLTransform`` still maps reference indices into each cell's coordinates;
+the repeat phase is then evaluated once in those coordinates.
+
+Atoms are grouped by adjacent height separations along the true surface normal,
+including across the periodic boundary. ``layer_tolerance`` is the maximum
+separation within a group, not a maximum total group thickness. A cut is placed
+at the midpoint of each remaining gap. Distorted or buckled chemical layers
+can split into several groups; inspect the result and choose an appropriate
+tolerance rather than assuming equally spaced or chemically defined planes.
+
+``unique=True`` merges candidates only under bulk symmetries preserving the
+oriented surface normal, species, occupancies and known displacement data.
+Anisotropic tensors are transformed when testing equivalence. The complete
+stacking participates in this check, not only the outermost composition.
+``unique=False`` returns all candidate gaps before merging. This enumerates
+bulk-truncated cuts for the requested cell and grouping, not reconstructed
+surfaces, adsorption, or lateral film/substrate registries.
+
+Each candidate exposes:
+
+* ``surface_spec``: resolved parent lattice, coordinate transform, origin and
+  layer boundaries. In surface mode ``bulk_transform`` retains the original
+  integer periodic basis for symmetry enumeration. Parent translation bounds
+  are calculated automatically.
+* ``cut_interval``: the open gap in unshifted oriented fractional z. Its upper
+  endpoint can exceed 1 for a wraparound gap. ``equivalent_cuts`` includes all
+  gaps merged into the candidate, including the representative.
+* ``layer_sequence``: layers from the surface inward, with occupancy-weighted
+  ``composition``, mean ``height_angstrom``, ``spacing_to_next_angstrom``, and
+  individual ``atoms``. The final spacing continues into the next bulk repeat.
+* ``outermost_atoms``: the first layer's atom dictionaries, with source labels,
+  occupancies, fractional coordinates and displacement properties.
+
+The candidate spec describes a wrapped 0 <= z < 1 repeat. ``build_unitcell``
+returns an independent cell translated to -1 <= z < 0, with the selected cut at
+z=0 and crystal on its negative side. Layer heights use this same interface
+origin and perpendicular distance, even when C is oblique. The built cell
+retains Wyckoff metadata. In surface mode this translation follows the full
+repeat, including its lateral component. Fractional x and y may lie outside
+[0, 1); preserving these representatives preserves phase at fractional in-plane
+indices. Candidate IDs are deterministic for unchanged inputs
+and settings; they are not persistent identifiers across changes of setting,
+cell, or grouping tolerance. No preferred termination or surface energy is
+inferred.
+
+Preserving CIF Source Properties
+--------------------------------
+
+``CTRsymmetry.structure_from_cif(path, block=None)`` uses the existing pymatgen
+dependency and retains partial occupancies, source labels, published Ueq/B,
+and anisotropic displacement tensors. Bibliography-only blocks are ignored;
+multiple structural blocks require ``block="name"``. The returned pymatgen
+Structure carries ``B_iso`` and ``U_cart`` site properties in Angstrom squared,
+plus ``cif_label``, ``cif_block`` and ``displacement_anisotropic`` provenance.
+``U_cart`` is Cartesian and rotated for every symmetry image. Published Ueq
+is retained independently of the tensor-derived equivalent value.
+
+Use this loader before modifying the lattice, and retain the site properties
+when constructing or copying structures. Ordinary pymatgen Structures can
+also provide ``B_iso``, ``U_iso`` or ``U_cart`` properties explicitly. Missing
+values remain missing. Unknown, nonpositive or overfull CIF occupancies and
+mixed-species sites are rejected rather than normalized or reduced to a single
+element. Values that differ within a geometrically assigned Wyckoff orbit
+raise an error instead of using just one representative.
+
+Source occupancy and displacement values are now inherited by
+``sites_from_seed``, ``model_from_seed`` and ``surface_unitcell_from_seed``.
+``iDW`` and ``oDW`` are B parameters in Angstrom squared; U is converted using
+:math:`B = 8\pi^2 U`. Explicit ``occ``, ``iDW`` and ``oDW`` still override the
+source. The historical missing-data fallback B=0.5 is retained by these older
+helpers, with a warning; ``fallback_B=None`` disables it. New termination
+builders require an explicit ``fallback_B`` if source displacement data are
+absent. Both explicit B overrides can also be supplied.
+
+Anisotropic data require ``displacement="isotropic_equivalent"`` or explicit
+in-plane and out-of-plane B overrides. The equivalent policy uses published
+Ueq/B when present, otherwise one third of the Cartesian tensor trace, and
+assigns the resulting B to both directions. General anisotropic scattering is
+not implemented by this option. Full tensors remain available on the source
+and candidates for inspection and equivalence checks, in the input structure's
+Cartesian frame. They are provenance, not surface-frame anisotropic scattering
+parameters. Explicit ``iDW``/``oDW`` overrides in surface mode are referenced to
+the surface plane/normal. Isotropic-equivalent B is independent of this rotation.
+
+The example ``examples/CTR/surface_stacking_example.py`` accepts a CIF path and
+compares both modes at identical physical scattering points. It defaults to
+(101), suitable for the published TbScO3 Pnma setting.
+
+This corrects previously silent changes to partial occupancies and displacement
+parameters and can change computed intensities. To reproduce the old uniform
+assignment deliberately, pass ``occ=1.0, iDW=0.5, oDW=0.5``.
+
 Building A Surface Symmetry Model
 ---------------------------------
 
@@ -48,8 +198,10 @@ surface cell as:
 
    p_{\mathrm{surface}} = S^{-1}(p_{\mathrm{parent}} - p_{\mathrm{origin}}).
 
-If PyXtal standardizes or reorients the input structure, the surface transform
-must be expressed in that PyXtal parent basis.
+The transform is expressed in the input parent basis. When PyXtal standardizes
+or reorients the structure, orGUI maps the assigned sites back to that basis.
+Use ``translation_range=None`` to calculate complete per-atom translation
+bounds automatically instead of specifying a search range manually.
 
 Querying Wyckoff Metadata
 -------------------------
@@ -271,6 +423,16 @@ API Reference
    :members: SurfaceCellSpec, SurfaceSymmetryModel, possible_wyckoff_positions,
              sites_from_seed, model_from_seed, surface_unitcell_from_seed
    :member-order: bysource
+   :no-index:
+
+.. autofunction:: orgui.datautils.xrayutils.CTRsymmetry.surface_terminations
+   :no-index:
+
+.. autofunction:: orgui.datautils.xrayutils.CTRsymmetry.structure_from_cif
+   :no-index:
+
+.. autoclass:: orgui.datautils.xrayutils.CTRsymmetry.SurfaceTermination
+   :members: build_unitcell, outermost_atoms
    :no-index:
 
 .. autoclass:: orgui.datautils.xrayutils.CTRuc.UnitCell

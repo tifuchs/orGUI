@@ -353,6 +353,14 @@ class SXRDCrystal:
         height_new = 0.0
         i = 0
         layer_state_new = getattr(self.uc_bulk, "layer_state", None)
+        if (layer_state_new is not None
+                and self.uc_bulk.stacking_translation != (0.0, 0.0, 1.0)):
+            # Stack layout starts at the bulk phase origin z=0. Interfaces
+            # separately account for any native repeat extending above it.
+            layer_state_new = LayerState(
+                layer_state_new.cycle, layer_state_new.layer,
+                self.uc_bulk._registry_at_boundary(0),
+            )
         layer_number_new = layer_state_new.layer if layer_state_new is not None else -1
         loc_new = 0.0
         component_new = self.uc_bulk
