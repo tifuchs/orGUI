@@ -115,3 +115,44 @@ def test_named_hdf5_dataset_keeps_normal_tree_behavior(qapp, tmp_path):
         )
     finally:
         model.removeIndex(root)
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled", "complete"])
+def test_batch_cleanup_refreshes_tree_without_published_lines(qapp, tmp_path, state):
+    """Deleting staging must invalidate lazy tree entries even on failure."""
+    from types import SimpleNamespace
+    from orgui.app.database import DataBase, RockingBatchWriter
+
+    with h5py.File(tmp_path / "changing.h5", "w") as file:
+        file["remaining"] = [3, 4]
+        model = RobustHdf5TreeModel(ownFiles=False)
+        database = SimpleNamespace(
+            _requireOpenFile=lambda: file,
+            _waitForPendingOperations=lambda: None,
+            hdf5model=model,
+        )
+        database.sync_integration_results = lambda: DataBase.sync_integration_results(
+            database
+        )
+        writer = RockingBatchWriter(database, 2, 1)
+        model.insertH5pyObject(file)
+        root = model.index(0, 0)
+        # Cache the staging root without resolving its lazy HDF5 object.
+        _child(model, root, writer.WORK_ROOT)
+        try:
+            writer.close(state)
+            for _ in range(1000):
+                qapp.processEvents()
+                if not model.hasPendingOperations():
+                    break
+                qt.QThread.msleep(1)
+            assert not model.hasPendingOperations()
+            root = model.index(0, 0)
+            assert model.rowCount(root) == 1
+            remaining = _child(model, root, "remaining")
+            assert not model.hasChildren(remaining)
+            np.testing.assert_array_equal(
+                model.data(remaining, model.H5PY_OBJECT_ROLE)[()], [3, 4]
+            )
+        finally:
+            model.removeIndex(root)

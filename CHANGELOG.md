@@ -7,6 +7,13 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Failed or cancelled rocking integrations remove unpublished data and refresh
+  the database tree even when no line completed, preventing crashes from stale
+  staging entries. Scan metadata is published with the first completed line;
+  existing completed lines remain available. Rocking and stationary integrations
+  validate normalization and footprint inputs before image extraction, so missing
+  exposure/monitor data or invalid correction settings fail before long jobs run.
+
 - Stationary and rocking scans now share edits to integration lines by default.
   Loading a configuration with lines saved for only one mode populates both
   modes, including existing databases with stationary lines and an empty

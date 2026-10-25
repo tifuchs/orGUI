@@ -835,8 +835,184 @@ def test_cancelled_assembly_publishes_only_completed_lines(context, monkeypatch)
     )
     assert result["status"] == "cancelled"
     assert not result["paths"]
-    assert "first" not in file["scan/measurement"]
+    assert "scan" not in file
     assert "_orgui_integration_work" not in file
+
+
+def _run_preflight_mode(ctx, mode):
+    if mode == "rocking":
+        return integration.integrate_rocking_scan(ctx, lines=[_prepared_line(ctx)])
+    if mode == "single":
+        return integration.integrate_stationary_scan(ctx)
+    return integration.integrate_stationary_scan(
+        ctx, lines=[{"id": "first", "H_0": [3, 0, 0], "H_1": [0, 0, 1]}],
+        geometry_provider=lambda line: pytest.fail("geometry before preflight"),
+    )
+
+
+@pytest.mark.parametrize("mode", ["rocking", "stationary", "single"])
+@pytest.mark.parametrize("problem, expected", [
+    ("missing_exposure", "exposure_time is required"),
+    ("invalid_exposure", "exposure_time must"),
+    ("missing_monitor", "no primary monitor"),
+    ("invalid_monitor", "monitor must"),
+    ("counter_shape", "broadcast"),
+    ("missing_flux", "requires total_incident_flux"),
+    ("missing_reference", "reference_monitor is required"),
+    ("missing_reference_exposure", "reference_exposure is required"),
+])
+def test_normalization_preflight_precedes_extraction(context, mode, problem, expected):
+    """Validate every frame's counters before workers or geometry are started."""
+    ctx, scan, file = context
+    scan.ic2 = np.ones(len(scan))
+    scan.exposure_time = np.ones(len(scan))
+    state = CorrectionState(
+        primary_monitor="ic2", primary_monitor_kind="rate",
+        total_flux_calibrated=False,
+    )
+    if problem == "missing_exposure":
+        del scan.exposure_time
+    elif problem == "invalid_exposure":
+        scan.exposure_time[-1] = np.nan
+    elif problem == "missing_monitor":
+        del scan.ic2
+    elif problem == "invalid_monitor":
+        scan.ic2[-1] = 0.0
+    elif problem == "counter_shape":
+        scan.ic2 = np.ones(len(scan) - 1)
+    else:
+        state.total_flux_calibrated = True
+        if problem != "missing_flux":
+            state.total_incident_flux = 1000.0
+        if problem == "missing_reference_exposure":
+            state.primary_monitor_kind = "integrated"
+            state.monitor_reference_reading = 10.0
+    ctx.config_snapshot.corrections = state
+    options = ctx.scanSelector.get_integration_options()
+    options["normalization"] = True
+    ctx.scanSelector.get_integration_options = lambda: options
+    reads = scan.reads.copy()
+    result = _run_preflight_mode(ctx, mode)
+    assert result["status"] == "error"
+    assert result["message"].startswith("Correction preflight failed:")
+    assert expected in result["message"]
+    assert scan.reads == reads
+    assert not list(file)
+
+
+@pytest.mark.parametrize("mode", ["rocking", "stationary", "single"])
+@pytest.mark.parametrize("problem, expected", [
+    ("horizontal", "horizontal_interception"),
+    ("shape", "unsupported sample-interception settings version"),
+    ("azimuth", "missing_motor"),
+    ("profile", "finite positive peak density"),
+])
+def test_footprint_preflight_precedes_extraction(context, mode, problem, expected):
+    """Footprint settings fail early without performing overlap quadrature."""
+    from orgui.datautils.xrayutils.corrections.beamprofile import top_hat_profile
+
+    ctx, scan, file = context
+    profile = top_hat_profile(300e-6)
+    settings = {}
+    if problem in {"shape", "azimuth"}:
+        settings = {
+            "enabled": True, "version": 1 if problem == "azimuth" else 99,
+            "shape": {"kind": "rectangle", "dimensions_m": [.01, .01]},
+            "azimuth_source": "missing_motor" if problem == "azimuth" else "auto",
+            "normal_rotation_confirmed": True,
+            "horizontal": {
+                "analytical": True, "shape": "Top hat", "shape_values": [20000],
+            },
+        }
+    elif problem == "profile":
+        profile = SimpleNamespace(peak_density=np.nan)
+    ctx.config_snapshot.corrections = CorrectionState(
+        total_flux_calibrated=False, sample_interception=settings,
+    )
+    options = ctx.scanSelector.get_integration_options()
+    options["footprint"] = True
+    ctx = replace(
+        ctx, getMuOm=lambda: (np.full(len(scan), .01), np.zeros(len(scan))),
+        scanSelector=integration.prepared_selector(
+            options, 0, [3, 0, 0], [0, 0, 1], [3, 3],
+            SimpleNamespace(beamProfile=lambda: profile, sampleLength=lambda: .01),
+        ),
+    )
+    reads = scan.reads.copy()
+    result = _run_preflight_mode(ctx, mode)
+    assert result["status"] == "error"
+    assert result["message"].startswith("Correction preflight failed:")
+    assert expected in result["message"]
+    assert scan.reads == reads
+    assert not list(file)
+
+
+@pytest.mark.parametrize("normalize, kind", [(False, "rate"), (True, "integrated")])
+def test_preflight_preserves_optional_exposure(context, normalize, kind):
+    """Disabled normalization and integrated monitors need no frame exposure."""
+    ctx, scan, _ = context
+    scan.ic2 = np.ones(len(scan))
+    ctx.config_snapshot.corrections = CorrectionState(
+        primary_monitor="ic2", primary_monitor_kind=kind,
+        total_flux_calibrated=False,
+    )
+    options = ctx.scanSelector.get_integration_options()
+    options["normalization"] = normalize
+    ctx.scanSelector.get_integration_options = lambda: options
+    result = integration.integrate_rocking_scan(ctx, lines=[_prepared_line(ctx)])
+    assert result["status"] == "success", result
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_missing_exposure_preflight_keeps_database_usable(
+    context, monkeypatch, existing
+):
+    """A correction failure does no extraction and leaves the database usable."""
+    ctx, scan, file = context
+    if existing:
+        file["scan/title"] = "previous scan"
+        file["scan/measurement/previous"] = [123.0]
+    scan.ic2 = np.ones(len(scan))
+    ctx.config_snapshot.corrections = CorrectionState(
+        primary_monitor="ic2", primary_monitor_kind="rate",
+        total_flux_calibrated=False,
+    )
+    options = ctx.scanSelector.get_integration_options()
+    options["normalization"] = True
+    ctx.scanSelector.get_integration_options = lambda: options
+    refreshed = []
+    ctx.database.sync_integration_results = lambda: refreshed.append(True)
+
+    def finish():
+        assert "_orgui_integration_work" not in file
+        assert refreshed == [True]
+
+    monkeypatch.setattr(
+        logger_utils, "create_progress_logger",
+        lambda *a, **kw: SimpleNamespace(
+            update=lambda value: None, wasCanceled=lambda: False, finish=finish
+        ),
+    )
+    reads_before = scan.reads.copy()
+    result = integration.integrate_rocking_scan(ctx, lines=[_prepared_line(ctx)])
+    assert result["status"] == "error"
+    assert "exposure_time is required for a rate monitor" in result["traceback"]
+    assert not result["paths"]
+    assert scan.reads == reads_before
+    assert refreshed == []
+    if existing:
+        assert file["scan/title"].asstr()[()] == "previous scan"
+        np.testing.assert_array_equal(file["scan/measurement/previous"], [123.0])
+        assert list(file["scan/measurement"]) == ["previous"]
+    else:
+        assert "scan" not in file
+
+    # The same database supports a retry once the missing metadata is supplied.
+    scan.exposure_time = np.ones(len(scan))
+    refreshed.clear()
+    result = integration.integrate_rocking_scan(ctx, lines=[_prepared_line(ctx)])
+    assert result["status"] == "success"
+    assert result["paths"] == ["/scan/measurement/first"]
 
 
 def test_cancel_after_publication_keeps_completed_line(context, monkeypatch):
@@ -869,6 +1045,25 @@ def test_cancel_after_publication_keeps_completed_line(context, monkeypatch):
         file["scan/measurement/first/rois/croibg"][0], 4 * (95 + scan.axis)
     )
     assert "second" not in file["scan/measurement"]
+    assert "_orgui_integration_work" not in file
+
+
+def test_failed_publication_removes_new_scan_metadata(context, monkeypatch):
+    """A failed result move must roll back the newly published scan shell."""
+    ctx, _, file = context
+    move = h5py.Group.move
+
+    def fail_result_move(group, source, target):
+        if "/results/" in source:
+            raise OSError("result move failed")
+        return move(group, source, target)
+
+    monkeypatch.setattr(h5py.Group, "move", fail_result_move)
+    result = integration.integrate_rocking_scan(ctx, lines=[_prepared_line(ctx)])
+    assert result["status"] == "error"
+    assert "result move failed" in result["traceback"]
+    assert not result["paths"]
+    assert "scan" not in file
     assert "_orgui_integration_work" not in file
 
 

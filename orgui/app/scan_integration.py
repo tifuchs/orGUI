@@ -366,6 +366,57 @@ def _resolve_mask(context):
     return replace(context, scanSelector=selector, config_snapshot=snapshot)
 
 
+def _preflight_corrections(context):
+    """Check enabled correction inputs before extraction or database writes.
+
+    Reuse the numerical normalization policy, including frame-array shapes.
+    Footprint geometry uses acquisition angles [rad] and sample lengths [m].
+    Shape overlap still waits for the extracted ROI-valid frame mask; only its
+    profiles, geometry and angle sources are validated here, without quadrature.
+    """
+    try:
+        size = len(context.fscan)
+        if not size:
+            return None
+        options = context.scanSelector.get_integration_options()
+        state = context.config_snapshot.corrections
+        integration_corrections.frame_correction_policy(
+            context.fscan, state, size,
+            use_normalization=options["normalization"], use_illumination=False,
+        )
+        if options["footprint"]:
+            from .sample_interception_config import (
+                resolve_shape_inputs, validate_beam_profile,
+            )
+
+            dialog = context.scanSelector.correctionsDialog.footprintOptions_shared()
+            profile, length = dialog.beamProfile(), dialog.sampleLength()
+            validate_beam_profile(profile)
+            alpha, omega = context.getMuOm()
+            alpha = np.broadcast_to(np.asarray(alpha, dtype=np.float64), (size,))
+            settings = state.sample_interception
+            if settings.get("enabled", False):
+                resolve_shape_inputs(
+                    context.fscan, settings, alpha, count=size, omega=omega,
+                    base_path=getattr(state, "_profile_root", None),
+                )
+            else:
+                integration_corrections.frame_correction_policy(
+                    context.fscan, state, size,
+                    use_normalization=options["normalization"],
+                    use_illumination=True, alpha=alpha,
+                    beam_profile=profile, sample_length=length,
+                )
+    except Exception as exc:
+        message = f"Correction preflight failed: {exc}"
+        logger.warning(message, exc_info=True)
+        return {
+            "status": "error", "message": message,
+            "traceback": traceback.format_exc(), "paths": [],
+        }
+    return None
+
+
 def integrate_stationary_scan(context, *, lines=None, geometry_provider=None):
     """Integrate multiple stationary lines, retaining counters in memory.
 
@@ -376,6 +427,9 @@ def integrate_stationary_scan(context, *, lines=None, geometry_provider=None):
     :returns: Existing status dictionary, including partial saved-line status
         on cancellation or errors.
     """
+    error = _preflight_corrections(context)
+    if error is not None:
+        return error
     try:
         return _integrate_stationary_job(
             replace(_resolve_mask(context), _frame_policy_cache={},
@@ -530,6 +584,9 @@ def integrate_rocking_scan(
     """
     from .database import RockingBatchWriter
 
+    error = _preflight_corrections(context)
+    if error is not None:
+        return error
     if lines is None:
         lines = [
             {
@@ -654,9 +711,6 @@ def integrate_rocking_scan(
                 "measurement": {"@NX_class": "NXentry"},
             }
         }
-        error = context._saveIntegrationResult(scan_metadata, "rocking scan metadata")
-        if error is not None:
-            return error
         offset = 0
         for entry in lines:
             size = len(entry["xy"])
@@ -720,7 +774,8 @@ def integrate_rocking_scan(
             if progress.wasCanceled():
                 raise IntegrationCancelled()
             published = writer.publish(
-                context.activescanname, result_name, line_id=entry.get("id")
+                context.activescanname, result_name, line_id=entry.get("id"),
+                scan_metadata=scan_metadata,
             )
             if published is None:
                 identifier = entry.get("id", entry["name"])
@@ -757,12 +812,16 @@ def integrate_rocking_scan(
             "paths": [] if writer is None else list(writer.published),
         }
     finally:
-        progress.finish()
-        if writer is not None:
-            try:
-                writer.close(state)
-            except Exception:
-                logger.warning("Cannot clean integration staging data", exc_info=True)
+        try:
+            if writer is not None:
+                try:
+                    writer.close(state)
+                except Exception:
+                    logger.warning(
+                        "Cannot clean integration staging data", exc_info=True
+                    )
+        finally:
+            progress.finish()
 
 
 def prepared_selector(options, mode, h0, h1, xy, footprint):

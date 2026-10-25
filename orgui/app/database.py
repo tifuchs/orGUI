@@ -101,6 +101,7 @@ class RockingBatchWriter:
         self.frames = frames
         self.rois = rois
         self.published = []
+        self._created_scans = set()
         compression = getattr(database, "compression", None)
         self.filters = (
             dict(compression)
@@ -209,8 +210,12 @@ class RockingBatchWriter:
         self._rows[name] = offset + size
         self._flush()
 
-    def publish(self, scan_name, name, *, line_id=None):
-        """Publish a finished line at the reader's existing measurement path."""
+    def publish(self, scan_name, name, *, line_id=None, scan_metadata=None):
+        """Publish a finished line and its metadata at the measurement path.
+
+        Optional ``scan_metadata`` is a NeXus mapping keyed by scan name.
+        Keep new scan metadata private until a complete line is available.
+        """
         if not np.all(self.group["committed_frames"][()]):
             raise ValueError("Cannot publish incomplete frame extraction")
         if not self._rows.get(name):
@@ -219,6 +224,17 @@ class RockingBatchWriter:
         target = f"/{scan_name}/measurement/{name}"
         if target in self.file:
             raise ValueError(f"Result path already exists: {target}")
+        if scan_metadata is not None and not self.published:
+            metadata = self.group.require_group("scan_metadata")
+            dicttonx(scan_metadata, metadata, update_mode="add",
+                     create_dataset_args=self.filters)
+            self._flush()
+            if scan_name not in self.file:
+                self.file.move(f"{metadata.name}/{scan_name}", f"/{scan_name}")
+                self._created_scans.add(scan_name)
+            else:
+                dicttonx(scan_metadata, self.file, update_mode="add",
+                         create_dataset_args=self.filters)
         group = self.file[source]
         group.attrs["orgui_batch_job"] = self.job_id
         for key in ("frame_batch", "curve_batch", "memory_mib", "workers"):
@@ -240,12 +256,17 @@ class RockingBatchWriter:
             return
         self.group.attrs["state"] = state
         self._flush()
+        if not self.published:
+            for scan_name in self._created_scans:
+                del self.file[scan_name]
         del self.file[self.path]
         root = self.file[self.WORK_ROOT]
         if not len(root):
             del self.file[self.WORK_ROOT]
         self._flush()
-        if self.published and hasattr(self.database, "sync_integration_results"):
+        # The tree may have seen staging data during progress/event handling.
+        # Refresh even when failure or cancellation published no result.
+        if hasattr(self.database, "sync_integration_results"):
             self.database.sync_integration_results()
 
 
