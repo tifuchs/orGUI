@@ -51,9 +51,15 @@ def _make_selector():
 
 @pytest.fixture
 def selector(qapp):
+    """Destroy the selector's whole widget tree before its callbacks are GC'd."""
     widget = _make_selector()
     yield widget
+    parent = widget._test_parent
+    # parentmainwindow is a Python reference, not the selector's Qt parent.
     widget.deleteLater()
+    qapp.sendPostedEvents(widget, qt.QEvent.DeferredDelete)
+    parent.deleteLater()
+    qapp.sendPostedEvents(parent, qt.QEvent.DeferredDelete)
 
 
 #: Every switch off its default, so a dropped one is visible.
@@ -151,7 +157,11 @@ def test_the_settings_survive_a_nexus_group(selector, tmp_path):
         })
         after = fresh.get_integration_options()
     finally:
+        parent = fresh._test_parent
         fresh.deleteLater()
+        qt.QApplication.sendPostedEvents(fresh, qt.QEvent.DeferredDelete)
+        parent.deleteLater()
+        qt.QApplication.sendPostedEvents(parent, qt.QEvent.DeferredDelete)
 
     assert after["region"] == pytest.approx(options["region"])
     assert after["advanced"] == pytest.approx(options["advanced"])

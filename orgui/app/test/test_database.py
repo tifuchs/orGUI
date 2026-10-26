@@ -38,14 +38,17 @@ def _writeError(*args, **kwargs):
 
 @pytest.fixture
 def database(tmp_path, monkeypatch):
+    """Provide a database and destroy its Qt children before cyclic GC."""
     monkeypatch.chdir(tmp_path)
     _getQApplication()
     db = DataBase(None)
     yield db
     db.closeSafe()
-    # the widget is not deleted on purpose: silx parents its global wait icon
-    # and thread pool to the first widget using them, deleting the widget
-    # breaks the tree model of all following tests.
+    # Destroy Qt children while their Python callbacks are still alive.
+    # Cyclic GC can otherwise clear silx's NoArgPartial before the tree
+    # model emits destroyed, which aborts PyQt during a later test.
+    db.deleteLater()
+    qt.QApplication.sendPostedEvents(db, qt.QEvent.DeferredDelete)
 
 
 def test_temporary_database_is_open_after_creation(database):
@@ -122,7 +125,8 @@ def test_fallback_database_is_created_if_the_new_database_fails(database, monkey
     database.add_nxdict({"@NX_class": "NXcollection", "counter": 1}, h5path="/entry")
 
 
-def test_robust_tree_model_removes_file_which_cannot_be_closed(tmp_path):
+def test_robust_tree_model_removes_file_which_cannot_be_closed(tmp_path, monkeypatch):
+    """A failed close removes the row without escaping into Qt callbacks."""
     _getQApplication()
     filename = str(tmp_path / "data.h5")
     with h5py.File(filename, "w") as h5:
@@ -135,10 +139,17 @@ def test_robust_tree_model_removes_file_which_cannot_be_closed(tmp_path):
     h5file = model.data(
         model.index(0, 0), role=RobustHdf5TreeModel.H5PY_OBJECT_ROLE
     ).file
-    h5file.close = _writeError
-
-    model.removeH5pyObject(h5file)  # must not raise into the Qt event loop
-    assert model.rowCount() == 0
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(h5file, "close", _writeError)
+            model.removeH5pyObject(h5file)  # must not raise into the Qt event loop
+            assert model.rowCount() == 0
+    finally:
+        # The failed close leaves the file in silx's owned-file list. Restore
+        # real I/O before its destroyed callback retries closing that file.
+        h5file.close()
+        model.deleteLater()
+        qt.QApplication.sendPostedEvents(model, qt.QEvent.DeferredDelete)
 
 
 @pytest.fixture

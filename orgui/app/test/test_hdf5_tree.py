@@ -94,6 +94,7 @@ def test_expand_spec_measurement_with_empty_label(
         view.close()
         model.removeIndex(root)
         view.deleteLater()
+        qapp.sendPostedEvents(view, qt.QEvent.DeferredDelete)
 
 
 def test_named_hdf5_dataset_keeps_normal_tree_behavior(qapp, tmp_path):
@@ -115,6 +116,8 @@ def test_named_hdf5_dataset_keeps_normal_tree_behavior(qapp, tmp_path):
         )
     finally:
         model.removeIndex(root)
+        model.deleteLater()
+        qapp.sendPostedEvents(model, qt.QEvent.DeferredDelete)
 
 
 @pytest.mark.parametrize("state", ["failed", "cancelled", "complete"])
@@ -156,3 +159,5 @@ def test_batch_cleanup_refreshes_tree_without_published_lines(qapp, tmp_path, st
             )
         finally:
             model.removeIndex(root)
+            model.deleteLater()
+            qapp.sendPostedEvents(model, qt.QEvent.DeferredDelete)
