@@ -349,14 +349,27 @@ def test_map_rejects_scan_without_any_physical_incidence():
         _reconstruction_frame_policy(config, _Scan())
 
 
-def test_execution_footprint_reports_progress_and_can_cancel():
-    """Execution evaluates unchanged factors while exposing per-frame progress."""
+@pytest.mark.parametrize(
+    ("backend", "frame_count"),
+    [("python", 3), ("native", 3), ("native", 257)],
+)
+def test_execution_footprint_reports_progress_and_can_cancel(
+    monkeypatch, backend, frame_count,
+):
+    """Python frames and native batches preserve factors and allow cancellation."""
+    from orgui.datautils.xrayutils.corrections import sample_interception
+
+    if backend == "python":
+        monkeypatch.setattr(sample_interception, "_sample_interception_cpp", None)
+    elif sample_interception._sample_interception_cpp is None:
+        pytest.skip("native sample-interception extension is unavailable")
+
     class Scan:
-        th = np.array([0.0, -7.0, -30.0])
-        mu = np.full(3, 0.36)
+        th = -np.linspace(0.0, 30.0, frame_count)
+        mu = np.full(frame_count, 0.36)
 
         def __len__(self):
-            return 3
+            return frame_count
 
     state = _footprint_state(use_normalization=False, sample_interception={
         "version": 1, "enabled": True,
@@ -371,11 +384,30 @@ def test_execution_footprint_reports_progress_and_can_cancel():
     _correction_pipeline(config, Scan(), {}, provenance,
                          progress=lambda *event: events.append(event))
     np.testing.assert_array_equal(provenance["illumination"]["divisor"], expected)
-    assert events[0] == (0, 4, "Evaluating footprint correction")
-    assert events[-1] == (3, 4, "Evaluating footprint correction")
-    assert any(event[0] == 1 for event in events)
+    message = "Evaluating footprint correction"
+    assert events[0] == (0, frame_count + 1, message)
+    assert events[-1] == (frame_count, frame_count + 1, message)
+    assert all(event[1:] == (frame_count + 1, message) for event in events)
+    completed = [event[0] for event in events]
+    assert completed == sorted(completed)
+    # Native progress is reported between batches of up to 256 unique
+    # geometries. A three-frame native scan can finish in its first batch.
+    has_intermediate_progress = backend == "python" or frame_count > 256
+    if has_intermediate_progress:
+        assert any(0 < value < frame_count for value in completed)
+
+    cancelled_events = []
+
+    def cancel_after_progress(completed, total, message):
+        """Cancel at the first progress report after some frames were evaluated."""
+        cancelled_events.append((completed, total, message))
+        return completed == 0
+
     cancelled_provenance = {}
     with pytest.raises(InterruptedError, match="cancelled"):
         _correction_pipeline(config, Scan(), {}, cancelled_provenance,
-                             progress=lambda completed, total, msg: completed < 1)
+                             progress=cancel_after_progress)
+    assert cancelled_events[-1][0] > 0
+    if has_intermediate_progress:
+        assert cancelled_events[-1][0] < frame_count
     assert "illumination" not in cancelled_provenance
