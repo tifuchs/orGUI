@@ -57,7 +57,7 @@ import traceback
 
 from . import qutils
 from .scan_integration import BatchOptions, IntegrationCancelled
-from .rocking_tiles import _RowGroup, _read_roi_tile, _join_reduced_tiles
+from .rocking_tiles import _RowDataset, _RowGroup, _read_roi_tile, _join_reduced_tiles
 from .config_data import (
     CURVE_CORRECTIONS_GROUP,
     CURVE_CORRECTIONS_SCHEMA_VERSION,
@@ -116,6 +116,7 @@ QTVERSION = qt.qVersion()
 DEBUG = 0
 
 MAX_ROIS_DISPLAY = 100
+_UNSET = object()
 
 if hasattr(np, "trapezoid"):  # ToDo remove for orGUI release >1.5
     _trapz_impl = np.trapezoid  # numpy >= 2.0
@@ -2042,29 +2043,33 @@ class RockingPeakIntegrator(qt.QMainWindow):
             delta_arm = np.asarray(cnters["delta_arm"][()], dtype=float)
             alpha_pk = np.asarray(cnters["alpha_pk"][()], dtype=float).reshape(-1)
             theta_pk = np.asarray(cnters["theta_pk"][()], dtype=float).reshape(-1)
+            indices = None
+            expected = None
 
             def at_peak(values):
+                nonlocal indices, expected
                 values = np.asarray(values, dtype=float)
                 if values.ndim == 0:
                     return np.full(alpha_pk.shape, float(values))
                 if values.shape == alpha_pk.shape:
                     return values
 
-                alpha = np.asarray(cnters["alpha"][()], dtype=float)
-                theta = np.asarray(cnters["theta"][()], dtype=float)
-                expected = (alpha_pk.size, alpha.shape[-1])
-                alpha = np.broadcast_to(alpha, expected)
-                theta = np.broadcast_to(theta, expected)
+                if indices is None:
+                    alpha = np.asarray(cnters["alpha"][()], dtype=float)
+                    theta = np.asarray(cnters["theta"][()], dtype=float)
+                    expected = (alpha_pk.size, alpha.shape[-1])
+                    alpha = np.broadcast_to(alpha, expected)
+                    theta = np.broadcast_to(theta, expected)
+
+                    def angular_difference(actual, target):
+                        return (actual - target[:, None] + 180.0) % 360.0 - 180.0
+
+                    distance = angular_difference(alpha, alpha_pk) ** 2
+                    distance += angular_difference(theta, theta_pk) ** 2
+                    if np.any(~np.isfinite(distance).any(axis=1)):
+                        raise ValueError("no finite frame lies near a calculated peak")
+                    indices = np.nanargmin(distance, axis=1)
                 values = np.broadcast_to(values, expected)
-
-                def angular_difference(actual, target):
-                    return (actual - target[:, None] + 180.0) % 360.0 - 180.0
-
-                distance = angular_difference(alpha, alpha_pk) ** 2
-                distance += angular_difference(theta, theta_pk) ** 2
-                if np.any(~np.isfinite(distance).any(axis=1)):
-                    raise ValueError("no finite frame lies near a calculated peak")
-                indices = np.nanargmin(distance, axis=1)
                 return values[np.arange(alpha_pk.size), indices]
 
             gamma_arm = at_peak(gamma_arm)
@@ -2092,8 +2097,10 @@ class RockingPeakIntegrator(qt.QMainWindow):
             )
             return None, None
 
-    def _integrate_curve_tile(self, h5_obj, rows, progress):
-        curves = self.get_all_ro_curves(rows=rows)
+    def _integrate_curve_tile(
+        self, h5_obj, rows, progress, *, stored_record=None, detector=_UNSET,
+    ):
+        curves = self.get_all_ro_curves(rows=rows, correction_record=stored_record)
         correction_record = curves.get("correction_record")
         versioned_total_flux = correction_record is not None
         cnters = _RowGroup(h5_obj["rois"], rows)
@@ -2194,7 +2201,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
         detector_acceptance, acceptance_applied = None, False
         solid_angle_mean, solid_angle_compensated = None, False
         if self.lorentzButton.isChecked():
-            detector = self._stored_detector(scangroup)
+            if detector is _UNSET:
+                detector = self._stored_detector(scangroup)
             detector_acceptance, acceptance_applied = self._rocking_acceptance(
                 detector, cnters, x, y
             )
@@ -2255,7 +2263,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
             raise ValueError("No rocking scan selected.")
         name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
-        self._prepareFootprintAction(h5_obj, lazy=True)
+        stored_record = self._prepareFootprintAction(h5_obj, lazy=True)
         cnters = h5_obj["rois"]
         s_array = cnters["s"][()]
         count = s_array.size
@@ -2268,10 +2276,18 @@ class RockingPeakIntegrator(qt.QMainWindow):
         )
         results, acceptances = [], []
         try:
+            _raise_if_cancelled(progress)
+            # These inputs belong to this reduction, not to an individual
+            # tile. Rebuilding pyFAI geometry also forces garbage collection.
+            detector = (
+                self._stored_detector(h5_obj.parent.parent)
+                if self.lorentzButton.isChecked() else None
+            )
             for start in range(0, count, tile_size):
                 _raise_if_cancelled(progress)
                 tile, metadata = self._integrate_curve_tile(
-                    h5_obj, slice(start, min(start + tile_size, count)), progress
+                    h5_obj, slice(start, min(start + tile_size, count)), progress,
+                    stored_record=stored_record, detector=detector,
                 )
                 results.append(tile)
                 if metadata["detector_acceptance"] is not None:
@@ -2609,7 +2625,7 @@ class RockingPeakIntegrator(qt.QMainWindow):
         """Return one rocking curve under its stored correction contract."""
         return self.get_all_ro_curves(idx)
 
-    def get_all_ro_curves(self, idx=None, *, rows=None):
+    def get_all_ro_curves(self, idx=None, *, rows=None, correction_record=None):
         """Return rocking curves without silently changing their scale.
 
         New total-flux records are reconstructed from the immutable base
@@ -2622,6 +2638,8 @@ class RockingPeakIntegrator(qt.QMainWindow):
         :param int or None idx: Read only this curve. It is shown in its
             stored footprint state; a pending footprint action is applied
             only by :meth:`integrate`.
+        :param correction_record: Optional record already parsed from this
+            scan for the current reduction. Per-curve datasets remain lazy.
         """
         if idx is not None and rows is not None:
             raise ValueError("Use idx or rows, not both")
@@ -2629,19 +2647,30 @@ class RockingPeakIntegrator(qt.QMainWindow):
         name = self._currentRoInfo["name"]
         h5_obj = self.database.nxfile[name]
         if CURVE_CORRECTIONS_GROUP in h5_obj:
-            record = RockingPeakIntegrator._storedCurveCorrectionRecord(h5_obj)
+            record = correction_record
+            if record is None:
+                record = RockingPeakIntegrator._storedCurveCorrectionRecord(h5_obj)
             if record is not None and record.algorithm.startswith(
                 ("framewise_ctr_total_flux_", "shape_interception_")
             ):
                 if selection is not None:
+                    def select(value):
+                        """Select a curve tile without reading unused arrays."""
+                        # Keep unused provenance arrays unread. Reconstructing
+                        # a stored curve needs only its base, variance and
+                        # divisors, not every extraction diagnostic.
+                        if isinstance(selection, slice):
+                            return _RowDataset(value, selection)
+                        return value[selection]
+
                     record = dataclasses.replace(
                         record,
                         profile_provenance={
-                            key: value[selection] if np.ndim(value) >= 2 else value
+                            key: select(value) if np.ndim(value) >= 2 else value
                             for key, value in record.profile_provenance.items()
                         },
                         **{
-                            field.name: getattr(record, field.name)[selection]
+                            field.name: select(getattr(record, field.name))
                             for field in dataclasses.fields(record)
                             if np.ndim(getattr(record, field.name)) >= 2
                         },

@@ -12,6 +12,12 @@ Other user-visible changes:
   therefore agree for tilted rods, including 00L with nonzero phi/chi. The
   machine-parameter dialog accepts signed chi and phi from -360 to 360 degrees.
 
+- Rocking-curve reduction reuses stored detector geometry and correction
+  metadata across batches, reads only the correction arrays it needs, and
+  batches detector acceptance geometry. This removes repeated setup and I/O
+  when integrating with "Keep stored correction" while preserving the
+  framewise corrections and propagated errors.
+
 - Failed or cancelled rocking integrations remove unpublished data and refresh
   the database tree even when no line completed, preventing crashes from stale
   staging entries. Scan metadata is published with the first completed line;

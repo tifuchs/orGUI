@@ -9,7 +9,11 @@ class _RowDataset:
         self.rows = rows
         self.shape = (rows.stop - rows.start,) + dataset.shape[1:]
         self.ndim = dataset.ndim
-        self.attrs = dataset.attrs
+        self.attrs = getattr(dataset, "attrs", {})
+
+    def __array__(self, dtype=None, copy=None):
+        array = np.asarray(self.dataset[self.rows], dtype=dtype)
+        return array.copy() if copy else array
 
     def __getitem__(self, key):
         # Reading a tile first also supports the old [:, 0][()] idiom.

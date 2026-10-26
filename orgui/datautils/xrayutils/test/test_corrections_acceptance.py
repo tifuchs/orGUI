@@ -149,6 +149,88 @@ def test_a_zero_or_negative_region_is_rejected():
         acceptance.out_of_plane_acceptance(det, 300.0, 240.0, -5.0, 0.0)
 
 
+@pytest.mark.parametrize("orientation", [1, 2, 3, 4])
+def test_paired_surface_angles_match_scalar_geometry(orientation):
+    """Broadcast pairs preserve tilt, arm reference and detector orientation."""
+    det = _calibrated_detector(rot3=0.31)
+    det.rot1, det.rot2 = 0.07, -0.12
+    det.detector = pyFAI.detectors.Detector(
+        pixel1=PIXEL, pixel2=PIXEL, max_shape=SHAPE, orientation=orientation,
+    )
+    det.setAzimuthalReference(0.43)
+    det.setArmReference(gamma_arm=0.06, delta_arm=-0.11)
+    row = np.array([[120.0], [430.0]])
+    column = np.array([60.0, 230.0, 410.0])
+    alpha = np.array([[0.01], [0.08]])
+    gamma_arm = np.array([0.0, 0.2, -0.1])
+    delta_arm = np.array([0.1, -0.3, 0.4])
+    inputs = np.broadcast_arrays(row, column, alpha, gamma_arm, delta_arm)
+    expected = np.empty((2, 2, 3))
+    for index in np.ndindex(2, 3):
+        values = [float(value[index]) for value in inputs]
+        angles = det.surfaceAnglesPoint(
+            np.array([values[0]]), np.array([values[1]]), *values[2:]
+        )
+        expected[(slice(None),) + index] = np.asarray(angles).ravel()
+    actual = acceptance._surface_gamma(
+        det, row, column, alpha, gamma_arm, delta_arm
+    )
+    np.testing.assert_allclose(actual, expected[0], rtol=1e-12, atol=1e-14)
+    if orientation == 3:
+        paired = det.surfaceAnglesPointPairs(
+            row, column, alpha, gamma_arm, delta_arm
+        )
+        np.testing.assert_allclose(paired, expected, rtol=1e-12, atol=1e-14)
+
+
+def test_acceptance_batches_geometry_instead_of_calling_per_curve(monkeypatch):
+    """Two edge batches suffice even when every arm position differs."""
+    det = _calibrated_detector(rot3=0.3)
+    original = det.detector.calc_cartesian_positions
+    calls = []
+
+    def positions(row, column, *args, **kwargs):
+        """Count position batches without changing detector geometry."""
+        calls.append(np.shape(row))
+        return original(row, column, *args, **kwargs)
+
+    monkeypatch.setattr(det.detector, "calc_cartesian_positions", positions)
+    monkeypatch.setattr(
+        det, "surfaceAnglesPoint",
+        lambda *a: pytest.fail("per-curve geometry evaluation"),
+    )
+    result = acceptance.out_of_plane_acceptance(
+        det, np.linspace(100, 500, 257), 240.0, 30.0, 0.01,
+        np.linspace(0.0, 0.3, 257), 0.2,
+    )
+    assert result.shape == (257,)
+    assert calls == [(257,), (257,)]
+    assert np.all(result > 0)
+
+
+def test_paired_parallax_refusal_retains_scalar_acceptance(monkeypatch):
+    """A configured parallax correction must never be silently skipped."""
+    det = _calibrated_detector()
+    det._parallax = object()
+    with pytest.raises(NotImplementedError, match="parallax"):
+        det.surfaceAnglesPointPairs([100.0], [240.0], 0.01, [0.1], [0.2])
+    calls = []
+
+    def scalar(row, column, alpha, gamma_arm, delta_arm):
+        """Stand in for the parallax-capable scalar geometry."""
+        calls.append(gamma_arm)
+        return _LinearDetector().surfaceAnglesPoint(
+            row, column, alpha, gamma_arm, delta_arm
+        )
+
+    monkeypatch.setattr(det, "surfaceAnglesPoint", scalar)
+    result = acceptance.out_of_plane_acceptance(
+        det, [100.0, 200.0], 240.0, [20.0, 40.0], 0.01, [0.1, 0.2], 0.3,
+    )
+    np.testing.assert_allclose(result, np.array([20.0, 40.0]) * 1e-4)
+    assert calls == [0.1, 0.2, 0.1, 0.2]
+
+
 def test_pixel_acceptance_is_the_one_row_case():
     """The resolution limit, and the unit a region's acceptance is read in."""
     det = _LinearDetector()

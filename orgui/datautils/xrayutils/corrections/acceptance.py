@@ -104,9 +104,9 @@ def _surface_gamma(detector, row, column, alpha, gamma_arm=None, delta_arm=None)
         )
         return np.asarray(gamma, dtype=np.float64)
 
-    # ``surfaceAnglesPoint`` accepts one arm geometry at a time. A rocking
-    # reduction instead supplies one ROI and one arm position per curve, so
-    # evaluate those pairs rather than forming every arm-by-ROI combination.
+    # Batch one ROI and arm position per curve without forming every
+    # arm-by-ROI combination. Custom detectors and configured parallax
+    # retain the scalar geometry contract below.
     row, column, alpha, gamma_arm, delta_arm = np.broadcast_arrays(
         row,
         column,
@@ -114,6 +114,13 @@ def _surface_gamma(detector, row, column, alpha, gamma_arm=None, delta_arm=None)
         np.asarray(gamma_arm, dtype=np.float64),
         np.asarray(delta_arm, dtype=np.float64),
     )
+    paired = getattr(detector, "surfaceAnglesPointPairs", None)
+    if paired is not None:
+        try:
+            gamma, _delta = paired(row, column, alpha, gamma_arm, delta_arm)
+            return np.asarray(gamma, dtype=np.float64)
+        except NotImplementedError:
+            pass
     result = np.empty(row.shape, dtype=np.float64)
     for index in np.ndindex(row.shape):
         gamma, _delta = detector.surfaceAnglesPoint(

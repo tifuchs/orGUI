@@ -782,7 +782,7 @@ class Detector2D_SXRD(geometry.Geometry):
         tth = np.arctan2(np.sqrt(t1 * t1 + t2 * t2), t3)
         return tth, np.arctan2(t1, t2) + self._deltaChi
 
-    def _tthAzimuthAtArms(self, x, y, gamma_arm, delta_arm):
+    def _tthAzimuthAtArms(self, x, y, gamma_arm, delta_arm, *, pairwise=False):
         """:meth:`_tthAzimuthAtArm` for one set of points at many arm positions.
 
         A rocking or reflectivity scan needs exactly this shape of problem:
@@ -806,6 +806,9 @@ class Detector2D_SXRD(geometry.Geometry):
         :param y: Pixel column (pyFAI dimension 2), same shape as ``x``.
         :param gamma_arm: Arm ``gamma_p`` per frame, shape ``(n_frames,)``.
         :param delta_arm: Arm ``delta_p`` per frame, shape ``(n_frames,)``.
+        :param bool pairwise: Pair each point with its own arm position rather
+            than evaluating every point at every arm. Inputs must then have
+            the same shape and the output retains that shape.
         :returns: ``(tth, azimuth)``, each shape ``(n_frames,) + x.shape``,
             in rad, azimuth already offset by the azimuthal reference.
         :rtype: tuple
@@ -826,6 +829,8 @@ class Detector2D_SXRD(geometry.Geometry):
         gamma_arm = np.asarray(gamma_arm, dtype=np.float64)
         delta_arm = np.asarray(delta_arm, dtype=np.float64)
         point_shape = x.shape
+        if pairwise:
+            gamma_arm, delta_arm = gamma_arm.ravel(), delta_arm.ravel()
 
         # The position-only half: pixel coordinates minus the PONI, as a
         # vector from the sample. Computed once, shared by every frame.
@@ -853,8 +858,14 @@ class Detector2D_SXRD(geometry.Geometry):
         home = pyFAIRotationMatrix(*self.param[3:6])
         rotation = relabel.T @ relative @ relabel @ home  # (n_frames, 3, 3)
 
-        coord_sample = np.einsum("nij,jm->nim", rotation, coord_det)
-        t1, t2, t3 = coord_sample[:, 0], coord_sample[:, 1], coord_sample[:, 2]
+        if pairwise:
+            coord_sample = np.einsum(
+                "nij,jn->in", rotation.reshape(-1, 3, 3), coord_det
+            )
+            t1, t2, t3 = coord_sample
+        else:
+            coord_sample = np.einsum("nij,jm->nim", rotation, coord_det)
+            t1, t2, t3 = coord_sample[:, 0], coord_sample[:, 1], coord_sample[:, 2]
 
         orientation = self.detector.orientation
         if orientation in (1, 2):
@@ -862,7 +873,7 @@ class Detector2D_SXRD(geometry.Geometry):
         if orientation in (1, 4):
             t2 = -t2
 
-        out_shape = (gamma_arm.shape[0],) + point_shape
+        out_shape = point_shape if pairwise else (gamma_arm.shape[0],) + point_shape
         t1 = t1.reshape(out_shape)
         t2 = t2.reshape(out_shape)
         t3 = t3.reshape(out_shape)
@@ -946,6 +957,43 @@ class Detector2D_SXRD(geometry.Geometry):
         delta = np.arcsin(
             (np.sin(delta_p) * np.cos(gamma_p)) / np.cos(gamma)
         )  # evil, revise!!!
+        return gamma, delta
+
+    def surfaceAnglesPointPairs(self, x, y, alpha_i, gamma_arm, delta_arm):
+        """Surface angles pairing each detector point with its own arm.
+
+        This uses linear memory and batches the calibrated rotations, as
+        needed for rocking-curve detector acceptance.
+
+        :param x: Pixel row (pyFAI dimension 1).
+        :param y: Pixel column (pyFAI dimension 2).
+        :param alpha_i: Incidence angle in radian.
+        :param gamma_arm: Primary-beam-frame arm gamma in radian.
+        :param delta_arm: Primary-beam-frame arm delta in radian.
+        :returns: ``(gamma, delta)`` in radian, broadcast over all inputs.
+        :raises NotImplementedError: If parallax or a non-default detector
+            orientation needs the scalar :meth:`surfaceAnglesPoint` path.
+        """
+        # pyFAI releases differ in whether non-default orientation flips
+        # occur before or after rotation. Preserve the installed scalar
+        # implementation for those detectors rather than assuming an order.
+        if self.detector.orientation not in (0, 3):
+            raise NotImplementedError("paired geometry needs default orientation")
+        x, y, alpha_i, gamma_arm, delta_arm = np.broadcast_arrays(
+            *[np.asarray(value, dtype=np.float64) for value in
+              (x, y, alpha_i, gamma_arm, delta_arm)]
+        )
+        tth, azimuth = self._tthAzimuthAtArms(
+            np.require(x, requirements=["C"]),
+            np.require(y, requirements=["C"]),
+            gamma_arm, delta_arm, pairwise=True,
+        )
+        gamma_p, delta_p = _primBeamFromTthAzimuth(tth, azimuth)
+        gamma = np.arcsin(
+            np.cos(alpha_i) * np.sin(gamma_p)
+            - np.sin(alpha_i) * np.cos(delta_p) * np.cos(gamma_p)
+        )
+        delta = np.arcsin(np.sin(delta_p) * np.cos(gamma_p) / np.cos(gamma))
         return gamma, delta
 
     def surfaceAnglesPointParam(

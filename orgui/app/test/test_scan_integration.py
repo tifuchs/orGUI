@@ -776,9 +776,32 @@ def test_reduction_tiles_match_full_nested_results(
         add_nxdict=lambda data, **kwargs: saved.append(data),
     )
     monkeypatch.setattr(ConfigData, "from_gui", lambda gui: ctx.config_snapshot)
+    detector_reads = []
+    record_reads = []
+    read_record = RockingPeakIntegrator._storedCurveCorrectionRecord
+
+    def stored_detector(scangroup):
+        """Count geometry rebuilds across complete reduction runs."""
+        detector_reads.append(scangroup.name)
+        return None
+
+    def stored_record(curvegroup):
+        """Count correction parsing across complete reduction runs."""
+        record_reads.append(curvegroup.name)
+        return read_record(curvegroup)
+
+    monkeypatch.setattr(driver, "_stored_detector", stored_detector)
+    monkeypatch.setattr(driver, "_storedCurveCorrectionRecord", stored_record)
+    monkeypatch.setattr(
+        RockingPeakIntegrator, "_storedCurveCorrectionRecord",
+        staticmethod(stored_record),
+    )
     for size in (5, 1, 2):
         driver.rocking_batch_options = integration.BatchOptions(curves=size)
         driver.integrate()
+
+    assert len(detector_reads) == (3 if lorentz else 0)
+    assert len(record_reads) == 3
 
     def compare(a, b):
         """Compare every nested reduced array and metadata field."""

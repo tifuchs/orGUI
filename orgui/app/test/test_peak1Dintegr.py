@@ -918,6 +918,58 @@ def test_one_total_flux_curve_is_read_lazily_in_its_stored_state(tmp_path):
     assert curve["illumination_action"] == "applied"
 
 
+def test_curve_tile_does_not_read_unused_extraction_arrays(tmp_path, monkeypatch):
+    """Keep stored correction loads only the base curve and its divisors."""
+    base = np.arange(1.0, 16.0).reshape(5, 3)
+    record = CurveCorrectionRecord(
+        algorithm="framewise_ctr_total_flux_v1",
+        output_quantity="rocking_ctr_photon_curve",
+        scale_convention="total_flux_relative",
+        normalization_status="applied",
+        normalization_divisor=np.array([2.0, 3.0, 4.0]),
+        illumination_status="applied",
+        illumination_convention="total_flux_H",
+        illumination_divisor=np.full_like(base, 0.5),
+        base_croibg=base,
+        base_croibg_variance=base,
+        base_croi=base,
+        polarization_croi_factor=base,
+        alpha=base,
+        profile_provenance={"sample_azimuth": base},
+    )
+    path = tmp_path / "tile.h5"
+    dicttonx(
+        {"scan": {CURVE_CORRECTIONS_GROUP: curve_correction_record_to_nxdict(record)}},
+        path,
+    )
+    original = h5py.Dataset.__getitem__
+    reads = []
+
+    def read(dataset, key):
+        """Reject extra diagnostic reads and full per-curve reads."""
+        if dataset.ndim == 2:
+            assert dataset.name.rsplit("/", 1)[-1] in {
+                "croibg", "croibg_variance", "divisor",
+            }
+            assert key == slice(1, 3)
+            reads.append(dataset.name)
+        return original(dataset, key)
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", read)
+    with h5py.File(path, "r") as handle:
+        driver = SimpleNamespace(
+            _currentRoInfo={"name": "/scan", "axisname": "mu", "axis": np.arange(3)},
+            database=SimpleNamespace(nxfile=handle),
+            footprint_action=FOOTPRINT_KEEP,
+        )
+        curves = RockingPeakIntegrator.get_all_ro_curves(driver, rows=slice(1, 3))
+        np.testing.assert_allclose(curves["croibg"], base[1:3] / [2, 3, 4] / 0.5)
+        np.testing.assert_allclose(
+            curves["croibg_errors"], np.sqrt(base[1:3]) / [2, 3, 4] / 0.5,
+        )
+    assert len(reads) == 3
+
+
 def test_unknown_legacy_curve_only_allows_keep_and_requests_reextraction():
     """Unknown provenance cannot expose apply/remove as safe operations."""
     state = RockingPeakIntegrator._correctionUiState(
