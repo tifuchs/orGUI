@@ -32,6 +32,7 @@ import numpy as np
 from .. import util
 import warnings
 import os
+import json
 from dataclasses import dataclass
 
 # random.seed(45)
@@ -56,6 +57,7 @@ from .CTRstacking import (  # noqa: F401
     LayerCycle,
     LayerState,
     LayerTransition,
+    StackValidationError,
 )
 
 
@@ -161,6 +163,9 @@ class SXRDCrystal:
     factor is included.
     """
 
+    # Old pickles have no instance policy; they retain legacy semantics.
+    _stack_policy = None
+
     def __init__(self, uc_bulk, *uc_surface, **keyargs):
         """Create a surface X-ray diffraction crystal model.
 
@@ -181,6 +186,7 @@ class SXRDCrystal:
             out-of-plane repeat.
         """
         self.uc_bulk = uc_bulk
+        self._stack_policy = None
         self.uc_surface_list = list(uc_surface)
         self.enable_uc_stacking = keyargs.get("enable_stacking", False)
         if not self.enable_uc_stacking:
@@ -225,8 +231,210 @@ class SXRDCrystal:
         reference_rotation = keyargs.get("reference_rotation", np.identity(3))
         self.setGlobalReferenceUnitCell(reference_uc, reference_rotation)
 
+    @classmethod
+    def from_stack(cls, uc_bulk, components, *, overlap="error", **kwargs):
+        """Create a validated bottom-to-top stack of interface/Film pairs.
+
+        Supplied objects are retained, as with the legacy constructor. Each
+        interface takes its upper cell first and its lower cell second.
+        Terminal surfaces, overlapping transition supports, nonunit crystal
+        weights, and outer domains are not supported by this strict API.
+        Material templates require one unit-occupancy identity domain;
+        interface strain coupling and explicit lattice geometry are supported.
+        Explicit ``layer_transition`` selectors may connect differently named
+        adjacent cycles with the same native layer positions and cyclic order.
+
+        :param UnitCell uc_bulk: Semi-infinite substrate.
+        :param components: Nonempty iterable of EpitaxyInterface, Film pairs.
+        :param str overlap: Only ``"error"`` is supported.
+        :param kwargs: Existing crystal options, except stacking overrides.
+        :returns: A crystal that revalidates support on each evaluation.
+        :rtype: SXRDCrystal
+        :raises StackValidationError: For unsupported topology or geometry.
+        """
+        policy = cls._parse_stack_policy({"version": 1, "overlap": overlap})
+        components = list(components)
+        cls._validate_stack_components(uc_bulk, components)
+        if "stacking" in kwargs or not kwargs.get("enable_stacking", True):
+            raise StackValidationError("from_stack assigns ascending stacking levels")
+        kwargs["enable_stacking"] = True
+        crystal = cls(uc_bulk, *components,
+                      stacking=np.arange(1, len(components) + 1), **kwargs)
+        crystal._stack_policy = policy
+        crystal.apply_stacking()
+        return crystal
+
+    @staticmethod
+    def _parse_stack_policy(policy):
+        if not isinstance(policy, dict) or set(policy) != {"version", "overlap"}:
+            raise StackValidationError("Invalid stack policy metadata")
+        if policy["version"] != 1 or policy["overlap"] != "error":
+            raise StackValidationError(f"Unsupported stack policy: {policy!r}")
+        return {"version": 1, "overlap": "error"}
+
+    @staticmethod
+    def _validate_stack_components(bulk, components):
+        if not isinstance(bulk, UnitCell):
+            raise StackValidationError("Strict stacks require a UnitCell substrate")
+        if not components or len(components) % 2:
+            raise StackValidationError(
+                "Strict stacks require nonempty (EpitaxyInterface, Film) pairs; "
+                "terminal surfaces are not supported")
+        names = set()
+        identities = {id(bulk)}
+        for index, component in enumerate(components):
+            expected = EpitaxyInterface if index % 2 == 0 else Film
+            if not isinstance(component, expected):
+                raise StackValidationError(
+                    f"Component {index} must be {expected.__name__}")
+            name = component.name
+            if (not isinstance(name, str) or not name.strip() or name == "bulk"
+                    or name != name.strip() or "//" in name
+                    or name in names or any(c in name for c in "\n\r#")):
+                raise StackValidationError(
+                    f"Invalid or duplicate component name {name!r}")
+            if id(component) in identities:
+                raise StackValidationError(f"Component {name!r} is reused")
+            identities.add(id(component))
+            names.add(name)
+
+    @staticmethod
+    def _validate_stack_cells(source, target, description, transition=None):
+        # Atomic coordinates, scattering factors, occupancies and disorder may
+        # differ deliberately. Geometry must describe the same adjacent lattice.
+        for attr in ("a", "alpha", "refHKLTransform", "R_mat",
+                     "stacking_translation"):
+            if not np.allclose(getattr(source, attr), getattr(target, attr),
+                               rtol=1e-10, atol=1e-12):
+                raise StackValidationError(f"{description}: incompatible {attr}")
+        source_cycle = source.layer_cycle
+        target_cycle = target.layer_cycle
+        if transition is not None:
+            if len(source_cycle.layers) != len(target_cycle.layers):
+                raise StackValidationError(
+                    f"{description}: unequal layer counts are not supported")
+            # A transition selects an upper START after a lower TERMINATION;
+            # it is not a same-plane label correspondence. Establish that
+            # correspondence independently using native fractional positions.
+            # Adjacent templates have the same lattice, checked above, so this
+            # preserves absolute registry as well as physical layer spacings.
+            for lower, upper in transition.mapping.items():
+                if lower not in source_cycle.layers or upper not in target_cycle.layers:
+                    raise StackValidationError(
+                        f"{description}: transition {lower!r} -> {upper!r} "
+                        "references a layer outside the adjacent cycles")
+            correspondence = {}
+            for upper in target_cycle.layers:
+                matches = [lower for lower in source_cycle.layers
+                           if np.isclose(source.layerpos[lower], target.layerpos[upper],
+                                         rtol=0, atol=1e-12)]
+                if len(matches) != 1:
+                    raise StackValidationError(
+                        f"{description}: transition requires matching physical "
+                        "layer positions; labels alone cannot change geometry")
+                correspondence[upper] = matches[0]
+            if len(set(correspondence.values())) != len(correspondence):
+                raise StackValidationError(
+                    f"{description}: ambiguous physical layer correspondence")
+            renamed_cycle = LayerCycle(
+                [correspondence[layer] for layer in target_cycle.layers])
+            if not source_cycle.is_rotation_of(renamed_cycle):
+                raise StackValidationError(
+                    f"{description}: transition requires a one-to-one cyclic "
+                    "layer geometry; unequal layer counts are not supported")
+            return correspondence
+        if (not source_cycle.is_rotation_of(target_cycle)
+                or source.layerpos.keys() != target.layerpos.keys()
+                or any(not np.isclose(source.layerpos[key], target.layerpos[key],
+                                      rtol=0, atol=1e-12)
+                       for key in source.layerpos)):
+            raise StackValidationError(f"{description}: incompatible layer geometry")
+        return {layer: layer for layer in target_cycle.layers}
+
+    def _validate_stack_definition(self):
+        self._parse_stack_policy(self._stack_policy)
+        components = self.uc_surface_list
+        self._validate_stack_components(self.uc_bulk, components)
+        levels = np.asarray(self.uc_stacking)
+        if (levels.shape != (len(components),) or not np.isfinite(levels).all()
+                or not np.equal(levels, np.floor(levels)).all()
+                or np.any(np.diff(levels) <= 0)):
+            raise StackValidationError(
+                "Strict stacking levels must increase bottom to top")
+        if not self.enable_uc_stacking:
+            raise StackValidationError("Strict stacks cannot disable stacking")
+        if (np.shape(self.weights) != (len(components),)
+                or not np.all(np.asarray(self.weights) == 1)):
+            raise StackValidationError("Strict stacks require unit component weights")
+        if len(self.domains) != len(components):
+            raise StackValidationError("Strict stacks require one domain per component")
+        for component, domains in zip(components, self.domains):
+            if (len(domains) != 1 or domains[0][1] != 1
+                    or not np.array_equal(domains[0][0], np.eye(3))):
+                raise StackValidationError(
+                    f"{component.name}: strict stacks require identity outer domains")
+        below = self.uc_bulk
+        lower_layer_maps = {}
+        for interface, film in zip(components[::2], components[1::2]):
+            for cell in (below, interface.uc_bottom, interface.uc_top, film.unitcell):
+                # Interface generation builds its own domains; Film generation
+                # only uses selected template-domain entries. Neither defines
+                # a general multi-domain lattice transition. Require explicit
+                # lattice/atomic geometry and the interface's strain parameter.
+                identity = np.column_stack((np.eye(3), np.zeros(3)))
+                matrices = np.asarray(cell.coherentDomainMatrix)
+                if (matrices.shape != (1, 3, 4)
+                        or not np.array_equal(matrices[0], identity)
+                        or not np.array_equal(cell.coherentDomainOccupancy, [1.])):
+                    raise StackValidationError(
+                        f"{interface.name}: material template {cell.name!r} must "
+                        "have one unit-occupancy identity coherent domain")
+            lower_layer_maps[id(interface)] = self._validate_stack_cells(
+                below, interface.uc_bottom, f"Below {interface.name}",
+                interface.layer_transition if interface.layer_behavior == "select"
+                else None)
+            self._validate_stack_cells(interface.uc_top, film.unitcell,
+                                       f"{interface.name} / {film.name}",
+                                       film.layer_transition
+                                       if film.layer_behavior == "select" else None)
+            if not np.array_equal(interface.uc_top.layers, interface.uc_bottom.layers):
+                raise StackValidationError(
+                    f"{interface.name}: top/bottom layer identifiers must match")
+            if not np.isfinite(film.basis[0]) or film.basis[0] < 0:
+                raise StackValidationError(
+                    f"{film.name}: W must be finite and nonnegative")
+            below = film.unitcell
+        # Public lists may have changed since construction. Never use stale
+        # constructor-derived ordering to validate or generate a strict stack.
+        self.uc_surface_list_ordered = np.array(components)
+        self.uc_stacking_ordered = levels.copy()
+        return lower_layer_maps
+
+    def _validate_stack_support(self):
+        previous = None
+        for interface in self.uc_surface_list[::2]:
+            low, high = interface._support_bounds
+            if not np.isfinite([low, high]).all() or low >= high:
+                raise StackValidationError(f"{interface.name}: invalid support bounds")
+            if previous is not None:
+                prior, prior_low, prior_high = previous
+                # Relative roundoff in absolute heights plus the existing
+                # layer-boundary tolerance, expressed in Angstrom.
+                tolerance = (1e-10 * max(interface.uc_bottom.a[2], prior.uc_top.a[2])
+                             + 32 * np.finfo(float).eps
+                             * max(abs(low), abs(prior_high), 1.))
+                if low < prior_high - tolerance:
+                    raise StackValidationError(
+                        f"{prior.name} support [{prior_low:.12g}, {prior_high:.12g}) "
+                        f"overlaps {interface.name} support [{low:.12g}, {high:.12g}) "
+                        "Angstrom; increase Film W or reduce interface support "
+                        f"(W={interface.basis[0]:g}, S={interface.basis[1]:g})")
+            previous = interface, low, high
+
     def parametersToDict(self):
         d = dict()
+        if self._stack_policy is not None:
+            d["stack_policy"] = dict(self._stack_policy)
         d["weights_0"] = self.weights_0
         d["_parIdNo"] = self._parIdNo
 
@@ -253,6 +461,11 @@ class SXRDCrystal:
         self.uc_bulk.clearParameters()
 
     def parametersFromDict(self, d, override_values=True):
+        if "stack_policy" in d:
+            policy = self._parse_stack_policy(d["stack_policy"])
+            if self._stack_policy is not None and policy != self._stack_policy:
+                raise StackValidationError("Conflicting model and fit stack policies")
+            self._stack_policy = policy
         for p in self.parameters:
             self.parameters[p] = []
 
@@ -278,6 +491,8 @@ class SXRDCrystal:
             warnings.warn(
                 "Weight values not updated from Parameter values. This can cause a mismatch between weight and fitparameter values!"  # noqa: E501
             )
+        if self._stack_policy is not None:
+            self.apply_stacking()
 
     def updateFromParameters(self):
         self.weights = np.copy(self.weights_0)
@@ -341,6 +556,8 @@ class SXRDCrystal:
             Complex surface amplitude in electrons per reference lateral cell.
         :rtype: numpy.ndarray
         """
+        if self._stack_policy is not None:
+            self.apply_stacking()
         F = np.zeros_like(Larray, dtype=np.complex128)
         for uc, weight in zip(self.uc_surface_list, self.weights):
             area_scale = self.reference_area / uc.uc_area
@@ -349,6 +566,9 @@ class SXRDCrystal:
 
     def apply_stacking(self):
         """Generate object positions and cyclic layers from bottom to top."""
+        lower_layer_maps = {}
+        if self._stack_policy is not None:
+            lower_layer_maps = self._validate_stack_definition()
         self.enable_uc_stacking = True
         height_new = 0.0
         i = 0
@@ -374,17 +594,23 @@ class SXRDCrystal:
             while self.uc_stacking_ordered[i] == stacking_level:
                 uc = self.uc_surface_list_ordered[i]
                 if isinstance(uc, EpitaxyInterface):
-                    uc._bind_underlying_components(lower_components)
+                    uc._bind_underlying_components(
+                        lower_components,
+                        layer_correspondence=lower_layer_maps.get(id(uc)))
                 if hasattr(uc, "stack_on"):
                     stack_kwargs = {"below_state": layer_state_new}
                     if isinstance(uc, PoissonSurface):
                         stack_kwargs["below_component"] = below_component
-                    uc.stack_on(
-                        below_loc,
-                        below_height,
-                        below_layer,
-                        **stack_kwargs,
-                    )
+                    try:
+                        uc.stack_on(below_loc, below_height, below_layer,
+                                    **stack_kwargs)
+                    except ValueError as exc:
+                        if self._stack_policy is None:
+                            raise
+                        raise StackValidationError(
+                            f"{uc.name}: {exc}; lower origin={below_loc:.12g}, "
+                            f"support height={below_height:.12g} Angstrom"
+                        ) from exc
                 else:
                     uc.start_layer_number = below_layer
                     uc.pos_absolute = below_height
@@ -403,6 +629,8 @@ class SXRDCrystal:
                 completed_components.append((uc, self.weights[component_index]))
                 i += 1
                 if i == len(self.uc_stacking_ordered):
+                    if self._stack_policy is not None:
+                        self._validate_stack_support()
                     return
             lower_components.extend(completed_components)
 
@@ -530,7 +758,7 @@ class SXRDCrystal:
             harray, karray, Larray, self.atten
         )
         hkl = np.vstack((harray, karray, Larray))
-        if self.enable_uc_stacking:
+        if self.enable_uc_stacking or self._stack_policy is not None:
             self.apply_stacking()
 
         # `total` is accumulated contribution by contribution in the original
@@ -1349,7 +1577,7 @@ class SXRDCrystal:
         return state
 
     def zDensity_G(self, z, h, k):
-        if self.enable_uc_stacking:
+        if self.enable_uc_stacking or self._stack_policy is not None:
             self.apply_stacking()
         rho = self.uc_bulk.zDensity_G_asbulk(z, h, k)
         for uc, w in zip(self.uc_surface_list, self.weights):
@@ -1371,7 +1599,7 @@ class SXRDCrystal:
         :raises NotImplementedError:
             If a component does not expose an atomistic optical profile.
         """
-        if self.enable_uc_stacking:
+        if self.enable_uc_stacking or self._stack_policy is not None:
             self.apply_stacking()
         profiles = [self.uc_bulk.optical_profile_asbulk()]
         water_components = []
@@ -1572,6 +1800,9 @@ class SXRDCrystal:
         :rtype: str
         """
         s = f"E = {self.uc_bulk._E * 1e-3:.5f} keV\n"
+        if self._stack_policy is not None:
+            self.apply_stacking()
+            s += "// StackPolicy " + json.dumps(self._stack_policy) + "\n"
         for i, (no, w, uc) in enumerate(
             zip(self.uc_stacking, self.weights, self.uc_surface_list)
         ):
@@ -1587,6 +1818,18 @@ class SXRDCrystal:
 
     @staticmethod
     def fromStr(string, atten=0.01):
+        policies = [line.strip()[len("// StackPolicy"):].strip()
+                    for line in string.splitlines()
+                    if line.strip().startswith("// StackPolicy")]
+        if len(policies) > 1:
+            raise StackValidationError("Duplicate stack policy metadata")
+        policy = None
+        if policies:
+            try:
+                policy = SXRDCrystal._parse_stack_policy(json.loads(policies[0]))
+            except (TypeError, ValueError) as exc:
+                raise StackValidationError(
+                    f"Invalid stack policy metadata: {exc}") from exc
         weights = []
         werrors = []
         uc_suface = []
@@ -1651,6 +1894,9 @@ class SXRDCrystal:
         xtal.weights = np.array(weights)
         xtal.weights_0 = np.copy(weights)
         xtal.werrors = np.array(werrors) if errors else None
+        xtal._stack_policy = policy
+        if policy is not None:
+            xtal.apply_stacking()
         return xtal
 
     def __getitem__(self, uc_name_or_index):

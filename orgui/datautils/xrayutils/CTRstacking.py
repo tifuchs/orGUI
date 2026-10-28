@@ -3,6 +3,10 @@
 from dataclasses import dataclass
 
 
+class StackValidationError(ValueError):
+    """A strict multilayer stack violates its topology or support contract."""
+
+
 @dataclass(frozen=True)
 class LayerCycle:
     """Ordered local structural-layer identifiers for one crystal structure."""

@@ -833,7 +833,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         self.below_H = height
         self.createInterfaceCells()
 
-    def _bind_underlying_components(self, components):
+    def _bind_underlying_components(self, components, *, layer_correspondence=None):
         """Bind live (component, weight) pairs, bulk first, before stacking.
 
         This derived context is rebuilt by SXRDCrystal, not persisted in model
@@ -841,6 +841,10 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         structural boundary zero supplied by ``set_below``.
         """
         self._underlying_components = tuple(components)
+        # Strict stacking proves correspondence by physical native positions.
+        # Keys are interface-bottom IDs, values are underlying material IDs.
+        # Legacy stacking retains its established label lookup when unset.
+        self._lower_layer_correspondence = layer_correspondence
         self._basis_created[:] = np.nan
 
     def _lower_reference_origin(self):
@@ -854,6 +858,8 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         include its forward phase offset, rather than moving the lattice.
         """
         first = self.layer_order[0]
+        correspondence = getattr(self, "_lower_layer_correspondence", None)
+        lower_first = first if correspondence is None else correspondence[first]
         if not self._underlying_components:
             return 0.0
         if len(self._underlying_components) > 1:
@@ -863,21 +869,22 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 next_index = component._layers_to_create % len(component.layer_order)
                 next_layer = component.layer_order[next_index]
                 first_position = source.layerpos.get(
-                    first, self.uc_bottom.layerpos[first],
+                    lower_first, self.uc_bottom.layerpos[first],
                 )
                 phase = (first_position - source.layerpos[next_layer]) % 1.0
                 return phase * source.a[2] * source.coherentDomainMatrix[0][2, 2]
             if isinstance(component, EpitaxyInterface):
                 source = component.uc_top
                 first_position = source.layerpos.get(
-                    first, self.uc_bottom.layerpos[first],
+                    lower_first, self.uc_bottom.layerpos[first],
                 )
                 next_layer = component.layer_order[0]
                 return ((first_position - source.layerpos[next_layer]) % 1.0
                         * source.a[2])
             if isinstance(component, UnitCell):
                 matrix = component.coherentDomainMatrix[-1]
-                native = component.layerpos.get(first, self.uc_bottom.layerpos[first])
+                native = component.layerpos.get(
+                    lower_first, self.uc_bottom.layerpos[first])
                 origin = (matrix[2, 2] * native + matrix[2, 3]) * component.a[2]
                 phase = (origin - self.below_H) / component.a[2]
                 if np.isclose(phase, round(phase), rtol=0, atol=1e-12):
@@ -887,7 +894,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         bulk = self._underlying_components[0][0]
         # Explicit transitions can rename the lower cycle. Native lower-cell
         # coordinates still define its registry; labels are not distances.
-        origin = (bulk.layerpos[first] if first in bulk.layers
+        origin = (bulk.layerpos[lower_first] if lower_first in bulk.layers
                   else self.uc_bottom.layerpos[first])
         last = max(bulk.layerpos[layer] for layer in bulk.layers)
         origin += np.floor(last - origin) + 1.0
@@ -1027,6 +1034,12 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         _move_domains(self.top_layers, delta_height)
         _move_domains(self.bottom_layers, delta_height)
         _move_domains(self._reference_layers, delta_height)
+        # Older pickles have no derived support metadata. Their legacy
+        # translation still works; strict stacking regenerates the metadata.
+        for attribute in ("_support_bounds", "_replacement_bounds"):
+            if hasattr(self, attribute):
+                setattr(self, attribute, tuple(
+                    z + delta_height for z in getattr(self, attribute)))
         self.below_H = pos
         self._loc_absolute = self._loc_absolute_ref + self.below_H
 
@@ -1451,11 +1464,30 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             self._loc_absolute = self.below_H
             _translate_domains(self.top_layers, self.below_H, self._below_registry)
             _translate_domains(self.bottom_layers, self.below_H, self._below_registry)
-            self._create_reference_layers(
+            self._replacement_bounds = (
                 self.below_H - ideal_bottom_loc,
                 self.below_H - ideal_bottom_loc
                 + len(unitcells) / n_layers * a3_bottom,
             )
+            # Conservative support is the union of BOTH generated material
+            # fields and the exact replacement window. Endpoints are structural
+            # layer boundaries in Angstrom, not atomic positions or occupancy
+            # thresholds. Exclude appended sharp-reference subtraction domains.
+            bounds = list(self._replacement_bounds)
+            for layers, parent, spacings in (
+                (self.top_layers, self.uc_top, top_layer_space),
+                (self.bottom_layers, self.uc_bottom, bottom_layer_space),
+            ):
+                for layer, layer_id, spacing in zip(layers, self.layer_order, spacings):
+                    matrices = np.asarray(
+                        layer.coherentDomainMatrix[:len(probability_top)])
+                    start = parent.layerpos[layer_id]
+                    endpoints = (matrices[:, 2, 3, None]
+                                 + matrices[:, 2, 2, None]
+                                 * np.array([start, start + spacing])) * parent.a[2]
+                    bounds.extend((float(endpoints.min()), float(endpoints.max())))
+            self._support_bounds = min(bounds), max(bounds)
+            self._create_reference_layers(*self._replacement_bounds)
             self._end_layer_number = self.layer_order[-1]
 
             self._basis_created = np.copy(self.basis)
@@ -1902,12 +1934,23 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
     parameterLookup_inv = dict(map(reversed, parameterLookup.items()))
 
     def __init__(self, unitcell, **kwargs):
+        """Create a Film with an optional nominal width in structural layers.
+
+        :param UnitCell unitcell: Repeating film material.
+        :param float width_layers: Nonnegative nominal W; defaults to zero.
+            Fractional values retain the existing layer-rounding convention.
+            W is not an exact physical thickness in Angstrom.
+        :raises ValueError: If width_layers is negative or nonfinite.
+        """
         super().__init__()
+        width = float(kwargs.pop("width_layers", 0.0))
+        if not np.isfinite(width) or width < 0:
+            raise ValueError("Film width_layers must be finite and nonnegative")
         self.type = type
         self.set_ucs(unitcell, **kwargs)
-        self.basis = np.array([0.0])
+        self.basis = np.array([width])
         self._basis_created = np.array([np.nan])
-        self.basis_0 = np.array([0.0])
+        self.basis_0 = np.array([width])
         self.errors = None
         if "name" in kwargs:
             self.name = kwargs["name"]

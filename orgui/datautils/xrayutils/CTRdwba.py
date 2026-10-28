@@ -758,7 +758,8 @@ class DWBAState:
 
     def _live_records(self):
         self._require_available()
-        if self._crystal.enable_uc_stacking:
+        if (self._crystal.enable_uc_stacking
+                or self._crystal._stack_policy is not None):
             self._crystal.apply_stacking()
         bulk = self._crystal.uc_bulk
         records = [
@@ -856,6 +857,16 @@ class DWBAState:
 
     def _atomic_model_snapshot(self):
         if self._batch_depth and self._batch_snapshot is not None:
+            if self._crystal._stack_policy is not None:
+                # Batches prohibit model mutation, but must not let a cached
+                # snapshot conceal invalid strict geometry if a caller does
+                # change parameters. Keep valid-batch cache semantics intact.
+                try:
+                    self._crystal.apply_stacking()
+                except ValueError:
+                    self._batch_snapshot = None
+                    self._batch_packings = {}
+                    raise
             return self._batch_snapshot
 
         self._cache_counters["snapshot_builds"] += 1
