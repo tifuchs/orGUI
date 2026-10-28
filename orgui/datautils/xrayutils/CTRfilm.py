@@ -974,11 +974,14 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                         matrices.append(fixed)
                         occupancies.append(-weight * occupancy)
                 if matrices:
-                    # Keep equal-material additions and removals together.
+                    # Merge only a shared order source, not merely equal
+                    # current crystallinities: independent fits may diverge.
                     # DWBA can then cancel their atomic and optical reference
                     # terms within the same signed record at a sharp interface.
                     matching = next((layer for layer in self.bottom_layers
-                                     if all(np.array_equal(getattr(layer, attr, None),
+                                     if (layer._crystallinity_owner()
+                                         is source._crystallinity_owner())
+                                     and all(np.array_equal(getattr(layer, attr, None),
                                                            getattr(source, attr, None))
                                             for attr in ("basis", "names", "a",
                                                          "alpha", "refHKLTransform",
@@ -2550,6 +2553,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 source,
                 film_layer_ids,
             )
+            for cell in self.termination_cells.values():
+                cell._crystallinity_source = source
         if set(self.termination_cells) != set(film_layer_ids):
             raise ValueError(
                 "PoissonSurface requires exactly one surface unit cell for "
@@ -2619,6 +2624,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 film_layer_ids,
             )
             reference_uc = film_terminations[layer]
+            reference_uc._crystallinity_source = film_uc
             reference_uc.name = f"{film_uc.name}_reference_termination_{layer:g}"
             self._film_termination_ucs[layer] = reference_uc
 

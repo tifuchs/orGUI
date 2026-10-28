@@ -9,6 +9,8 @@ Unreleased (2026-07-19)
 
 Other user-visible changes:
 
+- Unit cells support a fitted ``crystallinity`` amplitude fraction in [0, 1]. Film, interface, and Poisson-surface layers inherit their source material's value; removed material retains the underlying source's crystallinity. Kinematic amplitudes and DWBA atomic-minus-reference contrasts scale while optical profiles stay fixed. Text models and HDF5 fit settings preserve the parameter, and older models default to fully crystalline material.
+
 - Mu/reflectivity-scan ROI trajectories now keep the scan theta fixed instead of imposing equal incident and exit angles. Stationary and rocking overlays therefore agree for tilted rods, including 00L with nonzero phi/chi. The machine-parameter dialog accepts signed chi and phi from -360 to 360 degrees.
 
 - Rocking-curve reduction reuses stored detector geometry and correction metadata across batches, reads only the correction arrays it needs, and batches detector acceptance geometry. This removes repeated setup and I/O when integrating with "Keep stored correction" while preserving the framewise corrections and propagated errors.

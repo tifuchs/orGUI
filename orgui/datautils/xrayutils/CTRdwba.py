@@ -352,9 +352,10 @@ class DWBAContribution:
     reference lateral cell and have the same scalar or array shape as the
     parent :class:`DWBAResult`.
 
-    Only the two independently computed arrays are stored.  ``F_atomic`` and
-    ``F_reference`` come straight from the native kernel; ``F_h`` is their
-    difference and is derived on access.  Off specular every ``F_reference``
+    ``F_atomic`` is the effective-density amplitude: the native crystalline
+    atomic amplitude A is interpolated with its reference R as R + c*(A-R).
+    ``F_reference`` is the unchanged native reference; ``F_h`` is their
+    difference and is derived on access. Off specular every ``F_reference``
     is identically zero and all records share one zero array.
     """
 
@@ -385,7 +386,9 @@ class DWBAResult:
 
     **What is stored.**  The native kernel computes exactly two arrays per
     generated record, the atomic amplitude and the planar-reference amplitude.
-    Those, the summed :attr:`F_h`, and the Fresnel amplitude :math:`r_0` from
+    The atomic amplitude is then mixed with the reference according to the
+    source cell's crystallinity, keeping their difference equal to c*(A-R).
+    Those effective amplitudes, the summed :attr:`F_h`, and :math:`r_0` from
     the field solver are the only independent quantities; every other member
     below is derived arithmetic and is evaluated on access, which costs
     microseconds and avoids holding redundant arrays during a fit.
@@ -1898,6 +1901,18 @@ class DWBAState:
         )
         atomic = np.asarray(atomic, dtype=np.complex128)
         reference = np.asarray(reference, dtype=np.complex128)
+        # Crystallinity changes only the contrast, never the optical reference
+        # or the native packing. Read live source values even in a fit batch.
+        # Retain exact legacy arithmetic for c=1 and exact cancellation at c=0.
+        for index, record in enumerate(records):
+            crystallinity = record.cell.crystallinity
+            if crystallinity == 0.0:
+                atomic[index] = reference[index]
+            elif crystallinity != 1.0:
+                atomic[index] = (
+                    crystallinity * atomic[index]
+                    + (1.0 - crystallinity) * reference[index]
+                )
         # The planar reference is laterally uniform, so it has no Fourier
         # component off specular and every record's row is then identically
         # zero.  Share one read-only zero array instead of storing a separate

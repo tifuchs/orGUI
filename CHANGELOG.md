@@ -7,6 +7,13 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Unit cells support a fitted `crystallinity` amplitude fraction in [0, 1].
+  Film, interface, and Poisson-surface layers inherit their source material's
+  value; removed material retains the underlying source's crystallinity.
+  Kinematic amplitudes and DWBA atomic-minus-reference contrasts scale while
+  optical profiles stay fixed. Text models and HDF5 fit settings preserve the
+  parameter, and older models default to fully crystalline material.
+
 - Mu/reflectivity-scan ROI trajectories now keep the scan theta fixed instead
   of imposing equal incident and exit angles. Stationary and rocking overlays
   therefore agree for tilted rods, including 00L with nonzero phi/chi. The

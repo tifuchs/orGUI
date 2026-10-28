@@ -47,6 +47,42 @@ and are outside this chapter.  They may use the same slab integral in
 Eq.~\eqref{eq:profile-reference-term}, but their actual-density integral must
 be derived from their own continuous profile.
 
+\section{Cell crystallinity at fixed optical reference}
+
+Each source UnitCell carries a real, dimensionless coherent-order parameter
+$c_u\in[0,1]$, defaulting to one. Generated material records inherit it live;
+their occupancies and optical density shares remain unchanged. In the
+density and squared-index conventions of Chapter~\ref{chap:reference},
+the prescription is
+\begin{equation}
+  \rho_u(c_u)=\overline\rho_u+
+      c_u(\rho_u^{\rm at}-\overline\rho_u),
+  \qquad
+  \Delta\rho_u(c_u)=c_u\Delta\rho_u(1),
+  \qquad
+  \delta n_u^2(c_u)=c_u\delta n_u^2(1).
+\end{equation}
+The prepared $n_0(z)$, fields, and $r_0$ do not depend on $c_u$.
+If $A_u$ and $R_u$ denote the two native-kernel outputs (with $R_u$
+positive in the Python API convention), evaluation returns
+\begin{equation}
+  F_{{\rm atomic},u}=c_u A_u+(1-c_u)R_u,
+  \qquad F_{{\rm reference},u}=R_u,
+  \qquad F_{\bm h}=\sum_u c_u(A_u-R_u).
+\end{equation}
+This preserves the public difference identity and makes each zero-order
+record's contrast vanish without deleting its optical material. Kinematic
+amplitudes instead use $F_u^{\rm kin}(c_u)=c_u F_u^{\rm kin}(1)$;
+physical density diagnostic helpers retain their unscaled densities.
+
+For replacement or etching the correction is
+$c_{\rm added}D_{\rm added}-c_{\rm removed}D_{\rm removed}$.
+Subtractions therefore retain the order of the underlying material.
+Equal atomic structures with independent crystallinity sources cannot be
+merged into one signed record, even when their current values coincide.
+This is coherent amplitude suppression, with an isolated intensity scaling
+as $c_u^2$; diffuse redistribution is outside this model.
+
 \section{Preparation and evaluation boundary}
 
 The prepared object must freeze all quantities that define the reference

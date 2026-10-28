@@ -360,7 +360,8 @@ The :doc:`RuO2/TiO2 DWBA diagnostics tutorial
 specular Fresnel-plus-contrast amplitude, critical edge, extended specular
 rod, and fixed-incidence non-specular rods for flat and rough film models.
 Its executed plots compare each DWBA observable with the corresponding
-kinematical curve.
+kinematical curve. A short :math:`00L` crystallinity sweep also shows the
+reflectivity through :math:`L=3` with a fixed optical profile.
 
 ``DWBAResult.F_h`` and ``SXRDCrystal.F`` are both amplitudes in
 electrons per reference lateral cell, and off specular they are directly

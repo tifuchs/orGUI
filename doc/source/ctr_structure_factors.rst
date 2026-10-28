@@ -307,7 +307,7 @@ Unit-cell amplitudes
 .. math::
 
    F_{\mathrm{uc}}(\mathbf{Q})
-   = \sum_i o_i f_i(\mathbf{Q})
+   = c_{\mathrm{uc}} \sum_i o_i f_i(\mathbf{Q})
      \exp\left(i\mathbf{Q}\cdot\mathbf{r}_i\right),
 
 including coherent-domain occupancies and displacement factors. No unit-cell
@@ -316,6 +316,71 @@ area or volume normalization is applied.
 ``Film.F_uc`` and ``PoissonSurface.F_uc`` sum their generated layer amplitudes
 and return electrons for one lateral unit cell of their source
 ``UnitCell``.
+
+Crystallinity
+-------------
+
+``UnitCell.crystallinity`` is a dimensionless coherent amplitude fraction
+between zero and one, defaulting to one. It multiplies kinematic unit-cell
+and bulk amplitudes once. An isolated contribution's intensity therefore
+scales with its square; interference with other components remains coherent.
+This parameter does not model diffuse scattering or an incoherent crystalline
+volume fraction.
+
+Crystallinity leaves atomic occupancies, physical density helpers
+(``zDensity_G`` and ``zDensity_G_asbulk``), and optical profiles unchanged.
+In DWBA the reference index :math:`n_0(z)`, absorption, distorted fields, and
+reference reflection amplitude remain fixed. For each generated material
+record :math:`u`, the contrast is
+
+.. math::
+
+   \Delta\rho_u(c_u) = c_u(\rho_u^{\mathrm{at}}-\bar\rho_u),
+   \qquad
+   F_{\mathbf h,u}(c_u)
+   = c_u\left(A_u-R_u\right).
+
+Here :math:`A_u` and :math:`R_u` are the crystalline atomic and planar-reference
+matrix elements under the same wavefields. DWBA diagnostics report
+``F_atomic`` as the effective density amplitude
+:math:`c_u A_u+(1-c_u)R_u`, and ``F_reference`` as the unchanged :math:`R_u`.
+Their difference remains ``F_h``. At zero crystallinity that record has no
+contrast, while its optical contribution remains present. The specular
+reference reflection and any other crystalline components still scatter.
+
+Set the property on the source material cell, or register it for fitting:
+
+.. code-block:: python
+
+   film_cell.crystallinity = 0.7
+   film_cell.addCrystallinityParameter(
+       name="film_order", limits=(0.0, 1.0)
+   )
+
+Generated Film and interface layers follow their source cell live, including
+after deep copying a model for fitting. Poisson surface terminations follow
+the supplied surface cell, or their individual cells in an explicit
+termination bank. Use separate source cells to fit the film and interface
+independently; sharing a source cell also shares its crystallinity.
+
+Replacement and etching subtract material with the crystallinity of the
+underlying source, independently of the crystallinity of the added material:
+
+.. math::
+
+   \Delta F = c_{\mathrm{added}}D_{\mathrm{added}}
+              -c_{\mathrm{removed}}D_{\mathrm{removed}}.
+
+Zero crystallinity of a surface termination suppresses the entire exposed
+slab represented by that cell, not only its outermost atomic plane. Signed
+records from independently ordered materials remain separate even when their
+atomic structures are identical.
+
+Native text models store a ``crystallinity:`` line per cell. Fit-settings
+dictionaries and HDF5 files also preserve the scalar and its fit parameter,
+bounds, and uncertainty. Older models without this field load with
+crystallinity one. ``clearParameters()`` removes the fit definition while
+retaining the current crystallinity value.
 
 Semi-infinite bulk amplitude
 -----------------------------
@@ -514,7 +579,8 @@ alignment as the selected surface slab and adds
 
 Thus a multi-layer relaxed slab replaces, rather than duplicates, the same
 depth of Film material.  If every termination slab is identical to its Film
-reference, this term cancels numerically in ``F_uc``, ``zDensity_G``, and the
+reference, including crystallinity, this term cancels numerically in
+``F_uc``, ``zDensity_G``, and the
 optical profile.  A zero-width distribution selects and replaces only the
 single sharp termination.
 
@@ -621,7 +687,8 @@ Crystal stacking supplies the underlying UnitCell, Film, and earlier interface
 components.  Subtraction copies their actual atoms, occupancies, and domain
 matrices within the half-open lower support window.  Crossing 50% statistical
 occupancy never changes which underlying atoms are removed.  Equal-material
-signed domains share a record for sharp-interface cancellation in DWBA; other
+signed domains with the same crystallinity source share a record for
+sharp-interface cancellation in DWBA; other
 reference material retains separate atomic and optical records.  Finite
 corrections retain the existing unattenuated component convention; bulk
 attenuation is unchanged.
@@ -1058,7 +1125,7 @@ API reference
 .. autofunction:: orgui.datautils.xrayutils.CTRincoherent.create_incoherent_model_from_config
 
 .. autoclass:: orgui.datautils.xrayutils.CTRuc.UnitCell
-   :members: F_uc, F_bulk, setReferenceUnitCell, supercell, affine_layer_transform, as_surface_termination
+   :members: F_uc, F_bulk, crystallinity, addCrystallinityParameter, setReferenceUnitCell, supercell, affine_layer_transform, as_surface_termination
    :member-order: bysource
 
 .. autoclass:: orgui.datautils.xrayutils.CTRfilm.Film

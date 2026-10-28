@@ -1360,7 +1360,7 @@ def test_zero_width_epitaxy_bottom_correction_cancels_in_dwba():
     bulk = _layered_cell("bulk")
     interface = CTRfilm.EpitaxyInterface(
         _layered_cell("top"),
-        _layered_cell("bottom"),
+        bulk,
         profile=SkellamProfile(0.0, 0.0),
         fixed_ucs=2,
         name="interface",

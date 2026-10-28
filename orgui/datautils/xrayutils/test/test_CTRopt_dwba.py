@@ -210,6 +210,28 @@ def test_global_reflectivity_scale_multiplies_live_predictions():
     assert optimizer._fitted_scale_count() == 1
 
 
+def test_crystallinity_fit_scales_off_specular_amplitude_with_fixed_optics():
+    """The public optimizer exposes order and reuses its optical reference."""
+    crystal = _crystal()
+    crystal.uc_bulk.addCrystallinityParameter(name="bulk_order")
+    rod = _ctr(crystal, hk=(1., 0.), quantity="structure_factor")
+    optimizer = CTRopt.CTROptimizer(
+        crystal, CTRplotutil.CTRCollection([rod]), scale_policy={"F": "fixed"},
+    )
+    optimizer.set_dwba()
+    optimizer.prepareFit()
+    before = optimizer.flat_prediction().copy()
+    optics = optimizer.xtal.dwba.cache_info()
+    optimizer.set_parameters([0.4])
+    np.testing.assert_allclose(optimizer.flat_prediction(), 0.4 * before)
+    assert optimizer.xtal.dwba.cache_info()["reference_misses"] == optics[
+        "reference_misses"
+    ]
+    optimizer.set_parameters([1.])
+    np.testing.assert_allclose(optimizer.flat_prediction(), before)
+    assert crystal.uc_bulk.crystallinity == 1.
+
+
 @pytest.mark.parametrize(
     ("s_fraction", "outgoing", "expected_calls"),
     [

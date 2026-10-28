@@ -1089,7 +1089,8 @@ class UnitCell(Lattice):
         self.fitparameter_prior = []
         """
 
-        self.parameters = {"absolute": [], "relative": []}
+        self.parameters = {"absolute": [], "relative": [], "crystallinity": []}
+        self.crystallinity = keyargs.get("crystallinity", 1.0)
         self.layer_behaviour = keyargs.get(
             "layer_behavior",
             keyargs.get("layer_behaviour", "ignore"),
@@ -1119,6 +1120,31 @@ class UnitCell(Lattice):
         self._special_formfactors_present = False
         self.symmetry_metadata = keyargs.get("symmetry_metadata", None)
         self.stacking_translation = keyargs.get("stacking_translation", (0, 0, 1))
+
+    @property
+    def crystallinity(self):
+        """Coherent amplitude fraction in [0, 1], independent of optical density.
+
+        Generated layers follow their source cell live. Assigning a value to
+        a generated layer explicitly detaches that layer from its source.
+        """
+        source = getattr(self, "_crystallinity_source", None)
+        return source.crystallinity if source is not None else self._crystallinity
+
+    @crystallinity.setter
+    def crystallinity(self, value):
+        """Set a finite coherent amplitude fraction and detach any source link."""
+        if np.ndim(value) != 0:
+            raise ValueError("crystallinity must be a finite scalar in [0, 1].")
+        value = float(value)
+        if not np.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("crystallinity must be a finite scalar in [0, 1].")
+        self._crystallinity = value
+        self._crystallinity_source = None
+
+    def _crystallinity_owner(self):
+        source = getattr(self, "_crystallinity_source", None)
+        return self if source is None else source._crystallinity_owner()
 
     @property
     def stacking_translation(self):
@@ -1153,6 +1179,9 @@ class UnitCell(Lattice):
 
     def parametersToDict(self):
         d = dict()
+        d["crystallinity_value"] = self.crystallinity
+        for par in self.parameters["crystallinity"]:
+            par.value = self.crystallinity
         d["basis_0"] = self.basis_0
         d["dw_increase_constraint"] = self.dw_increase_constraint
         for p in self.parameters:
@@ -1170,10 +1199,11 @@ class UnitCell(Lattice):
         self.basis_0[:] = basis_0
         self.dw_increase_constraint = d["dw_increase_constraint"].astype(np.bool_)
         for p in self.parameters:
-            for dkey in sorted(d[p].keys()):
+            for dkey in sorted(d.get(p, {}).keys()):
                 self.parameters[p].append(Parameter(**d[p][dkey]))
 
         if override_values:
+            self.crystallinity = d.get("crystallinity_value", 1.0)
             try:
                 self.updateFromParameters()
             except Exception as e:
@@ -1187,6 +1217,10 @@ class UnitCell(Lattice):
 
     def updateFromParameters(self):
         """Update basis from the values stored in the Parameters"""
+        for par in self.parameters["crystallinity"]:
+            if par.value is None:
+                raise ValueError("Crystallinity parameter value is not set.")
+            self.crystallinity = par.value
         no_errors = False
         self.basis[:] = self.basis_0
         self.errors = np.full_like(self.basis, np.nan)
@@ -1395,6 +1429,7 @@ class UnitCell(Lattice):
             idx_low = where[0]
             idx_high = where[-1] + 1
             uc = UnitCell(self.a, np.rad2deg(self.alpha), name=self.name + f"_layer{l}")
+            uc._crystallinity_source = self
             uc.basis = self.basis[idx_low:idx_high]
             if self.errors is not None:
                 uc.errors = self.errors[idx_low:idx_high]
@@ -2111,6 +2146,7 @@ class UnitCell(Lattice):
             np.rad2deg(self.alpha),
             name=self.name if name is None else name,
             layer_behavior=self.layer_behavior,
+            crystallinity=self.crystallinity,
         )
         transformed.layer_transition = copy.deepcopy(self.layer_transition)
         transformed.refHKLTransform = np.copy(self.refHKLTransform)
@@ -2229,7 +2265,7 @@ class UnitCell(Lattice):
             for iz in range(int(repeats[2]))
             for layer in cycle
         )
-        transformed.parameters = {"absolute": [], "relative": []}
+        transformed.parameters = {"absolute": [], "relative": [], "crystallinity": []}
         transformed.basis_0 = np.copy(transformed.basis)
         transformed._basis_parvalues = np.copy(transformed.basis)
         transformed.symmetry_metadata = self._supercell_symmetry_metadata(
@@ -2578,6 +2614,36 @@ class UnitCell(Lattice):
         )
         self.parameters["absolute"].append(par)
         return par
+
+    def addCrystallinityParameter(self, limits=(0.0, 1.0), *, name=None, prior=None):
+        """Fit the dimensionless coherent amplitude fraction of this cell.
+
+        :param tuple limits: Finite lower and upper bounds within [0, 1].
+        :param str name: Optional unique fit-parameter name.
+        :param prior: Optional prior accepted by the existing fit machinery.
+        :returns: The scalar crystallinity parameter.
+        :rtype: Parameter
+        """
+        self._validate_crystallinity_limits(limits)
+        if not limits[0] <= self.crystallinity <= limits[1]:
+            raise ValueError("Initial crystallinity is outside the fit limits.")
+        name = name or f"{self.name}_crystallinity"
+        if self.parameters["crystallinity"] or name in self.fitparnames:
+            raise ValueError("A crystallinity parameter or its name already exists.")
+        # Scalar cell parameters do not index the atomic basis.
+        par = Parameter(
+            name, np.empty((2, 0), dtype=np.intp), ParameterType.ABSOLUTE,
+            tuple(limits), prior, {"cell_parameter": "crystallinity"},
+            value=self.crystallinity,
+        )
+        self.parameters["crystallinity"].append(par)
+        return par
+
+    @staticmethod
+    def _validate_crystallinity_limits(limits):
+        if (np.shape(limits) != (2,) or not np.all(np.isfinite(limits))
+                or not 0 <= limits[0] <= limits[1] <= 1):
+            raise ValueError("Crystallinity limits must satisfy 0 <= low <= high <= 1.")
 
     def addRelParameter(self, indexarray, factors, limits=(-np.inf, np.inf), **keyargs):
         # if not limits[0] <= np.mean(self.basis[indexarray]) <= limits[1]:
@@ -3259,20 +3325,19 @@ class UnitCell(Lattice):
         print(self.fitparameterList())
 
     def parameter_list(self):
-        return self.parameters["absolute"] + self.parameters["relative"]
+        return (self.parameters["absolute"] + self.parameters["relative"]
+                + self.parameters["crystallinity"])
 
     @property
     def fitparnames(self):
         # pars = [self.fitparToStr(i,True) for i in range(len(self.fitparameters))] + [self.fitparToStr(i + len(self.fitparameters),True) for i in range(len(self.relfitparam))]  # noqa: E501
         # pars =
-        return [p.name for p in self.parameters["absolute"]] + [
-            p.name for p in self.parameters["relative"]
-        ]
+        return [p.name for p in self.parameter_list()]
 
     @property
     def priors(self):
         priorlist = []
-        for par in self.parameters["absolute"] + self.parameters["relative"]:
+        for par in self.parameter_list():
             if par.prior is None:
                 if tuple(par.limits) == (-np.inf, np.inf):
                     raise Exception(
@@ -3313,9 +3378,14 @@ class UnitCell(Lattice):
         elif verbosity > 2:
             outstr += "# No rel. parameters"
 
+        for par in self.parameters["crystallinity"]:
+            outstr += "\n" + self.fitparToStr(par)
         return outstr
 
     def fitparToStr(self, par):
+        if par.settings.get("cell_parameter") == "crystallinity":
+            return (f"{par.name}: crystallinity={self.crystallinity:g}, "
+                    f"limits={par.limits}")
         if self.basis_0 is None:
             basis_0 = np.copy(self.basis)
         else:
@@ -3399,9 +3469,18 @@ class UnitCell(Lattice):
             lower.append(par.limits[0])
             upper.append(par.limits[1])
 
+        for par in self.parameters["crystallinity"]:
+            x0.append(self.crystallinity)
+            lower.append(par.limits[0])
+            upper.append(par.limits[1])
         return np.array(x0), np.array(lower), np.array(upper)
 
     def setFitParameters(self, x):
+        scalar_offset = (len(self.parameters["absolute"])
+                         + len(self.parameters["relative"]))
+        for val, par in zip(x[scalar_offset:], self.parameters["crystallinity"]):
+            self.crystallinity = val
+            par.value = val
         x_0 = x[: len(self.parameters["absolute"])]
         x_r = x[len(self.parameters["absolute"]) :]
         self.basis[:] = self.basis_0
@@ -3415,6 +3494,11 @@ class UnitCell(Lattice):
         self._basis_parvalues = np.copy(self.basis)
 
     def setLimits(self, lim):
+        scalar_offset = (len(self.parameters["absolute"])
+                         + len(self.parameters["relative"]))
+        for val, par in zip(lim[scalar_offset:], self.parameters["crystallinity"]):
+            self._validate_crystallinity_limits(val)
+            par.limits = tuple(val)
         x_0 = lim[: len(self.parameters["absolute"])]
         x_r = lim[len(self.parameters["absolute"]) :]
         for val, par in zip(x_0, self.parameters["absolute"]):
@@ -3430,10 +3514,14 @@ class UnitCell(Lattice):
         if errors is None:
             self.errors = None
             self._errors_parvalues = None
-            for par in self.parameters["absolute"] + self.parameters["relative"]:
+            for par in self.parameter_list():
                 par.error = None
             return
         self.errors = np.full_like(self.basis, np.nan)
+        scalar_offset = (len(self.parameters["absolute"])
+                         + len(self.parameters["relative"]))
+        for val, par in zip(errors[scalar_offset:], self.parameters["crystallinity"]):
+            par.error = val
         err_0 = errors[: len(self.parameters["absolute"])]
         err_r = errors[len(self.parameters["absolute"]) :]
         for val, par in zip(err_0, self.parameters["absolute"]):
@@ -3469,7 +3557,8 @@ class UnitCell(Lattice):
             else:
                 err0.append(par.error)
 
-        err0 = np.array(err0)
+        err0.extend(par.error for par in self.parameters["crystallinity"])
+        err0 = np.array(err0, dtype=np.float64)
         if np.any(~np.isfinite(err0)):
             raise ValueError("Some errors are non-finite or not set.")
         return err0
@@ -3513,6 +3602,8 @@ class UnitCell(Lattice):
     def F_uc_bulk(self, h, k, l, atten=0):  # noqa: E741
         """Return one attenuated bulk unit-cell amplitude in electrons.
 
+        Includes the cell's dimensionless :attr:`crystallinity` once.
+
         :param numpy.ndarray h:
             Reference-frame reciprocal coordinate in r.l.u.
         :param numpy.ndarray k:
@@ -3547,7 +3638,7 @@ class UnitCell(Lattice):
                 domain_occupancy,
                 self.uc_area,
             )
-            return F
+            return self.crystallinity * F
         else:
             F = np.zeros(h.size, dtype=np.complex128)
             f = np.zeros(h.size, dtype=np.complex128)
@@ -3582,14 +3673,15 @@ class UnitCell(Lattice):
                         * np.exp(2j * np.pi * np.sum(hkl.T * xyz_rel, axis=1))
                         * math.exp(atten * xyz_rel[2])
                     )
-            return F
+            return self.crystallinity * F
 
     # returns the structure factor of the unit cell
     # h,k,l have to be 1d arrays
     def F_uc_bulk_direct(self, h, k, l, atten=0):  # noqa: E741
         """Return one bulk-cell amplitude without reference conversion.
 
-        The result is unnormalized and has units of electrons.
+        The result is unnormalized and has units of electrons, including
+        the cell's dimensionless :attr:`crystallinity` once.
 
         :param numpy.ndarray h:
             Reciprocal coordinate in this unit cell's r.l.u.
@@ -3634,10 +3726,13 @@ class UnitCell(Lattice):
                     * np.exp(2j * np.pi * np.sum(hkl.T * xyz_rel, axis=1))
                     * math.exp(atten * xyz_rel[2])
                 )
-        return F
+        return self.crystallinity * F
 
     def F_uc(self, h, k, l):  # noqa: E741
         """Return the canonical unit-cell structure factor in electrons.
+
+        Includes :attr:`crystallinity`; physical density helpers and optical
+        profiles retain the full material density.
 
         No unit-cell area or volume normalization is applied. Input reciprocal
         coordinates are interpreted in the configured reference unit cell and
@@ -3674,7 +3769,7 @@ class UnitCell(Lattice):
                 domain_occupancy,
                 self.uc_area,
             )
-            return F
+            return self.crystallinity * F
         else:
             F = np.zeros(h.size, dtype=np.complex128)
             f = np.zeros(h.size, dtype=np.complex128)
@@ -3714,7 +3809,7 @@ class UnitCell(Lattice):
                         * f
                         * np.exp(2j * np.pi * np.sum(hkl.T * xyz_rel, axis=1))
                     )
-            return F
+            return self.crystallinity * F
 
     def F_bulk(self, h, k, l, atten=0):  # noqa: E741
         """Return the semi-infinite bulk structure factor in electrons.
@@ -3724,6 +3819,8 @@ class UnitCell(Lattice):
         Its phase uses reciprocal coordinates after conversion from the
         configured reference unit cell. With a lateral repeat, coherent
         domains must preserve that repeat; use separate bulk cells otherwise.
+        Includes :attr:`crystallinity` once; zero order has zero amplitude
+        even at a pole of the ideal, unattenuated lattice sum.
 
         :param numpy.ndarray h:
             Reference-frame reciprocal coordinate in r.l.u.
@@ -3739,6 +3836,8 @@ class UnitCell(Lattice):
         :rtype: numpy.ndarray
         """
         basis, formf, names = self.build_selected_basis()
+        if self.crystallinity == 0.0:
+            return np.zeros(np.asarray(h).size, dtype=np.complex128)
         # The reciprocal transform maps reference r.l.u. to bulk r.l.u.;
         # (2, 2) is the bulk/reference out-of-plane repeat ratio.
         repeat_atten = atten * abs(self.refHKLTransform[2, 2])
@@ -3779,7 +3878,7 @@ class UnitCell(Lattice):
                 domain_occupancy,
                 self.uc_area,
             )
-            return F
+            return self.crystallinity * F
         else:
             hkl = self.refHKLTransform @ np.vstack((h, k, l))
             Fuc = self.F_uc_bulk_direct(*hkl, repeat_atten)
@@ -4400,6 +4499,7 @@ class UnitCell(Lattice):
             + "\n"
             + self._parameter_header(showErrors)
             + "\n"
+            + f"crystallinity: {self.crystallinity:.17g}\n"
             + self.parameterStr(showErrors=showErrors)
         )
 
@@ -4623,11 +4723,15 @@ class UnitCell(Lattice):
             layer_behaviour = "ignore"
             layer_cycle = None
             stacking_translation = (0, 0, 1)
+            crystallinity = 1.0
             symmetry_lines = []
             reading_symmetry = False
             for l in f:  # noqa: E741
                 line = l.rsplit("//")[0]
                 stripped = line.strip()
+                if stripped.startswith("crystallinity:"):
+                    crystallinity = float(stripped.split(":", 1)[1])
+                    continue
                 if stripped.startswith("stacking_translation:"):
                     stacking_translation = tuple(
                         float(value) for value in stripped.split(":", 1)[1].split()
@@ -4795,6 +4899,7 @@ class UnitCell(Lattice):
         uc.layer_behaviour = layer_behaviour
         uc._explicit_layer_cycle = layer_cycle
         uc.stacking_translation = stacking_translation
+        uc.crystallinity = crystallinity
         # uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
         if len(basis) >= 2:
             basis = np.vstack(basis)

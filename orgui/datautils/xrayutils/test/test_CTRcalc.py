@@ -2128,7 +2128,8 @@ class TestLayerStacking(unittest.TestCase):
             supercell.symmetry_metadata.surface_spec.transform,
             np.diag([2.0, 3.0, 1.0]),
         )
-        self.assertEqual(supercell.parameters, {"absolute": [], "relative": []})
+        self.assertEqual(supercell.parameters,
+                         {"absolute": [], "relative": [], "crystallinity": []})
 
     def test_unitcell_supercell_rejects_fractional_repeat_counts(self):
         unitcell = self.make_single_wyckoff_cell()
