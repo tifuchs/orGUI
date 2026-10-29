@@ -7,6 +7,9 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Copying plots to the clipboard works with silx 3.1.3 and PySide6 again.
+  PNG buffer exports used by copying and printing retain the colorbar.
+
 - Unit cells support a fitted `crystallinity` amplitude fraction in [0, 1].
   Film, interface, and Poisson-surface layers inherit their source material's
   value; removed material retains the underlying source's crystallinity.

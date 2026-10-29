@@ -77,6 +77,7 @@ from .ArrayTableDialog import ArrayTableDialog
 from .MaskConfigDialog import MaskConfigDialog
 from .HDF5SettingsDialog import HDF5SettingsDialog
 from .StyleDialog import StyleDialog
+from .silx_compat import _install_png_buffer_compat
 from .ReconstructionDialog import ReconstructionDialog
 from .bgroi import RectangleBgROI
 from .database import DataBase, DBUnavailableError, FILTERS
@@ -135,6 +136,7 @@ except Exception:
     print("Cannot retrieve available memory size. Cap usage to 6 GB.")
 
 silx.config.DEFAULT_PLOT_SYMBOL = "."
+_install_png_buffer_compat()
 
 
 

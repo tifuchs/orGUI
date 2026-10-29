@@ -9,6 +9,8 @@ Unreleased (2026-07-19)
 
 Other user-visible changes:
 
+- Copying plots to the clipboard works with silx 3.1.3 and PySide6 again. PNG buffer exports used by copying and printing retain the colorbar.
+
 - Unit cells support a fitted ``crystallinity`` amplitude fraction in [0, 1]. Film, interface, and Poisson-surface layers inherit their source material's value; removed material retains the underlying source's crystallinity. Kinematic amplitudes and DWBA atomic-minus-reference contrasts scale while optical profiles stay fixed. Text models and HDF5 fit settings preserve the parameter, and older models default to fully crystalline material.
 
 - Mu/reflectivity-scan ROI trajectories now keep the scan theta fixed instead of imposing equal incident and exit angles. Stationary and rocking overlays therefore agree for tilted rods, including 00L with nonzero phi/chi. The machine-parameter dialog accepts signed chi and phi from -360 to 360 degrees.
