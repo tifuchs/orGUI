@@ -41,6 +41,11 @@ env:
     orgui.datautils.xrayutils.test.test_CTRsymmetry
     orgui.datautils.xrayutils.test.test_CTRresolution
     orgui.datautils.xrayutils.test.test_CTRoptical_profile
+    orgui.datautils.xrayutils.test.test_CTRdwba
+    orgui.datautils.xrayutils.test.test_CTRcontinuous
+    orgui.datautils.xrayutils.test.test_CTRwater
+    orgui.datautils.xrayutils.test.test_CTRwater_models
+    orgui.datautils.xrayutils.test.test_CTRwater_analytic
     orgui.datautils.xrayutils.test.test_scattering_factor_cache
     orgui.datautils.xrayutils.test.test_reconstruction_subdivision
     orgui.datautils.xrayutils.test.test_reconstruction_checkpoint

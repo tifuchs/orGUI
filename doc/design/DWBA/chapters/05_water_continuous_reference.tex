@@ -1,0 +1,120 @@
+\section{Water ambient and analytic perturbations}
+
+The water extension keeps $z$ increasing into the incident medium and
+$n=1-\ii\beta-\delta$.  The local glancing angle $\alpha_w$ specifies
+\begin{equation}
+ k_\parallel=k_0 n_w\cos\alpha_w,\qquad
+ \kappa_j^2=k_0^2 n_j^2-k_\parallel^2,\qquad
+ k_{z,j}=-\kappa_j.
+\end{equation}
+The slab and continuous solvers use the same radiation branch.  Incident
+amplitude is normalized at a finite plane in homogeneous water.  Translating
+this phase origin changes the complex amplitudes, including attenuation in an
+absorbing ambient.  A measured external angle requires entrance-interface
+propagation; it is not substituted for $\alpha_w$.
+
+The local Green-function conversion becomes
+\begin{equation}
+ r_{\bm h}=\frac{2\pi\ii r_e}{A_{\rm ref} k_0 n_w\sin\alpha_f}
+ F_{\bm h}.
+\end{equation}
+The normal components of the reciprocal p-polarized waves use
+$k_0 n_w\cos\alpha/k_{z,j}$ consistently.  The squared amplitude ratio is a
+local observable; macroscopic water-path attenuation and cell transmission
+are separate.  In an absorbing incident half-space it must not be interpreted
+as a globally conserved reflected-flux fraction.  See also S.~J.~Byrnes,
+\emph{Multilayer optical calculations}, arXiv:1603.02720, for the distinction
+between amplitude ratios and power flow with absorbing exterior media.
+
+Water is split before integration:
+\begin{equation}
+ \rho_w=\rho_{w,0}+\Delta\rho_w,\qquad
+ \Delta\rho_w\longrightarrow0\quad (z\longrightarrow+\infty).
+\end{equation}
+The equimolar sharp reference satisfies
+$\int(\rho_w-\rho_\infty\Theta(z-z_G))\,dz=0$.
+For the progressively broadened Gaussian stack,
+$z_G=z_0+d(1/2-A_0)-\sigma_b^2/(2d)$.
+Terrace averages translate both densities by the same heights and weights.
+Only the finite, localized contrast enters the water matrix element; the
+diagnostic atomic/reference arrays use a common finite baseline rather than
+two separately divergent water half-space integrals.
+
+
+The production reference contains only the water onset.  Sharp interfaces use
+Fresnel coefficients; tanh interfaces use the exact isolated s-polarized
+Epstein coefficients.  Neither adsorption peaks nor molecular layers introduce
+additional optical segments.  The existing dry solid reference is retained,
+adding one interface per physical terrace onset.
+
+For molecular number density $\rho_m$ and $f(q)=f_O(q)+2f_H(q)$, the physical
+transforms per lateral area are
+\begin{align}
+ W_{\rm step}(q)&=f(q)e^{\ii qz_0-\sigma_0^2q^2/2}
+    \left(\frac{\ii\rho_m}{q}+\Gamma e^{\ii q\Delta z_a}\right),\\
+ W_{\rm layered}(q)&=\rho_m d f(q)e^{\ii qz_0-\sigma_0^2q^2/2}
+    \left[A_0-1+\frac{1}{1-e^{\ii qd-\sigma_b^2q^2/2}}\right].
+\end{align}
+The second expression sums the infinite damped Hosemann paracrystal.  Its
+evaluation cost is independent of the number of visible water layers or their
+damping length. Step adsorption has $\Gamma=A_0/A_{\rm cell}$, whereas layered
+$A_0$ is the relative first-layer weight. The equimolar step position is
+$z_G=z_0-\Gamma/\rho_m$ for the step family.
+
+The reference transform and localized perturbation are
+\begin{equation}
+ W_0(q)=\frac{\ii\rho_m f(0)}{q}e^{\ii qz_G}B(q),\qquad
+ D(q)=W(q)-W_0(q),\qquad
+ B(q)=1\quad\hbox{or}\quad
+ \frac{\sqrt{3}\sigma_0 q}{\sinh(\sqrt{3}\sigma_0 q)}.
+\end{equation}
+The implementation subtracts these half-spaces analytically using
+\texttt{expm1} and small-$q$ series. It does not subtract two divergent numerical
+quantities. The equimolar limit is $D(0)=0$; a frozen reference displaced from
+the live equimolar plane instead gives the appropriate finite integrated excess.
+
+For each terrace and each of four reciprocal plane-wave channels, $D(q)$ is
+evaluated once at $q=-(\mu k_{z,i}+\nu k_{z,f})$. The coefficients include the
+two local branch amplitudes, polarization contraction, and phase references.
+The constant wavevectors on the water side of the frozen onset are extended
+through the localized perturbation, as for an atomic form factor assigned to
+its host medium. This is the declared local constant-medium DWBA approximation.
+The finite coherent terrace sum remains; the infinite molecular sum is closed.
+Off-specular direct water scattering vanishes because this water is laterally
+uniform. The solid continues to use the native plane-wave DWBA kernel.
+
+An isolated Epstein transition has
+\begin{equation}
+ \varepsilon(z)=\varepsilon_-+
+ (\varepsilon_+-\varepsilon_-)\frac{1+\tanh((z-z_G)/w)}{2},
+ \qquad w=\sqrt{12}\sigma_0/\pi.
+\end{equation}
+Writing $a=-\ii w k_{z,-}/2$ and $b=-\ii w k_{z,+}/2$, its center-referenced
+downward-incidence s amplitudes can be written without critical-point gamma poles:
+\begin{align}
+ r&=\frac{b-a}{a+b}\frac{\Gamma(1-2b)}{\Gamma(1+2b)}
+       \left[\frac{\Gamma(1+a+b)}{\Gamma(1+a-b)}\right]^2,\\
+ t&=\frac{2b}{a+b}
+       \frac{\Gamma(1+a+b)^2}{\Gamma(1+2a)\Gamma(1+2b)}.
+\end{align}
+Reverse-incidence coefficients interchange the upper and lower wavevectors.
+Scattering-matrix composition connects these interface coefficients through
+constant media. It does not sample hypergeometric internal fields or fit finite
+tanh segments to a sampled density. This effective-interface construction is
+not an exact Maxwell solution of overlapping tanh transitions. The plotted
+onset envelope retains the first-order density-to-index convention and is not
+a claim of an exactly solved global continuous profile.
+
+Analytic tanh supports s polarization only. The production path explicitly
+rejects p instead of silently invoking numerical integration; sharp interfaces
+support both. For step-model confirmation, the explicitly selected erf path
+solves the full physical step/adsorption profile numerically and evaluates
+continuous DWBA matrix elements. It therefore tests the effective-interface and
+constant-medium approximations as well as the reference choice, while retaining
+identical physical densities and molecular factors. Its Maxwell equations are
+\begin{equation}
+ E''+(k_0^2\varepsilon-k_\parallel^2)E=0,\qquad
+ (H'/\varepsilon)' +(k_0^2-k_\parallel^2/\varepsilon)H=0.
+\end{equation}
+Reciprocal electric fields enter bilinearly without complex conjugation.
+Numerical erf convergence does not make the full atomistic DWBA exact.

@@ -69,6 +69,7 @@ class StratifiedProfile:
 
     values: np.ndarray
     boundaries: np.ndarray
+    continuous: object = None
 
     @property
     def z(self):
@@ -288,8 +289,8 @@ def water_optical_profile(water_model, noUC=30, z_step=None, z_origin=None):
         lattice height when no atomistic profile supplies a spacing.
     :param float z_origin:
         Optional origin of the atomistic z grid in Angstrom. When supplied,
-        the first water sample is aligned to that grid at or above the water
-        onset.
+        the first water sample is aligned below the negative-z transition tail.
+        Endpoint rows represent zero water and homogeneous bulk water exactly.
     :returns:
         C-contiguous ``(N, 3)`` array with columns ``z`` in Angstrom,
         ``delta``, and ``beta``.
@@ -305,17 +306,19 @@ def water_optical_profile(water_model, noUC=30, z_step=None, z_origin=None):
         raise ValueError("noUC must be a positive integer.")
     if z_step is None:
         z_step = water_model.a[2]
-    if z_step <= 0.0:
+    if not np.isfinite(z_step) or z_step <= 0.0:
         raise ValueError("z_step must be positive.")
 
     water_onset = water_model.pos_absolute + water_model.basis[0] * water_model.a[2]
-    z_start = water_onset
+    z_start, tail_stop = water_model.transition_extent()
     if z_origin is not None:
-        grid_index = np.ceil((water_onset - z_origin) / z_step - 1e-12)
+        grid_index = np.floor((z_start - z_origin) / z_step)
         z_start = z_origin + grid_index * z_step
-    z_stop = water_onset + noUC * water_model.a[2]
+    z_stop = max(tail_stop, water_onset + noUC * water_model.a[2])
     z = np.arange(z_start, z_stop + 0.5 * z_step, z_step, dtype=np.float64)
     rho_f = water_model.zDensity_G(z, 0.0, 0.0)
+    rho_f[0] = 0.
+    rho_f[-1] = water_model.bulk_density
     wavelength = HC_KEV_ANGSTROM / (water_model._E * 1e-3)
     scale = 2.8179403262e-5 * wavelength**2 / (2.0 * np.pi)
     profile = np.empty((z.size, 3), dtype=np.float64)

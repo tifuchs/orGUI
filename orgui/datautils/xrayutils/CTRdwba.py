@@ -146,9 +146,7 @@ def _component_record_cells(component):
         )
         return records
     if isinstance(component, WaterModel):
-        raise NotImplementedError(
-            "DWBA does not support continuous-density WaterModel components."
-        )
+        return []
     raise NotImplementedError(
         f"DWBA does not support {type(component).__name__} components."
     )
@@ -171,6 +169,9 @@ def _hash_record_geometry(records):
     for record in records:
         digest.update(repr(record.identity_token).encode("utf-8"))
         cell = record.cell
+        if isinstance(cell, WaterModel):
+            digest.update(_hash_arrays(cell.B_mat, cell.refHKLTransform, [cell._E]))
+            continue
         digest.update(
             _hash_arrays(
                 np.asarray(cell.basis.shape, dtype=np.int64),
@@ -303,6 +304,7 @@ class PreparedOpticalReference:
     energy_eV: float
     k0: float
     fingerprint: bytes
+    continuous: object = None
 
 
 @dataclass(frozen=True)
@@ -357,6 +359,8 @@ class DWBAContribution:
     ``F_reference`` is the unchanged native reference; ``F_h`` is their
     difference and is derived on access. Off specular every ``F_reference``
     is identically zero and all records share one zero array.
+    For water, ``F_atomic`` is a finite reference baseline plus the localized
+    continuum contrast; it is not a divergent upper-half-space integral.
     """
 
     component_index: int
@@ -402,11 +406,11 @@ class DWBAResult:
         = \\frac{2\\pi\\mathrm{i}\\,r_e}{A_{\\mathrm{ref}}\\,\\kappa_f}\\,
           F_{\\mathbf{h}},
         \\qquad
-        \\kappa_f = k_0\\sin\\alpha_f ,
+        \\kappa_f = k_0 n_{\\mathrm{ambient}}\\sin\\alpha_f ,
 
     with :math:`r_e` the classical electron radius and :math:`\\kappa_f` the
-    **exit** normal wavevector in vacuum (positive; off-specular it differs
-    from the incident one).  The design note
+    **exit** normal wavevector in the incident medium (complex for absorbing
+    water; off-specular it differs from the incident one).  The design note
     ``doc/design/DWBA/dwba_bulk_specular_math.tex`` writes the same relation
     as its Eq. (1.33) with a minus sign, because it uses the negative-root
     convention :math:`k_{z,0,f}=-\\kappa_f`.  The two agree.
@@ -457,7 +461,11 @@ class DWBAResult:
     @property
     def amplitude_prefactor(self):
         """Return ``2 pi i r_e / (A_ref kappa_f)``, the amplitude conversion."""
-        kappa_f = self.prepared.k0 * np.sin(self.prepared.alpha_f)
+        kappa_f = (
+            self.prepared.k0
+            * self.prepared.reference.n[0]
+            * np.sin(self.prepared.alpha_f)
+        )
         value = (
             2j
             * np.pi
@@ -601,6 +609,8 @@ class DWBAState:
         self._reference_cache = OrderedDict()
         self._field_cache = OrderedDict()
         self._prepared_cache = OrderedDict()
+        self._continuous_integral_cache = OrderedDict()
+        self._water_contrast_cache = OrderedDict()
         self._batch_depth = 0
         self._batch_snapshot = None
         self._batch_packings = {}
@@ -696,6 +706,8 @@ class DWBAState:
         self._reference_cache.clear()
         self._field_cache.clear()
         self._prepared_cache.clear()
+        self._continuous_integral_cache.clear()
+        self._water_contrast_cache.clear()
 
     def _energy_changed(self):
         self.clear_cache()
@@ -705,6 +717,8 @@ class DWBAState:
         return {
             **self._cache_counters,
             "geometry_size": len(self._geometry_cache),
+            "continuous_integral_size": len(self._continuous_integral_cache),
+            "water_contrast_size": len(self._water_contrast_cache),
             "reference_size": len(self._reference_cache),
             "field_size": len(self._field_cache),
             "prepared_size": len(self._prepared_cache),
@@ -745,21 +759,45 @@ class DWBAState:
             )
         if not hasattr(self._crystal.uc_bulk, "_E"):
             raise ValueError("Set the bulk unit-cell energy before using DWBA.")
+        self._water_components()
         for component in self._crystal.uc_surface_list:
-            if isinstance(component, WaterModel):
-                raise NotImplementedError(
-                    "DWBA does not support continuous-density WaterModel "
-                    "components."
-                )
             if not isinstance(
-                component, UnitCell | Film | EpitaxyInterface | PoissonSurface
+                component,
+                UnitCell | Film | EpitaxyInterface | PoissonSurface | WaterModel,
             ):
                 raise NotImplementedError(
-                    "DWBA supports only UnitCell, Film, EpitaxyInterface, "
-                    f"and PoissonSurface components, not {type(component).__name__}."
+                    f"Unsupported DWBA component {type(component).__name__}."
                 )
 
+    def _water_components(self):
+        if any(isinstance(c, PoissonSurface) and c.water is not None
+               and c.underlying_film is None for c in self._crystal.uc_surface_list):
+            self._crystal.apply_stacking()
+        result = []
+        for index, component in enumerate(self._crystal.uc_surface_list):
+            if isinstance(component, WaterModel):
+                if getattr(component, "_surface_owner", None) is not None:
+                    raise ValueError(
+                        "Owned water cannot also be a top-level component."
+                    )
+                result.append((index, component))
+            elif isinstance(component, PoissonSurface) and component.water is not None:
+                result.append((index, component._sync_water()))
+        if len(result) > 1:
+            raise ValueError("Only one water half-space is supported.")
+        return result
+
+    def _ambient_index(self):
+        from ._CTRwater_dwba import _scale
+        waters = self._water_components()
+        if not waters:
+            return 1.+0j
+        index, water = waters[0]
+        return 1 - _scale(water._E)*water.bulk_density*self._crystal.weights[index]
+
     def _live_records(self):
+        if self._crystal.enable_uc_stacking or self._crystal._stack_policy is not None:
+            self._crystal.apply_stacking()
         self._require_available()
         if (self._crystal.enable_uc_stacking
                 or self._crystal._stack_policy is not None):
@@ -815,12 +853,32 @@ class DWBAState:
                         ),
                     )
                 )
+        for component_index, water in self._water_components():
+            weight = float(self._crystal.weights[component_index])
+            if not np.isfinite(weight) or weight <= 0:
+                raise ValueError("Water component weight must be finite and positive.")
+            domains = self._crystal.domains[component_index]
+            if (
+                len(domains) != 1
+                or not np.allclose(domains[0][0], np.eye(3))
+                or domains[0][1] != 1
+            ):
+                raise NotImplementedError(
+                    "Water DWBA requires an identity outer domain."
+                )
+            records.append(_LiveAtomicRecord(
+                component_index, self._crystal.uc_surface_list[component_index].name,
+                "WaterModel", 0, water.name, "water", None, water, weight,
+                ((np.eye(3), 1.),), ("water", component_index, id(water)),
+            ))
         return tuple(records)
 
     def _tagged_component_profile(self, component, records, record_count):
         values = []
         shares = []
         for global_index, record in records:
+            if isinstance(record.cell, WaterModel):
+                continue
             profile = record.cell.optical_profile()
             if not len(profile):
                 continue
@@ -881,7 +939,12 @@ class DWBAState:
             shares[0, 0] = profile.values[0, 1:]
             stratified = profile
         else:
-            bulk_profile = self._crystal.uc_bulk.optical_profile_asbulk()
+            if len(records) == 2 and records[-1].role == "water":
+                bulk_profile = homogeneous_bulk_profile(self._crystal.uc_bulk).values[
+                    :1
+                ]
+            else:
+                bulk_profile = self._crystal.uc_bulk.optical_profile_asbulk()
             bulk_shares = np.zeros(
                 (record_count, len(bulk_profile), 2), dtype=np.float64
             )
@@ -906,7 +969,11 @@ class DWBAState:
                 np.concatenate(component_values, axis=0),
                 np.concatenate(component_shares, axis=1),
             )
-            dz = top_layer_spacing(structural)
+            dz = (
+                top_layer_spacing(structural)
+                if len(structural) > 1
+                else self._crystal.uc_bulk.volume / self._crystal.uc_bulk.uc_area
+            )
             vacuum = np.array(
                 [[structural[-1, 0] + dz, 0.0, 0.0]], dtype=np.float64
             )
@@ -915,12 +982,25 @@ class DWBAState:
                 (shares, np.zeros((record_count, 1, 2), dtype=np.float64)),
                 axis=1,
             )
-            stratified, shares = _stratify_tagged(
-                structural,
-                shares,
-                _OPTICAL_DELTA_TOLERANCE,
-                _OPTICAL_BETA_TOLERANCE,
-            )
+            if any(record.role == "water" for record in records):
+                from ._CTRwater_dwba import _with_water_reference
+                water = next(record.cell for record in records
+                             if record.role == "water")
+                if water.optical_reference != "erf" or water.basis[2] == 0:
+                    # Reuse exactly the dry solid reference. Molecular water
+                    # must not restore every repeated solid-cell boundary.
+                    structural, shares = _stratify_tagged(
+                        structural, shares, _OPTICAL_DELTA_TOLERANCE,
+                        _OPTICAL_BETA_TOLERANCE,
+                    )
+                stratified, shares = _with_water_reference(structural, shares, records)
+                from ._CTRwater_continuous import _make_continuous
+                stratified, shares = _make_continuous(stratified, shares, records)
+            else:
+                stratified, shares = _stratify_tagged(
+                    structural, shares, _OPTICAL_DELTA_TOLERANCE,
+                    _OPTICAL_BETA_TOLERANCE,
+                )
         if not np.allclose(
             shares.sum(axis=0), stratified.values[:, 1:], rtol=2e-14, atol=1e-18
         ):
@@ -947,7 +1027,7 @@ class DWBAState:
     def _vlieg_angles(self):
         energy_eV = float(self._crystal.uc_bulk._E)
         ub = UBCalculator(self._crystal.uc_bulk, energy_eV * 1e-3)
-        ub.setLambda(HC_KEV_ANGSTROM / (energy_eV * 1e-3))
+        ub.setLambda(HC_KEV_ANGSTROM / (energy_eV * 1e-3) / self._ambient_index().real)
         ub.setU(self._orientation)
         return VliegAngles(ub)
 
@@ -960,9 +1040,9 @@ class DWBAState:
             [_OPTICAL_DELTA_TOLERANCE, _OPTICAL_BETA_TOLERANCE],
             dtype=np.float64,
         )
-        fingerprint = _hash_arrays(
-            values, boundaries, energy_bytes, simplification
-        )
+        fingerprint = _hash_arrays(values, boundaries, energy_bytes, simplification)
+        if profile.continuous is not None:
+            fingerprint += profile.continuous.fingerprint
         cached = self._reference_cache.get(fingerprint)
         if cached is not None:
             self._cache_counters["reference_hits"] += 1
@@ -979,6 +1059,7 @@ class DWBAState:
             energy_eV=energy_eV,
             k0=2.0 * np.pi / wavelength,
             fingerprint=fingerprint,
+            continuous=profile.continuous,
         )
         self._reference_cache[fingerprint] = reference
         while len(self._reference_cache) > _PREPARATION_CACHE_SIZE:
@@ -1049,6 +1130,20 @@ class DWBAState:
             flat.view(np.uint64), return_index=True, return_inverse=True
         )
         order = np.argsort(first_index)
+        if reference.continuous is not None:
+            unique, inverse = np.unique(np.asarray(angles), return_inverse=True)
+            key = (reference.fingerprint, polarization, unique.tobytes())
+            if key not in self._field_cache:
+                self._cache_counters["field_misses"] += len(unique)
+                self._field_cache[key] = reference.continuous.solve(
+                    unique, polarization
+                )
+                while len(self._field_cache) > _FIELD_CACHE_SIZE:
+                    self._field_cache.popitem(last=False)
+            else:
+                self._cache_counters["field_hits"] += len(unique)
+                self._field_cache.move_to_end(key)
+            return self._field_cache[key], _readonly_array(inverse, np.int64)
         unique_values = flat[first_index[order]]
         sorted_to_order = np.empty(order.size, dtype=np.int64)
         sorted_to_order[order] = np.arange(order.size, dtype=np.int64)
@@ -1094,6 +1189,7 @@ class DWBAState:
             _hash_arrays(h, k, l, self._orientation),
             float(self._crystal.uc_bulk._E),
             self._geometry_revision,
+            self._ambient_index(),
             float(geometry_rtol),
             float(geometry_atol),
             _hash_arrays(
@@ -1215,7 +1311,7 @@ class DWBAState:
         hkl_bulk = self._crystal.uc_bulk.refHKLTransform @ hkl_reference
         Q_cartesian = self._orientation @ self._crystal.uc_bulk.B_mat @ hkl_bulk
         Q_parallel = np.ascontiguousarray(Q_cartesian[:2].T)
-        k0 = reference.k0
+        k0 = reference.k0 * reference.n[0].real
         expected_Qz = k0 * (np.sin(alpha_i) + np.sin(alpha_f))
         if not np.allclose(
             Q_cartesian[2], expected_Qz, rtol=geometry_rtol, atol=geometry_atol
@@ -1267,20 +1363,21 @@ class DWBAState:
         field_f, field_f_index = self._fields(
             reference, alpha_f, polarization_f
         )
-        if field_i.n is not reference.n and not np.array_equal(
-            field_i.n, reference.n
-        ):
-            raise RuntimeError("The incident field does not share the frozen n0.")
-        if field_f.n is not reference.n and not np.array_equal(
-            field_f.n, reference.n
-        ):
-            raise RuntimeError("The exit field does not share the frozen n0.")
-        if np.any(np.asarray(field_i.A_minus)[-1] != 0.0) or np.any(
-            np.asarray(field_f.A_minus)[-1] != 0.0
-        ):
-            raise RuntimeError(
-                "The terminal substrate must satisfy A_i_minus=A_f_minus=0."
-            )
+        if isinstance(field_i, LayeredElectricField):
+            if field_i.n is not reference.n and not np.array_equal(
+                field_i.n, reference.n
+            ):
+                raise RuntimeError("The incident field does not share the frozen n0.")
+            if field_f.n is not reference.n and not np.array_equal(
+                field_f.n, reference.n
+            ):
+                raise RuntimeError("The exit field does not share the frozen n0.")
+            if np.any(np.asarray(field_i.A_minus)[-1] != 0.0) or np.any(
+                np.asarray(field_f.A_minus)[-1] != 0.0
+            ):
+                raise RuntimeError(
+                    "The terminal substrate must satisfy A_i_minus=A_f_minus=0."
+                )
         specular_tolerance = 64.0 * np.finfo(np.float64).eps * max(k0, 1.0)
         is_specular = np.linalg.norm(Q_parallel, axis=1) <= specular_tolerance
         return PreparedCTR(
@@ -1461,7 +1558,7 @@ class DWBAState:
         energy_eV = float(self._crystal.uc_bulk._E)
         k0 = 2.0 * np.pi / (HC_KEV_ANGSTROM / (energy_eV * 1e-3))
         h_array, k_array, ai, af = arrays
-        Qz = k0 * (np.sin(ai) + np.sin(af))
+        Qz = k0 * self._ambient_index().real * (np.sin(ai) + np.sin(af))
         return (Qz - normal[0] * h_array - normal[1] * k_array) / normal[2]
 
     def prepare_from_glancing(
@@ -1530,6 +1627,7 @@ class DWBAState:
         geometry_rtol=1e-7,
         geometry_atol=1e-8,
         cache=True,
+        angles_in_ambient=False,
     ):
         """Prepare from measured six-circle Vlieg angles.
 
@@ -1546,10 +1644,20 @@ class DWBAState:
         :param omega: Vlieg sample omega circle in radians.
         :param chi: Vlieg sample chi circle in radians.
         :param phi: Vlieg sample phi circle in radians.
+        :param bool angles_in_ambient: Explicitly interpret all supplied angles
+            in the local incident medium. Required for wet six-circle geometry;
+            no external entrance-interface correction is inferred.
         :raises ValueError: If chi or phi is nonzero or angles are invalid.
         :returns: Immutable measured-geometry preparation.
         :rtype: PreparedCTR
         """
+        if not isinstance(angles_in_ambient, (bool, np.bool_)):
+            raise TypeError("angles_in_ambient must be boolean.")
+        if self._water_components() and not angles_in_ambient:
+            raise ValueError(
+                "External Vlieg angles require cell refraction geometry; "
+                "use prepare_from_glancing with angles in water."
+            )
         arrays = np.broadcast_arrays(
             *[
                 np.asarray(value, dtype=np.float64)
@@ -1687,6 +1795,8 @@ class DWBAState:
 
         for global_record_index, record in enumerate(records):
             cell = record.cell
+            if isinstance(cell, WaterModel):
+                continue
             basis, factors, _ = cell.build_selected_basis()
             if cell._special_formfactors_present:
                 raise NotImplementedError(
@@ -1857,54 +1967,76 @@ class DWBAState:
         def field_array(value):
             return np.ascontiguousarray(np.asarray(value).reshape(media, -1))
 
-        atomic, reference = _CTRcalc_cpp.unitcell_F_DWBA_records(
-            prepared.Q_parallel,
-            prepared.is_specular,
-            prepared.reference.n,
-            prepared.field_i_index,
-            prepared.field_f_index,
-            field_array(prepared.field_i.kz),
-            field_array(prepared.field_i.A_plus),
-            field_array(prepared.field_i.A_minus),
-            field_array(prepared.field_i._A_plus_over_kz),
-            field_array(prepared.field_i._A_minus_over_kz),
-            field_array(prepared.field_f.kz),
-            field_array(prepared.field_f.A_plus),
-            field_array(prepared.field_f.A_minus),
-            field_array(prepared.field_f._A_plus_over_kz),
-            field_array(prepared.field_f._A_minus_over_kz),
-            prepared.field_i.z_reference,
-            prepared.field_f.z_reference,
-            prepared.field_i.z_interfaces,
-            prepared.alpha_i,
-            prepared.alpha_f,
-            prepared.cos_azimuth,
-            prepared.sin_azimuth,
-            prepared.k0,
-            prepared.polarization_i,
-            prepared.polarization_f,
-            prepared._atomic_model.reference_shares,
-            prepared.reference_area,
-            bulk_mode == "semi_infinite",
-            float(bulk_attenuation),
-            packed["atom_basis"],
-            packed["form_factors"],
-            packed["finite_positions"],
-            packed["finite_atom_index"],
-            packed["finite_record_index"],
-            packed["finite_weight"],
-            packed["bulk_positions"],
-            packed["bulk_atom_index"],
-            packed["bulk_weight"],
-            packed["bulk_repeat_coordinate"],
-            packed["bulk_repeat"],
-        )
+        if not isinstance(prepared.field_i, LayeredElectricField):
+            from ._CTRwater_continuous import _evaluate_continuous
+            if bulk_mode != "semi_infinite":
+                raise ValueError(
+                    "Continuous water references require semi_infinite bulk mode."
+                )
+            atomic, reference = _evaluate_continuous(
+                prepared, records, packed, bulk_attenuation,
+                integral_cache=self._continuous_integral_cache,
+            )
+        else:
+            atomic, reference = _CTRcalc_cpp.unitcell_F_DWBA_records(
+                prepared.Q_parallel,
+                prepared.is_specular,
+                prepared.reference.n,
+                prepared.field_i_index,
+                prepared.field_f_index,
+                field_array(prepared.field_i.kz),
+                field_array(prepared.field_i.A_plus),
+                field_array(prepared.field_i.A_minus),
+                field_array(prepared.field_i._A_plus_over_kz),
+                field_array(prepared.field_i._A_minus_over_kz),
+                field_array(prepared.field_f.kz),
+                field_array(prepared.field_f.A_plus),
+                field_array(prepared.field_f.A_minus),
+                field_array(prepared.field_f._A_plus_over_kz),
+                field_array(prepared.field_f._A_minus_over_kz),
+                prepared.field_i.z_reference,
+                prepared.field_f.z_reference,
+                prepared.field_i.z_interfaces,
+                prepared.alpha_i,
+                prepared.alpha_f,
+                prepared.cos_azimuth,
+                prepared.sin_azimuth,
+                prepared.k0,
+                prepared.polarization_i,
+                prepared.polarization_f,
+                prepared._atomic_model.reference_shares,
+                prepared.reference_area,
+                bulk_mode == "semi_infinite",
+                float(bulk_attenuation),
+                packed["atom_basis"],
+                packed["form_factors"],
+                packed["finite_positions"],
+                packed["finite_atom_index"],
+                packed["finite_record_index"],
+                packed["finite_weight"],
+                packed["bulk_positions"],
+                packed["bulk_atom_index"],
+                packed["bulk_weight"],
+                packed["bulk_repeat_coordinate"],
+                packed["bulk_repeat"],
+            )
         atomic = np.asarray(atomic, dtype=np.complex128)
         reference = np.asarray(reference, dtype=np.complex128)
         # Crystallinity changes only the contrast, never the optical reference
         # or the native packing. Read live source values even in a fit batch.
         # Retain exact legacy arithmetic for c=1 and exact cancellation at c=0.
         for index, record in enumerate(records):
+            if isinstance(record.cell, WaterModel):
+                if not isinstance(prepared.field_i, LayeredElectricField):
+                    continue
+                from ._CTRwater_analytic import _water_contrast
+                if bulk_mode != "semi_infinite":
+                    raise ValueError("Water DWBA requires semi_infinite bulk mode.")
+                contrast = _water_contrast(
+                    prepared, record, index, cache=self._water_contrast_cache
+                )
+                atomic[index] = reference[index] + contrast
+                continue
             crystallinity = record.cell.crystallinity
             if crystallinity == 0.0:
                 atomic[index] = reference[index]

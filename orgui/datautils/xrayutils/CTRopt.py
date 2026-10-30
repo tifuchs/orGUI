@@ -716,6 +716,7 @@ class CTROptimizer:
         )[0]
         prepared = self.xtal.dwba.prepare_from_vlieg(
             *(angles[name] for name in _DWBA_ANGLE_NAMES),
+            angles_in_ambient=getattr(ctr, "angles", None) is None,
             polarization_i=polarization_i,
             polarization_f=polarization_f,
         )
@@ -793,6 +794,7 @@ class CTROptimizer:
         ):
             result = state.evaluate_from_vlieg(
                 *(angles[name] for name in _DWBA_ANGLE_NAMES),
+                angles_in_ambient=getattr(ctr, "angles", None) is None,
                 polarization_i=polarization_i,
                 polarization_f=polarization_f,
                 bulk_mode="semi_infinite",

@@ -960,10 +960,10 @@ py::tuple unitcell_F_DWBA_records(
                         * static_cast<double>(sigma_f[channel])
                         * incident_amplitude * exit_amplitude
                         * incident_sine * exit_sine * cos_data[point];
-                    const complex128 incident_normal = -k0
+                    const complex128 incident_normal = -k0 * reference_n_data[0]
                         * std::cos(alphai_data[point]) * incident_sine
                         * incident_over_kz;
-                    const complex128 exit_normal = -k0
+                    const complex128 exit_normal = -k0 * reference_n_data[0]
                         * std::cos(alphaf_data[point]) * exit_sine
                         * exit_over_kz;
                     vector_weight = tangent + incident_normal * exit_normal;

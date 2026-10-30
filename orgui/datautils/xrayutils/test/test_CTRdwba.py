@@ -1549,10 +1549,10 @@ def test_water_special_factors_and_unsupported_transforms_fail_clearly(
     bulk = _layered_cell("bulk")
     water = CTRuc.WaterModel(bulk.a, bulk.alpha, "step")
     water.setEnergy(10000.0)
-    with pytest.raises(NotImplementedError, match="WaterModel"):
-        CTRcalc.SXRDCrystal(bulk, water).dwba.prepare_from_glancing(
-            0.0, 0.0, 0.04, 0.04
-        )
+    prepared_water = CTRcalc.SXRDCrystal(bulk, water).dwba.prepare_from_glancing(
+        0.0, 0.0, 0.04, 0.04
+    )
+    assert prepared_water.reference.n[0] != 1.0
 
     surface = _layered_cell("surface")
     surface.coherentDomainMatrix[0][0, 0] = 1.1

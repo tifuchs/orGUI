@@ -43,7 +43,6 @@ from scipy.ndimage import gaussian_filter1d
 import os
 import re
 import importlib
-from scipy.special import erf
 
 # random.seed(45)
 from collections import OrderedDict
@@ -350,6 +349,20 @@ def _coherent_domain_arrays(coherent_domain_matrix, coherent_domain_occupancy):
 
 
 class WaterModel(Lattice, LinearFitFunctions):
+    """Step or layered water with independent optical-reference selection.
+
+    :param a: Lattice lengths in Angstrom.
+    :param alpha: Lattice angles in degrees.
+    :param str watertype: ``step`` (optional adsorption) or ``layered``.
+    :param str optical_reference: ``tanh`` (analytic s interfaces; default
+        for step), ``sharp`` (analytic s/p; default for layered), or ``erf``
+        (explicit numerical confirmation for step).
+    :param str form_factor: ``molecular`` selects independent O + 2H factors.
+        Other conventions are retained for legacy import compatibility.
+
+    Deprecated type aliases preserve their old density and factor conventions.
+    Serialized settings distinguish these imports from newly constructed steps.
+    """
     # path = os.path.split(__file__)[0]
 
     # f_water = np.loadtxt("%s/water_scattering.dat" % path).T
@@ -360,22 +373,21 @@ class WaterModel(Lattice, LinearFitFunctions):
     # 2 for measured bulk liquid water
     # 1 for calculated "free atom model"
     # f0_water_fun = interp1d(f_water[0],f_water[2])
-    supportedTypes = [
-        "step",
-        "layered",
-        "1layer",
-        "1layer_O",
-        "layered_O",
-        "1layer_s_O",
-    ]
+    supportedTypes = ["step", "layered"]
+    legacyTypes = ["tanh", "erf", "1layer", "1layer_O", "layered_O", "1layer_s_O"]
 
     parameterOrder = "zpos/frac layer_spacing/frac sigma_0/frac  sigma_bar/frac rho_0_r"
 
     parameterLookup = {"z": 0, "spacing": 1, "sigma_0": 2, "sigma_bar": 3, "rho_0": 4}
 
     parameterLookup_inv = dict(map(reversed, parameterLookup.items()))
+    # Accept the physical name without changing legacy generated fit labels.
+    parameterLookup["A0"] = 4
 
-    def __init__(self, a, alpha, watertype="step", **keyargs):
+    def __init__(
+        self, a, alpha, watertype="step", *, optical_reference=None,
+        form_factor=None, **keyargs
+    ):
         super().__init__(a, alpha)
         LinearFitFunctions.__init__(self)
         self.basis = np.array([0.0, 2.8, 0.5, 1.0, 0.0])
@@ -397,15 +409,119 @@ class WaterModel(Lattice, LinearFitFunctions):
             self.name = keyargs["name"]
         else:
             self.name = "unnamed water model"
-        if watertype not in WaterModel.supportedTypes:
-            raise Exception(
-                f"Water model {watertype} is not supported, should be one of {WaterModel.supportedTypes}"  # noqa: E501
-            )
         self.type = watertype
+        if optical_reference is not None:
+            self.optical_reference = optical_reference
+        if form_factor is not None:
+            self.form_factor = form_factor
+        self._validate_settings()
 
         self.refHKLTransform = np.identity(3)
         self.refRealTransform = np.identity(3)
         self._pos_absolute = 0.0
+
+    @property
+    def type(self):
+        """Return the physical family: ``step`` or ``layered``."""
+        return self._water_type
+
+    @type.setter
+    def type(self, value):
+        """Select a family, accepting deprecated names with their old physics."""
+        self._set_type(value)
+
+    def _set_type(self, value, *, legacy=False):
+        value = np.asarray(value).item()
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
+        if value not in self.supportedTypes + self.legacyTypes:
+            raise ValueError(f"Unknown water model {value!r}; use step or layered.")
+        if value in self.legacyTypes:
+            warnings.warn(
+                f"Water model {value!r} is deprecated; use step or layered with "
+                "separate optical_reference and form_factor settings. Legacy "
+                "density and scattering conventions are retained.",
+                DeprecationWarning, stacklevel=3,
+            )
+        self._water_type = "layered" if value.startswith("layered") else "step"
+        self.optical_reference = (
+            value if value in {"tanh", "erf"}
+            else "tanh" if value == "step" and not legacy else "sharp"
+        )
+        self.form_factor = {
+            "tanh": "forward", "erf": "forward",
+            "1layer_O": "scaled_oxygen", "layered_O": "oxygen",
+            "1layer_s_O": "oxide",
+        }.get(value, "molecular")
+        # These settings retain imported density conventions. New step models
+        # use an erf onset with optional adsorption and full molecular factors.
+        self.density_profile = "tanh" if value == "tanh" else "erf"
+        self.adsorption = value.startswith("1layer") or (
+            value == "step" and not legacy
+        )
+        self.adsorption_position = "onset" if value == "1layer_s_O" else "offset"
+
+    def _validate_settings(self):
+        if not isinstance(self.adsorption, (bool, np.bool_)):
+            raise ValueError("Water adsorption must be a boolean.")
+        if self.optical_reference not in {"sharp", "tanh", "erf"}:
+            raise ValueError("optical_reference must be sharp, tanh, or erf.")
+        if self.type == "layered" and self.optical_reference == "erf":
+            raise ValueError(
+                "Layered water requires a sharp or tanh optical reference."
+            )
+        if self.form_factor not in {
+            "molecular", "forward", "oxygen", "scaled_oxygen", "oxide"
+        }:
+            raise ValueError("Unknown water form_factor convention.")
+        if self.density_profile not in {"erf", "tanh"}:
+            raise ValueError("Water density_profile must be erf or tanh.")
+        if self.density_profile == "tanh" and self.form_factor != "forward":
+            raise ValueError("Legacy tanh density requires forward form factors.")
+        if self.adsorption_position not in {"offset", "onset"}:
+            raise ValueError("adsorption_position must be offset or onset.")
+
+    def _settings(self):
+        self._validate_settings()
+        return dict(
+            version=2, optical_reference=self.optical_reference,
+            form_factor=self.form_factor, density_profile=self.density_profile,
+            adsorption=bool(self.adsorption),
+            adsorption_position=self.adsorption_position,
+        )
+
+    def _restore_settings(self, settings):
+        if np.asarray(settings.get("version", 0)).item() != 2:
+            raise ValueError("Unsupported water settings version.")
+        for key in self._settings():
+            if key != "version":
+                value = np.asarray(settings[key]).item()
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8")
+                setattr(self, key, value)
+        self._validate_settings()
+
+    def _settings_text(self):
+        import json
+
+        return (
+            "// water_settings = "
+            + json.dumps(self._settings(), sort_keys=True) + "\n"
+        )
+
+    def _read_settings_text(self, string, original_type):
+        import json
+
+        match = re.search(r"water_settings\s*=\s*(\{[^\n]*\})", string)
+        if match:
+            self._restore_settings(json.loads(match.group(1)))
+        elif original_type == "step":
+            # Old files often contain A0=1 even though step ignored it. Keep
+            # that unused parameter inert, including when restoring fit state.
+            self._set_type("step", legacy=True)
+        density = re.search(r"water_number_density\s*=\s*([0-9.eE+-]+)", string)
+        if density:
+            self.pw = float(density.group(1))
 
     def setReferenceUnitCell(self, uc, rotMatrix=np.identity(3)):
         """Set the reciprocal- and real-space reference coordinate system.
@@ -476,165 +592,90 @@ class WaterModel(Lattice, LinearFitFunctions):
         self.pos_absolute = below_height
 
     def F_uc(self, h, k, l):  # noqa: E741
-        """Return the water-model structure factor in electrons.
+        """Return the continuous-water amplitude in electrons per lateral cell.
 
-        The result is the unnormalized scattering amplitude associated with
-        this model's lateral unit cell. Area conversion between heterogeneous
-        components is performed by
-        :meth:`~orgui.datautils.xrayutils.CTRcalc.SXRDCrystal.F`.
-
-        :param numpy.ndarray h:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param numpy.ndarray k:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :param numpy.ndarray l:
-            Reference-frame reciprocal coordinate in r.l.u.
-        :returns:
-            Complex structure-factor amplitude in electrons.
-        :rtype: numpy.ndarray
+        Coordinates are reference-cell r.l.u.; q is transformed to Cartesian
+        inverse Angstrom. Only the specular Fourier component is nonzero.
         """
-        mask = np.logical_and(np.isclose(h, 0), np.isclose(k, 0))
-        if not np.any(mask):
-            return np.zeros_like(l, dtype=np.complex128)
-        a, alpha, b, beta = self.getLatticeParameters()
-        # Layered water model '''simga_0 is rms of water profile simga_bar is successive broadening where: simga_j = #sqrt(simga_0**2 + j*sigma_bar**2) spacing is the layer spacing.'''  # noqa: E501
-        # self.pw = 0.0334
-        # density of water
-        # f = np.zeros(h.size,dtype=np.complex128)
-        # hkl = (self.refHKLTransform * np.vstack((h[mask],k[mask],l[mask]))).A
-        # l = hkl[2]
-        # Q_cart2 = ((self._BMatrix * hkl).A)**2
-        # Q2 = np.sum(Q_cart2,axis=0) #squared!!!
+        from ._CTRwater import _fourier
 
-        # for i in range(2):
-        #    f[:] +=  self.f[i][10] + self.f[i][11] + 1j*self.f[i][12]
-        #    for j in range(5):
-        #        f += self.f[i][j]*np.exp(- self.f[i][j+5]*Q2)
-        # zwater = WaterModel.f0_water_fun(Q) + self.f #scattering factor of water
-        # sigma_bar = self.basis[3]
-        # spacing = self.basis[1]
-        l_masked = l[mask]
-        zpos, d_layering, sigma_0, sigma_bar, A0 = self.basis
-
-        zpos += self.pos_absolute / self.a[2]
-
-        # f = np.empty_like(l_masked,dtype=np.complex128)
-
-        if self.type == "step":
-            raise NotImplementedError(
-                "This water type uses data, that is not distributed with this version of datautils."  # noqa: E501
-            )
-            # fwater = f0_water_fun(l_masked*b[2]) + self.wat_dispersion
-            # F_wat = 1j*self.pw*fwater*self.volume*np.exp(-2*(np.pi * sigma_0 * l_masked)**2)/(2*np.pi*l_masked)  # noqa: E501
-        elif self.type == "layered":
-            raise NotImplementedError(
-                "This water type uses data, that is not distributed with this version of datautils."  # noqa: E501
-            )
-            # fwater = f0_water_fun(l_masked*b[2]) + self.wat_dispersion
-            # f_w_layer = fwater*self.pw*self.volume*d_layering
-            # if A0 == 1.:
-            #    sf = np.exp(-2*(np.pi * sigma_0 * l_masked)**2)/(1. - np.exp(-2*(np.pi * sigma_bar * l_masked)**2)*np.exp(2j*np.pi * l_masked * d_layering))  # noqa: E501
-            #    F_wat = f_w_layer*sf
-            # else:
-            #    sigma_1 = np.sqrt(sigma_0**2 + sigma_bar**2)
-            #    sf = np.exp(-2*(np.pi * sigma_1 * l_masked)**2)/(1. - np.exp(-2*(np.pi * sigma_bar * l_masked)**2)*np.exp(2j*np.pi * l_masked * d_layering))  # noqa: E501
-            #    F_wat = f_w_layer*( A0*np.exp(-0.5*(sigma_0*l_masked*b[2])**2) + sf*np.exp(2j*np.pi * l_masked * d_layering))  # noqa: E501
-        elif self.type == "layered_O":
-            # fwater = f0_water_fun(l_masked*b[2]) + self.wat_dispersion
-
-            f = np.empty_like(l_masked, dtype=np.complex128)
-            f[:] = self.f[0][10] + self.f[0][11] + 1j * self.f[0][12]
-            for j in range(5):
-                f += self.f[0][j] * np.exp(-self.f[0][j + 5] * (l_masked * b[2]) ** 2)
-            # f *= (10/8)
-
-            f_w_layer = f * self.pw * self.volume * d_layering
-
-            if A0 == 1.0:
-                sf = np.exp(-2 * (np.pi * sigma_0 * l_masked) ** 2) / (
-                    1.0
-                    - np.exp(-2 * (np.pi * sigma_bar * l_masked) ** 2)
-                    * np.exp(2j * np.pi * l_masked * d_layering)
+        h, k, l = np.broadcast_arrays(h, k, l)  # noqa: E741
+        shape = h.shape
+        q = self.B_mat @ self.refHKLTransform @ np.vstack(
+            (h.ravel(), k.ravel(), l.ravel())
+        )
+        mask = np.isclose(q[0], 0., atol=1e-10) & np.isclose(q[1], 0., atol=1e-10)
+        result = np.zeros(h.size, complex)
+        if np.any(mask):
+            qz = q[2, mask]
+            result[mask] = _fourier(self, qz)
+            if getattr(self, "_placements", None) is not None:
+                heights, probabilities = self._placements
+                result[mask] *= sum(
+                    p * np.exp(1j * qz * z) for z, p in zip(heights, probabilities)
                 )
-                F_wat = f_w_layer * sf
-            else:
-                sigma_1 = np.sqrt(sigma_0**2 + sigma_bar**2)
-                sf = np.exp(-2 * (np.pi * sigma_1 * l_masked) ** 2) / (
-                    1.0
-                    - np.exp(-2 * (np.pi * sigma_bar * l_masked) ** 2)
-                    * np.exp(2j * np.pi * l_masked * d_layering)
-                )
-                F_wat = f_w_layer * (
-                    A0 * np.exp(-0.5 * (sigma_0 * l_masked * b[2]) ** 2)
-                    + sf * np.exp(2j * np.pi * l_masked * d_layering)
-                )
+        return result.reshape(shape)
 
-        elif self.type == "1layer":
-            raise NotImplementedError(
-                "This water type uses data, that is not distributed with this version of datautils."  # noqa: E501
-            )
-            # fwater = f0_water_fun(l_masked*b[2]) + self.wat_dispersion
-            # rho, mu_offset = self._1layer_firstGauss()
-            # F_wat = 1j*self.pw*fwater*self.volume*np.exp(-2*(np.pi * sigma_0 * l_masked)**2)/(2*np.pi*l_masked)  # noqa: E501
-            # F_wat = F_wat + A0*fwater*np.exp(-0.5*(sigma_0*l_masked*b[2])**2)*np.exp(2j*np.pi * l_masked * mu_offset)  # noqa: E501
+    @property
+    def bulk_density(self):
+        """Return complex bulk scattering density in electrons/Angstrom cubed."""
+        from ._CTRwater import _bulk_density
+        return _bulk_density(self)
 
-        elif self.type == "1layer_O":
-            rho, mu_offset = self._1layer_firstGauss(0.00)
-            f = np.empty_like(l_masked, dtype=np.complex128)
-            f[:] = self.f[0][10] + self.f[0][11] + 1j * self.f[0][12]
-            for j in range(5):
-                f += self.f[0][j] * np.exp(-self.f[0][j + 5] * (l_masked * b[2]) ** 2)
+    @property
+    def reference_position(self):
+        """Return the intrinsic equimolar reference boundary in Angstrom."""
+        from ._CTRwater import _reference_position
+        return _reference_position(self)
 
-            f *= 10 / 8
-            F_wat = (
-                1j
-                * self.pw
-                * f
-                * self.volume
-                * np.exp(-2 * (np.pi * sigma_0 * l_masked) ** 2)
-                / (2 * np.pi * l_masked)
-            )
-
-            F_wat = F_wat + A0 * f * np.exp(
-                -0.5 * (sigma_0 * l_masked * b[2]) ** 2
-            ) * np.exp(2j * np.pi * l_masked * mu_offset)
-
-        elif self.type == "1layer_s_O":
-            rho, mu_offset = self._1layer_firstGauss(0.0)
-            f = np.empty_like(l_masked, dtype=np.complex128)
-            f[:] = (
-                self.f[2][10] + self.f[2][11] + 1j * self.f[2][12]
-            )  # self.f[2] is O2-
-            for j in range(5):
-                f += self.f[2][j] * np.exp(-self.f[2][j + 5] * (l_masked * b[2]) ** 2)
-
-            F_wat = (
-                1j
-                * self.pw
-                * f
-                * self.volume
-                * np.exp(-2 * (np.pi * sigma_0 * l_masked) ** 2)
-                / (2 * np.pi * l_masked)
-            )
-
-            F_wat = F_wat + A0 * f * np.exp(-0.5 * (sigma_0 * l_masked * b[2]) ** 2)
-
-        else:
-            warnings.warn(f"unknown water type {self.type} !")
-            F_wat = np.zeros_like(l_masked)
-
-        F_wat *= np.exp(2j * np.pi * l_masked * zpos)  # position of water
-
-        # temp = np.exp(-0.5*(Q*sigma_bar)**2)*np.exp(1j*Q*spacing)
-        # flayer = spacing*(zwater)*pw*self.uc_area*np.exp(-0.5*(Q*sigma_0)**2)
-        # F = (np.exp(2j*np.pi*l[mask]*zpos)*(flayer/(1-temp)))/self.volume
-
-        F_water = np.zeros_like(l, dtype=np.complex128)
-        F_water[mask] = F_wat
-        return F_water
+    def transition_extent(self, tolerance=1e-10):
+        """Return the finite transition bounds in Angstrom, including terraces."""
+        from ._CTRwater import _extent
+        low, high = _extent(self, tolerance)
+        if getattr(self, "_placements", None) is not None:
+            heights, _ = self._placements
+            low += min(heights)
+            high += max(heights)
+        return low, high
 
     def setWaterParameters(self, zpos, layer_spacing, sigma_0, sigma_bar, A0):
+        """Set four fractional lengths and the dimensionless adsorption weight.
+
+        Lengths multiply ``volume / uc_area`` to obtain Angstrom. For ``step``,
+        ``A0`` counts excess molecules per lateral cell; for ``layered`` it is
+        the first-layer weight relative to subsequent layers. Imported plain
+        steps retain ``adsorption=False``; set it true to activate their A0.
+        """
         self.basis = np.array([zpos, layer_spacing, sigma_0, sigma_bar, A0])
+        self.basis_0 = self.basis.copy()
+        self._basis_parvalues = None
+
+    def getStartParamAndLimits(self, force_recalculate=False):
+        """Prepare water fit values, retaining unfitted intrinsic parameters."""
+        if self.basis_0 is None:
+            self.basis_0 = self.basis.copy()
+        return super().getStartParamAndLimits(force_recalculate)
+
+    def parametersToDict(self):
+        """Serialize fit parameters and the water material convention."""
+        if self.basis_0 is None:
+            self.basis_0 = self.basis.copy()
+        result = super().parametersToDict()
+        result["water_type"] = self.type
+        result["water_number_density"] = self.pw
+        result["water_settings"] = self._settings()
+        return result
+
+    def parametersFromDict(self, values, override_values=True):
+        """Restore fit state, accepting legacy dictionaries without water metadata."""
+        kind = values.get("water_type", self.type)
+        if "water_settings" in values:
+            self.type = kind
+            self._restore_settings(values["water_settings"])
+        elif "water_type" in values:
+            self._set_type(kind, legacy=True)
+        self.pw = float(values.get("water_number_density", self.pw))
+        super().parametersFromDict(values, override_values)
 
     def setEnergy(self, E):
         self._E = E
@@ -693,192 +734,21 @@ class WaterModel(Lattice, LinearFitFunctions):
         return rho_0 * (10.0 + self.wat_dispersion), mu
 
     def zDensity_G(self, z, h, k):
+        """Return complex continuous density in electrons/Angstrom cubed.
+
+        :param z: Physical normal coordinates in Angstrom, in any order.
+        :param h: In-plane Fourier index; only h=k=0 contributes.
+        :param k: In-plane Fourier index.
         """
-        calculates h,k-th Fourier component of the electron density
-        Water models only contribute to the 0,0-th component
-        Will return an array with zeros for h, k != 0
-
-        The density is normalized to the surface area of the unit cell
-
-        Parameters
-        ----------
-        z : 1-d array
-            z coordinates in Angstrom, should be equidestant
-            and monotonally increasing to avoid numerical issues with convolutions
-        h : float
-            h-th component index
-        k : float
-            k-th component index
-
-        Returns
-        -------
-        1d- array complex128
-            complex h,k-th Fourier component of the electron density
-            in electrons/Angstrom**3
-
-        """
-
-        if abs(h) > 0.001 or abs(k) > 0.001:
-            return np.zeros_like(z)
-        zstep = np.diff(z)
-        zstep_mean = np.mean(zstep)
-        if not np.allclose(zstep, zstep_mean):
-            warnings.warn(
-                "zDensity: z stepsize is not equal in given z array."
-                "This will result in numerical errors in electron density calculation!"
-            )
-        zpos, d_layering, sigma_0, sigma_bar, A0 = self.basis
-        zpos += self.pos_absolute / self.a[2]
-        if self.type == "step":
-            rho = (
-                0.5
-                * (10.0 + self.wat_dispersion)
-                * self.pw
-                * (
-                    1.0
-                    + erf((z - zpos * self._a[2]) / (np.sqrt(2) * sigma_0 * self._a[2]))
-                )
-            )
-            rho_real = gaussian_filter1d(rho.real, 0.2547 / zstep_mean)
-            rho_imag = gaussian_filter1d(rho.imag, 0.2547 / zstep_mean)
-            rho = rho_real + 1j * rho_imag  # estimation of water molecular form factor
-        elif self.type == "layered":
-            zrange_waterstructure = np.amax(z) / self._a[2] - zpos  # lattice units
-            nogausseans_inrange = np.ceil(zrange_waterstructure / d_layering)
-            nogausseans = int(
-                nogausseans_inrange + 20
-            )  # some additional gausseans to reduce edge effects
-            layer_density = (
-                (10.0 + self.wat_dispersion) * self.pw * d_layering * self._a[2]
-            )
-            rho = np.zeros_like(z, dtype=np.complex128)
-            for i in range(nogausseans):
-                sigma2_rel = sigma_0**2 + i * sigma_bar**2 + (0.2547 / self._a[2]) ** 2
-                if i == 0:
-                    rho += (
-                        A0
-                        * np.exp(
-                            -((z / self._a[2] - zpos - i * d_layering) ** 2)
-                            / (2 * sigma2_rel)
-                        )
-                        / (np.sqrt(2 * np.pi * sigma2_rel) * self._a[2])
-                    )
-                else:
-                    rho += np.exp(
-                        -((z / self._a[2] - zpos - i * d_layering) ** 2)
-                        / (2 * sigma2_rel)
-                    ) / (np.sqrt(2 * np.pi * sigma2_rel) * self._a[2])
-            rho *= layer_density
-        elif self.type == "layered_O":
-            zrange_waterstructure = np.amax(z) / self._a[2] - zpos  # lattice units
-            nogausseans_inrange = np.ceil(zrange_waterstructure / d_layering)
-            nogausseans = int(
-                nogausseans_inrange + 5
-            )  # some additional gausseans to reduce edge effects
-            layer_density = self.pw * d_layering * self._a[2]
-            rho = np.zeros_like(z, dtype=np.complex128)
-
-            for i in range(nogausseans):
-                sigma2_rel = sigma_0**2 + i * sigma_bar**2
-                deltaZ2i = sigma2_rel * self._a[2] ** 2
-
-                z_i = (zpos + i * d_layering) * self._a[2]
-
-                rho_i = (
-                    (self.f[0][10] + self.f[0][11] + 1j * self.f[0][12])
-                    / (np.sqrt(2 * np.pi * deltaZ2i))
-                ) * np.exp(-0.5 * (((z - z_i) ** 2) / deltaZ2i))
-                for j in range(5):
-                    exp_dz = self.f[0][j + 5] + 0.5 * deltaZ2i
-                    rho_i += (self.f[0][j] / (np.sqrt(4.0 * np.pi * exp_dz))) * np.exp(
-                        -(((z - z_i) ** 2) / (4 * exp_dz))
-                    )
-                # rho_i *= np.exp(-2j*np.pi*((z- z_i)/self._a[2]))
-                if i == 0:
-                    rho += A0 * rho_i * layer_density
-                else:
-                    rho += rho_i * layer_density
-
-        elif self.type == "1layer":
-            sigma2_rel = sigma_0**2 + (0.2547 / self._a[2]) ** 2
-            rho = (
-                0.5
-                * (10.0 + self.wat_dispersion)
-                * self.pw
-                * (
-                    1.0
-                    + erf((z - zpos * self._a[2]) / (np.sqrt(2) * sigma_0 * self._a[2]))
-                )
-            )
-            rho_real = gaussian_filter1d(rho.real, 0.2547 / zstep_mean)
-            rho_imag = gaussian_filter1d(rho.imag, 0.2547 / zstep_mean)
-            rho = rho_real + 1j * rho_imag  # estimation of water molecular form factor
-            rho_layer, mu_offset = self._1layer_firstGauss()
-            rho += rho_layer * np.exp(
-                -((z / self._a[2] - zpos - mu_offset) ** 2) / (2 * sigma2_rel)
-            )
-        elif self.type == "1layer_O":
-            # rho = 0.5*(10.+self.wat_dispersion)*self.pw*(1. + erf((z - zpos*self._a[2])/(np.sqrt(2)* sigma_0 * self._a[2])))  # noqa: E501
-            # rho = gaussian_filter1d(np.abs(rho),0.2547 / zstep_mean).astype(np.complex128) #estimation of water molecular form factor  # noqa: E501
-            rho_layer, mu_offset = self._1layer_firstGauss(0.00)
-
-            deltaZ2i = (sigma_0 * self._a[2]) ** 2
-            z_i = (zpos + mu_offset) * self._a[2]
-
-            rho_i = (
-                (self.f[0][10] + self.f[0][11] + 1j * self.f[0][12])
-                / (np.sqrt(2 * np.pi * deltaZ2i))
-            ) * np.exp(-0.5 * (((z - z_i) ** 2) / deltaZ2i))
-            rho_step = util.stepup(
-                z,
-                self.f[0][10] + self.f[0][11] + 1j * self.f[0][12],
-                sigma_0 * self._a[2],
-                zpos * self._a[2],
-            )
-            for j in range(5):
-                # exp_dpara = self.f[i][j+5] + 0.5*deltaPara2i
-                exp_dz = self.f[0][j + 5] + 0.5 * deltaZ2i
-                eff_sigma = np.sqrt(exp_dz / 2)
-                rho_step += util.stepup(z, self.f[0][j], eff_sigma, zpos * self._a[2])
-                rho_i += (self.f[0][j] / (np.sqrt(4.0 * np.pi * exp_dz))) * np.exp(
-                    -(((z - z_i) ** 2) / (4 * exp_dz))
-                )
-            rho_i *= A0 * np.exp(-2j * np.pi * ((z - z_i) / self._a[2]))
-
-            rho_step *= (10 / 8) * self.pw
-
-            rho = rho_i / self.uc_area + rho_step
-        elif self.type == "1layer_s_O":
-            rho_layer, mu_offset = self._1layer_firstGauss(0.0)
-
-            deltaZ2i = (sigma_0 * self._a[2]) ** 2
-            z_i = (zpos) * self._a[2]
-
-            rho_i = (
-                (self.f[2][10] + self.f[2][11] + 1j * self.f[2][12])
-                / (np.sqrt(2 * np.pi * deltaZ2i))
-            ) * np.exp(-0.5 * (((z - z_i) ** 2) / deltaZ2i))
-            rho_step = util.stepup(
-                z,
-                self.f[2][10] + self.f[2][11] + 1j * self.f[2][12],
-                sigma_0 * self._a[2],
-                zpos * self._a[2],
-            )
-            for j in range(5):
-                # exp_dpara = self.f[i][j+5] + 0.5*deltaPara2i
-                exp_dz = self.f[2][j + 5] + 0.5 * deltaZ2i
-                eff_sigma = np.sqrt(exp_dz / 2)
-                rho_step += util.stepup(z, self.f[2][j], eff_sigma, zpos * self._a[2])
-                rho_i += (self.f[2][j] / (np.sqrt(4.0 * np.pi * exp_dz))) * np.exp(
-                    -(((z - z_i) ** 2) / (4 * exp_dz))
-                )
-            rho_i *= A0 * np.exp(-2j * np.pi * ((z - z_i) / self._a[2]))
-
-            rho_step *= self.pw
-
-            rho = rho_i / self.uc_area + rho_step
-
-        return rho
+        from ._CTRwater import _density
+        z = np.asarray(z, dtype=float)
+        if not (np.isclose(h, 0.) and np.isclose(k, 0.)):
+            return np.zeros(z.shape, complex)
+        if getattr(self, "_placements", None) is None:
+            return _density(self, z)
+        heights, probabilities = self._placements
+        return sum(p * _density(self, z-height)
+                   for height, p in zip(heights, probabilities))
 
     def __repr__(self):
         repr_super = super().__repr__()
@@ -928,11 +798,15 @@ class WaterModel(Lattice, LinearFitFunctions):
 
     def writeWATfile(self, filename):
         with open(filename, "w") as f:
-            st = self.latticeRODStr() + "\n" + self.parameterStrRod()
+            st = self.toRODStr()
             f.write(st)
 
     def toRODStr(self):
-        return self.latticeRODStr() + "\n" + self.parameterStrRod()
+        return (
+            self.latticeRODStr() + "\n" + self.parameterStrRod()
+            + self._settings_text()
+            + f"// water_number_density = {self.pw:.17g}\n"
+        )
 
     def toStr(self, showErrors=True):
         """Serialize the water model as plain text.
@@ -949,6 +823,8 @@ class WaterModel(Lattice, LinearFitFunctions):
             + WaterModel.parameterOrder
             + "\n"
             + self.parameterStr(showErrors=showErrors)
+            + self._settings_text()
+            + f"// water_number_density = {self.pw:.17g}\n"
         )
 
     def pos(self):
@@ -969,22 +845,9 @@ class WaterModel(Lattice, LinearFitFunctions):
 
     @staticmethod
     def fromWATfile(watfile):
+        """Read modern or legacy WAT files, preserving their water conventions."""
         with open(watfile) as f:
-            next_skip_comment(f)  # return line
-            nline = next_skip_comment(f).split()
-            try:
-                latticeparams = np.array(nline, dtype=np.float64)
-                watertype = "step"  # default behaviour
-            except ValueError:
-                watertype = nline[0]
-                latticeparams = np.array(next_skip_comment(f).split(), dtype=np.float64)
-            basis = np.loadtxt(f)
-        uc = WaterModel(latticeparams[:3], latticeparams[3:], watertype)
-        if basis.size < 5:  # compatibility to old versions
-            basis = np.concatenate((basis, [1.0]))
-        uc.basis = basis
-        uc.basis_0 = np.copy(uc.basis)
-        return uc
+            return WaterModel.fromStr(f.read().strip().removeprefix("return\n"))
 
     @staticmethod
     def fromStr(string):
@@ -1023,6 +886,7 @@ class WaterModel(Lattice, LinearFitFunctions):
                 pass
         uc = WaterModel(latticeparams[:3], latticeparams[3:], watertype)
         uc.basis = basis
+        uc._read_settings_text(string, watertype)
         uc.errors = errors
         uc.basis_0 = np.copy(uc.basis)
         return uc

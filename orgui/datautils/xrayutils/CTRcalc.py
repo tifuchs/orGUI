@@ -188,6 +188,10 @@ class SXRDCrystal:
         self.uc_bulk = uc_bulk
         self._stack_policy = None
         self.uc_surface_list = list(uc_surface)
+        owned_water = [c.water for c in self.uc_surface_list
+                       if isinstance(c, PoissonSurface) and c.water is not None]
+        if any(w in self.uc_surface_list for w in owned_water):
+            raise ValueError("Owned water cannot also be a top-level component.")
         self.enable_uc_stacking = keyargs.get("enable_stacking", False)
         if not self.enable_uc_stacking:
             for uc in self.uc_surface_list:
@@ -566,6 +570,12 @@ class SXRDCrystal:
 
     def apply_stacking(self):
         """Generate object positions and cyclic layers from bottom to top."""
+        component_ids = {id(c) for c in self.uc_surface_list}
+        if any(
+            id(getattr(c, "water", None)) in component_ids
+            for c in self.uc_surface_list if isinstance(c, PoissonSurface)
+        ):
+            raise ValueError("Owned water cannot also be a top-level component.")
         lower_layer_maps = {}
         if self._stack_policy is not None:
             lower_layer_maps = self._validate_stack_definition()
@@ -1614,6 +1624,11 @@ class SXRDCrystal:
                 profile = component.optical_profile().copy()
                 profile[:, 1:] *= weight
                 profiles.append(profile)
+                if (
+                    isinstance(component, PoissonSurface)
+                    and component.water is not None
+                ):
+                    water_components.append((component._sync_water(), weight))
         structural_profile = combine_profiles(*profiles)
         dz = top_layer_spacing(structural_profile)
         if not water_components:

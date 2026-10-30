@@ -45,7 +45,7 @@ from .CTRutil import (
 )
 from .CTRoptics import combine_profiles
 
-from .CTRuc import UnitCell, ctr_accel_enabled
+from .CTRuc import UnitCell, WaterModel, ctr_accel_enabled
 from .CTRdistributions import (
     DEFAULT_TAIL_PROBABILITY,
     PoissonProfile,
@@ -2419,6 +2419,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
     def __init__(self, unitcell, **kwargs):
         super().__init__()
+        self.water = None
+        water = kwargs.pop("water", None)
         profile = kwargs.pop("profile", None)
         if profile is not None and not isinstance(profile, PoissonProfile):
             raise TypeError("PoissonSurface profile must be PoissonProfile")
@@ -2448,6 +2450,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         self._film_layer_ucs_base = []
         self.film_layer_ucs = []
         self._initialize_layer_stacking(kwargs)
+        self.attach_water(water)
 
     def set_ucs(self, unitcell, **kwargs):
         """Set a legacy source cell or explicit termination-cell mapping."""
@@ -2517,6 +2520,86 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         if self._source_unitcell is not None:
             return [self._source_unitcell]
         return list(self.termination_cells.values())
+
+    def _owned_components(self):
+        return self._owned_unitcells() + (
+            [self.water] if self.water is not None else []
+        )
+
+    def attach_water(self, water):
+        """Attach a continuous water model to every terrace, or detach with None.
+
+        Water keeps its intrinsic fractional offset and width. Its absolute
+        position is generated from the live surface geometry in Angstrom.
+        """
+        if water is not None and not isinstance(water, WaterModel):
+            raise TypeError("Attached water must be a WaterModel or None.")
+        if water is not None and getattr(water, "_surface_owner", self) is not self:
+            raise ValueError("Water already belongs to another PoissonSurface.")
+        previous = getattr(self, "water", None)
+        if previous is not None:
+            previous.__dict__.pop("_surface_owner", None)
+            previous._placements = None
+        self.water = water
+        if water is not None:
+            water._surface_owner = self
+            water.pos_absolute = 0.
+            if self._reference_unitcell is not None:
+                water.setReferenceUnitCell(
+                    self._reference_unitcell, self._reference_rotation
+                )
+            if hasattr(self, "E"):
+                water.setEnergy(self.E)
+
+    def terrace_distribution(self):
+        """Return read-only top heights (Angstrom), probabilities, and tail mass.
+
+        Retained water probabilities are normalized separately from historical
+        solid coherent truncation. The omitted probability is reported.
+        """
+        if self.underlying_film is None:
+            raise ValueError("Stack PoissonSurface on a Film before placing water.")
+        if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
+            self.createLayers()
+        candidates = self._profile_candidates()
+        probabilities = np.asarray(candidates.exposed_probability, dtype=float).copy()
+        heights = []
+        for layer in candidates.layer_numbers:
+            geometry = self._layer_domain_geometry(int(layer) + 1)
+            cell = geometry.surface_uc
+            matrix = self._with_below_translation(geometry.surface_matrix, cell)
+            origin = cell.layerpos[geometry.layer_id]
+            heights.append((matrix[2, 2]*origin + matrix[2, 3])*cell.R_mat[2, 2])
+        heights = np.asarray(heights)
+        active = probabilities > 0
+        heights, probabilities = heights[active], probabilities[active]
+        retained = probabilities.sum()
+        if retained <= 0:
+            raise ValueError("No water terrace probability retained.")
+        probabilities /= retained
+        heights.flags.writeable = probabilities.flags.writeable = False
+        return heights, probabilities, max(0., 1.-retained)
+
+    def _sync_water(self):
+        if self.water is not None:
+            heights, probabilities, _ = self.terrace_distribution()
+            self.water.pos_absolute = 0.
+            self.water._placements = heights, probabilities
+        return self.water
+
+    def _flat_water_amplitude(self, layer_number, h, k, l):  # noqa: E741
+        if self.water is None:
+            return 0.
+        geometry = self._layer_domain_geometry(layer_number + 1)
+        cell = geometry.surface_uc
+        matrix = self._with_below_translation(geometry.surface_matrix, cell)
+        height = (
+            matrix[2, 2] * cell.layerpos[geometry.layer_id] + matrix[2, 3]
+        ) * cell.R_mat[2, 2]
+        water = copy.copy(self.water)
+        water._placements = None
+        water.pos_absolute = height
+        return water.F_uc(h, k, l) * self.uc_area / water.uc_area
 
     def _refresh_legacy_terminations(self):
         if self._source_unitcell is None or self.underlying_film is None:
@@ -2675,7 +2758,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         """
         self._reference_unitcell = uc
         self._reference_rotation = np.asarray(rotMatrix, dtype=np.float64)
-        for cell in self._owned_unitcells():
+        for cell in self._owned_components():
             cell.setReferenceUnitCell(uc, rotMatrix)
         for cell in getattr(self, "_termination_views", {}).values():
             cell.setReferenceUnitCell(uc, rotMatrix)
@@ -2689,7 +2772,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             X-ray energy in eV.
         """
         self.E = E
-        for cell in self._owned_unitcells():
+        for cell in self._owned_components():
             cell.setEnergy(E)
         for cell in getattr(self, "_termination_views", {}).values():
             cell.setEnergy(E)
@@ -3064,7 +3147,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             k,
             l,
         )
-        return exposed + replaced
+        return (
+            exposed
+            + replaced
+            + self._flat_water_amplitude(geometry.layer_number, h, k, l)
+        )
 
     def flat_domain_corrections(self, h, k, l, *, exact_layer_count=10):  # noqa: E741
         """Return the retained flat-height states and their corrections.
@@ -3279,6 +3366,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         for film_uc in self._film_termination_ucs.values():
             if film_uc.coherentDomainMatrix:
                 F += film_uc.F_uc(h, k, l)
+        if self.water is not None:
+            F += self._sync_water().F_uc(h, k, l) * self.uc_area / self.water.uc_area
         return F
 
     def zDensity_G(self, z, h, k):
@@ -3293,6 +3382,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         for film_uc in self._film_termination_ucs.values():
             if film_uc.coherentDomainMatrix:
                 rho += film_uc.zDensity_G(z, h, k)
+        if self.water is not None:
+            rho += self._sync_water().zDensity_G(z, h, k)
         return rho
 
     def optical_profile(self):
@@ -3345,7 +3436,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         )  # absolute and relative
         uc_values = [
             cell.getStartParamAndLimits(force_recalculate)
-            for cell in self._owned_unitcells()
+            for cell in self._owned_components()
         ]
         uc_x0 = np.concatenate([value[0] for value in uc_values])
         uc_lower = np.concatenate([value[1] for value in uc_values])
@@ -3367,7 +3458,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 tail_probability=self.profile.tail_probability,
             )
         cursor = abs_rel_no
-        for cell in self._owned_unitcells():
+        for cell in self._owned_components():
             fp_no = len(cell.fitparnames)
             cell.setFitParameters(x[cursor : cursor + fp_no])
             cursor += fp_no
@@ -3377,7 +3468,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         super().setLimits(lim[:abs_rel_no])
         cursor = abs_rel_no
-        for cell in self._owned_unitcells():
+        for cell in self._owned_components():
             fp_no = len(cell.fitparnames)
             cell.setLimits(lim[cursor : cursor + fp_no])
             cursor += fp_no
@@ -3385,13 +3476,13 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
     def setFitErrors(self, errors):
         if errors is None:
             super().setFitErrors(None)
-            for cell in self._owned_unitcells():
+            for cell in self._owned_components():
                 cell.setFitErrors(None)
             return
         abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         super().setFitErrors(errors[:abs_rel_no])
         cursor = abs_rel_no
-        for cell in self._owned_unitcells():
+        for cell in self._owned_components():
             fp_no = len(cell.fitparnames)
             cell.setFitErrors(errors[cursor : cursor + fp_no])
             cursor += fp_no
@@ -3399,7 +3490,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
     def getFitErrors(self):
         err = super().getFitErrors()
         err_uc = np.concatenate(
-            [cell.getFitErrors() for cell in self._owned_unitcells()]
+            [cell.getFitErrors() for cell in self._owned_components()]
         )
         return np.concatenate([err, err_uc])
 
@@ -3418,13 +3509,13 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         # nothing else changes. Serialization is unaffected: it keys on the
         # cell name, not on this list.
         return super().fitparnames + [
-            name for cell in self._owned_unitcells() for name in cell.fitparnames
+            name for cell in self._owned_components() for name in cell.fitparnames
         ]
 
     @property
     def priors(self):
         return super().priors + [
-            prior for cell in self._owned_unitcells() for prior in cell.priors
+            prior for cell in self._owned_components() for prior in cell.priors
         ]
 
     def parametersToDict(self):
@@ -3432,15 +3523,19 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         d["unitcells"] = {
             cell.name: cell.parametersToDict() for cell in self._owned_unitcells()
         }
+        if self.water is not None:
+            d["water"] = self.water.parametersToDict()
         return d
 
     def clearParameters(self):
         super().clearParameters()
-        for cell in self._owned_unitcells():
+        for cell in self._owned_components():
             cell.clearParameters()
 
     def parametersFromDict(self, d, override_values=True):
         cells = self._owned_unitcells()
+        if self.water is not None and "water" in d:
+            self.water.parametersFromDict(d["water"], override_values)
         stored = d["unitcells"]
         if "unitcell" in stored and len(cells) == 1:
             cells[0].parametersFromDict(stored["unitcell"], override_values)
@@ -3451,7 +3546,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
     def updateFromParameters(self):
         """Update basis from the values stored in the Parameters"""
-        for cell in self._owned_unitcells():
+        for cell in self._owned_components():
             cell.updateFromParameters()
         super().updateFromParameters()
         if self.profile is not None:
@@ -3465,6 +3560,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
     def __getitem__(self, uc_name_or_index):
         if isinstance(uc_name_or_index, str):
+            if self.water is not None and uc_name_or_index in {
+                "water",
+                self.water.name,
+            }:
+                return self.water
             for layer, cell in self.termination_cells.items():
                 if uc_name_or_index.lower() in {
                     cell.name.lower(),
@@ -3494,12 +3594,18 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
     def parameter_list(self):
         return super().parameter_list() + [
             parameter
-            for cell in self._owned_unitcells()
+            for cell in self._owned_components()
             for parameter in cell.parameter_list()
         ]
 
     @classmethod
     def fromStr(cls, string):
+        water = None
+        if "\nAttachedWater " in string:
+            string, water_text = string.split("\nAttachedWater ", 1)
+            name, body = water_text.split("\n", 1)
+            water = WaterModel.fromStr(body.removeprefix("return\n"))
+            water.name = name
         with util.StringIO(string) as f:
             # parse header
             line = next_skip_comment(f).split()
@@ -3582,6 +3688,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         film = cls(
             unitcells,
             profile=profile,
+            water=water,
             layer_transition=_parse_layer_transition(string),
         )
         film.statistics = statistics
@@ -3617,6 +3724,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             for layer, cell in self.termination_cells.items():
                 s += f"TerminationUnitCell {layer:g} {cell.name}\n"
                 s += cell.toStr(showErrors=showErrors) + "\n\n"
+        if self.water is not None:
+            s += f"\nAttachedWater {self.water.name}\n" + self.water.toStr(showErrors)
         return s
 
     def __repr__(self):

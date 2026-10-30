@@ -1145,3 +1145,116 @@ API reference
    :member-order: bysource
 
 .. autofunction:: orgui.datautils.xrayutils.CTRutil.generate_surface_termination_cells
+
+
+Water on rough surfaces
+-----------------------
+
+``PoissonSurface`` can own one intrinsic ``WaterModel``. It translates water
+to each structural terrace top and uses the solid's height probabilities:
+
+.. math::
+
+   \overline\rho_w(z)=\sum_m p_m\rho_w(z-H_m),\qquad
+   F_w(q_z)=F_w^{\rm intrinsic}(q_z)\sum_m p_m e^{iq_zH_m}.
+
+The intrinsic offset is included in :math:`\rho_w`; do not add a second
+roughness factor. In ``PoissonHeightDomains`` each flat state carries its own
+water before the intensity is formed, retaining solid/water interference.
+
+.. code-block:: python
+
+   water = WaterModel(a, alpha, watertype="step",
+                      optical_reference="tanh", name="water")
+   # z, d, sigma_0 and sigma_bar are fractional cell heights; A0 is dimensionless.
+   water.setWaterParameters(zpos=0.1, layer_spacing=0.2, sigma_0=0.05,
+                            sigma_bar=0.1, A0=1.0)
+   surface.attach_water(water)  # detach with surface.attach_water(None)
+   water.addFitParameter("sigma_0", limits=(0.01, 0.2), name="water_width")
+   water.addFitParameter("A0", limits=(0.0, 2.0), name="adsorbed_water")
+
+Owned water participates in energy/reference propagation, fit parameters and
+errors, text models and HDF5 fit settings. Explicit fit names retain the
+existing shared-parameter convention; give independent water parameters distinct
+names. Do not also register that instance as a top-level crystal component.
+Standalone water keeps its existing stacking behavior. The public
+``surface.terrace_distribution()`` returns physical heights in Angstrom,
+normalized probabilities, and the excluded tail probability.
+
+Profiles and normalization
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+There are two public physical families: ``step`` and ``layered``. A new step
+is an erf onset plus an optional adsorbed Gaussian; ``A0=0`` removes the excess
+layer. A layered model is a progressively broadened Gaussian stack. Both use
+``form_factor="molecular"``, the bundled independent-atom O + 2H approximation,
+normalized to ten forward electrons before anomalous corrections. They do not
+read the unavailable historical measured molecular form-factor dataset.
+
+``optical_reference="tanh"`` selects analytic Epstein interface coefficients
+for s polarization; ``"sharp"`` uses Fresnel interfaces for s or p. Both
+families support either choice. The water perturbation is an analytic
+step/adsorption transform or infinite Hosemann sum in constant-medium DWBA
+channels. Neither fitting path samples or slices the water density.
+``"erf"`` explicitly selects slower continuous numerical confirmation for
+step models. These settings preserve physical densities, form factors, and
+kinematic amplitudes. New steps default to ``"tanh"``. Analytic tanh rejects
+p polarization instead of silently falling back to numerical integration.
+The full molecular factors also supply the atomic-size convolution in density.
+
+``pw`` is number density in scattering units per cubic Angstrom (molecules for
+plain profiles). Layered ``A0`` weights the first layer, whereas step
+``A0`` specifies excess scattering units per lateral cell. Fractional lengths
+are converted with cell volume divided by lateral area, and amplitudes use
+physical reciprocal vectors. Specular ``q_z=0`` is undefined for an infinite
+half-space and raises an error. Non-decaying layered profiles with
+``sigma_bar=0`` cannot supply a homogeneous DWBA ambient. Zero-width delta
+layers cannot be sampled as ordinary densities; use a positive width.
+
+The step excess has integrated molecular density ``A0 / uc_area`` and initial
+Gaussian width ``sigma_0``. Its center follows the existing one-layer offset
+rule (depending on A0, width, area and bulk density), retaining the old
+``1layer`` behavior. ``adsorption_position="onset"`` instead centers it at
+the step midpoint. Each atomic factor convolves this Gaussian in the same way
+as the onset.
+
+Legacy names and saved models
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``1layer_O``, ``layered_O`` and ``1layer_s_O`` are deprecated, as are the old
+family names ``1layer``, ``tanh`` and ``erf``. Constructors and file readers
+still accept them and emit ``DeprecationWarning``. They map to ``step`` or
+``layered`` with explicit settings, preserving their predictions from before
+this consolidation:
+
+* ``1layer`` becomes a step with adsorption and sharp reference optics.
+* ``1layer_O`` retains ``form_factor="scaled_oxygen"`` (10/8 times O).
+* ``layered_O`` retains ``form_factor="oxygen"`` (O).
+* ``1layer_s_O`` retains ``form_factor="oxide"`` (O2-) and an excess centered
+  at the onset.
+* Legacy ``tanh``/``erf`` retain forward-only factors, their original physical
+  onset shapes, and disabled adsorption. New reference selections on a step
+  do not inherit these legacy approximations.
+
+An old plain ``step`` file, including one without a type line, imports with
+``optical_reference="sharp"`` and ``adsorption=False``. This preserves the
+historically ignored A0, including the default A0=1 in four-parameter files.
+To deliberately activate adsorption on such an import, set
+``water.adsorption=True`` and choose A0.
+
+New ``.xtal``, ``.xpr`` and ``.wat`` output writes a canonical family plus a
+versioned ``// water_settings = {...}`` JSON comment. It records the optical
+reference, form-factor and imported density/adsorption conventions. HDF5 fit
+settings retain the same metadata. Keep that comment when editing files;
+older software that ignores it cannot reproduce the new model semantics.
+
+The shared implementation intentionally repairs legacy density/amplitude
+inconsistencies in the oxygen variants, including the single-excess-layer
+normalization and Gaussian widths, and restores unavailable plain water types
+using the stated independent-atom convention. Those earlier formula repairs
+can change historical results; this naming consolidation introduces no further
+change to imported legacy profiles.
+
+See :doc:`dwba` for the semi-infinite water boundary, local incident-angle
+convention, piecewise tanh fitting references, full numerical erf confirmation,
+and the executed RuO2/TiO2 comparison.
