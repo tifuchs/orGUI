@@ -130,7 +130,9 @@ py::tuple unitcell_F_DWBA_records_uncached(
     const auto atoms = basis_info.shape[0];
     const auto finite_instances = finite_position_info.shape[0];
     const auto bulk_instances = bulk_position_info.shape[0];
-    const bool homogeneous_bulk_only = records == 1;
+    // A bare substrate can be evaluated on a shared multilayer reference.
+    // One atomic record does not imply homogeneous distorted fields.
+    const bool homogeneous_bulk_only = records == 1 && media == 2;
     if (Q_info.shape[1] != 2 || records < 1 || media < 2) {
         throw py::value_error("DWBA geometry requires records and at least two media");
     }

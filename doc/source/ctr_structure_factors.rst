@@ -1496,3 +1496,79 @@ change to imported legacy profiles.
 See :doc:`dwba` for the semi-infinite water boundary, local incident-angle
 convention, piecewise tanh fitting references, full numerical erf confirmation,
 and the executed RuO2/TiO2 comparison.
+
+Complete finite-film dissolution
+-------------------------------------
+
+``CTRincoherent.FiniteFilmDissolution`` is an opt-in physical ensemble. It
+replaces the selected surface's height distribution and removes a connected
+upper sequence of named finite Films, including their populations within mixed
+interfaces. The semi-infinite bulk remains protected. To model substrate
+dissolution, represent its removable inventory as an explicit finite Film of
+substrate material and include that Film's name. Creating such a Film does not
+automatically subtract material from the bulk: the finite/bulk partition must
+preserve atomic registry, chemical inventory and the original complex amplitude.
+
+For an existing native crystal, construct the wrapper explicitly::
+
+    from orgui.datautils.xrayutils.CTRdistributions import RecenteredSkellamProfile
+    from orgui.datautils.xrayutils.CTRincoherent import FiniteFilmDissolution
+
+    model = FiniteFilmDissolution(
+        crystal, films=["LaNiO3"], surface="LaNiO3_surface",
+        profile=RecenteredSkellamProfile(
+            t=1., k_up=0., k_down=12., offset=-4.),
+        incoherent_fraction=0.2,
+        exposure_policy="native_or_unreconstructed",
+        optical_reference="state_specific")
+    intensity = model.F2(h, k, l)
+    audit = model.statistics()
+
+The frozen material-selective interface closure retains each surviving owner's
+native coordinates, occupancies and displacement factors. Removing LaNiO3 from
+a mixed interface leaves the existing STO populations and vacancies; it does
+not refill vacancies with STO. This is a static ensemble, not a model of
+dissolution kinetics, atomic relaxation or microscopic lateral interface
+correlations.
+
+The latent Skellam index H maps to ``max(H, exhausted_index)``. Its entire
+lower-tail probability accumulates at the fully exhausted state; it is not
+conditioned on survival. Consequently parent mean/variance and realized front
+mean/variance differ when exhaustion is appreciable. The front is a structural
+coordinate in Angstrom, not the highest occupied atom in a porous interface.
+``statistics()`` reports both moment sets, exhausted and exposed-owner
+probabilities, and initial, remaining, removed and added species inventories
+per reference lateral cell. At exhaustion the selected owners have zero
+inventory. Positive states continue the top Film's native structural cycle.
+
+``exposure_policy="native_or_unreconstructed"`` applies the original surface
+motif only while its complete depth fits in fully occupied surviving top-owner
+material with native Film geometry and chemistry, including equivalent material
+inside an interface component. No probability cutoff makes a partial population
+full. Thinner states expose the unchanged surviving material, with no ghost
+termination at exhaustion. ``"preserve"`` exposes unchanged material in every
+state. This
+choice changes the physical model and is saved in the wrapper configuration.
+
+Numerical support is separate from this boundary rule. The upper-tail
+certificate bounds omitted probability and absolute first and second index
+moments. The remaining non-exhausted probabilities are multiplied by the
+reported ``normalization_factor`` to restore normalization; the exhausted
+probability is never rescaled. Physical height-moment bounds include this
+redistribution. Tighten the budgets and compare native observables before a
+refit; the bounds are not themselves a scattering-error certificate. Existing
+interface support is audited separately. ``max_states`` raises an error if
+the requested accuracy cannot be represented; it never clips a distribution.
+``RecenteredSkellamProfile.tight_support()`` is a separate numerical helper
+using the existing probability/first-moment budgets. It does not change legacy
+surface support or opt old models into dissolution.
+
+The first version rejects water/overlayers, overlapping interfaces, non-unit
+component weights, differing outer domains and depth-dependent surface/interface
+crystallinity profiles. Common outer domains and constant native crystallinity
+remain supported. Fit the parent parameters on the wrapper; remove local
+surface-height fit parameters first. Existing legacy models retain their
+finite-support rejection. No fit data or saved crystals are migrated implicitly.
+
+See :doc:`dwba` for optical field policies. A runnable synthetic example is
+provided in ``examples/finite_film_dissolution.py``.

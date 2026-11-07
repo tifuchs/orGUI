@@ -62,6 +62,13 @@ Other user-visible changes:
   reference density in earlier termination models. Affected DWBA fits and
   crystallinity-to-disorder conversion fractions need reevaluation.
 
+- The opt-in `FiniteFilmDissolution` ensemble removes complete selected finite
+  Film inventories, including their mixed-interface populations, while protecting
+  the semi-infinite bulk. Exhausted probability, material inventories, realized
+  height moments and numerical tail certificates are exposed explicitly. Native
+  kinematic and DWBA calculations support coherent/incoherent mixing. DWBA now
+  evaluates bare-bulk states correctly on shared multilayer optical fields.
+
 - Copying plots to the clipboard works with silx 3.1.3 and PySide6 again.
   PNG buffer exports used by copying and printing retain the colorbar.
 

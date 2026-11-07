@@ -428,6 +428,27 @@ class RecenteredSkellamProfile(SurfaceProfile):
             radius *= 1.5
         raise ValueError("Could not bound the recentered Skellam support")
 
+    def tight_support(self):
+        """Shrink the legacy interval using the same bounds and safety margins.
+
+        This opt-in numerical diagnostic leaves :meth:`support` and all legacy
+        surface behavior unchanged. Returned bounds are structural-layer
+        offsets; retained heights are one index greater at both endpoints.
+        """
+        lower, upper = self.support()
+
+        def acceptable(lo, hi):
+            probability, moment = self.omitted_bounds(lo+1, hi+1)
+            return (probability <= self.tail_probability/4
+                    and moment <= self.moment_tolerance/4
+                    and abs(self.offset)*probability <= self.moment_tolerance/4)
+
+        while lower < -1 and acceptable(lower+1, upper):
+            lower += 1
+        while upper > 0 and acceptable(lower, upper-1):
+            upper -= 1
+        return lower, upper
+
 
 @dataclass(frozen=True)
 class SkellamProfile:
@@ -493,3 +514,102 @@ PROFILE_TYPES = {
     "skellam": SkellamProfile,
     "recentered_skellam": RecenteredSkellamProfile,
 }
+
+
+@dataclass(frozen=True)
+class SupportCertificate:
+    """Numerical upper-tail bounds, separate from physical exhaustion.
+
+    First and second moments are in parent index units and index squared.
+    ``normalization_factor`` applies only to non-exhausted retained states.
+    The physical exhausted probability is never renormalized.
+    """
+
+    upper: int
+    omitted_probability: float
+    omitted_first_moment: float
+    omitted_second_moment: float
+    retained_probability: float
+    normalization_factor: float
+
+
+def capped_skellam_states(profile, minimum, *, second_moment_tolerance=1e-8,
+                          max_states=4096):
+    """Return states of ``max(H, minimum)`` and an upper-tail certificate.
+
+    :param RecenteredSkellamProfile profile: Unbounded parent distribution.
+    :param int minimum: Physical exhausted state in structural indices.
+    :param float second_moment_tolerance: Omitted index-squared budget.
+    :param int max_states: Explicit resource limit; never a clipping policy.
+    :returns: Read-only indices, probabilities, and a SupportCertificate.
+    :raises ValueError: For invalid settings or insufficient resources.
+    """
+    if not isinstance(profile, RecenteredSkellamProfile):
+        raise TypeError("A RecenteredSkellamProfile is required")
+    if int(minimum) != minimum or minimum > 0:
+        raise ValueError("minimum must be an integer at or below zero")
+    if (not np.isfinite(second_moment_tolerance)
+            or second_moment_tolerance <= 0):
+        raise ValueError("second_moment_tolerance must be finite and positive")
+    if int(max_states) != max_states or max_states < 1:
+        raise ValueError("max_states must be a positive integer")
+    minimum = int(minimum)
+    shift, fraction = profile._shift()
+    variance = profile.variance
+    mean = profile.mean
+    bernoulli = fraction * (1 - fraction)
+    third = profile.mu_up - profile.mu_down + bernoulli * (1 - 2*fraction)
+    fourth_cumulant = (profile.mu_up + profile.mu_down
+                       + bernoulli * (1 - 6*bernoulli))
+    fourth = max(0., fourth_cumulant + 4*mean*third + 3*variance**2
+                 + 6*mean**2*variance + mean**4)
+
+    def bounds(upper):
+        if profile.mu_up == 0 and upper >= shift + int(fraction > 0):
+            return 0., 0., 0.
+        distance = upper + 1 - mean
+        if distance <= 0:
+            return 1., np.sqrt(variance + mean**2), np.sqrt(fourth)
+        tilt = min(20., np.log1p(distance/(variance + 1)))
+        cgf = (profile.mu_up * (np.expm1(tilt) - tilt)
+               + profile.mu_down * (np.expm1(-tilt) + tilt)
+               + tilt*mean + np.log1p(fraction*np.expm1(tilt))
+               - fraction*tilt)
+        logp = min(0., cgf - tilt*(upper + 1))
+        # Cauchy--Schwarz bounds E[|H|;tail] and E[H²;tail].
+        rootp = np.exp(logp/2)
+        return (np.exp(logp), np.sqrt(variance + mean**2)*rootp,
+                np.sqrt(fourth)*rootp)
+
+    upper = max(0, int(np.ceil(mean + 8*np.sqrt(variance))))
+    if profile.mu_up == 0:
+        upper = max(minimum, shift + int(fraction > 0))
+    while True:
+        p_bound, m_bound, s_bound = bounds(upper)
+        if (p_bound <= profile.tail_probability/4
+                and m_bound <= profile.moment_tolerance/4
+                and s_bound <= second_moment_tolerance/4):
+            break
+        upper += max(1, (upper - minimum)//4)
+        if upper - minimum + 1 > max_states:
+            raise ValueError("max_states cannot meet the upper-tail budgets")
+    if upper - minimum + 1 > max_states:
+        raise ValueError("max_states cannot represent the physical state range")
+    indices = np.arange(minimum, upper + 1, dtype=np.int64)
+    probabilities = profile.probability(indices)
+    probabilities[0] = float(profile._height_cdf(minimum))
+    retained = float(probabilities.sum())
+    above = float(profile.occupancy(minimum))
+    retained_above = float(probabilities[1:].sum())
+    factor = above/retained_above if retained_above else 1.
+    if above and not retained_above:
+        raise ValueError("No non-exhausted state represents positive mass")
+    probabilities[1:] *= factor
+    if (not np.all(np.isfinite(probabilities))
+            or np.any(probabilities < 0)
+            or abs(probabilities.sum() - 1) > 1e-12):
+        raise ValueError("Could not normalize bounded Skellam states accurately")
+    indices.flags.writeable = probabilities.flags.writeable = False
+    return indices, probabilities, SupportCertificate(
+        upper, float(p_bound), float(m_bound), float(s_bound), retained,
+        float(factor))

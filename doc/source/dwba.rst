@@ -768,3 +768,36 @@ API reference
 .. automethod:: orgui.datautils.xrayutils.CTRopt.CTROptimizer.set_dwba
 
 .. automethod:: orgui.datautils.xrayutils.CTRopt.CTROptimizer.get_dwba
+
+Finite-film dissolution ensembles
+-------------------------------------
+
+``FiniteFilmDissolution.dwba`` evaluates complete native atomic states, including
+the protected bulk, all surviving mixed-interface populations and the selected
+exposed termination. It supports the usual geometry and polarization entry
+points. ``optical_reference="state_specific"`` recomputes each state's native
+optical medium; ``"shared"`` uses the native averaged material profile and a
+common slab grid. These are different physical optical approximations, not
+interchangeable numerical settings.
+
+Amplitudes are transformed to a common ambient phase origin before mixing.
+For incoherent fraction kappa, the result is
+``(1-kappa)*abs(sum(p*A))**2 + kappa*sum(p*abs(A)**2)``. The shared-policy
+coherent endpoint equals the native averaged structure. Bare-bulk states on
+shared multilayer fields use the complete multilayer kernel, even though their
+atomic model contains only one record.
+
+Each standalone call snapshots the current structure and parent distribution.
+``with model.dwba.batch():`` reuses a snapshot across rods and channels; do not
+mutate parameters inside that context. Unsupported dissolution configurations
+raise explicitly. See :doc:`ctr_structure_factors` for material ownership,
+exhaustion, numerical tail certificates and the frozen-interface closure.
+
+Native optical profiles currently retain some sensitivity to changes in
+interface support and component grouping, including for ordinary unwrapped
+crystals. Consequently a material-preserving kinematic repartition is not by
+itself a DWBA convergence certificate. The synthetic diagnostic
+``python -m benchmarks.audit_dissolution_dwba_partition`` records this separately
+from exact-state DWBA tests. Keep the interface representation explicit and
+check optical-profile/observable convergence before a DWBA refit; the new
+wrapper does not silently change or replace that native optical approximation.

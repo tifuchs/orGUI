@@ -1058,6 +1058,11 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         its native repeat zero is included, as in UnitCell.F_bulk.
         """
         self._reference_layers = []
+        # Provenance only: these entries distinguish physical lower material
+        # from algebraic replacement records for finite-owner dissolution.
+        for layer in self.bottom_layers:
+            layer._dissolution_reference_owners = [None] * len(
+                layer.coherentDomainMatrix)
         for component_index, (component, weight) in enumerate(
             self._underlying_components
         ):
@@ -1136,6 +1141,9 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                                                          "R_mat", "f"))), None)
                     if matching is not None:
                         matching.coherentDomainMatrix.extend(matrices)
+                        matching._dissolution_reference_owners.extend(
+                            [("bulk" if component_index == 0 else "film",
+                              component.name)] * len(matrices))
                         matching.coherentDomainOccupancy = np.concatenate((
                             matching.coherentDomainOccupancy, occupancies,
                         ))
@@ -1143,6 +1151,9 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                     correction = copy.copy(source)
                     correction.coherentDomainMatrix = matrices
                     correction.coherentDomainOccupancy = np.asarray(occupancies)
+                    correction._dissolution_reference_owners = [
+                        ("bulk" if component_index == 0 else "film",
+                         component.name)] * len(matrices)
                     self._reference_layers.append(correction)
 
     @property
@@ -4004,6 +4015,38 @@ class PoissonSurface(RoughSurface):
     _profile_type = PoissonProfile
     _basis_fields = ("mean_change", "alpha", "offset")
     _default_basis = (0.0, 1.0, 0.0)
+
+
+class _FrozenMaterial:
+    """Evaluation-only native cells retaining their original optical grouping."""
+
+    def __init__(self, cells, name, area):
+        self.cells = tuple(cells)
+        self.name = name
+        self.uc_area = area
+
+    def setReferenceUnitCell(self, reference, rotMatrix=np.identity(3)):
+        """Set reciprocal reference without changing material placement."""
+        for cell in self.cells:
+            cell.setReferenceUnitCell(reference, rotMatrix)
+
+    def setEnergy(self, energy):
+        """Set native scattering factors at energy in eV."""
+        for cell in self.cells:
+            cell.setEnergy(energy)
+
+    def F_uc(self, h, k, l):  # noqa: E741
+        """Return native cell amplitudes per this component's lateral area."""
+        return sum(self.uc_area/cell.uc_area*cell.F_uc(h, k, l)
+                   for cell in self.cells)
+
+    def zDensity_G(self, z, h, k):
+        """Return the native physical density of the retained cells."""
+        return sum(cell.zDensity_G(z, h, k) for cell in self.cells)
+
+    def optical_profile(self):
+        """Combine native optical records using their original component grouping."""
+        return combine_profiles(*(cell.optical_profile() for cell in self.cells))
 
 
 class SkellamSurface(RoughSurface):

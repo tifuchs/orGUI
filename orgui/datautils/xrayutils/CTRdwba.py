@@ -9,7 +9,7 @@ import hashlib
 import numpy as np
 
 from ._CTRnative import HAS_CPP_ACCEL, _CTRcalc_cpp
-from .CTRfilm import EpitaxyInterface, Film, RoughSurface
+from .CTRfilm import EpitaxyInterface, Film, RoughSurface, _FrozenMaterial
 from .CTRoptics import (
     HC_KEV_ANGSTROM,
     LayeredElectricField,
@@ -138,6 +138,8 @@ def _copy_parent_domains(parent, layer):
 
 
 def _component_record_cells(component):
+    if isinstance(component, _FrozenMaterial):
+        return [("frozen_material", cell) for cell in component.cells]
     if isinstance(component, UnitCell):
         layers = component.split_in_layers(ordered=True)
         if component.layer_behavior == "select":
@@ -854,7 +856,8 @@ class DWBAState:
         for component in self._crystal.uc_surface_list:
             if not isinstance(
                 component,
-                UnitCell | Film | EpitaxyInterface | RoughSurface | WaterModel,
+                UnitCell | Film | EpitaxyInterface | RoughSurface | WaterModel
+                | _FrozenMaterial,
             ):
                 raise NotImplementedError(
                     f"Unsupported DWBA component {type(component).__name__}."
