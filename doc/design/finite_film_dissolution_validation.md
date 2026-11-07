@@ -4,21 +4,52 @@ Date: 2026-11-07. Branch: `codex/finite-film-dissolution`.
 
 ## Scope and provenance
 
-The worktree starts at repository commit
-`a5a6afe16b072ab4092c6a16aec54c886b9f805e`, followed by prerequisite snapshot
-`eeeb30b`. That snapshot preserves the initial uncommitted scientific-core
-changes, including Skellam, multilayer, crystallinity and native DWBA work.
-Implementation is a separate commit after the snapshot. The original checkout
-and canonical fit files were not edited by this implementation.
+The two dissolution implementation/diagnostic commits have been rebased onto
+authoritative local master `5fc381b0815b3d92095acbe36d02c7c4fdb7b460`.
+Its finalized prerequisites are `af86a67` (crystallinity and optical inventory),
+`7980c2e` (DWBA terrace ensembles), and `5fc381b` (native reuse and batching).
+The initial prerequisite snapshot `eeeb30b` is no longer in branch ancestry.
+The old branch is preserved at
+`codex/backup-finite-film-pre-rebase-10dc5e2`.
 
-The original checkout subsequently changed in `CTRdwba.py`,
-`_CTRincoherent_dwba.py`, `cpp/CTRdwba_cpp.hpp` and `test/test_CTRdwba_reuse.py`.
-Those later native-reuse changes remain outside this frozen worktree baseline.
-Integration must retain the dissolution fix that disables the homogeneous-bulk
-shortcut when the reference contains more than two optical media, even if the
-kernel has been moved to another header by that later work (currently
-`cpp/CTRdwba_records.hpp`, whose `homogeneous_bulk_only` expression still needs
-the `media == 2` condition).
+Master's `_CTRincoherent_dwba.py`, `cpp/CTRdwba_cpp.hpp` dispatcher and
+`test/test_CTRdwba_reuse.py` are unchanged by the replay. The dissolution guard
+now lives in master's `cpp/CTRdwba_records.hpp`: the homogeneous-bulk shortcut
+requires both one atomic record and exactly two optical media. The small
+`CTRdwba.py` additions only admit and enumerate frozen material components.
+The original checkout and canonical fit files were not edited.
+
+## Validation after rebasing onto final DWBA master
+
+- Rebuilt the native extension against the finalized master headers, including
+  the relocated homogeneous-bulk guard. All 254 dissolution, DWBA, reuse,
+  motif, incoherent-DWBA, optical-profile and optical-inventory tests pass from
+  source and independently from an isolated wheel installation. These include
+  all 55 dissolution regressions. Both runs report 28 existing NumPy deprecation
+  warnings.
+- `ruff check orgui --no-cache` and `git diff --check master` pass. Regenerating
+  release notes produces no additional changes.
+- The zero-anchor causal diagnostic passes unchanged: final master's native
+  reuse changes do not remove the optical-center discrepancy described below.
+  The coordinate-only probe still reduces all three relative discrepancies
+  below `1e-9`; this is not a production repair.
+- The original checkout's HEAD, tracked status and binary tracked-diff SHA256
+  match their pre-rebase snapshot. Master remains unchanged. No refit or new C1
+  replay was performed during this rebase; the data results below are historical.
+
+The first wheel attempt exposed a local packaging hazard: Meson's source-tree
+installation also copied an old in-place `.pyd`, producing a duplicate archive
+entry that shadowed the newly compiled extension. That wheel failed two native
+extreme-range reuse tests and is not the validated artifact. Temporarily moving
+the worktree's in-place binaries outside `orgui` during wheel construction,
+then restoring them, produced one native archive entry with the same SHA256 as
+the fresh build. No packaging source or master files were changed.
+
+Validated wheel: `orgui-1.5.1.dev387+gd8a81c26c-cp314-cp314-win_amd64.whl`.
+SHA256: `aeb065ac2390a02e26f623799222190fbc0ae8b7f16e4c374d6c7d6a18cf796c`.
+Native extension SHA256:
+`4373ef0907b7178b4659173040f926cfe635bd0d853d7fd2e550cbfa1a96062f`.
+The wheel precedes the documentation-only amendment recording these results.
 
 ## Implemented contract
 
@@ -51,7 +82,7 @@ The frozen native-cell adapter preserves optical plane geometry and component
 grouping. In particular, zero-weight protected records can anchor native
 optical slab boundaries and must not be dropped casually.
 
-## Executed tests
+## Executed tests before the rebase
 
 - 55 focused dissolution cases pass from source and the rebuilt isolated
   installed wheel. They cover independent PMFs/moments; plain-Film state
@@ -71,7 +102,7 @@ optical slab boundaries and must not be dropped casually.
   substrate Film. Changelog-generated release notes were refreshed. Sphinx
   HTML builds succeed; unrelated pre-existing warnings remain.
 
-The final wheel was built locally without changing the normal installed orGUI:
+The pre-rebase wheel was built locally without changing the normal installed orGUI:
 `orgui-1.5.1.dev383+geeeb30b38.d20261107-cp314-cp314-win_amd64.whl`.
 SHA256: `8d5914ff7c4fc740d4e941931bdc32fb2d64ca37ba378d82c8c9cf7c84ffcdbd`.
 
@@ -152,3 +183,62 @@ moves the substrate boundary, restores STO vacancies or changes saved fits.
 
 Stage 8 (a new analysis fit) was not performed. No claim of an unconstrained
 C1 roughness or production DWBA fit readiness follows from this implementation.
+
+## Root cause identified: zero-weight records select optical positions
+
+The support discrepancy above is now isolated. Reproduce the causal experiment
+with:
+
+```powershell
+python -m benchmarks.audit_dissolution_dwba_partition --diagnose-zero-anchors
+```
+
+`EpitaxyInterface.createInterfaceCells` retains algebraic lower-material
+subtraction domains with weight `-0.0` when the native underlying-component
+replacement is used. `_optical_profile` emits these as zero-density rows at
+their unstrained positions. Extending interface support extends these empty
+records too. At one representative plane in the expanded fixture:
+
+| Record | Position (Angstrom) | Weight | Optical contribution |
+| --- | --- | --- | --- |
+| Upper material | 30.18 | 1 | Nonzero |
+| Lower material | 30.18 | 0 | Zero |
+| Unused sharp-boundary subtraction | 30.00 | -0.0 | Zero |
+
+`CTRdwba._combine_tagged` sorts records by position, coalesces origins within
+0.6 Angstrom, sums their density/reference shares, and selects the *lowest*
+position without checking whether that row contributes any material. Therefore
+the empty row moves the merged optical center from 30.18 to 30.00 Angstrom.
+The public `CTRoptics.combine_profiles` has the same position-selection rule.
+`profile_boundaries` then places interfaces at midpoints of these displaced
+centers. The reference fields and DWBA amplitudes consequently change despite
+unchanged atomic positions and occupancies.
+
+In this fixture twelve centers move by 0.18 Angstrom. The raw delta/beta arrays
+are exactly unchanged (`max_raw_delta_beta_change == 0`). The discrepancy is
+already present before optical slab simplification and native kernel evaluation.
+
+The diagnostic temporarily changes only the representative coordinate of each
+nonempty coalesced group: it selects the lowest position with a nonzero tagged
+share. It retains all shares, signed contributions, empty groups and the 0.6
+Angstrom grouping tolerance. It changes no source atoms, distributions, native
+kernel, fit parameters or physical boundary policy.
+
+| Calculation | Original maximum relative support change | Coordinate-only probe |
+| --- | --- | --- |
+| Ordinary native DWBA | 2.05732655e-4 | 7.10543e-14 |
+| Dissolution, shared fields | 1.48178726e-4 | 6.67244e-14 |
+| Dissolution, state-specific fields | 1.24291133e-4 | 9.43690e-14 |
+
+Two controls support the causal attribution: setting both optical
+simplification tolerances to zero leaves the original discrepancies unchanged;
+setting interface displacement to zero makes occupied and empty positions
+coincide and reduces all three discrepancies below 4e-15 without the probe.
+
+This identifies the cause of the reproduced inconsistencies. It is not a
+production repair yet. A repair should prevent empty bookkeeping records from
+moving physical optical coordinates, cover both profile-coalescing APIs, retain
+signed per-record reference information, and preserve intentionally empty
+physical regions. Simply deleting every zero-density row is not a justified
+general solution. The diagnostic never deletes a whole empty group or treats
+a small nonzero tail as zero. Runtime library behavior remains unchanged.
