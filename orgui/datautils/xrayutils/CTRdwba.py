@@ -2,7 +2,8 @@
 
 from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import copy
 import hashlib
 
 import numpy as np
@@ -13,6 +14,8 @@ from .CTRoptics import (
     HC_KEV_ANGSTROM,
     LayeredElectricField,
     StratifiedProfile,
+    _internal_plane_geometry,
+    _optical_profile,
     homogeneous_bulk_profile,
     profile_boundaries,
     solve_electric_field,
@@ -86,6 +89,39 @@ class _PreparedAtomicModel:
     reference_shares: np.ndarray
     geometry_fingerprint: bytes
     decomposition_fingerprint: bytes
+    layer_reference_shares: np.ndarray
+    layer_reference_layout: tuple
+
+
+def _layer_reference_layout(records):
+    """Keep each record's first slot at its original index, then append layers.
+
+    Water reference builders use the original record index. Extra solid slots
+    carry linear density shares through slab merging without changing n_0.
+    """
+    layout, extra = [], []
+    for index, record in enumerate(records):
+        layers = ((None,) if isinstance(record.cell, WaterModel)
+                  else record.cell.crystallinity_layers)
+        layers = layers or (None,)
+        layout.append((index, layers[0]))
+        extra.extend((index, layer) for layer in layers[1:])
+    return tuple(layout + extra)
+
+
+def _masked_layer_cell(cell, layer):
+    """Keep optical slab geometry while isolating a structural density share."""
+    masked = copy.copy(cell)
+    masked.basis = cell.basis.copy()
+    masked.basis[cell._crystallinity_labels() != layer, 6] = 0.0
+    return masked
+
+
+def _sum_layer_shares(shares, layout, count, weights=None):
+    result = np.zeros((count, *shares.shape[1:]), dtype=shares.dtype)
+    for slot, (index, _) in enumerate(layout):
+        result[index] += shares[slot] * (1.0 if weights is None else weights[slot])
+    return result
 
 
 def _record_layer(cell):
@@ -120,14 +156,17 @@ def _component_record_cells(component):
         if (np.any(component._basis_created != component.basis)
                 or component._repeat_state_changed()):
             component.createLayers()
-        return [("film_layer", cell) for cell in component.layer_ucs]
+        return [("film_layer", part) for cell in component.layer_ucs
+                for part in component._scattering_cells(cell)]
     if isinstance(component, EpitaxyInterface):
         if (np.any(component._basis_created != component.basis)
                 or component._repeat_state_changed()):
             component.createInterfaceCells()
         return [
-            *(("interface_top", cell) for cell in component.top_layers),
-            *(("interface_bottom", cell) for cell in component.bottom_layers),
+            *(("interface_top", part) for cell in component.top_layers
+              for part in component._scattering_cells(cell, "top")),
+            *(("interface_bottom", part) for cell in component.bottom_layers
+              for part in component._scattering_cells(cell, "bottom")),
             *(("interface_reference", cell) for cell in component._reference_layers),
         ]
     if isinstance(component, PoissonSurface):
@@ -138,11 +177,15 @@ def _component_record_cells(component):
         for surface_cell, film_cell in zip(
             component.layer_ucs, component.film_layer_ucs
         ):
-            records.append(("surface_termination", surface_cell))
-            records.append(("covered_film", film_cell))
+            records.extend(
+                ("surface_termination", part)
+                for part in component._scattering_cells(surface_cell, "surface"))
+            records.extend(("covered_film", part)
+                           for part in component._scattering_cells(film_cell, "film"))
         records.extend(
-            ("sharp_film_correction", cell)
+            ("sharp_film_correction", part)
             for cell in component._film_termination_ucs.values()
+            for part in component._scattering_cells(cell, "film")
         )
         return records
     if isinstance(component, WaterModel):
@@ -172,10 +215,14 @@ def _hash_record_geometry(records):
         if isinstance(cell, WaterModel):
             digest.update(_hash_arrays(cell.B_mat, cell.refHKLTransform, [cell._E]))
             continue
+        planes = _internal_plane_geometry(cell) or {}
         digest.update(
             _hash_arrays(
+                np.asarray([[key, *value] for key, value in sorted(planes.items())],
+                           dtype=np.float64).reshape((-1, 3)),
                 np.asarray(cell.basis.shape, dtype=np.int64),
                 np.asarray(cell.basis[:, 7], dtype=np.float64),
+                cell._crystallinity_labels(),
                 cell.B_mat,
                 cell.R_mat,
                 cell.R_mat_inv,
@@ -195,7 +242,7 @@ def _hash_record_geometry(records):
     return digest.digest()
 
 
-def _combine_tagged(values, shares, z_tolerance=0.6):
+def _combine_tagged(values, shares, z_tolerance=0.6, density_count=None):
     values = np.asarray(values, dtype=np.float64)
     shares = np.asarray(shares, dtype=np.float64)
     if len(values) == 0:
@@ -215,7 +262,8 @@ def _combine_tagged(values, shares, z_tolerance=0.6):
     for group_index, (start, stop) in enumerate(zip(group_starts, group_stops)):
         combined_shares[:, group_index] = shares[:, start:stop].sum(axis=1)
         combined[group_index, 0] = values[start, 0]
-        combined[group_index, 1:] = combined_shares[:, group_index].sum(axis=0)
+        combined[group_index, 1:] = combined_shares[
+            :density_count, group_index].sum(axis=0)
     return np.ascontiguousarray(combined), np.ascontiguousarray(combined_shares)
 
 
@@ -391,7 +439,8 @@ class DWBAResult:
     **What is stored.**  The native kernel computes exactly two arrays per
     generated record, the atomic amplitude and the planar-reference amplitude.
     The atomic amplitude is then mixed with the reference according to the
-    source cell's crystallinity, keeping their difference equal to c*(A-R).
+    source cell's crystallinity and structural-layer overrides, keeping their
+    difference equal to the sum of c_j*(A_j-R_j).
     Those effective amplitudes, the summed :attr:`F_h`, and :math:`r_0` from
     the field solver are the only independent quantities; every other member
     below is derived arithmetic and is evaluated on access, which costs
@@ -873,7 +922,7 @@ class DWBAState:
             ))
         return tuple(records)
 
-    def _tagged_component_profile(self, component, records, record_count):
+    def _tagged_component_profile(self, component, records, layout, density_count):
         values = []
         shares = []
         for global_index, record in records:
@@ -899,25 +948,32 @@ class DWBAState:
                 transformed = np.array(profile, copy=True)
                 transformed[:, 0] *= normal_stretch
                 transformed[:, 1:] *= scale
-                tagged = np.zeros(
-                    (record_count, len(profile), 2), dtype=np.float64
-                )
-                tagged[global_index] = transformed[:, 1:]
+                tagged = np.zeros((len(layout), len(profile), 2), dtype=np.float64)
+                slots = [(slot, layer) for slot, (owner, layer) in enumerate(layout)
+                         if owner == global_index]
+                for slot, layer in slots:
+                    partial = (profile if len(slots) == 1 else
+                               _masked_layer_cell(record.cell, layer).optical_profile())
+                    tagged[slot] = partial[:, 1:] * scale
+                    if slot >= density_count:
+                        widths = _optical_profile(record.cell, thickness=True)[:, 3]
+                        tagged[slot] *= widths[:, None] * normal_stretch
                 values.append(transformed)
                 shares.append(tagged)
         if not values:
             return (
                 np.empty((0, 3), dtype=np.float64),
-                np.empty((record_count, 0, 2), dtype=np.float64),
+                np.empty((len(layout), 0, 2), dtype=np.float64),
             )
         values = np.concatenate(values, axis=0)
         shares = np.concatenate(shares, axis=1)
         if not isinstance(component, UnitCell):
-            values, shares = _combine_tagged(values, shares)
+            values, shares = _combine_tagged(
+                values, shares, density_count=density_count)
         return values, shares
 
-    def _atomic_model_snapshot(self):
-        if self._batch_depth and self._batch_snapshot is not None:
+    def _atomic_model_snapshot(self, *, raw_structure=False):
+        if not raw_structure and self._batch_depth and self._batch_snapshot is not None:
             if self._crystal._stack_policy is not None:
                 # Batches prohibit model mutation, but must not let a cached
                 # snapshot conceal invalid strict geometry if a caller does
@@ -933,10 +989,28 @@ class DWBAState:
         self._cache_counters["snapshot_builds"] += 1
         records = self._live_records()
         record_count = len(records)
+        layout = _layer_reference_layout(records)
+        slot_count = len(layout)
+        # Carry areal optical inventory separately for whole-cell terminations.
+        # Their physical planes may fall on a different final midpoint grid
+        # after strain, coalescing and signed material replacement.
+        conservative = [slot for slot, (index, _) in enumerate(layout)
+                        if index != 0
+                        and not isinstance(records[index].cell, WaterModel)
+                        and len(records[index].cell.crystallinity_layers)
+                        > len(records[index].cell.layers)]
+        assembly_layout = layout + tuple(layout[slot] for slot in conservative)
+        assembly_count = len(assembly_layout)
+        bulk_slots = [(slot, layer) for slot, (owner, layer) in enumerate(layout)
+                      if owner == 0]
         if not self._crystal.uc_surface_list:
             profile = homogeneous_bulk_profile(self._crystal.uc_bulk)
-            shares = np.zeros((1, 2, 2), dtype=np.float64)
-            shares[0, 0] = profile.values[0, 1:]
+            shares = np.zeros((slot_count, 2, 2), dtype=np.float64)
+            for slot, layer in bulk_slots:
+                partial = (profile if len(bulk_slots) == 1 else
+                           homogeneous_bulk_profile(_masked_layer_cell(
+                               self._crystal.uc_bulk, layer)))
+                shares[slot, 0] = partial.values[0, 1:]
             stratified = profile
         else:
             if len(records) == 2 and records[-1].role == "water":
@@ -946,9 +1020,14 @@ class DWBAState:
             else:
                 bulk_profile = self._crystal.uc_bulk.optical_profile_asbulk()
             bulk_shares = np.zeros(
-                (record_count, len(bulk_profile), 2), dtype=np.float64
+                (assembly_count, len(bulk_profile), 2), dtype=np.float64
             )
-            bulk_shares[0] = bulk_profile[:, 1:]
+            for slot, layer in bulk_slots:
+                cell = _masked_layer_cell(self._crystal.uc_bulk, layer)
+                partial = (homogeneous_bulk_profile(cell).values[:1]
+                           if len(records) == 2 and records[-1].role == "water"
+                           else cell.optical_profile_asbulk())
+                bulk_shares[slot] = partial[:, 1:]
             component_values = [bulk_profile]
             component_shares = [bulk_shares]
             for component_index, component in enumerate(
@@ -960,7 +1039,7 @@ class DWBAState:
                     if record.component_index == component_index
                 ]
                 values, tagged = self._tagged_component_profile(
-                    component, selected, record_count
+                    component, selected, assembly_layout, slot_count
                 )
                 if len(values):
                     component_values.append(values)
@@ -968,6 +1047,7 @@ class DWBAState:
             structural, shares = _combine_tagged(
                 np.concatenate(component_values, axis=0),
                 np.concatenate(component_shares, axis=1),
+                density_count=slot_count,
             )
             dz = (
                 top_layer_spacing(structural)
@@ -979,9 +1059,18 @@ class DWBAState:
             )
             structural = np.concatenate((structural, vacuum), axis=0)
             shares = np.concatenate(
-                (shares, np.zeros((record_count, 1, 2), dtype=np.float64)),
+                (shares, np.zeros((assembly_count, 1, 2), dtype=np.float64)),
                 axis=1,
             )
+            if conservative:
+                widths = np.diff(profile_boundaries(structural))
+                inventories = shares[slot_count:]
+                shares = shares[:slot_count].copy()
+                for extra, slot in enumerate(conservative):
+                    shares[slot, 1:-1] = inventories[extra, 1:-1] / widths[:, None]
+                structural[:, 1:] = shares.sum(axis=0)
+            if raw_structure:
+                return structural
             if any(record.role == "water" for record in records):
                 from ._CTRwater_dwba import _with_water_reference
                 water = next(record.cell for record in records
@@ -1007,10 +1096,17 @@ class DWBAState:
             raise RuntimeError(
                 "DWBA record reference shares do not reconstruct the optical profile."
             )
+        layer_shares = shares
+        shares = _sum_layer_shares(layer_shares, layout, record_count)
+        if stratified.continuous is not None:
+            stratified = replace(stratified, continuous=replace(
+                stratified.continuous, shares=_readonly_array(shares, np.float64),
+            ))
         geometry_fingerprint = _hash_record_geometry(records)
         digest = hashlib.blake2b(digest_size=20)
         digest.update(geometry_fingerprint)
         digest.update(_hash_arrays(shares))
+        digest.update(_hash_arrays(layer_shares))
         for record in records:
             digest.update(repr(_record_descriptor(record)).encode("utf-8"))
         model = _PreparedAtomicModel(
@@ -1018,6 +1114,8 @@ class DWBAState:
             reference_shares=_readonly_array(shares[:, ::-1], np.float64),
             geometry_fingerprint=geometry_fingerprint,
             decomposition_fingerprint=digest.digest(),
+            layer_reference_shares=_readonly_array(layer_shares[:, ::-1], np.float64),
+            layer_reference_layout=layout,
         )
         snapshot = records, model, stratified
         if self._batch_depth:
@@ -1782,6 +1880,8 @@ class DWBAState:
 
         self._cache_counters["packing_builds"] += 1
         atom_basis = []
+        atom_records = []
+        atom_layers = []
         form_factors = []
         finite_positions = []
         finite_atom_index = []
@@ -1806,6 +1906,10 @@ class DWBAState:
             factors = np.asarray(factors, dtype=np.float64)
             atom_offset = sum(len(value) for value in atom_basis)
             atom_basis.append(basis)
+            atom_records.append(
+                np.full(len(basis), global_record_index, dtype=np.int64)
+            )
+            atom_layers.append(cell._selected_crystallinity_labels())
             form_factors.append(factors)
             atom_indices = np.arange(len(basis), dtype=np.int64) + atom_offset
             domain_matrices, domain_occupancies = _coherent_domain_arrays(
@@ -1873,6 +1977,8 @@ class DWBAState:
             raise ValueError("The DWBA bulk must contain at least one domain.")
         packed = {
             "atom_basis": concatenate(atom_basis, (0, 8), np.float64),
+            "atom_records": concatenate(atom_records, (0,), np.int64),
+            "atom_layers": concatenate(atom_layers, (0,), np.float64),
             "form_factors": concatenate(form_factors, (0, 13), np.float64),
             "finite_positions": concatenate(
                 finite_positions, (0, 3), np.float64
@@ -1936,32 +2042,7 @@ class DWBAState:
             )
         return records
 
-    def evaluate_prepared(
-        self,
-        prepared,
-        *,
-        bulk_mode="semi_infinite",
-        bulk_attenuation=0.0,
-    ):
-        """Evaluate current atomic parameters on a frozen DWBA preparation.
-
-        No wavefield calculation occurs. ``bulk_attenuation`` is an optional
-        empirical exponent per bulk repeat and defaults to zero because
-        physical absorption is already present in the complex wavevectors.
-
-        :param PreparedCTR prepared: Retained preparation from this crystal.
-        :param str bulk_mode: ``"unit_cell"`` or ``"semi_infinite"``.
-        :param float bulk_attenuation: Non-negative exponent per bulk repeat.
-        :returns: Coherent contrast and normalized observable amplitudes.
-        :rtype: DWBAResult
-        """
-        self._require_available()
-        if bulk_mode not in {"unit_cell", "semi_infinite"}:
-            raise ValueError("bulk_mode must be 'unit_cell' or 'semi_infinite'.")
-        if not np.isfinite(bulk_attenuation) or bulk_attenuation < 0.0:
-            raise ValueError("bulk_attenuation must be finite and non-negative.")
-        records = self._validate_prepared(prepared)
-        packed = self._pack_atomic_records(prepared, records)
+    def _evaluate_raw(self, prepared, records, packed, bulk_mode, bulk_attenuation):
         media = len(prepared.reference.n)
 
         def field_array(value):
@@ -2020,6 +2101,81 @@ class DWBAState:
                 packed["bulk_repeat_coordinate"],
                 packed["bulk_repeat"],
             )
+        return atomic, reference
+
+    def evaluate_prepared(
+        self,
+        prepared,
+        *,
+        bulk_mode="semi_infinite",
+        bulk_attenuation=0.0,
+    ):
+        """Evaluate current atomic parameters on a frozen DWBA preparation.
+
+        No wavefield calculation occurs. ``bulk_attenuation`` is an optional
+        empirical exponent per bulk repeat and defaults to zero because
+        physical absorption is already present in the complex wavevectors.
+
+        :param PreparedCTR prepared: Retained preparation from this crystal.
+        :param str bulk_mode: ``"unit_cell"`` or ``"semi_infinite"``.
+        :param float bulk_attenuation: Non-negative exponent per bulk repeat.
+        :returns: Coherent contrast and normalized observable amplitudes.
+        :rtype: DWBAResult
+        """
+        self._require_available()
+        if bulk_mode not in {"unit_cell", "semi_infinite"}:
+            raise ValueError("bulk_mode must be 'unit_cell' or 'semi_infinite'.")
+        if not np.isfinite(bulk_attenuation) or bulk_attenuation < 0.0:
+            raise ValueError("bulk_attenuation must be finite and non-negative.")
+        records = self._validate_prepared(prepared)
+        packed = self._pack_atomic_records(prepared, records)
+        atomic, reference = self._evaluate_raw(
+            prepared, records, packed, bulk_mode, bulk_attenuation,
+        )
+        layout = prepared._atomic_model.layer_reference_layout
+        layer_weights = np.array([
+            1.0 if layer is None else records[index].cell.getLayerCrystallinity(layer)
+            for index, layer in layout
+        ])
+        nonuniform = any(weight != layer_weights[index]
+                         for (index, _), weight in zip(layout, layer_weights))
+        if nonuniform:
+            # Apply order to temporary scattering occupancies only. Physical
+            # basis arrays, n_0(z), and both distorted fields remain untouched.
+            weighted_packed = dict(packed)
+            weighted_basis = packed["atom_basis"].copy()
+            order_values = {
+                (index, layer): weight
+                for (index, layer), weight in zip(layout, layer_weights)
+            }
+            weighted_basis[:, 6] *= [
+                order_values[index, layer]
+                for index, layer in zip(packed["atom_records"], packed["atom_layers"])
+            ]
+            weighted_packed["atom_basis"] = weighted_basis
+            weighted_shares = _sum_layer_shares(
+                prepared._atomic_model.layer_reference_shares, layout,
+                len(records), layer_weights,
+            )
+            model = replace(
+                prepared._atomic_model, reference_shares=weighted_shares,
+                decomposition_fingerprint=_hash_arrays(weighted_shares),
+            )
+            reference_state = prepared.reference
+            if reference_state.continuous is not None:
+                # This copy supplies only the weighted subtraction integrals;
+                # retain the already solved fields of the physical reference.
+                reference_state = replace(reference_state, continuous=replace(
+                    reference_state.continuous, shares=weighted_shares[:, ::-1],
+                ))
+            weighted_prepared = replace(
+                prepared, _atomic_model=model, reference=reference_state,
+            )
+            weighted_atomic, weighted_reference = self._evaluate_raw(
+                weighted_prepared, records, weighted_packed,
+                bulk_mode, bulk_attenuation,
+            )
+            atomic = weighted_atomic + reference - weighted_reference
         atomic = np.asarray(atomic, dtype=np.complex128)
         reference = np.asarray(reference, dtype=np.complex128)
         # Crystallinity changes only the contrast, never the optical reference
@@ -2037,7 +2193,11 @@ class DWBAState:
                 )
                 atomic[index] = reference[index] + contrast
                 continue
-            crystallinity = record.cell.crystallinity
+            if nonuniform:
+                continue
+            layers = record.cell.crystallinity_layers
+            crystallinity = (record.cell.getLayerCrystallinity(layers[0])
+                             if layers else record.cell.crystallinity)
             if crystallinity == 0.0:
                 atomic[index] = reference[index]
             elif crystallinity != 1.0:

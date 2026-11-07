@@ -96,7 +96,10 @@ def optical_profile(unit_cell, include_coherent_domains=True):
     and ``beta`` in the convention ``n = 1-delta-i*beta``. The forward
     scattering amplitude always uses the Waasmaier--Kirfel representation at
     ``Q = 0`` plus the energy-dependent dispersion correction, matching the
-    structure-factor kernels exactly.
+    structure-factor kernels exactly. Whole-cell surface terminations retain
+    one row per internal physical plane, independently of their stacking
+    selector. The densities use each source plane's transformed thickness;
+    crystal/DWBA assembly conserves its inventory on the final slab grid.
 
     :param UnitCell unit_cell:
         Unit cell with energy-dependent scattering factors populated by
@@ -109,6 +112,29 @@ def optical_profile(unit_cell, include_coherent_domains=True):
     :raises ValueError:
         If the unit-cell energy has not populated anomalous scattering factors.
     """
+    return _optical_profile(unit_cell, include_coherent_domains)
+
+
+def _internal_plane_geometry(unit_cell):
+    """Read internal planes, recovering legacy collapsed groups from coordinates."""
+    geometry = getattr(unit_cell, "_optical_plane_geometry", None)
+    labels = unit_cell._crystallinity_labels()
+    if geometry is not None or len(np.unique(labels)) <= len(unit_cell.layers):
+        return geometry
+    groups = sorted(np.unique(labels),
+                    key=lambda key: np.mean(unit_cell.basis[labels == key, 3]))
+    positions = [float(np.mean(unit_cell.basis[labels == key, 3])) for key in groups]
+    geometry = {}
+    for index, key in enumerate(groups):
+        width = positions[(index + 1) % len(groups)] - positions[index]
+        while width <= 0:
+            width += 1.0
+        geometry[key] = (positions[index], width)
+    return geometry
+
+
+def _optical_profile(unit_cell, include_coherent_domains=True, *, thickness=False):
+    """Optionally append each source plane's transformed thickness in Angstrom."""
     if not hasattr(unit_cell, "_E") or not hasattr(unit_cell, "f"):
         raise ValueError(
             "Set the UnitCell energy before calculating optical constants."
@@ -119,7 +145,18 @@ def optical_profile(unit_cell, include_coherent_domains=True):
     if not layer_ids:
         return np.empty((0, 3), dtype=np.float64)
 
-    if hasattr(unit_cell, "_optical_layer_origin"):
+    plane_geometry = _internal_plane_geometry(unit_cell)
+    labels = unit_cell._crystallinity_labels()
+    if plane_geometry is not None:
+        if set(plane_geometry) != set(labels):
+            raise ValueError("Optical-plane geometry must cover every internal layer.")
+        layer_ids = tuple(sorted(plane_geometry,
+                                 key=lambda key: plane_geometry[key][0]))
+        origins = np.array([plane_geometry[key][0] for key in layer_ids])
+        thickness_fraction = np.array([plane_geometry[key][1] for key in layer_ids])
+        atom_groups = [(unit_cell.basis[labels == key], unit_cell.f[labels == key])
+                       for key in layer_ids]
+    elif hasattr(unit_cell, "_optical_layer_origin"):
         if len(layer_ids) != 1:
             raise ValueError("Layer optical metadata requires exactly one layer.")
         origins = np.asarray([unit_cell._optical_layer_origin], dtype=np.float64)
@@ -142,6 +179,9 @@ def optical_profile(unit_cell, include_coherent_domains=True):
                 spacing += 1.0
             thickness_fraction[index] = spacing
 
+    if plane_geometry is None:
+        atom_groups = [(cell.basis, cell.f) for cell in layers.values()]
+
     wavelength = HC_KEV_ANGSTROM / (unit_cell._E * 1e-3)
     scale = 2.8179403262e-5 * wavelength**2 / (2.0 * np.pi)
     if include_coherent_domains:
@@ -150,18 +190,19 @@ def optical_profile(unit_cell, include_coherent_domains=True):
     else:
         domain_matrices = [np.hstack((np.identity(3), np.zeros((3, 1))))]
         domain_occupancies = [1.0]
-    profile = np.empty((len(layer_ids) * len(domain_matrices), 3), dtype=np.float64)
+    profile = np.empty((len(layer_ids) * len(domain_matrices), 4 if thickness else 3),
+                       dtype=np.float64)
     row = 0
-    for layer_index, (layer_id, layer_cell) in enumerate(layers.items()):
+    for layer_index, (basis, factors) in enumerate(atom_groups):
         forward_static_factor = (
-            np.sum(layer_cell.f[:, :5], axis=1) + layer_cell.f[:, 10]
+            np.sum(factors[:, :5], axis=1) + factors[:, 10]
         )
         forward_factor = np.sum(
-            layer_cell.basis[:, 6]
+            basis[:, 6]
             * (
                 forward_static_factor
-                + layer_cell.f[:, 11]
-                + 1j * layer_cell.f[:, 12]
+                + factors[:, 11]
+                + 1j * factors[:, 12]
             )
         )
         layer_volume = unit_cell.volume * thickness_fraction[layer_index]
@@ -185,11 +226,14 @@ def optical_profile(unit_cell, include_coherent_domains=True):
             contribution = (
                 float(occupancy) * optical_density / normal_stretch
             )
-            profile[row] = [
+            profile[row, :3] = [
                 domain_origin[2] * unit_cell.a[2],
                 contribution.real,
                 contribution.imag,
             ]
+            if thickness:
+                profile[row, 3] = (unit_cell.volume / unit_cell.uc_area
+                                   * thickness_fraction[layer_index] * normal_stretch)
             row += 1
     return profile
 

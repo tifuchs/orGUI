@@ -322,8 +322,8 @@ Crystallinity
 
 ``UnitCell.crystallinity`` is a dimensionless coherent amplitude fraction
 between zero and one, defaulting to one. It multiplies kinematic unit-cell
-and bulk amplitudes once. An isolated contribution's intensity therefore
-scales with its square; interference with other components remains coherent.
+and bulk amplitudes once unless a structural layer overrides it. An isolated
+contribution's intensity therefore scales with its square; interference with other components remains coherent.
 This parameter does not model diffuse scattering or an incoherent crystalline
 volume fraction.
 
@@ -357,6 +357,30 @@ Set the property on the source material cell, or register it for fitting:
        name="film_order", limits=(0.0, 1.0)
    )
 
+Use structural-layer overrides when order varies within a cell:
+
+.. code-block:: python
+
+   film_cell.setLayerCrystallinity(2, 0.3)
+   film_cell.addCrystallinityParameter(layer=2, name="layer_2_order")
+   film_cell.getLayerCrystallinity(2)  # 0.3, replacing the cell default
+   film_cell.setLayerCrystallinity(2, None)  # resume the default/inherited value
+
+``layer_crystallinity`` returns a copy of the explicit overrides;
+``crystallinity_layers`` lists the available structural order IDs. These are
+independent of optical slab discretization. Both atomic and reference matrix
+elements are weighted by the same layer value:
+
+.. math::
+
+   F_{\mathbf h,u} = \sum_j c_{u,j}(A_{u,j}-R_{u,j}).
+
+The reported ``F_reference`` remains :math:`\sum_j R_{u,j}` and
+``F_atomic`` is :math:`\sum_j[c_{u,j}A_{u,j}+(1-c_{u,j})R_{u,j}]`.
+The frozen reference retains each structural layer's density share, including
+when several contributions share one optical medium. Changing layer order
+reuses prepared wavefields, including inside a DWBA fit batch.
+
 Generated Film and interface layers follow their source cell live, including
 after deep copying a model for fitting. Poisson surface terminations follow
 the supplied surface cell, or their individual cells in an explicit
@@ -371,16 +395,115 @@ underlying source, independently of the crystallinity of the added material:
    \Delta F = c_{\mathrm{added}}D_{\mathrm{added}}
               -c_{\mathrm{removed}}D_{\mathrm{removed}}.
 
-Zero crystallinity of a surface termination suppresses the entire exposed
-slab represented by that cell, not only its outermost atomic plane. Signed
+Without overrides, zero crystallinity of a surface termination suppresses the
+entire exposed slab represented by that cell. A layer override changes only
+that structural group's contrast. Layer order IDs follow the atoms through
+layered translations and are retained when ``as_surface_termination`` collapses
+the stacking labels; inspect ``crystallinity_layers`` on the source slab.
+Generated termination banks inherit subsequent source-layer edits live.
+Supercells assign order IDs to their repeated structural layers. Signed
 records from independently ordered materials remain separate even when their
 atomic structures are identical.
 
-Native text models store a ``crystallinity:`` line per cell. Fit-settings
-dictionaries and HDF5 files also preserve the scalar and its fit parameter,
-bounds, and uncertainty. Older models without this field load with
+Whole-cell terminations retain their physical internal optical planes separately
+from the collapsed stacking selector. Each group contributes its own planar
+forward-scattering inventory in electrons per square Angstrom, including the
+absorptive part. When strain or coincident-plane merging changes the assembled
+slab widths, the reference density is normalized to those widths to conserve
+that inventory. The same construction supplies the crystal optical profile and
+the frozen DWBA group shares. Consequently, replacing ordered material by its
+planar reference conserves the group's electron content.
+
+Native ``.xtal`` and ``.xpr`` files store ``optical_plane:`` records containing
+the order-group ID, fractional origin and fractional thickness. Older saved
+terminations with surviving ``crystallinity_layers:`` labels recover internal
+origins from the groups' mean atomic z coordinates. If the original structural
+origins differed from those means, regenerate the termination bank from its
+source cell. Models that lost both the internal labels and the optical metadata
+also require regeneration. Earlier DWBA fits using collapsed multi-plane
+references need reevaluation; their fitted crystallinity values cannot be
+assumed to represent mass-conserving conversion fractions. The atomic kinematic
+structure-factor convention is unchanged by this optical correction.
+
+Native text models store a ``crystallinity:`` line per cell, optional
+``layer_crystallinity:`` overrides, and ``crystallinity_layers:`` atom labels
+when needed to preserve transformed or collapsed groups. Fit-settings
+dictionaries and HDF5 files also preserve the default, layer overrides and fit
+parameters, bounds, and uncertainty. Older models without this field load with
 crystallinity one. ``clearParameters()`` removes the fit definition while
 retaining the current crystallinity value.
+
+Independent order and occupancy profiles
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``PoissonSurface`` and ``EpitaxyInterface`` can also own independent
+``CrystallinityProfile`` objects. The existing probability distribution still
+sets material occupancy. The added profile sets coherent order as a function
+of depth from the **local** surface or interface boundary. Both profiles can
+therefore coexist and be fitted independently.
+
+For a surface whose top occupied structural layer is :math:`H`, a film layer
+:math:`j` has local depth :math:`d=H-j`. Its material and coherent weights are
+
+.. math::
+
+   p_j = \sum_H P(H)\,\mathbf{1}_{j\leq H}, \qquad
+   w_j = \sum_H P(H)\,\mathbf{1}_{j\leq H}\,C(H-j).
+
+Occupancy is counted once. Order applies only to the material present in
+each terrace state; the final amplitudes are averaged over those states.
+Within an exposed termination slab, depth counts its internal structural
+layers down from the top. The same recovery continues into the immediately
+underlying ``Film``. Bulk and other stack components retain their own order.
+Flat-height states used for incoherent intensity averaging carry this same
+local-depth profile.
+
+The profile is a cumulative distribution of recovery depths:
+
+.. math::
+
+   C(d)=c_{\min}+(1-c_{\min})P(D\leq d-d_0).
+
+``minimum`` is a dimensionless amplitude fraction; depth zero is the first
+occupied structural layer beside the local boundary. Poisson parameters and
+``depth_offset`` use structural-layer counts. Skellam ``width`` retains its
+existing unit-cell convention, converted using the host's layer count.
+For example, deterministic recovery at depth two suppresses the first two
+layers and recovers at the third. The result multiplies each material's
+existing cell or layer crystallinity. Optical density and :math:`n_0` stay
+unchanged.
+
+.. code-block:: python
+
+   from orgui.datautils.xrayutils.CTRcalc import CrystallinityProfile
+   from orgui.datautils.xrayutils.CTRdistributions import PoissonProfile
+
+   # surface.profile continues to control the distribution of terrace heights.
+   order = surface.setCrystallinityProfile(
+       CrystallinityProfile(PoissonProfile(2.0, alpha=0.5), minimum=0.2)
+   )
+   order.addFitParameter("mean_change", name="disorder_depth", limits=(0, 5))
+   order.addFitParameter("minimum", name="surface_order", limits=(0, 1))
+
+The setter copies the supplied object and returns the owned profile. For
+an interface, use ``side="top"`` and ``side="bottom"`` to attach independent
+profiles on either side of the same fluctuating boundary. Depth increases
+away from that boundary into each material. Use distinct fit names for
+independent parameters; the existing shared-name fitting convention still
+applies. Passing ``None`` detaches a profile.
+
+Interface recovery must reach unity, within the distribution tail tolerance,
+before the represented interface support ends. Choose ``fixed_ucs`` large
+enough for the entire intended fitting range; a profile that exceeds this
+support raises ``ValueError`` instead of silently truncating the disorder.
+Height/boundary sums use the occupancy distribution's retained support and
+tail tolerance. Adding or removing a profile changes DWBA record layout and
+requires preparing again. Changing its fitted values within the supported
+range can reuse the frozen optical fields.
+
+Text models save ``crystallinity_profiles:`` metadata. HDF5 companions also
+preserve fit parameters, bounds and uncertainties. Models without the new
+metadata retain their existing amplitudes.
 
 Semi-infinite bulk amplitude
 -----------------------------
@@ -1125,7 +1248,7 @@ API reference
 .. autofunction:: orgui.datautils.xrayutils.CTRincoherent.create_incoherent_model_from_config
 
 .. autoclass:: orgui.datautils.xrayutils.CTRuc.UnitCell
-   :members: F_uc, F_bulk, crystallinity, addCrystallinityParameter, setReferenceUnitCell, supercell, affine_layer_transform, as_surface_termination
+   :members: F_uc, F_bulk, crystallinity, crystallinity_layers, layer_crystallinity, getLayerCrystallinity, setLayerCrystallinity, addCrystallinityParameter, setReferenceUnitCell, supercell, affine_layer_transform, as_surface_termination
    :member-order: bysource
 
 .. autoclass:: orgui.datautils.xrayutils.CTRfilm.Film
@@ -1133,12 +1256,15 @@ API reference
    :member-order: bysource
 
 .. autoclass:: orgui.datautils.xrayutils.CTRfilm.EpitaxyInterface
-   :members: F_uc, uc_area, setReferenceUnitCell
+   :members: F_uc, uc_area, setReferenceUnitCell, setCrystallinityProfile, crystallinity_profiles
    :member-order: bysource
 
 .. autoclass:: orgui.datautils.xrayutils.CTRfilm.PoissonSurface
-   :members: F_uc, uc_area, setReferenceUnitCell, flat_domain_corrections
+   :members: F_uc, uc_area, setReferenceUnitCell, flat_domain_corrections, setCrystallinityProfile, crystallinity_profile
    :member-order: bysource
+
+.. autoclass:: orgui.datautils.xrayutils.CTRcrystallinity.CrystallinityProfile
+   :members: evaluate
 
 .. autoclass:: orgui.datautils.xrayutils.CTRfilm.FlatHeightCorrections
    :members: excluded_probability, iter_states, as_array

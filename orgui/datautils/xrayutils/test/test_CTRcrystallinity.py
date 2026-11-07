@@ -289,3 +289,206 @@ def test_crystal_fit_updates_generated_dwba_records():
         np.testing.assert_allclose(current.F_h, factor * initial.F_h, atol=1e-12)
     np.testing.assert_array_equal(result.F_h, again.F_h)
     assert _prepare(crystal) is prepared
+
+
+@pytest.mark.parametrize("backend", ["numpy", "cpp", "numba"])
+def test_layer_order_matches_weighted_atomic_motif(backend, monkeypatch):
+    """Layer overrides replace the default in every kinematic amplitude path."""
+    if backend == "numba":
+        pytest.importorskip("numba")
+    if backend == "cpp" and not CTRuc.HAS_CPP_ACCEL:
+        pytest.skip("native CTR extension unavailable")
+    monkeypatch.setattr(CTRuc, "CTR_ACCEL_BACKEND", backend)
+    cell = _cell(crystallinity=0.)
+    cell.setLayerCrystallinity(2, 0.7)
+    expected = _cell()
+    expected.basis[:, 6] *= [0., 0.7]
+    profile = cell.optical_profile().copy()
+    for repeat in [(0., 0., 1.), (0.2, -0.1, 1.)]:
+        cell.stacking_translation = expected.stacking_translation = repeat
+        for method in ("F_uc", "F_uc_bulk", "F_uc_bulk_direct", "F_bulk"):
+            np.testing.assert_allclose(getattr(cell, method)(*_hkl()),
+                                       getattr(expected, method)(*_hkl()))
+    np.testing.assert_array_equal(cell.optical_profile(), profile)
+    cell.setLayerCrystallinity(2, None)
+    np.testing.assert_array_equal(cell.F_bulk(*_hkl()), 0.j)
+
+
+def test_layer_order_validation_and_inheritance():
+    """Generated views follow overrides live, with explicit local detachment."""
+    cell = _cell(crystallinity=0.6)
+    layers = cell.split_in_layers()
+    for value in [-0.1, 1.1, np.nan, np.inf, [0.5]]:
+        with pytest.raises(ValueError, match="crystallinity"):
+            cell.setLayerCrystallinity(1, value)
+    with pytest.raises(ValueError, match="Unknown"):
+        cell.setLayerCrystallinity(99, 0.5)
+    cell.setLayerCrystallinity(1, 0.2)
+    assert layers[1].getLayerCrystallinity(1) == 0.2
+    assert layers[2].getLayerCrystallinity(2) == 0.6
+    layers[1].setLayerCrystallinity(1, 0.8)
+    assert cell.getLayerCrystallinity(1) == 0.2
+    layers[1].setLayerCrystallinity(1, None)
+    assert layers[1].getLayerCrystallinity(1) == 0.2
+    layers[1].crystallinity = 0.3
+    assert layers[1].getLayerCrystallinity(1) == 0.3
+
+
+def test_layer_order_fit_and_saved_termination(tmp_path):
+    """Independent layer fits and internal termination IDs survive text/HDF5."""
+    from silx.io.dictdump import dicttoh5, h5todict
+
+    cell = _cell(crystallinity=0.6)
+    cell.addCrystallinityParameter(name="default")
+    cell.addCrystallinityParameter(layer=2, name="outer")
+    cell.setFitParameters([0.8, 0.15])
+    cell.setFitErrors([0.02, 0.03])
+    with pytest.raises(ValueError, match="already exists"):
+        cell.addCrystallinityParameter(layer=2)
+    # A termination has only one stacking label but retains two order groups.
+    cell = cell.as_surface_termination(7)
+    assert cell.crystallinity_layers == (1., 2.)
+    assert np.unique(cell.basis[:, 7]).tolist() == [7.]
+    saved = CTRuc.UnitCell.fromStr(cell.toStr())
+    saved.setEnergy(10000.)
+    np.testing.assert_allclose(saved.F_uc(*_hkl()), cell.F_uc(*_hkl()))
+    path = str(tmp_path / "layer-fit.h5")
+    dicttoh5(cell.parametersToDict(), path)
+    saved.parametersFromDict(h5todict(path))
+    np.testing.assert_allclose(saved.getInitialParameters(), [0.8, 0.15])
+    np.testing.assert_allclose(saved.getFitErrors(), [0.02, 0.03])
+    saved.setFitParameters([0., 0.4])
+    assert saved.getLayerCrystallinity(1) == 0.
+    assert saved.getLayerCrystallinity(2) == 0.4
+
+
+@pytest.mark.parametrize("transform", [
+    lambda c: c.translate_layered([0, 0, 1]),
+    lambda c: c.affine_layer_transform([0, 0, 1]),
+    lambda c: c.as_surface_termination(7),
+    lambda c: c.supercell((2, 1, 2)),
+    lambda c: c.as_surface_termination(7).supercell((1, 1, 2)),
+])
+def test_layer_order_follows_transformed_atoms(transform):
+    """Reordering and collapsed termination labels cannot swap atomic order."""
+    cell = _cell(crystallinity=0.3)
+    cell.setLayerCrystallinity(2, 0.8)
+    expected = _cell()
+    expected.basis[:, 6] *= [0.3, 0.8]
+    expected.basis_0[:] = expected.basis
+    actual, expected = transform(cell), transform(expected)
+    np.testing.assert_allclose(actual.F_uc(*_hkl()), expected.F_uc(*_hkl()))
+
+
+@pytest.mark.parametrize("attenuation", [0., 0.03])
+def test_bulk_layer_dwba_independent_homogeneous_reference(attenuation):
+    """Weight the two motifs and their complex forward-density shares separately."""
+    cell = _cell()
+    crystal = CTRcalc.SXRDCrystal(cell)
+    prepared = _prepare(crystal)
+    baseline = crystal.dwba.evaluate_prepared(prepared, bulk_attenuation=attenuation)
+    atomic = []
+    for occupancy in ([1., 0.], [0., 1.]):
+        cell.basis[:, 6] = occupancy
+        atomic.append(crystal.dwba.evaluate_prepared(
+            prepared, bulk_attenuation=attenuation,
+        ).F_atomic)
+    cell.basis[:, 6] = 1.
+    forward = (cell.f[:, :5].sum(axis=1) + cell.f[:, 10]
+               + cell.f[:, 11] + 1j*cell.f[:, 12])
+    cell.crystallinity = 0.2
+    cell.setLayerCrystallinity(2, 0.7)
+    with crystal.dwba.batch():
+        result = crystal.dwba.evaluate_prepared(prepared, bulk_attenuation=attenuation)
+    expected = (0.2*atomic[0] + 0.7*atomic[1]
+                - np.dot([0.2, 0.7], forward)/forward.sum()*baseline.F_reference)
+    np.testing.assert_allclose(result.F_h, expected, atol=1e-11)
+    np.testing.assert_array_equal(result.F_reference, baseline.F_reference)
+    np.testing.assert_array_equal(result.unperturbed_amplitude,
+                                  baseline.unperturbed_amplitude)
+    assert _prepare(crystal) is prepared
+
+
+def test_distinct_optical_layers_keep_independent_order():
+    """A layer loses its own contrast, leaving a different-index neighbour intact."""
+    surface = _cell("surface")
+    crystal = CTRcalc.SXRDCrystal(_cell("bulk"), surface, stacking=np.array([1]))
+    prepared = _prepare(crystal)
+    initial = crystal.dwba.evaluate_prepared(prepared)
+    assert len(np.unique(prepared.reference.n)) > 2
+    surface.setLayerCrystallinity(2, 0.)
+    changed = crystal.dwba.evaluate_prepared(prepared)
+    for old, new in zip(initial.contributions, changed.contributions):
+        expected = 0.j if new.component_index == 0 and new.layer == 2 else old.F_h
+        np.testing.assert_allclose(new.F_h, expected, atol=1e-12)
+    np.testing.assert_array_equal(changed.F_reference, initial.F_reference)
+    assert _prepare(crystal) is prepared
+
+
+def test_poisson_internal_layer_override_roundtrip(tmp_path):
+    """A whole-cell termination retains independently ordered internal planes."""
+    crystal, surface = poisson_crystal(CTRfilm.PoissonProfile(0., alpha=0.))
+    crystal.setEnergy(10000.)
+    prepared = _prepare(crystal)
+    baseline = crystal.dwba.evaluate_prepared(prepared)
+    source = surface._source_unitcell
+    source.setLayerCrystallinity(source.crystallinity_layers[-1], 0.)
+    changed = crystal.dwba.evaluate_prepared(prepared)
+    assert not np.allclose(changed.F_h, baseline.F_h)
+    for old, new in zip(baseline.contributions, changed.contributions):
+        if new.role != "surface_termination":
+            np.testing.assert_allclose(new.F_h, old.F_h, atol=1e-12)
+    assert any(np.any(abs(c.F_h) > 1e-8) for c in changed.contributions
+               if c.role == "surface_termination")
+    np.testing.assert_array_equal(changed.F_reference, baseline.F_reference)
+    path = str(tmp_path / "surface-layer.xtal")
+    crystal.toFile(path)
+    restored = CTRcalc.SXRDCrystal.fromFile(path)
+    restored.setEnergy(10000.)
+    np.testing.assert_allclose(restored.F(*_hkl()), crystal.F(*_hkl()), atol=1e-11)
+    result = restored.dwba.evaluate_prepared(_prepare(restored))
+    np.testing.assert_allclose(result.F_h, changed.F_h, atol=1e-11)
+
+
+def test_existing_source_override_remains_live_in_generated_terminations():
+    """Copies made while an override exists must not shadow subsequent fits."""
+    crystal, surface = poisson_crystal(CTRfilm.PoissonProfile(0., alpha=0.))
+    source = surface._source_unitcell
+    layer = source.crystallinity_layers[-1]
+    source.setLayerCrystallinity(layer, 0.7)
+    # Rebuild the source-derived bank, then edit order without rebuilding it.
+    surface.underlying_film = None
+    crystal.setEnergy(10000.)
+    prepared = _prepare(crystal)
+    source.setLayerCrystallinity(layer, 0.2)
+    for cell in surface.termination_cells.values():
+        assert cell.getLayerCrystallinity(layer) == 0.2
+    first = crystal.dwba.evaluate_prepared(prepared)
+    with crystal.dwba.batch():
+        source.setLayerCrystallinity(layer, 0.8)
+        second = crystal.dwba.evaluate_prepared(prepared)
+    assert not np.allclose(first.F_h, second.F_h)
+    np.testing.assert_array_equal(first.F_reference, second.F_reference)
+
+
+@pytest.mark.parametrize("kind", ["step_sharp", "tanh", "erf"])
+def test_layer_order_with_water_preserves_water_and_optics(kind):
+    """Solid layer overrides leave sharp, analytic and numerical water intact."""
+    from .test_CTRwater import _water
+
+    cell = _cell()
+    crystal = CTRcalc.SXRDCrystal(cell, _water(kind))
+    prepared = crystal.dwba.prepare_from_glancing(0., 0., 0.04, 0.04)
+    initial = crystal.dwba.evaluate_prepared(prepared)
+    cell.setLayerCrystallinity(2, 0.3)
+    first = crystal.dwba.evaluate_prepared(prepared)
+    cell.setLayerCrystallinity(2, 0.6)
+    second = crystal.dwba.evaluate_prepared(prepared)
+    np.testing.assert_allclose(initial.F_h - second.F_h,
+                               (initial.F_h - first.F_h)*0.4/0.7, atol=1e-10)
+    for result in [first, second]:
+        np.testing.assert_array_equal(result.F_reference, initial.F_reference)
+        np.testing.assert_allclose(result.contributions[-1].F_h,
+                                   initial.contributions[-1].F_h, atol=1e-10)
+        np.testing.assert_array_equal(result.unperturbed_amplitude,
+                                      initial.unperturbed_amplitude)

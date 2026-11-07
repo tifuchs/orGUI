@@ -32,6 +32,7 @@ import copy
 import numpy as np
 from .. import util
 import re
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 # random.seed(45)
@@ -44,6 +45,7 @@ from .CTRutil import (
     LinearFitFunctions,
 )
 from .CTRoptics import combine_profiles
+from .CTRcrystallinity import CrystallinityProfile, _bound_cell
 
 from .CTRuc import UnitCell, WaterModel, ctr_accel_enabled
 from .CTRdistributions import (
@@ -276,6 +278,87 @@ def _move_domains(layers, delta_height):
 
 
 class _LayerStackingMixin:
+    @property
+    def crystallinity_profiles(self):
+        """Return independent order profiles keyed by surface, top, or bottom."""
+        profiles = getattr(self, "_crystallinity_profiles", {})
+        return {side: profiles[side] for side in ("surface", "top", "bottom")
+                if side in profiles}
+
+    @property
+    def crystallinity_profile(self):
+        """Return a rough surface's local-depth order profile, or None."""
+        return self.crystallinity_profiles.get("surface")
+
+    def setCrystallinityProfile(self, profile, *, side=None):
+        """Attach independent order recovery relative to the local boundary.
+
+        :param profile: :class:`CrystallinityProfile`, Poisson/Skellam profile,
+            or ``None`` to detach. Supplied objects are copied, so the occupancy
+            distribution and the two interface sides stay independent.
+        :param str side: ``surface`` for PoissonSurface; ``top`` or ``bottom``
+            for EpitaxyInterface (default ``top``).
+        :returns: The owned, independently fittable profile, or None.
+        """
+        if isinstance(self, EpitaxyInterface):
+            side = side or "top"
+            valid = ("top", "bottom")
+        elif isinstance(self, PoissonSurface):
+            side = side or "surface"
+            valid = ("surface",)
+        else:
+            raise TypeError(
+                "Order profiles belong to PoissonSurface or EpitaxyInterface.")
+        if side not in valid:
+            raise ValueError(f"Crystallinity side must be one of {valid}.")
+        if isinstance(profile, (PoissonProfile, SkellamProfile)):
+            profile = CrystallinityProfile(profile, name=f"{side}_order")
+        if profile is not None and not isinstance(profile, CrystallinityProfile):
+            raise TypeError(
+                "Expected a CrystallinityProfile or a Poisson/Skellam profile.")
+        profiles = self.crystallinity_profiles
+        if profile is None:
+            profiles.pop(side, None)
+        else:
+            profile._validate()
+            profiles[side] = copy.deepcopy(profile)
+        self._crystallinity_profiles = profiles
+        self._order_cache = {}
+        return profiles.get(side)
+
+    def _order_settings(self, include_fit=False):
+        return {side: profile.to_settings(include_fit)
+                for side, profile in self.crystallinity_profiles.items()}
+
+    def _restore_order_settings(self, settings):
+        self._crystallinity_profiles = {}
+        for side, values in settings.items():
+            self.setCrystallinityProfile(CrystallinityProfile.from_settings(values),
+                                        side=side)
+
+    def _order_to_str(self):
+        settings = self._order_settings()
+        return ("\ncrystallinity_profiles: " + json.dumps(settings, allow_nan=False)
+                if settings else "")
+
+    def _order_from_str(self, string):
+        for line in string.splitlines():
+            if line.strip().startswith("crystallinity_profiles:"):
+                self._restore_order_settings(json.loads(line.split(":", 1)[1]))
+                return
+
+    def _order_cached(self, key, compute):
+        signature = (tuple(self.basis), tuple(
+            (side, tuple(profile.basis), profile.tail_probability)
+            for side, profile in self.crystallinity_profiles.items()))
+        if getattr(self, "_order_cache_signature", None) != signature:
+            self._order_cache_signature = signature
+            self._order_cache = {}
+        cache = self._order_cache
+        if key not in cache:
+            cache[key] = compute()
+        return cache[key]
+
     def _repeat_signature(self):
         cells = [getattr(self, name, None) for name in
                  ("unitcell", "uc_top", "uc_bottom", "_source_unitcell")]
@@ -726,7 +809,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         else:
             self.basis = np.array([profile.width, profile.asymmetry, 1.0, 0.0])
         self._basis_created = np.full(4, np.nan)
-        self.basis_0 = np.array([0.0, 0.0, 1.0, 0.0])
+        self.basis_0 = self.basis.copy()
         self.errors = None
         if "name" in kwargs:
             self.name = kwargs["name"]
@@ -740,6 +823,67 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         self._underlying_components = ()
         self._reference_layers = []
         self._initialize_layer_stacking(kwargs)
+
+    def _owned_components(self):
+        return [self.uc_top, self.uc_bottom, *self.crystallinity_profiles.values()]
+
+    def _order_factor(self, side, offset, depth):
+        profile = self.crystallinity_profiles.get(side)
+        if profile is None:
+            return 1.0
+
+        def conditional():
+            count = len(self.layers)
+            tail = (self.profile.tail_probability if self.profile is not None
+                    else DEFAULT_TAIL_PROBABILITY)
+            distribution = SkellamProfile(self.basis[0], self.basis[1], tail)
+            low, high = distribution.support(count)
+            boundary = np.arange(low, high + 1)
+            mass = (distribution.occupancy(boundary, count)
+                    - distribution.occupancy(boundary - 1, count))
+            local_depth = (offset - boundary if side == "top"
+                           else boundary - 1 - offset)
+            present = local_depth >= 0
+            retained = mass[present].sum()
+            if retained == 0:
+                return 1.0
+            return float(np.dot(
+                mass[present], profile.evaluate(local_depth[present], count)
+            ) / retained)
+
+        return self._order_cached((side, offset), conditional)
+
+    def _scattering_cells(self, cell, side):
+        if side not in self.crystallinity_profiles:
+            return [cell]
+        self._validate_order_support(side)
+        offsets = cell._crystallinity_domain_offsets
+        result = []
+        for index, (matrix, occupancy) in enumerate(zip(
+                cell.coherentDomainMatrix, cell.coherentDomainOccupancy)):
+            if index < len(offsets):
+                result.append(_bound_cell(cell, matrix, occupancy, self, side,
+                                          offsets[index]))
+            else:
+                # Signed subtractions retain the underlying material's order.
+                copied = copy.copy(cell)
+                copied.coherentDomainMatrix = [matrix]
+                copied.coherentDomainOccupancy = [occupancy]
+                result.append(copied)
+        return result
+
+    def _validate_order_support(self, side):
+        """Reject disorder extending beyond the explicitly represented interface."""
+        cells = self.top_layers if side == "top" else self.bottom_layers
+        offsets = np.concatenate([cell._crystallinity_domain_offsets for cell in cells])
+        edge = int(offsets.max() if side == "top" else offsets.min())
+        profile = self.crystallinity_profiles[side]
+        tolerance = max(profile.tail_probability, DEFAULT_TAIL_PROBABILITY) * 2
+        if 1 - self._order_factor(side, edge, 0) > tolerance:
+            raise ValueError(
+                f"The {side} crystallinity profile has not recovered at the "
+                "interface support edge; increase EpitaxyInterface fixed_ucs "
+                "before preparing or fitting the model.")
 
     def set_ucs(self, uc_top, uc_bottom, **kwargs):
         if not np.all(uc_top.layers == uc_bottom.layers):
@@ -984,6 +1128,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                                      and all(np.array_equal(getattr(layer, attr, None),
                                                            getattr(source, attr, None))
                                             for attr in ("basis", "names", "a",
+                                                         "_crystallinity_atom_layers",
                                                          "alpha", "refHKLTransform",
                                                          "R_mat", "f"))), None)
                     if matching is not None:
@@ -1149,6 +1294,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         # the nominal boundary. Re-synchronize explicitly rather than rely
         # on aliasing that copying may have broken. Same reasoning as
         # `Film.createLayers`.
+        self._order_cache_signature = None
         for layer_id, uc in self.uc_layers_top.items():
             uc.basis[:] = self.uc_top.basis[self.uc_top.basis[:, 7] == layer_id]
             uc.stacking_translation = self.uc_top.stacking_translation
@@ -1233,6 +1379,9 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             a3_bottom = self.bottom_layers[0].a[2]
 
             for i, (uc_t, uc_b) in enumerate(zip(self.top_layers, self.bottom_layers)):
+                uc_t._crystallinity_domain_offsets = unitcells.reshape(
+                    -1, n_layers)[:, i]
+                uc_b._crystallinity_domain_offsets = uc_t._crystallinity_domain_offsets
                 uc_t.coherentDomainMatrix = []
                 uc_t.coherentDomainOccupancy = np.ascontiguousarray(occupancy_top.T[i])
                 uc_b.coherentDomainMatrix = []
@@ -1522,8 +1671,10 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
         F = np.zeros_like(l, dtype=np.complex128)
         for uc_t, uc_b in zip(self.top_layers, self.bottom_layers):
-            F += self.uc_area * uc_t.F_uc(h, k, l) / uc_t.uc_area
-            F += self.uc_area * uc_b.F_uc(h, k, l) / uc_b.uc_area
+            for cell in self._scattering_cells(uc_t, "top"):
+                F += self.uc_area * cell.F_uc(h, k, l) / cell.uc_area
+            for cell in self._scattering_cells(uc_b, "bottom"):
+                F += self.uc_area * cell.F_uc(h, k, l) / cell.uc_area
         for layer in self._reference_layers:
             F += self.uc_area * layer.F_uc(h, k, l) / layer.uc_area
         return F
@@ -1595,91 +1746,73 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             )
 
     def getStartParamAndLimits(self, force_recalculate=False):
-        # if self.basis_0 is None:
-        #    self.basis_0 = np.copy(self.basis)
-        x0, lower, upper = super().getStartParamAndLimits(
-            force_recalculate
-        )  # absolute and relative
-        top_x0, top_lower, top_upper = self.uc_top.getStartParamAndLimits(
-            force_recalculate
-        )
-        bottom_x0, bottom_lower, bottom_upper = self.uc_bottom.getStartParamAndLimits(
-            force_recalculate
-        )
-        return (
-            np.concatenate([x0, top_x0, bottom_x0]),
-            np.concatenate([lower, top_lower, bottom_lower]),
-            np.concatenate([upper, top_upper, bottom_upper]),
-        )
+        """Return interface, material and independent order fit values and limits."""
+        values = [super().getStartParamAndLimits(force_recalculate)]
+        values.extend(child.getStartParamAndLimits(force_recalculate)
+                      for child in self._owned_components())
+        return tuple(np.concatenate([value[i] for value in values]) for i in range(3))
 
     def setFitParameters(self, x):
-        abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
-        fp_top_no = len(self.uc_top.fitparnames)
-        fp_bottom_no = len(self.uc_bottom.fitparnames)
-        super().setFitParameters(x[:abs_rel_no])
+        """Apply interface, material and independent order parameters."""
+        count = len(self.parameters["absolute"]) + len(self.parameters["relative"])
+        super().setFitParameters(x[:count])
         if self.profile is not None:
             self.profile = SkellamProfile(
-                self.basis[0],
-                self.basis[1],
-                self.profile.tail_probability,
-            )
-        self.uc_top.setFitParameters(x[abs_rel_no : abs_rel_no + fp_top_no])
-        self.uc_bottom.setFitParameters(
-            x[abs_rel_no + fp_top_no : abs_rel_no + fp_top_no + fp_bottom_no]
-        )
+                *self.basis[:2], self.profile.tail_probability)
+        for child in self._owned_components():
+            stop = count + len(child.fitparnames)
+            child.setFitParameters(x[count:stop])
+            count = stop
 
-    def setLimits(self, lim):
-        abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
-        fp_top_no = len(self.uc_top.fitparnames)
-        fp_bottom_no = len(self.uc_bottom.fitparnames)
-        super().setLimits(lim[:abs_rel_no])
-        self.uc_top.setLimits(lim[abs_rel_no : abs_rel_no + fp_top_no])
-        self.uc_bottom.setLimits(
-            lim[abs_rel_no + fp_top_no : abs_rel_no + fp_top_no + fp_bottom_no]
-        )
+    def setLimits(self, limits):
+        """Set limits in the same order as the combined fit vector."""
+        count = len(self.parameters["absolute"]) + len(self.parameters["relative"])
+        super().setLimits(limits[:count])
+        for child in self._owned_components():
+            stop = count + len(child.fitparnames)
+            child.setLimits(limits[count:stop])
+            count = stop
 
     def setFitErrors(self, errors):
-        if errors is None:
-            super().setFitErrors(None)
-            self.uc_top.setFitErrors(None)
-            self.uc_bottom.setFitErrors(None)
-            return
-        abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
-        fp_top_no = len(self.uc_top.fitparnames)
-        fp_bottom_no = len(self.uc_bottom.fitparnames)
-        super().setFitErrors(errors[:abs_rel_no])
-        self.uc_top.setFitErrors(errors[abs_rel_no : abs_rel_no + fp_top_no])
-        self.uc_bottom.setFitErrors(
-            errors[abs_rel_no + fp_top_no : abs_rel_no + fp_top_no + fp_bottom_no]
-        )
+        """Propagate errors to the interface, material and order parameters."""
+        count = len(self.parameters["absolute"]) + len(self.parameters["relative"])
+        super().setFitErrors(None if errors is None else errors[:count])
+        for child in self._owned_components():
+            stop = count + len(child.fitparnames)
+            child.setFitErrors(None if errors is None else errors[count:stop])
+            count = stop
 
     def getFitErrors(self):
-        err = super().getFitErrors()
-        err_t = self.uc_top.getFitErrors()
-        err_b = self.uc_bottom.getFitErrors()
-        return np.concatenate([err, err_t, err_b])
+        """Return errors for the combined fit vector."""
+        return np.concatenate([
+            super().getFitErrors(),
+            *(child.getFitErrors() for child in self._owned_components())])
 
     @property
     def fitparnames(self):
-        return (
-            super().fitparnames + self.uc_top.fitparnames + self.uc_bottom.fitparnames
-        )
+        """Return names of interface, material and independent order parameters."""
+        return super().fitparnames + [name for child in self._owned_components()
+                                      for name in child.fitparnames]
 
     @property
     def priors(self):
-        return super().priors + self.uc_top.priors + self.uc_bottom.priors
+        """Return priors for the combined fit vector."""
+        return super().priors + [prior for child in self._owned_components()
+                                for prior in child.priors]
 
     def parametersToDict(self):
-        d = super().parametersToDict()
-        d["unitcells"] = {}
-        d["unitcells"]["top"] = self.uc_top.parametersToDict()
-        d["unitcells"]["bottom"] = self.uc_bottom.parametersToDict()
-        return d
+        """Save interface, material and independent order fit settings."""
+        result = super().parametersToDict()
+        result["unitcells"] = {"top": self.uc_top.parametersToDict(),
+                               "bottom": self.uc_bottom.parametersToDict()}
+        result["crystallinity_profiles"] = self._order_settings(include_fit=True)
+        return result
 
     def clearParameters(self):
+        """Clear fit definitions while retaining the current physical model."""
         super().clearParameters()
-        self.uc_top.clearParameters()
-        self.uc_bottom.clearParameters()
+        for child in self._owned_components():
+            child.clearParameters()
 
     def parametersFromDict(self, d, override_values=True):
         """Restore fit settings, including v1.5.0 HDF5 companions.
@@ -1692,6 +1825,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         :param bool override_values:
             Apply stored fit-parameter values to the interface basis.
         """
+        self._restore_order_settings(d.get("crystallinity_profiles", {}))
         self.uc_top.parametersFromDict(d["unitcells"]["top"], override_values)
         self.uc_bottom.parametersFromDict(d["unitcells"]["bottom"], override_values)
         interface_parameters = dict(d)
@@ -1710,8 +1844,8 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
     def updateFromParameters(self):
         """Update basis from the values stored in the Parameters"""
-        self.uc_top.updateFromParameters()
-        self.uc_bottom.updateFromParameters()
+        for child in self._owned_components():
+            child.updateFromParameters()
         super().updateFromParameters()
         if self.profile is not None:
             self.profile = SkellamProfile(
@@ -1739,11 +1873,11 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             raise ValueError(f"must be str, not {type(uc_name_or_index)}")
 
     def parameter_list(self):
-        return (
-            super().parameter_list()
-            + self.uc_top.parameter_list()
-            + self.uc_bottom.parameter_list()
-        )
+        """Return all interface, material and independent order fit parameters."""
+        return super().parameter_list() + [
+            parameter for child in self._owned_components()
+            for parameter in child.parameter_list()
+        ]
 
     @classmethod
     def fromStr(cls, string):
@@ -1872,12 +2006,14 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             uc_bottom,
             ep_type,
             profile=profile,
+            fixed_ucs=int(_parse_float_metadata(string, "fixed_ucs", 0)),
             layer_transition=_parse_layer_transition(string),
         )
         epit.statistics = statistics
         epit.basis = basis
         epit.basis_0 = np.copy(basis)
         epit.errors = errors
+        epit._order_from_str(string)
         return epit
 
     def toStr(self, showErrors=True):
@@ -1901,6 +2037,9 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             and self.profile.tail_probability != DEFAULT_TAIL_PROBABILITY
         ):
             s += f"\ntail_probability: {self.profile.tail_probability:.12g}"
+        s += self._order_to_str()
+        if self.fixed_ucs:
+            s += f"\nfixed_ucs: {self.fixed_ucs}"
         metadata = self._stacking_metadata_to_str()
         if metadata:
             s += "\n" + metadata.rstrip()
@@ -2160,6 +2299,11 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
         self._basis_created = np.copy(self.basis)
         self._repeat_created = self._repeat_signature()
 
+    def _scattering_cells(self, cell):
+        surface = getattr(self, "_crystallinity_surface", None)
+        return ([cell] if surface is None else
+                surface._scattering_cells(cell, "film"))
+
     def F_uc(self, h, k, l):  # noqa: E741
         """Return the Film structure factor in electrons.
 
@@ -2182,7 +2326,8 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
         F = np.zeros_like(l, dtype=np.complex128)
         for uc in self.layer_ucs:
-            F += uc.F_uc(h, k, l)
+            for cell in self._scattering_cells(uc):
+                F += cell.F_uc(h, k, l)
         return F
 
     def zDensity_G(self, z, h, k):
@@ -2434,7 +2579,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 [profile.mean_change, profile.alpha, profile.offset]
             )
         self._basis_created = np.array([np.nan, np.nan, np.nan])
-        self.basis_0 = np.array([0.0, 0.0, 0.0])
+        self.basis_0 = self.basis.copy()
         self.errors = None
         if "name" in kwargs:
             self.name = kwargs["name"]
@@ -2444,6 +2589,9 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         self.below_loc = 0.0
         self.below_H = 0.0
         self.below_layer = -1.0
+        previous = getattr(self, "underlying_film", None)
+        if getattr(previous, "_crystallinity_surface", None) is self:
+            del previous._crystallinity_surface
         self.underlying_film = None
         self._reference_unitcell = None
         self._reference_rotation = np.identity(3)
@@ -2524,7 +2672,56 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
     def _owned_components(self):
         return self._owned_unitcells() + (
             [self.water] if self.water is not None else []
-        )
+        ) + list(self.crystallinity_profiles.values())
+
+    def _order_factor(self, role, offset, depth):
+        profile = self.crystallinity_profile
+        if profile is None:
+            return 1.0
+        count = len(self._layer_ids)
+        if role == "surface":
+            return float(profile.evaluate(depth, count))
+        if role == "flat_film":
+            return float(profile.evaluate(offset + depth, count))
+        layer_number = offset - depth
+
+        def conditional():
+            candidates = self._profile_candidates()
+            heights = candidates.layer_numbers
+            masses = candidates.exposed_probability
+            thickness = np.array([
+                len(self.termination_cells[float(self.layer_order[h % count])]
+                    .crystallinity_layers) for h in heights
+            ])
+            depths = heights - layer_number
+            # Film material remains only below the complete termination slab.
+            covered = depths >= thickness
+            total = masses[covered].sum()
+            if total == 0:
+                return 1.0  # no surviving film at this height
+            return float(np.dot(masses[covered],
+                                profile.evaluate(depths[covered], count)) / total)
+
+        return self._order_cached(("film", layer_number), conditional)
+
+    def _domain_layer_number(self, cell, matrix):
+        layer_id = float(cell.basis[0, 7])
+        index = int(np.flatnonzero(self.layer_order == layer_id)[0])
+        origin = getattr(cell, "_optical_layer_origin", cell.layerpos.get(layer_id, 0.))
+        z = (matrix[2, 2] * origin + matrix[2, 3]) * cell.a[2]
+        film = self.underlying_film.unitcell
+        period = film.a[2] * film.coherentDomainMatrix[0][2, 2]
+        cycle = (z - self.below_H - self._below_registry[2]) / period
+        cycle -= self.layerpos[index] - self.layerpos[0]
+        return int(np.rint(cycle)) * len(self._layer_ids) + index
+
+    def _scattering_cells(self, cell, role):
+        if self.crystallinity_profile is None:
+            return [cell]
+        return [_bound_cell(cell, matrix, occupancy, self, role,
+                            self._domain_layer_number(cell, matrix))
+                for matrix, occupancy in zip(cell.coherentDomainMatrix,
+                                             cell.coherentDomainOccupancy)]
 
     def attach_water(self, water):
         """Attach a continuous water model to every terrace, or detach with None.
@@ -2622,6 +2819,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             raise ValueError(
                 "PoissonSurface must be stacked immediately above a Film"
             )
+        previous = self.underlying_film
+        if previous is not component and getattr(
+                previous, "_crystallinity_surface", None) is self:
+            del previous._crystallinity_surface
+        component._crystallinity_surface = self
         if self.underlying_film is component and hasattr(
             self, "_film_termination_ucs"
         ):
@@ -2638,6 +2840,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             )
             for cell in self.termination_cells.values():
                 cell._crystallinity_source = source
+                cell._layer_crystallinity = {}
         if set(self.termination_cells) != set(film_layer_ids):
             raise ValueError(
                 "PoissonSurface requires exactly one surface unit cell for "
@@ -2708,6 +2911,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             )
             reference_uc = film_terminations[layer]
             reference_uc._crystallinity_source = film_uc
+            reference_uc._layer_crystallinity = {}
             reference_uc.name = f"{film_uc.name}_reference_termination_{layer:g}"
             self._film_termination_ucs[layer] = reference_uc
 
@@ -2759,7 +2963,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         self._reference_unitcell = uc
         self._reference_rotation = np.asarray(rotMatrix, dtype=np.float64)
         for cell in self._owned_components():
-            cell.setReferenceUnitCell(uc, rotMatrix)
+            if not isinstance(cell, CrystallinityProfile):
+                cell.setReferenceUnitCell(uc, rotMatrix)
         for cell in getattr(self, "_termination_views", {}).values():
             cell.setReferenceUnitCell(uc, rotMatrix)
         for cell in getattr(self, "_film_termination_ucs", {}).values():
@@ -2773,7 +2978,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         """
         self.E = E
         for cell in self._owned_components():
-            cell.setEnergy(E)
+            if not isinstance(cell, CrystallinityProfile):
+                cell.setEnergy(E)
         for cell in getattr(self, "_termination_views", {}).values():
             cell.setEnergy(E)
         for cell in getattr(self, "_film_termination_ucs", {}).values():
@@ -3082,6 +3288,9 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         retained interval is evaluated exactly once, and only one amplitude
         array is in flight.
         """
+        if self.crystallinity_profile is not None:
+            yield from self._iter_ordered_flat_states(layer_numbers, h, k, l)
+            return
         film_occupancy = self.underlying_film.unitcell.coherentDomainOccupancy[0]
         mat_0 = np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
         lowest = int(layer_numbers[0])
@@ -3113,6 +3322,36 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
                 running = running - self._film_layer_amplitude(
                     geometry, film_occupancy, h, k, l
                 )
+
+    def _iter_ordered_flat_states(self, layer_numbers, h, k, l):  # noqa: E741
+        """Evaluate local order separately for every retained terrace height."""
+        film = self.underlying_film
+        baseline = film.F_uc(h, k, l)
+        occupied = [self._domain_layer_number(cell, matrix)
+                    for cell in film.layer_ucs
+                    for matrix in cell.coherentDomainMatrix]
+        lowest = min(occupied, default=0)
+        occupancy = film.unitcell.coherentDomainOccupancy[0]
+        for height in layer_numbers:
+            geometry = self._layer_domain_geometry(int(height))
+            surface = _bound_cell(
+                geometry.surface_uc,
+                self._with_below_translation(
+                    geometry.surface_matrix, geometry.surface_uc),
+                self._termination_domain_occupancy[geometry.layer_id],
+                self, "surface", 0)
+            amplitude = surface.F_uc(h, k, l) - baseline
+            thickness = len(surface.crystallinity_layers)
+            for layer in range(lowest, int(height) - thickness + 1):
+                buried = self._layer_domain_geometry(layer)
+                cell = _bound_cell(
+                    buried.film_uc,
+                    self._with_below_translation(
+                        buried.film_matrix, buried.film_uc),
+                    occupancy, self, "flat_film", int(height) - layer)
+                amplitude += cell.F_uc(h, k, l)
+            yield int(height), amplitude + self._flat_water_amplitude(
+                int(height), h, k, l)
 
     def _film_layer_amplitude(self, geometry, film_occupancy, h, k, l):  # noqa: E741
         """Return one Film layer slab at occupancy one."""
@@ -3213,6 +3452,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
 
     def createLayers(self):
         """Create co-located surface and covered-Film layer domains."""
+        self._order_cache_signature = None
         if self.underlying_film is None:
             raise ValueError(
                 "PoissonSurface must be stacked immediately above a Film "
@@ -3360,12 +3600,15 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         F = np.zeros_like(l, dtype=np.complex128)
         for surface_uc, film_uc in zip(self.layer_ucs, self.film_layer_ucs):
             if surface_uc.coherentDomainMatrix:
-                F += surface_uc.F_uc(h, k, l)
+                for cell in self._scattering_cells(surface_uc, "surface"):
+                    F += cell.F_uc(h, k, l)
             if film_uc.coherentDomainMatrix:
-                F += film_uc.F_uc(h, k, l)
+                for cell in self._scattering_cells(film_uc, "film"):
+                    F += cell.F_uc(h, k, l)
         for film_uc in self._film_termination_ucs.values():
             if film_uc.coherentDomainMatrix:
-                F += film_uc.F_uc(h, k, l)
+                for cell in self._scattering_cells(film_uc, "film"):
+                    F += cell.F_uc(h, k, l)
         if self.water is not None:
             F += self._sync_water().F_uc(h, k, l) * self.uc_area / self.water.uc_area
         return F
@@ -3523,6 +3766,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         d["unitcells"] = {
             cell.name: cell.parametersToDict() for cell in self._owned_unitcells()
         }
+        d["crystallinity_profiles"] = self._order_settings(include_fit=True)
         if self.water is not None:
             d["water"] = self.water.parametersToDict()
         return d
@@ -3533,6 +3777,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             cell.clearParameters()
 
     def parametersFromDict(self, d, override_values=True):
+        self._restore_order_settings(d.get("crystallinity_profiles", {}))
         cells = self._owned_unitcells()
         if self.water is not None and "water" in d:
             self.water.parametersFromDict(d["water"], override_values)
@@ -3695,6 +3940,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         film.basis = basis
         film.basis_0 = np.copy(basis)
         film.errors = errors
+        film._order_from_str(string)
         return film
 
     def toStr(self, showErrors=True):
@@ -3713,6 +3959,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             and self.profile.tail_probability != DEFAULT_TAIL_PROBABILITY
         ):
             s += f"\ntail_probability = {self.profile.tail_probability:.12g}"
+        s += self._order_to_str()
         metadata = self._stacking_metadata_to_str()
         if metadata:
             s += "\n" + metadata.rstrip()

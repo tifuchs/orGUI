@@ -7,6 +7,23 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Structural layers can override the unit-cell crystallinity, including internal
+  planes in whole-cell surface terminations. Kinematic and DWBA amplitudes apply
+  each layer's order to its own contrast while preserving physical density and
+  the optical reference. Layer overrides support fitting and text/HDF5 saves;
+  existing models retain their cell-wide default. `PoissonSurface` and
+  `EpitaxyInterface` can additionally own independently fitted Poisson/Skellam
+  order-recovery profiles alongside occupancy distributions. Order follows
+  local terrace/interface depth, including buried film layers, with occupancy
+  counted once; profiles persist in text/HDF5 models.
+
+- Multi-plane surface terminations now retain internal optical-plane geometry
+  independently of their stacking selector. DWBA reference shares conserve
+  each group's integrated electron inventory through strain and slab assembly;
+  native saves retain the plane geometry. This corrects underestimated optical
+  reference density in earlier termination models. Affected DWBA fits and
+  crystallinity-to-disorder conversion fractions need reevaluation.
+
 - Copying plots to the clipboard works with silx 3.1.3 and PySide6 again.
   PNG buffer exports used by copying and printing retain the colorbar.
 

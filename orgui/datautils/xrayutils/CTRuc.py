@@ -1007,8 +1007,107 @@ class UnitCell(Lattice):
         self._crystallinity_source = None
 
     def _crystallinity_owner(self):
+        if getattr(self, "_layer_crystallinity", {}):
+            return self
         source = getattr(self, "_crystallinity_source", None)
         return self if source is None else source._crystallinity_owner()
+
+    def _crystallinity_labels(self):
+        if not self.basis.size:
+            return np.empty(0, dtype=np.float64)
+        return getattr(self, "_crystallinity_atom_layers", self.basis[:, 7])
+
+    @property
+    def crystallinity_layers(self):
+        """Structural order-group IDs, preserved inside collapsed terminations."""
+        return tuple(float(v) for v in np.unique(self._crystallinity_labels()))
+
+    @property
+    def layer_crystallinity(self):
+        """Return explicit dimensionless layer overrides, including inherited ones.
+
+        Edit overrides with :meth:`setLayerCrystallinity`. Unspecified layers
+        use :attr:`crystallinity`; overrides replace, rather than multiply, it.
+        """
+        source = getattr(self, "_crystallinity_source", None)
+        values = {} if source is None else source.layer_crystallinity
+        values.update(getattr(self, "_layer_crystallinity", {}))
+        if not values:
+            return {}
+        return {layer: values[layer] for layer in self.crystallinity_layers
+                if layer in values}
+
+    def getLayerCrystallinity(self, layer):
+        """Return the effective coherent amplitude fraction for a structural layer."""
+        layer = float(layer)
+        if layer not in self.crystallinity_layers:
+            raise ValueError(f"Unknown crystallinity layer {layer:g}.")
+        value = self.layer_crystallinity.get(layer, self.crystallinity)
+        modifier = getattr(self, "_crystallinity_modifier", None)
+        return value if modifier is None else value * modifier.factor(layer)
+
+    def setLayerCrystallinity(self, layer, value):
+        """Override a structural layer's coherent amplitude fraction in [0, 1].
+
+        :param float layer: An ID in :attr:`crystallinity_layers`.
+        :param value: Dimensionless amplitude fraction, or ``None`` to remove
+            the local override and resume inheritance. Optical density stays fixed.
+        """
+        layer = float(layer)
+        if layer not in self.crystallinity_layers:
+            raise ValueError(f"Unknown crystallinity layer {layer:g}.")
+        if value is not None:
+            if np.ndim(value) != 0 or not np.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError("crystallinity must be a finite scalar in [0, 1].")
+            value = float(value)
+        overrides = dict(getattr(self, "_layer_crystallinity", {}))
+        if value is None:
+            overrides.pop(layer, None)
+        else:
+            overrides[layer] = value
+        self._layer_crystallinity = overrides
+
+    def _crystallinity_parameter_value(self, par):
+        layer = par.settings.get("layer")
+        return (self.crystallinity if layer is None
+                else self.getLayerCrystallinity(layer))
+
+    def _set_crystallinity_parameter(self, par, value):
+        layer = par.settings.get("layer")
+        if layer is None:
+            self.crystallinity = value
+        else:
+            self.setLayerCrystallinity(layer, value)
+
+    def _selected_crystallinity_labels(self):
+        labels = self._crystallinity_labels()
+        if self.layer_behavior == "select":
+            layer = (self.layers[0] if self.start_layer_number == -1.0
+                     else self.start_layer_number)
+            labels = labels[self.basis[:, 7] == layer]
+        return labels
+
+    def _selected_crystallinity(self):
+        overrides, default = self.layer_crystallinity, self.crystallinity
+        if getattr(self, "_crystallinity_modifier", None) is not None:
+            overrides = {layer: self.getLayerCrystallinity(layer)
+                         for layer in self.crystallinity_layers}
+        return np.asarray([overrides.get(v, default)
+                           for v in self._selected_crystallinity_labels()])
+
+    def _coherent_basis(self):
+        basis, formf, names = self.build_selected_basis()
+        if (not self.layer_crystallinity
+                and getattr(self, "_crystallinity_modifier", None) is None):
+            return basis, formf, names, self.crystallinity
+        values = self._selected_crystallinity()
+        if not len(values):
+            return basis, formf, names, self.crystallinity
+        if np.all(values == values[0]):
+            return basis, formf, names, values[0]
+        basis = basis.copy()
+        basis[:, 6] *= values
+        return basis, formf, names, 1.0
 
     @property
     def stacking_translation(self):
@@ -1044,8 +1143,11 @@ class UnitCell(Lattice):
     def parametersToDict(self):
         d = dict()
         d["crystallinity_value"] = self.crystallinity
+        d["layer_crystallinity_values"] = {
+            str(k): v for k, v in self.layer_crystallinity.items()
+        }
         for par in self.parameters["crystallinity"]:
-            par.value = self.crystallinity
+            par.value = self._crystallinity_parameter_value(par)
         d["basis_0"] = self.basis_0
         d["dw_increase_constraint"] = self.dw_increase_constraint
         for p in self.parameters:
@@ -1068,6 +1170,9 @@ class UnitCell(Lattice):
 
         if override_values:
             self.crystallinity = d.get("crystallinity_value", 1.0)
+            self._layer_crystallinity = {}
+            for layer, value in d.get("layer_crystallinity_values", {}).items():
+                self.setLayerCrystallinity(float(layer), value)
             try:
                 self.updateFromParameters()
             except Exception as e:
@@ -1084,7 +1189,7 @@ class UnitCell(Lattice):
         for par in self.parameters["crystallinity"]:
             if par.value is None:
                 raise ValueError("Crystallinity parameter value is not set.")
-            self.crystallinity = par.value
+            self._set_crystallinity_parameter(par, par.value)
         no_errors = False
         self.basis[:] = self.basis_0
         self.errors = np.full_like(self.basis, np.nan)
@@ -1182,6 +1287,10 @@ class UnitCell(Lattice):
             self.basis = np.vstack([self.basis, parameters])
         else:
             self.basis = np.array([parameters])
+        if hasattr(self, "_crystallinity_atom_layers"):
+            self._crystallinity_atom_layers = np.append(
+                self._crystallinity_atom_layers, parameters[7],
+            )
         if self.basis_0.size > 0:
             self.basis_0 = np.vstack([self.basis_0, parameters])
         else:
@@ -1230,6 +1339,10 @@ class UnitCell(Lattice):
             self.basis = np.insert(self.basis, index, parameters, axis=0)
         else:
             self.basis = np.array([parameters])
+        if hasattr(self, "_crystallinity_atom_layers"):
+            self._crystallinity_atom_layers = np.insert(
+                self._crystallinity_atom_layers, index, parameters[7],
+            )
         if self.basis_0.size > 0:
             self.basis_0 = np.insert(self.basis_0, index, parameters, axis=0)
         else:
@@ -1294,6 +1407,14 @@ class UnitCell(Lattice):
             idx_high = where[-1] + 1
             uc = UnitCell(self.a, np.rad2deg(self.alpha), name=self.name + f"_layer{l}")
             uc._crystallinity_source = self
+            uc._crystallinity_atom_layers = (
+                self._crystallinity_labels()[idx_low:idx_high]
+            )
+            if hasattr(self, "_optical_plane_geometry"):
+                labels = set(uc._crystallinity_atom_layers)
+                uc._optical_plane_geometry = {
+                    key: value for key, value in self._optical_plane_geometry.items()
+                    if key in labels}
             uc.basis = self.basis[idx_low:idx_high]
             if self.errors is not None:
                 uc.errors = self.errors[idx_low:idx_high]
@@ -1367,6 +1488,16 @@ class UnitCell(Lattice):
         from .CTRoptics import optical_profile
 
         return optical_profile(self)
+
+    def _restore_optical_planes(self):
+        """Validate native plane metadata, or recover older collapsed groups."""
+        from .CTRoptics import _internal_plane_geometry
+        geometry = _internal_plane_geometry(self)
+        if geometry is not None:
+            if set(geometry) != set(self._crystallinity_labels()):
+                raise ValueError(
+                    "Optical-plane geometry must cover every internal layer.")
+            self._optical_plane_geometry = geometry
 
     def optical_profile_asbulk(self, noUC=30):
         """Return a finite representation of the semi-infinite bulk profile.
@@ -1460,6 +1591,7 @@ class UnitCell(Lattice):
             "_errors_parvalues",
             "f",
             "dw_increase_constraint",
+            "_crystallinity_atom_layers",
         ):
             values = getattr(self, attribute, None)
             if values is not None and np.size(values):
@@ -1632,6 +1764,16 @@ class UnitCell(Lattice):
         z_shift_by_layer,
         test_special_formfactors=False,
     ):
+        new_to_old = np.argsort(old_to_new)
+        transformed._crystallinity_atom_layers = (
+            self._crystallinity_labels()[new_to_old].copy()
+        )
+        if hasattr(self, "_optical_plane_geometry"):
+            labels = self._crystallinity_labels()
+            transformed._optical_plane_geometry = {
+                key: (origin + z_shift_by_layer[
+                    self.basis[np.flatnonzero(labels == key)[0], 7]], width)
+                for key, (origin, width) in self._optical_plane_geometry.items()}
         for parameters in transformed.parameters.values():
             for parameter in parameters:
                 self._remap_parameter_atom_indices(parameter, old_to_new)
@@ -1951,6 +2093,20 @@ class UnitCell(Lattice):
                 origin = 0.0
         origin = float(origin)
 
+        transformed._crystallinity_atom_layers = self._crystallinity_labels().copy()
+        # A termination selector is not a physical optical plane. Retain the
+        # internal layer origins and fractional thicknesses before collapsing it.
+        from .CTRoptics import _internal_plane_geometry
+        geometry = _internal_plane_geometry(self)
+        if geometry is not None:
+            transformed._optical_plane_geometry = copy.deepcopy(geometry)
+        else:
+            transformed._optical_plane_geometry = {}
+            for cell in self.split_in_layers(ordered=True).values():
+                for label in cell.crystallinity_layers:
+                    transformed._optical_plane_geometry[label] = (
+                        cell._optical_layer_origin,
+                        cell._optical_layer_thickness_fraction)
         for values in (
             transformed.basis,
             transformed.basis_0,
@@ -2037,6 +2193,16 @@ class UnitCell(Lattice):
         cycle = self.layer_cycle.layers
         layer_positions = self._layer_positions_for_cycle(cycle)
         layer_ids = self._supercell_layer_ids(cycle, int(repeats[2]))
+        order_layer_ids = self._supercell_layer_ids(
+            self.crystallinity_layers, int(repeats[2]),
+        )
+        order_labels = self._crystallinity_labels()
+        if hasattr(self, "_optical_plane_geometry"):
+            transformed._optical_plane_geometry = {
+                order_layer_ids[(iz, key)]: (
+                    (origin + iz) / repeats[2], width / repeats[2])
+                for iz in range(int(repeats[2]))
+                for key, (origin, width) in self._optical_plane_geometry.items()}
 
         rows = []
         for iz in range(int(repeats[2])):
@@ -2064,6 +2230,9 @@ class UnitCell(Lattice):
                                 "name": self.names[atom_index],
                                 "constraint": self.dw_increase_constraint[atom_index],
                                 "old_atom": atom_index,
+                                "order_layer": order_layer_ids[
+                                    (iz, order_labels[atom_index])
+                                ],
                                 "copy_index": copy_index,
                                 "cell_offset": cell_offset,
                                 "layer_order": iz * len(cycle) + layer_index,
@@ -2099,6 +2268,16 @@ class UnitCell(Lattice):
         rows = [row for _, row in rows]
 
         transformed.basis = np.vstack([row["basis"] for row in rows])
+        transformed._crystallinity_atom_layers = np.array(
+            [row["order_layer"] for row in rows], dtype=np.float64,
+        )
+        overrides = self.layer_crystallinity
+        for row in rows:
+            source_layer = self._crystallinity_labels()[row["old_atom"]]
+            if source_layer in overrides:
+                transformed.setLayerCrystallinity(
+                    row["order_layer"], overrides[source_layer],
+                )
         transformed.basis_0 = np.vstack([row["basis_0"] for row in rows])
         transformed.names = [row["name"] for row in rows]
         transformed.dw_increase_constraint = np.asarray(
@@ -2479,27 +2658,38 @@ class UnitCell(Lattice):
         self.parameters["absolute"].append(par)
         return par
 
-    def addCrystallinityParameter(self, limits=(0.0, 1.0), *, name=None, prior=None):
+    def addCrystallinityParameter(
+        self, limits=(0.0, 1.0), *, name=None, prior=None, layer=None,
+    ):
         """Fit the dimensionless coherent amplitude fraction of this cell.
 
         :param tuple limits: Finite lower and upper bounds within [0, 1].
         :param str name: Optional unique fit-parameter name.
         :param prior: Optional prior accepted by the existing fit machinery.
+        :param layer: Optional structural layer ID; omitted fits the cell default.
         :returns: The scalar crystallinity parameter.
         :rtype: Parameter
         """
         self._validate_crystallinity_limits(limits)
-        if not limits[0] <= self.crystallinity <= limits[1]:
+        value = (self.crystallinity if layer is None
+                 else self.getLayerCrystallinity(layer))
+        if not limits[0] <= value <= limits[1]:
             raise ValueError("Initial crystallinity is outside the fit limits.")
-        name = name or f"{self.name}_crystallinity"
-        if self.parameters["crystallinity"] or name in self.fitparnames:
+        suffix = "" if layer is None else f"_layer{float(layer):g}"
+        name = name or f"{self.name}_crystallinity{suffix}"
+        if (any(p.settings.get("layer") == layer
+                for p in self.parameters["crystallinity"])
+                or name in self.fitparnames):
             raise ValueError("A crystallinity parameter or its name already exists.")
         # Scalar cell parameters do not index the atomic basis.
         par = Parameter(
             name, np.empty((2, 0), dtype=np.intp), ParameterType.ABSOLUTE,
             tuple(limits), prior, {"cell_parameter": "crystallinity"},
-            value=self.crystallinity,
+            value=value,
         )
+        if layer is not None:
+            par.settings["layer"] = float(layer)
+            self.setLayerCrystallinity(layer, value)
         self.parameters["crystallinity"].append(par)
         return par
 
@@ -3248,7 +3438,8 @@ class UnitCell(Lattice):
 
     def fitparToStr(self, par):
         if par.settings.get("cell_parameter") == "crystallinity":
-            return (f"{par.name}: crystallinity={self.crystallinity:g}, "
+            value = self._crystallinity_parameter_value(par)
+            return (f"{par.name}: crystallinity={value:g}, "
                     f"limits={par.limits}")
         if self.basis_0 is None:
             basis_0 = np.copy(self.basis)
@@ -3334,7 +3525,7 @@ class UnitCell(Lattice):
             upper.append(par.limits[1])
 
         for par in self.parameters["crystallinity"]:
-            x0.append(self.crystallinity)
+            x0.append(self._crystallinity_parameter_value(par))
             lower.append(par.limits[0])
             upper.append(par.limits[1])
         return np.array(x0), np.array(lower), np.array(upper)
@@ -3343,7 +3534,7 @@ class UnitCell(Lattice):
         scalar_offset = (len(self.parameters["absolute"])
                          + len(self.parameters["relative"]))
         for val, par in zip(x[scalar_offset:], self.parameters["crystallinity"]):
-            self.crystallinity = val
+            self._set_crystallinity_parameter(par, val)
             par.value = val
         x_0 = x[: len(self.parameters["absolute"])]
         x_r = x[len(self.parameters["absolute"]) :]
@@ -3480,7 +3671,7 @@ class UnitCell(Lattice):
             Complex structure-factor amplitude in electrons.
         :rtype: numpy.ndarray
         """
-        basis, formf, names = self.build_selected_basis()
+        basis, formf, names, crystallinity = self._coherent_basis()
         if ctr_accel_enabled():
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
             accel = _ctr_accel_module()
@@ -3502,7 +3693,7 @@ class UnitCell(Lattice):
                 domain_occupancy,
                 self.uc_area,
             )
-            return self.crystallinity * F
+            return crystallinity * F
         else:
             F = np.zeros(h.size, dtype=np.complex128)
             f = np.zeros(h.size, dtype=np.complex128)
@@ -3537,7 +3728,7 @@ class UnitCell(Lattice):
                         * np.exp(2j * np.pi * np.sum(hkl.T * xyz_rel, axis=1))
                         * math.exp(atten * xyz_rel[2])
                     )
-            return self.crystallinity * F
+            return crystallinity * F
 
     # returns the structure factor of the unit cell
     # h,k,l have to be 1d arrays
@@ -3559,7 +3750,7 @@ class UnitCell(Lattice):
             Complex structure-factor amplitude in electrons.
         :rtype: numpy.ndarray
         """
-        basis, formf, names = self.build_selected_basis()
+        basis, formf, names, crystallinity = self._coherent_basis()
         F = np.zeros(h.size, dtype=np.complex128)
         f = np.zeros(h.size, dtype=np.complex128)
         hkl = np.vstack((h, k, l))
@@ -3590,7 +3781,7 @@ class UnitCell(Lattice):
                     * np.exp(2j * np.pi * np.sum(hkl.T * xyz_rel, axis=1))
                     * math.exp(atten * xyz_rel[2])
                 )
-        return self.crystallinity * F
+        return crystallinity * F
 
     def F_uc(self, h, k, l):  # noqa: E741
         """Return the canonical unit-cell structure factor in electrons.
@@ -3612,7 +3803,7 @@ class UnitCell(Lattice):
             Complex structure-factor amplitude in electrons.
         :rtype: numpy.ndarray
         """
-        basis, formf, names = self.build_selected_basis()
+        basis, formf, names, crystallinity = self._coherent_basis()
         if ctr_accel_enabled() and not self._special_formfactors_present:
             h, k, l = _ensure_contiguous(h, k, l, testOnly=False, astype=np.float64)  # noqa: E741
             accel = _ctr_accel_module()
@@ -3633,7 +3824,7 @@ class UnitCell(Lattice):
                 domain_occupancy,
                 self.uc_area,
             )
-            return self.crystallinity * F
+            return crystallinity * F
         else:
             F = np.zeros(h.size, dtype=np.complex128)
             f = np.zeros(h.size, dtype=np.complex128)
@@ -3673,7 +3864,7 @@ class UnitCell(Lattice):
                         * f
                         * np.exp(2j * np.pi * np.sum(hkl.T * xyz_rel, axis=1))
                     )
-            return self.crystallinity * F
+            return crystallinity * F
 
     def F_bulk(self, h, k, l, atten=0):  # noqa: E741
         """Return the semi-infinite bulk structure factor in electrons.
@@ -3699,8 +3890,8 @@ class UnitCell(Lattice):
             Complex bulk amplitude in electrons per lateral bulk cell.
         :rtype: numpy.ndarray
         """
-        basis, formf, names = self.build_selected_basis()
-        if self.crystallinity == 0.0:
+        basis, formf, names, crystallinity = self._coherent_basis()
+        if crystallinity == 0.0:
             return np.zeros(np.asarray(h).size, dtype=np.complex128)
         # The reciprocal transform maps reference r.l.u. to bulk r.l.u.;
         # (2, 2) is the bulk/reference out-of-plane repeat ratio.
@@ -3742,7 +3933,7 @@ class UnitCell(Lattice):
                 domain_occupancy,
                 self.uc_area,
             )
-            return self.crystallinity * F
+            return crystallinity * F
         else:
             hkl = self.refHKLTransform @ np.vstack((h, k, l))
             Fuc = self.F_uc_bulk_direct(*hkl, repeat_atten)
@@ -4364,6 +4555,15 @@ class UnitCell(Lattice):
             + self._parameter_header(showErrors)
             + "\n"
             + f"crystallinity: {self.crystallinity:.17g}\n"
+            + "".join(f"layer_crystallinity: {k:.17g} {v:.17g}\n"
+                      for k, v in self.layer_crystallinity.items())
+            + ("crystallinity_layers: "
+               + " ".join(f"{v:.17g}" for v in self._crystallinity_labels())
+               + "\n" if hasattr(self, "_crystallinity_atom_layers") else "")
+            + "".join(
+                f"optical_plane: {key:.17g} {origin:.17g} {width:.17g}\n"
+                for key, (origin, width) in getattr(
+                    self, "_optical_plane_geometry", {}).items())
             + self.parameterStr(showErrors=showErrors)
         )
 
@@ -4588,11 +4788,30 @@ class UnitCell(Lattice):
             layer_cycle = None
             stacking_translation = (0, 0, 1)
             crystallinity = 1.0
+            layer_crystallinity = {}
+            crystallinity_labels = None
+            optical_planes = {}
             symmetry_lines = []
             reading_symmetry = False
             for l in f:  # noqa: E741
                 line = l.rsplit("//")[0]
                 stripped = line.strip()
+                if stripped.startswith("optical_plane:"):
+                    key, origin, width = map(float, stripped.split(":", 1)[1].split())
+                    if (not np.all(np.isfinite([key, origin, width]))
+                            or width <= 0 or key in optical_planes):
+                        raise ValueError("Invalid optical-plane geometry.")
+                    optical_planes[key] = (origin, width)
+                    continue
+                if stripped.startswith("layer_crystallinity:"):
+                    key, value = map(float, stripped.split(":", 1)[1].split())
+                    layer_crystallinity[key] = value
+                    continue
+                if stripped.startswith("crystallinity_layers:"):
+                    crystallinity_labels = np.array(
+                        [float(v) for v in stripped.split(":", 1)[1].split()]
+                    )
+                    continue
                 if stripped.startswith("crystallinity:"):
                     crystallinity = float(stripped.split(":", 1)[1])
                     continue
@@ -4763,6 +4982,8 @@ class UnitCell(Lattice):
         uc.layer_behaviour = layer_behaviour
         uc._explicit_layer_cycle = layer_cycle
         uc.stacking_translation = stacking_translation
+        if optical_planes:
+            uc._optical_plane_geometry = optical_planes
         uc.crystallinity = crystallinity
         # uc.dw_increase_constraint = np.ones(uc.basis.shape[0],dtype=np.bool_)
         if len(basis) >= 2:
@@ -4784,6 +5005,14 @@ class UnitCell(Lattice):
             uc.basis_0 = np.copy(uc.basis)
             uc.dw_increase_constraint = np.ones(uc.basis.shape[0], dtype=np.bool_)
             uc._test_special_formfactors()
+            if crystallinity_labels is not None:
+                if (crystallinity_labels.shape != (len(uc.basis),)
+                        or not np.all(np.isfinite(crystallinity_labels))):
+                    raise ValueError("Invalid crystallinity layer labels.")
+                uc._crystallinity_atom_layers = crystallinity_labels
+            uc._restore_optical_planes()
+            for layer, value in layer_crystallinity.items():
+                uc.setLayerCrystallinity(layer, value)
             if symmetry_lines:
                 from .CTRsymmetry import symmetry_metadata_from_lines
 
@@ -4812,6 +5041,14 @@ class UnitCell(Lattice):
             uc.basis_0 = np.copy(uc.basis)
             uc.dw_increase_constraint = np.ones(uc.basis.shape[0], dtype=np.bool_)
             uc._test_special_formfactors()
+            if crystallinity_labels is not None:
+                if (crystallinity_labels.shape != (len(uc.basis),)
+                        or not np.all(np.isfinite(crystallinity_labels))):
+                    raise ValueError("Invalid crystallinity layer labels.")
+                uc._crystallinity_atom_layers = crystallinity_labels
+            uc._restore_optical_planes()
+            for layer, value in layer_crystallinity.items():
+                uc.setLayerCrystallinity(layer, value)
             if symmetry_lines:
                 from .CTRsymmetry import symmetry_metadata_from_lines
 

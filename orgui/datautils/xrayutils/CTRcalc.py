@@ -53,6 +53,7 @@ from .CTRoptics import (
     top_layer_spacing,
 )
 from .CTRdistributions import PoissonProfile, SkellamProfile  # noqa: F401
+from .CTRcrystallinity import CrystallinityProfile  # noqa: F401
 from .CTRstacking import (  # noqa: F401
     LayerCycle,
     LayerState,
@@ -1629,7 +1630,17 @@ class SXRDCrystal:
                     and component.water is not None
                 ):
                     water_components.append((component._sync_water(), weight))
-        structural_profile = combine_profiles(*profiles)
+        internal_planes = any(
+            len(cell.crystallinity_layers) > len(cell.layers)
+            for component in self.uc_surface_list
+            for cell in ([component] if isinstance(component, UnitCell) else
+                         getattr(component, "termination_cells", {}).values()))
+        if internal_planes:
+            # Use the same conservative internal-plane assembly as DWBA.
+            structural_profile = self.dwba._atomic_model_snapshot(
+                raw_structure=True)[:-1]
+        else:
+            structural_profile = combine_profiles(*profiles)
         dz = top_layer_spacing(structural_profile)
         if not water_components:
             vacuum = np.array(
