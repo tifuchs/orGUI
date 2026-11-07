@@ -3,6 +3,9 @@
 Date: 2026-11-07. Scientific implementation: `898bca1`, including final DWBA
 master `5fc381b`. This assessment changes no runtime scientific code or fits.
 
+The staged follow-up is documented in the
+[kinematic and DWBA performance implementation plan](finite_film_dissolution_performance_plan.md).
+
 ## Measurement protocol
 
 The supplied C1 loader verifies the SHA256 of both `0056_C1.xtal` and its
