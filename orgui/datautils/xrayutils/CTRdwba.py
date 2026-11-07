@@ -664,6 +664,10 @@ class DWBAState:
         self._batch_depth = 0
         self._batch_snapshot = None
         self._batch_packings = {}
+        self._batch_profiles = {}
+        self._batch_field_blocks = OrderedDict()
+        self._batch_native = None
+        self._batch_reuse = True
         self._cache_counters = {
             "geometry_hits": 0,
             "geometry_misses": 0,
@@ -675,12 +679,20 @@ class DWBAState:
             "prepared_misses": 0,
             "snapshot_builds": 0,
             "packing_builds": 0,
+            "profile_builds": 0,
+            "profile_hits": 0,
+            "field_block_hits": 0,
         }
 
     @property
     def orientation(self):
         """Return the configured 3-by-3 orientation matrix."""
         return self._orientation
+
+    def __getstate__(self):
+        # Native batch scratch belongs to this owner and is not serializable.
+        # Copying a crystal must remain possible while a batch is active.
+        return {**self.__dict__, "_batch_native": None}
 
     def set_orientation(self, U):
         """Set the orientation matrix used by Vlieg angle calculations.
@@ -776,6 +788,8 @@ class DWBAState:
         self._prepared_cache.clear()
         self._continuous_integral_cache.clear()
         self._water_contrast_cache.clear()
+        self._batch_field_blocks.clear()
+        self._batch_native = None
 
     def _energy_changed(self):
         self.clear_cache()
@@ -799,8 +813,9 @@ class DWBAState:
         """Share rod-independent atomic work across a block of evaluations.
 
         Nested scopes share the outer scope. The atomic-model snapshot,
-        validated live records, and compatible packed atom tables are retained
-        only until the outermost scope exits, including after an exception.
+        validated live records, compatible packed atom tables, cell profiles,
+        assembled fields and bounded finite-scattering sums are retained only
+        until the outermost scope exits, including after an exception.
         Existing geometry, optical-reference, preparation, and field caches
         remain the only persistent caches.
 
@@ -809,6 +824,10 @@ class DWBAState:
         if self._batch_depth == 0:
             self._batch_snapshot = None
             self._batch_packings = {}
+            self._batch_profiles = {}
+            self._batch_field_blocks = OrderedDict()
+            self._batch_native = None
+            self._batch_reuse = True
         self._batch_depth += 1
         try:
             yield self
@@ -817,6 +836,10 @@ class DWBAState:
             if self._batch_depth == 0:
                 self._batch_snapshot = None
                 self._batch_packings = {}
+                self._batch_profiles = {}
+                self._batch_field_blocks.clear()
+                self._batch_native = None
+                self._batch_reuse = True
 
     def _require_available(self):
         if not HAS_CPP_ACCEL or not hasattr(
@@ -941,13 +964,51 @@ class DWBAState:
             ))
         return tuple(records)
 
+    def _cell_profile(self, cell, *, layer=None, kind="finite"):
+        """Reuse exact unit-cell optics only within an immutable fit batch.
+
+        Keys include physical planes, coherent domains, density and energy;
+        transformed component weights and terrace slab assembly stay separate.
+        Unknown subclasses retain their own optical implementation.
+        """
+        cache = self._batch_profiles if self._batch_depth else None
+        key = None
+        if (cache is not None and type(cell) is UnitCell
+                and hasattr(cell, "f") and hasattr(cell, "_E")
+                and not any(name in cell.__dict__ for name in (
+                    "optical_profile", "optical_profile_asbulk", "split_in_layers",
+                    "_crystallinity_labels"))):
+            key = (kind, layer, _hash_arrays(
+                cell.basis, cell.f, cell.a, cell.alpha, cell.R_mat, cell.R_mat_inv,
+                [cell._E, cell.volume, cell.uc_area], cell._crystallinity_labels(),
+                cell.coherentDomainMatrix, cell.coherentDomainOccupancy,
+            ), repr((cell.layerpos, cell._explicit_layer_cycle,
+                     getattr(cell, "_optical_plane_geometry", None),
+                     getattr(cell, "_optical_layer_origin", None),
+                     getattr(cell, "_optical_layer_thickness_fraction", None))))
+            if key in cache:
+                self._cache_counters["profile_hits"] += 1
+                return cache[key]
+        selected = cell if layer is None else _masked_layer_cell(cell, layer)
+        if kind == "bulk":
+            value = selected.optical_profile_asbulk()
+        elif kind == "thickness":
+            value = _optical_profile(selected, thickness=True)
+        else:
+            value = selected.optical_profile()
+        self._cache_counters["profile_builds"] += 1
+        if key is not None:
+            value = _readonly_array(value)
+            cache[key] = value
+        return value
+
     def _tagged_component_profile(self, component, records, layout, density_count):
         values = []
         shares = []
         for global_index, record in records:
             if isinstance(record.cell, WaterModel):
                 continue
-            profile = record.cell.optical_profile()
+            profile = self._cell_profile(record.cell)
             if not len(profile):
                 continue
             for outer_matrix, outer_occupancy in record.outer_domains:
@@ -972,10 +1033,10 @@ class DWBAState:
                          if owner == global_index]
                 for slot, layer in slots:
                     partial = (profile if len(slots) == 1 else
-                               _masked_layer_cell(record.cell, layer).optical_profile())
+                               self._cell_profile(record.cell, layer=layer))
                     tagged[slot] = partial[:, 1:] * scale
                     if slot >= density_count:
-                        widths = _optical_profile(record.cell, thickness=True)[:, 3]
+                        widths = self._cell_profile(record.cell, kind="thickness")[:, 3]
                         tagged[slot] *= widths[:, None] * normal_stretch
                 values.append(transformed)
                 shares.append(tagged)
@@ -1037,7 +1098,7 @@ class DWBAState:
                     :1
                 ]
             else:
-                bulk_profile = self._crystal.uc_bulk.optical_profile_asbulk()
+                bulk_profile = self._cell_profile(self._crystal.uc_bulk, kind="bulk")
             bulk_shares = np.zeros(
                 (assembly_count, len(bulk_profile), 2), dtype=np.float64
             )
@@ -1045,7 +1106,8 @@ class DWBAState:
                 cell = _masked_layer_cell(self._crystal.uc_bulk, layer)
                 partial = (homogeneous_bulk_profile(cell).values[:1]
                            if len(records) == 2 and records[-1].role == "water"
-                           else cell.optical_profile_asbulk())
+                           else self._cell_profile(
+                               self._crystal.uc_bulk, layer=layer, kind="bulk"))
                 bulk_shares[slot] = partial[:, 1:]
             component_values = [bulk_profile]
             component_shares = [bulk_shares]
@@ -1243,6 +1305,12 @@ class DWBAState:
 
     def _fields(self, reference, angles, polarization):
         flat = np.asarray(angles, dtype=np.float64).reshape(-1)
+        block_key = (reference.fingerprint, polarization, flat.tobytes())
+        if (self._batch_depth and self._batch_reuse
+                and block_key in self._batch_field_blocks):
+            self._cache_counters["field_block_hits"] += 1
+            self._batch_field_blocks.move_to_end(block_key)
+            return self._batch_field_blocks[block_key]
         _, first_index, inverse_sorted = np.unique(
             flat.view(np.uint64), return_index=True, return_inverse=True
         )
@@ -1298,10 +1366,15 @@ class DWBAState:
                 fields[missing_indices[index]] = field
             while len(self._field_cache) > self._field_cache_capacity:
                 self._field_cache.popitem(last=False)
-        return (
+        result = (
             self._assemble_fields(fields, (len(fields),)),
             _readonly_array(point_index, np.int64),
         )
+        if self._batch_depth and self._batch_reuse:
+            self._batch_field_blocks[block_key] = result
+            while len(self._batch_field_blocks) > 4:
+                self._batch_field_blocks.popitem(last=False)
+        return result
 
     def _geometry_key(self, h, k, l, geometry_rtol, geometry_atol):  # noqa: E741
         return (
@@ -2080,6 +2153,8 @@ class DWBAState:
                 integral_cache=self._continuous_integral_cache,
             )
         else:
+            if self._batch_depth and self._batch_reuse and self._batch_native is None:
+                self._batch_native = _CTRcalc_cpp._DWBAFiniteCache()
             atomic, reference = _CTRcalc_cpp.unitcell_F_DWBA_records(
                 prepared.Q_parallel,
                 prepared.is_specular,
@@ -2121,6 +2196,7 @@ class DWBAState:
                 packed["bulk_weight"],
                 packed["bulk_repeat_coordinate"],
                 packed["bulk_repeat"],
+                self._batch_native if self._batch_depth and self._batch_reuse else None,
             )
         return atomic, reference
 

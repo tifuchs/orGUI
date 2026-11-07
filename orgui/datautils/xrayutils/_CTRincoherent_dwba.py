@@ -271,12 +271,20 @@ class SurfaceHeightDWBA:
             return
         self._model.validate(forward_model="dwba")
         with ExitStack() as stack:
-            stack.enter_context(self._model.coherent_model.dwba.batch())
+            native = self._model.coherent_model.dwba
+            stack.enter_context(native.batch())
+            profiles, reuse = native._batch_profiles, native._batch_reuse
+            if self._model.optical_reference == "shared":
+                # The shared correction basis already reuses whole amplitudes.
+                # Avoid extra keys and scratch for its alternating mean/basis calls.
+                native._batch_profiles = None
+                native._batch_reuse = False
             self._scope = {"stack": stack}
             try:
                 yield self
             finally:
                 self._scope = None
+                native._batch_profiles, native._batch_reuse = profiles, reuse
 
     def _selection(self):
         if "selection" not in self._scope:
@@ -314,12 +322,19 @@ class SurfaceHeightDWBA:
 
     def _states(self, heights):
         if "states" not in self._scope:
+            native = self._model.coherent_model.dwba
+            if native._batch_profiles is None:
+                native._batch_profiles = {}
             states = []
             for height in heights:
                 state = _flat_crystal(self._model, height).dwba
                 self._scope["stack"].enter_context(state.batch())
-                # Private states form reference cycles with their crystals.
-                # Release field arrays before waiting for cyclic collection.
+                state._batch_profiles = (
+                    self._model.coherent_model.dwba._batch_profiles)
+                state._batch_reuse = self._model.coherent_model.dwba._batch_reuse
+                # These private crystals form reference cycles with their
+                # DWBAState. Release large field tables at scope exit rather
+                # than waiting for cyclic GC during later fit proposals.
                 self._scope["stack"].callback(state.clear_cache)
                 _, atomic, profile = state._atomic_model_snapshot()
                 states.append((state, atomic, profile))
@@ -390,8 +405,18 @@ class SurfaceHeightDWBA:
         return coherent_intensity, incoherent
 
     def _evaluate(self, method, args, kwargs):
+        single = self._scope is None
         with self.batch():
-            return self._evaluate_in_batch(method, args, kwargs)
+            native = self._model.coherent_model.dwba
+            previous = native._batch_reuse
+            if single:
+                # A standalone channel has no later request to reuse finite
+                # sums or assembled fields; still share profiles across heights.
+                native._batch_reuse = False
+            try:
+                return self._evaluate_in_batch(method, args, kwargs)
+            finally:
+                native._batch_reuse = previous
 
     def _evaluate_in_batch(self, method, args, kwargs):
         model = self._model

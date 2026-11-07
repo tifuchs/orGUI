@@ -20,6 +20,13 @@ Other user-visible changes:
   terrace-correction basis where applicable. Evaluation batches reuse state
   preparations, atom packing, and fields across channels and rods without
   retaining stale fitted parameters.
+  Identical cell optics are shared across terrace snapshots. Small batched
+  scans also reuse finite-film scattering across polarization and damping
+  controls, with bounded native storage and separate substrate calculations.
+  The native layered kernel reuses lateral atomic sums and depth phases within
+  each evaluation, accelerating new fit proposals as well as repeated calls
+  while retaining distinct scattering parameters, optical media and signed
+  contributions (up to floating-point summation roundoff).
   Private terrace field caches are released at batch exit to reduce memory
   retained between fit proposals.
 

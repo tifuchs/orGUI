@@ -457,8 +457,40 @@ order and optical changes are read on the next call. Models must not be
 changed inside a ``model.dwba.batch()`` scope. Native field-cache controls
 remain on ``crystal.dwba``. State-specific evaluation and state-dependent
 crystallinity still require more work than the shared correction basis.
-Private terrace field caches are also cleared at batch exit, so reference
-cycles cannot retain their arrays between fit proposals.
+
+The native layered kernel also reuses lateral atomic sums within each call.
+Atoms share a sum only when their output record, depth, optical medium and
+scattering parameters agree exactly. All signed domain weights remain in the
+sum; distinct optical interfaces and terrace probabilities remain intact.
+This reduces repeated phase evaluation for both optical policies and for new
+fit proposals. Regrouping the atomic sum can change floating-point rounding;
+it does not change the optical approximation or the intensity-mixing order.
+Private terrace field caches are cleared at batch exit so reference cycles
+cannot retain these large tables until a later garbage-collection pass.
+
+Within a batch, identical unit-cell optical profiles are also shared across
+terraces. Each terrace still assembles its own optical discontinuities and
+reference shares. Small state-specific scan blocks can reuse finite-film sums
+across exit polarizations and bulk attenuation controls; their optical coefficients,
+substrate contribution and reference subtraction are evaluated separately.
+For example, both damping controls can share work through the existing API::
+
+    with model.dwba.batch():
+        physical = model.dwba.polarization_reflectivity(
+            h, k, l, outgoing="unanalysed", bulk_attenuation=0.0)
+        diagnostic = model.dwba.polarization_reflectivity(
+            h, k, l, outgoing="unanalysed", bulk_attenuation=0.005)
+
+Finite-sum retention is limited to one small scan block per state (at most
+128 points and 1 MiB of retained native storage). Larger requests use the
+complete uncached kernel; the limit never reduces the evaluated points or
+atomic support. Explicit batches also retain up to four assembled field
+requests per state. Standalone ``evaluate`` calls avoid these extra retained
+tables, while still sharing profile construction across terraces. All this
+additional storage is released at the outermost batch exit, including after
+exceptions. No new fit-parameter cache survives into the next batch.
+The shared-field correction basis keeps its existing complete-amplitude reuse
+without these extra native or assembled-field caches.
 
 Comparing a DWBA rod with a kinematical rod
 --------------------------------------------

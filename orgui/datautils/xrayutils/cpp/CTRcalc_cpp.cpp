@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cstdint>
 #include <list>
+#include <map>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -1446,5 +1447,58 @@ PYBIND11_MODULE(_CTRcalc_cpp, module) {
         &homogeneous_bulk_optical_constants
     );
     module.def("unitcell_F_DWBA_bulk", &unitcell_F_DWBA_bulk);
-    module.def("unitcell_F_DWBA_records", &unitcell_F_DWBA_records);
+    py::class_<DWBAFiniteCache>(module, "_DWBAFiniteCache").def(py::init<>());
+    module.def("unitcell_F_DWBA_records", &unitcell_F_DWBA_records,
+        py::arg("Q_parallel"),
+        py::arg("is_specular"),
+        py::arg("reference_refractive_indices"),
+        py::arg("field_i_index"),
+        py::arg("field_f_index"),
+        py::arg("kz_i"),
+        py::arg("A_i_plus"),
+        py::arg("A_i_minus"),
+        py::arg("A_i_plus_over_kz"),
+        py::arg("A_i_minus_over_kz"),
+        py::arg("kz_f"),
+        py::arg("A_f_plus"),
+        py::arg("A_f_minus"),
+        py::arg("A_f_plus_over_kz"),
+        py::arg("A_f_minus_over_kz"),
+        py::arg("z_reference_i"),
+        py::arg("z_reference_f"),
+        py::arg("z_interfaces"),
+        py::arg("alpha_i"),
+        py::arg("alpha_f"),
+        py::arg("cos_azimuth"),
+        py::arg("sin_azimuth"),
+        py::arg("k0"),
+        py::arg("polarization_i"),
+        py::arg("polarization_f"),
+        py::arg("reference_delta_beta"),
+        py::arg("reference_area"),
+        py::arg("semi_infinite"),
+        py::arg("attenuation"),
+        py::arg("basis"),
+        py::arg("f_factors"),
+        py::arg("finite_positions"),
+        py::arg("finite_atom_index"),
+        py::arg("finite_record_index"),
+        py::arg("finite_weight"),
+        py::arg("bulk_positions"),
+        py::arg("bulk_atom_index"),
+        py::arg("bulk_weight"),
+        py::arg("bulk_repeat_coordinate"),
+        py::arg("bulk_repeat"),
+        py::arg("finite_cache") = nullptr);
+    module.def("_dwba_motif_work", []() {
+        py::dict result;
+        result["finite_cache_hits"] = dwba_motif_work.finite_cache_hits;
+        result["finite_cache_bytes"] = dwba_motif_work.finite_cache_bytes;
+        result["instances"] = dwba_motif_work.instances;
+        result["motifs"] = dwba_motif_work.motifs;
+        result["lateral_exponentials"] = dwba_motif_work.lateral_exponentials;
+        result["normal_exponentials"] = dwba_motif_work.normal_exponentials;
+        result["motif_channels"] = dwba_motif_work.motif_channels;
+        return result;
+    }, "Work counts for the last successful record evaluation on this thread.");
 }
