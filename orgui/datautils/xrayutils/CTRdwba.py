@@ -263,7 +263,12 @@ def _combine_tagged(values, shares, z_tolerance=0.6, density_count=None):
     )
     for group_index, (start, stop) in enumerate(zip(group_starts, group_stops)):
         combined_shares[:, group_index] = shares[:, start:stop].sum(axis=1)
-        combined[group_index, 0] = values[start, 0]
+        # Empty subtraction records must not displace an occupied optical
+        # center. Test individual signed shares before cancellation, including
+        # areal inventory slots beyond density_count. Keep wholly empty groups.
+        active = np.flatnonzero(np.any(shares[:, start:stop] != 0, axis=(0, 2)))
+        anchor = start + int(active[0]) if len(active) else start
+        combined[group_index, 0] = values[anchor, 0]
         combined[group_index, 1:] = combined_shares[
             :density_count, group_index].sum(axis=0)
     return np.ascontiguousarray(combined), np.ascontiguousarray(combined_shares)

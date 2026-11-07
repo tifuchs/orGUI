@@ -793,11 +793,20 @@ mutate parameters inside that context. Unsupported dissolution configurations
 raise explicitly. See :doc:`ctr_structure_factors` for material ownership,
 exhaustion, numerical tail certificates and the frozen-interface closure.
 
-Native optical profiles currently retain some sensitivity to changes in
-interface support and component grouping, including for ordinary unwrapped
-crystals. Consequently a material-preserving kinematic repartition is not by
-itself a DWBA convergence certificate. The synthetic diagnostic
-``python -m benchmarks.audit_dissolution_dwba_partition`` records this separately
-from exact-state DWBA tests. Keep the interface representation explicit and
-check optical-profile/observable convergence before a DWBA refit; the new
-wrapper does not silently change or replace that native optical approximation.
+Optical-profile coalescing retains the existing origin-based merge groups and
+0.6 Angstrom tolerance. Within each group, its coordinate is the lowest origin
+with a nonzero optical contribution. Tagged assembly checks individual signed
+reference shares, including areal inventory, before cancellation. Exactly zero
+interface subtraction records therefore cannot select the coordinate of a
+nonempty group. Arbitrarily small nonzero tails still count; a wholly empty
+group retains its lowest coordinate so empty physical regions are preserved.
+The public ``combine_profiles`` API applies the same rule to delta/beta inputs.
+
+This corrects the reproduced interface-support displacement in ordinary native
+DWBA and both dissolution optical-reference policies. Run
+``python -m benchmarks.audit_dissolution_dwba_partition --diagnose-zero-anchors``
+to compare the correction with a temporary reproduction of the old coordinate
+rule. The regression verifies this fixture, not arbitrary material repartition:
+group membership still depends on input origins, and nonzero material tails
+still affect optics. Keep the interface representation explicit and verify
+optical-profile and observable convergence before a DWBA refit.

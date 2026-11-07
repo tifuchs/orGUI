@@ -1,7 +1,7 @@
-"""Report inherited native optical-profile sensitivity to interface support.
+"""Audit native optical-profile invariance under interface-support expansion.
 
-This diagnostic does not declare convergence or change any tolerance. Run from
-the checkout with python -m benchmarks.audit_dissolution_dwba_partition.
+This diagnostic verifies one support-expansion fixture without changing any
+tolerance. Run with python -m benchmarks.audit_dissolution_dwba_partition.
 The synthetic fixtures require no measured data.
 """
 
@@ -46,7 +46,7 @@ def _crystals(offset=.03):
 
 def _report(source, expanded):
     report = dict(
-        interpretation="Numerical diagnostic, not a passed DWBA support gate.",
+        interpretation="Synthetic support audit; not a universal DWBA error bound.",
         native_kinematic=_errors(expanded.F(*_hkl()), source.F(*_hkl())),
         native_dwba=_errors(expanded.dwba.evaluate(*_hkl()).reflectivity,
                             source.dwba.evaluate(*_hkl()).reflectivity))
@@ -60,27 +60,25 @@ def _report(source, expanded):
     return report
 
 
-def _active_anchor_probe(original):
-    """Change only the representative position of a nonempty merged group.
+def _legacy_anchor_probe(original):
+    """Restore the old lowest-input coordinate to reproduce the fixed defect.
 
     This is a causal experiment, not a production profile algorithm. It keeps
     all density/reference shares, all empty groups, and the 0.6-Angstrom grouping
-    tolerance. Signed nonzero shares qualify even if their total density cancels.
+    tolerance. Production now uses the lowest nonzero contributor instead.
     """
     def combine(values, shares, z_tolerance=.6, density_count=None):
         result, tagged = original(values, shares, z_tolerance, density_count)
         if not len(values):
             return result, tagged
         order = np.argsort(values[:, 0], kind="stable")
-        values, shares = values[order], shares[:, order]
+        values = values[order]
         starts = [0]
         for index in range(1, len(values)):
             if values[index, 0]-values[starts[-1], 0] > z_tolerance:
                 starts.append(index)
-        for group, (start, stop) in enumerate(zip(starts, [*starts[1:], len(values)])):
-            active = np.flatnonzero(np.any(shares[:, start:stop] != 0, axis=(0, 2)))
-            if len(active):
-                result[group, 0] = values[start+active[0], 0]
+        for group, start in enumerate(starts):
+            result[group, 0] = values[start, 0]
         return result, tagged
     return combine
 
@@ -92,26 +90,27 @@ def main():
     args = parser.parse_args()
     source, expanded = _crystals()
     report = _report(source, expanded)
+    for name in ("native_dwba", "shared", "state_specific"):
+        assert report[name]["max_relative"] < 1e-9
     if args.diagnose_zero_anchors:
-        narrow = source.dwba._atomic_model_snapshot(raw_structure=True)
-        wide = expanded.dwba._atomic_model_snapshot(raw_structure=True)
+        with patch.object(CTRdwba, "_combine_tagged", _legacy_anchor_probe(
+                CTRdwba._combine_tagged)):
+            legacy = _report(*_crystals())
+            narrow = source.dwba._atomic_model_snapshot(raw_structure=True)
+            wide = expanded.dwba._atomic_model_snapshot(raw_structure=True)
+            with patch.object(CTRdwba, "_OPTICAL_DELTA_TOLERANCE", 0.), \
+                    patch.object(CTRdwba, "_OPTICAL_BETA_TOLERANCE", 0.):
+                no_simplification = _report(*_crystals())
         np.testing.assert_equal(narrow.shape, wide.shape)
         np.testing.assert_allclose(narrow[:, 1:], wide[:, 1:],
                                    rtol=1e-12, atol=1e-18)
         changed = np.flatnonzero(abs(narrow[:, 0]-wide[:, 0]) > 1e-9)
-        with patch.object(CTRdwba, "_OPTICAL_DELTA_TOLERANCE", 0.), \
-                patch.object(CTRdwba, "_OPTICAL_BETA_TOLERANCE", 0.):
-            no_simplification = _report(*_crystals())
-        with patch.object(CTRdwba, "_combine_tagged", _active_anchor_probe(
-                CTRdwba._combine_tagged)):
-            active_anchor = _report(*_crystals())
         for name in ("native_dwba", "shared", "state_specific"):
-            assert active_anchor[name]["max_relative"] < 1e-9
             np.testing.assert_allclose(no_simplification[name]["max_relative"],
-                                       report[name]["max_relative"], rtol=1e-10)
+                                       legacy[name]["max_relative"], rtol=1e-10)
         report = dict(
-            original=report, no_simplification=no_simplification,
-            active_anchor_only=active_anchor,
+            legacy_anchor=legacy, legacy_no_simplification=no_simplification,
+            corrected=report,
             zero_interface_displacement=_report(*_crystals(offset=0.)),
             moved_centers_A=[dict(narrow=float(narrow[i, 0]),
                                    expanded=float(wide[i, 0])) for i in changed],

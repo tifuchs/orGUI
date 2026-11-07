@@ -7,6 +7,12 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Optical-profile coalescing now places a merged plane at its lowest nonzero
+  contributor, preserving signed reference shares and wholly empty groups.
+  Exactly zero interface subtraction records no longer shift occupied optical
+  centers when numerical support expands. This corrects affected native and
+  ensemble DWBA amplitudes without changing atomic populations or tail budgets.
+
 - `SurfaceHeightDomains` and `PoissonHeightDomains` now evaluate native DWBA
   terrace ensembles through their public `dwba` API and `CTROptimizer`.
   Complete substrate-film-surface amplitudes retain interference within each

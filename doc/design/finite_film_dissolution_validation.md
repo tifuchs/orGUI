@@ -79,8 +79,9 @@ The wheel precedes the documentation-only amendment recording these results.
   native probability/first-moment budgets. No legacy tolerance was relaxed.
 
 The frozen native-cell adapter preserves optical plane geometry and component
-grouping. In particular, zero-weight protected records can anchor native
-optical slab boundaries and must not be dropped casually.
+grouping. Zero-weight protected records are retained; the optical-position
+correction below prevents them from anchoring nonempty merged groups, while
+preserving wholly empty groups.
 
 ## Executed tests before the rebase
 
@@ -163,17 +164,15 @@ inventories, realized front moments and scattering. In a porous interface the
 structural front is not a unique atomic surface height. Full exhaustion means
 all represented selected-owner material has been removed.
 
-**DWBA interface-support invariance has not passed the proposed 1e-9 gate.**
-The reproducible `benchmarks/audit_dissolution_dwba_partition.py` diagnostic
-shows that widening interface support can change native optical profiles even
-for ordinary unwrapped crystals whose kinematic amplitudes agree. In its
-synthetic motif fixture the native DWBA maximum relative change is 2.0573e-4;
-the maximum error divided by the maximum reference intensity is 3.1052e-7.
-The new shared and state-specific ensembles also inherit optical grouping
-sensitivity. This is separate from exact-state/native-DWBA agreement, which
-passes. The tolerance was not relaxed, and no replacement optical solver was
-introduced. Optical-profile convergence remains a prerequisite for a DWBA
-refit or a claim of DWBA-invariant repartition.
+The synthetic DWBA interface-support fixture now passes the proposed `1e-9`
+relative-observable gate after the optical-position correction below. Before
+that correction its native DWBA error was `2.0573e-4`, inherited also by the
+shared and state-specific dissolution ensembles. The correction does not
+establish invariance under arbitrary repartition: existing grouping membership
+still depends on input origins, and genuine nonzero tails affect optics.
+Optical-profile convergence remains a prerequisite for a DWBA refit or a claim
+of DWBA-invariant repartition. No numerical tolerance was relaxed or native
+scattering kernel replaced.
 
 Water, other overlayers, overlapping interface supports, non-unit component
 weights, different outer domains across components and depth-dependent
@@ -235,10 +234,50 @@ simplification tolerances to zero leaves the original discrepancies unchanged;
 setting interface displacement to zero makes occupied and empty positions
 coincide and reduces all three discrepancies below 4e-15 without the probe.
 
-This identifies the cause of the reproduced inconsistencies. It is not a
-production repair yet. A repair should prevent empty bookkeeping records from
-moving physical optical coordinates, cover both profile-coalescing APIs, retain
-signed per-record reference information, and preserve intentionally empty
-physical regions. Simply deleting every zero-density row is not a justified
-general solution. The diagnostic never deletes a whole empty group or treats
-a small nonzero tail as zero. Runtime library behavior remains unchanged.
+That experiment identified the cause before the runtime repair. Simply deleting
+every zero-density row would not be justified: signed reference contributions
+and wholly empty physical regions must survive. The production correction is
+recorded below; the diagnostic can still reproduce the legacy coordinate rule
+using a temporary patch.
+
+## Optical-position correction
+
+Both `CTRdwba._combine_tagged` and `CTRoptics.combine_profiles` now retain the
+lowest contributing origin within each existing coalesced group. Tagged
+assembly examines every individual signed share, including areal inventory
+slots beyond `density_count`, before cancellation. Public profile assembly
+examines each input delta/beta row. The test is exact nonzero, with no density
+threshold. Wholly empty groups keep their original lowest coordinate. Group
+membership, the 0.6 Angstrom tolerance, sums, populations, boundaries between
+materials and all physical dissolution policies are otherwise unchanged;
+optical midpoint boundaries are recomputed from the corrected centers.
+
+The independent pre-fix tests reproduce coordinate and observable failures.
+Regression coverage checks signed cancellation, tiny nonzero tails, separate
+reference-only inventory, empty media, public/tagged profile coordinates and
+midpoint boundaries, native complex amplitudes and intensities for s and p,
+and shared/state-specific dissolution at incoherent fractions 0, 0.2 and 1.
+Repartitioned stacking coordinates are compared to a four-machine-epsilon
+roundoff budget scaled by the coordinate range, in Angstrom; observables use
+the original `1e-9` gate.
+
+The updated diagnostic verifies the production fix and reproduces the old
+coordinate rule only in its temporary legacy control. Maximum relative
+support errors are `7.10543e-14` for native DWBA, `6.67244e-14` for shared
+dissolution fields, and `9.43690e-14` for state-specific fields. The legacy
+control reproduces the original table above. This is a correction to numerical
+optical assembly, independent of adopting a dissolution model. It changes no
+kinematic atoms, fit data, distribution weights or probability/moment budgets.
+
+Validation: the complete `test_CTR*.py` run passed 1,303 tests and 193 subtests,
+with three skips. Its single failure was an existing self-snapshot expecting
+an empty subtraction origin at 0 Angstrom. Inspection of its component rows
+confirmed that the lowest contributor is at 0.007419160637154795 Angstrom; only
+that coordinate expectation was updated, with all density and kinematic
+expectations retained. The corrected case and 21 new regressions then passed
+together. One additional same-origin signed-cancellation regression also
+passed, bringing coverage to 22 new cases and 1,305 distinct passing CTR cases
+across the broad run and focused reruns. `ruff check orgui` (plus the audit
+script) and `git diff --check` pass. C++ sources are unchanged by this fix;
+tests use the freshly rebuilt final-master extension identified above. No
+data were refitted.

@@ -445,8 +445,10 @@ def combine_profiles(*profiles, z_tolerance=0.6):
         Arrays returned by :func:`optical_profile`, optionally empty.
     :param float z_tolerance:
         Maximum separation in Angstrom between layer origins that represent
-        one homogeneous optical layer.  The lowest origin in each merged
-        group is retained as its coordinate.
+        one homogeneous optical layer. Groups are bounded by their lowest
+        input origin. Each group's coordinate is its lowest origin with a
+        nonzero delta or beta contribution, before signed cancellation. A
+        wholly empty group retains its lowest origin, preserving empty media.
     :returns:
         C-contiguous ``(N, 3)`` array sorted by z, with delta and beta summed
         for origins separated by at most ``z_tolerance``.
@@ -470,7 +472,11 @@ def combine_profiles(*profiles, z_tolerance=0.6):
     combined = np.empty((len(group_starts), 3), dtype=np.float64)
     for index, (start, stop) in enumerate(zip(group_starts, group_stops)):
         group = stacked[start:stop]
-        combined[index] = [group[0, 0], group[:, 1].sum(), group[:, 2].sum()]
+        # Exact zero bookkeeping must not move physical optical centers;
+        # signed contributions and arbitrarily small nonzero tails still count.
+        active = np.flatnonzero(np.any(group[:, 1:] != 0, axis=1))
+        anchor = int(active[0]) if len(active) else 0
+        combined[index] = [group[anchor, 0], group[:, 1].sum(), group[:, 2].sum()]
     return np.ascontiguousarray(combined)
 
 
