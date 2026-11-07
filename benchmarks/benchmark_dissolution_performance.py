@@ -32,6 +32,7 @@ import psutil  # noqa: E402
 from .benchmark_dwba_c1 import _load, _setup  # noqa: E402
 from orgui.datautils.xrayutils import CTRdwba, CTRoptics  # noqa: E402
 from orgui.datautils.xrayutils.CTRincoherent import FiniteFilmDissolution  # noqa: E402
+from orgui.datautils.xrayutils.CTRuc import UnitCell, _coherent_domain_arrays  # noqa: E402
 
 
 def _rays(points):
@@ -226,6 +227,72 @@ def _memory(kind, policy):
                 private_states_after_gc=sum(r() is not None for r in references))
 
 
+def _kinematic_analysis(repeats):
+    """Isolate repeated native evaluations with a temporary exact C1 cache.
+
+    This diagnostic is intentionally not a production/general UnitCell cache.
+    It assumes the validated C1 native cells without custom form-factor hooks.
+    All patches and stored results are confined to one F2 call.
+    """
+    originals = dict(unit=UnitCell.F_uc, bulk=UnitCell.F_bulk)
+
+    def evaluate(model, memoize):
+        counts, caches = Counter(), dict(unit={}, bulk={})
+
+        def wrap(kind):
+            def call(cell, h, k, ell, *args):
+                counts[kind + "_calls"] += 1
+                if not memoize:
+                    return originals[kind](cell, h, k, ell, *args)
+                assert type(cell) is UnitCell
+                assert not cell._special_formfactors_present
+                basis, factors, _, order = cell._coherent_basis()
+                domains, weights = _coherent_domain_arrays(
+                    cell.coherentDomainMatrix, cell.coherentDomainOccupancy)
+                arrays = (basis, factors, cell.refHKLTransform, cell.B_mat,
+                          cell.R_mat, cell.R_mat_inv, domains, weights,
+                          cell.stacking_translation, h, k, ell)
+                key = (order, cell.uc_area, args, *(
+                    (np.asarray(a).shape, np.asarray(a).dtype.str,
+                     np.asarray(a).tobytes()) for a in arrays))
+                if key not in caches[kind]:
+                    counts[kind + "_misses"] += 1
+                    caches[kind][key] = originals[kind](cell, h, k, ell, *args)
+                return caches[kind][key]
+            return call
+
+        with patch.object(UnitCell, "F_uc", wrap("unit")), \
+                patch.object(UnitCell, "F_bulk", wrap("bulk")), \
+                patch.object(CTRdwba, "solve_electric_field",
+                             side_effect=AssertionError("Unexpected DWBA work")), \
+                patch.object(UnitCell, "optical_profile",
+                             side_effect=AssertionError("Unexpected optical work")):
+            elapsed, result = _timed(lambda: model.F2(*_rays(512)))
+        return elapsed, result, dict(counts)
+
+    times = dict(baseline=[], memoized=[])
+    counts = {}
+    reference = _model("dissolution", "shared").F2(*_rays(512))
+    for trial in range(repeats):
+        order = ("baseline", "memoized") if trial % 2 == 0 else ("memoized", "baseline")
+        for kind in order:
+            model = _model("dissolution", "shared")
+            elapsed, result, counts[kind] = evaluate(model, kind == "memoized")
+            np.testing.assert_array_equal(result, reference)
+            times[kind].append(elapsed)
+    model = _model("dissolution", "shared")
+    profiler = cProfile.Profile()
+    profiler.runcall(model.F2, *_rays(512))
+    stats = pstats.Stats(profiler)
+    rows = [dict(file=Path(file).name, line=line, function=name, calls=value[1],
+                 self_seconds=value[2], cumulative_seconds=value[3])
+            for (file, line, name), value in stats.stats.items()]
+    return dict(timings={key: _summary(values) for key, values in times.items()},
+                counts=counts, bitwise_equal=True, optical_work_forbidden=True,
+                instrumented_total_seconds=stats.total_tt,
+                profile=sorted(rows, key=lambda r: -r["cumulative_seconds"])[:35])
+
+
 def main():
     """Measure separately the numerical fix, complete models and hot paths."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -233,7 +300,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--section", choices=["all", "fix", "models", "profile",
-                                             "scaling", "memory"], default="all")
+                                             "scaling", "memory", "kinematic"],
+                        default="all")
     parser.add_argument("--kind", choices=["legacy", "dissolution"],
                         default="dissolution")
     parser.add_argument("--policy", choices=["shared", "state_specific"],
@@ -283,6 +351,8 @@ def main():
                 save(f"scaling_{policy}_{points}", dict(seconds=elapsed))
     if args.section == "memory":
         save(f"memory_{args.kind}_{args.policy}", _memory(args.kind, args.policy))
+    if args.section == "kinematic":
+        save("kinematic_redundancy", _kinematic_analysis(max(5, args.repeats)))
 
 
 if __name__ == "__main__":

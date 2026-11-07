@@ -172,3 +172,65 @@ parameters outside a batch, failed candidates, complete exhaustion, and the
 optical-support regression. Add deterministic work-count and cache-lifetime
 checks. Preserve existing numerical budgets and material inventory; skipping
 rare states requires a separately justified amplitude/moment error bound.
+
+## Kinematic root-cause follow-up
+
+The kinematic regression is an evaluation-strategy issue in the dissolution
+wrapper. `FiniteFilmDissolution._iter_states` calls `path.state(index)` and
+`state.crystal.F(...)` for every nonzero state. Each call reconstructs and
+evaluates the entire retained crystal. It does not reuse common material as
+the legacy `KinematicIncoherentContext`/surface correction path does.
+
+On C1, one call performs 55 complete crystal evaluations, 55 identical bulk
+evaluations, and 832 native unit-cell evaluations. The legacy profile performs
+one complete crystal evaluation, one bulk evaluation and 123 unit-cell
+evaluations. Construction invokes `state()` 56 times: the 55 ensemble states
+plus a nominal state used while establishing the path's initial inventory.
+The lazy coherent context is not causing an additional unused full evaluation.
+
+The follow-up profiled dissolution call totals 0.839 s:
+
+| Work | Time, seconds | Count |
+| --- | --- | --- |
+| Native unit-cell scattering | 0.525 self | 832 |
+| Native bulk scattering | 0.071 self | 55 |
+| Complete state construction | 0.151 cumulative | 56 |
+| Path/support snapshot | 0.041 cumulative | 1 |
+
+Cumulative construction/snapshot times overlap slightly and should not be
+summed. No optical-profile construction or electric-field calculation occurs:
+the timed diagnostic replaces those entry points with exceptions and still
+completes successfully. DWBA object/geometry bookkeeping exists in generic
+state construction, but it is not the expensive field-solving path.
+
+A temporary C1-only memoization control hashes exact native scattering inputs
+within one evaluation and reuses the original native function's result. It
+does not replace any scattering formula, skip states, change weights, or keep
+anything across fit proposals. It finds only 116 distinct unit-cell evaluations
+among the 832 calls (716 redundant calls, 86%), and one distinct bulk evaluation
+among 55. All five paired trials produce bitwise-identical `F2` arrays.
+
+| Evaluation | Median, seconds | Range, seconds |
+| --- | --- | --- |
+| Current kinematic dissolution | 0.713 | 0.471–0.775 |
+| Temporary exact-input memoization | 0.197 | 0.177–0.208 |
+
+This is a measured 3.63x reduction before eliminating repeated state
+construction. An initial exploratory cached call took 0.091 s, but the paired
+five-trial result is the representative measurement. The cache control still
+constructs all states, hashes arrays, runs Python dispatch and sums complete
+crystal amplitudes. It is not a proposed production-wide UnitCell cache; the
+diagnostic explicitly requires native C1 cells without custom form factors.
+
+For kinematic optimization, prioritize one bulk/common-material evaluation,
+native per-layer/domain amplitudes reused across retained-height states, and
+cumulative sums over removable material intervals plus each state's exact
+termination correction. Keep complete crystal construction for independent
+oracles, inventories, and optical evaluation. Coherent and incoherent mixing
+must continue to use complete amplitudes, with reference-area scaling, outer
+domains, attenuation, signed records, and exposure policy preserved. This
+follow-up diagnoses and measures the issue; runtime implementation is unchanged.
+
+Reproduce with the benchmark's `--section kinematic` option and a new output
+filename. The run stores paired timings, exact cache misses and the profile;
+the original measurements are in `output/dissolution/kinematic_redundancy.json`.
