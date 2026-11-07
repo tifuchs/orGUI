@@ -1182,11 +1182,14 @@ and displacement constraints keep receiving an ``SXRDCrystal``, while
 ``optimizer.model`` is the fitted forward model.  Resolution is applied to
 ``F2`` before the conversion back to a stored ``|F|``.
 
-The first implementation is kinematical only.  Combining an incoherent
-``F2`` model with DWBA raises during ``prepareFit``: changing the flat
-surface height changes the optical reference profile and its internal fields,
-so a correct DWBA ensemble would have to prepare and evaluate each height
-separately and mix ``abs(r) ** 2``.
+``SurfaceHeightDomains`` and its ``PoissonHeightDomains`` compatibility wrapper
+also support native DWBA through ``domains.dwba.evaluate(...)`` and
+``CTROptimizer(domains, ctrs).set_dwba()``. Their kinematic ``F2`` retains its
+existing meaning. DWBA mixes complete reflection amplitudes, including the
+substrate and film, and convolves field intensity before converting to the
+measured quantity. The persisted ``optical_reference`` policy selects shared
+averaged fields (default) or fields specific to each terrace; see
+:ref:`dwba-height-domains` for the physical assumptions and endpoint definitions.
 
 The target surface does not have to be the topmost component: a water layer
 or a cap may be stacked above it.  Anything above the surface is placed once
@@ -1204,6 +1207,95 @@ probability masses and the profile's tail target, never from measured CTR
 values, and is renormalized once.  ``exact_layer_count`` (default 10) retains
 every state for a narrow distribution; it is a policy switch, not a cap.
 
+Recentered Skellam surface roughness
+------------------------------------
+
+``SkellamSurface`` adds two-sided integer-layer roughness to a ``Film`` while
+keeping its mean layer coverage fixed. Its basis is ``[t, k_up, k_down, offset]``:
+time is in seconds, each rate is in inverse seconds for a single structural-layer
+event, and ``offset`` is the target mean displacement in structural layers.
+All parameters are fixed until selected for fitting. For a single snapshot,
+fix the measured time: only the products ``k_up*t`` and ``k_down*t`` are
+independently determined by the profile.
+
+For independent Poisson variables, define
+
+.. math::
+
+   X &= N_+ - N_-, \qquad N_\pm\sim\mathrm{Poisson}(k_\pm t),\\
+   s &= \mathrm{offset} - (k_+-k_-)t,\qquad m=\lfloor s\rfloor,
+        \quad f=s-m,\\
+   H &= X+m+B,\qquad B\sim\mathrm{Bernoulli}(f).
+
+The independent Bernoulli variable mixes two adjacent integer translations.
+Atomic planes retain their crystallographic positions. The actual mean and
+variance are
+
+.. math::
+
+   \langle H\rangle=\mathrm{offset},\qquad
+   \operatorname{Var}(H)=(k_++k_-)t+f(1-f).
+
+In the repository convention, layer :math:`n` is filled when :math:`H>n` and is
+exposed when :math:`H=n+1`. At zero offset the summed occupancy correction to the
+sharp Film boundary is zero. This conserves physical mass when each transported
+layer has the same inventory per lateral area. Alternating chemically different
+layers, modified terminations, and attached water do not acquire elemental mass
+conservation merely from recentering the height distribution. Unequal physical
+layer spacings also distinguish mean layer displacement from geometric mean
+height; stacking retains the existing nominal average-layer-spacing convention.
+
+This is a recentered family of profiles, not the solution of a conservative
+transport equation. Evaluating at two successive times is not generally
+equivalent to evaluating once at their sum. Integer centering crossings are
+continuous but can introduce corners in fit derivatives. Interpolation adds
+at most 0.25 layers squared of variance.
+
+.. code-block:: python
+
+   import numpy as np
+   from orgui.datautils.xrayutils.CTRcalc import (
+       Film, RecenteredSkellamProfile, SkellamSurface, SXRDCrystal,
+   )
+
+   # bulk_cell and surface_cell are existing UnitCell objects.
+   film = Film(surface_cell, width_layers=80, name="film")
+   surface = SkellamSurface(
+       surface_cell,
+       profile=RecenteredSkellamProfile(t=1.0, k_up=0.2, k_down=0.7),
+       name="surface",
+   )
+   crystal = SXRDCrystal(bulk_cell, film, surface, stacking=np.array([1, 2]))
+   surface.addFitParameter("k_up", limits=(0, 1), name="up_rate")
+
+Choose a Film thick enough to contain the retained etching support. The new
+surface rejects support extending below its underlying Film rather than
+clipping and renormalizing it. ``tail_probability`` bounds omitted probability;
+``moment_tolerance`` bounds the omitted absolute first moment in structural
+layers. Both default to ``1e-10``. The model retains all bins in this support
+for coherent scattering and height-domain averaging. A probability-only cutoff
+would not by itself bound lost material.
+
+When ``k_up=0``, the raw profile is negative Poisson. With
+``lam=k_down*t`` the recentered profile is exactly equivalent to
+``PoissonProfile(-lam, alpha=1, offset=lam+offset)``. The opposite one-sided
+limit is ``PoissonProfile(lam, alpha=1, offset=offset-lam)`` for ``lam=k_up*t``.
+Zero time and zero offset recover the sharp surface. The existing
+``PoissonSurface`` and interface ``SkellamProfile`` retain their definitions.
+
+``SkellamSurface`` supports complete termination banks, attached water,
+local-depth crystallinity profiles, native text/HDF5 saves, fitting, and coherent
+kinematical/DWBA evaluation. To average large height domains in intensity, use
+``SurfaceHeightDomains(crystal, surface="surface", incoherent_fraction=...)``
+from ``CTRincoherent``. This wrapper accepts either surface family and has the
+same complete-crystal averaging convention as ``PoissonHeightDomains``.
+Native DWBA height-domain averaging supports shared and state-specific optical
+references; see :ref:`dwba-height-domains`.
+
+The executable example ``examples/CTR/recentered_skellam_surface.py`` compares
+flat, symmetric, asymmetric, and one-sided profiles and their coherent CTRs,
+and prints the coverage-conservation residual for each case.
+
 API reference
 -------------
 
@@ -1218,6 +1310,10 @@ API reference
    :member-order: bysource
 
 .. autoclass:: orgui.datautils.xrayutils.CTRdistributions.PoissonProfile
+   :members:
+   :member-order: bysource
+
+.. autoclass:: orgui.datautils.xrayutils.CTRdistributions.RecenteredSkellamProfile
    :members:
    :member-order: bysource
 
@@ -1239,6 +1335,16 @@ API reference
 
 .. autoclass:: orgui.datautils.xrayutils.CTRincoherent.PoissonHeightDomains
    :members: incoherent_fraction, target_surface
+   :inherited-members:
+   :member-order: bysource
+
+.. autoclass:: orgui.datautils.xrayutils.CTRincoherent.SurfaceHeightDomains
+   :members: incoherent_fraction, target_surface, optical_reference, dwba
+
+.. autoclass:: orgui.datautils.xrayutils.CTRincoherent.SurfaceHeightDWBA
+   :members: evaluate, evaluate_from_glancing, evaluate_from_vlieg, polarization_reflectivity, polarization_reflectivity_from_glancing, polarization_reflectivity_from_vlieg, batch
+
+.. autoclass:: orgui.datautils.xrayutils.CTRincoherent.DWBAEnsembleResult
    :member-order: bysource
 
 .. autofunction:: orgui.datautils.xrayutils.CTRincoherent.available_incoherent_models
@@ -1261,6 +1367,12 @@ API reference
 
 .. autoclass:: orgui.datautils.xrayutils.CTRfilm.PoissonSurface
    :members: F_uc, uc_area, setReferenceUnitCell, flat_domain_corrections, setCrystallinityProfile, crystallinity_profile
+   :inherited-members:
+   :member-order: bysource
+
+.. autoclass:: orgui.datautils.xrayutils.CTRfilm.SkellamSurface
+   :members: F_uc, uc_area, setReferenceUnitCell, flat_domain_corrections, setCrystallinityProfile, crystallinity_profile
+   :inherited-members:
    :member-order: bysource
 
 .. autoclass:: orgui.datautils.xrayutils.CTRcrystallinity.CrystallinityProfile

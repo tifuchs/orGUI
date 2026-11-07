@@ -38,6 +38,16 @@ unique-angle field, and 32-entry preparation caches; ``clear_cache`` clears
 them.  Repeated glancing angles are solved and stored once, with native index
 maps selecting their field columns for each scan point.
 
+The field cache retains up to 16384 entries by default. Larger repeated scans
+can raise that limit with ``crystal.dwba.set_field_cache_capacity(32768)``;
+entries are allocated only as needed. Lowering the limit immediately evicts
+the least-recently used entries without invalidating prepared scans.
+Requests exceeding the limit still evaluate in full: their required fields
+remain available for that request while persistent storage stays bounded.
+``clear_cache`` preserves the configured capacity, which is reported as
+``cache_info()["field_capacity"]``. Cache capacity does not change the optical
+model or scattering amplitudes.
+
 Measured geometries are available without changing a persistent rod rule.
 ``prepare_from_glancing(h, k, alpha_i, alpha_f)`` derives ``l`` from the Ewald
 condition, and ``prepare_from_vlieg(alpha, delta, gamma, omega, chi, phi)``
@@ -353,6 +363,103 @@ meaning of its empirical angle correction for mixed F/R DWBA predictions is
 not defined. Nonzero chi/phi and the other core geometry limitations listed
 above remain unsupported.
 
+.. _dwba-height-domains:
+
+Partially incoherent terrace heights
+--------------------------------------------------
+
+Keep the fitted surface and its native Poisson or Skellam probabilities when
+switching to DWBA::
+
+    from orgui.datautils.xrayutils.CTRincoherent import SurfaceHeightDomains
+
+    model = SurfaceHeightDomains(
+        crystal, surface="surface", incoherent_fraction=0.205,
+        optical_reference="shared",
+    )
+    model.validate(forward_model="dwba")
+    crystal.dwba.set_ctr_geometry(alpha_i=0.003)  # radians
+    channel = model.dwba.evaluate(h, k, l)        # reference-cell r.l.u.
+    intensity = model.dwba.polarization_reflectivity(
+        h, k, l, s_fraction=0.6, outgoing="unanalysed",
+    )
+    fit = CTROptimizer(model, ctrs)
+    fit.set_dwba()
+
+Every terrace state includes the semi-infinite substrate, all films, the
+surface termination and signed film replacement. Their amplitudes interfere
+within each state. Orientational domains retain their native coherent
+amplitude weights. Incident and analysed exit polarization channels are then
+summed in intensity. The result exposes ``reflectivity`` and
+``amplitude_prefactor``, with the same units as the coherent API, but has no
+mixed complex amplitude. The ``evaluate_from_glancing`` and
+``evaluate_from_vlieg`` variants accept angles in radians.
+
+Two optical-reference policies describe different physical assumptions:
+
+* ``shared`` (default) propagates all states through the native coherent
+  crystal's averaged optical profile. Each state's atomic and disordered
+  planar density is evaluated on those fields, and the common planar
+  reference is subtracted once. When state-dependent planar density is needed,
+  one common grid subdivides the reference slabs at all state boundaries
+  without changing their refractive indices. At zero incoherent
+  fraction this returns the existing coherent DWBA intensity exactly,
+  including its historical finite-support convention.
+* ``state_specific`` treats each terrace as its own stratified optical medium.
+  Each state receives its own Fresnel term and incident/exit fields. Before
+  coherent averaging, the amplitudes are translated to the averaged
+  reference's ambient phase origin. Its coherent endpoint is
+  :math:`|\sum_n p_n r_n|^2`; it generally differs from DWBA on the averaged
+  optical profile because the field solution is nonlinear in density.
+
+For both policies the fully incoherent endpoint is
+:math:`\sum_n p_n |r_n|^2`, and intermediate fractions interpolate between
+the two intensity endpoints. ``coherent_intensity`` and
+``incoherent_intensity`` expose those endpoints; the latter is ``None`` on
+the shared, zero-fraction fast path. Native retained terrace probabilities
+are normalized once using the same ``exact_layer_count`` and tail policy as
+kinematic height domains. A single height reproduces native coherent DWBA
+under either policy. For a Born comparison, match the polarization vector
+contractions and pass the kinematic empirical attenuation explicitly as
+``bulk_attenuation``; the DWBA default remains zero.
+
+Resolution convolution and sampling act on the mixed field intensity, before
+polarization-reduction factors, the central-point amplitude prefactor, and
+the square root used for structure-factor data. Independent components above
+the target stay at their mean stacked positions, as in the kinematic wrapper;
+water attached to the target follows its terrace. Shared fields currently
+require a layered optical reference; continuous water references require
+``state_specific``. Native DWBA geometry and polarization restrictions still
+apply.
+
+``optical_reference`` is included in ``to_config()`` and restored by the public
+incoherent-model factory; older configurations default to ``shared``. Shared
+fields for fully crystalline dry models evaluate a basis of Film-layer and
+termination corrections in one additional native call per channel. Prefix
+sums construct all complete terrace amplitudes, reusing the coherent
+substrate and common Film contributions. Fixed partial crystallinity also
+uses this basis off specular, where planar reference terms vanish.
+
+Other shared-field cases solve a single common optical grid and retain each
+state's packed records. State-specific references retain separate fields.
+Both paths reuse terrace preparations across channels and rods inside an
+evaluation batch; the optimizer opens one batch per objective evaluation.
+Scripts evaluating several rods can do the same::
+
+    with model.dwba.batch():
+        intensities = [model.dwba.polarization_reflectivity(
+            h, k, l, s_fraction=0.6, outgoing="unanalysed",
+        ) for h, k, l in rods]
+
+All terrace snapshots are released at batch exit, including after exceptions.
+Standalone calls automatically open a batch, so geometry, domain, roughness,
+order and optical changes are read on the next call. Models must not be
+changed inside a ``model.dwba.batch()`` scope. Native field-cache controls
+remain on ``crystal.dwba``. State-specific evaluation and state-dependent
+crystallinity still require more work than the shared correction basis.
+Private terrace field caches are also cleared at batch exit, so reference
+cycles cannot retain their arrays between fit proposals.
+
 Comparing a DWBA rod with a kinematical rod
 --------------------------------------------
 
@@ -623,7 +730,7 @@ API reference
    :member-order: bysource
 
 .. autoclass:: orgui.datautils.xrayutils.CTRdwba.DWBAState
-   :members: set_orientation, set_ctr_geometry, prepare, prepare_from_glancing, prepare_from_vlieg, evaluate, evaluate_prepared, evaluate_from_glancing, evaluate_from_vlieg, reflectivity, cache_info, clear_cache
+   :members: set_orientation, set_ctr_geometry, prepare, prepare_from_glancing, prepare_from_vlieg, evaluate, evaluate_prepared, evaluate_from_glancing, evaluate_from_vlieg, reflectivity, set_field_cache_capacity, cache_info, clear_cache
    :member-order: bysource
 
 .. automethod:: orgui.datautils.xrayutils.CTRopt.CTROptimizer.set_dwba

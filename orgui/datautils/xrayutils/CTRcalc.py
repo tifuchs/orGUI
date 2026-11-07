@@ -41,7 +41,9 @@ import errno
 from .CTRutil import ParameterType, Parameter, next_skip_comment
 
 from .CTRuc import WaterModel, UnitCell
-from .CTRfilm import EpitaxyInterface, Film, PoissonSurface
+from .CTRfilm import (
+    EpitaxyInterface, Film, PoissonSurface, RoughSurface, SkellamSurface,
+)
 from .CTRoptics import (
     _specular_reflection,
     add_structural_to_sampled_profile,
@@ -52,7 +54,9 @@ from .CTRoptics import (
     stratify_profile,
     top_layer_spacing,
 )
-from .CTRdistributions import PoissonProfile, SkellamProfile  # noqa: F401
+from .CTRdistributions import (  # noqa: F401
+    PoissonProfile, RecenteredSkellamProfile, SkellamProfile,
+)
 from .CTRcrystallinity import CrystallinityProfile  # noqa: F401
 from .CTRstacking import (  # noqa: F401
     LayerCycle,
@@ -190,13 +194,13 @@ class SXRDCrystal:
         self._stack_policy = None
         self.uc_surface_list = list(uc_surface)
         owned_water = [c.water for c in self.uc_surface_list
-                       if isinstance(c, PoissonSurface) and c.water is not None]
+                       if isinstance(c, RoughSurface) and c.water is not None]
         if any(w in self.uc_surface_list for w in owned_water):
             raise ValueError("Owned water cannot also be a top-level component.")
         self.enable_uc_stacking = keyargs.get("enable_stacking", False)
         if not self.enable_uc_stacking:
             for uc in self.uc_surface_list:
-                stackable = Film | PoissonSurface | EpitaxyInterface | WaterModel
+                stackable = Film | RoughSurface | EpitaxyInterface | WaterModel
                 if isinstance(uc, stackable):
                     self.enable_uc_stacking = True
                     break
@@ -574,7 +578,7 @@ class SXRDCrystal:
         component_ids = {id(c) for c in self.uc_surface_list}
         if any(
             id(getattr(c, "water", None)) in component_ids
-            for c in self.uc_surface_list if isinstance(c, PoissonSurface)
+            for c in self.uc_surface_list if isinstance(c, RoughSurface)
         ):
             raise ValueError("Owned water cannot also be a top-level component.")
         lower_layer_maps = {}
@@ -610,7 +614,7 @@ class SXRDCrystal:
                         layer_correspondence=lower_layer_maps.get(id(uc)))
                 if hasattr(uc, "stack_on"):
                     stack_kwargs = {"below_state": layer_state_new}
-                    if isinstance(uc, PoissonSurface):
+                    if isinstance(uc, RoughSurface):
                         stack_kwargs["below_component"] = below_component
                     try:
                         uc.stack_on(below_loc, below_height, below_layer,
@@ -1157,7 +1161,7 @@ class SXRDCrystal:
             if internal is not None:
                 raise ValueError("UnitCell components do not use 'unitcell'.")
             return component
-        if isinstance(component, Film | PoissonSurface):
+        if isinstance(component, Film | RoughSurface):
             if internal is not None:
                 return component[internal]
             return component.unitcell
@@ -1626,7 +1630,7 @@ class SXRDCrystal:
                 profile[:, 1:] *= weight
                 profiles.append(profile)
                 if (
-                    isinstance(component, PoissonSurface)
+                    isinstance(component, RoughSurface)
                     and component.water is not None
                 ):
                     water_components.append((component._sync_water(), weight))
@@ -1906,6 +1910,8 @@ class SXRDCrystal:
                 uc = Film.fromStr(strio.read())
             elif classname == "PoissonSurface":
                 uc = PoissonSurface.fromStr(strio.read())
+            elif classname == "SkellamSurface":
+                uc = SkellamSurface.fromStr(strio.read())
             else:
                 raise NotImplementedError(f"class name not understood: {classname}")
             uc.name = name

@@ -437,15 +437,7 @@ class CTROptimizer:
     def _validate_dwba_input(self):
         """Validate measurement metadata required by live DWBA prediction."""
         if isinstance(self.model, IncoherentModel):
-            # Rejected before any DWBA code runs. Changing the flat surface
-            # height changes the optical reference profile and its internal
-            # fields, so a kinematical F2 mixture is not a reflectivity and
-            # must never be reinterpreted as one.
-            raise ValueError(
-                f"{self.model.model_type} does not support the DWBA forward "
-                f"model: it returns {self.model.output_quantity}, not a "
-                "reflectivity"
-            )
+            self.model.validate(forward_model="dwba")
         if not isinstance(self.xtal, SXRDCrystal):
             raise TypeError("DWBA fitting requires an SXRDCrystal model")
         if self._fit_resolution and self.resolution_calculation == "sample":
@@ -786,12 +778,13 @@ class CTROptimizer:
     def _dwba_intensity_and_prefactor(self, ctr, angles):
         """Evaluate requested polarization pairs and return R and c."""
         reduction = ctr.reduction.polarization
-        state = self.xtal.dwba
+        state = self.model.dwba
         intensity = None
         prefactor = None
-        for polarization_i, polarization_f, weight in state._polarization_pairs(
+        pairs = self.xtal.dwba._polarization_pairs(
             reduction.s_fraction, reduction.outgoing
-        ):
+        )
+        for polarization_i, polarization_f, weight in pairs:
             result = state.evaluate_from_vlieg(
                 *(angles[name] for name in _DWBA_ANGLE_NAMES),
                 angles_in_ambient=getattr(ctr, "angles", None) is None,
@@ -884,7 +877,7 @@ class CTROptimizer:
         """Return shared model, observation, and uncertainty values per CTR.
         """
         if self._dwba_enabled:
-            with self.xtal.dwba.batch():
+            with self.model.dwba.batch():
                 predictions = [
                     self._calculated_value(ctr, index)
                     for index, ctr in enumerate(self.CTRs)

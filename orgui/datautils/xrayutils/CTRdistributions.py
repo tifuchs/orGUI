@@ -8,6 +8,7 @@ from scipy.stats import poisson, skellam
 
 
 DEFAULT_TAIL_PROBABILITY = 1e-10
+DEFAULT_MOMENT_TOLERANCE = 1e-10
 SURFACE_OCCUPANCY_TOLERANCE = 1e-12
 
 
@@ -218,6 +219,217 @@ class PoissonProfile(SurfaceProfile):
         return 1.0 - self._height_cdf(offsets)
 
 @dataclass(frozen=True)
+class RecenteredSkellamProfile(SurfaceProfile):
+    """Recenter a Skellam height distribution on integer structural layers.
+
+    Heights are ``Poisson(k_up*t) - Poisson(k_down*t) + Step(s)``, where
+    ``s = offset - (k_up-k_down)*t`` and ``Step(s)`` mixes the two adjacent
+    integers with mean ``s``. Thus the mean height is always ``offset``.
+    Zero offset conserves layer coverage; physical mass conservation also
+    requires equivalent material inventories in the transported layers.
+    This recentered family is not a constant-rate kinetic semigroup.
+
+    :param float t: Elapsed time in seconds, nonnegative.
+    :param float k_up: Upward single-layer event rate in inverse seconds.
+    :param float k_down: Downward single-layer event rate in inverse seconds.
+    :param float offset: Target mean displacement in structural layers.
+    :param float tail_probability: Maximum probability outside the support.
+    :param float moment_tolerance:
+        Maximum omitted absolute first moment, in structural layers.
+    """
+
+    t: float = 0.0
+    k_up: float = 0.0
+    k_down: float = 0.0
+    offset: float = 0.0
+    tail_probability: float = DEFAULT_TAIL_PROBABILITY
+    moment_tolerance: float = DEFAULT_MOMENT_TOLERANCE
+
+    def __post_init__(self):
+        for name in ("t", "k_up", "k_down", "offset",
+                     "tail_probability", "moment_tolerance"):
+            value = float(getattr(self, name))
+            if not np.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+            object.__setattr__(self, name, value)
+        if min(self.t, self.k_up, self.k_down) < 0:
+            raise ValueError("t, k_up and k_down must be nonnegative")
+        _validate_tail_probability(self.tail_probability)
+        if self.moment_tolerance <= 0:
+            raise ValueError("moment_tolerance must be positive")
+        if not np.isfinite(self.mu_up + self.mu_down):
+            raise ValueError("rate-time products and their sum must be finite")
+        if max(abs(self.offset),
+               abs(self.offset - self.mu_up + self.mu_down)) >= 2**52:
+            raise ValueError("centering shift exceeds float64 layer resolution")
+
+    @property
+    def mu_up(self):
+        """Return the dimensionless expected upward event count."""
+        return self.k_up * self.t
+
+    @property
+    def mu_down(self):
+        """Return the dimensionless expected downward event count."""
+        return self.k_down * self.t
+
+    @property
+    def expected_height_change(self):
+        """Return the target mean displacement in structural layers."""
+        return self.offset
+
+    @property
+    def mean(self):
+        """Return the actual mean height change in structural layers."""
+        return self.offset
+
+    @property
+    def variance(self):
+        """Return height variance in layers squared, including interpolation."""
+        _, fraction = self._shift()
+        return self.mu_up + self.mu_down + fraction * (1 - fraction)
+
+    def _shift(self):
+        shift = self.offset - (self.mu_up - self.mu_down)
+        lower = int(np.floor(shift))
+        return lower, shift - lower
+
+    def _raw_cdf(self, values, up, down):
+        values = np.floor(np.asarray(values, dtype=np.float64))
+        if up == 0 and down == 0:
+            result = (values >= 0).astype(np.float64)
+        elif down == 0:
+            result = poisson.cdf(values, up)
+        elif up == 0:
+            result = poisson.sf(-values - 1, down)
+        else:
+            result = skellam.cdf(values, up, down)
+        if not np.all(np.isfinite(result)):
+            raise ValueError("Skellam CDF could not be evaluated accurately")
+        return result
+
+    def _height_cdf(self, values):
+        lower, fraction = self._shift()
+        return ((1 - fraction) * self._raw_cdf(
+            np.asarray(values) - lower, self.mu_up, self.mu_down)
+            + fraction * self._raw_cdf(
+                np.asarray(values) - lower - 1, self.mu_up, self.mu_down))
+
+    def occupancy(self, offsets):
+        """Return ``P(H > n)`` at structural-layer offsets ``n``."""
+        lower, fraction = self._shift()
+        values = np.floor(np.asarray(offsets, dtype=np.float64))
+        # Reflect X to evaluate the small upper tail directly, rather than
+        # subtracting a CDF close to one (SciPy's generic discrete sf).
+        return ((1 - fraction) * self._raw_cdf(
+            lower - values - 1, self.mu_down, self.mu_up)
+            + fraction * self._raw_cdf(
+                lower - values, self.mu_down, self.mu_up))
+
+    def correction(self, offsets):
+        """Return the stable signed material correction to a sharp Film."""
+        offsets = np.asarray(offsets, dtype=np.float64)
+        return np.where(offsets < 0, -self._height_cdf(offsets),
+                        self.occupancy(offsets))
+
+    def probability(self, changes):
+        """Return masses at integer height changes; zero off the layer grid."""
+        changes = np.asarray(changes, dtype=np.float64)
+        lower, fraction = self._shift()
+
+        def pmf(values):
+            if self.mu_up == 0 and self.mu_down == 0:
+                return (values == 0).astype(np.float64)
+            if self.mu_down == 0:
+                return poisson.pmf(values, self.mu_up)
+            if self.mu_up == 0:
+                return poisson.pmf(-values, self.mu_down)
+            return skellam.pmf(values, self.mu_up, self.mu_down)
+
+        result = ((1 - fraction) * pmf(changes - lower)
+                  + fraction * pmf(changes - lower - 1))
+        if not np.all(np.isfinite(result)):
+            raise ValueError("Skellam PMF could not be evaluated accurately")
+        return np.where(changes == np.floor(changes), result, 0.0)
+
+    def surface_occupancy(self, offsets):
+        """Return exact exposed masses ``P(H=n+1)`` without folding tails."""
+        super().surface_occupancy(offsets)  # Validate the layer grid.
+        return self.probability(np.asarray(offsets) + 1)
+
+    def omitted_bounds(self, lower, upper):
+        """Bound probability and absolute first moment outside height bounds.
+
+        :param int lower: Inclusive retained height, at or below zero.
+        :param int upper: Inclusive retained height, at or above zero.
+        :returns: Probability bound and absolute first-moment bound in layers.
+
+        Chernoff bounds use the centered cumulant generating function;
+        Cauchy--Schwarz then bounds the omitted first moment. These conservative
+        bounds avoid cancellation between large signed raw Poisson moments.
+        """
+        if lower > 0 or upper < 0 or lower > upper:
+            raise ValueError("height bounds must contain zero")
+        if self.mu_up + self.mu_down == 0:
+            shift, fraction = self._shift()
+            heights = np.array([shift, shift + 1])
+            masses = np.array([1 - fraction, fraction])
+            omitted = (heights < lower) | (heights > upper)
+            return (float(np.sum(masses[omitted])),
+                    float(np.sum(np.abs(heights[omitted]) * masses[omitted])))
+        shift, fraction = self._shift()
+
+        def log_bound(sign, threshold):
+            if sign < 0 and self.mu_down == 0 and -threshold < shift:
+                return -np.inf
+            if (sign > 0 and self.mu_up == 0
+                    and threshold > shift + int(fraction > 0)):
+                return -np.inf
+            distance = threshold - sign * self.offset
+            if distance <= 0:
+                return 0.0
+            tilt = min(20.0, np.log1p(distance / (self.variance + 1)))
+            q = sign * tilt
+            # Each expm1 remainder is nonnegative, including near zero.
+            cgf = (self.mu_up * (np.expm1(q) - q)
+                   + self.mu_down * (np.expm1(-q) + q)
+                   + q * self.offset
+                   + np.log1p(fraction * np.expm1(q)) - fraction * q)
+            return min(0.0, cgf - tilt * threshold)
+
+        log_probability = min(0.0, np.logaddexp(
+            log_bound(-1, 1 - lower), log_bound(1, upper + 1)))
+        second_moment = self.variance + self.offset**2
+        moment = np.exp(0.5 * (np.log(second_moment) + log_probability))
+        return float(np.exp(log_probability)), float(moment)
+
+    def support(self):
+        """Return layer bounds satisfying probability and first-moment limits."""
+        shift, fraction = self._shift()
+        if self.mu_up + self.mu_down == 0:
+            return min(-1, shift - 1), max(0, shift + int(fraction > 0))
+        radius = max(2.0, 8 * np.sqrt(self.variance))
+        for _ in range(64):
+            lower = min(-1, int(np.floor(self.offset - radius)) - 1)
+            upper = max(0, int(np.ceil(self.offset + radius)))
+            if self.mu_down == 0:
+                lower = max(lower, min(-1, shift - 1))
+            if self.mu_up == 0:
+                upper = min(upper, max(0, shift + int(fraction > 0)))
+            if max(abs(lower), abs(upper)) >= 2**52:
+                raise ValueError("support exceeds float64 layer resolution")
+            probability, moment = self.omitted_bounds(lower + 1, upper + 1)
+            # Reserve margin for renormalization of a selected domain ensemble.
+            if (probability <= self.tail_probability / 4
+                    and moment <= self.moment_tolerance / 4
+                    and abs(self.offset) * probability
+                    <= self.moment_tolerance / 4):
+                return lower, upper
+            radius *= 1.5
+        raise ValueError("Could not bound the recentered Skellam support")
+
+
+@dataclass(frozen=True)
 class SkellamProfile:
     """Describe a two-sided Skellam interface profile.
 
@@ -279,4 +491,5 @@ class SkellamProfile:
 PROFILE_TYPES = {
     "poisson": PoissonProfile,
     "skellam": SkellamProfile,
+    "recentered_skellam": RecenteredSkellamProfile,
 }

@@ -7,6 +7,37 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- `SurfaceHeightDomains` and `PoissonHeightDomains` now evaluate native DWBA
+  terrace ensembles through their public `dwba` API and `CTROptimizer`.
+  Complete substrate-film-surface amplitudes retain interference within each
+  state, with native probabilities, partial coherence, polarization channels,
+  orientational domains, and intensity-first resolution broadening. Persisted
+  `shared` and `state_specific` optical-reference policies distinguish averaged
+  fields from separately solved terrace fields. Shared-field preparation handles
+  floating-point-coincident state/reference boundaries without moving averaged
+  optical interfaces or discarding resolvable state-reference splits.
+  Shared-field evaluation reuses complete common amplitudes and a native
+  terrace-correction basis where applicable. Evaluation batches reuse state
+  preparations, atom packing, and fields across channels and rods without
+  retaining stale fitted parameters.
+  Private terrace field caches are released at batch exit to reduce memory
+  retained between fit proposals.
+
+- Added `SkellamSurface` with elapsed time and upward/downward event rates.
+  Its recentered integer-layer profile preserves mean layer coverage, with
+  explicit probability and material-moment tail tolerances and exact
+  compensated Poisson limits. Physical mass conservation additionally requires
+  equal inventories in transported layers. The model supports fitting, native
+  saves, termination banks, attached water, crystallinity, and coherent DWBA.
+  `SurfaceHeightDomains` adds opt-in kinematic domain averaging for either
+  Skellam or Poisson surfaces; existing Poisson and interface models keep their
+  behavior.
+
+- DWBA's field cache now defaults to 16384 entries and supports a configurable
+  capacity. Dense requests larger than that capacity remain valid even when
+  required fields are evicted from the persistent cache; scattering amplitudes
+  and prepared-scan validity are unchanged.
+
 - Structural layers can override the unit-cell crystallinity, including internal
   planes in whole-cell surface terminations. Kinematic and DWBA amplitudes apply
   each layer's order to its own contrast while preserving physical density and

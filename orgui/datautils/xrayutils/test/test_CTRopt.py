@@ -2097,12 +2097,12 @@ class TestIncoherentWrapperIntegration(unittest.TestCase):
         for received in seen:
             self.assertIs(received, fit.xtal)
 
-    def test_dwba_is_rejected_during_preparation(self):
-        """An F2 wrapper must fail before any DWBA code runs."""
+    def test_dwba_requires_measurement_metadata_during_preparation(self):
+        """A height wrapper supports DWBA but still needs polarization metadata."""
         fit = self.optimizer(self.build())
         fit.set_dwba(True)
         with self.assertRaisesRegex(
-            ValueError, "does not support the DWBA forward model"
+            ValueError, "polarization-reduction metadata"
         ):
             fit.prepareFit()
 

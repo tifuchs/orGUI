@@ -9,7 +9,7 @@ import hashlib
 import numpy as np
 
 from ._CTRnative import HAS_CPP_ACCEL, _CTRcalc_cpp
-from .CTRfilm import EpitaxyInterface, Film, PoissonSurface
+from .CTRfilm import EpitaxyInterface, Film, RoughSurface
 from .CTRoptics import (
     HC_KEV_ANGSTROM,
     LayeredElectricField,
@@ -36,7 +36,7 @@ __all__ = [
 
 _CLASSICAL_ELECTRON_RADIUS_ANGSTROM = 2.8179403262e-5
 _PREPARATION_CACHE_SIZE = 32
-_FIELD_CACHE_SIZE = 4096
+_FIELD_CACHE_SIZE = 16384
 _OPTICAL_DELTA_TOLERANCE = 1e-9
 _OPTICAL_BETA_TOLERANCE = 1e-9
 
@@ -169,7 +169,7 @@ def _component_record_cells(component):
               for part in component._scattering_cells(cell, "bottom")),
             *(("interface_reference", cell) for cell in component._reference_layers),
         ]
-    if isinstance(component, PoissonSurface):
+    if isinstance(component, RoughSurface):
         if (np.any(component._basis_created != component.basis)
                 or component._repeat_state_changed()):
             component.createLayers()
@@ -657,6 +657,7 @@ class DWBAState:
         self._geometry_cache = OrderedDict()
         self._reference_cache = OrderedDict()
         self._field_cache = OrderedDict()
+        self._field_cache_capacity = _FIELD_CACHE_SIZE
         self._prepared_cache = OrderedDict()
         self._continuous_integral_cache = OrderedDict()
         self._water_contrast_cache = OrderedDict()
@@ -749,6 +750,24 @@ class DWBAState:
         self._geometry_cache.clear()
         self._prepared_cache.clear()
 
+    def set_field_cache_capacity(self, capacity):
+        """Set the maximum number of retained electric-field cache entries.
+
+        Entries are populated on demand. A request larger than the capacity
+        still evaluates in full; only its least-recent entries are evicted
+        from the persistent cache. Existing prepared scans remain usable.
+
+        :param int capacity: Positive entry count; default is 16384.
+        :raises ValueError: If ``capacity`` is not a positive integer.
+        """
+        if (isinstance(capacity, (bool, np.bool_))
+                or not isinstance(capacity, (int, np.integer))
+                or capacity < 1):
+            raise ValueError("Field cache capacity must be a positive integer.")
+        self._field_cache_capacity = int(capacity)
+        while len(self._field_cache) > self._field_cache_capacity:
+            self._field_cache.popitem(last=False)
+
     def clear_cache(self):
         """Clear all automatic DWBA geometry, reference, field, and scan caches."""
         self._geometry_cache.clear()
@@ -772,7 +791,7 @@ class DWBAState:
             "field_size": len(self._field_cache),
             "prepared_size": len(self._prepared_cache),
             "prepared_capacity": _PREPARATION_CACHE_SIZE,
-            "field_capacity": _FIELD_CACHE_SIZE,
+            "field_capacity": self._field_cache_capacity,
         }
 
     @contextmanager
@@ -812,14 +831,14 @@ class DWBAState:
         for component in self._crystal.uc_surface_list:
             if not isinstance(
                 component,
-                UnitCell | Film | EpitaxyInterface | PoissonSurface | WaterModel,
+                UnitCell | Film | EpitaxyInterface | RoughSurface | WaterModel,
             ):
                 raise NotImplementedError(
                     f"Unsupported DWBA component {type(component).__name__}."
                 )
 
     def _water_components(self):
-        if any(isinstance(c, PoissonSurface) and c.water is not None
+        if any(isinstance(c, RoughSurface) and c.water is not None
                and c.underlying_film is None for c in self._crystal.uc_surface_list):
             self._crystal.apply_stacking()
         result = []
@@ -830,7 +849,7 @@ class DWBAState:
                         "Owned water cannot also be a top-level component."
                     )
                 result.append((index, component))
-            elif isinstance(component, PoissonSurface) and component.water is not None:
+            elif isinstance(component, RoughSurface) and component.water is not None:
                 result.append((index, component._sync_water()))
         if len(result) > 1:
             raise ValueError("Only one water half-space is supported.")
@@ -1236,7 +1255,7 @@ class DWBAState:
                 self._field_cache[key] = reference.continuous.solve(
                     unique, polarization
                 )
-                while len(self._field_cache) > _FIELD_CACHE_SIZE:
+                while len(self._field_cache) > self._field_cache_capacity:
                     self._field_cache.popitem(last=False)
             else:
                 self._cache_counters["field_hits"] += len(unique)
@@ -1248,14 +1267,20 @@ class DWBAState:
         point_index = sorted_to_order[inverse_sorted]
         missing_values = []
         missing_keys = []
-        for angle in unique_values:
+        missing_indices = []
+        # Keep request-owned references before LRU eviction. Dense requests
+        # may exceed capacity, or their misses may evict earlier cache hits.
+        fields = [None] * len(unique_values)
+        for field_index, angle in enumerate(unique_values):
             key = self._field_cache_key(reference, polarization, angle)
             if key in self._field_cache:
                 self._cache_counters["field_hits"] += 1
                 self._field_cache.move_to_end(key)
+                fields[field_index] = self._field_cache[key]
             else:
                 missing_keys.append(key)
                 missing_values.append(float(angle))
+                missing_indices.append(field_index)
         if missing_values:
             self._cache_counters["field_misses"] += len(missing_values)
             solved = solve_electric_field(
@@ -1268,15 +1293,11 @@ class DWBAState:
             if not np.array_equal(solved.n, reference.n):
                 raise RuntimeError("The solved field does not use its frozen n0.")
             for index, key in enumerate(missing_keys):
-                self._field_cache[key] = self._slice_field(solved, index)
-            while len(self._field_cache) > _FIELD_CACHE_SIZE:
+                field = self._slice_field(solved, index)
+                self._field_cache[key] = field
+                fields[missing_indices[index]] = field
+            while len(self._field_cache) > self._field_cache_capacity:
                 self._field_cache.popitem(last=False)
-        fields = [
-            self._field_cache[
-                self._field_cache_key(reference, polarization, angle)
-            ]
-            for angle in unique_values
-        ]
         return (
             self._assemble_fields(fields, (len(fields),)),
             _readonly_array(point_index, np.int64),

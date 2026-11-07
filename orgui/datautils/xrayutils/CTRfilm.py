@@ -49,8 +49,10 @@ from .CTRcrystallinity import CrystallinityProfile, _bound_cell
 
 from .CTRuc import UnitCell, WaterModel, ctr_accel_enabled
 from .CTRdistributions import (
+    DEFAULT_MOMENT_TOLERANCE,
     DEFAULT_TAIL_PROBABILITY,
     PoissonProfile,
+    RecenteredSkellamProfile,
     SkellamProfile,
 )
 from .CTRstacking import (
@@ -296,19 +298,19 @@ class _LayerStackingMixin:
         :param profile: :class:`CrystallinityProfile`, Poisson/Skellam profile,
             or ``None`` to detach. Supplied objects are copied, so the occupancy
             distribution and the two interface sides stay independent.
-        :param str side: ``surface`` for PoissonSurface; ``top`` or ``bottom``
+        :param str side: ``surface`` for RoughSurface; ``top`` or ``bottom``
             for EpitaxyInterface (default ``top``).
         :returns: The owned, independently fittable profile, or None.
         """
         if isinstance(self, EpitaxyInterface):
             side = side or "top"
             valid = ("top", "bottom")
-        elif isinstance(self, PoissonSurface):
+        elif isinstance(self, RoughSurface):
             side = side or "surface"
             valid = ("surface",)
         else:
             raise TypeError(
-                "Order profiles belong to PoissonSurface or EpitaxyInterface.")
+                "Order profiles belong to RoughSurface or EpitaxyInterface.")
         if side not in valid:
             raise ValueError(f"Crystallinity side must be one of {valid}.")
         if isinstance(profile, (PoissonProfile, SkellamProfile)):
@@ -601,7 +603,8 @@ class _LayerStackingMixin:
         ):
             if getattr(self, "underlying_film", None) is not None:
                 source = self.underlying_film.unitcell
-                advance = (self.basis[0] + self.basis[2]) / len(self._layer_ids)
+                advance = (self._make_profile().expected_height_change
+                           / len(self._layer_ids))
                 registry = tuple(np.asarray(self._below_registry) +
                                  advance * np.r_[source.repeat_cartesian[:2], 0])
             elif getattr(self, "_layers_to_create", None) == 0:
@@ -2546,39 +2549,39 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
             return "   ".join(l)
 
 
-class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
-    """Signed step--Poisson growth or etching at a Film boundary.
+class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
+    """Shared Film replacement and termination assembly for height profiles.
 
-    ``W`` is the signed process mean in structural layers. ``alpha`` assigns
-    a fraction of its magnitude to Poisson roughening and the remainder to
-    ideal layer-by-layer progression. ``offset`` is an independent,
-    deterministic structural height shift. Positive ``W`` models growth and
-    negative ``W`` models dissolution or etching.
+    Construct a :class:`PoissonSurface` or :class:`SkellamSurface`. Heights and
+    profile parameters use structural layers, while stacking positions use
+    Angstrom. Each subclass supplies its basis and profile construction.
     """
 
-    parameterOrder = "W/layers alpha offset/layers"
-
-    parameterLookup = {"W": 0, "alpha": 1, "offset": 2}
-
-    parameterLookup_inv = {0: "W", 1: "alpha", 2: "offset"}
+    _profile_type = None
+    _numerical_defaults = {"tail_probability": DEFAULT_TAIL_PROBABILITY}
+    _settings_format = ".12g"
 
     def __init__(self, unitcell, **kwargs):
+        if self._profile_type is None:
+            raise TypeError("Construct PoissonSurface or SkellamSurface")
         super().__init__()
         self.water = None
         water = kwargs.pop("water", None)
         profile = kwargs.pop("profile", None)
-        if profile is not None and not isinstance(profile, PoissonProfile):
-            raise TypeError("PoissonSurface profile must be PoissonProfile")
+        if profile is not None and not isinstance(profile, self._profile_type):
+            raise TypeError(
+                f"{type(self).__name__} profile must be "
+                f"{self._profile_type.__name__}")
         self.profile = profile
         self.type = type
         self.set_ucs(unitcell, **kwargs)
         if profile is None:
-            self.basis = np.array([0.0, 1.0, 0.0])
+            self.basis = np.array(self._default_basis, dtype=float)
         else:
             self.basis = np.array(
-                [profile.mean_change, profile.alpha, profile.offset]
+                [getattr(profile, key) for key in self._basis_fields]
             )
-        self._basis_created = np.array([np.nan, np.nan, np.nan])
+        self._basis_created = np.full_like(self.basis, np.nan)
         self.basis_0 = self.basis.copy()
         self.errors = None
         if "name" in kwargs:
@@ -2599,6 +2602,25 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         self.film_layer_ucs = []
         self._initialize_layer_stacking(kwargs)
         self.attach_water(water)
+
+    @classmethod
+    def _profile_from_basis(cls, basis, **settings):
+        if np.shape(basis) != (len(cls._basis_fields),):
+            raise ValueError(
+                f"{cls.__name__} requires {len(cls._basis_fields)} parameters")
+        return cls._profile_type(*basis, **settings)
+
+    def _profile_settings(self):
+        return {name: getattr(self.profile, name, default)
+                for name, default in self._numerical_defaults.items()}
+
+    def _make_profile(self):
+        return self._profile_from_basis(self.basis, **self._profile_settings())
+
+    def _repeat_signature(self):
+        # Numerical profile settings also invalidate layer and optical caches.
+        return (super()._repeat_signature(),
+                tuple(self._profile_settings().items()))
 
     def set_ucs(self, unitcell, **kwargs):
         """Set a legacy source cell or explicit termination-cell mapping."""
@@ -3041,7 +3063,8 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             else self.unitcell
         )
         layer_height = film_uc.a[2] / len(self._layer_ids)
-        return self.below_H + layer_height * (self.basis[0] + self.basis[2])
+        return (self.below_H
+                + layer_height * self._make_profile().expected_height_change)
 
     def _profile_candidates(self):
         """Return the unmasked profile arrays for the live basis.
@@ -3053,21 +3076,11 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             Candidate layer numbers, occupancies, and masses.
         :rtype: _PoissonCandidates
         """
-        tail_probability = (
-            self.profile.tail_probability
-            if self.profile is not None
-            else DEFAULT_TAIL_PROBABILITY
-        )
-        profile = PoissonProfile(
-            mean_change=self.basis[0],
-            alpha=self.basis[1],
-            offset=self.basis[2],
-            tail_probability=tail_probability,
-        )
+        profile = self._make_profile()
+        tail_probability = profile.tail_probability
         support_low, support_high = profile.support()
         layer_numbers = np.arange(support_low, support_high + 1)
         material_occupancy = profile.occupancy(layer_numbers)
-        sharp_film_occupancy = (layer_numbers < 0).astype(np.float64)
         return _PoissonCandidates(
             profile=profile,
             layer_numbers=layer_numbers,
@@ -3075,7 +3088,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             surface_occupancy=profile.surface_occupancy(layer_numbers),
             # Layer n is the top filled layer when the height change is n + 1.
             exposed_probability=profile.probability(layer_numbers + 1),
-            film_correction_occupancy=material_occupancy - sharp_film_occupancy,
+            film_correction_occupancy=profile.correction(layer_numbers),
             tail_probability=tail_probability,
         )
 
@@ -3577,7 +3590,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         self._repeat_created = self._repeat_signature()
 
     def F_uc(self, h, k, l):  # noqa: E741
-        """Return the step--Poisson surface correction in electrons.
+        """Return the statistical surface correction in electrons.
 
         Positive occupancies add grown material and negative occupancies remove
         etched material relative to the sharp Film boundary. The amplitude
@@ -3694,12 +3707,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         abs_rel_no = len(self.parameters["absolute"]) + len(self.parameters["relative"])
         super().setFitParameters(x[:abs_rel_no])
         if self.profile is not None:
-            self.profile = PoissonProfile(
-                mean_change=self.basis[0],
-                alpha=self.basis[1],
-                offset=self.basis[2],
-                tail_probability=self.profile.tail_probability,
-            )
+            self.profile = self._make_profile()
         cursor = abs_rel_no
         for cell in self._owned_components():
             fp_no = len(cell.fitparnames)
@@ -3795,12 +3803,7 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             cell.updateFromParameters()
         super().updateFromParameters()
         if self.profile is not None:
-            self.profile = PoissonProfile(
-                mean_change=self.basis[0],
-                alpha=self.basis[1],
-                offset=self.basis[2],
-                tail_probability=self.profile.tail_probability,
-            )
+            self.profile = self._make_profile()
         self._refresh_legacy_terminations()
 
     def __getitem__(self, uc_name_or_index):
@@ -3921,15 +3924,9 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             )
         unitcells = cells if cells else legacy_uc
 
-        tail_probability = _parse_float_metadata(
-            string, "tail_probability", DEFAULT_TAIL_PROBABILITY
-        )
-        profile = PoissonProfile(
-            mean_change=basis[0],
-            alpha=basis[1],
-            offset=basis[2],
-            tail_probability=tail_probability,
-        )
+        settings = {key: _parse_float_metadata(string, key, default)
+                    for key, default in cls._numerical_defaults.items()}
+        profile = cls._profile_from_basis(basis, **settings)
         film = cls(
             unitcells,
             profile=profile,
@@ -3944,21 +3941,19 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
         return film
 
     def toStr(self, showErrors=True):
-        """Serialize the Poisson surface as plain text.
+        """Serialize the statistical surface as plain text.
 
         :param bool showErrors:
             Include propagated surface and nested unit-cell errors.
         :returns:
-            Plain-text Poisson-surface representation.
+            Plain-text surface representation.
         :rtype: str
         """
         # s = "type %s" % self.type
         s = "\n" + self.parameterOrder + "\n" + self.filmToStr(showErrors=showErrors)
-        if (
-            self.profile is not None
-            and self.profile.tail_probability != DEFAULT_TAIL_PROBABILITY
-        ):
-            s += f"\ntail_probability = {self.profile.tail_probability:.12g}"
+        for key, value in self._profile_settings().items():
+            if value != self._numerical_defaults[key]:
+                s += f"\n{key} = {value:{self._settings_format}}"
         s += self._order_to_str()
         metadata = self._stacking_metadata_to_str()
         if metadata:
@@ -3991,3 +3986,104 @@ class PoissonSurface(_LayerStackingMixin, LinearFitFunctions):
             for p in param:
                 l.append(f"{p:.5f} ")
             return "   ".join(l)
+
+
+class PoissonSurface(RoughSurface):
+    """Signed step--Poisson growth or etching at a Film boundary.
+
+    ``W`` is the signed process mean in structural layers. ``alpha`` assigns
+    a fraction of its magnitude to Poisson roughening and the remainder to
+    ideal layer-by-layer progression. ``offset`` is an independent,
+    deterministic structural height shift. Positive ``W`` models growth and
+    negative ``W`` models dissolution or etching.
+    """
+
+    parameterOrder = "W/layers alpha offset/layers"
+    parameterLookup = {"W": 0, "alpha": 1, "offset": 2}
+    parameterLookup_inv = {0: "W", 1: "alpha", 2: "offset"}
+    _profile_type = PoissonProfile
+    _basis_fields = ("mean_change", "alpha", "offset")
+    _default_basis = (0.0, 1.0, 0.0)
+
+
+class SkellamSurface(RoughSurface):
+    """Recentered integer-layer roughness at a Film boundary.
+
+    :param unitcell: Surface source cell or a mapping of termination cells.
+    :param RecenteredSkellamProfile profile:
+        Optional profile specifying time in seconds, rates in inverse seconds,
+        and a mean displacement in structural layers. The default is flat.
+
+    The basis is ``[t, k_up, k_down, offset]``. At zero offset this conserves
+    layer coverage, and mass when transported layers have equal inventories.
+    Fractional recentering mixes adjacent integer heights, adding at most
+    0.25 layers squared to the raw Skellam variance. Fix time when fitting rates
+    to a single snapshot. Etching support must stay inside the underlying Film.
+    """
+
+    parameterOrder = "t/s k_up/s^-1 k_down/s^-1 offset/layers"
+    parameterLookup = {"t": 0, "k_up": 1, "k_down": 2, "offset": 3}
+    parameterLookup_inv = {0: "t", 1: "k_up", 2: "k_down", 3: "offset"}
+    _profile_type = RecenteredSkellamProfile
+    _basis_fields = ("t", "k_up", "k_down", "offset")
+    _default_basis = (0.0, 0.0, 0.0, 0.0)
+    _settings_format = ".17g"
+    _numerical_defaults = {
+        "tail_probability": DEFAULT_TAIL_PROBABILITY,
+        "moment_tolerance": DEFAULT_MOMENT_TOLERANCE,
+    }
+
+    def _profile_candidates(self):
+        candidates = super()._profile_candidates()
+        if self.underlying_film is not None:
+            available = self.underlying_film._layers_to_create
+            if candidates.layer_numbers[0] + 1 < -available:
+                raise ValueError(
+                    "SkellamSurface etching support extends below the "
+                    "underlying Film; increase Film width or reduce roughness")
+        return candidates
+
+    @staticmethod
+    def _coherent_retention(candidates):
+        # The profile's support controls omitted material, not per-bin mass.
+        # Dropping individually small corrections would lose that bound.
+        return np.ones(candidates.layer_numbers.size, dtype=bool)
+
+    @staticmethod
+    def _height_state_selection(candidates, exact_layer_count):
+        if int(exact_layer_count) != exact_layer_count or exact_layer_count < 1:
+            raise ValueError("exact_layer_count must be a positive integer")
+        masses = candidates.exposed_probability
+        total = float(np.sum(masses))
+        if total <= 0 or not np.isfinite(total):
+            raise ValueError("Skellam surface has no retained height mass")
+        heights = candidates.layer_numbers + 1
+        profile = candidates.profile
+        mean = float(masses @ heights / total)
+        if abs(mean - profile.mean) > profile.moment_tolerance:
+            raise ValueError("Retained Skellam states exceed moment_tolerance")
+        # Keep the complete support chosen by both tail and moment bounds.
+        lower = float(profile._height_cdf(heights[0] - 1))
+        upper = float(profile.occupancy(heights[-1]))
+        return 0, len(masses) - 1, masses / total, total, lower, upper
+
+    def parametersToDict(self):
+        """Return fit settings including numerical profile tolerances."""
+        result = super().parametersToDict()
+        result["profile_settings"] = self._profile_settings()
+        return result
+
+    def parametersFromDict(self, d, override_values=True):
+        """Restore fit settings and numerical profile tolerances."""
+        settings = d.get("profile_settings", self._profile_settings())
+        if set(settings) != set(self._numerical_defaults):
+            raise ValueError("Invalid SkellamSurface profile_settings")
+        self.profile = self._profile_from_basis(self.basis, **settings)
+        super().parametersFromDict(d, override_values)
+
+    def filmToStr(self, showErrors=True):
+        """Serialize rates and time without rounding their product or shift."""
+        if self.errors is not None and showErrors:
+            return "   ".join(f"({p:.17g} +- {err:.17g})"
+                              for p, err in zip(self.basis, self.errors))
+        return "   ".join(f"{p:.17g}" for p in self.basis)

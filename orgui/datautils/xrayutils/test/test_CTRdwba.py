@@ -1060,6 +1060,70 @@ def test_unit_cell_surface_support_and_missing_native_extension_errors():
             crystal.dwba.prepare_from_glancing(0.0, 0.0, 0.04, 0.04)
 
 
+def test_field_cache_capacity_can_be_extended_and_shrunk():
+    """Changing retention limits preserves prepared scans and validates input."""
+    state = CTRcalc.SXRDCrystal(_one_atom_cell()).dwba
+    assert state.cache_info()["field_capacity"] == 16384
+    state.set_field_cache_capacity(np.int64(32768))
+    assert state.cache_info()["field_capacity"] == 32768
+    angles = np.linspace(0.03, 0.08, 8)
+    prepared = state.prepare_from_glancing(0.0, 0.0, angles, angles)
+    before = state.evaluate_prepared(prepared).F_effective
+    assert state.cache_info()["field_size"] == 8
+    state.set_field_cache_capacity(3)
+    assert state.cache_info()["field_size"] == 3
+    np.testing.assert_array_equal(
+        state.evaluate_prepared(prepared).F_effective, before,
+    )
+    for invalid in (0, -1, True, np.bool_(False), 2.5, "12", None):
+        with pytest.raises(ValueError, match="positive integer"):
+            state.set_field_cache_capacity(invalid)
+        assert state.cache_info()["field_capacity"] == 3
+    state.clear_cache()
+    assert state.cache_info()["field_size"] == 0
+    assert state.cache_info()["field_capacity"] == 3
+
+
+def test_oversized_field_request_keeps_hits_after_lru_eviction():
+    """Mixed hits and misses retain exact field order beyond cache capacity."""
+    state = CTRcalc.SXRDCrystal(_one_atom_cell()).dwba
+    angles = np.array([0.06, 0.04, 0.08, 0.07, 0.04, 0.05, 0.06])
+    expected = state.evaluate_from_glancing(
+        0.0, 0.0, angles, angles,
+    ).F_effective
+    state.clear_cache()
+    state.set_field_cache_capacity(2)
+    state.prepare_from_glancing(0.0, 0.0, angles[:2], angles[:2])
+    hits_before = state.cache_info()["field_hits"]
+    prepared = state.prepare_from_glancing(0.0, 0.0, angles, angles)
+    assert state.cache_info()["field_hits"] > hits_before
+    assert state.cache_info()["field_size"] == 2
+    np.testing.assert_array_equal(
+        state.evaluate_prepared(prepared).F_effective, expected,
+    )
+    state.clear_cache()
+    np.testing.assert_array_equal(
+        state.evaluate_prepared(prepared).F_effective, expected,
+    )
+
+
+def test_dense_dwba_scan_exceeding_original_field_capacity():
+    """A scan larger than the old limit agrees with independent scalar calls."""
+    state = CTRcalc.SXRDCrystal(_one_atom_cell()).dwba
+    state.set_field_cache_capacity(4096)
+    angles = np.linspace(0.01, 0.08, 4097)
+    result = state.evaluate_from_glancing(0.0, 0.0, angles, angles)
+    assert state.cache_info()["field_size"] == 4096
+    assert np.all(np.isfinite(result.F_effective))
+    for index in (0, 2048, 4096):
+        single = state.evaluate_from_glancing(
+            0.0, 0.0, angles[index], angles[index],
+        )
+        np.testing.assert_allclose(
+            result.F_effective[index], single.F_effective, rtol=1e-13, atol=1e-13,
+        )
+
+
 def test_cache_clear_and_info_contract():
     crystal = CTRcalc.SXRDCrystal(_one_atom_cell())
     crystal.dwba.prepare_from_glancing(0.0, 0.0, 0.04, 0.04)

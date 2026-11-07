@@ -936,7 +936,8 @@ class TestPoissonHeightDomainsContract(PoissonModelMixin):
         self.assertEqual(config["type"], "poisson_height_domains")
         self.assertEqual(
             config["settings"],
-            {"surface": "surface", "exact_layer_count": 7},
+            {"surface": "surface", "exact_layer_count": 7,
+             "optical_reference": "shared"},
         )
 
         restored = create_incoherent_model_from_config(crystal, config)
@@ -1064,12 +1065,11 @@ class TestPoissonHeightDomainsContract(PoissonModelMixin):
                         crystal, surface="surface", exact_layer_count=bad
                     )
 
-    def test_dwba_is_refused_before_any_prediction(self):
-        """An F2 wrapper must never be reinterpreted as a reflectivity."""
+    def test_dwba_is_supported_through_separate_intensity_api(self):
+        """The height wrapper exposes native DWBA separately from kinematic F2."""
         model, _, _, _ = self.model(self.PROFILE)
         model.validate(forward_model="kinematical")
-        with self.assertRaisesRegex(ValueError, "does not support"):
-            model.validate(forward_model="dwba")
+        model.validate(forward_model="dwba")
 
     def test_survives_the_deep_copy_the_optimizer_performs(self):
         """Component selection by name must outlive a copy."""

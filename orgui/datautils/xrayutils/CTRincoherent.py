@@ -21,7 +21,7 @@
 # THE SOFTWARE.
 #
 # ###########################################################################*/
-"""Incoherent kinematical CTR models.
+"""Incoherent CTR models with kinematical and terrace DWBA evaluation.
 
 An incoherent model wraps one coherent :class:`CTRcalc.SXRDCrystal` and
 returns a squared structure factor for a mixed state. Constructing a wrapper
@@ -55,17 +55,21 @@ from types import MappingProxyType
 import numpy as np
 
 from .CTRcalc import SXRDCrystal
-from .CTRfilm import PoissonSurface
+from .CTRfilm import PoissonSurface, RoughSurface
 from .CTRutil import LinearFitFunctions
+from ._CTRincoherent_dwba import DWBAEnsembleResult, SurfaceHeightDWBA
 
 __all__ = [
     "CoherentStateEnsembleModel",
+    "DWBAEnsembleResult",
     "IncoherentF2Model",
     "IncoherentModel",
     "IncoherentModelInfo",
     "IncoherentState",
     "KinematicIncoherentContext",
     "PoissonHeightDomains",
+    "SurfaceHeightDomains",
+    "SurfaceHeightDWBA",
     "available_incoherent_models",
     "create_incoherent_model",
     "create_incoherent_model_from_config",
@@ -882,36 +886,43 @@ def create_incoherent_model_from_config(crystal, config):
 
 
 @register_incoherent_model(builtin=True)
-class PoissonHeightDomains(CoherentStateEnsembleModel):
-    """Laterally large height domains on a Poisson-roughened surface.
+class SurfaceHeightDomains(CoherentStateEnsembleModel):
+    """Laterally large height domains on a statistical rough surface.
 
     Each coherence patch sees one flat height drawn from the surface's
-    ``PoissonProfile``. The states are the complete coherent amplitudes of the
+    height profile. The states are the complete coherent amplitudes of the
     crystal at those heights, so bulk-surface and Film-surface interference
     stays inside each domain, and ``incoherent_fraction`` interpolates between
     the coherent limit and their squared average.
 
-    Constructing this wrapper is the opt-in: the ``PoissonSurface`` it targets
+    Constructing this wrapper is the opt-in: the ``RoughSurface`` it targets
     stays an ordinary coherent structural model on its own.
 
     :param CTRcalc.SXRDCrystal crystal:
         Coherent crystal to wrap.
     :param str surface:
-        Stable name of the target ``PoissonSurface`` component.
+        Stable name of the target ``PoissonSurface`` or ``SkellamSurface``.
     :param float incoherent_fraction:
         Dimensionless mixing fraction ``kappa`` in ``[0, 1]``. Zero is fully
         coherent, one is the large-domain limit.
     :param int exact_layer_count:
         Retain every height state when the profile populates no more than
         this many. A policy switch, not a cap.
+    :param str optical_reference:
+        DWBA policy: ``shared`` uses the native averaged optical profile;
+        ``state_specific`` solves each flat terrace's optical fields. The
+        latter's coherent endpoint is the probability-weighted amplitude
+        sum in a common phase gauge, not the averaged-profile DWBA result.
     :param str name:
         Wrapper name, the default prefix for its local parameter.
     :raises ValueError:
-        If the target is missing, duplicated, not a ``PoissonSurface``, or
+        If the target is missing, duplicated, not a ``RoughSurface``, or
         the fraction is out of range.
     """
 
-    model_type = "poisson_height_domains"
+    model_type = "surface_height_domains"
+    supported_forward_models = frozenset({"kinematical", "dwba"})
+    _surface_type = RoughSurface
     parameterLookup = {"incoherent_fraction": 0}
     parameterLookup_inv = {0: "incoherent_fraction"}
 
@@ -922,6 +933,7 @@ class PoissonHeightDomains(CoherentStateEnsembleModel):
         surface,
         incoherent_fraction=0.0,
         exact_layer_count=10,
+        optical_reference="shared",
         name="incoherent",
     ):
         super().__init__(crystal, name=name)
@@ -932,6 +944,7 @@ class PoissonHeightDomains(CoherentStateEnsembleModel):
         ):
             raise ValueError("exact_layer_count must be a positive integer")
         self.exact_layer_count = int(exact_layer_count)
+        self.optical_reference = optical_reference
         # One local basis entry, so a fixed fraction and a fitted one are the
         # same stored value. `basis_0` is seeded too, because
         # `updateFromParameters` rebuilds `basis` from it whenever the
@@ -941,6 +954,29 @@ class PoissonHeightDomains(CoherentStateEnsembleModel):
         self.errors = None
         self.incoherent_fraction = incoherent_fraction
         self._validate_target()
+
+    @property
+    def optical_reference(self):
+        """Return the DWBA optical-field policy, independent of fit parameters."""
+        return self._optical_reference
+
+    @optical_reference.setter
+    def optical_reference(self, value):
+        if value not in {"shared", "state_specific"}:
+            raise ValueError("optical_reference must be shared or state_specific")
+        self._optical_reference = value
+
+    @property
+    def dwba(self):
+        """Return the native terrace DWBA intensity API.
+
+        Configure geometry and orientation on ``coherent_model.dwba``.
+        ``evaluate*`` returns field intensities, never a mixed amplitude.
+        Coordinates are r.l.u.; glancing and Vlieg angles are radians.
+        """
+        if getattr(self, "_dwba_ensemble", None) is None:
+            self._dwba_ensemble = SurfaceHeightDWBA(self)
+        return self._dwba_ensemble
 
     @property
     def incoherent_fraction(self):
@@ -960,12 +996,12 @@ class PoissonHeightDomains(CoherentStateEnsembleModel):
         self.basis_0[0] = value
 
     def target_surface(self):
-        """Return the targeted ``PoissonSurface`` component.
+        """Return the targeted rough surface component.
 
         Selection is by stable name: component identities do not survive the
         deep copy the optimizer performs once per fit.
 
-        :rtype: CTRfilm.PoissonSurface
+        :rtype: CTRfilm.RoughSurface
         :raises ValueError:
             If no component, or more than one, carries the name.
         """
@@ -992,7 +1028,7 @@ class PoissonHeightDomains(CoherentStateEnsembleModel):
         return matches[0]
 
     def _validate_target(self):
-        """Check that the named component is a Poisson surface.
+        """Check that the named component has the accepted surface type.
 
         The target does not have to be the topmost component. Anything
         stacked above it is placed by ``apply_stacking`` at the surface's
@@ -1004,10 +1040,10 @@ class PoissonHeightDomains(CoherentStateEnsembleModel):
         See :meth:`_iter_states` for what that approximation costs.
         """
         target = self.target_surface()
-        if not isinstance(target, PoissonSurface):
+        if not isinstance(target, self._surface_type):
             raise ValueError(
                 f"Component {self.surface!r} is a "
-                f"{type(target).__name__}, not a PoissonSurface"
+                f"{type(target).__name__}, not a {self._surface_type.__name__}"
             )
 
     def _validate_model(self, forward_model):
@@ -1051,4 +1087,18 @@ class PoissonHeightDomains(CoherentStateEnsembleModel):
         return {
             "surface": self.surface,
             "exact_layer_count": self.exact_layer_count,
+            "optical_reference": self.optical_reference,
         }
+
+
+@register_incoherent_model(builtin=True)
+class PoissonHeightDomains(SurfaceHeightDomains):
+    """Compatibility wrapper for large height domains on a PoissonSurface.
+
+    Accepts the same parameters as :class:`SurfaceHeightDomains`, retaining
+    the historical target type and persistence key. For Skellam surfaces use
+    :class:`SurfaceHeightDomains`.
+    """
+
+    model_type = "poisson_height_domains"
+    _surface_type = PoissonSurface
