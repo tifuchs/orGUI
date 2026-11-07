@@ -234,3 +234,103 @@ follow-up diagnoses and measures the issue; runtime implementation is unchanged.
 Reproduce with the benchmark's `--section kinematic` option and a new output
 filename. The run stores paired timings, exact cache misses and the profile;
 the original measurements are in `output/dissolution/kinematic_redundancy.json`.
+
+## DWBA root-cause follow-up
+
+`benchmarks/audit_dissolution_dwba_reuse.py` adds temporary native reuse
+controls, without editing the runtime implementation or C++ kernel:
+
+- `state_batches` enters every private state's existing native batch context,
+  shares the immutable cell-profile cache, and clears private persistent caches
+  at exit. The production wrapper enters only the averaged crystal's batch.
+- `shared_prepared` additionally reuses the common prepared fields, replacing
+  only state identity and regridded atomic/reference shares. It asserts exact
+  equality of union-grid boundaries and values before reuse. It retains the
+  original all-state union grid and all probabilities.
+
+First-call work counts on C1 (32-ray diagnostic, same 55 nonzero states):
+
+| Shared-field control | Snapshot builds | Packings | Preparations | Field solves | Distinct field-solver inputs | Native scattering calls |
+| --- | --- | --- | --- | --- | --- | --- |
+| Current implementation | 111 | 56 | 57 | 114 | 4 | 56 |
+| Native state batches | 56 | 56 | 57 | 114 | 4 | 56 |
+| Batches + common preparation | 56 | 56 | 2 | 4 | 4 | 56 |
+
+On an identical second call, current code rebuilds 110 snapshots and 55
+packings; both controls rebuild neither. Common preparation reduces the second
+call to one explicit preparation. The remaining first-call pair prepares an
+initial averaged reference and then the refined union reference; a future
+implementation can order assembly before field preparation to avoid that
+initial unused reference preparation.
+
+The state-specific case is different: its 112 solver calls have 112 distinct
+inputs. Those fields cannot be shared merely because atomic material overlaps.
+Its redundant repeated snapshots/packings still disappear with native batches.
+
+Paired 512-ray timings, three alternating-order trials for fresh medians:
+
+| Policy/control | Fresh median, seconds | Identical in-batch repeat, seconds |
+| --- | --- | --- |
+| Shared, current | 7.438 | 5.984 |
+| Shared, native state batches | 6.535 | 4.020 |
+| Shared, batches + common preparation | 4.904 | 3.924 |
+| State-specific, current | 6.298 | 4.959 |
+| State-specific, native state batches | 5.968 | 3.762 |
+
+Repeat timings are single observations. Batch entry is about 0.023–0.028 s for
+current code and 0.047–0.051 s for the controls, which eagerly create the private
+states. These paired-run timings differ from the earlier host timings; compare
+within a run rather than interpreting that change as a code speedup. C1's mixed,
+coherent and incoherent outputs are bitwise unchanged in these controls. A
+further 24 comparisons cover s/s, s/p, p/s, p/p, mixed specular/non-specular
+coordinates, damping, interface removal and near-exhaustion states; the maximum
+relative change is `1.78e-15` (acceptance `rtol=1e-10`, `atol=1e-28`).
+
+### Why native batching does not remove the main 512-ray cost
+
+The final master dispatcher in `cpp/CTRdwba_cpp.hpp` selects its bounded native
+finite-scattering cache only for calls of at most **128 rays**, with a 1 MiB
+limit per cache entry. This is unrelated to any distribution state-count limit.
+At 512 rays the uncached kernel is selected even with a native batch active.
+Measured shared-preparation control counts confirm it:
+
+| Rays | First / repeated finite-cache hits | First / repeated normal-phase exponentials |
+| --- | --- | --- |
+| 32 | 0 / 55 | 2,350,848 / 1,067,520 |
+| 512 | 0 / 0 | 37,613,568 / 37,613,568 |
+
+The 512-ray legacy shared-height implementation performs two native scattering
+calls and 2,134,528 normal-phase exponentials, versus 56 calls and 37,613,568 for
+dissolution even after these controls. Thus Python caching alone cannot close
+the gap. A material-aware common/per-layer amplitude basis on the shared fields
+is the larger algorithmic opportunity. The existing surface-only basis cannot
+be applied blindly across mixed-interface removal and exhaustion. Neither the
+128-ray threshold nor memory bound was changed in this assessment.
+
+### Unused averaged-crystal scattering in state-specific mode
+
+The wrapper always calls `average.evaluate_prepared`. In state-specific mode
+none of that result's scattered amplitudes or intensities are consumed: the
+coherent intensity is computed from the state amplitude sum, and only the
+averaged result's geometry-derived `amplitude_prefactor` is used at return.
+The `state_batches_no_average` diagnostic substitutes an object exposing only
+the native prefactor property, so any other result access would fail. C1 is
+bitwise unchanged and eight boundary/polarization checks agree within
+`1.45e-15`; packings and scattering calls drop from 56 to 55. This control
+retains the averaged preparation and phase reference, and does not assume that
+the distinct state fields can be merged. Its one-pair timing is not used to
+claim a stable percentage speedup.
+
+### Reproduction and implementation boundary
+
+Run `python -m benchmarks.audit_dissolution_dwba_reuse` with `--request-dir`
+as above, `--policy shared` or `state_specific`, and a new `--output` JSON.
+Optional `--points` and `--repeats` control the timing workload. The helper
+`_counts(policy, mode, points)` provides the 32/512-ray native-work probes;
+`_control("state_batches_no_average")` isolates the unused averaged scattering.
+Raw outputs are `output/dissolution/dwba_reuse_shared.json`,
+`dwba_reuse_state_specific.json`, `dwba_reuse_native_limits.json` and
+`dwba_reuse_legacy_native_work.json`. Native state/field reuse and removal of
+unused work are diagnostic controls only, not yet production changes. Any
+implementation must also validate changed rods/channels within a batch,
+parameter updates between batches, exception cleanup and cache lifetime.
