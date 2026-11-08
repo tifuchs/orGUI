@@ -1932,11 +1932,12 @@ class ROIAdvancedOptions(qt.QWidget):
 
         backgroundFitLayout = qt.QGridLayout()
         self._backgroundFitOrder = qutils.CompactSpinBox()
-        self._backgroundFitOrder.setRange(0, 2)
+        self._backgroundFitOrder.setRange(0, 4)
         self._backgroundFitOrder.setValue(1)
         self._backgroundFitOrder.setToolTip(
             "Polynomial order for the local background fit: "
-            "0=constant, 1=plane, 2=quadratic."
+            "0=constant, 1=plane, 2=quadratic, 3=cubic, 4=quartic. "
+            "The fit includes all terms up to the selected total degree."
         )
         backgroundFitLayout.addWidget(qt.QLabel("Polynomial order:"), 0, 0)
         backgroundFitLayout.addWidget(self._backgroundFitOrder, 0, 1)

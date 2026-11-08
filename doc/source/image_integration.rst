@@ -449,6 +449,45 @@ while the arm is at its calibrated position, so a fixed-arm scan is unchanged.
 The reciprocal-space reconstruction applies the polarization per pixel and
 does not carry this correction.
 
+Fitted Local Background
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The optional local background fit supports polynomial degrees zero through
+four. Degree zero is constant, degree one is a plane, and higher degrees
+include every two-dimensional term of total degree up to the selected order
+(for example, degree two includes :math:`x^2`, :math:`xy`, and :math:`y^2`).
+The default remains degree one. The selected degree is saved with the ROI
+settings and also controls the fitted-background preview.
+
+Only original, unmasked, non-NaN background pixels enter the unweighted fit.
+If there are too few independent samples, the fit tries successively lower
+degrees. With no usable background samples, no fitted background is subtracted.
+Coordinates are centered on the signal ROI; cubic and quartic fits also scale
+coordinates over the complete fit support to reduce numerical conditioning
+problems. A larger polynomial degree requires more independent background
+samples and is not evidence that the physical background has that shape.
+
+Fitted-background counting errors propagate the fit's linear influence
+weights. They include repeated pixels in overlapping background regions and
+covariance when signal and background footprints overlap. For signal sum
+:math:`S`, stored background estimator :math:`B`, and background multiplier
+:math:`r`, the propagated variance is
+
+.. math::
+
+   \operatorname{Var}(S-rB) = \operatorname{Var}(S)
+       + r^2 \operatorname{Var}(B) - 2r\operatorname{Cov}(S,B).
+
+Original detector counts supply the Poisson variance estimates; these errors
+do not quantify bias from an unsuitable background model. Saved versioned
+curves retain separate signal/background variances, their covariance, and the
+uncertainty convention. Previously saved curves retain their existing values.
+
+For repeated frames with fixed ROIs, the integration reuses an immutable fit
+plan built from that job's mask and settings. A change in valid background
+pixels rebuilds the affected fit. Moving ROI footprints require a new fit;
+cubic and quartic fits therefore cost more on that path.
+
 The Corrections Dialog
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -903,5 +942,69 @@ explicit:
 * repaired pixels do not contribute to fitted-background samples;
 * repaired pixels do not alter fitted-background preview images.
 
-For fitted local background integration, repair is currently disabled and orGUI
-logs a warning. The original mask is used for the fitted-background path.
+For fitted local background integration, successful repairs extend the signal
+and predicted-background footprints. The fit still uses only original valid
+background samples. Its counting covariance includes shared donors between
+the repaired signal and the fitted background.
+
+Counting Uncertainty
+^^^^^^^^^^^^^^^^^^^^
+
+The ROI uncertainty follows original detector samples rather than treating
+each repaired pixel as another independent Poisson measurement. Multi-pixel
+weighted repairs propagate their fixed coefficients, including covariance
+between repaired pixels, directly counted donors, and background estimators.
+Overlapping background strips also retain their repeated-sample covariance.
+
+An isolated-pixel median is nonlinear. Its uncertainty uses an explicit local
+model: original donors are independent Poisson samples with one common rate
+per connected donor neighborhood. Neighborhoods are connected when their
+repairs share original valid donors. The rate estimate is the arithmetic mean
+of the distinct original donor counts in that connected neighborhood. Repaired
+values never enter this estimate. The same rate supplies the directly counted
+donor variances whenever that neighborhood contributes a repaired signal.
+Neighborhoods containing only weighted repairs retain independent per-donor
+count estimates and do not require the common-rate assumption.
+
+Median intensities retain the original sample median, including the mean of
+the two middle values for an even donor count. Deterministic Poisson
+order-statistic calculations account for ties, odd/even counts, covariance
+with original donors, and overlapping medians. Prepared moment tables use a
+common rate grid and linear interpolation of complete covariance entries.
+This preserves positive semidefiniteness; it does not freeze the observed
+middle-donor identities. Missing donors change the dependency graph. Uncached
+donor-count/overlap combinations are evaluated at the same grid endpoints,
+without per-frame simulation.
+
+This is a **model-conditioned, estimated-rate counting uncertainty**. A peak,
+gradient, or other spatial structure can violate the common-rate assumption.
+Interpolation bias and error in the intensity model are not included. Rate
+estimation uncertainty is not separately propagated, and the plug-in moment
+estimate can be biased at low counts. For example, six equal-rate donors at
+0.3 counts have median variance about 0.0661 counts squared, whereas averaging
+the plug-in variance over repeated samples gives about 0.0743. These are
+distinct from numerical table interpolation errors.
+
+The validated median model supports up to 32 donors and rates through
+:math:`10^8` counts per donor. Default radius two uses at most 12 donors;
+radius three uses at most 28. Larger radii can exceed the supported domain.
+Intensities are preserved, but affected ROI uncertainties are stored as
+``NaN`` rather than receiving an unvalidated approximation. The application
+warns when the planned geometry contains such neighborhoods. Negative or
+nonfinite donor counts also make that neighborhood's uncertainty unavailable.
+Tables extend through :math:`2^{20}` counts; rates outside the table interval
+but within the supported model domain use deterministic evaluation, which
+can cost more than a lookup.
+
+The geometry and tables are immutable snapshots for one job's mask and repair
+settings. Normal frames reuse their dependency graph; altered valid-donor
+subsets rebuild it. Geometry-independent moment tables are shared across jobs
+in a process cache bounded to 32 MiB; first use of a new donor-count/overlap
+combination has a preparation cost. Preparation is restricted to the job's
+signal footprints; connected-neighborhood rate estimates still use the full
+set of original donors. Saved curves retain separate
+signal/background variances, their covariance, and the
+``median_poisson_neighborhood_plugin_v1`` convention.
+No migration changes existing curves: repeat extraction to obtain these new
+uncertainties. Reference background images are treated as fixed; their own
+measurement uncertainty is not included.

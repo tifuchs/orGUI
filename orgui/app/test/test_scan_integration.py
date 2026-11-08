@@ -1372,6 +1372,179 @@ def test_rocking_frames_fill_final_datasets_once(context, monkeypatch, backgroun
         assert group["ctr_curve_v3/base/croi_variance"].id == group["rois/croi"].id
 
 
+@pytest.mark.parametrize("degree", [2, 3, 4])
+def test_polynomial_covariance_survives_rocking_batches(context, degree):
+    """Saved variances follow fit influence weights, rather than fitted counts."""
+    ctx, scan, file = context
+    options = ctx.scanSelector.get_integration_options()
+    options["advanced"].update(fitted_background=True, fitted_background_order=degree)
+    ctx = replace(ctx, scanSelector=integration.prepared_selector(
+        options, 0, [0, 0, 0], [0, 0, 1], [3, 3], None
+    ))
+    line = _prepared_line(ctx)
+    line["rois"].update(
+        left=[(slice(0, 2), slice(0, 6))],
+        right=[(slice(4, 6), slice(0, 6))],
+        top=[(slice(2, 4), slice(0, 2))],
+        bottom=[(slice(2, 4), slice(4, 6))],
+    )
+    signal_coordinates = np.array([(x, y) for y in range(2, 4) for x in range(2, 4)])
+    background_coordinates = np.array([
+        (x, y) for y in range(6) for x in range(6)
+        if not (2 <= x < 4 and 2 <= y < 4)
+    ])
+
+    def design(coordinates):
+        """Independent full-rank polynomial design in raw pixel coordinates."""
+        x, y = coordinates.T
+        return np.array([
+            x**px * y**py for total in range(degree + 1)
+            for px in range(total + 1) for py in [total - px]
+        ]).T.astype(float)
+
+    weights = np.linalg.lstsq(
+        design(background_coordinates).T, design(signal_coordinates).sum(axis=0),
+        rcond=None,
+    )[0]
+    variance_prediction = 5.0 * np.dot(weights, weights)
+    result = integration.integrate_rocking_scan(
+        ctx, lines=[line], batch_options=integration.BatchOptions(frames=3, curves=1)
+    )
+    assert result["status"] == "success", result
+    group = file["scan/measurement/first"]
+    base = group["ctr_curve_v3/base"]
+    count = 4.0 * (100.0 + scan.axis)
+    np.testing.assert_allclose(base["croi_variance"][0], count)
+    np.testing.assert_allclose(base["bgroi_variance"][0],
+                               variance_prediction * (32.0 / 4.0)**2, rtol=1e-9)
+    np.testing.assert_allclose(base["croi_bgroi_covariance"][0], 0.0)
+    np.testing.assert_allclose(base["croibg_variance"][0],
+                               count + variance_prediction, rtol=1e-9)
+    np.testing.assert_allclose(group["rois/croibg_errors"][0]**2,
+                               count + variance_prediction, rtol=1e-9)
+    assert base["croi_variance"].id != base["croi"].id
+    assert base["bgroi_variance"].id != base["bgroi"].id
+    assert base["uncertainty_model"][()].decode() == "linear_poisson_covariance_v1"
+
+
+def test_polynomial_covariance_survives_stationary_trajectories(context):
+    """Moving-ROI counter groups retain fitted moments through saved errors."""
+    ctx, scan, file = context
+    options = ctx.scanSelector.get_integration_options()
+    options["advanced"].update(fitted_background=True, fitted_background_order=4)
+    options["region"].update(left=2, right=2, top=2, bottom=2)
+    ctx = replace(ctx, scanSelector=integration.prepared_selector(
+        options, 0, [0, 0, 0], [0, 0, 1], [3, 3], None
+    ))
+
+    def geometry(line):
+        """A fixed valid trajectory plus the absent second intersection."""
+        array = np.zeros((len(scan), 9))
+        array[:, 0] = line["H_0"][0]
+        array[:, 2] = array[:, 5] = scan.axis
+        array[:, 3:5] = .1
+        array[:, 6:8] = [3., 3.]
+        array[:, -1] = 1.
+        other = array.copy()
+        other[:, -1] = 0.
+        return array, other
+
+    result = integration.integrate_stationary_scan(
+        ctx, lines=[{"id": "first", "H_0": [3, 0, 0], "H_1": [0, 0, 1]}],
+        geometry_provider=geometry,
+    )
+    assert result["status"] == "success", result
+    group = next(g for g in file["scan/measurement"].values()
+                 if "ctr_curve_v3" in g and np.any(g["counters/croi"][()] > 0))
+    base = group["ctr_curve_v3/base"]
+    signal_variance = base["croi_variance"][()]
+    background_variance = base["bgroi_variance"][()]
+    assert not np.allclose(background_variance, base["bgroi"][()])
+    np.testing.assert_array_equal(base["croi_bgroi_covariance"][()], 0.)
+    expected = signal_variance + (4.0 / 16.0)**2 * background_variance
+    np.testing.assert_allclose(base["croibg_variance"][()], expected)
+    np.testing.assert_allclose(group["counters/croibg_errors"][()]**2, expected)
+
+
+@pytest.mark.parametrize("stationary", [False, True])
+@pytest.mark.parametrize("background", ["sum", "fit", "image"])
+def test_repair_moments_survive_extraction(context, stationary, background):
+    """Repair covariance survives batching, trajectories and NeXus persistence."""
+    from orgui.app import _roi_sum_cpp as native
+
+    ctx, scan, file = context
+    mask = np.zeros((12, 12), dtype=bool)
+    mask[2, 2] = True
+    gaps = np.empty((0, 2), dtype=np.int32)
+    repair = SimpleNamespace(max_component_pixels=4, max_span=3,
+                             radius=1, min_valid_neighbors=2)
+    options = ctx.scanSelector.get_integration_options()
+    options["mask"] = True
+    if background == "fit":
+        options["advanced"].update(fitted_background=True, fitted_background_order=4)
+    bg = np.ones((12, 12))
+    bg[2:4, 2:4] = 2.
+    ctx = replace(
+        ctx, get_detector_mask=lambda shape: mask,
+        _repair_config_for_image=lambda shape: (True, repair, gaps, gaps),
+        background_image=bg if background == "image" else None,
+        scanSelector=integration.prepared_selector(
+            options, 0, [0, 0, 0], [0, 0, 1], [3, 3], None),
+    )
+    if stationary:
+        def geometry(line):
+            """One valid intersection and one absent intersection."""
+            first = np.zeros((len(scan), 9))
+            first[:, 0] = 3.
+            first[:, 2] = first[:, 5] = scan.axis
+            first[:, 3:5] = .1
+            first[:, 6:8] = [3., 3.]
+            first[:, -1] = 1.
+            second = first.copy()
+            second[:, -1] = 0.
+            return first, second
+
+        result = integration.integrate_stationary_scan(
+            ctx, lines=[{"id": "first", "H_0": [3, 0, 0], "H_1": [0, 0, 1]}],
+            geometry_provider=geometry,
+        )
+    else:
+        result = integration.integrate_rocking_scan(
+            ctx, lines=[_prepared_line(ctx)],
+            batch_options=integration.BatchOptions(frames=3, curves=1),
+        )
+    assert result["status"] == "success", result
+    group = next(g for g in file["scan/measurement"].values()
+                 if "ctr_curve_v3" in g and np.any(g["ctr_curve_v3/base/croi"][()] > 0))
+    base = group["ctr_curve_v3/base"]
+    counters = group["counters" if stationary else "rois"]
+    vc, vb, cov = [np.asarray(base[key]).ravel() for key in (
+        "croi_variance", "bgroi_variance", "croi_bgroi_covariance")]
+    assert base["uncertainty_model"][()].decode() == (
+        "median_poisson_neighborhood_plugin_v1")
+    assert base["croi_variance"].id != base["croi"].id
+    assert np.all(cov > 0.)
+    ratio = np.asarray(counters["croi_pix"]).ravel() / np.asarray(
+        counters["bgroi_pix"]).ravel()
+    expected = vc + ratio**2*vb - 2*ratio*cov
+    np.testing.assert_allclose(
+        np.asarray(counters["croibg_errors"]).ravel()**2, expected)
+    np.testing.assert_allclose(np.asarray(base["croibg_variance"]).ravel(), expected)
+    if background != "fit":
+        peak = 100. + scan.axis
+        rates = (peak + 5.) / 2.
+        values = np.array([native._median_poisson_moments(4, rate) for rate in rates])
+        np.testing.assert_allclose(vc, peak + 2*rates + values[:, 1] + 4*values[:, 2])
+        np.testing.assert_allclose(vb, 15. + rates)
+        np.testing.assert_allclose(cov, values[:, 2])
+    if background == "image":
+        # The fixed reference's three valid center pixels are area-normalized
+        # to the four-pixel repaired center; its center/background ratio is2.
+        alternate = vc + 4*vb - 4*cov
+        np.testing.assert_allclose(
+            np.asarray(counters["croibg_bgimg_errors"]).ravel()**2, alternate)
+
+
 def test_rocking_frame_buffers_overlap_writing_without_reuse(context):
     """Next-batch work runs while the collector owns the current buffer."""
     from threading import Event

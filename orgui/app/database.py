@@ -287,6 +287,8 @@ class _RockingFrameWriter(RockingBatchWriter):
         "Cfactors_croi", "Cfactors_croi_pix",
         "Cfactors_bgroi", "Cfactors_bgroi_pix",
         "bgimg_croi", "bgimg_croi_pix", "bgimg_bgroi", "bgimg_bgroi_pix",
+        "croi_variance", "bgroi_variance", "croi_bgroi_covariance",
+        "raw_croibg_variance",
     )
     _FRAME_FIELDS = (
         "alpha", "theta", "delta", "gamma", "omega", "h", "k", "l",
@@ -310,13 +312,21 @@ class _RockingFrameWriter(RockingBatchWriter):
     }
 
     def __init__(self, database, frames, lines, *, frame_batch, curve_batch,
-                 background=False):
+                 background=False, moments=False):
         self._lines = [(entry["result_name"], len(entry["xy"])) for entry in lines]
         self._frame_batch = frame_batch
         self._curve_batch = curve_batch
         self._datasets = {}
         self._capacities = dict(self._lines)
-        self._raw_fields = self._COUNTERS[:12 if background else 8]
+        self._raw_fields = self._COUNTERS[:16 if moments else 12 if background else 8]
+        self._aliases = dict(self._ALIASES)
+        if moments:
+            # Fitted/repair estimators do not have variance equal to counts.
+            self._aliases.update({
+                "base/croi_variance": "croi_variance",
+                "base/bgroi_variance": "bgroi_variance",
+                "base/croi_bgroi_covariance": "croi_bgroi_covariance",
+            })
         super().__init__(database, frames, sum(self._capacities.values()),
                          background=background)
 
@@ -365,7 +375,7 @@ class _RockingFrameWriter(RockingBatchWriter):
                 name, "ctr_curve_v3/illumination/alpha", (self.frames,)
             )
             group = self.group[f"results/{name}"]
-            for target, source in self._ALIASES.items():
+            for target, source in self._aliases.items():
                 parent, leaf = target.rsplit("/", 1)
                 group.require_group(f"ctr_curve_v3/{parent}")[leaf] = (
                     group[f"rois/{source}"]
@@ -436,7 +446,7 @@ class _RockingFrameWriter(RockingBatchWriter):
                 elif self._is_row_field(path, value) and not isinstance(value, str):
                     if path in {f"rois/{k}" for k in self._raw_fields}:
                         continue
-                    if path.removeprefix("ctr_curve_v3/") in self._ALIASES:
+                    if path.removeprefix("ctr_curve_v3/") in self._aliases:
                         continue
                     value = np.atleast_1d(value)
                     if value.shape[0] != size:

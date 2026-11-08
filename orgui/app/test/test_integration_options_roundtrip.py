@@ -117,6 +117,21 @@ def test_every_setting_round_trips_through_the_widgets(selector):
     assert options["rocking_scan"] == pytest.approx(ROCKING)
 
 
+@pytest.mark.parametrize("order", range(5))
+def test_background_polynomial_degree_survives_widget_and_nexus_mapping(
+    selector, order,
+):
+    """Degree 3/4 uses the existing persisted field without changing defaults."""
+    advanced = dict(ADVANCED, fitted_background_order=order)
+    selector.set_integration_options({"advanced": advanced})
+    options = selector.get_integration_options()
+    assert options["advanced"]["fitted_background_order"] == order
+    state = ROIState(advanced=dict(options["advanced"]))
+    restored = roi_from_nxdict(roi_to_nxdict(state))
+    selector.set_integration_options({"advanced": restored.advanced})
+    assert selector.roioptions.get_background_fit_order() == order
+
+
 def test_restoring_delta_s_does_not_re_clip_it(selector):
     """The stored value is already the resolution-clipped one.
 
@@ -130,12 +145,15 @@ def test_restoring_delta_s_does_not_re_clip_it(selector):
     assert selector.roscanDeltaS.value() == pytest.approx(0.0019)
 
 
-def test_the_settings_survive_a_nexus_group(selector, tmp_path):
+@pytest.mark.parametrize("background_order", [2, 4])
+def test_the_settings_survive_a_nexus_group(selector, tmp_path, background_order):
     """Widgets -> ROIState -> NeXus -> ROIState -> widgets is the identity."""
     from silx.io.dictdump import dicttonx, nxtodict
 
     selector.set_integration_options({
-        "region": REGION, "advanced": ADVANCED, "rocking_scan": ROCKING,
+        "region": REGION,
+        "advanced": dict(ADVANCED, fitted_background_order=background_order),
+        "rocking_scan": ROCKING,
     })
     options = selector.get_integration_options()
     state = ROIState(

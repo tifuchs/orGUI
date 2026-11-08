@@ -217,6 +217,11 @@ class CurveCorrectionRecord:
     ``base_croibg`` and its variance are the reversible scalar curve before
     normalization and illumination divisors. They are not raw detector images
     and cannot undo arbitrary pixel reweighting.
+
+    Optional ``base_croi_bgroi_covariance`` is the covariance of the raw
+    signal/background estimators in squared detector counts, before ROI
+    correction factors. ``roi_uncertainty_model`` identifies their convention;
+    neither field is inferred for older saved curves.
     """
 
     algorithm: str
@@ -257,6 +262,8 @@ class CurveCorrectionRecord:
     detector_acceptance: Any = None
     lorentz_mode: str | None = None
     profile_provenance: dict[str, Any] = field(default_factory=dict)
+    base_croi_bgroi_covariance: Any = None
+    roi_uncertainty_model: str | None = None
 
 
 def _as_text(value):
@@ -818,6 +825,8 @@ def curve_correction_record_to_nxdict(record):
             "croi_variance": record.base_croi_variance,
             "bgroi": record.base_bgroi,
             "bgroi_variance": record.base_bgroi_variance,
+            "croi_bgroi_covariance": record.base_croi_bgroi_covariance,
+            "uncertainty_model": record.roi_uncertainty_model,
             "croibg": record.base_croibg,
             "croibg_variance": record.base_croibg_variance,
         }),
@@ -919,6 +928,8 @@ def curve_correction_record_from_nxdict(nxdict):
                 "base_croi_variance": "croi_variance",
                 "base_bgroi": "bgroi",
                 "base_bgroi_variance": "bgroi_variance",
+                "base_croi_bgroi_covariance": "croi_bgroi_covariance",
+                "roi_uncertainty_model": "uncertainty_model",
                 "base_croibg": "croibg",
                 "base_croibg_variance": "croibg_variance",
             },

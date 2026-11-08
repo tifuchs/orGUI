@@ -312,6 +312,25 @@ def test_applied_curve_record_arrays_survive_save_and_reopen(tmp_path):
         np.testing.assert_array_equal(getattr(loaded, name), getattr(expected, name))
 
 
+def test_roi_covariance_metadata_roundtrip_is_optional(tmp_path):
+    """New estimator moments survive storage without changing legacy defaults."""
+    expected = _curve_record()
+    expected.base_croi_bgroi_covariance = np.array([1.25, 2.5])
+    expected.roi_uncertainty_model = "linear_poisson_covariance_v1"
+    stored = _through_file(
+        curve_correction_record_to_nxdict(expected), tmp_path, "roi_moments"
+    )
+    loaded = curve_correction_record_from_nxdict(stored)
+    np.testing.assert_array_equal(loaded.base_croi_bgroi_covariance,
+                                  expected.base_croi_bgroi_covariance)
+    assert loaded.roi_uncertainty_model == expected.roi_uncertainty_model
+    legacy = curve_correction_record_from_nxdict(
+        curve_correction_record_to_nxdict(_curve_record())
+    )
+    assert legacy.base_croi_bgroi_covariance is None
+    assert legacy.roi_uncertainty_model is None
+
+
 def test_versioned_curve_branch_is_not_dispatched_as_legacy():
     """A normalized-capable branch cannot masquerade as ``rois/croibg``."""
     versioned = {CURVE_CORRECTIONS_GROUP: curve_correction_record_to_nxdict(

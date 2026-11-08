@@ -2,10 +2,15 @@
 #include <cstdint>
 #include <algorithm>
 #include <limits>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <queue>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include <pybind11/numpy.h>
@@ -121,7 +126,8 @@ struct PolyFitResult {
     bool fitted = false;
     int order = -1;
     double sample_count = 0.0;
-    double coefficients[6] = {0.0};
+    double coefficients[15] = {0.0};
+    double normal_matrix[225] = {0.0};
 };
 
 struct RepairResult {
@@ -360,6 +366,10 @@ void repair_masked_pixels_inplace(
     }
 }
 
+#include "roi_median_poisson.h"
+#include "roi_repair_covariance.h"
+#include "roi_repair_moments.h"
+
 struct PlannedRepairCandidate {
     py::ssize_t index;
     double inverse_distance2;
@@ -388,7 +398,9 @@ public:
         const int max_component_pixels,
         const int max_span,
         const int radius,
-        const int min_valid_neighbors
+        const int min_valid_neighbors,
+        const bool roi_covariance = false,
+        py::object covariance_region = py::none()
     )
         : max_component_pixels_(max_component_pixels),
           max_span_(max_span),
@@ -410,6 +422,14 @@ public:
         const bool *mask_data = bool_ptr(mask_info);
         const std::int32_t *row_gap_data = int32_ptr(row_gap_info);
         const std::int32_t *col_gap_data = int32_ptr(col_gap_info);
+        BoolArray2D region_array;
+        const bool* region = nullptr;
+        if (!covariance_region.is_none()) {
+            region_array = covariance_region.cast<BoolArray2D>();
+            const auto info = region_array.request();
+            require_same_image_shape(mask_info, info, "covariance_region");
+            region = bool_ptr(info);
+        }
         mask_.resize(static_cast<std::size_t>(size_));
         {
             py::gil_scoped_release release;
@@ -423,6 +443,7 @@ public:
                 col_gap_data,
                 col_gap_info
             );
+            if (roi_covariance) prepare_moment_tables(region);
         }
     }
 
@@ -532,6 +553,8 @@ public:
         return py::make_tuple(remaining, repaired);
     }
 
+    #include "roi_repair_records.h"
+
     py::dict configuration() const {
         py::dict result;
         result["shape"] = py::make_tuple(height_, width_);
@@ -541,6 +564,31 @@ public:
         result["max_span"] = max_span_;
         result["radius"] = radius_;
         result["min_valid_neighbors"] = min_valid_neighbors_;
+        result["roi_covariance"] = moment_tables_ != nullptr;
+        result["unsupported_median_components"] = unsupported_median_components_;
+        result["median_max_donors"] = median_poisson_max_donors;
+        result["median_max_rate"] = median_poisson_max_rate;
+        std::size_t storage = sizeof(*this) + mask_.capacity()
+            + components_.capacity() * sizeof(PlannedRepairComponent)
+            + moment_clusters_.capacity() * sizeof(RoiRepairCluster)
+            + component_clusters_.capacity() * sizeof(std::size_t);
+        for (const auto& component : components_) {
+            storage += component.targets.capacity() * sizeof(py::ssize_t)
+                + component.candidates.capacity() * sizeof(PlannedRepairCandidate);
+        }
+        for (const auto& cluster : moment_clusters_)
+            storage += cluster.donors.capacity() * sizeof(py::ssize_t);
+        if (moment_tables_) {
+            result["median_moment_tables"] = moment_tables_->single.size();
+            result["median_pair_tables"] = moment_tables_->pairs.size();
+            result["median_table_rate_max"] = median_poisson_rate_grid().back();
+            std::size_t tables = 0;
+            for (const auto& entry : moment_tables_->single) tables += entry.second->storage_bytes();
+            for (const auto& entry : moment_tables_->pairs) tables += entry.second->storage_bytes();
+            result["median_table_bytes"] = tables;
+            storage += tables;
+        }
+        result["storage_bytes"] = storage;
         return result;
     }
 
@@ -721,6 +769,10 @@ private:
     std::size_t repairable_pixels_ = 0;
     std::vector<unsigned char> mask_;
     std::vector<PlannedRepairComponent> components_;
+    std::unique_ptr<RoiMedianTableBank> moment_tables_;
+    std::vector<RoiRepairCluster> moment_clusters_;
+    std::vector<std::size_t> component_clusters_;
+    std::size_t unsupported_median_components_ = 0;
 };
 
 RoiSums sum_roi_with_mask(
@@ -769,13 +821,7 @@ RoiSums sum_roi_with_mask(
 }
 
 int polynomial_terms(const int order) {
-    if (order <= 0) {
-        return 1;
-    }
-    if (order == 1) {
-        return 3;
-    }
-    return 6;
+    return (order + 1) * (order + 2) / 2;
 }
 
 void polynomial_basis(
@@ -796,7 +842,24 @@ void polynomial_basis(
     basis[3] = x * x;
     basis[4] = x * y;
     basis[5] = y * y;
+    if (order == 2) {
+        return;
+    }
+    basis[6] = basis[3] * x;
+    basis[7] = basis[3] * y;
+    basis[8] = basis[5] * x;
+    basis[9] = basis[5] * y;
+    if (order == 3) {
+        return;
+    }
+    basis[10] = basis[6] * x;
+    basis[11] = basis[6] * y;
+    basis[12] = basis[3] * basis[5];
+    basis[13] = basis[9] * x;
+    basis[14] = basis[9] * y;
 }
+
+bool solve_polynomial_system(double *matrix, double *rhs, const int order);
 
 bool solve_linear_system(double *matrix, double *rhs, const int n) {
     for (int col = 0; col < n; ++col) {
@@ -835,6 +898,35 @@ bool solve_linear_system(double *matrix, double *rhs, const int n) {
             value -= matrix[row * n + col] * rhs[col];
         }
         rhs[row] = value / matrix[row * n + row];
+    }
+    return true;
+}
+
+bool solve_polynomial_system(double *matrix, double *rhs, const int order) {
+    const int n = polynomial_terms(order);
+    if (order <= 2) {
+        return solve_linear_system(matrix, rhs, n);
+    }
+    // Equilibrate the Gram matrix before pivoting. Coordinates are normalized
+    // over the support; this also handles narrow, anisotropic ROI footprints.
+    double scale[15];
+    for (int i = 0; i < n; ++i) {
+        scale[i] = std::sqrt(matrix[i * n + i]);
+        if (!std::isfinite(scale[i]) || scale[i] <= 0.0) {
+            return false;
+        }
+    }
+    for (int i = 0; i < n; ++i) {
+        rhs[i] /= scale[i];
+        for (int j = 0; j < n; ++j) {
+            matrix[i * n + j] /= scale[i] * scale[j];
+        }
+    }
+    if (!solve_linear_system(matrix, rhs, n)) {
+        return false;
+    }
+    for (int i = 0; i < n; ++i) {
+        rhs[i] /= scale[i];
     }
     return true;
 }
@@ -898,7 +990,7 @@ void accumulate_fit_roi(
     double &sample_count
 ) {
     const int n_terms = polynomial_terms(order);
-    double basis[6];
+    double basis[15];
     const std::int64_t x0 = roi_value(roi, roi_info, n, 0, 0);
     const std::int64_t x1 = roi_value(roi, roi_info, n, 0, 1);
     const std::int64_t y0 = roi_value(roi, roi_info, n, 1, 0);
@@ -911,7 +1003,8 @@ void accumulate_fit_roi(
             if (mask_data[idx]) {
                 continue;
             }
-            const double value = image_data[idx];
+            // A null image builds a reusable geometry-only fit plan.
+            const double value = image_data ? image_data[idx] : 0.0;
             if (std::isnan(value)) {
                 continue;
             }
@@ -940,10 +1033,11 @@ double evaluate_fit_roi(
     const double y_origin,
     const double scale,
     const int order,
-    const double *coefficients
+    const double *coefficients,
+    const bool *repaired_data = nullptr
 ) {
     const int n_terms = polynomial_terms(order);
-    double basis[6];
+    double basis[15];
     double total = 0.0;
     const std::int64_t x0 = roi_value(roi, roi_info, n, 0, 0);
     const std::int64_t x1 = roi_value(roi, roi_info, n, 0, 1);
@@ -954,7 +1048,7 @@ double evaluate_fit_roi(
         const double yn = (static_cast<double>(y) - y_origin) / scale;
         for (std::int64_t x = x0; x < x1; ++x) {
             const py::ssize_t idx = row_offset + x;
-            if (mask_data[idx]) {
+            if (mask_data[idx] && !(repaired_data && repaired_data[idx])) {
                 continue;
             }
             const double xn = (static_cast<double>(x) - x_origin) / scale;
@@ -983,7 +1077,7 @@ void fill_fit_roi_patch(
     const py::ssize_t patch_width
 ) {
     const int n_terms = polynomial_terms(order);
-    double basis[6];
+    double basis[15];
     const std::int64_t x0 = roi_value(roi, roi_info, n, 0, 0);
     const std::int64_t x1 = roi_value(roi, roi_info, n, 0, 1);
     const std::int64_t y0 = roi_value(roi, roi_info, n, 1, 0);
@@ -1017,7 +1111,7 @@ double residual_sse_fit_roi(
     const double *coefficients
 ) {
     const int n_terms = polynomial_terms(order);
-    double basis[6];
+    double basis[15];
     double sse = 0.0;
     const std::int64_t x0 = roi_value(roi, roi_info, n, 0, 0);
     const std::int64_t x1 = roi_value(roi, roi_info, n, 0, 1);
@@ -1066,8 +1160,8 @@ PolyFitResult fit_local_polynomial_background(
     int order = fit_order;
     while (order >= 0 && !result.fitted) {
         const int n_terms = polynomial_terms(order);
-        double normal_matrix[36] = {0.0};
-        double normal_rhs[6] = {0.0};
+        double normal_matrix[225] = {0.0};
+        double normal_rhs[15] = {0.0};
         double sample_count = 0.0;
         accumulate_fit_roi(
             image_data,
@@ -1129,8 +1223,10 @@ PolyFitResult fit_local_polynomial_background(
             normal_rhs,
             sample_count
         );
+        std::copy(normal_matrix, normal_matrix + n_terms * n_terms,
+                  result.normal_matrix);
         if (sample_count >= n_terms
-            && solve_linear_system(normal_matrix, normal_rhs, n_terms)) {
+            && solve_polynomial_system(normal_matrix, normal_rhs, order)) {
             result.fitted = true;
             result.order = order;
             result.sample_count = sample_count;
@@ -1143,6 +1239,8 @@ PolyFitResult fit_local_polynomial_background(
     }
     return result;
 }
+
+#include "roi_polynomial.h"
 
 void fill_image_and_correction_counters(
     const double *image_data,
@@ -1443,7 +1541,9 @@ void processImage_repair_Carr(
     const int max_component_pixels,
     const int max_span,
     const int radius,
-    const int min_valid_neighbors
+    const int min_valid_neighbors,
+    py::object moments = py::none(),
+    const PixelRepairPlan* plan = nullptr
 ) {
     py::array_t<bool, py::array::c_style> repaired(mask.request().shape);
     auto repaired_info = repaired.request();
@@ -1451,7 +1551,17 @@ void processImage_repair_Carr(
     for (py::ssize_t i = 0; i < repaired_info.size; ++i) {
         repaired_data[i] = false;
     }
-    repair_masked_pixels_inplace(
+    RoiRepairFrame frame;
+    if (!moments.is_none() || plan) {
+        if (plan) {
+            frame = plan->apply_roi_records(image, repaired, !moments.is_none());
+        } else {
+            const PixelRepairPlan temporary(mask, row_gaps, col_gaps,
+                max_component_pixels, max_span, radius, min_valid_neighbors);
+            frame = temporary.apply_roi_records(image, repaired);
+        }
+    } else {
+        repair_masked_pixels_inplace(
         image,
         mask,
         row_gaps,
@@ -1461,7 +1571,8 @@ void processImage_repair_Carr(
         max_span,
         radius,
         min_valid_neighbors
-    );
+        );
+    }
 
     auto image_info = image.request();
     auto mask_info = mask.request();
@@ -1500,6 +1611,14 @@ void processImage_repair_Carr(
     const double *correction_data = double_ptr(correction_info);
     const bool *mask_data = bool_ptr(mask_info);
     repaired_data = static_cast<bool *>(repaired_info.ptr);
+    Array2D moment_array;
+    double* moment_data = nullptr;
+    if (!moments.is_none()) {
+        moment_array = moments.cast<Array2D>();
+        const auto info = moment_array.request();
+        require_counter_shape(info, n_rois, "moments");
+        moment_data = mutable_double_ptr(info);
+    }
     py::gil_scoped_release release;
     for (py::ssize_t i = 0; i < n_rois; ++i) {
         const RoiSums center = sum_roi_with_mask(
@@ -1522,6 +1641,31 @@ void processImage_repair_Carr(
             image_data, correction_data, nullptr, mask_data, repaired_data, false,
             width, roi_ptr(bottom_info), bottom_info, i
         );
+        if (moment_data) {
+            const auto signal = repair_rectangle(center_info, i);
+            const RoiRepairRectangle background[4] = {
+                repair_rectangle(left_info, i), repair_rectangle(right_info, i),
+                repair_rectangle(top_info, i), repair_rectangle(bottom_info, i)};
+            double* row = moment_data + 4 * i;
+            row[0] = center.image;
+            row[1] = left.image + right.image + top.image + bottom.image;
+            row[2] = 0.0;
+            for (int j = 0; j < 4; ++j) {
+                row[2] += repair_overlap_sum(signal, background[j], image_data, mask_data, width);
+                for (int k = 0; k < j; ++k) row[1] += 2.0 * repair_overlap_sum(
+                    background[j], background[k], image_data, mask_data, width);
+            }
+            const double bgpixels = left.pixels + right.pixels + top.pixels + bottom.pixels;
+            const double ratio = bgpixels > 0.0 ? center.pixels / bgpixels : 0.0;
+            row[3] = row[0] + ratio * ratio * row[1] - 2.0 * ratio * row[2];
+            add_repair_covariance(frame, signal, image_data, width,
+                plan ? plan->maximum_span() : max_span,
+                center.pixels, bgpixels, [&](py::ssize_t index) {
+                    int count = 0;
+                    for (const auto& rect : background) count += rect.contains(index, width);
+                    return static_cast<double>(count);
+                }, row, true);
+        }
         all_data[i * all_info.shape[1] + 0] = center.image;
         all_data[i * all_info.shape[1] + 1] = center.pixels;
         all_data[i * all_info.shape[1] + 2] = (
@@ -1559,12 +1703,14 @@ void processImage_repair_bg_Carr(
     const int max_component_pixels,
     const int max_span,
     const int radius,
-    const int min_valid_neighbors
+    const int min_valid_neighbors,
+    py::object moments = py::none(),
+    const PixelRepairPlan* plan = nullptr
 ) {
     processImage_repair_Carr(
         image, mask, correction, center_roi, left_roi, right_roi, top_roi,
         bottom_roi, row_gaps, col_gaps, all_counters, correction_counters,
-        max_component_pixels, max_span, radius, min_valid_neighbors
+        max_component_pixels, max_span, radius, min_valid_neighbors, moments, plan
     );
     auto image_info = image.request();
     auto background_info = background.request();
@@ -1628,10 +1774,13 @@ void processImage_polybg_Carr(
     const RoiArray3D bottom_roi,
     Array2D all_counters,
     Array2D correction_counters,
-    int fit_order
+    int fit_order,
+    py::object moments = py::none(),
+    py::object repaired_mask = py::none(),
+    const PixelRepairPlan* repair_plan = nullptr
 ) {
-    if (fit_order < 0 || fit_order > 2) {
-        throw py::value_error("fit_order must be 0, 1, or 2");
+    if (fit_order < 0 || fit_order > 4) {
+        throw py::value_error("fit_order must be between 0 and 4");
     }
     auto image_info = image.request();
     auto mask_info = mask.request();
@@ -1676,9 +1825,44 @@ void processImage_polybg_Carr(
     const py::ssize_t image_width = image_info.shape[1];
     const py::ssize_t counter_width = all_info.shape[1];
     const py::ssize_t correction_counter_width = correction_counter_info.shape[1];
+    Array2D moments_array;
+    double *moments_data = nullptr;
+    if (!moments.is_none()) {
+        moments_array = moments.cast<Array2D>();
+        const auto info = moments_array.request();
+        require_counter_shape(info, n_rois, "moments");
+        moments_data = mutable_double_ptr(info);
+    }
+    BoolArray2D repaired_array;
+    const bool *repaired_data = nullptr;
+    RoiRepairFrame repair_frame;
+    if (repair_plan) {
+        if (!repaired_mask.is_none()) {
+            throw py::value_error("Supply repair_plan or repaired_mask, not both");
+        }
+        repaired_array = BoolArray2D(image_info.shape);
+        std::fill(repaired_array.mutable_data(),
+                  repaired_array.mutable_data() + image_info.size, false);
+        repair_frame = repair_plan->apply_roi_records(image, repaired_array, moments_data != nullptr);
+        repaired_data = repaired_array.data();
+    } else if (!repaired_mask.is_none()) {
+        repaired_array = repaired_mask.cast<BoolArray2D>();
+        const auto info = repaired_array.request();
+        require_same_image_shape(image_info, info, "repaired_mask");
+        repaired_data = bool_ptr(info);
+        if (moments_data && std::any_of(
+                repaired_data, repaired_data + info.size,
+                [](const bool value) { return value; })) {
+            throw py::value_error(
+                "moments with repaired pixels require repair provenance");
+        }
+    }
+    const py::buffer_info *background_info[4] = {
+        &left_info, &right_info, &top_info, &bottom_info,
+    };
     py::gil_scoped_release release;
     for (py::ssize_t i = 0; i < n_rois; ++i) {
-        const RoiSums center = sum_roi(
+        const RoiSums original_center = sum_roi(
             image_data,
             correction_data,
             nullptr,
@@ -1688,6 +1872,10 @@ void processImage_polybg_Carr(
             center_info,
             i
         );
+        const RoiSums center = repaired_data ? sum_roi_with_mask(
+            image_data, correction_data, nullptr, mask_data, repaired_data,
+            true, image_width, roi_ptr(center_info), center_info, i
+        ) : original_center;
         const RoiSums left = sum_roi(
             image_data,
             correction_data,
@@ -1743,10 +1931,8 @@ void processImage_polybg_Carr(
         );
         const double x_origin = 0.5 * (x0 + x1 - 1.0);
         const double y_origin = 0.5 * (y0 + y1 - 1.0);
-        const double scale = std::max(
-            1.0,
-            std::max(std::abs(x1 - x0), std::abs(y1 - y0))
-        );
+        const double scale = polynomial_coordinate_scale(
+            center_info, background_info, i, x_origin, y_origin, fit_order);
 
         const PolyFitResult fit = fit_local_polynomial_background(
             image_data,
@@ -1778,7 +1964,8 @@ void processImage_polybg_Carr(
                 y_origin,
                 scale,
                 fit.order,
-                fit.coefficients
+                fit.coefficients,
+                repaired_data
             );
         }
 
@@ -1787,6 +1974,28 @@ void processImage_polybg_Carr(
             // Preserve the legacy background-subtraction formula:
             // cpixels / bgpixels * bgroi == fitted center background.
             stored_background = fitted_background * fit.sample_count / center.pixels;
+        }
+        if (moments_data) {
+            const auto weights = polynomial_background_weights(
+                image_data, mask_data, image_width, center_info, background_info,
+                i, x_origin, y_origin, scale, fit, center.pixels, repaired_data);
+            // The public call rejects repaired-center moments without donor
+            // provenance. Repair-aware kernels can compose the same weights
+            // with their original-pixel repair coefficients internally.
+            polynomial_counter_moments(
+                image_data, image_width, center_info, i, weights,
+                original_center.image, center.pixels,
+                fit.fitted ? fit.sample_count : 0.0, moments_data + 4 * i);
+            if (repair_plan) {
+                add_repair_covariance(repair_frame, repair_rectangle(center_info, i),
+                    image_data, image_width, repair_plan->maximum_span(), center.pixels,
+                    fit.fitted ? fit.sample_count : 0.0,
+                    [&](py::ssize_t index) {
+                        const auto found = std::lower_bound(weights.begin(), weights.end(), index,
+                            [](const auto& entry, py::ssize_t value) { return entry.first < value; });
+                        return found != weights.end() && found->first == index ? found->second : 0.0;
+                    }, moments_data + 4 * i);
+            }
         }
         all_data[i * counter_width + 0] = center.image;
         all_data[i * counter_width + 1] = center.pixels;
@@ -1818,8 +2027,8 @@ py::tuple interpolate_polybg_croi(
     const RoiArray3D bottom_roi,
     int fit_order
 ) {
-    if (fit_order < 0 || fit_order > 2) {
-        throw py::value_error("fit_order must be 0, 1, or 2");
+    if (fit_order < 0 || fit_order > 4) {
+        throw py::value_error("fit_order must be between 0 and 4");
     }
     auto image_info = image.request();
     auto mask_info = mask.request();
@@ -1864,11 +2073,11 @@ py::tuple interpolate_polybg_croi(
 
     const double x_origin = 0.5 * (static_cast<double>(x0 + x1) - 1.0);
     const double y_origin = 0.5 * (static_cast<double>(y0 + y1) - 1.0);
-    const double scale = std::max(
-        1.0,
-        std::max(std::abs(static_cast<double>(x1 - x0)),
-                 std::abs(static_cast<double>(y1 - y0)))
-    );
+    const py::buffer_info *background_info[4] = {
+        &left_info, &right_info, &top_info, &bottom_info,
+    };
+    const double scale = polynomial_coordinate_scale(
+        center_info, background_info, 0, x_origin, y_origin, fit_order);
     const double *image_data = double_ptr(image_info);
     const bool *mask_data = bool_ptr(mask_info);
     const py::ssize_t image_width = image_info.shape[1];
@@ -1982,6 +2191,8 @@ py::tuple interpolate_polybg_croi(
     return py::make_tuple(patch, stats);
 }
 
+#include "roi_polynomial_plan.h"
+
 void calcMaxSum(const Array2D image, Array2D sum_image, Array2D max_image) {
     auto image_info = image.request();
     auto sum_info = sum_image.request();
@@ -2049,6 +2260,20 @@ void calcMaxSum_bg(
 
 PYBIND11_MODULE(_roi_sum_cpp, module) {
     module.doc() = "CPU C++ acceleration kernels for ROI image summing.";
+    module.def("_median_poisson_moments", [](int n, double rate) {
+        const auto value = median_poisson_moments(n, rate);
+        return py::make_tuple(value.mean, value.variance, value.donor_covariance);
+    });
+    module.def("_median_poisson_covariance", &median_poisson_covariance);
+    py::class_<MedianPoissonMomentsTable>(module, "_MedianPoissonMomentsTable")
+        .def(py::init<int>())
+        .def("moments", [](const MedianPoissonMomentsTable& table, double rate) {
+            const auto value = table.moments(rate);
+            return py::make_tuple(value.mean, value.variance, value.donor_covariance);
+        });
+    py::class_<MedianPoissonTable>(module, "_MedianPoissonTable")
+        .def(py::init<int, int, int>())
+        .def("covariance", &MedianPoissonTable::covariance);
     py::class_<PixelRepairPlan>(module, "PixelRepairPlan")
         .def(
             py::init<
@@ -2058,7 +2283,9 @@ PYBIND11_MODULE(_roi_sum_cpp, module) {
                 int,
                 int,
                 int,
-                int
+                int,
+                bool,
+                py::object
             >(),
             py::arg("mask"),
             py::arg("row_gaps"),
@@ -2066,7 +2293,9 @@ PYBIND11_MODULE(_roi_sum_cpp, module) {
             py::arg("max_component_pixels") = 4,
             py::arg("max_span") = 3,
             py::arg("radius") = 2,
-            py::arg("min_valid_neighbors") = 6
+            py::arg("min_valid_neighbors") = 6,
+            py::arg("roi_covariance") = false,
+            py::arg("covariance_region") = py::none()
         )
         .def(
             "apply_inplace",
@@ -2078,6 +2307,21 @@ PYBIND11_MODULE(_roi_sum_cpp, module) {
             "configuration",
             &PixelRepairPlan::configuration
         );
+    py::class_<PolynomialBackgroundPlan>(module, "PolynomialBackgroundPlan")
+        .def(py::init<const BoolArray2D, const RoiArray3D, const RoiArray3D,
+                      const RoiArray3D, const RoiArray3D, const RoiArray3D, int,
+                      const PixelRepairPlan*>(),
+             py::arg("mask"), py::arg("croi"), py::arg("leftroi"),
+             py::arg("rightroi"), py::arg("toproi"), py::arg("bottomroi"),
+             py::arg("fit_order") = 1,
+             py::arg("repair_plan") = nullptr, py::keep_alive<1, 9>(),
+             "Cache a fixed mask/ROI polynomial fit through total degree four.")
+        .def("process", &PolynomialBackgroundPlan::process,
+             py::arg("image"), py::arg("C_corr"), py::arg("all_counters"),
+             py::arg("all_Carr"), py::arg("moments") = py::none(),
+             "Integrate photon counts and optional (VC, VB, CovCB, Vsub) moments.")
+        .def("configuration", &PolynomialBackgroundPlan::configuration,
+             "Return immutable geometry settings and estimated storage bytes.");
     module.def("processImage_Carr", &processImage_Carr);
     module.def("processImage_bg_Carr", &processImage_bg_Carr);
     module.def(
@@ -2111,7 +2355,9 @@ PYBIND11_MODULE(_roi_sum_cpp, module) {
         py::arg("max_component_pixels") = 4,
         py::arg("max_span") = 3,
         py::arg("radius") = 2,
-        py::arg("min_valid_neighbors") = 6
+        py::arg("min_valid_neighbors") = 6,
+        py::arg("moments") = py::none(),
+        py::arg("plan") = nullptr
     );
     module.def(
         "processImage_repair_bg_Carr",
@@ -2133,7 +2379,9 @@ PYBIND11_MODULE(_roi_sum_cpp, module) {
         py::arg("max_component_pixels") = 4,
         py::arg("max_span") = 3,
         py::arg("radius") = 2,
-        py::arg("min_valid_neighbors") = 6
+        py::arg("min_valid_neighbors") = 6,
+        py::arg("moments") = py::none(),
+        py::arg("plan") = nullptr
     );
     module.def(
         "processImage_polybg_Carr",
@@ -2148,7 +2396,15 @@ PYBIND11_MODULE(_roi_sum_cpp, module) {
         py::arg("bottomroi"),
         py::arg("all_counters"),
         py::arg("all_Carr"),
-        py::arg("fit_order") = 1
+        py::arg("fit_order") = 1,
+        py::arg("moments") = py::none(),
+        py::arg("repaired_mask") = py::none(),
+        py::arg("repair_plan") = nullptr,
+        "Fit a total-degree polynomial background (0..4) in pixel coordinates. "
+        "Optional moments are VC, VB, CovCB, V(C-cpix/bgpix*B), in counts squared. "
+        "They propagate original Poisson counting noise, not model mismatch. "
+        "Nonempty repaired_mask with moments requires repair provenance and "
+        "is rejected; repaired_mask alone may extend the prediction footprint."
     );
     module.def(
         "interpolate_polybg_croi",

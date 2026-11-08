@@ -175,6 +175,10 @@ HAS_CPP_BACKEND = _cpp_backend is not None
 PixelRepairPlan = (
     None if _cpp_backend is None else getattr(_cpp_backend, "PixelRepairPlan", None)
 )
+PolynomialBackgroundPlan = (
+    None if _cpp_backend is None
+    else getattr(_cpp_backend, "PolynomialBackgroundPlan", None)
+)
 HAS_NUMBA_BACKEND = False
 HAS_ACCEL_BACKEND = ROI_ACCEL_BACKEND != "numpy"
 _bind_backend(ROI_ACCEL_BACKEND, _counter_backend)

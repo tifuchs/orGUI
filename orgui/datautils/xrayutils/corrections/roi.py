@@ -33,6 +33,7 @@ import numpy as np
 __all__ = [
     "CorrectionFactors",
     "roi_mean_correction",
+    "roi_difference_variance",
 ]
 
 
@@ -91,3 +92,29 @@ def roi_mean_correction(correction_sum, pixel_count):
         out=np.zeros_like(correction_sum),
         where=pixel_count > 0,
     )
+
+
+def roi_difference_variance(signal_variance, background_variance,
+                            covariance, background_scale):
+    """Propagate the counting variance of ``signal - scale * background``.
+
+    :param signal_variance: Signal-sum variance, in squared photon counts.
+    :param background_variance: Background-estimator variance in the same units.
+    :param covariance: Covariance of those two estimators, in squared counts.
+    :param background_scale: Dimensionless multiplier of the background.
+    :returns: Variance in squared photon counts. Tiny negative roundoff is
+        clipped to zero; materially inconsistent moments remain NaN.
+    """
+    signal_variance, background_variance, covariance, scale = np.broadcast_arrays(
+        np.asarray(signal_variance, dtype=np.float64),
+        np.asarray(background_variance, dtype=np.float64),
+        np.asarray(covariance, dtype=np.float64),
+        np.asarray(background_scale, dtype=np.float64),
+    )
+    total = signal_variance + scale**2 * background_variance
+    cross = 2.0 * scale * covariance
+    variance = total - cross
+    tolerance = 32.0 * np.finfo(float).eps * np.maximum(
+        1.0, np.abs(total) + np.abs(cross)
+    )
+    return np.where(variance >= -tolerance, np.maximum(variance, 0.0), np.nan)

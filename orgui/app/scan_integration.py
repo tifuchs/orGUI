@@ -26,6 +26,7 @@ from .config_data import (
     curve_correction_record_to_nxdict,
 )
 from ..datautils.xrayutils.corrections import detector as detector_corrections
+from ..datautils.xrayutils.corrections.roi import roi_difference_variance
 
 logger = logging.getLogger(__name__)
 try:
@@ -96,6 +97,7 @@ class IntegrationContext:
     validate: object = None
     _frame_policy_cache: dict | None = None
     _interception_required_frames: object = None
+    _roi_uncertainty_model: str | None = None
 
     def intkey(self, coordinates):
         """Return clipped center ROI bounds in pixel (x, y) order."""
@@ -511,6 +513,8 @@ def _integrate_stationary_job(context, lines, geometry_provider):
     if isinstance(prepared, dict):
         return prepared
     worker = prepared[0]
+    context = replace(context, _roi_uncertainty_model=getattr(
+        worker, "roi_uncertainty_model", None))
     probe = worker(0)
     arrays = [np.zeros((frame_count, slots, 4), dtype=float) for _ in probe]
     for array, counters in zip(arrays, probe):
@@ -723,6 +727,8 @@ def integrate_rocking_scan(
         if isinstance(prepared, dict):
             return prepared
         worker, polarization, background_polarization = prepared
+        context = replace(context, _roi_uncertainty_model=getattr(
+            worker, "roi_uncertainty_model", None))
         probe = worker(0)
         groups = len(probe)
         batch_frames, workers = options.extraction_sizes(
@@ -748,7 +754,8 @@ def integrate_rocking_scan(
             lines,
             frame_batch=batch_frames,
             curve_batch=batch_curves,
-            background=groups == 3,
+            background=groups >= 3,
+            moments=groups == 4,
         )
         writer.group.attrs["frame_batch"] = batch_frames
         writer.group.attrs["curve_batch"] = batch_curves
@@ -1500,28 +1507,23 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
             "Fitted local background requires the compiled ROI accelerator; "
             "using summed background ROIs instead."
         )
-    if use_fitted_background and fitted_background_order >= 1:
-        logger.warning(
-            "Fitted local background order %d underestimates the "
-            "background error: the saved uncertainty still assumes an "
-            "unweighted flat-background sample and does not propagate "
-            "the polynomial fit's covariance.",
-            fitted_background_order,
-        )
     repair_enabled, repair, row_gaps, col_gaps = self._repair_config_for_image(
         image.img.shape
     )
-    if repair_enabled and use_fitted_background:
-        logger.warning(
-            "Pixel repair is disabled for fitted local background; "
-            "using the original mask for this integration."
-        )
-        repair_enabled = False
+    use_roi_moments = HAS_ACCEL and (
+        repair_enabled or (use_fitted_background and not has_bg_img)
+    )
+    roi_moments = (
+        np.zeros((len(self.fscan), 2, 4), dtype=np.float64)
+        if use_roi_moments else None
+    )
 
     if imgmask is not None:
-        mask = np.ascontiguousarray(imgmask, dtype=bool)
+        # A running job and its native geometry plans share one fixed mask.
+        mask = np.array(imgmask, dtype=bool, order="C", copy=True)
     else:
         mask = np.zeros(image.img.shape, dtype=bool)
+    repair_plan = None
     if corr:
         C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
     else:
@@ -1586,6 +1588,11 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
                 for l in roi_lists  # noqa: E741
             ]
             roi_lists_accel.append(roi_lists)
+        if repair_enabled and counters is None:
+            repair_plan = _repair_moment_plan(
+                mask, row_gaps, col_gaps, repair,
+                (frame[0] for frame in roi_lists_accel),
+            )
 
     if counters is None:
         if HAS_ACCEL:
@@ -1615,7 +1622,13 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
                     BgImg_counters = np.zeros(
                         (roi_lists_accel[i][0].shape[0],) + (4,), dtype=np.float64
                     )  # need gil for python object creation
+                    moment_counters = (
+                        np.zeros_like(all_counters) if repair_enabled else None
+                    )
                     if not dataavail[i]:
+                        if repair_enabled:
+                            return (all_counters, Carr_counters, BgImg_counters,
+                                    moment_counters)
                         return all_counters, Carr_counters, BgImg_counters
                     image = self.fscan.get_raw_img(i).img.astype(
                         np.float64, order="C", copy=True
@@ -1636,6 +1649,8 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
                             repair.max_span,
                             repair.radius,
                             repair.min_valid_neighbors,
+                            moments=moment_counters,
+                            plan=repair_plan,
                         )  # compiled accelerator releases the GIL
                     else:
                         _roi_sum_accel.processImage_bg_Carr(
@@ -1648,6 +1663,9 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
                             Carr_counters,
                             BgImg_counters,
                         )  # compiled accelerator releases the GIL
+                    if repair_enabled:
+                        return (all_counters, Carr_counters, BgImg_counters,
+                                moment_counters)
                     return all_counters, Carr_counters, BgImg_counters
             else:
 
@@ -1659,7 +1677,13 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
                     Carr_counters = np.zeros(
                         (roi_lists_accel[i][0].shape[0],) + (4,), dtype=np.float64
                     )  # need gil for python object creation
+                    moment_counters = (
+                        np.zeros_like(all_counters) if use_roi_moments else None
+                    )
                     if not dataavail[i]:
+                        if use_roi_moments:
+                            return (all_counters, Carr_counters,
+                                    np.zeros_like(all_counters), moment_counters)
                         return all_counters, Carr_counters
                     image = self.fscan.get_raw_img(i).img.astype(
                         np.float64, order="C", copy=True
@@ -1673,6 +1697,8 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
                             all_counters,
                             Carr_counters,
                             fitted_background_order,
+                            moments=moment_counters,
+                            repair_plan=repair_plan,
                         )  # compiled accelerator releases the GIL
                     elif repair_enabled:
                         _roi_sum_accel.processImage_repair_Carr(
@@ -1688,6 +1714,8 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
                             repair.max_span,
                             repair.radius,
                             repair.min_valid_neighbors,
+                            moments=moment_counters,
+                            plan=repair_plan,
                         )  # compiled accelerator releases the GIL
                     else:
                         _roi_sum_accel.processImage_Carr(
@@ -1698,6 +1726,9 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
                             all_counters,
                             Carr_counters,
                         )  # compiled accelerator releases the GIL
+                    if use_roi_moments:
+                        return (all_counters, Carr_counters,
+                                np.zeros_like(all_counters), moment_counters)
                     return all_counters, Carr_counters
 
         else:  # not HAS_ACCEL
@@ -1840,6 +1871,11 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
         )
         for i, result in results:
             try:
+                if len(result) == 4:
+                    if roi_moments is None:
+                        roi_moments = np.zeros((len(self.fscan), 2, 4))
+                    roi_moments[i] = result[3]
+                    result = result[:3 if has_bg_img else 2]
                 if has_bg_img:
                     all_counters, Carr_counters, BgImg_counters = result
                     bgimg_croi1_a[i] = BgImg_counters[0, 0]
@@ -2055,6 +2091,41 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
         else:
             croibg2_a = croi2_a * (roi_size2 / cpixel2_a)
             croibg2_err_a = np.sqrt(croi2_a) * (roi_size2 / cpixel2_a)
+
+    if roi_moments is not None:
+        errors = []
+        for index, pixels, background_pixels, size in (
+            (0, cpixel1_a, bgpixel1_a, roi_size1),
+            (1, cpixel2_a, bgpixel2_a, roi_size2),
+        ):
+            ratio = integration_corrections.roi_mean_correction(
+                pixels, background_pixels
+            )
+            variance = roi_difference_variance(
+                roi_moments[:, index, 0], roi_moments[:, index, 1],
+                roi_moments[:, index, 2], ratio,
+            )
+            area_scale = np.divide(
+                size, pixels, out=np.full_like(pixels, np.nan), where=pixels > 0
+            )
+            errors.append(np.sqrt(variance) * area_scale)
+        croibg1_err_a, croibg2_err_a = errors
+        if croibg1_bgimg_err_a is not None:
+            ratio = integration_corrections.roi_mean_correction(
+                bgimg_croi1_norm, bgimg_bgroi1_norm
+            )
+            croibg1_bgimg_err_a = np.sqrt(roi_difference_variance(
+                roi_moments[:, 0, 0], roi_moments[:, 0, 1],
+                roi_moments[:, 0, 2], ratio,
+            )) * (roi_size1 / cpixel1_a)
+        if croibg2_bgimg_err_a is not None:
+            ratio = integration_corrections.roi_mean_correction(
+                bgimg_croi2_norm, bgimg_bgroi2_norm
+            )
+            croibg2_bgimg_err_a = np.sqrt(roi_difference_variance(
+                roi_moments[:, 1, 0], roi_moments[:, 1, 1],
+                roi_moments[:, 1, 2], ratio,
+            )) * (roi_size2 / cpixel2_a)
 
     base_signal1 = np.asarray(croibg1_a, dtype=np.float64).copy()
     base_error1 = np.asarray(croibg1_err_a, dtype=np.float64).copy()
@@ -2512,6 +2583,7 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
         x_stop,
         y_start,
         y_stop,
+        moments,
     ):
         """Build the non-legacy sibling branch for one trajectory."""
         record = CurveCorrectionRecord(
@@ -2559,9 +2631,15 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
             intercepted_fraction=frame_policy.intercepted_fraction,
             alpha=alpha_all,
             base_croi=croi,
-            base_croi_variance=croi,
+            base_croi_variance=croi if moments is None else moments[:, 0],
             base_bgroi=bgroi,
-            base_bgroi_variance=bgroi,
+            base_bgroi_variance=bgroi if moments is None else moments[:, 1],
+            base_croi_bgroi_covariance=None if moments is None else moments[:, 2],
+            roi_uncertainty_model=(
+                ("median_poisson_neighborhood_plugin_v1" if repair_enabled
+                 else "linear_poisson_covariance_v1")
+                if moments is not None else None
+            ),
             base_croibg=base_croibg,
             base_croibg_variance=base_croibg_variance,
             combined_croi_factor=combined_croi,
@@ -2601,6 +2679,7 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
         roi_x_stop1_a,
         roi_y_start1_a,
         roi_y_stop1_a,
+        None if roi_moments is None else roi_moments[:, 0],
     )
     datas2[CURVE_CORRECTIONS_GROUP] = versioned_stationary_curve(
         factors2,
@@ -2620,6 +2699,7 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
         roi_x_stop2_a,
         roi_y_start2_a,
         roi_y_stop2_a,
+        None if roi_moments is None else roi_moments[:, 1],
     )
     data = {
         self.activescanname: {
@@ -2686,6 +2766,28 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
     return {"status": "success"}
 
 
+def _repair_moment_plan(mask, row_gaps, col_gaps, repair, center_groups):
+    """Snapshot repair geometry and prepare model-conditioned Poisson moments."""
+    coverage = np.zeros_like(mask)
+    for group in center_groups:
+        for (x0, x1), (y0, y1) in group:
+            coverage[y0:y1, x0:x1] = True
+    plan = _roi_sum_accel.PixelRepairPlan(
+        mask, row_gaps, col_gaps, repair.max_component_pixels,
+        repair.max_span, repair.radius, repair.min_valid_neighbors,
+        roi_covariance=True, covariance_region=coverage,
+    )
+    metadata = plan.configuration()
+    if metadata["unsupported_median_components"]:
+        logger.warning(
+            "%d median repair neighborhoods exceed the validated %d-donor "
+            "uncertainty model. Intensities are preserved; uncertainties for "
+            "affected ROIs are unavailable (NaN).",
+            metadata["unsupported_median_components"], metadata["median_max_donors"],
+        )
+    return plan
+
+
 def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
     try:
         image = self.fscan.get_raw_img(0)
@@ -2743,7 +2845,7 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
     use_polarization = self.scanSelector.usePolarizationBox.isChecked()
     corr = use_solid_angle or use_polarization
     mask = (
-        np.ascontiguousarray(imgmask, dtype=bool)
+        np.array(imgmask, dtype=bool, order="C", copy=True)
         if imgmask is not None
         else np.zeros(image.img.shape, dtype=bool)
     )
@@ -2792,26 +2894,13 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
             "Fitted local background requires the compiled ROI accelerator; "
             "using summed background ROIs instead."
         )
-    if use_fitted_background and fitted_background_order >= 1:
-        logger.warning(
-            "Fitted local background order %d underestimates the "
-            "background error: the saved uncertainty still assumes an "
-            "unweighted flat-background sample and does not propagate "
-            "the polynomial fit's covariance.",
-            fitted_background_order,
-        )
     repair_enabled = False
     roi_lists_accel = None
     if HAS_ACCEL:
         repair_enabled, repair, row_gaps, col_gaps = self._repair_config_for_image(
             image.img.shape
         )
-        if repair_enabled and use_fitted_background:
-            logger.warning(
-                "Pixel repair is disabled for fitted local background; "
-                "using the original mask for this integration."
-            )
-            repair_enabled = False
+        repair_plan = None
         if corr:
             C_arr = np.ascontiguousarray(C_arr, dtype=np.float64)
         else:
@@ -2828,6 +2917,12 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
                 )
             roi_list = np.ascontiguousarray(np.stack(roi_list), dtype=np.int64)
             roi_lists_accel.append(roi_list)
+        if repair_enabled:
+            repair_plan = _repair_moment_plan(
+                mask, row_gaps, col_gaps, repair,
+                (frame[0] for frame in frame_rois) if frame_rois is not None
+                else [roi_lists_accel[0]],
+            )
         if background_image is not None and background_image.shape == image.img.shape:
             if use_fitted_background:
                 logger.warning(
@@ -2853,6 +2948,9 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
                 BgImg_counters = np.zeros(
                     (roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64
                 )  # need gil for python object creation
+                moment_counters = (
+                    np.zeros_like(all_counters) if repair_enabled else None
+                )
                 if repair_enabled:
                     _roi_sum_accel.processImage_repair_bg_Carr(
                         image,
@@ -2869,6 +2967,8 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
                         repair.max_span,
                         repair.radius,
                         repair.min_valid_neighbors,
+                        moments=moment_counters,
+                        plan=repair_plan,
                     )  # compiled accelerator releases the GIL
                 else:
                     _roi_sum_accel.processImage_bg_Carr(
@@ -2881,8 +2981,18 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
                         Carr_counters,
                         BgImg_counters,
                     )  # compiled accelerator releases the GIL
+                if repair_enabled:
+                    return (all_counters, Carr_counters, BgImg_counters,
+                            moment_counters)
                 return all_counters, Carr_counters, BgImg_counters
         else:
+            fit_plan = (
+                _roi_sum_accel.PolynomialBackgroundPlan(
+                    mask, *roi_lists_accel, fitted_background_order,
+                    repair_plan=repair_plan,
+                )
+                if use_fitted_background and frame_rois is None else None
+            )
 
             def sumImage(i):
                 """CLI-safe worker: read and integrate one image."""
@@ -2896,7 +3006,15 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
                 all_counters = np.zeros(
                     (roi_lists_accel[0].shape[0],) + (4,), dtype=np.float64
                 )  # need gil for python object creation
-                if use_fitted_background:
+                moment_counters = (
+                    np.empty_like(all_counters)
+                    if use_fitted_background or repair_enabled else None
+                )
+                if fit_plan is not None:
+                    fit_plan.process(
+                        image, C_arr, all_counters, Carr_counters, moment_counters
+                    )
+                elif use_fitted_background:
                     _roi_sum_accel.processImage_polybg_Carr(
                         image,
                         mask,
@@ -2905,6 +3023,8 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
                         all_counters,
                         Carr_counters,
                         fitted_background_order,
+                        moments=moment_counters,
+                        repair_plan=repair_plan,
                     )  # compiled accelerator releases the GIL
                 elif repair_enabled:
                     _roi_sum_accel.processImage_repair_Carr(
@@ -2920,6 +3040,8 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
                         repair.max_span,
                         repair.radius,
                         repair.min_valid_neighbors,
+                        moments=moment_counters,
+                        plan=repair_plan,
                     )  # compiled accelerator releases the GIL
                 else:
                     _roi_sum_accel.processImage_Carr(
@@ -2930,6 +3052,9 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
                         all_counters,
                         Carr_counters,
                     )  # compiled accelerator releases the GIL
+                if moment_counters is not None:
+                    return (all_counters, Carr_counters,
+                            np.zeros_like(all_counters), moment_counters)
                 return all_counters, Carr_counters
 
     else:
@@ -3033,6 +3158,10 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
         polarization_counters[:, 2], polarization_counters[:, 3]
     )
 
+    sumImage.roi_uncertainty_model = (
+        "median_poisson_neighborhood_plugin_v1" if repair_enabled
+        else "linear_poisson_covariance_v1" if use_fitted_background else None
+    )
     return sumImage, P_croi, P_bgroi
 
 
@@ -3077,6 +3206,7 @@ def _assemble_rocking_tile(
     bgimg_cpixel1_all = counters[9]
     bgimg_bgroi1_all = counters[10]
     bgimg_bgpixel1_all = counters[11]
+    roi_moments = counters[12:16] if len(counters) >= 16 else None
     nominal_rocking_pixels = np.asarray(
         [
             (region[0].stop - region[0].start) * (region[1].stop - region[1].start)
@@ -3122,6 +3252,12 @@ def _assemble_rocking_tile(
     for key in ("croibg", "croibg_errors", "ctr_croibg", "ctr_croibg_errors",
                 "Cfactor_croi", "Cfactor_bgroi", "Pfactor_croi", "Pfactor_bgroi"):
         fields[key] = np.empty((roi_count, frame_count))
+    if roi_moments is not None:
+        for key, values in zip(
+            ("croi_variance", "bgroi_variance", "croi_bgroi_covariance",
+             "raw_croibg_variance"), roi_moments
+        ):
+            fields[key] = values.T
     if "angles" in refldict:
         for column, key in enumerate(("alpha", "delta", "gamma", "omega",
                                       "chi", "phi")):
@@ -3211,6 +3347,28 @@ def _assemble_rocking_tile(
             else:
                 croibg1_a = croi1_a * (roi_size / cpixel1_a)
                 croibg1_err_a = np.sqrt(croi1_a) * (roi_size / cpixel1_a)
+
+        if roi_moments is not None:
+            ratio = integration_corrections.roi_mean_correction(
+                cpixel1_a, bgpixel1_a
+            )
+            variance = roi_difference_variance(
+                roi_moments[0][:, d], roi_moments[1][:, d],
+                roi_moments[2][:, d], ratio,
+            )
+            area_scale = np.divide(
+                roi_size, cpixel1_a, out=np.full_like(cpixel1_a, np.nan),
+                where=cpixel1_a > 0,
+            )
+            croibg1_err_a = np.sqrt(variance) * area_scale
+            if croibg1_bgimg_err_a is not None:
+                ratio = integration_corrections.roi_mean_correction(
+                    bgimg_croi1_norm, bgimg_bgroi1_norm
+                )
+                croibg1_bgimg_err_a = np.sqrt(roi_difference_variance(
+                    roi_moments[0][:, d], roi_moments[1][:, d],
+                    roi_moments[2][:, d], ratio,
+                )) * area_scale
 
         base_croibg1 = np.asarray(croibg1_a, dtype=np.float64).copy()
         base_croibg1_err = np.asarray(croibg1_err_a, dtype=np.float64).copy()
@@ -3379,9 +3537,13 @@ def _assemble_rocking_tile(
         ),
         alpha=np.deg2rad(rois["alpha"]),
         base_croi=rois["croi"],
-        base_croi_variance=rois["croi"],
+        base_croi_variance=rois.get("croi_variance", rois["croi"]),
         base_bgroi=rois["bgroi"],
-        base_bgroi_variance=rois["bgroi"],
+        base_bgroi_variance=rois.get("bgroi_variance", rois["bgroi"]),
+        base_croi_bgroi_covariance=rois.get("croi_bgroi_covariance"),
+        roi_uncertainty_model=(
+            self._roi_uncertainty_model if roi_moments is not None else None
+        ),
         base_croibg=rois["ctr_croibg"],
         base_croibg_variance=np.square(rois["ctr_croibg_errors"]),
         combined_croi_factor=rois["Cfactor_croi"],
