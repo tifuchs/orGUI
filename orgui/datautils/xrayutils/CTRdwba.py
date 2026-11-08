@@ -54,6 +54,17 @@ def _readonly_result(value, shape, scalar, dtype=None):
     return _readonly_array(array)
 
 
+def _amplitude_prefactor(prepared):
+    """Convert electrons per reference cell to dimensionless DWBA amplitude."""
+    kappa_f = (prepared.k0 * prepared.reference.n[0]
+               * np.sin(prepared.alpha_f))
+    value = (2j * np.pi * _CLASSICAL_ELECTRON_RADIUS_ANGSTROM
+             / (kappa_f * prepared.reference_area))
+    if prepared.scalar:
+        return complex(np.asarray(value).reshape(-1)[0])
+    return np.asarray(value).reshape(prepared.shape)
+
+
 def _hash_arrays(*values):
     digest = hashlib.blake2b(digest_size=20)
     for value in values:
@@ -517,20 +528,7 @@ class DWBAResult:
     @property
     def amplitude_prefactor(self):
         """Return ``2 pi i r_e / (A_ref kappa_f)``, the amplitude conversion."""
-        kappa_f = (
-            self.prepared.k0
-            * self.prepared.reference.n[0]
-            * np.sin(self.prepared.alpha_f)
-        )
-        value = (
-            2j
-            * np.pi
-            * _CLASSICAL_ELECTRON_RADIUS_ANGSTROM
-            / (kappa_f * self.prepared.reference_area)
-        )
-        if self.prepared.scalar:
-            return complex(np.asarray(value).reshape(-1)[0])
-        return np.asarray(value).reshape(self.prepared.shape)
+        return _amplitude_prefactor(self.prepared)
 
     @property
     def F_atomic(self):

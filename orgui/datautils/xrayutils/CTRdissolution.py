@@ -2,7 +2,7 @@
 
 The interface closure is frozen and material selective. A structural front
 removes finite-owner populations; it never replenishes the protected substrate.
-All amplitudes and optical profiles are evaluated by ordinary native crystals.
+Amplitudes and optical profiles use native unit-cell and crystal evaluators.
 """
 
 import copy
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .CTRcalc import SXRDCrystal
+from .CTRcalc import SXRDCrystal, _broadcast_kinematic_hkl
 from .CTRdistributions import (
     DEFAULT_TAIL_PROBABILITY, PoissonProfile, RecenteredSkellamProfile,
     SkellamProfile,
@@ -18,6 +18,7 @@ from .CTRdistributions import (
 from .CTRfilm import (
     EpitaxyInterface, Film, RoughSurface, SkellamSurface, _FrozenMaterial,
 )
+from .CTRuc import UnitCell
 
 
 @dataclass(frozen=True)
@@ -262,7 +263,7 @@ class DissolutionPath:
         self._interval_records = {
             key: tuple(r for r in removable if r.interval == key)
             for key in self._intervals}
-        self.initial_inventory = self.state(0).inventory
+        self.initial_inventory = self._selected_material(0)[3]
 
     def _domains(self, cell, parent, owner, role, component_name, order=None):
         layer = float(cell.layers[0])
@@ -395,19 +396,108 @@ class DissolutionPath:
         _copy_geometry(source, crystal)
         return crystal
 
-    def state(self, index):
-        """Build one complete state; index zero is the nominal Film boundary."""
+    def _selected_material(self, index):
+        """Select and validate material without constructing scattering objects."""
         if int(index) != index or index < self.minimum:
             raise ValueError("State index is below exhaustion or is not integer")
         index = int(index)
         keep = len(self._intervals) + min(index, 0)
         retained = [r for r in self._removable if self._rank[r.interval] < keep]
-        records = [*self._protected, *retained, *self._extra_records(index)]
+        extra = self._extra_records(index)
+        records = [*self._protected, *retained, *extra]
         inventory = _inventory(records, self.source.reference_area)
         for owner in self.films:
             inventory.setdefault(owner, {})
         if any(v < -1e-10 for values in inventory.values() for v in values.values()):
             raise ValueError("Exposed motif creates negative material inventory")
+        return keep, retained, extra, inventory
+
+    def _iter_kinematic_amplitudes(self, indices, h, k, l):  # noqa: E741
+        """Stream complete native amplitudes using material prefixes.
+
+        HKL is in the configured reference frame (r.l.u.); amplitudes are in
+        electrons per reference lateral cell. Native component-domain scaling
+        and FrozenMaterial's cell-area conversion remain the only area factors.
+        The plan and all cell copies live only for this request.
+        """
+        indices = list(indices)
+        if any(b <= a for a, b in zip(indices, indices[1:])):
+            raise ValueError("Kinematic state indices must be strictly increasing")
+        selections = []
+        cells = {id(r.cell): r.cell for r in self.records}
+        for index in indices:
+            keep, _, extra, _ = self._selected_material(index)
+            selections.append((int(index), keep, extra))
+            cells.update((id(r.cell), r.cell) for r in extra)
+        # Preserve custom-cell/callback behavior through the complete-state
+        # oracle rather than assuming that an unknown evaluator is additive.
+        bulk = self.source.uc_bulk
+        native_cells = [bulk, *cells.values()]
+        if any(type(cell) is not UnitCell or cell._special_formfactors_present
+               or "F_uc" in cell.__dict__ or "F_bulk" in cell.__dict__
+               for cell in native_cells):
+            for index in indices:
+                yield int(index), self.state(index).crystal.F(h, k, l)
+            return
+        if not indices:
+            return
+
+        coordinates, shape = _broadcast_kinematic_hkl(h, k, l)
+        hkl = np.vstack(coordinates)
+        common = self._crystal(self._protected)
+        protected = common.F(*coordinates)
+        # All accepted components share outer domains. A native one-component
+        # carrier supplies their canonical scales even for a bare common bulk.
+        carrier = common if common.uc_surface_list else self._crystal(
+            self._removable[:1])
+        templates = {}
+        for key, original in cells.items():
+            cell = copy.copy(original)
+            cell.basis = cell.basis.copy()
+            cell.basis_0 = cell.basis_0.copy()
+            cell.setReferenceUnitCell(self.source.reference_uc,
+                                      self.source.reference_rotation)
+            templates[key] = cell
+
+        def _amplitude(records):
+            grouped = {}
+            for record in records:
+                key = id(record.cell)
+                if key not in grouped:
+                    cell = copy.copy(templates[key])
+                    cell.coherentDomainMatrix = []
+                    cell.coherentDomainOccupancy = []
+                    grouped[key] = cell
+                grouped[key].coherentDomainMatrix.append(record.matrix)
+                grouped[key].coherentDomainOccupancy.append(record.weight)
+            if not grouped:
+                return 0.
+            component = _FrozenMaterial(
+                grouped.values(), "kinematic_terms", self.source.reference_area)
+            return sum(carrier._iter_scaled_contributions(
+                0, hkl, lambda _unused, h, k, ell: component.F_uc(h, k, ell)))
+
+        retained_amplitude = np.zeros_like(protected)
+        growth_amplitude = np.zeros_like(protected)
+        previous_keep = previous_growth = 0
+        for index, keep, extra in selections:
+            for rank in range(previous_keep, keep):
+                retained_amplitude += _amplitude(
+                    self._interval_records[self._intervals[rank]])
+            growth_amplitude += _amplitude(
+                r for r in extra if r.role == "growth"
+                and r.interval[1] >= previous_growth)
+            termination = _amplitude(r for r in extra if r.role != "growth")
+            amplitude = (protected + retained_amplitude
+                         + growth_amplitude + termination)
+            yield index, amplitude.reshape(shape)
+            previous_keep, previous_growth = keep, max(0, index)
+
+    def state(self, index):
+        """Build one complete state; index zero is the nominal Film boundary."""
+        keep, retained, extra, inventory = self._selected_material(index)
+        index = int(index)
+        records = [*self._protected, *retained, *extra]
         if index <= 0:
             height = self._heights[keep]
         else:

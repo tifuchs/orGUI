@@ -1,7 +1,8 @@
 # Finite-film dissolution performance assessment
 
-Date: 2026-11-07. Scientific implementation: `898bca1`, including final DWBA
-master `5fc381b`. This assessment changes no runtime scientific code or fits.
+Date: 2026-11-07. Original assessment: `898bca1`, including final DWBA
+master `5fc381b`. Historical measurements below predate the production
+optimizations recorded in the final section. No fits or input data were changed.
 
 The staged follow-up is documented in the
 [kinematic and DWBA performance implementation plan](finite_film_dissolution_performance_plan.md).
@@ -326,7 +327,8 @@ claim a stable percentage speedup.
 
 ### Reproduction and implementation boundary
 
-Run `python -m benchmarks.audit_dissolution_dwba_reuse` with `--request-dir`
+At the historical `0a38763` revision, run
+`python -m benchmarks.audit_dissolution_dwba_reuse` with `--request-dir`
 as above, `--policy shared` or `state_specific`, and a new `--output` JSON.
 Optional `--points` and `--repeats` control the timing workload. The helper
 `_counts(policy, mode, points)` provides the 32/512-ray native-work probes;
@@ -337,3 +339,140 @@ Raw outputs are `output/dissolution/dwba_reuse_shared.json`,
 unused work are diagnostic controls only, not yet production changes. Any
 implementation must also validate changed rods/channels within a batch,
 parameter updates between batches, exception cleanup and cache lifetime.
+
+## First implementation stages
+
+Stages 1 and 2 of the performance plan are implemented on the dissolution
+worktree. These are numerical work-reuse changes. Material selection, physical
+exhaustion, numerical support, probabilities and all optical positions remain
+unchanged. No data or scales were fitted. The native extension is unchanged:
+SHA256 `4373ef0907b7178b4659173040f926cfe635bd0d853d7fd2e550cbfa1a96062f`.
+
+### Implemented changes
+
+- Kinematic evaluation validates material selections without building a full
+  crystal for every height. It evaluates the protected bulk/material once,
+  accumulates removable-interval amplitudes and growth prefixes, and adds each
+  exact termination/reference correction. All scattering and area/domain
+  conversion still use native UnitCell/FrozenMaterial/crystal evaluators.
+  Unknown cell subclasses or custom evaluators keep the complete-state path.
+- DWBA enters the native batch lifecycle for every private state. One shared
+  cell-profile cache serves the immutable ensemble. Shared-reference mode
+  constructs the all-state union grid and rebins each decomposition once;
+  all states use the same prepared wavefields. The last shared ray preparation
+  is reused, with bounded native preparation caches for state-specific mode.
+- State-specific mode no longer evaluates the unused averaged atomic
+  scattering. A private geometry-only helper supplies the existing amplitude
+  prefactor. Distinct state wavefields, the averaged phase frame and native
+  reference subtraction are retained.
+- All private average/state caches are cleared at outer batch exit, including
+  after errors. No cache survives across standalone fit proposals.
+
+### Paired C1 measurements
+
+`benchmarks/benchmark_dissolution_optimized.py` compares the optimized path with
+frozen native complete-state oracles. It alternates timing order, records source,
+native and C1 hashes, and counts native work separately from timing. Loading is
+excluded; fresh calls include snapshot construction, preparation and cleanup.
+Inputs are the same 512-point C1 rod and single-thread policy described above.
+
+| Mode | Complete-state median | Optimized median | Ratio |
+| --- | ---: | ---: | ---: |
+| Kinematic fresh, five pairs | 0.36686 s | 0.04803 s | 7.64x |
+| Shared DWBA fresh, three pairs | 7.64163 s | 5.12783 s | 1.49x |
+| Shared DWBA repeat | 6.44930 s | 4.07152 s | 1.58x |
+| State-specific DWBA fresh, three pairs | 6.43319 s | 6.05091 s | 1.06x |
+| State-specific DWBA repeat | 5.45972 s | 3.78691 s | 1.44x |
+
+Kinematic ranges were 0.36326–0.43288 s complete and 0.04724–0.05216 s optimized.
+A separate same-host five-trial comparison measured legacy at 0.05024 s median,
+versus optimized dissolution at 0.04809 s. Its complete-state median was
+0.36207 s; compare within each run rather than treating the earlier 0.7 s
+observation as a fixed machine speed.
+
+DWBA timings are preliminary Stage 2 measurements, not final acceptance.
+Shared fresh ranged 7.58417–7.86855 s complete and 5.08671–9.79295 s optimized;
+the first optimized call was the high outlier. Repeat ranges were
+6.17872–6.58582 s and 3.99948–4.18506 s. State-specific fresh ranged
+6.38010–11.94844 s complete and 5.89238–6.09333 s optimized; repeat ranges were
+5.30776–10.53486 s and 3.71965–3.89172 s. Retain these outliers in the report;
+final acceptance needs the planned five-pair trials after the later stages.
+
+C1 kinematic intensity differences are at most `1.44e-14` relative. Both DWBA
+policies produce bitwise-identical reflectivity, coherent/incoherent intensities
+and squared prefactors in these runs. Repeat results are bitwise equal to fresh
+results. Tests also compare the optical grid values and boundaries exactly.
+
+| Native work, C1 | Before | After |
+| --- | ---: | ---: |
+| Kinematic bulk / unit-cell calls | 55 / 832 | 1 / 116 |
+| Shared DWBA first snapshot / packing builds | 111 / 56 | 56 / 56 |
+| Shared DWBA first field solves | 114 | 4 |
+| Shared DWBA repeat snapshot / packing / field solves | repeated | 0 / 0 / 0 |
+| State-specific first packing / scattering calls | 56 / 56 | 55 / 55 |
+| State-specific distinct first field solves | 112 | 112 |
+| State-specific repeat snapshot / packing / field solves | repeated | 0 / 0 / 0 |
+
+The shared path still performs 56 native scattering calls and 37,613,568 normal
+exponentials at 512 rays. State-specific still performs 55 scattering calls and
+36,331,008 normal exponentials. Native finite-cache hits remain zero at this
+ray count. This is why Stage 2 does not meet the final shared-DWBA target.
+
+The focused tests cover complete-state amplitude comparisons, unequal lateral
+areas/reference frames, mixed interfaces, explicit finite substrate, growth and
+exhaustion, common outer domains, all polarization pairs, mixing endpoints,
+scalar/broadcast HKL, custom-cell fallback, native work counts and nested/error
+batch cleanup. Existing live-update and optical-position regressions remain
+part of the wider validation.
+
+Reproduce with `python -m benchmarks.benchmark_dissolution_optimized`, supplying
+the hash-checking `--request-dir` used above, `--mode kinematic`, `shared` or
+`state_specific`, `--repeats` and a new `--output`. Raw files are
+`output/dissolution/optimized-kinematic.json`, `optimized-shared.json` and
+`optimized-state-specific.json`. Source hashes in those files describe the
+measured implementation, before its commit was created.
+
+### Full kinematic replay and regression results
+
+The fixed-input C1 replay covers 5,596 non-specular observations, 26,042 original
+resolution nodes and all four recorded domain rotations. It averages domain
+intensities, applies the original resolution matrix, takes square roots and
+retains the original rod scales. No refitting or support changes were made.
+
+| Full replay | Evaluation time | chi-squared / N |
+| --- | ---: | ---: |
+| Complete-state dissolution oracle | 66.20480 s | 8.394242357554576 |
+| Optimized dissolution | 5.00442 s | 8.394242357554575 |
+| Legacy model, different physical boundary | 9.04367 s | 8.394242571229753 |
+
+This single replay is about 13.2x faster than the complete-state calculation;
+it is an objective-level check, not a five-pair performance acceptance study.
+Maximum node-intensity relative difference is `3.22e-14`; maximum residual
+change is `2.00e-14` sigma. Tightening the tail tolerances produced no observable
+change in this replay. The legacy saved amplitude also agrees within `1.14e-13`
+absolute, confirming the original grid/domain/scale reconstruction.
+
+Run `python -m benchmarks.validate_dissolution_c1 --root <LaNiO3-directory>
+--compare-complete-states --output <new-report.json>` to reproduce. Raw report:
+`output/dissolution/optimized-full-c1.json`. Loading and material-statistics
+reporting are excluded from the evaluation times; the four native evaluations
+and resolution/domain averaging are included.
+
+Validation completed:
+
+- Full `test_CTR*.py` suite: 1,351 passed, 3 skipped, 193 passing subtests.
+- Final performance-regression module: 50 passed, including four additional
+  cases for changing channels/ray blocks and explicit `cache=False` within a
+  batch. The explicit bypass still disables native preparation caching.
+- Ruff passes for the scientific-core tree and both changed benchmark drivers;
+  `git diff --check` passes. Release notes were regenerated from the changelog.
+- No C++ changes were made, so the previously verified native extension remains
+  the evaluated binary. Isolated-wheel verification belongs to the final stage.
+
+### Remaining stages
+
+The shared-field material amplitude basis (Stage 3), further field-independent
+state-specific reuse (Stage 4), large-ray native cache/block policy (Stage 5)
+and final isolated-wheel/full-DWBA-objective validation (Stage 6) are still open.
+Do not label the entire performance plan complete or infer full-objective DWBA
+throughput from these 512-ray measurements.

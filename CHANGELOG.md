@@ -74,6 +74,10 @@ Other user-visible changes:
   height moments and numerical tail certificates are exposed explicitly. Native
   kinematic and DWBA calculations support coherent/incoherent mixing. DWBA now
   evaluates bare-bulk states correctly on shared multilayer optical fields.
+  Kinematic evaluation reuses native material amplitudes across heights and
+  evaluates the protected bulk once. DWBA batches reuse state snapshots and
+  packing, share wavefields on the common optical grid where requested, and
+  release private caches on exit. State-specific optics retain distinct fields.
 
 - Copying plots to the clipboard works with silx 3.1.3 and PySide6 again.
   PNG buffer exports used by copying and printing retain the colorbar.

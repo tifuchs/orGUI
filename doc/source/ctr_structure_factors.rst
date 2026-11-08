@@ -1570,5 +1570,14 @@ remain supported. Fit the parent parameters on the wrapper; remove local
 surface-height fit parameters first. Existing legacy models retain their
 finite-support rejection. No fit data or saved crystals are migrated implicitly.
 
+Kinematic evaluation constructs native material amplitudes once per request
+and accumulates the retained material across heights. Complete states remain
+available for inspection, and custom unit-cell evaluators retain the complete
+state path. DWBA batches reuse immutable state snapshots, atom packing and,
+for ``optical_reference="shared"``, wavefields on the all-state union grid.
+``"state_specific"`` retains each state's own fields. Do not mutate the model
+inside ``model.dwba.batch()``; standalone calls take fresh snapshots. Private
+state caches are released when the outer batch exits, including on errors.
+
 See :doc:`dwba` for optical field policies. A runnable synthetic example is
 provided in ``examples/finite_film_dissolution.py``.

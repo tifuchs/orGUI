@@ -1227,11 +1227,11 @@ class FiniteFilmDissolution(CoherentStateEnsembleModel):
 
     def _iter_states(self, context):
         path, indices, probabilities, _ = self._snapshot()
-        for index, probability in zip(indices, probabilities):
-            if probability:
-                state = path.state(int(index))
-                yield IncoherentState(int(index), float(probability),
-                                      state.crystal.F(*context.coordinates))
+        active = probabilities != 0
+        amplitudes = path._iter_kinematic_amplitudes(
+            indices[active], *context.coordinates)
+        for (index, amplitude), probability in zip(amplitudes, probabilities[active]):
+            yield IncoherentState(index, float(probability), amplitude)
 
     def _evaluate_F2(self, context):  # noqa: N802
         incoherent, amplitude, _ = self.accumulate_states(context)

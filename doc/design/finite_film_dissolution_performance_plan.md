@@ -1,8 +1,13 @@
 # Kinematic and DWBA dissolution performance implementation plan
 
-Status: planned; diagnostic controls exist, production optimization has not
-started. Date: 2026-11-07. Baseline: `0a38763`, including authoritative DWBA
+Status: Stages 1 and 2 implemented; later stages remain open. Date: 2026-11-07.
+Baseline: `0a38763`, including authoritative DWBA
 master `5fc381b` and optical-position correction `898bca1`.
+
+The [implementation measurements](finite_film_dissolution_performance.md#first-implementation-stages)
+record the first production changes and their validation. The initial C1
+kinematic goal is met. DWBA preparation reuse is an intermediate improvement;
+the shared material basis and full fitting-workload acceptance remain pending.
 
 Remove repeated full-state work while preserving the implemented finite-film
 model and native scattering. Implement kinematic amplitude reuse first, then

@@ -9,10 +9,12 @@ Outputs are written only to --output. The private dataset is not distributed.
 
 import argparse
 import copy
+from contextlib import nullcontext
 import hashlib
 import json
 import os
 from pathlib import Path
+import time
 
 for _key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ[_key] = "1"
@@ -34,6 +36,8 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--interface-fixed-ucs", type=int)
+    parser.add_argument("--compare-complete-states", action="store_true",
+                        help="Compare optimized kinematics to full native states")
     args = parser.parse_args()
     ctr = args.root / "CTR"
     xtal = ctr / "settings/1V2/0056_C1.xtal"
@@ -71,6 +75,8 @@ def main():
         incoherent_fraction=new.incoherent_fraction, tail_probability=1e-12,
         moment_tolerance=1e-12, second_moment_tolerance=1e-12)
     models = [("legacy", old), ("dissolution", new), ("tight", tight)]
+    if args.compare_complete_states:
+        models.append(("complete", new))
     if args.interface_fixed_ucs is not None:
         expanded = copy.deepcopy(crystal)
         interface = expanded["STO_to_LaNiO3"]
@@ -79,16 +85,26 @@ def main():
         models.append(("wider_interface", FiniteFilmDissolution(
             expanded, films=new.films, surface=new.surface, profile=new.profile,
             incoherent_fraction=new.incoherent_fraction)))
-    predictions = {}
+    predictions, timings, raw_intensities = {}, {}, {}
     for name, model in models:
+        start = time.perf_counter()
         intensities = []
         for number, rotation in enumerate(meta["domain_rotations"]):
             print(f"{name}: domain {number+1}/4", flush=True)
             model.coherent_model.domains = [
                 [(np.asarray(rotation), 1.)]
                 for _ in model.coherent_model.uc_surface_list]
-            intensities.append(model.F2(*hkl.T))
+            if name == "complete":
+                from .benchmark_dissolution_optimized import _oracle
+                context = _oracle("kinematic")
+            else:
+                context = nullcontext()
+            with context:
+                intensities.append(model.F2(*hkl.T))
         predictions[name] = np.sqrt(kernel @ np.mean(intensities, axis=0))
+        timings[name] = time.perf_counter()-start
+        if args.compare_complete_states and name in {"dissolution", "complete"}:
+            raw_intensities[name] = np.asarray(intensities)
     _, groups = np.unique(data[:, :2], axis=0, return_inverse=True)
     scale = result["scales"][groups]
     residuals = {k: (scale*v-data[:, 3])/data[:, 4]
@@ -99,11 +115,23 @@ def main():
         input_hashes=hashes, import_path=CTRincoherent.__file__,
         observations=len(data), resolution_points=len(hkl), rotations=4,
         fixed_scales=result["scales"].tolist(), statistics=new.statistics(),
+        evaluation_seconds=timings,
         legacy_saved_amplitude_max_abs=float(np.max(abs(
             predictions["legacy"]-result["amplitude"]))),
         chi2_N={k: float(v@v/len(v)) for k, v in residuals.items()},
         physical_change_max_sigma=float(np.max(abs(delta))),
         tighter_support_change_max_sigma=float(np.max(abs(numerical))))
+    if args.compare_complete_states:
+        for values in (raw_intensities, predictions):
+            np.testing.assert_allclose(values["dissolution"], values["complete"],
+                                       rtol=2e-12, atol=1e-9)
+        reference = raw_intensities["complete"]
+        nonzero = reference != 0
+        report["optimized_node_intensity_max_relative_difference"] = float(
+            np.max(abs(raw_intensities["dissolution"][nonzero]
+                       / reference[nonzero]-1)))
+        report["optimized_change_max_sigma"] = float(np.max(abs(
+            residuals["dissolution"]-residuals["complete"])))
     if "wider_interface" in residuals:
         difference = residuals["wider_interface"]-residuals["dissolution"]
         report["interface_fixed_ucs"] = args.interface_fixed_ucs
