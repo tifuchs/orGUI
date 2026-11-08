@@ -1,6 +1,10 @@
 Installation
 ============
 
+orGUI requires Python 3.10 or newer. Source installations additionally need a
+C++17 compiler; pip installs the Meson build tools automatically, while matching
+binary wheels need no compiler.
+
 orGUI can be installed from PyPI with its full optional dependency set:
 
 .. code-block:: bash

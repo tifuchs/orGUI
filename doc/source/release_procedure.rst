@@ -147,6 +147,8 @@ Check that GitHub Actions:
 
 * builds and publishes the source distribution from ``release.yml``
 * builds Linux, macOS, and Windows wheels for CPython 3.10 through 3.14
+* imports all six native extensions and runs the wheel regression suite on each
+  wheel, including Linux aarch64 on a native ARM64 runner
 * attaches the binary wheels and source distribution to the GitHub Release
 * publishes the binary wheels to PyPI
 * runs ``twine check``
@@ -160,12 +162,16 @@ number for a fix.
 The ``Test binary wheels`` workflow can also be started manually to test the
 full wheel matrix without publishing. Manual runs never publish to PyPI and do
 not attach artifacts to a GitHub Release. Pushes to ``master`` run a smaller
-smoke matrix: Linux x86_64 on CPython 3.10 and 3.14, macOS arm64 on CPython
-3.14, and Windows x86_64 on CPython 3.14.
+smoke matrix: Linux x86_64 on CPython 3.10 and 3.14, plus Linux aarch64,
+macOS arm64, and Windows x86_64 on CPython 3.14.
 
-Pull requests run the ``Tests`` workflow on the same limited Python/platform
-matrix. Configure branch protection for ``master`` to require the four
-``Tests`` jobs before merging PRs.
+Pull requests and pushes to ``master`` also run the complete installed-package
+test collection (``pytest --pyargs orgui``), including Qt tests, in the ``Tests``
+workflow on Linux x86_64 (Python 3.10/3.14), macOS arm64 (3.14), and Windows
+x86_64 (3.14). Those four jobs use strict floating-point contraction settings;
+the separate wheel suite checks the release compiler settings and packaged
+native modules without Qt. Configure branch protection for ``master`` to
+require the four ``Tests`` jobs before merging PRs.
 
 5. Verify the published package
 -------------------------------
@@ -174,8 +180,12 @@ matrix. Configure branch protection for ``master`` to require the four
 
    python -m venv .venv-release-check
    .\.venv-release-check\Scripts\python -m pip install --upgrade pip
-   .\.venv-release-check\Scripts\python -m pip install "orGUI[full]==X.Y.Z"
+   .\.venv-release-check\Scripts\python -m pip install --only-binary=orGUI "orGUI[full]==X.Y.Z"
    .\.venv-release-check\Scripts\python -c "import orgui; print(orgui.__version__)"
+   .\.venv-release-check\Scripts\python -c "from orgui.datautils.xrayutils import _CTRcalc_cpp, _reciprocal_reconstruction_cpp, _sample_interception_cpp; from orgui.app import _roi_sum_cpp, _peak_search_cpp, _qconversion_cpp; print('all six extensions loaded')"
+
+For a GUI launch check, install one Qt binding as described in
+:doc:`installation`, then run ``orGUI`` from the same environment.
 
 Confirm the GitHub release, PyPI page, attached artifacts, and Read the Docs
 build.

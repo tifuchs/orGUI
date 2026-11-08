@@ -85,15 +85,15 @@ jobs:
             cibw_archs: x86_64
             artifact: linux-x86_64
           - name: Linux aarch64 wheels
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             cibw_archs: aarch64
             artifact: linux-aarch64
           - name: macOS x86_64 wheels
-            os: macos-13
+            os: macos-15-intel
             cibw_archs: x86_64
             artifact: macos-x86_64
           - name: macOS arm64 wheels
-            os: macos-14
+            os: macos-15
             cibw_archs: arm64
             artifact: macos-arm64
           - name: Windows x86_64 wheels
@@ -107,12 +107,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Set up QEMU
-        if: runner.os == 'Linux' && matrix.cibw_archs == 'aarch64'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.0
@@ -134,8 +128,9 @@ jobs:
           CIBW_TEST_COMMAND: >-
             python -c "import orgui.datautils.xrayutils._CTRcalc_cpp,
             orgui.datautils.xrayutils._reciprocal_reconstruction_cpp,
+            orgui.datautils.xrayutils._sample_interception_cpp,
             orgui.app._roi_sum_cpp, orgui.app._peak_search_cpp,
-            orgui.app._qconversion_cpp; print('all five extensions loaded')" &&
+            orgui.app._qconversion_cpp; print('all six extensions loaded')" &&
             python -c "from orgui.datautils.xrayutils import CTRuc;
             assert CTRuc.HAS_CPP_ACCEL;
             CTRuc.set_accel_backend('cpp');
@@ -156,7 +151,8 @@ jobs:
             orgui.datautils.xrayutils.test.test_reconstruction_subdivision
             orgui.datautils.xrayutils.test.test_reconstruction_checkpoint
             orgui.datautils.xrayutils.test.test_reconstruction_group
-          CIBW_TEST_SKIP: "*-manylinux_aarch64"
+            orgui.datautils.xrayutils.test.test_sample_interception
+            orgui.datautils.xrayutils.test.test_sample_interception_native
         with:
           output-dir: wheelhouse
 

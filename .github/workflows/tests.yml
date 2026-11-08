@@ -33,7 +33,7 @@ jobs:
             python-version: "3.14"
             qt-binding: PyQt6
           - name: macOS arm64 Python 3.14
-            os: macos-14
+            os: macos-15
             python-version: "3.14"
             qt-binding: PyQt6
           - name: Windows x86_64 Python 3.14

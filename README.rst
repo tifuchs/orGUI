@@ -34,7 +34,7 @@ Diffraction (`TSD <https://doi.org/10.1021/acs.jpclett.7b00332>`_).
 Installation
 ------------
 
-Install orGUI with its full GUI and analysis dependency set:
+Install orGUI with its full optional dependency set:
 
 .. code-block:: bash
 
@@ -45,6 +45,13 @@ For a minimal install:
 .. code-block:: bash
 
    pip install orGUI
+
+Install a Qt binding (PySide6, PyQt6, or PyQt5) separately to run the GUI;
+neither command installs one.
+
+orGUI requires Python 3.10 or newer. Source installations additionally need a
+C++17 compiler; pip installs the Meson build tools automatically, while matching
+binary wheels need no compiler.
 
 Geometry and Detector Calibration
 ---------------------------------
