@@ -21,13 +21,14 @@ import configparser
 import datetime
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import h5py
 import numpy as np
 from silx.io.dictdump import dicttonx, nxtodict
 
-from ..datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg
+from ..datautils.xrayutils import CTRcalc, DetectorCalibration, HKLVlieg, unitcells
 
 SCHEMA_VERSION = 1
 
@@ -1102,47 +1103,88 @@ class ConfigData:
     def from_ini(cls, filename):
         """Read legacy INI config into a structured config object.
 
-        Config ``SDD`` and ``pixelsize`` are read in meters, detector center is
-        read in pixels, energy is keV, and lattice constants are Angstrom.
+        Config ``SDD`` and ``pixelsize`` are in meters, detector center in
+        pixels, energy in keV, lattice lengths in Angstrom and angles in
+        degrees. Relative PONI and crystal paths are resolved beside the INI.
+        A PONI wavelength overrides the configured energy; a complete set of
+        six lattice parameters overrides a loaded crystal's lattice.
+
+        :param filename: Path to the legacy INI configuration.
+        :raises OSError: If a requested file cannot be opened.
+        :raises ValueError: If a requested calibration is invalid.
         """
+        filename = Path(filename)
         config = configparser.ConfigParser()
-        config.read(filename)
+        with filename.open() as config_file:
+            config.read_file(config_file)
         machine = config["Machine"]
         lattice = config["Lattice"]
         diffrac = config["Diffractometer"]
 
         energy = machine.getfloat("E", 78.0)
-        cell = CTRcalc.UnitCell(
-            [
-                lattice.getfloat("a1", 1.0),
-                lattice.getfloat("a2", 1.0),
-                lattice.getfloat("a3", 1.0),
-            ],
-            [
-                lattice.getfloat("alpha1", 90.0),
-                lattice.getfloat("alpha2", 90.0),
-                lattice.getfloat("alpha3", 90.0),
-            ],
-        )
-        cell.addAtom("Pt", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0)
-        cell.setEnergy(energy * 1e3)
-        ub_calculator = HKLVlieg.UBCalculator(cell, energy)
-        ub_calculator.defaultU()
+        lengths = [lattice.getfloat(key, 1.0) for key in ("a1", "a2", "a3")]
+        angles = [lattice.getfloat(key, 90.0) for key in (
+            "alpha1", "alpha2", "alpha3"
+        )]
+        crystal_name = lattice.get("crystal", "").strip()
+        if crystal_name:
+            if crystal_name in unitcells.availablebulk:
+                cell = unitcells.unitcell(crystal_name)
+            else:
+                crystal_path = filename.absolute().parent / crystal_name
+                try:
+                    if crystal_path.suffix in (".xtal", ".h5", ".xpr"):
+                        cell = CTRcalc.SXRDCrystal.fromFile(str(crystal_path))["bulk"]
+                    else:
+                        cell = CTRcalc.UnitCell.fromFile(str(crystal_path))
+                except OSError:
+                    raise
+                except Exception as exc:
+                    raise ValueError(
+                        f"Cannot read crystal file {crystal_path}"
+                    ) from exc
+            keys = ("a1", "a2", "a3", "alpha1", "alpha2", "alpha3")
+            if all(key in lattice for key in keys) and all(
+                value >= 0 for value in lengths + angles
+            ):
+                cell.setLattice(lengths, angles)
+        else:
+            cell = CTRcalc.UnitCell(lengths, angles)
+            cell.addAtom("Pt", [0.0, 0.0, 0.0], 0.1, 0.1, 1.0)
 
         detector = DetectorCalibration.Detector2D_SXRD()
-        detector.setFit2D(
-            machine.getfloat("SDD", 0.729) * 1e3,
-            machine.getfloat("cpx", 731),
-            machine.getfloat("cpy", 1587),
-            pixelX=machine.getfloat("pixelsize", 172e-6) * 1e6,
-            pixelY=machine.getfloat("pixelsize", 172e-6) * 1e6,
-        )
-        detector.wavelength = ub_calculator.getLambda() * 1e-10
-        detector.detector.shape = (
-            int(machine.getfloat("sizey", 3000)),
-            int(machine.getfloat("sizex", 3000)),
-        )
-        detector.detector.max_shape = detector.detector.shape
+        poni = machine.get("poni", "").strip()
+        if poni:
+            poni_path = filename.absolute().parent / poni
+            detector.load(str(poni_path))
+            if (detector.wavelength is None
+                    or not np.isfinite(detector.wavelength)
+                    or detector.wavelength <= 0):
+                raise ValueError(
+                    f"PONI file {poni_path} must contain a positive wavelength"
+                )
+            energy = detector.energy
+        else:
+            detector.setFit2D(
+                machine.getfloat("SDD", 0.729) * 1e3,
+                machine.getfloat("cpx", 731),
+                machine.getfloat("cpy", 1587),
+                pixelX=machine.getfloat("pixelsize", 172e-6) * 1e6,
+                pixelY=machine.getfloat("pixelsize", 172e-6) * 1e6,
+            )
+            detector.detector.shape = (
+                int(machine.getfloat("sizey", 3000)),
+                int(machine.getfloat("sizex", 3000)),
+            )
+            detector.detector.max_shape = detector.detector.shape
+
+        cell.setEnergy(energy * 1e3)
+        ub_calculator = HKLVlieg.UBCalculator(cell, energy)
+        if poni:
+            ub_calculator.setLambda(detector.wavelength * 1e10)
+        else:
+            detector.wavelength = ub_calculator.getLambda() * 1e-10
+        ub_calculator.defaultU()
         detector.setAzimuthalReference(
             np.deg2rad(diffrac.getfloat("azimuthal_reference", 0))
         )
