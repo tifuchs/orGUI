@@ -158,6 +158,25 @@ class BatchOptions:
             raise ValueError("Memory budget cannot hold one frame and curve")
         return frames, curves
 
+    def extraction_sizes(self, frame_count, roi_count, groups, workers):
+        """Budget two frame buffers, worker counters and one write transpose.
+
+        The arrays owned by extraction have a deterministic upper bound:
+        ``2 * B * R * G * 4 * 8 + W * R * G * 4 * 8 + B * R * 8``
+        bytes. Detector images/backend allocations and shared correction maps
+        remain excluded as documented by :class:`BatchOptions`.
+        """
+        self.sizes(frame_count, roi_count)  # Validate the shared options.
+        budget = int(self.memory_mib * 2**20)
+        result_bytes = roi_count * groups * 4 * 8
+        buffer_bytes = 2 * result_bytes + roi_count * 8
+        for active in range(min(max(1, int(workers)), frame_count), 0, -1):
+            frames = min(self.frames, frame_count,
+                         (budget - active * result_bytes) // buffer_bytes)
+            if frames >= 1 and 2 * frames >= active:
+                return frames, active
+        raise ValueError("Memory budget cannot hold one worker and frame buffers")
+
 
 class IntegrationCancelled(Exception):
     """Cooperative cancellation that unwinds before saving partial results."""
@@ -557,6 +576,75 @@ def _integrate_stationary_job(context, lines, geometry_provider):
     return {"status": "success", "completed_lines": completed}
 
 
+def _rocking_frame_batches(
+    context, worker, probe, count, rois, frames, workers, progress,
+):
+    """Yield frame blocks while one persistent pool fills the next block.
+
+    Each worker owns one frame slice. Futures retain no counter arrays;
+    completed counters are copied directly into one of two reusable buffers.
+    HDF5 and GUI/progress calls remain exclusively on the collector.
+    """
+    groups = len(probe)
+    buffers = [np.empty((groups, frames, rois, 4)) for _ in range(2)]
+    for target, values in zip(buffers[0], probe):
+        target[0] = values
+    del probe, target, values
+    processed = 1
+    progress.update(processed)
+
+    def fill(buffer, start, i):
+        """Fill the frame slice exclusively owned by this worker."""
+        result = worker(i)
+        for target, values in zip(buffer, result):
+            target[i - start] = values
+
+    def check_cancelled():
+        """Check captured state and cancellation on the collector."""
+        _validate_context(context)
+        if progress.wasCanceled():
+            raise IntegrationCancelled()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = [None, None]
+
+        def submit(slot, start):
+            """Queue only the frames belonging to one reusable buffer."""
+            stop = min(start + frames, count)
+            pending[slot] = {
+                pool.submit(fill, buffers[slot], start, i)
+                for i in range(max(1, start), stop)
+            }
+
+        try:
+            submit(0, 0)
+            if frames < count:
+                submit(1, frames)
+            for batch, start in enumerate(range(0, count, frames)):
+                slot = batch % 2
+                while pending[slot]:
+                    done, pending[slot] = concurrent.futures.wait(
+                        pending[slot], timeout=0.1,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+                    for future in done:
+                        future.result()
+                    processed += len(done)
+                    progress.update(processed)
+                    check_cancelled()
+                check_cancelled()
+                yield start, buffers[slot][:, :min(frames, count - start)]
+                # The collector has finished writing this buffer. Refill it
+                # while the other buffer is being collected and written.
+                next_start = start + 2 * frames
+                if next_start < count:
+                    submit(slot, next_start)
+        finally:
+            for futures in pending:
+                for future in futures or ():
+                    future.cancel()
+
+
 def integrate_rocking_scan(
     context,
     xylist=None,
@@ -582,7 +670,7 @@ def integrate_rocking_scan(
     :param batch_options: Optional :class:`BatchOptions` execution limits.
     :returns: Existing status dictionary plus published result paths.
     """
-    from .database import RockingBatchWriter
+    from .database import _RockingFrameWriter
 
     error = _preflight_corrections(context)
     if error is not None:
@@ -637,10 +725,29 @@ def integrate_rocking_scan(
         worker, polarization, background_polarization = prepared
         probe = worker(0)
         groups = len(probe)
-        writer = RockingBatchWriter(
+        batch_frames, workers = options.extraction_sizes(
+            count, len(xy), groups, workers
+        )
+        reserved = set()
+        lines = [dict(entry) for entry in lines]
+        for entry in lines:
+            stem = _available_name(context.database, context.activescanname,
+                                   entry["name"])
+            result_name = stem
+            suffix = 1
+            while (result_name in reserved or
+                   f"/{context.activescanname}/measurement/{result_name}"
+                   in context.database.nxfile):
+                result_name = f"{stem}_{suffix}"
+                suffix += 1
+            entry["result_name"] = result_name
+            reserved.add(result_name)
+        writer = _RockingFrameWriter(
             context.database,
             count,
-            len(xy),
+            lines,
+            frame_batch=batch_frames,
+            curve_batch=batch_curves,
             background=groups == 3,
         )
         writer.group.attrs["frame_batch"] = batch_frames
@@ -654,33 +761,19 @@ def integrate_rocking_scan(
             len(xy),
             workers,
         )
-        processed = 1
         required_frames = np.zeros(count, dtype=bool)
-        progress.update(processed)
-        for start in range(0, count, batch_frames):
-            stop = min(start + batch_frames, count)
-            buffer = np.empty((groups, stop - start, len(xy), 4), dtype=float)
-            indices = range(max(start, 1), stop) if start == 0 else range(start, stop)
-            if start == 0:
-                buffer[:, 0] = probe
-                del probe
-            results = _bounded_results(worker, indices, max(1, workers))
-            try:
-                for i, result in results:
-                    buffer[:, i - start] = result
-                    processed += 1
-                    progress.update(processed)
-                    _validate_context(context)
-                    if progress.wasCanceled():
-                        raise IntegrationCancelled()
-            finally:
-                results.close()
-            if progress.wasCanceled():
-                raise IntegrationCancelled()
-            _validate_context(context)
-            required_frames[start:stop] = _frames_with_roi_data(buffer[0])
-            writer.write_frames(start, buffer)
-            del buffer
+        batches = _rocking_frame_batches(
+            context, worker, probe, count, len(xy), batch_frames, workers, progress
+        )
+        del probe
+        try:
+            for start, buffer in batches:
+                stop = start + buffer.shape[1]
+                required_frames[start:stop] = _frames_with_roi_data(buffer[0])
+                writer.write_frames(start, buffer)
+        finally:
+            batches.close()
+        del buffer
         del worker, prepared
         context = replace(context, _interception_required_frames=required_frames)
         writer.group.attrs["state"] = "assembling"
@@ -714,9 +807,7 @@ def integrate_rocking_scan(
         offset = 0
         for entry in lines:
             size = len(entry["xy"])
-            result_name = _available_name(
-                context.database, context.activescanname, entry["name"]
-            )
+            result_name = entry["result_name"]
             for start in range(0, size, batch_curves):
                 stop = min(start + batch_curves, size)
                 if progress.wasCanceled():
@@ -733,12 +824,13 @@ def integrate_rocking_scan(
                     for key, value in entry["rois"].items()
                     if key in regions
                 }
-                counters = writer.read_curves(offset + start, offset + stop)
+                counters = writer.read_line_curves(result_name, start, stop)
                 selected = np.flatnonzero(np.any(counters[1] > 0, axis=0))
                 if not selected.size:
                     progress.update(count + offset + stop)
                     continue
                 reflections = _slice_reflections(entry["reflections"], start, stop)
+                selection = slice(None) if len(selected) == stop - start else selected
                 for key in ("angles", "s_masked", "hkl_masked"):
                     if key in reflections:
                         reflections[key] = reflections[key][selected]
@@ -750,10 +842,10 @@ def integrate_rocking_scan(
                     context,
                     tile_xy[selected],
                     tile_rois,
-                    tile_geometry[selected],
+                    tile_geometry[selection],
                     reflections,
                     result_name,
-                    [values[:, selected] for values in counters],
+                    [values[:, selection] for values in counters],
                     polarization[offset + start : offset + stop][selected],
                     background_polarization[offset + start : offset + stop][selected],
                     row_offset=start,
@@ -766,7 +858,7 @@ def integrate_rocking_scan(
                     tile["@orgui_effective_delta_s"] = entry["effective_delta_s"]
                 if "intersection" in entry:
                     tile["@orgui_intersection"] = entry["intersection"]
-                writer.append_tile(result_name, tile)
+                writer.append_tile(result_name, tile, source_rows=start + selected)
                 progress.update(count + offset + stop)
                 _validate_context(context)
                 del tile, tile_geometry, counters
@@ -2998,80 +3090,53 @@ def _assemble_rocking_tile(
         "Rocking extraction",
     )
 
-    currentPlotCount = len(self.integrdataPlot.getAllCurves())
-    numberOfNewPlots = xylist.shape[0]
-    maxAmountOfPlots = 30
-    plotOnlyNth = (
-        numberOfNewPlots // max((maxAmountOfPlots - currentPlotCount), 1)
-    ) + 1
-
-    # print('Number of integration curves: ' + str(numberOfPlots))
-    # print('We can plot every ' + str(plotOnlyNth) + '-th curve.' )
-
-    auxcounters = {"@NX_class": "NXcollection"}
-    for auxname in self.fscan.auxillary_counters:
-        if hasattr(self.fscan, auxname):
-            cntr = getattr(self.fscan, auxname)
-            if cntr is not None:
-                auxcounters[auxname] = cntr
-
-    if hasattr(self.fscan, "title"):
-        title = str(self.fscan.title)
-    else:
-        title = f"{self.fscan.axisname}-scan"
-
+    frame_count, roi_count = croi1_all.shape
     mu, om = self.getMuOm()
-    if len(np.asarray(om).shape) == 0:
-        om = np.full_like(mu, om)
-    if len(np.asarray(mu).shape) == 0:
-        mu = np.full_like(om, mu)
+    mu = np.broadcast_to(np.asarray(mu), (frame_count,))
+    om = np.broadcast_to(np.asarray(om), (frame_count,))
     gamma_arm, delta_arm = self.getArmAngles()
-    gamma_arm = np.broadcast_to(
-        np.asarray(gamma_arm, dtype=np.float64), (len(self.fscan),)
-    ).copy()
-    delta_arm = np.broadcast_to(
-        np.asarray(delta_arm, dtype=np.float64), (len(self.fscan),)
-    ).copy()
-
     config_snapshot = self.config_snapshot
-    data = {
-        self.activescanname: {  # legacy, to be removed!
-            "instrument": {
-                "@NX_class": "NXinstrument",
-                "positioners": {
-                    "@NX_class": "NXcollection",
-                    self.fscan.axisname: self.fscan.axis,
-                },
-            },
-            "auxillary": auxcounters,
-            "measurement": {
-                "@NX_class": "NXentry",
-                "@default": name,
-                name: {
-                    "@NX_class": "NXentry",
-                    "@default": "rois",
-                    "@orgui_meta": "rocking",
-                    "rois": {
-                        "@NX_class": "NXcollection",
-                        "@default": None,
-                        "@orgui_meta": "roi rocking",
-                    },
-                },
-            },
-            "title": f"{title}",
-            "configuration": config_snapshot.to_nxdict(
-                role="scan", source="scan_import"
-            ),
-            "@NX_class": "NXentry",
-            "@default": f"measurement/{name}",
-            "@orgui_meta": "scan",
-        }
+    fields = {
+        "@NX_class": "NXcollection", "@default": "croibg",
+        "@orgui_meta": "roi rocking",
+        "alpha": np.broadcast_to(np.rad2deg(mu), (roi_count, frame_count)),
+        "theta": np.broadcast_to(np.rad2deg(-om), (roi_count, frame_count)),
+        "omega": np.broadcast_to(np.rad2deg(om), (roi_count, frame_count)),
+        "chi": np.broadcast_to(np.atleast_1d(np.rad2deg(self.ubcalc.chi)),
+                               (roi_count, np.size(self.ubcalc.chi))),
+        "phi": np.broadcast_to(np.atleast_1d(np.rad2deg(self.ubcalc.phi)),
+                               (roi_count, np.size(self.ubcalc.phi))),
+        "delta": np.rad2deg(hkl_del_gam[:, :, 3]),
+        "gamma": np.rad2deg(hkl_del_gam[:, :, 4]),
+        "h": hkl_del_gam[:, :, 0], "k": hkl_del_gam[:, :, 1],
+        "l": hkl_del_gam[:, :, 2], "axis": hkl_del_gam[:, :, 5],
+        "croi": croi1_all.T, "croi_pix": cpixel1_all.T,
+        "bgroi": bgroi1_all.T, "bgroi_pix": bgpixel1_all.T,
+        "Cfactors_croi": Corr_croi1_all.T, "Cfactors_bgroi": Corr_bgroi1_all.T,
+        "bgimg_croi": bgimg_croi1_all.T, "bgimg_bgroi": bgimg_bgroi1_all.T,
+        "x": np.asarray(xylist)[:, 0], "y": np.asarray(xylist)[:, 1],
+        "vsize": rocking_roi_edges["y_stop"] - rocking_roi_edges["y_start"],
+        "hsize": rocking_roi_edges["x_stop"] - rocking_roi_edges["x_start"],
+        **_rocking_arm_snapshot(gamma_arm, delta_arm, (roi_count, frame_count)),
     }
-
+    for key in ("croibg", "croibg_errors", "ctr_croibg", "ctr_croibg_errors",
+                "Cfactor_croi", "Cfactor_bgroi", "Pfactor_croi", "Pfactor_bgroi"):
+        fields[key] = np.empty((roi_count, frame_count))
+    if "angles" in refldict:
+        for column, key in enumerate(("alpha", "delta", "gamma", "omega",
+                                      "chi", "phi")):
+            fields[key + "_pk"] = np.rad2deg(refldict["angles"][:, column])
+        fields["theta_pk"] = -fields["omega_pk"]
+        if "s_masked" in refldict:
+            fields["s"] = np.asarray(refldict["s_masked"])
+            if "H_1" in refldict:
+                fields["H_0"] = np.broadcast_to(refldict["H_0"], (roi_count, 3))
+                fields["H_1"] = np.broadcast_to(refldict["H_1"], (roi_count, 3))
+                fields["HKL_pk"] = fields["H_0"] + fields["s"][:, None] * fields["H_1"]
+            else:
+                fields["HKL_pk"] = np.asarray(refldict["hkl_masked"])
     croibg1_bgimg_a = None
     croibg1_bgimg_err_a = None
-
-    # plot and save data in database
     for d in range(croi1_all.shape[1]):
         roi_d = rois["center"][d]
         roi_size = (roi_d[0].stop - roi_d[0].start) * (roi_d[1].stop - roi_d[1].start)
@@ -3188,373 +3253,38 @@ def _assemble_rocking_tile(
             croibg1_bgimg_a = croibg1_bgimg_a * combined_croi_factor
             croibg1_bgimg_err_a = croibg1_bgimg_err_a * combined_croi_factor
 
-        rod_mask1 = np.isfinite(croibg1_a)
-
-        axis_masked = hkl_del_gam_1[:, 5][rod_mask1]
-
-        croibg1_a_masked = croibg1_a[rod_mask1]
-
-        croibg1_err_a_masked = croibg1_err_a[rod_mask1]
-
-        # save data
-
-        x, y = xylist[d]
-        name1 = f"rocking_{d + row_offset}"
-        if "angles" in refldict:
-            alpha1, delta1, gamma1, omega1, chi1, phi1 = refldict["angles"][d]
-            sixc_angles_hkl = {
-                "@NX_class": "NXpositioner",
-                "alpha": np.rad2deg(alpha1),
-                "omega": np.rad2deg(omega1),
-                "theta": np.rad2deg(-1 * omega1),
-                "delta": np.rad2deg(delta1),
-                "gamma": np.rad2deg(gamma1),
-                "chi": np.rad2deg(chi1),
-                "phi": np.rad2deg(phi1),
-                "@unit": "deg",
-            }
-            traj1 = {
-                # "@direction" : u"Rocking scan at fixed pixel location along H_1*s + H_0 in reciprocal space",  # noqa: E501
-                "@NX_class": "NXcollection",
-                "axis": hkl_del_gam_1[:, 5],
-                "HKL_sixc_angles": sixc_angles_hkl,
-            }
-            # determine the type of rocking scan:
-            if "H_1" in refldict:  # H_1 * s H_0 -like rocking scan (CTR scan)
-                traj1["s"] = refldict["s_masked"][d]
-                traj1["H_1"] = refldict["H_1"]
-                traj1["H_0"] = refldict["H_0"]
-                # equal refldict['hkl_masked']?
-                traj1["HKL_pk"] = (
-                    refldict["H_1"] * refldict["s_masked"][d] + refldict["H_0"]
-                )
-            elif "s_masked" in refldict:
-                traj1["s"] = refldict["s_masked"][d]
-                traj1["HKL_pk"] = refldict["hkl_masked"][d]
-        else:
-            traj1 = {
-                # "@direction" : u"Rocking scan at fixed pixel location along H_1*s + H_0 in reciprocal space",  # noqa: E501
-                "@NX_class": "NXcollection",
-                "axis": hkl_del_gam_1[:, 5],
-            }
-
-        suffix = ""
-        i = 0
-
-        while (
-            self.activescanname + "/measurement/" + name + "/" + name1 + suffix
-            in self.database.nxfile
+        for key, values in (
+            ("croibg", croibg1_a), ("croibg_errors", croibg1_err_a),
+            ("ctr_croibg", ctr_croibg1_a), ("ctr_croibg_errors", ctr_croibg1_err_a),
+            ("Cfactor_croi", combined_croi_factor),
+            ("Cfactor_bgroi", combined_bgroi_factor),
+            ("Pfactor_croi", polarization_croi_factor),
+            ("Pfactor_bgroi", polarization_bgroi_factor),
         ):
-            suffix = f"_{i}"
-            i += 1
-
-        availname1 = name1 + suffix
-
-        x, y = xylist[d]  #
-        # x_coord1_a = xylist[:,0]
-        # y_coord1_a = xylist[:,1]
-
-        datas1 = {
-            "@NX_class": "NXdata",
-            "sixc_angles": {
-                "@NX_class": "NXpositioner",
-                "alpha": np.rad2deg(mu),
-                "omega": np.rad2deg(om),
-                "theta": np.rad2deg(-1 * om),
-                "delta": np.rad2deg(hkl_del_gam_1[:, 3]),
-                "gamma": np.rad2deg(hkl_del_gam_1[:, 4]),
-                "chi": np.rad2deg(self.ubcalc.chi),
-                "phi": np.rad2deg(self.ubcalc.phi),
-                "@unit": "deg",
-            },
-            "hkl": {
-                "@NX_class": "NXcollection",
-                "h": hkl_del_gam_1[:, 0],
-                "k": hkl_del_gam_1[:, 1],
-                "l": hkl_del_gam_1[:, 2],
-            },
-            "counters": {
-                "@NX_class": "NXdetector",
-                "croibg": croibg1_a,
-                "croibg_errors": croibg1_err_a,
-                "ctr_croibg": ctr_croibg1_a,
-                "ctr_croibg_errors": ctr_croibg1_err_a,
-                "croibg_bgimg": croibg1_bgimg_a,  # when None, will not create data set  # noqa: E501
-                "croibg_bgimg_errors": croibg1_bgimg_err_a,  # when None, will not create data set  # noqa: E501
-                "croi": croi1_a,
-                "bgroi": bgroi1_a,
-                "croi_pix": cpixel1_a,
-                "bgroi_pix": bgpixel1_a,
-                "Cfactors_croi": Corr_croi1_a,
-                "Cfactors_bgroi": Corr_bgroi1_a,
-                "Cfactor_croi": combined_croi_factor,
-                "Cfactor_bgroi": combined_bgroi_factor,
-                "Pfactor_croi": polarization_croi_factor,
-                "Pfactor_bgroi": polarization_bgroi_factor,
-                "bgimg_croi": bgimg_croi1_a,
-                "bgimg_bgroi": bgimg_bgroi1_a,
-            },
-            "pixelcoord": {
-                "@NX_class": "NXdetector",
-                "x": x,
-                "y": y,
-                "vsize": (roi_d[1].stop - roi_d[1].start),
-                "hsize": (roi_d[0].stop - roi_d[0].start),
-            },
-            "trajectory": traj1,
-            "@signal": "counters/croibg",
-            "@axes": "trajectory/axis",
-            "@title": self.activescanname + "_" + availname1,
-            "@orgui_meta": "roi rocking",
-            "configuration": config_snapshot.to_nxdict(
-                role="integration", source="integration_save"
-            ),
-        }
-
-        data[self.activescanname]["measurement"][name]["rois"]["@default"] = availname1
-        if np.any(cpixel1_a > 0.0):
-            data[self.activescanname]["measurement"][name]["rois"][availname1] = datas1
-            if d % plotOnlyNth == 0 and not min(croibg1_a_masked) == max(
-                croibg1_a_masked
-            ):
+            fields[key][d] = values
+        if croibg1_bgimg_a is not None:
+            for key, values in (("croibg_bgimg", croibg1_bgimg_a),
+                                ("croibg_bgimg_errors", croibg1_bgimg_err_a)):
+                if key not in fields:
+                    fields[key] = np.zeros((roi_count, frame_count))
+                fields[key][d] = values
+        if len(self.integrdataPlot.getAllCurves()) < 30:
+            valid = np.isfinite(croibg1_a)
+            if np.any(valid) and np.ptp(croibg1_a[valid]) > 0:
                 self.integrdataPlot.addCurve(
-                    axis_masked,
-                    croibg1_a_masked,
-                    legend=self.activescanname + "_" + availname1,
+                    hkl_del_gam_1[:, 5][valid], croibg1_a[valid],
+                    legend=f"{self.activescanname}_rocking_{row_offset + d}",
                     xlabel=f"trajectory/{self.fscan.axisname}",
-                    ylabel="counters/croibg",
-                    yerror=croibg1_err_a_masked,
+                    ylabel="counters/croibg", yerror=croibg1_err_a[valid],
                 )
-
-    # lets keep legacy data structure for now
-
-    data_2d_structured = {
-        self.activescanname: {
-            "instrument": {
-                "@NX_class": "NXinstrument",
-                "positioners": {
-                    "@NX_class": "NXcollection",
-                    self.fscan.axisname: self.fscan.axis,
-                },
-            },
-            "auxillary": auxcounters,
-            "measurement": {
-                "@NX_class": "NXentry",
-                "@default": name,
-                name: {
-                    "@NX_class": "NXentry",
-                    "@default": "rois",
-                    "@orgui_meta": "rocking",
-                    "configuration": config_snapshot.to_nxdict(
-                        role="integration", source="integration_save"
-                    ),
-                },
-            },
-            "title": f"{title}",
-            "configuration": config_snapshot.to_nxdict(
-                role="scan", source="scan_import"
-            ),
-            "@NX_class": "NXentry",
-            "@default": f"measurement/{name}",
-            "@orgui_meta": "scan",
-        }
+    rois = fields
+    result = {
+        "@NX_class": "NXentry", "@default": "rois", "@orgui_meta": "rocking",
+        "configuration": config_snapshot.to_nxdict(
+            role="integration", source="integration_save"
+        ),
+        "rois": rois,
     }
-    alpha = []
-    theta = []
-    delta = []
-    gamma = []
-    chi = []
-    phi = []
-    omega = []
-    alpha_pk = []
-    theta_pk = []
-    delta_pk = []
-    gamma_pk = []
-    chi_pk = []
-    phi_pk = []
-    omega_pk = []
-    x = []
-    y = []
-    h = []
-    k = []
-    l = []  # noqa: E741
-    croibg = []
-    croibg_errors = []
-    ctr_croibg = []
-    ctr_croibg_errors = []
-    croi = []
-    bgroi = []
-    croi_pix = []
-    bgroi_pix = []
-    croibg_bgimg = []
-    croibg_bgimg_errors = []
-    Cfactors_croi = []
-    Cfactors_bgroi = []
-    Cfactor_croi = []
-    Cfactor_bgroi = []
-    Pfactor_croi = []
-    Pfactor_bgroi = []
-    bgimg_croi = []
-    bgimg_bgroi = []
-    axis = []
-    s = []
-    H_0 = []
-    H_1 = []
-    HKL_pk = []
-    vsize = []
-    hsize = []
-
-    # from IPython import embed; embed()
-
-    optional_labels = {"s": s, "H_1": H_1, "H_0": H_0, "HKL_pk": HKL_pk}
-
-    for sc in data[self.activescanname]["measurement"][name]["rois"]:
-        if sc.startswith("@"):
-            continue
-        try:
-            dsc = data[self.activescanname]["measurement"][name]["rois"][sc]
-
-            # 2D arrays
-            alpha.append(dsc["sixc_angles"]["alpha"])
-            theta.append(dsc["sixc_angles"]["theta"])
-            delta.append(dsc["sixc_angles"]["delta"])
-            gamma.append(dsc["sixc_angles"]["gamma"])
-            chi.append(dsc["sixc_angles"]["chi"])
-            phi.append(dsc["sixc_angles"]["phi"])
-            omega.append(dsc["sixc_angles"]["omega"])
-
-            # 2D arrays
-            h.append(dsc["hkl"]["h"])
-            k.append(dsc["hkl"]["k"])
-            l.append(dsc["hkl"]["l"])
-
-            # 2D arrays
-            croibg.append(dsc["counters"]["croibg"])
-            croibg_errors.append(dsc["counters"]["croibg_errors"])
-            ctr_croibg.append(dsc["counters"]["ctr_croibg"])
-            ctr_croibg_errors.append(dsc["counters"]["ctr_croibg_errors"])
-            croi.append(dsc["counters"]["croi"])
-            bgroi.append(dsc["counters"]["bgroi"])
-            croi_pix.append(dsc["counters"]["croi_pix"])
-            bgroi_pix.append(dsc["counters"]["bgroi_pix"])
-            if dsc["counters"]["croibg_bgimg"] is not None:
-                croibg_bgimg.append(dsc["counters"]["croibg_bgimg"])
-                croibg_bgimg_errors.append(dsc["counters"]["croibg_bgimg_errors"])
-            Cfactors_croi.append(dsc["counters"]["Cfactors_croi"])
-            Cfactors_bgroi.append(dsc["counters"]["Cfactors_bgroi"])
-            Cfactor_croi.append(dsc["counters"]["Cfactor_croi"])
-            Cfactor_bgroi.append(dsc["counters"]["Cfactor_bgroi"])
-            Pfactor_croi.append(dsc["counters"]["Pfactor_croi"])
-            Pfactor_bgroi.append(dsc["counters"]["Pfactor_bgroi"])
-            bgimg_croi.append(dsc["counters"]["bgimg_croi"])
-            bgimg_bgroi.append(dsc["counters"]["bgimg_bgroi"])
-
-            # 1D arrays
-            x.append(dsc["pixelcoord"]["x"])
-            y.append(dsc["pixelcoord"]["y"])
-
-            # 1D arrays
-            vsize.append(dsc["pixelcoord"]["vsize"])
-            hsize.append(dsc["pixelcoord"]["hsize"])
-
-            axis.append(dsc["trajectory"]["axis"])
-
-            for lbl in optional_labels:
-                if lbl in dsc["trajectory"]:
-                    optional_labels[lbl].append(dsc["trajectory"][lbl])
-
-            # 1d Array
-            if "HKL_sixc_angles" in dsc["trajectory"]:
-                alpha_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["alpha"])
-                theta_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["theta"])
-                delta_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["delta"])
-                gamma_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["gamma"])
-                chi_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["chi"])
-                phi_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["phi"])
-                omega_pk.append(dsc["trajectory"]["HKL_sixc_angles"]["omega"])
-        except Exception:
-            logger.exception("Unexpected exception while creating data sets to save")
-            # from IPython import embed; embed()
-            # sys.exit(0)
-
-    rois = {
-        "@NX_class": "NXcollection",
-        "@default": "croibg",
-        "@orgui_meta": "roi rocking",
-        "alpha": np.vstack(alpha),
-        "theta": np.vstack(theta),
-        "delta": np.vstack(delta),
-        "gamma": np.vstack(gamma),
-        "chi": np.vstack(chi),
-        "phi": np.vstack(phi),
-        "omega": np.vstack(omega),
-        "h": np.vstack(h),
-        "k": np.vstack(k),
-        "l": np.vstack(l),
-        "croibg": np.vstack(croibg),
-        "croibg_errors": np.vstack(croibg_errors),
-        "ctr_croibg": np.vstack(ctr_croibg),
-        "ctr_croibg_errors": np.vstack(ctr_croibg_errors),
-        "croi": np.vstack(croi),
-        "bgroi": np.vstack(bgroi),
-        "croi_pix": np.vstack(croi_pix),
-        "bgroi_pix": np.vstack(bgroi_pix),
-        "Cfactors_croi": np.vstack(Cfactors_croi),
-        "Cfactors_bgroi": np.vstack(Cfactors_bgroi),
-        "Cfactor_croi": np.vstack(Cfactor_croi),
-        "Cfactor_bgroi": np.vstack(Cfactor_bgroi),
-        "Pfactor_croi": np.vstack(Pfactor_croi),
-        "Pfactor_bgroi": np.vstack(Pfactor_bgroi),
-        "bgimg_croi": np.vstack(bgimg_croi),
-        "bgimg_bgroi": np.vstack(bgimg_bgroi),
-        "x": np.array(x),
-        "y": np.array(y),
-        "vsize": np.array(vsize),
-        "hsize": np.array(hsize),
-        "axis": np.vstack(axis),
-        # True scattering angles are repeated for each extracted curve
-        # because its peak can occur at a different source frame.
-        **_rocking_arm_snapshot(gamma_arm, delta_arm, np.vstack(alpha).shape),
-    }
-    if alpha_pk:
-        rois["alpha_pk"] = np.array(alpha_pk)
-        rois["theta_pk"] = np.array(theta_pk)
-        rois["delta_pk"] = np.array(delta_pk)
-        rois["gamma_pk"] = np.array(gamma_pk)
-        rois["chi_pk"] = np.array(chi_pk)
-        rois["phi_pk"] = np.array(phi_pk)
-        rois["omega_pk"] = np.array(omega_pk)
-
-    if croibg_bgimg:
-        rois["croibg_bgimg"] = np.vstack(croibg_bgimg)
-        rois["croibg_bgimg_errors"] = np.vstack(croibg_bgimg_errors)
-
-    for lbl in optional_labels:
-        if optional_labels[lbl]:
-            rois[lbl] = (
-                np.vstack(optional_labels[lbl]).reshape(-1)
-                if lbl == "s"
-                else np.vstack(optional_labels[lbl])
-            )
-
-    scsize = rois["axis"].shape[0]
-    for t in rois:
-        if t.startswith("@"):
-            continue
-        if rois[t].shape[0] != scsize:
-            logger.error(
-                "Error during ro integration: roi %s does not match scan size %s. "
-                "This is likely a coding error",
-                t,
-                scsize,
-            )
-            return {
-                "status": "error",
-                "message": "Error during ro integration: size mismatch",
-                "traceback": "",
-            }
-
-    data_2d_structured[self.activescanname]["measurement"][name]["rois"] = rois
     options = self.scanSelector.get_integration_options()
     beam_profile = sample_length = None
     if options["footprint"]:
@@ -3670,11 +3400,11 @@ def _assemble_rocking_tile(
         roi_y_stop=rocking_roi_edges["y_stop"],
         profile_provenance=profile_provenance,
     )
-    data_2d_structured[self.activescanname]["measurement"][name][
+    result[
         CURVE_CORRECTIONS_GROUP
     ] = curve_correction_record_to_nxdict(curve_record)
 
-    return data_2d_structured[self.activescanname]["measurement"][name]
+    return result
 
 
 def fixed_roi_geometry(self, xy, **kwargs):
@@ -3710,15 +3440,18 @@ def fixed_roi_geometry(self, xy, **kwargs):
 
     hkl_del_gam = np.empty((xy.shape[0], count, 6), dtype=np.float64)
     for i, xy_i in enumerate(xy):
-        x = np.full(count, xy_i[0])
-        y = np.full(count, xy_i[1])
+        # The detector pixel and arm are fixed within each arm group. Compute
+        # its laboratory direction once; crystalAnglesPoint broadcasts that
+        # direction against the per-frame incidence/refraction calculation.
+        x = np.asarray([xy_i[0]])
+        y = np.asarray([xy_i[1]])
         gamma = np.empty(count, dtype=np.float64)
         delta = np.empty(count, dtype=np.float64)
         alpha = np.empty(count, dtype=np.float64)
         for selection, gamma_arm, delta_arm in arm_groups:
             gamma_s, delta_s, alpha_s = self.ubcalc.detectorCal.crystalAnglesPoint(
-                np.atleast_1d(y[selection]),
-                np.atleast_1d(x[selection]),
+                y,
+                x,
                 mu_frames[selection],
                 self.ubcalc.n,
                 gamma_arm,

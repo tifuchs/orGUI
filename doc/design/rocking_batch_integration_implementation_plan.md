@@ -5,6 +5,61 @@ Date: 2026-09-30.
 Status: implemented and regression-validated in the working tree.
 This document retains the reviewed design and records the implementation below.
 
+## 2026-10-25: direct final-dataset writes supersede counter staging
+
+The original memory scaling test below did not establish production throughput.
+A live 10,929-frame, multi-line run exposed serialization at frame-batch pool
+shutdown, small per-chunk writes and a second pass copying counters into final
+datasets. Its memory-limited frame/curve batches were 44/19 while storage still
+used fixed 32-by-64 chunks. The provisional chunk dimensions had become write
+operation sizes without production-scale tuning.
+
+The extraction path now uses `_RockingFrameWriter`: final raw-counter, geometry
+and core corrected-field datasets are preallocated with the known ROI/frame
+dimensions. Workers write their counter vectors into exclusive frame slices of
+two reusable arrays; futures return no arrays. One persistent pool fills the
+next buffer while the collector writes the current one. Each write spans the
+whole line's ROI range for a frame block, independent of HDF5 chunk size.
+
+For `B` buffered frames, `R` total ROIs, `G` counter groups and `W` workers, the
+owned extraction-array upper bound in bytes is
+`(2 * B + W) * R * G * 4 * 8 + B * R * 8`. The last term reserves one write
+transpose. Detector/backend allocations and shared maps are excluded, as in
+the public batch-budget contract. Worker count and `B` are planned together.
+The buffers are released before the separately budgeted curve-finalization
+phase. HDF5 raw chunk caches are disabled for these explicit buffered writes.
+
+Raw chunks align with the actual frame and curve tile boundaries. Derived
+fields, which are filled as complete curves, use curve-aligned chunks with a
+byte-size target. This avoids both fixed 32-ROI write loops and compressed
+partial-chunk rewrites. The finalization pass reads the final raw datasets and
+writes only derived fields. It builds numerical arrays directly rather than
+constructing per-ROI dictionaries and stacking them back into arrays. Identical
+legacy/versioned fields are hard links. Fixed-ROI geometry evaluates one pixel
+per arm group and broadcasts the laboratory direction over the frame-dependent
+incidence/refraction calculation.
+
+Completed lines retain their existing schema/paths and publication semantics.
+The actual final datasets live privately until publication, which moves links,
+not data. Fully masked rows are compacted forward and trimmed once. Extraction
+markers now track in-process completeness; they are not durable resume
+checkpoints. Flushes occur at publication/cleanup rather than twice per batch.
+The compatibility `RockingBatchWriter` remains available for existing callers;
+normal extraction uses the direct writer. Angular reduction to structure factors
+remains a separate operation.
+
+Validation includes unchanged scientific regression tests, direct-write/no-resize
+checks, dataset identity across publication, masked-row compaction, failure and
+cancellation cleanup, bounded buffer overlap, and scalar-pixel geometry
+equivalence. A synthetic end-to-end comparison of 1,024 curves by 257 frames
+matched all 154 original datasets at `rtol=atol=1e-12`. On this workstation,
+an uncompressed run took 1.577 s before and 0.318 s after; output files were
+108,526,169 and 70,164,760 bytes. Gzip took 3.585 s before and 0.767 s after.
+These are synthetic processing measurements, not a real-CBF throughput claim.
+
+The rest of this document records the original implementation and its rationale;
+its separate staging store and per-batch durability barriers are superseded.
+
 The parent [multiple-line integration plan](multiple_line_scan_integration_plan.md)
 contains the approved stationary in-memory approach and the rocking memory
 assessment. Stationary results remain in RAM. This plan applies bounded

@@ -1319,3 +1319,236 @@ def test_main_window_guard_restores_controls_and_blocks_reentry(context):
         )
     assert central.enabled and menu.enabled
     assert not window._scan_integration_active
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_rocking_frames_fill_final_datasets_once(context, monkeypatch, background):
+    """Raw outputs are preallocated, filled once, and published without copies."""
+    from orgui.app import database
+
+    ctx, scan, file = context
+    if background:
+        ctx = replace(ctx, background_image=np.ones((12, 12)))
+    writer_type = database._RockingFrameWriter
+    original_write = writer_type.write_frames
+    identities = {}
+    writes = []
+    pool_count = []
+    executor = integration.concurrent.futures.ThreadPoolExecutor
+
+    def pool(*args, **kwargs):
+        """Count pool lifetimes across frame batches."""
+        pool_count.append(1)
+        return executor(*args, **kwargs)
+
+    def capture(writer, start, buffer):
+        """Observe final arrays before the first frame block is persisted."""
+        assert "counters" not in writer.group
+        for name, size in writer._lines:
+            group = writer.group[f"results/{name}"]
+            for key in ("croi", "croibg", "h"):
+                assert group[f"rois/{key}"].shape == (size, len(scan))
+            dataset = group["rois/croi"]
+            identities[name] = h5py.h5o.get_info(dataset.id).addr
+        writes.append(start)
+        original_write(writer, start, buffer)
+
+    monkeypatch.setattr(writer_type, "write_frames", capture)
+    monkeypatch.setattr(integration.concurrent.futures, "ThreadPoolExecutor", pool)
+    monkeypatch.setattr(database, "dicttonx", lambda *a, **kw: pytest.fail("dictdump"))
+    monkeypatch.setattr(h5py.Dataset, "resize", lambda *a, **kw: pytest.fail("resize"))
+    result = integration.integrate_rocking_scan(
+        ctx, lines=[_prepared_line(ctx), _prepared_line(ctx, 8, "second")],
+        batch_options=integration.BatchOptions(frames=3, curves=1),
+    )
+    assert result["status"] == "success", result
+    assert writes == [0, 3, 6]
+    assert len(pool_count) == 1
+    assert scan.reads == {i: 1 for i in range(len(scan))}
+    for name, address in identities.items():
+        group = file[f"scan/measurement/{name}"]
+        assert h5py.h5o.get_info(group["rois/croi"].id).addr == address
+        assert group["ctr_curve_v3/base/croi"].id == group["rois/croi"].id
+        assert group["ctr_curve_v3/base/croi_variance"].id == group["rois/croi"].id
+
+
+def test_rocking_frame_buffers_overlap_writing_without_reuse(context):
+    """Next-batch work runs while the collector owns the current buffer."""
+    from threading import Event
+
+    ctx, _, _ = context
+    next_batch = Event()
+    seen = []
+
+    def worker(i):
+        """Expose next-batch activity and return distinguishable frames."""
+        if i >= 3:
+            next_batch.set()
+        seen.append(i)
+        return (np.full((2, 4), i, dtype=float),) * 2
+
+    progress = SimpleNamespace(update=lambda value: None, wasCanceled=lambda: False)
+    batches = integration._rocking_frame_batches(
+        ctx, worker, worker(0), 7, 2, 3, 2, progress
+    )
+    try:
+        start, first = next(batches)
+        assert start == 0
+        saved = first.copy()
+        assert next_batch.wait(3), "writer blocked next-batch extraction"
+        np.testing.assert_array_equal(first, saved)
+        # No scan-wide prefetch: only two bounded buffers can be queued.
+        assert max(seen) < 6
+        collected = [(start, first.copy())]
+        collected.extend((start, values.copy()) for start, values in batches)
+    finally:
+        batches.close()
+    assert sorted(seen) == list(range(7))
+    for start, values in collected:
+        for j in range(values.shape[1]):
+            np.testing.assert_array_equal(values[:, j], start + j)
+
+
+@pytest.mark.parametrize("groups", [2, 3])
+@pytest.mark.parametrize("roi_count", [1, 32000])
+def test_extraction_array_budget_includes_workers_and_two_buffers(groups, roi_count):
+    """Frame size and worker count obey the shared numerical-array budget."""
+    options = integration.BatchOptions(memory_mib=64)
+    frames, workers = options.extraction_sizes(10000, roi_count, groups, 16)
+    bytes_per_result = roi_count * groups * 4 * 8
+    peak = ((2 * frames + workers) * bytes_per_result
+            + frames * roi_count * 8)
+    assert peak <= options.memory_mib * 2**20
+    assert frames >= 1 and 1 <= workers <= 16
+
+
+def test_preallocated_rows_compact_only_masked_curves(context):
+    """Dropped ROI rows preserve raw counters, denominators and point indices."""
+    ctx, scan, file = context
+    first, second = _prepared_line(ctx), _prepared_line(ctx, 8)
+    line = dict(first)
+    line["xy"] = np.concatenate([first["xy"], second["xy"]] * 2)
+    line["geometry"] = np.concatenate([first["geometry"], second["geometry"]] * 2)
+    line["rois"] = {k: (v + second["rois"][k]) * 2 for k, v in first["rois"].items()}
+    line["reflections"] = dict(first["reflections"])
+    for key in ("angles", "s_masked", "hkl_masked"):
+        line["reflections"][key] = np.repeat(first["reflections"][key], 4, axis=0)
+    line["point_indices"] = np.array([11, 22, 33, 44])
+    options = ctx.scanSelector.get_integration_options()
+    options["mask"] = True
+    mask = np.zeros((12, 12), dtype=bool)
+    mask[2:4, 2:4] = True
+    ctx = replace(
+        ctx, get_detector_mask=lambda shape: mask,
+        scanSelector=integration.prepared_selector(
+            options, 0, [0, 0, 0], [0, 0, 1], [3, 3], None
+        ),
+    )
+    result = integration.integrate_rocking_scan(
+        ctx, lines=[line], batch_options=integration.BatchOptions(frames=3, curves=1)
+    )
+    assert result["status"] == "success", result
+    group = file["scan/measurement/first"]
+    np.testing.assert_array_equal(group["rois/point_index"], [22, 44])
+    np.testing.assert_allclose(
+        group["rois/croi"], np.tile(4 * (200 + scan.axis), (2, 1))
+    )
+    np.testing.assert_array_equal(group["rois/Cfactors_croi_pix"], np.full((2, 7), 4.0))
+    assert group["ctr_curve_v3/base/croi"].shape == (2, 7)
+
+
+def test_fixed_roi_geometry_reuses_pixel_direction(context, monkeypatch):
+    """Scalar detector positions broadcast over changing incidence and arm groups."""
+    from orgui.datautils.xrayutils.DetectorCalibration import Detector2D_SXRD
+
+    ctx, scan, _ = context
+    dc = Detector2D_SXRD()
+    dc.detector.pixel1 = dc.detector.pixel2 = 1e-4
+    dc.dist = 0.4
+    dc.poni1 = dc.poni2 = 0.001
+    mu = np.linspace(.006, .015, len(scan))
+    om = -np.deg2rad(scan.axis)
+    groups = [(slice(0, 3), 0., 0.), (slice(3, 7), .02, .1)]
+    ctx = replace(
+        ctx, getMuOm=lambda: (mu, om), armFrameGroups=lambda count: groups,
+        ubcalc=SimpleNamespace(
+            detectorCal=dc, n=1 - 1e-6, chi=0., phi=0.,
+            angles=SimpleNamespace(anglesToHkl=lambda a, d, g, o, c, p: (a, d, g)),
+        ),
+    )
+    pixels = np.array([[3., 4.], [7., 9.]])
+    expected = np.zeros((2, len(scan), 6))
+    original = dc.crystalAnglesPoint
+    for i, (x, y) in enumerate(pixels):
+        for selection, ga, da in groups:
+            a = mu[selection]
+            gamma, delta, alpha = original(
+                np.full(a.size, y), np.full(a.size, x), a, ctx.ubcalc.n, ga, da
+            )
+            expected[i, selection, :5] = np.array([alpha, delta, gamma, delta, gamma]).T
+        expected[i, :, 5] = scan.axis
+    calls = []
+
+    def counted(y, x, *args):
+        """Record how many detector positions are recomputed per arm group."""
+        calls.append((np.size(y), np.size(x)))
+        return original(y, x, *args)
+
+    monkeypatch.setattr(dc, "crystalAnglesPoint", counted)
+    actual = integration.fixed_roi_geometry(ctx, pixels)
+    np.testing.assert_allclose(actual, expected, atol=1e-12, rtol=1e-12)
+    assert calls == [(1, 1)] * 4
+
+
+def test_failed_final_dataset_preallocation_cleans_private_job(context, monkeypatch):
+    """An allocation failure publishes nothing and leaves no dangling job."""
+    ctx, scan, file = context
+    create = h5py.Group.create_dataset
+
+    def fail(group, name, *args, **kwargs):
+        """Fail after some final datasets have already been created."""
+        if name == "rois/croi":
+            raise OSError("cannot allocate final counter")
+        return create(group, name, *args, **kwargs)
+
+    monkeypatch.setattr(h5py.Group, "create_dataset", fail)
+    result = integration.integrate_rocking_scan(ctx, lines=[_prepared_line(ctx)])
+    assert result["status"] == "error"
+    assert "cannot allocate final counter" in result["traceback"]
+    assert not result["paths"]
+    assert "scan" not in file
+    assert "_orgui_integration_work" not in file
+    assert scan.reads == {0: 1}
+
+
+def test_direct_frame_write_count_does_not_scale_with_roi_chunks(context, monkeypatch):
+    """A hundred ROIs still require one HDF5 write per counter and frame block."""
+    from orgui.app.database import _RockingFrameWriter
+
+    ctx, scan, _ = context
+    writer = _RockingFrameWriter(
+        ctx.database, len(scan), [{"result_name": "line", "xy": np.zeros((100, 2))}],
+        frame_batch=3, curve_batch=2,
+    )
+    original = h5py.Dataset.__setitem__
+    writes = []
+
+    def counted(dataset, key, value):
+        """Count raw writes, excluding the small completion marker."""
+        if "/rois/" in dataset.name:
+            writes.append(dataset.name)
+        return original(dataset, key, value)
+
+    monkeypatch.setattr(h5py.Dataset, "__setitem__", counted)
+    values = np.arange(2 * 7 * 100 * 4, dtype=float).reshape(2, 7, 100, 4)
+    try:
+        for start in (0, 3, 6):
+            writer.write_frames(start, values[:, start:start + 3])
+        assert len(writes) == 8 * 3
+        restored = writer.read_line_curves("line", 0, 100)
+        for field in range(8):
+            np.testing.assert_array_equal(
+                restored[field], values[field // 4, ..., field % 4]
+            )
+    finally:
+        writer.close("cancelled")

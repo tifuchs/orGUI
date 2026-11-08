@@ -109,16 +109,7 @@ class RockingBatchWriter:
             else {"compression": compression}
         )
         try:
-            self.counts = [
-                self.group.create_dataset(
-                    f"counters/{i}",
-                    shape=(rois, frames),
-                    dtype=np.float64,
-                    chunks=(min(rois, 32), min(frames, 64)),
-                    **self.filters,
-                )
-                for i in range(12 if background else 8)
-            ]
+            self._allocate(background)
             self.group.create_dataset("committed_frames", shape=(frames,), dtype=bool)
         except Exception:
             try:
@@ -130,6 +121,21 @@ class RockingBatchWriter:
                 logger.warning("Cannot clean failed integration setup", exc_info=True)
             raise
         self._rows = {}
+
+    def _allocate(self, background):
+        self.counts = [
+            self.group.create_dataset(
+                f"counters/{i}", shape=(self.rois, self.frames),
+                dtype=np.float64,
+                chunks=(min(self.rois, 32), min(self.frames, 64)),
+                **self.filters,
+            )
+            for i in range(12 if background else 8)
+        ]
+
+    def _write_metadata(self, parent, mapping):
+        dicttonx(mapping, parent, update_mode="add",
+                 create_dataset_args=self.filters)
 
     def _flush(self):
         try:
@@ -226,15 +232,13 @@ class RockingBatchWriter:
             raise ValueError(f"Result path already exists: {target}")
         if scan_metadata is not None and not self.published:
             metadata = self.group.require_group("scan_metadata")
-            dicttonx(scan_metadata, metadata, update_mode="add",
-                     create_dataset_args=self.filters)
+            self._write_metadata(metadata, scan_metadata)
             self._flush()
             if scan_name not in self.file:
                 self.file.move(f"{metadata.name}/{scan_name}", f"/{scan_name}")
                 self._created_scans.add(scan_name)
             else:
-                dicttonx(scan_metadata, self.file, update_mode="add",
-                         create_dataset_args=self.filters)
+                self._write_metadata(self.file, scan_metadata)
         group = self.file[source]
         group.attrs["orgui_batch_job"] = self.job_id
         for key in ("frame_batch", "curve_batch", "memory_mib", "workers"):
@@ -268,6 +272,196 @@ class RockingBatchWriter:
         # Refresh even when failure or cancellation published no result.
         if hasattr(self.database, "sync_integration_results"):
             self.database.sync_integration_results()
+
+
+class _RockingFrameWriter(RockingBatchWriter):
+    """Fill preallocated final datasets; publication moves links, not arrays.
+
+    The private job group contains the actual output datasets. Raw counters
+    are never copied to a second store. Only the collector accesses HDF5.
+    Fully masked rows are compacted during finalization and trimmed once.
+    """
+
+    _COUNTERS = (
+        "croi", "croi_pix", "bgroi", "bgroi_pix",
+        "Cfactors_croi", "Cfactors_croi_pix",
+        "Cfactors_bgroi", "Cfactors_bgroi_pix",
+        "bgimg_croi", "bgimg_croi_pix", "bgimg_bgroi", "bgimg_bgroi_pix",
+    )
+    _FRAME_FIELDS = (
+        "alpha", "theta", "delta", "gamma", "omega", "h", "k", "l",
+        "croibg", "croibg_errors", "ctr_croibg", "ctr_croibg_errors",
+        "Cfactor_croi", "Cfactor_bgroi", "Pfactor_croi", "Pfactor_bgroi",
+        "axis", "gamma_arm", "delta_arm", "bgimg_croi", "bgimg_bgroi",
+    )
+    # Identical quantities in the legacy and versioned schemas share storage.
+    _ALIASES = {
+        "base/croi": "croi", "base/croi_variance": "croi",
+        "base/bgroi": "bgroi", "base/bgroi_variance": "bgroi",
+        "base/croibg": "ctr_croibg",
+        "pixel_corrections/combined_croi": "Cfactor_croi",
+        "pixel_corrections/combined_bgroi": "Cfactor_bgroi",
+        "pixel_corrections/polarization_croi": "Pfactor_croi",
+        "pixel_corrections/polarization_bgroi": "Pfactor_bgroi",
+        "geometry/gamma_arm": "gamma_arm",
+        "geometry/delta_arm": "delta_arm",
+        "geometry/roi_x": "x", "geometry/roi_y": "y",
+        "geometry/roi_width": "hsize", "geometry/roi_height": "vsize",
+    }
+
+    def __init__(self, database, frames, lines, *, frame_batch, curve_batch,
+                 background=False):
+        self._lines = [(entry["result_name"], len(entry["xy"])) for entry in lines]
+        self._frame_batch = frame_batch
+        self._curve_batch = curve_batch
+        self._datasets = {}
+        self._capacities = dict(self._lines)
+        self._raw_fields = self._COUNTERS[:12 if background else 8]
+        super().__init__(database, frames, sum(self._capacities.values()),
+                         background=background)
+
+    def _create_row_dataset(self, name, path, shape, dtype=np.float64):
+        group = self.group.require_group(f"results/{name}")
+        rows = self._capacities[name]
+        shape = (rows,) + tuple(shape)
+        # Raw counters are written by frame and later read by curve. Match
+        # both batch boundaries so compressed chunks are neither rewritten
+        # nor repeatedly decompressed for adjacent curve tiles. Derived
+        # fields are written by complete curve and can use longer chunks.
+        # Neither chunk shape dictates the size of an HDF5 write operation.
+        if len(shape) == 2 and shape[1] == self.frames:
+            chunk_rows = min(rows, self._curve_batch)
+            if path in {f"rois/{key}" for key in self._raw_fields}:
+                columns = min(self._frame_batch, self.frames)
+            else:
+                columns = min(self.frames, max(1, 256 * 1024 // (8 * chunk_rows)))
+            chunks = (chunk_rows, columns)
+        else:
+            chunks = True
+        dataset = group.create_dataset(
+            path, shape=shape, maxshape=shape, dtype=dtype, chunks=chunks,
+            rdcc_nbytes=0, **self.filters,
+        )
+        self._datasets[name][path] = dataset
+        return dataset
+
+    def _allocate(self, background):
+        for name, _ in self._lines:
+            self._datasets[name] = {}
+            fields = set(self._raw_fields) | set(self._FRAME_FIELDS)
+            if background:
+                fields.update(("croibg_bgimg", "croibg_bgimg_errors"))
+            for field in sorted(fields):
+                self._create_row_dataset(name, f"rois/{field}", (self.frames,))
+            for field in ("chi", "phi"):
+                self._create_row_dataset(name, f"rois/{field}", (1,))
+            for field in ("x", "y", "vsize", "hsize"):
+                dtype = np.int64 if field in ("vsize", "hsize") else np.float64
+                self._create_row_dataset(name, f"rois/{field}", (), dtype)
+            self._create_row_dataset(
+                name, "ctr_curve_v3/base/croibg_variance", (self.frames,)
+            )
+            self._create_row_dataset(
+                name, "ctr_curve_v3/illumination/alpha", (self.frames,)
+            )
+            group = self.group[f"results/{name}"]
+            for target, source in self._ALIASES.items():
+                parent, leaf = target.rsplit("/", 1)
+                group.require_group(f"ctr_curve_v3/{parent}")[leaf] = (
+                    group[f"rois/{source}"]
+                )
+
+    def write_frames(self, start, buffer):
+        """Write each line's frame block directly into its final counters."""
+        stop = start + buffer.shape[1]
+        offset = 0
+        for name, size in self._lines:
+            datasets = self._datasets[name]
+            for field, key in enumerate(self._raw_fields):
+                tile = buffer[field // 4, :, offset:offset + size, field % 4]
+                datasets[f"rois/{key}"][:, start:stop] = np.ascontiguousarray(tile.T)
+            offset += size
+        # These markers certify in-process extraction, not crash recovery.
+        # Publication flushes completed data; no per-batch fsync barrier.
+        self.group["committed_frames"][start:stop] = True
+
+    def read_line_curves(self, name, start, stop):
+        """Read correction inputs from the final raw datasets for one line."""
+        arrays = [
+            self._datasets[name][f"rois/{key}"][start:stop].T
+            for key in self._raw_fields
+        ]
+        arrays.extend(np.zeros_like(arrays[0]) for _ in range(12 - len(arrays)))
+        return arrays
+
+    def _write_metadata(self, parent, mapping):
+        for key, value in mapping.items():
+            if value is None:
+                continue
+            if key.startswith("@"):
+                parent.attrs[key[1:]] = value
+            elif isinstance(value, Mapping):
+                self._write_metadata(parent.require_group(key), value)
+            elif key not in parent:
+                array = np.asarray(value)
+                if array.dtype.kind == "U":
+                    array = array.astype(h5py.string_dtype("utf-8"))
+                parent.create_dataset(key, data=array)
+
+    def append_tile(self, name, data, *, source_rows=None):
+        """Fill derived fields without extending or rewriting raw datasets."""
+        offset = self._rows.get(name, 0)
+        size = np.asarray(data["rois"]["croibg"]).shape[0]
+        compact = source_rows is not None and not np.array_equal(
+            source_rows, np.arange(offset, offset + size)
+        )
+        if compact:
+            # Output rows are always <= source rows, so forward compaction
+            # cannot overwrite an unread later tile. Include denominator
+            # counters which are intentionally absent from the legacy tile.
+            for key in self._raw_fields:
+                dataset = self._datasets[name][f"rois/{key}"]
+                dataset[offset:offset + size] = dataset[source_rows]
+
+        def write(parent, mapping, prefix=""):
+            """Write one schema mapping directly into existing datasets."""
+            for key, value in mapping.items():
+                path = prefix + key
+                if value is None:
+                    continue
+                if key.startswith("@"):
+                    parent.attrs[key[1:]] = value
+                elif isinstance(value, Mapping):
+                    write(parent.require_group(key), value, path + "/")
+                elif self._is_row_field(path, value) and not isinstance(value, str):
+                    if path in {f"rois/{k}" for k in self._raw_fields}:
+                        continue
+                    if path.removeprefix("ctr_curve_v3/") in self._ALIASES:
+                        continue
+                    value = np.atleast_1d(value)
+                    if value.shape[0] != size:
+                        raise ValueError(f"Curve row mismatch in {path}")
+                    dataset = self._datasets[name].get(path)
+                    if dataset is None:
+                        dataset = self._create_row_dataset(
+                            name, path, value.shape[1:], value.dtype
+                        )
+                    dataset[offset:offset + size] = value
+                elif key not in parent:
+                    self._write_metadata(parent, {key: value})
+
+        write(self.group[f"results/{name}"], data)
+        self._rows[name] = offset + size
+
+    def publish(self, scan_name, name, *, line_id=None, scan_metadata=None):
+        """Trim masked rows once, then publish the already-filled datasets."""
+        size = self._rows.get(name, 0)
+        if size:
+            for dataset in self._datasets[name].values():
+                if dataset.shape[0] != size:
+                    dataset.resize(size, axis=0)
+        return super().publish(scan_name, name, line_id=line_id,
+                               scan_metadata=scan_metadata)
 
 
 DEFAULT_FILTERS = {  # Filters available with h5py/libhdf5

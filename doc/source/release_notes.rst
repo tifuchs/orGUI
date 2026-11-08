@@ -31,6 +31,8 @@ Other user-visible changes:
 
 - Mu/reflectivity-scan ROI trajectories now keep the scan theta fixed instead of imposing equal incident and exit angles. Stationary and rocking overlays therefore agree for tilted rods, including 00L with nonzero phi/chi. The machine-parameter dialog accepts signed chi and phi from -360 to 360 degrees.
 
+- Rocking extraction preallocates final HDF5 counter arrays and fills them directly during image integration. A persistent worker pool overlaps bounded frame buffers with writing; the shared array budget includes both buffers, worker counters and the write transpose. Correction finalization no longer rewrites raw counters or resizes every curve tile. Completed-line publication, masked-row filtering and numerical results are preserved.
+
 - Rocking-curve reduction reuses stored detector geometry and correction metadata across batches, reads only the correction arrays it needs, and batches detector acceptance geometry. This removes repeated setup and I/O when integrating with "Keep stored correction" while preserving the framewise corrections and propagated errors.
 
 - Failed or cancelled rocking integrations remove unpublished data and refresh the database tree even when no line completed, preventing crashes from stale staging entries. Scan metadata is published with the first completed line; existing completed lines remain available. Rocking and stationary integrations validate normalization and footprint inputs before image extraction, so missing exposure/monitor data or invalid correction settings fail before long jobs run.

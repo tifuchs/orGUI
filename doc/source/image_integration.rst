@@ -341,14 +341,34 @@ Saved line IDs, sampled-point indices and effective step sizes identify the
 original points even when a line has no detector coverage or masked points
 are omitted.
 
-Rocking extraction buffers bounded frame batches in temporary datasets in
-the active database, then constructs complete curves in bounded tiles. The
-later angular reduction also reads curve tiles; each angular integral still
-uses its entire scan axis. Cancellation retains completed published lines
-and removes unpublished temporary results. A failed source read aborts
-extraction before any line is published. Deleting temporary HDF5 datasets
-does not necessarily shrink the database file, so allow disk space for both
-temporary counters and final curves.
+Rocking extraction preallocates each line's final raw-counter, geometry and
+core corrected-curve datasets. One persistent worker pool fills two bounded
+frame buffers while the collecting thread writes whole line/frame blocks
+directly with HDF5. There is no separate intermediate counter store. Storage
+chunk dimensions follow the actual frame/curve access patterns; they do not
+limit each write to a small number of ROIs.
+
+Geometry and correction-dependent fields are finalized in bounded curve
+tiles after extraction. Raw counters are already in place and are not
+rewritten. Identical legacy and versioned correction fields use HDF5 hard
+links to the same dataset. Additional ``Cfactors_croi_pix``,
+``Cfactors_bgroi_pix`` and, when a background image is used,
+``bgimg_croi_pix``/``bgimg_bgroi_pix`` retain the exact pixel-count denominators.
+The later angular reduction still uses each curve's complete scan axis.
+
+The output datasets remain under a private job group until their line is
+complete; publication moves HDF5 links without copying arrays. Fully masked
+rows are compacted and trimmed once. Cancellation retains completed lines
+and removes unpublished results. A failed source read aborts extraction
+before any line is published. Deleting incomplete HDF5 datasets does not
+necessarily shrink the database file.
+
+The extraction array budget includes both frame buffers, simultaneous worker
+counter arrays and one contiguous write transpose. Detector images,
+backend-owned allocations, shared detector maps and application state remain
+outside this budget. The worker count and frame batch are reduced together
+when needed. Curve finalization has its own conservative allocation estimate
+and runs after the frame buffers have been released.
 
 Scripts can set line collections and execution limits explicitly::
 

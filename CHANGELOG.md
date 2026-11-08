@@ -127,6 +127,13 @@ Other user-visible changes:
   therefore agree for tilted rods, including 00L with nonzero phi/chi. The
   machine-parameter dialog accepts signed chi and phi from -360 to 360 degrees.
 
+- Rocking extraction preallocates final HDF5 counter arrays and fills them
+  directly during image integration. A persistent worker pool overlaps bounded
+  frame buffers with writing; the shared array budget includes both buffers,
+  worker counters and the write transpose. Correction finalization no longer
+  rewrites raw counters or resizes every curve tile. Completed-line publication,
+  masked-row filtering and numerical results are preserved.
+
 - Rocking-curve reduction reuses stored detector geometry and correction
   metadata across batches, reads only the correction arrays it needs, and
   batches detector acceptance geometry. This removes repeated setup and I/O
