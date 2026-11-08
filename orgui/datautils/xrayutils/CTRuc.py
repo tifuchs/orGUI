@@ -976,6 +976,7 @@ class UnitCell(Lattice):
             self.name = "unnamed"
         self.refHKLTransform = np.identity(3, dtype=np.float64)
         self.refRealTransform = np.identity(3, dtype=np.float64)
+        self._reference_unit_cell_set = False
         self.coherentDomainMatrix = [
             np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
         ]
@@ -1249,6 +1250,7 @@ class UnitCell(Lattice):
         """
         self.refRealTransform[:] = self.R_mat_inv @ rotMatrix @ uc.R_mat
         self.refHKLTransform[:] = self.B_mat_inv @ rotMatrix @ uc.B_mat
+        self._reference_unit_cell_set = True
 
     def _test_special_formfactors(self):
         for name in self.names:
@@ -1431,6 +1433,9 @@ class UnitCell(Lattice):
                 uc._formfactor_state = uc._formfactor_state_token()
             uc.refRealTransform = self.refRealTransform
             uc.refHKLTransform = self.refHKLTransform
+            uc._reference_unit_cell_set = getattr(
+                self, "_reference_unit_cell_set", False
+            )
             uc.stacking_translation = self.stacking_translation
             layers[l] = uc
         if self._explicit_layer_cycle is not None:
@@ -2128,6 +2133,9 @@ class UnitCell(Lattice):
     def supercell(self, repeats, symmetry="preserve", name=None):
         """Return a repeated unit-cell copy.
 
+        An explicitly assigned reference remains the input coordinate system;
+        otherwise the returned cell uses its own fractional coordinates.
+
         :param repeats:
             Integer repeat counts along the ``a``, ``b``, and ``c`` lattice
             directions.
@@ -2169,8 +2177,21 @@ class UnitCell(Lattice):
             crystallinity=self.crystallinity,
         )
         transformed.layer_transition = copy.deepcopy(self.layer_transition)
-        transformed.refHKLTransform = np.copy(self.refHKLTransform)
-        transformed.refRealTransform = np.copy(self.refRealTransform)
+        has_reference = (
+            getattr(self, "_reference_unit_cell_set", False)
+            or not np.array_equal(self.refHKLTransform, np.eye(3))
+            or not np.array_equal(self.refRealTransform, np.eye(3))
+        )
+        if has_reference:
+            # Map reference fractional coordinates through Cartesian space
+            # (Angstrom or Angstrom^-1) into the new fractional basis.
+            transformed.refHKLTransform = (
+                transformed.B_mat_inv @ self.B_mat @ self.refHKLTransform
+            )
+            transformed.refRealTransform = (
+                transformed.R_mat_inv @ self.R_mat @ self.refRealTransform
+            )
+            transformed._reference_unit_cell_set = True
         transformed.stacking_translation = (
             np.asarray(self.stacking_translation) * repeats[2] / repeats
         )
