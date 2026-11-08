@@ -58,8 +58,9 @@ in the asset bundle rather than duplicated in JSON. The JSON and asset bundle
 are checksummed.
 
 ``Run Locally`` prepares the current settings and executes them. ``Open Job``
-opens an existing descriptor, while ``Resume`` verifies its sources and
-checksums and continues incomplete work. A completed result is registered in
+opens an existing descriptor, while ``Resume`` verifies the source reference
+and asset checksum, checks checkpoint identity and frame coverage, and
+continues incomplete work. A completed result is registered in
 the active orGUI database as an external result; the large arrays remain in the
 standalone file.
 
@@ -700,13 +701,16 @@ The execution stages are:
    arrives (an amortized :math:`O(\log N)` insert per frame, not a full
    re-sort). When a checkpoint's frame range finishes -- or its own share of
    the memory budget is exceeded first, in which case it splits into an
-   extra file -- write it as an immutable, checksummed HDF5 checkpoint file.
-7. Once every planned checkpoint is present and its checksum verified,
+   extra file -- write it as an immutable HDF5 checkpoint file, recording an
+   XXH3-128 digest of its in-memory records.
+7. Once checkpoint metadata shows that every planned frame range is covered
+   by parts with the matching job identity,
    stream each output grid's populated spatial chunks directly from its
    checkpoint files (merging any records checkpoints have in common),
    writing each chunk to the standalone HDF5 file exactly once.
-8. Validate the output checksum, register it as an external result, then
-   remove the checkpoint files and the asset bundle.
+8. Check the output dataset shapes, calculate and record the final file's
+   SHA-256 checksum, register it as an external result, then remove the
+   checkpoint files and the asset bundle.
 
 Before loading images, conservative geometry tests identify unreachable
 frames, output grids, and detector-tile/grid combinations. Proven-empty tile
@@ -720,10 +724,12 @@ Interrupted jobs retain checkpoint data. Cleanup occurs only after successful
 HDF5 close, validation, and checksum calculation. Cleanup errors are recorded
 but do not invalidate a completed scientific result.
 
-Resuming a job re-verifies each planned checkpoint's presence and checksum
-directly -- there is no separate manifest registry to consult. A planned
-checkpoint already fully covered by valid, checksummed files on disk is
-skipped; anything else is remapped from scratch.
+Resuming a job discovers checkpoint parts directly, without a separate
+manifest. For each planned checkpoint it checks the stored job identity and
+the sum of the parts' frame-coverage metadata. A fully covered checkpoint is
+skipped; otherwise it is remapped from scratch. Resume does not reread the
+checkpoint records to compare them with the stored XXH3-128 content digest,
+so these metadata checks do not verify checkpoint content against corruption.
 
 Paths
 -----
@@ -809,9 +815,10 @@ checkpoint files once all of them are complete. The bundle contains:
 
 ``*-finalize.sge`` or ``*-finalize.slurm``
    A single dependent job. It verifies that every node's planned
-   checkpoints are present and checksummed, merges their checkpoint files
-   directly into the final HDF5 file, and records completion in the job
-   JSON.
+   checkpoint parts match the job identity and cover their planned frame
+   ranges using the same metadata checks as resume. It merges their files
+   directly into the final HDF5 file and records completion in the job JSON;
+   it does not recompute checkpoint content digests.
 
 ``*-submit.sh``
    A convenience submission wrapper. For SGE it captures ``qsub -terse``

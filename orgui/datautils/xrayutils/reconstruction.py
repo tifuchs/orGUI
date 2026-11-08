@@ -1182,17 +1182,16 @@ def _read_checkpoint(path) -> dict[str, np.ndarray]:
 def _verify_checkpoint(path, *, spec_digest, full=False) -> bool:
     """Check a checkpoint file's identity, optionally its data integrity.
 
-    Cheap path (default): the file exists and its ``spec_sha256`` attribute
-    matches ``spec_digest`` -- this is the entire resume mechanism (design
-    doc Sec11), with no separate manifest registry, since atomic
-    write-then-replace already guarantees a file present at its final name
-    is complete.
+    The default path checks that the file exists and its ``spec_sha256``
+    attribute matches ``spec_digest``. Resume instead uses
+    :func:`_discover_checkpoint_state` to check identity and frame coverage.
+    Write-then-replace keeps normally interrupted writes at a temporary name;
+    it does not establish content integrity.
 
     :param bool full:
         If true, also re-read every column and re-verify the stored
-        XXH3-128 digest against freshly hashed data -- cheap at XXH3 speed
-        even for real job sizes, so safe to do routinely, unlike the
-        SHA-256-by-reread pattern this replaces (design doc Sec8).
+        XXH3-128 digest against freshly hashed data. This requires reading
+        the checkpoint records and is not performed by resume.
     :returns:
         ``True`` if the checkpoint is present and matches.
     :rtype: bool
