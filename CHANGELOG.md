@@ -1467,8 +1467,10 @@ ESRF ID31 beamline support and reciprocal-space display:
 - Added a ``BlissScan_EBS_p4`` backend for the ID31 Pilatus4 detector, an
   example backend under ``examples/backend/ID31_EBS_p4_backend.py``, and the
   ``ch8153`` beamtime.
-- The default backend is now ``id31_default_p4`` and the fallback geometry
-  describes a Pilatus4 4M CdTe detector.
+- Automatic beamtime detection now falls back to ``id31_default_p4`` when no
+  listed beamtime matches; the fallback geometry describes a Pilatus4 4M CdTe
+  detector. For older ID31 P3 data, disable automatic backend selection and
+  select ``id31_default`` manually.
 - Maximum and sum images are now untoggled when the image number changes, and
   the maximum/sum toolbar icons no longer get out of sync with the displayed
   image.
