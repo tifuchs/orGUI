@@ -394,6 +394,58 @@ def test_empty_mapping_can_be_allowed_explicitly(tmp_path, monkeypatch):
         )
 
     assert router.routed_records == 0
+    from orgui.datautils.xrayutils.reconstruction import _discover_checkpoint_state
+
+    boundaries = {grid_name: [(0, frame_count)]}
+    resumed, files = _discover_checkpoint_state(
+        tmp_path / "checkpoints", boundaries, "pipeline-test", cleanup_stale=True
+    )
+    assert resumed == {(grid_name, 0)}
+    assert files[grid_name]
+
+
+def test_rejected_empty_mapping_preserves_resumed_checkpoint(tmp_path, monkeypatch):
+    """Only checkpoint parts created by the rejected attempt are removed."""
+    from orgui.datautils.xrayutils.reconstruction import (
+        _CheckpointRouter, _discover_checkpoint_state,
+    )
+
+    spec = _spec()
+    name = spec.grids[0].grid_name
+    boundaries = {name: [(0, 2), (2, 4)]}
+    kwargs = dict(
+        correction_pipeline=_mask_everything, effective_memory=256 * 1024**2,
+        threads_per_image=1, accumulation_budget_bytes=None, total_images=4,
+        completed_images=0, progress=None,
+    )
+    router = _router(boundaries, tmp_path=tmp_path)
+    monkeypatch.setenv("ORGUI_ALLOW_EMPTY_MAPPING", "1")
+    with pytest.warns(RuntimeWarning, match="produced no records"):
+        _map_pending_ranges(
+            spec, _SlowScan(4, 0), _FakeConfig(), np.zeros((4, 2, 4)),
+            [(0, 1, 0, 1)], [(0, 2)], router, **kwargs
+        )
+    resumed, files = _discover_checkpoint_state(
+        tmp_path / "checkpoints", boundaries, "pipeline-test", cleanup_stale=True
+    )
+    prior = files[name][0]
+    assert resumed == {(name, 0)}
+    monkeypatch.delenv("ORGUI_ALLOW_EMPTY_MAPPING")
+    router = _CheckpointRouter(
+        boundaries, spec_digest="pipeline-test",
+        checkpoint_dir=tmp_path / "checkpoints",
+        active_budget_bytes=256 * 1024**2, resumed=resumed,
+    )
+    with pytest.raises(RuntimeError, match="produced no records"):
+        _map_pending_ranges(
+            spec, _SlowScan(4, 0), _FakeConfig(), np.zeros((4, 2, 4)),
+            [(0, 1, 0, 1)], [(2, 4)], router, **kwargs
+        )
+    resumed, files = _discover_checkpoint_state(
+        tmp_path / "checkpoints", boundaries, "pipeline-test", cleanup_stale=True
+    )
+    assert resumed == {(name, 0)}
+    assert files[name] == [prior]
 
 
 def test_map_pending_ranges_is_quiet_when_records_are_routed(tmp_path):

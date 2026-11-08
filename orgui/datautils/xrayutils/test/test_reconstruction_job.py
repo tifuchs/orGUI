@@ -112,6 +112,45 @@ def _two_frame_job(tmp_path, output_name):
 
 
 @pytest.mark.parametrize("cluster", [False, True])
+def test_rejected_empty_mapping_is_retried(tmp_path, monkeypatch, cluster):
+    """A rejected attempt cannot be mistaken for completed checkpoints."""
+    _, job = _two_frame_job(tmp_path, "result.h5")
+    if cluster:
+        job.checkpoint_plan = {}
+        job.cluster_settings = {"array_task_count": 1}
+    job_path = tmp_path / "job.json"
+    write_job(job, job_path)
+    original = reconstruction_job_module._correction_pipeline
+
+    def masked(*args, **kwargs):
+        def correct(payload, raw, frame, tile):
+            return (raw.astype(float), raw.astype(float),
+                    np.ones(raw.shape, dtype=bool))
+        return correct
+
+    monkeypatch.delenv("ORGUI_ALLOW_EMPTY_MAPPING", raising=False)
+    monkeypatch.setattr(reconstruction_job_module, "_correction_pipeline", masked)
+    def run():
+        if cluster:
+            return run_cluster_map_task(
+                job_path, 0, total_tasks=1, cpus=1, memory_bytes=64 * 1024**2
+            )
+        return run_job(job_path)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="produced no records"):
+            run()
+        assert not list((tmp_path / "scratch" / "checkpoints").rglob("*.h5"))
+    monkeypatch.setattr(reconstruction_job_module, "_correction_pipeline", original)
+    result = run()
+    if cluster:
+        result = run_cluster_finalize(
+            job_path, total_tasks=1, cpus=1, memory_bytes=64 * 1024**2
+        )
+    assert result["status"] == "complete"
+
+
+@pytest.mark.parametrize("cluster", [False, True])
 def test_saved_map_illumination_scales_output_and_survives_resume(tmp_path, cluster):
     """Local/cluster output applies H once, preserves coverage and saves factors."""
     results = []

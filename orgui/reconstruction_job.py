@@ -3287,11 +3287,17 @@ def _fail_if_nothing_was_routed(router, routed_before, total_images, progress):
         "every grid, and the resulting checkpoints would be empty while "
         "counting as complete on resume."
     )
-    if progress is not None:
-        progress(total_images, total_images, message)
     if os.environ.get(ALLOW_EMPTY_MAPPING_ENV_VAR):
+        if progress is not None:
+            progress(total_images, total_images, message)
         warnings.warn(message, RuntimeWarning, stacklevel=2)
         return
+    # These parts belong to this rejected attempt, not the checkpoints that
+    # were already resumed. Leaving them would make a retry skip the mapping.
+    for path in getattr(router, "written", ()):
+        path.unlink(missing_ok=True)
+    if progress is not None:
+        progress(total_images, total_images, message)
     raise RuntimeError(
         message
         + f" Set {ALLOW_EMPTY_MAPPING_ENV_VAR}=1 to allow it and warn instead."
