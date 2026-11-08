@@ -2180,11 +2180,17 @@ class RockingPeakIntegrator(qt.QMainWindow):
             y = cnters["y"][()]
 
         if versioned_total_flux:
-            if correction_record.scale_convention.startswith("total_flux_") and (
-                correction_record.normalization_status != "applied"
-                or curves["illumination_action"]
-                not in ("applied", "replaced", "applied_here")
-                or curves["illumination_convention"] != "total_flux_H"
+            # Diagnostic intensity retains the selected stored Q/H state;
+            # both divisors are mandatory only when producing F2.
+            if (
+                self.lorentzButton.isChecked()
+                and correction_record.scale_convention.startswith("total_flux_")
+                and (
+                    correction_record.normalization_status != "applied"
+                    or curves["illumination_action"]
+                    not in ("applied", "replaced", "applied_here")
+                    or curves["illumination_convention"] != "total_flux_H"
+                )
             ):
                 raise ValueError(
                     "This versioned total-flux curve lacks an applied Q or H "

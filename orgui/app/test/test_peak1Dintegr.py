@@ -876,6 +876,101 @@ def test_versioned_total_flux_curve_uses_stored_divisors_once(tmp_path):
     assert curves["illumination_action"] == "applied"
 
 
+@pytest.mark.parametrize("use_lorentz", [False, True])
+@pytest.mark.parametrize("state", ["complete", "remove_H", "no_Q", "no_H"])
+def test_total_flux_reduction_requires_q_h_only_for_f2(
+    tmp_path, monkeypatch, use_lorentz, state,
+):
+    """Diagnostic reduction saves its actual scale without inventing F2."""
+    from orgui import logger_utils
+    from orgui.app.config_data import ConfigData
+    from orgui.app.test.test_scan_integration import ReductionDriver
+
+    monkeypatch.setattr(logger_utils, "_LOGGING_CONTEXT", "cli")
+    monkeypatch.setattr(
+        ConfigData, "from_gui",
+        lambda gui: SimpleNamespace(to_nxdict=lambda **kwargs: {}),
+    )
+    base = np.array([[80., 96., 120.], [40., 48., 60.]])
+    variance = np.array([[16., 36., 64.], [4., 9., 16.]])
+    q = np.array([2., 4., 5.])
+    h = np.array([.5, .25, 1.])
+    record = CurveCorrectionRecord(
+        algorithm="framewise_ctr_total_flux_v1",
+        output_quantity="rocking_ctr_photon_curve",
+        scale_convention="total_flux_relative",
+        normalization_status="not_applied" if state == "no_Q" else "applied",
+        normalization_divisor=None if state == "no_Q" else q,
+        illumination_status="not_applied" if state == "no_H" else "applied",
+        illumination_divisor=None if state == "no_H" else h,
+        illumination_convention="total_flux_H",
+        base_croibg=base,
+        base_croibg_variance=variance,
+    )
+    counters = {
+        "s": np.array([1., 2.]), "x": np.full(2, 100.), "y": np.full(2, 200.),
+        "alpha": np.full_like(base, .4), "delta": np.full_like(base, 4.),
+        "gamma": np.full_like(base, 2.), "HKL_pk": np.ones((2, 3)),
+        # The immutable base curve must win over the legacy sibling.
+        "croibg": np.full_like(base, -999.),
+    }
+    for angle in ("alpha", "omega", "theta", "delta", "gamma", "chi", "phi"):
+        counters[angle + "_pk"] = np.full(2, .4)
+    path = tmp_path / "diagnostic_reduction.h5"
+    with h5py.File(path, "w") as handle:
+        group = handle.create_group("scan/rocking/curve")
+        dicttonx({
+            "rois": counters,
+            "integration": _roi_info([0., 0.], {"sig_1": (0., 2.)}),
+            CURVE_CORRECTIONS_GROUP: curve_correction_record_to_nxdict(record),
+        }, group)
+        driver = ReductionDriver()
+        driver._currentRoInfo = {
+            "name": group.name, "axisname": "th", "axis": np.arange(3.),
+        }
+        action = FOOTPRINT_REMOVE if state == "remove_H" else FOOTPRINT_KEEP
+        driver.footprintAction = SimpleNamespace(currentData=lambda: action)
+        driver.lorentzButton = SimpleNamespace(isChecked=lambda: use_lorentz)
+        driver.database = SimpleNamespace(
+            nxfile=handle, config_target=None,
+            add_nxdict=lambda data, **kwargs: dicttonx(data, handle, **kwargs),
+        )
+        if use_lorentz and state != "complete":
+            with pytest.raises(ValueError, match="lacks an applied Q or H"):
+                driver.integrate()
+            assert "measurement" not in group
+            return
+
+        driver.integrate()
+        saved = group["measurement/static_rocking_scan"]
+        divisor = np.ones(3)
+        if state != "no_Q":
+            divisor *= q
+        if state not in ("no_H", "remove_H"):
+            divisor *= h
+        weights = np.array([.5, 1., .5])
+        np.testing.assert_allclose(
+            saved["counters/croibg"], np.sum(base / divisor * weights, axis=1),
+        )
+        np.testing.assert_allclose(
+            saved["counters/croibg_errors"],
+            np.sqrt(np.sum(variance / divisor**2 * weights**2, axis=1)),
+        )
+        expected_action = {
+            "remove_H": "removed", "no_H": "not_applied",
+        }.get(state, "applied")
+        assert saved["illumination"].attrs["action"] == expected_action
+        if use_lorentz:
+            assert saved.attrs["signal"] == "counters/F2_hkl"
+            assert np.all(np.isfinite(saved["counters/F2_hkl"][()]))
+            assert np.all(saved["counters/F2_hkl"][()] > 0)
+        else:
+            assert saved.attrs["signal"] == "counters/croibg"
+            assert "F2_hkl" not in saved["counters"]
+            assert "F2_hkl_errors" not in saved["counters"]
+            assert "reduction" not in saved
+
+
 def test_one_total_flux_curve_is_read_lazily_in_its_stored_state(tmp_path):
     """Selecting a curve reads its row only and ignores a pending action."""
     base = np.array([[80.0, 96.0, 120.0], [40.0, 48.0, 60.0]])
