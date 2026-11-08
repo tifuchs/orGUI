@@ -209,6 +209,10 @@ Other user-visible changes:
   open a database. Integration controls remain usable after an aborted job;
   database locations and integration calculations are unchanged.
 
+- Reciprocal-space mapping skips detector-tile/grid calls already proved
+  empty, reducing native thread overhead on multi-grid jobs while preserving
+  map values and resumable checkpoint coverage.
+
 - Legacy flux normalization is deprecated and scheduled for removal. Its
   density and monitor-product controls are hidden and disabled in the GUI;
   only relative and calibrated total-flux modes can be selected. Imported
