@@ -126,6 +126,17 @@ Other user-visible changes:
   optical profiles stay fixed. Text models and HDF5 fit settings preserve the
   parameter, and older models default to fully crystalline material.
 
+- CTR models can use `SXRDCrystal.from_stack` for validated bottom-to-top
+  sequences of films separated by epitaxy interfaces, with `Film(width_layers=...)`
+  for nominal structural-layer widths. Evaluation rejects overlapping interface
+  supports, and native text/HDF5 fit settings preserve this validation policy.
+  The existing constructor retains its behavior; terminal surface models and
+  overlapping multi-material transitions remain outside the strict API.
+  Explicit layer transitions can connect differently labelled descriptions of
+  the same adjacent layer geometry. Lower registration follows physical plane
+  correspondence even when numeric labels are exchanged; unequal layer counts
+  still require a separate interface model.
+
 - Mu/reflectivity-scan ROI trajectories now keep the scan theta fixed instead
   of imposing equal incident and exit angles. Stationary and rocking overlays
   therefore agree for tilted rods, including 00L with nonzero phi/chi. The
