@@ -4,6 +4,8 @@ import copy
 from dataclasses import replace
 import pickle
 
+from ..CTRfilm import LegacySurfaceBoundary
+
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
@@ -32,7 +34,8 @@ def _crystal(profile=None, n_layers=2, bank=False, width=80):
     cls = (CTRfilm.PoissonSurface if isinstance(profile, PoissonProfile)
            else CTRfilm.SkellamSurface)
     # Retain coverage of the legacy correction/support contract explicitly.
-    surface = cls(template, profile=profile, name="surface", boundary=None)
+    surface = cls(template, profile=profile, name="surface",
+        boundary=LegacySurfaceBoundary())
     crystal = CTRcalc.SXRDCrystal(
         oracle.layered_cell(n_layers, "bulk"), film, surface,
         stacking=np.array([1, 2]))
@@ -195,7 +198,8 @@ def test_rejects_wrong_profiles_invalid_rates_and_film_overlap():
     """Invalid candidates must fail explicitly without clipping or shifting."""
     with pytest.raises(TypeError, match="RecenteredSkellamProfile"):
         CTRfilm.SkellamSurface(
-            oracle.layered_cell(), boundary=None, profile=PoissonProfile(1))
+            oracle.layered_cell(),
+                boundary=LegacySurfaceBoundary(), profile=PoissonProfile(1))
     with pytest.raises(ValueError, match="below the underlying Film"):
         _crystal(width=1)
     crystal, surface = _crystal()

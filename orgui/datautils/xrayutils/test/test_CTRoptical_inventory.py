@@ -2,6 +2,8 @@
 
 import copy
 
+from ..CTRfilm import LegacySurfaceBoundary
+
 import numpy as np
 import pytest
 
@@ -24,7 +26,8 @@ def _crystal(strain=1.0, repeats=1, roughness=0.0):
     )
     # This oracle audits legacy termination records and depth-dependent order.
     surface = PoissonSurface(
-        bank, boundary=None, profile=PoissonProfile(roughness), name="surface")
+        bank, boundary=LegacySurfaceBoundary(),
+        profile=PoissonProfile(roughness), name="surface")
     crystal = SXRDCrystal(bulk, film, surface, stacking=np.array([1, 2]))
     crystal.setEnergy(20000.0)
     return crystal, surface

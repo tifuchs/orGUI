@@ -49,7 +49,7 @@ common native stack/state interface rather than discarding them.
    new model. Fitting a surface changes its coherent, incoherent, density and
    DWBA predictions together.
 2. Old saved models without boundary metadata, and surfaces constructed with
-   explicit `boundary=None`, retain their current behavior, support rules and
+   explicit `boundary=LegacySurfaceBoundary()`, retain their current behavior, support rules and
    numerical tolerances. New constructors default to all finite Films. In particular, retain the
    existing Skellam finite-support rejection in legacy mode. Do not introduce a
    new Poisson rejection or new tail selection merely by loading an old model.
@@ -140,7 +140,7 @@ surface = PoissonSurface(
 The omitted finite-boundary policy fields have exactly the defaults shown in
 the Skellam example. Persist policy values explicitly. Omitting `boundary`
 selects `FiniteFilmBoundary()`: all finite Films are removable. Explicit
-`boundary=None` selects legacy behavior, as do old saved files without boundary
+`boundary=LegacySurfaceBoundary()` selects legacy behavior, as do old saved files without boundary
 metadata. The numerical defaults apply to the finite-boundary path only.
 
 `films=None` (the default) infers all finite Films from the live stack. It stays
@@ -490,15 +490,21 @@ Related records: [original physical implementation](finite_film_dissolution_impl
 ### Default-policy follow-up
 
 New native surface constructors now default to `FiniteFilmBoundary()`. Its
+omitted argument and explicit `boundary=None` are equivalent. Legacy behavior
+requires `LegacySurfaceBoundary()`, which is also the resolved policy when
+loading old text, parameter dictionaries or pickles without boundary metadata.
+New legacy saves record their policy explicitly. Dispatch uses the policy type.
+
+The finite policy's
 `films=None` selects every finite Film in the current stack. A named nonempty
 upper sequence restricts removal; semi-infinite bulk is always protected.
-Text/HDF5 round trips preserve automatic selection. Explicit `boundary=None`
+Text/HDF5 round trips preserve automatic selection. Explicit `boundary=LegacySurfaceBoundary()`
 and old persisted models without boundary metadata retain legacy behavior.
 
 The default change does not relax topology validation. In particular, some
 independently displaced interface geometries have nonmonotonic removal-front
 heights and remain unsupported, as do water and depth-dependent order. Existing
-tests of those native legacy behaviors now request `boundary=None` explicitly.
+tests of those native legacy behaviors now request `boundary=LegacySurfaceBoundary()` explicitly.
 
 Validation after this follow-up: 34 native-boundary tests passed, including
 default finite-substrate removal, explicit limits, broad signed Poisson/Skellam

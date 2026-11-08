@@ -271,7 +271,7 @@ class SurfaceHeightDWBA:
         if self._scope is not None:
             yield self
             return
-        if self._model.target_surface().boundary is not None:
+        if self._model.target_surface()._has_finite_boundary():
             with self._finite_batch():
                 yield self
             return
@@ -425,7 +425,7 @@ class SurfaceHeightDWBA:
                 native._batch_reuse = previous
 
     def _evaluate_in_batch(self, method, args, kwargs):
-        if self._model.target_surface().boundary is not None:
+        if self._model.target_surface()._has_finite_boundary():
             return self._evaluate_finite_in_batch(method, args, kwargs)
         return self._evaluate_terraces_in_batch(method, args, kwargs)
 

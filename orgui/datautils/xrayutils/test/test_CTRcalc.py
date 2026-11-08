@@ -38,6 +38,8 @@ from unittest import mock
 import os
 import tempfile
 
+from ..CTRfilm import LegacySurfaceBoundary
+
 import numpy as np
 
 from ... import util
@@ -403,7 +405,7 @@ class TestPoissonSurface(unittest.TestCase):
         return film
 
     def test_serialization_round_trip(self):
-        surface = CTRfilm.PoissonSurface(self.unitcell, boundary=None)
+        surface = CTRfilm.PoissonSurface(self.unitcell, boundary=LegacySurfaceBoundary())
         surface.basis = np.array([4.0, 1.0, 0.25])
         surface.basis_0 = np.copy(surface.basis)
         surface.errors = np.array([0.2, 0.1, 0.05])
@@ -432,7 +434,7 @@ class TestPoissonSurface(unittest.TestCase):
         bank never rebuilds them, so every evaluation on the copy failed.
         """
         surface = CTRfilm.PoissonSurface(
-            self.unitcell, boundary=None,
+            self.unitcell, boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=2.0, alpha=0.5),
         )
         self.bind_surface(surface)
@@ -467,7 +469,7 @@ class TestPoissonSurface(unittest.TestCase):
         cell.coherentDomainOccupancy = [1.0]
 
         surface = CTRfilm.PoissonSurface(
-            copy.deepcopy(cell), boundary=None,
+            copy.deepcopy(cell), boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=-2.0, alpha=0.0),
         )
         film = CTRfilm.Film(copy.deepcopy(cell), name="underlying_film")
@@ -507,7 +509,7 @@ class TestPoissonSurface(unittest.TestCase):
         layer-periodic residual density.
         """
         surface = CTRfilm.PoissonSurface(
-            self.unitcell, boundary=None,
+            self.unitcell, boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=-2.0, alpha=0.0),
         )
         self.bind_surface(surface)
@@ -563,7 +565,7 @@ class TestPoissonSurface(unittest.TestCase):
                 )
             components.append(
                 CTRfilm.PoissonSurface(
-                    source, boundary=None,
+                    source, boundary=LegacySurfaceBoundary(),
                     profile=PoissonProfile(mean_change=0.0, alpha=1.0),
                     name="surface",
                 )
@@ -618,7 +620,7 @@ class TestPoissonSurface(unittest.TestCase):
             bank = generate_surface_termination_cells(source, (1.0, 2.0))
             surfaces = {
                 "bank": CTRfilm.PoissonSurface(
-                    bank, boundary=None, profile=PoissonProfile(mean_change=0.5, alpha=0.5)
+                    bank, boundary=LegacySurfaceBoundary(), profile=PoissonProfile(mean_change=0.5, alpha=0.5)
                 ),
             }
             surfaces["round_trip"] = CTRfilm.PoissonSurface.fromStr(
@@ -658,7 +660,7 @@ class TestPoissonSurface(unittest.TestCase):
 
     def test_create_layers_assigns_convolved_occupancies(self):
         surface = CTRfilm.PoissonSurface(
-            self.unitcell, boundary=None,
+            self.unitcell, boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=2.0, alpha=0.5),
         )
 
@@ -702,7 +704,7 @@ class TestPoissonSurface(unittest.TestCase):
             offset=0.25,
             tail_probability=1e-8,
         )
-        surface = CTRfilm.PoissonSurface(self.unitcell, boundary=None, profile=profile)
+        surface = CTRfilm.PoissonSurface(self.unitcell, boundary=LegacySurfaceBoundary(), profile=profile)
         surface.basis_0[:] = surface.basis
         self.bind_surface(surface, loc=7.0, height=11.0)
 
@@ -736,7 +738,7 @@ class TestPoissonSurface(unittest.TestCase):
         termination_0.basis_0[top_atom, 3] += 0.025
 
         surface = CTRfilm.PoissonSurface(
-            {0: termination_0, 1: termination_1}, boundary=None,
+            {0: termination_0, 1: termination_1}, boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(1.0, alpha=1.0),
             name="surface",
         )
@@ -788,7 +790,7 @@ class TestPoissonSurface(unittest.TestCase):
     def test_termination_bank_requires_one_cell_per_film_cycle(self):
         termination = self.unitcell.as_surface_termination(0)
         surface = CTRfilm.PoissonSurface(
-            {0: termination}, boundary=None,
+            {0: termination}, boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(0.0),
         )
         film = CTRfilm.Film(copy.deepcopy(self.unitcell))
@@ -894,7 +896,7 @@ class TestPoissonSurface(unittest.TestCase):
 
     def test_poisson_surface_growth_and_etching_are_signed(self):
         growth = CTRfilm.PoissonSurface(
-            self.unitcell, boundary=None,
+            self.unitcell, boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=1.0, alpha=0.4),
         )
         self.bind_surface(growth, height=8.0)
@@ -905,7 +907,7 @@ class TestPoissonSurface(unittest.TestCase):
         self.assertAlmostEqual(growth.mean_height_absolute, 10.0)
 
         etching = CTRfilm.PoissonSurface(
-            self.unitcell, boundary=None,
+            self.unitcell, boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=-1.0, alpha=0.4),
         )
         self.bind_surface(etching, height=8.0)
@@ -926,7 +928,7 @@ class TestPoissonSurface(unittest.TestCase):
         film.basis[0] = 2.0
         film.createLayers()
         surface = CTRfilm.PoissonSurface(
-            copy.deepcopy(layered_cell), boundary=None,
+            copy.deepcopy(layered_cell), boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=-2.0, alpha=0.0),
         )
         surface.stack_on(
@@ -965,7 +967,7 @@ class TestPoissonSurface(unittest.TestCase):
             )
             rough_film.basis[0] = 4.0
             surface = CTRfilm.PoissonSurface(
-                copy.deepcopy(self.unitcell), boundary=None,
+                copy.deepcopy(self.unitcell), boundary=LegacySurfaceBoundary(),
                 profile=PoissonProfile(
                     mean_change=-float(removed_layers),
                     alpha=0.0,
@@ -1002,7 +1004,7 @@ class TestPoissonSurface(unittest.TestCase):
 
     def test_offset_is_an_independent_fit_parameter(self):
         surface = CTRfilm.PoissonSurface(
-            self.unitcell, boundary=None,
+            self.unitcell, boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=1.0, alpha=0.4, offset=0.25),
         )
         surface.basis_0[:] = surface.basis
@@ -1020,7 +1022,7 @@ class TestPoissonSurface(unittest.TestCase):
         film = CTRfilm.Film(copy.deepcopy(self.unitcell), name="film")
         film.basis[0] = 2.0
         surface = CTRfilm.PoissonSurface(
-            copy.deepcopy(self.unitcell), boundary=None,
+            copy.deepcopy(self.unitcell), boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=0.0),
         )
         crystal = CTRcalc.SXRDCrystal(
@@ -1056,7 +1058,7 @@ class TestPoissonSurface(unittest.TestCase):
         film = CTRfilm.Film(film_cell, name="film")
         film.basis[0] = 2.0
         surface = CTRfilm.PoissonSurface(
-            terminations, boundary=None,
+            terminations, boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=0.0),
         )
         crystal = CTRcalc.SXRDCrystal(
@@ -1088,7 +1090,7 @@ class TestPoissonSurface(unittest.TestCase):
         film = CTRfilm.Film(film_cell, name="film")
         film.basis[0] = 2.0
         surface = CTRfilm.PoissonSurface(
-            surface_cell, boundary=None,
+            surface_cell, boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=0.0),
             name="surface",
         )
@@ -1118,7 +1120,7 @@ class TestPoissonSurface(unittest.TestCase):
 
     def test_surface_requires_compatible_underlying_film(self):
         surface = CTRfilm.PoissonSurface(
-            copy.deepcopy(self.unitcell), boundary=None, profile=PoissonProfile(1.0)
+            copy.deepcopy(self.unitcell), boundary=LegacySurfaceBoundary(), profile=PoissonProfile(1.0)
         )
         crystal = CTRcalc.SXRDCrystal(
             self.unitcell, surface, stacking=np.array([1])
@@ -1140,7 +1142,7 @@ class TestPoissonSurface(unittest.TestCase):
         film = CTRfilm.Film(copy.deepcopy(self.unitcell), name="film")
         film.basis[0] = 2.0
         surface = CTRfilm.PoissonSurface(
-            copy.deepcopy(self.unitcell), boundary=None,
+            copy.deepcopy(self.unitcell), boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(1.0, alpha=0.5),
             name="surface",
         )
@@ -2267,7 +2269,7 @@ class TestLayerStacking(unittest.TestCase):
         np.testing.assert_allclose(film.unitcell.basis[:, 1], [0.3])
 
     def test_poisson_surface_forwards_wyckoff_shifts_to_template_unitcell(self):
-        surface = CTRfilm.PoissonSurface(self.make_single_wyckoff_cell(), boundary=None)
+        surface = CTRfilm.PoissonSurface(self.make_single_wyckoff_cell(), boundary=LegacySurfaceBoundary())
 
         surface.addWyckoffShift("C_1", "x", limits=(-0.2, 0.2))
         surface.setFitParameters([0.1])
@@ -2477,7 +2479,7 @@ class TestLayerStacking(unittest.TestCase):
         )
         self.assertAlmostEqual(film.height_absolute, 4.0)
 
-        surface = CTRfilm.PoissonSurface(self.make_layered_unitcell("surface"), boundary=None)
+        surface = CTRfilm.PoissonSurface(self.make_layered_unitcell("surface"), boundary=LegacySurfaceBoundary())
         surface.basis[:] = [2, 0, 0]
         surface._bind_underlying_component(film)
         surface.start_layer_number = 2
@@ -2579,7 +2581,7 @@ class TestLayerStacking(unittest.TestCase):
         upper.basis[0] = 4
         upper.pos_absolute = 100.0
 
-        surface = CTRfilm.PoissonSurface(self.make_layered_unitcell("surface"), boundary=None)
+        surface = CTRfilm.PoissonSurface(self.make_layered_unitcell("surface"), boundary=LegacySurfaceBoundary())
         surface.name = "surface"
         surface.basis[:] = [5, 0, 0]
 
@@ -2609,7 +2611,7 @@ class TestLayerStacking(unittest.TestCase):
         film = CTRfilm.Film(self.make_layered_unitcell("film"))
         film.basis[0] = 3
         surface = CTRfilm.PoissonSurface(
-            self.make_layered_unitcell("surface"), boundary=None,
+            self.make_layered_unitcell("surface"), boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(1.0),
         )
 
@@ -3218,7 +3220,7 @@ class TestLayerStacking(unittest.TestCase):
             film = CTRfilm.Film(self.make_layered_unitcell(f"{name}_film"))
             film.basis[0] = 30
             surface = CTRfilm.PoissonSurface(
-                self.make_layered_unitcell(f"{name}_surface"), boundary=None,
+                self.make_layered_unitcell(f"{name}_surface"), boundary=LegacySurfaceBoundary(),
                 profile=PoissonProfile(1.0),
             )
             crystal = CTRcalc.SXRDCrystal(
@@ -3703,7 +3705,7 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         film.basis[:] = [6.0]
         film.basis_0[:] = film.basis
         surface = CTRfilm.PoissonSurface(
-            self.make_layered_cell("surface_cell"), boundary=None,
+            self.make_layered_cell("surface_cell"), boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=1.5, alpha=0.5),
             name="surface",
         )
@@ -3792,7 +3794,7 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         self.assertAlmostEqual(interface.profile.asymmetry, -0.1)
 
         surface = CTRfilm.PoissonSurface(
-            self.make_layered_cell("surface_cell"), boundary=None,
+            self.make_layered_cell("surface_cell"), boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=2.0, alpha=0.4),
             name="surface",
         )
@@ -3813,7 +3815,7 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
 
     def test_linear_fit_parameter_dictionary_round_trip(self):
         original = CTRfilm.PoissonSurface(
-            self.make_layered_cell("surface_cell"), boundary=None,
+            self.make_layered_cell("surface_cell"), boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=2.0, alpha=0.4),
             name="surface",
         )
@@ -3828,7 +3830,7 @@ class TestCTRTextFilesAndFitParameters(unittest.TestCase):
         original.setFitErrors([0.05])
 
         restored = CTRfilm.PoissonSurface(
-            self.make_layered_cell("surface_cell"), boundary=None,
+            self.make_layered_cell("surface_cell"), boundary=LegacySurfaceBoundary(),
             profile=PoissonProfile(mean_change=2.0, alpha=0.4),
             name="surface",
         )

@@ -1050,7 +1050,7 @@ class SurfaceHeightDomains(CoherentStateEnsembleModel):
 
     def _validate_model(self, forward_model):
         """Check that the target is bound to the Film it corrects."""
-        if self.target_surface().boundary is not None:
+        if self.target_surface()._has_finite_boundary():
             self._snapshot()
             return
         target = self._bound_target()
@@ -1085,7 +1085,7 @@ class SurfaceHeightDomains(CoherentStateEnsembleModel):
                 h, k, l, exact_layer_count=self.exact_layer_count
             )
 
-        if self.target_surface().boundary is not None:
+        if self.target_surface()._has_finite_boundary():
             path, indices, probabilities, _ = self._snapshot()
             active = probabilities != 0
             amplitudes = path._iter_kinematic_amplitudes(
@@ -1099,7 +1099,7 @@ class SurfaceHeightDomains(CoherentStateEnsembleModel):
         return self.coherent_model._surface_state_plan(self.surface)._snapshot()
 
     def _evaluate_F2(self, context):  # noqa: N802
-        if self.target_surface().boundary is None:
+        if not self.target_surface()._has_finite_boundary():
             return super()._evaluate_F2(context)
         incoherent, amplitude, _ = self.accumulate_states(context)
         fraction = self._validated_fraction()

@@ -4,6 +4,8 @@ import copy
 import json
 import pickle
 
+from ..CTRfilm import LegacySurfaceBoundary
+
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
@@ -37,7 +39,8 @@ def _crystal(width=6, interface=False, substrate_film=False):
         components.append(transition)
     film = Film(film_cell, width_layers=width, name="film")
     # Build the independent pre-dissolution reference using legacy corrections.
-    surface = SkellamSurface(copy.deepcopy(film_cell), boundary=None, name="surface")
+    surface = SkellamSurface(copy.deepcopy(film_cell),
+        boundary=LegacySurfaceBoundary(), name="surface")
     components.extend((film, surface))
     crystal = SXRDCrystal(bulk, *components,
                           stacking=np.arange(1, len(components)+1))
@@ -316,7 +319,8 @@ def test_material_between_interfaces(remove_lower, lateral):
     from .test_CTRmultilayer import _parts
     bulk, components = _parts(lateral=lateral, roughness=.1)
     components.append(SkellamSurface(
-        copy.deepcopy(components[-1].unitcell), boundary=None, name="surface"))
+        copy.deepcopy(components[-1].unitcell),
+            boundary=LegacySurfaceBoundary(), name="surface"))
     crystal = SXRDCrystal(bulk, *components,
                           stacking=np.arange(1, len(components)+1))
     crystal.setEnergy(18000.)
@@ -495,7 +499,8 @@ def test_nonuniform_spacing_and_finite_substrate_partition():
     # must equal the same perfect crystal after a common origin translation.
     bulk = layered_cell(2, "bulk")
     film = Film(copy.deepcopy(bulk), width_layers=4, name="finite_substrate")
-    surface = SkellamSurface(copy.deepcopy(bulk), boundary=None, name="surface")
+    surface = SkellamSurface(copy.deepcopy(bulk),
+        boundary=LegacySurfaceBoundary(), name="surface")
     # Native F_bulk includes repeat zero. Shift its atoms down by one complete
     # cell so the finite replacement starts directly above the protected bulk.
     bulk.basis[:, 3] -= 1

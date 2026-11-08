@@ -3,6 +3,8 @@
 import copy
 from dataclasses import FrozenInstanceError
 
+from ..CTRfilm import LegacySurfaceBoundary
+
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
@@ -19,12 +21,13 @@ from ..CTRincoherent import SurfaceHeightDomains, create_incoherent_model
 from .test_CTRdissolution import _crystal, _flat, _hkl
 
 
-def _native(kind, profile, width=6):
+def _native(kind, profile, width=6, **kwargs):
     template = _crystal(width=width)
     surface = kind(
         copy.deepcopy(template["film"].unitcell),
         name="surface",
         profile=profile,
+        **kwargs,
     )
     crystal = SXRDCrystal(
         template.uc_bulk, template["film"], surface, stacking=np.array([1, 2])
@@ -160,7 +163,7 @@ def test_native_persistence_guard_and_no_companion_requirement(kind, profile):
 
 
 def test_default_native_boundary_and_unpublished_api_removal():
-    """New surfaces dissolve by default; explicit None keeps legacy correction."""
+    """New surfaces dissolve by default; a named policy keeps legacy correction."""
     from .. import CTRincoherent
 
     assert not hasattr(CTRincoherent, "FiniteFilmDissolution")
@@ -171,14 +174,14 @@ def test_default_native_boundary_and_unpublished_api_removal():
     crystal["surface"].boundary = FiniteFilmBoundary()
     crystal["surface"].height_support = HeightSupport()
     assert np.all(np.isfinite(crystal.F(*_hkl())))
-    crystal["surface"].boundary = None
+    crystal["surface"].boundary = LegacySurfaceBoundary()
     crystal["surface"].height_support = None
     with pytest.raises(ValueError, match="etching support"):
         crystal.F(*_hkl())
     with pytest.raises(FrozenInstanceError):
         FiniteFilmBoundary(("film",)).films = ("other",)
     with pytest.raises(ValueError, match="height_support"):
-        PoissonSurface(crystal["film"].unitcell, boundary=None,
+        PoissonSurface(crystal["film"].unitcell, boundary=LegacySurfaceBoundary(),
                        height_support=HeightSupport())
 
 
@@ -361,18 +364,76 @@ def test_default_broad_distribution_includes_mixed_interface(kind, profile):
 
 
 @pytest.mark.parametrize("kind", [PoissonSurface, SkellamSurface])
-def test_legacy_files_keep_explicit_legacy_behavior(kind):
+def test_legacy_files_keep_explicit_legacy_behavior(kind, tmp_path):
     """Absent persisted metadata is legacy even though constructors changed default."""
     cell = _crystal()["film"].unitcell
-    legacy = kind(cell, boundary=None)
+    legacy = kind(cell, boundary=LegacySurfaceBoundary())
+    assert legacy.toStr().startswith("LegacySurfaceBoundaryV1 ")
+    assert legacy.parametersToDict()["height_boundary"] == {
+        "kind": "legacy", "schema_version": 1}
     restored = kind.fromStr(legacy.toStr())
-    assert restored.boundary is None
+    assert restored.boundary == LegacySurfaceBoundary()
     assert restored.height_support is None
     fresh = kind(copy.deepcopy(cell))
     assert fresh.boundary == FiniteFilmBoundary()
     fresh.parametersFromDict(legacy.parametersToDict())
-    assert fresh.boundary is None
+    assert fresh.boundary == LegacySurfaceBoundary()
     assert fresh.height_support is None
+    old_text = legacy.toStr().split("\n", 1)[1]
+    assert kind.fromStr(old_text).boundary == LegacySurfaceBoundary()
+    old_parameters = legacy.parametersToDict()
+    del old_parameters["height_boundary"]
+    fresh.parametersFromDict(old_parameters)
+    assert fresh.boundary == LegacySurfaceBoundary()
+    from silx.io.dictdump import dicttoh5, h5todict
+    path = str(tmp_path / "legacy.h5")
+    dicttoh5(legacy.parametersToDict(), path)
+    fresh.parametersFromDict(h5todict(path))
+    assert fresh.boundary == LegacySurfaceBoundary()
+
+
+@pytest.mark.parametrize("kind,profile", [
+    (PoissonSurface, PoissonProfile(-7, .8)),
+    (SkellamSurface, RecenteredSkellamProfile(1, 0, 7, -5)),
+])
+def test_none_and_omission_are_identical_in_both_scattering_paths(kind, profile):
+    default = _native(kind, profile)
+    explicit_none = _native(kind, profile, boundary=None)
+    assert explicit_none["surface"].boundary == FiniteFilmBoundary()
+    assert_array_equal(default.F(*_hkl()), explicit_none.F(*_hkl()))
+    assert_array_equal(default.dwba.evaluate(*_hkl()).reflectivity,
+                       explicit_none.dwba.evaluate(*_hkl()).reflectivity)
+    for fraction in (0, .4, 1):
+        models = [SurfaceHeightDomains(
+            crystal, surface="surface", incoherent_fraction=fraction,
+            optical_reference="shared") for crystal in (default, explicit_none)]
+        assert_array_equal(models[0].F2(*_hkl()), models[1].F2(*_hkl()))
+        assert_array_equal(models[0].dwba.evaluate(*_hkl()).reflectivity,
+                           models[1].dwba.evaluate(*_hkl()).reflectivity)
+
+
+@pytest.mark.parametrize("kind,profile", [
+    (PoissonSurface, PoissonProfile(-1, .5)),
+    (SkellamSurface, RecenteredSkellamProfile(1, 0, .5)),
+])
+def test_old_pickle_policy_and_explicit_none_assignment(kind, profile):
+    import pickle
+
+    legacy = _native(kind, profile, width=80, boundary=LegacySurfaceBoundary())
+    expected = legacy.F(*_hkl())
+    for stored_none in (False, True):
+        old = copy.deepcopy(legacy)
+        del old["surface"].__dict__["_boundary"]
+        if stored_none:
+            old["surface"].__dict__["boundary"] = None
+        restored = pickle.loads(pickle.dumps(old))
+        assert restored["surface"].boundary == LegacySurfaceBoundary()
+        assert_array_equal(restored.F(*_hkl()), expected)
+        restored["surface"].boundary = None
+        assert restored["surface"].boundary == FiniteFilmBoundary()
+        assert restored["surface"].height_support == HeightSupport()
+        assert_allclose(restored.F(*_hkl()),
+                        _native(kind, profile, width=80).F(*_hkl()), atol=1e-10)
 
 
 def test_default_requires_an_explicit_finite_inventory():

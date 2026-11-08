@@ -42,7 +42,8 @@ from .CTRutil import ParameterType, Parameter, next_skip_comment
 
 from .CTRuc import WaterModel, UnitCell
 from .CTRfilm import (
-    EpitaxyInterface, Film, PoissonSurface, RoughSurface, SkellamSurface,
+    EpitaxyInterface, Film, FiniteFilmBoundary, PoissonSurface, RoughSurface,
+    SkellamSurface,
 )
 from .CTRoptics import (
     _specular_reflection,
@@ -752,13 +753,13 @@ class SXRDCrystal:
             yield matrix, area_scale * occup * weight
 
     def _has_height_boundary(self):
-        return any(getattr(component, "boundary", None) is not None
+        return any(isinstance(getattr(component, "boundary", None), FiniteFilmBoundary)
                    for component in self.uc_surface_list)
 
     def _surface_state_plan(self, surface=None):
         from ._CTRsurface_states import _SurfaceStatePlan
         targets = [c for c in self.uc_surface_list
-                   if getattr(c, "boundary", None) is not None]
+                   if isinstance(getattr(c, "boundary", None), FiniteFilmBoundary)]
         if len(targets) != 1 or (surface is not None and targets[0].name != surface):
             raise ValueError(
                 "Exactly one named surface with a finite boundary is required")

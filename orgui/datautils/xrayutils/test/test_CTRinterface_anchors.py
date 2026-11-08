@@ -8,6 +8,8 @@ import copy
 from unittest import mock
 
 import h5py
+from ..CTRfilm import LegacySurfaceBoundary
+
 import numpy as np
 import pytest
 from silx.io import dictdump
@@ -53,7 +55,7 @@ def _stack(width=32, reverse=False, coupling=1.0, offset=0.0,
         # Audit native interface registration independently of dissolution fronts.
         surface = CTRfilm.PoissonSurface(
             copy.deepcopy(top), profile=PoissonProfile(0.0), name="surface",
-            boundary=None,
+            boundary=LegacySurfaceBoundary(),
         )
     else:
         surface = copy.deepcopy(top)

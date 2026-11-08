@@ -1756,7 +1756,7 @@ Complete finite-film dissolution
 -------------------------------------
 
 New ``SkellamSurface`` and ``PoissonSurface`` objects allow dissolution of all
-finite Films by default. Omitting ``boundary=`` is equivalent to
+finite Films by default. Omitting ``boundary=`` or passing ``boundary=None`` is equivalent to
 ``boundary=FiniteFilmBoundary()``. To protect lower Films, pass
 ``FiniteFilmBoundary(films=("film",))`` with a connected upper sequence of names.
 The native surface owns its height parameters; native Film and interface
@@ -1797,9 +1797,11 @@ Configure the native surface when constructing the stack::
 The same policy works with ``PoissonSurface(profile=PoissonProfile(...))``.
 Its native ``W``, ``alpha`` and ``offset`` parameters remain unchanged. The
 parent mean is ``W + offset``; the variance includes Poisson variance and
-fractional structural-step variance. Explicit ``boundary=None`` preserves
+fractional structural-step variance. Explicit ``boundary=LegacySurfaceBoundary()`` preserves
 legacy surface corrections and support selection. Old saved crystals and
 parameter dictionaries without boundary metadata also retain legacy behavior.
+New legacy models explicitly store ``LegacySurfaceBoundary()`` in text and
+parameter metadata, so their behavior does not depend on constructor defaults.
 New default models save the boundary policy explicitly; automatic Film selection
 is resolved from the stack at evaluation time, including after a round trip.
 An empty explicit ``films=()`` is rejected rather than treated as unrestricted.
@@ -1808,7 +1810,7 @@ Finite dissolution currently requires a single top surface, unit component
 weights, common outer domains and ordered interface-front heights. Configurations
 with nonmonotonic front heights, attached water, overlayers or depth-dependent
 crystallinity are unsupported and raise errors. Existing models using these
-features can retain their surface-correction behavior with ``boundary=None``.
+features can retain their surface-correction behavior with ``boundary=LegacySurfaceBoundary()``.
 
 The frozen material-selective interface closure retains each surviving owner's
 native coordinates, occupancies and displacement factors. Removing LaNiO3 from

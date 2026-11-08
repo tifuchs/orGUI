@@ -113,7 +113,7 @@ class _SurfaceStatePlan:
             raise ValueError("Dissolution water placement is not defined")
         if self.surface.crystallinity_profile is not None:
             raise ValueError("Dissolution depth-dependent surface order is not defined")
-        if self.surface.boundary is None:
+        if not self.surface._has_finite_boundary():
             raise ValueError("A finite Film boundary is required")
         self.films = self.surface.boundary.films
         self.exposure_policy = self.surface.boundary.exposure_policy

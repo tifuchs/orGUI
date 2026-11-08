@@ -4,6 +4,8 @@ import copy
 from dataclasses import FrozenInstanceError
 from unittest import mock
 
+from ..CTRfilm import LegacySurfaceBoundary
+
 import numpy as np
 import pytest
 
@@ -1352,7 +1354,8 @@ def test_commensurate_surface_cells_preserve_reference_area_amplitude():
         (
             lambda: CTRfilm.PoissonSurface(
                 _layered_cell("termination"),
-                boundary=None,  # Inspect legacy correction record roles.
+                # Inspect legacy correction record roles.
+                boundary=LegacySurfaceBoundary(),
                 profile=PoissonProfile(1.5, 0.5),
                 name="surface",
             ),

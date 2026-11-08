@@ -69,8 +69,9 @@ Other user-visible changes:
   crystallinity-to-disorder conversion fractions need reevaluation.
 
 - New native `SkellamSurface` and `PoissonSurface` objects default to complete
-  dissolution through all finite Films. Explicit `FiniteFilmBoundary(films=...)`
-  restricts the removable upper sequence; `boundary=None` and old saved models
+  dissolution through all finite Films; omitted `boundary` and `boundary=None`
+  are equivalent. Explicit `FiniteFilmBoundary(films=...)`
+  restricts the removable upper sequence; `boundary=LegacySurfaceBoundary()` and old saved models
   without boundary metadata retain legacy surface corrections. This changes
   the default physical model for newly constructed surfaces. It removes finite
   Film inventories, including their mixed-interface populations, while protecting

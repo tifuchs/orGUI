@@ -22,6 +22,8 @@ cell.
 
 import copy
 
+from ..CTRfilm import LegacySurfaceBoundary
+
 import numpy as np
 
 from .. import CTRcalc, CTRfilm
@@ -133,7 +135,7 @@ def poisson_crystal(
     )
     # This oracle exercises legacy surface corrections against plain Films.
     surface = CTRfilm.PoissonSurface(
-        source, boundary=None, profile=profile, name="surface")
+        source, boundary=LegacySurfaceBoundary(), profile=profile, name="surface")
     crystal = _crystal(
         layered_cell(n_layers, "bulk"),
         (film, surface),
