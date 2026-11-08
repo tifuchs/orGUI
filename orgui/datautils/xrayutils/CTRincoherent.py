@@ -481,13 +481,13 @@ class IncoherentModel(LinearFitFunctions, ABC):
     # -- validation and configuration -----------------------------------
 
     def validate(self, *, forward_model):
-        """Check that this model can serve the selected forward model.
+        """Check that this model supports the selected scattering calculation.
 
         :param str forward_model:
             Name of the calculation the optimizer will run.
         :raises ValueError:
-            If the forward model is unsupported or the wrapped crystal does
-            not satisfy the model's own requirements.
+            If the scattering calculation is unsupported or the wrapped
+            crystal does not satisfy the model's own requirements.
         """
         if forward_model not in self.supported_forward_models:
             supported = ", ".join(sorted(self.supported_forward_models))

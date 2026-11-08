@@ -204,8 +204,144 @@ That still requires a real standard measurement, detector efficiency and
 external transmission, and characterization of the in-plane acceptance
 :math:`C_\mathrm{det}` when the ROI does not contain the complete peak.
 
-CTR fit predictions and statistics
-----------------------------------
+.. _ctr-fitting:
+
+Fitting CTR measurements
+------------------------
+
+``CTROptimizer`` connects a crystal model and a measured ``CTRCollection`` to
+prediction, residual, and statistics methods. It prepares the fit problem;
+a numerical solver such as SciPy's ``least_squares`` searches the selected
+structural parameters. The :doc:`ctr_data_workflow` tutorial provides complete
+examples for structure-factor data and absolute reflectivity.
+
+Define the model and fitted parameters
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Start with a configured ``SXRDCrystal`` and reduced measurements with known
+quantity metadata. H, K, and L are reference-cell reciprocal lattice units;
+``sfI`` contains F amplitudes or dimensionless corrected R, as declared by
+``ctr.reduction.quantity``. Supply finite, point-aligned observations and
+strictly positive uncertainties in the same units as those observations.
+
+Select the structural parameters and bounds on the model before constructing
+the optimizer. For example, if the first two atoms of a surface ``UnitCell``
+form its terminating plane, this registers one shared fractional-z parameter:
+
+.. code-block:: python
+
+   surface.addFitParameter(
+       ([0, 1], ["z", "z"]),
+       limits=(-0.03, 0.04),
+       name="surface_expansion",
+   )
+
+The bounds here are fractional cell coordinates, not Angstrom. Choose them
+for the actual model; other atomic parameters retain their own documented
+units. Crystal-level ``addFitParameter`` can couple parameters across named
+components, and :doc:`wyckoff_fitting` covers symmetry-aware parameter binding.
+Unselected model parameters remain fixed.
+
+The optimizer deep-copies both the model and measurements. Changes made later
+to the originals do not change the fit; use ``optimizer.model`` for the fitted
+model and ``optimizer.xtal`` for its coherent crystal. These are the
+same object for an ordinary ``SXRDCrystal``; an incoherent model wrapper owns
+the coherent crystal separately.
+
+Choose the scattering calculation and scale policy
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The default scattering calculation is kinematical and accepts F datasets only.
+For R data, mixed F/R collections, or distorted-wave calculations, enable
+``optimizer.set_dwba()`` before preparation and provide the measurement
+geometry and polarization described in :ref:`dwba-fitting`.
+
+By default, every F rod has its own positive analytical scale
+(``"F": "scaled"``), including a specular F rod, while R remains on its
+absolute scale with multiplier one (``"R": "fixed"``). The declared quantity
+determines these defaults; the indices ``(0, 0)`` do not imply reflectivity.
+
+Each rod resolves to one of three policies:
+
+* ``"fixed"`` multiplies the prediction by one. Use it when the model and
+  measurement already share an absolute scale.
+* ``"scaled"`` determines an independent multiplier for each selected rod.
+* ``"global"`` determines one shared multiplier for all rods assigned to the
+  global group. That group must contain only F or only R; combining both
+  quantities in one global group raises ``ValueError``.
+
+For unscaled prediction :math:`m_i`, observation :math:`y_i`, supplied
+uncertainty :math:`\sigma_i`, and rod weight :math:`w_i`, the fitted scale is
+
+.. math::
+
+   a = \frac{\sum_i w_i m_i y_i / \sigma_i^2}
+            {\sum_i w_i m_i^2 / \sigma_i^2}.
+
+The sums cover one rod for ``"scaled"`` or the complete global group for
+``"global"``. The scale multiplies the prediction in the stored F or R
+representation; observations and uncertainties are preserved. It is
+recalculated at every model evaluation rather than added to the numerical
+parameter vector. A zero prediction norm or a nonpositive/nonfinite fitted
+scale is invalid, so select physically meaningful starting parameters.
+
+The constructor accepts ``scale_policy={...}``, and
+``set_scale_policies({...})`` partially updates the current configuration.
+``"F"`` and ``"R"`` keys select quantity defaults; rod identifiers select
+overrides, which take precedence over those defaults. For example:
+
+.. code-block:: python
+
+   optimizer.set_scale_policies({"F": "global"})
+   rod_id = optimizer.CTRs[0].ctr_id
+   optimizer.set_scale_policy(rod_id, "fixed")
+   policies = optimizer.get_scale_policy()  # complete configuration
+   selected_policy = optimizer.get_scale_policy(rod_id)
+
+Use a rod's full ``ctr_id`` when multiple datasets have the same h and k.
+The shorthand ``(h, k)`` is accepted only when it identifies exactly one rod.
+An override affects that dataset alone; it does not rescale the observations
+or change the other quantity's default.
+
+Prepare, minimize, and inspect
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+With ``model`` already configured and at least one fitted parameter selected,
+a basic kinematical F fit is:
+
+.. code-block:: python
+
+   from scipy.optimize import least_squares
+   from orgui.datautils.xrayutils.CTRopt import CTROptimizer
+   from orgui.datautils.xrayutils.CTRplotutil import CTRCollection
+
+   measured_ctrs = CTRCollection.fromCTRFile("sample.ctr")
+   optimizer = CTROptimizer(model, measured_ctrs)
+   optimizer.prepareFit()
+   result = least_squares(
+       optimizer.weighted_residues,
+       optimizer.get_parameters().copy(),
+       bounds=optimizer.get_bounds(),
+   )
+   prediction = optimizer.flat_prediction(result.x)
+   diagnostics = optimizer.statistics(result.x)
+   fitted_model = optimizer.model
+
+Check the solver's ``result.success`` and ``result.message`` along with the
+predicted curves and residuals. ``weighted_residues`` returns
+:math:`\sqrt{w_i}(y_i-a m_i)/\sigma_i`; least squares minimizes their squared
+sum. Rod weights are empirical objective weights, not replacement measurement
+uncertainties. This example uses bound constraints only; it does not enforce
+optional displacement inequality constraints.
+
+``fitparnames``, ``get_parameters()``, and ``get_bounds()`` describe the
+prepared numerical vector in the same order. ``n_parameters`` is its length;
+analytical scales are counted separately in the statistical degrees of freedom.
+If no numerical parameters are selected, use ``prepareFit()`` and the
+prediction/statistics methods directly without calling ``least_squares``.
+
+Prediction and statistics contract
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Constructing a ``CTROptimizer`` does not evaluate the model. Call
 ``prepareFit()`` after defining fitted parameters, callbacks, resolution-width
@@ -258,6 +394,11 @@ estimable, the unavailable statistics and parameter errors are ``None`` and a
 warning is emitted. Raw chi-square and the available F/R diagnostics remain
 reported. The p-value retains the existing chi-square interpretation and is
 therefore heuristic when empirical per-rod weights differ from one.
+
+As an example of a specialized subclass, ``CTROptAngleCorrection`` adds an
+optional empirical sinusoidal correction based on measured omega, with fitted
+phase and amplitude when ``useAnglecorr=True``. It is a kinematical extension
+of ``CTROptimizer`` and does not support DWBA fitting.
 
 Signed intensity-to-amplitude conversion
 ----------------------------------------
@@ -1179,7 +1320,7 @@ parameter, after which it occupies the first entry of the model block::
 The wrapper is passed through the optimizer's existing model argument.
 ``optimizer.xtal`` remains the coherent crystal, so registered fit callbacks
 and displacement constraints keep receiving an ``SXRDCrystal``, while
-``optimizer.model`` is the fitted forward model.  Resolution is applied to
+``optimizer.model`` is the fitted model.  Resolution is applied to
 ``F2`` before the conversion back to a stored ``|F|``.
 
 ``SurfaceHeightDomains`` and its ``PoissonHeightDomains`` compatibility wrapper
