@@ -438,6 +438,19 @@ def add_structural_to_sampled_profile(
     return np.ascontiguousarray(profile[np.argsort(profile[:, 0], kind="stable")])
 
 
+def _without_empty_bookkeeping(cell, profile):
+    """Exclude explicitly marked zero-weight domains from optical assembly."""
+    marked = getattr(cell, "_optical_bookkeeping_domains", None)
+    if marked is None:
+        return profile
+    occupancy = np.asarray(cell.coherentDomainOccupancy)
+    marked = np.asarray(marked, dtype=bool)
+    if len(marked) != len(occupancy) or not len(marked):
+        return profile
+    keep = ~(marked & (occupancy == 0))
+    return profile[np.tile(keep, len(profile) // len(keep))]
+
+
 def combine_profiles(*profiles, z_tolerance=0.6):
     """Combine and coalesce homogeneous optical-profile contributions.
 

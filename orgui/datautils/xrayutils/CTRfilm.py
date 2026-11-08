@@ -44,7 +44,7 @@ from .CTRutil import (
     next_skip_comment,
     LinearFitFunctions,
 )
-from .CTRoptics import combine_profiles
+from .CTRoptics import combine_profiles, _without_empty_bookkeeping
 from .CTRcrystallinity import CrystallinityProfile, _bound_cell
 
 from .CTRuc import UnitCell, WaterModel, ctr_accel_enabled
@@ -866,15 +866,35 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         for index, (matrix, occupancy) in enumerate(zip(
                 cell.coherentDomainMatrix, cell.coherentDomainOccupancy)):
             if index < len(offsets):
-                result.append(_bound_cell(cell, matrix, occupancy, self, side,
-                                          offsets[index]))
+                bound = _bound_cell(cell, matrix, occupancy, self, side,
+                                    offsets[index])
+                marked = getattr(cell, "_optical_bookkeeping_domains", None)
+                if marked is not None:
+                    bound._optical_bookkeeping_domains = [marked[index]]
+                result.append(bound)
             else:
                 # Signed subtractions retain the underlying material's order.
                 copied = copy.copy(cell)
                 copied.coherentDomainMatrix = [matrix]
                 copied.coherentDomainOccupancy = [occupancy]
+                marked = getattr(cell, "_optical_bookkeeping_domains", None)
+                if marked is not None:
+                    copied._optical_bookkeeping_domains = [marked[index]]
                 result.append(copied)
         return result
+
+    def _ensure_optical_bookkeeping(self):
+        """Reconstruct generated-slot provenance for older saved interfaces."""
+        for cell in self.bottom_layers:
+            if hasattr(cell, "_optical_bookkeeping_domains"):
+                continue
+            count = len(getattr(cell, "_crystallinity_domain_offsets", ()))
+            total = len(cell.coherentDomainOccupancy)
+            if count and total >= 2 * count:
+                cell._optical_bookkeeping_domains = (
+                    [False] * count + [True] * count
+                    + [False] * (total - 2 * count)
+                )
 
     def _validate_order_support(self, side):
         """Reject disorder extending beyond the explicitly represented interface."""
@@ -1142,6 +1162,8 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                                                          "R_mat", "f"))), None)
                     if matching is not None:
                         matching.coherentDomainMatrix.extend(matrices)
+                        matching._optical_bookkeeping_domains.extend(
+                            [False] * len(matrices))
                         matching._dissolution_reference_owners.extend(
                             [("bulk" if component_index == 0 else "film",
                               component.name)] * len(matrices))
@@ -1402,6 +1424,11 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
                 uc_b.coherentDomainMatrix = []
                 uc_b.coherentDomainOccupancy = np.ascontiguousarray(
                     occupancy_bottom.T[i]
+                )
+                # The appended sharp-subtraction slots are algebraic records;
+                # a zero slot has no optical medium of its own.
+                uc_b._optical_bookkeeping_domains = (
+                    [False] * len(probability_top) + [True] * len(probability_top)
                 )
 
             mat_0 = np.vstack((np.identity(3).T, np.array([0, 0, 0]))).T
@@ -1715,8 +1742,10 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
         """
         if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createInterfaceCells()
+        self._ensure_optical_bookkeeping()
         profiles = [uc.optical_profile() for uc in self.top_layers]
-        profiles.extend(uc.optical_profile() for uc in self.bottom_layers)
+        profiles.extend(_without_empty_bookkeeping(uc, uc.optical_profile())
+                        for uc in self.bottom_layers)
         profiles.extend(uc.optical_profile() for uc in self._reference_layers)
         return combine_profiles(*profiles)
 
@@ -4176,7 +4205,8 @@ class _FrozenMaterial:
 
     def optical_profile(self):
         """Combine native optical records using their original component grouping."""
-        return combine_profiles(*(cell.optical_profile() for cell in self.cells))
+        return combine_profiles(*(_without_empty_bookkeeping(
+            cell, cell.optical_profile()) for cell in self.cells))
 
 
 class SkellamSurface(RoughSurface):

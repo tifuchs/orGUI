@@ -16,6 +16,7 @@ from .CTRoptics import (
     StratifiedProfile,
     _internal_plane_geometry,
     _optical_profile,
+    _without_empty_bookkeeping,
     homogeneous_bulk_profile,
     profile_boundaries,
     solve_electric_field,
@@ -175,6 +176,7 @@ def _component_record_cells(component):
         if (np.any(component._basis_created != component.basis)
                 or component._repeat_state_changed()):
             component.createInterfaceCells()
+        component._ensure_optical_bookkeeping()
         return [
             *(("interface_top", part) for cell in component.top_layers
               for part in component._scattering_cells(cell, "top")),
@@ -993,6 +995,7 @@ class DWBAState:
                 cell.coherentDomainMatrix, cell.coherentDomainOccupancy,
             ), repr((cell.layerpos, cell._explicit_layer_cycle,
                      getattr(cell, "_optical_plane_geometry", None),
+                     getattr(cell, "_optical_bookkeeping_domains", None),
                      getattr(cell, "_optical_layer_origin", None),
                      getattr(cell, "_optical_layer_thickness_fraction", None))))
             if key in cache:
@@ -1005,6 +1008,8 @@ class DWBAState:
             value = _optical_profile(selected, thickness=True)
         else:
             value = selected.optical_profile()
+        if kind != "bulk":
+            value = _without_empty_bookkeeping(selected, value)
         self._cache_counters["profile_builds"] += 1
         if key is not None:
             value = _readonly_array(value)

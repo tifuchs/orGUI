@@ -41,6 +41,7 @@ class _MaterialRecord:
     lower_A: float
     upper_A: float
     interval: tuple
+    optical_bookkeeping: bool = False
 
 
 @dataclass(frozen=True)
@@ -199,6 +200,7 @@ class _SurfaceStatePlan:
                         component.name))
             else:
                 lower_owner, upper_owner = self.interface_owners[component.name]
+                component._ensure_optical_bookkeeping()
                 for side, cells, parent, owner in (
                     ("top", component.top_layers, component.uc_top, upper_owner),
                     ("bottom", component.bottom_layers, component.uc_bottom,
@@ -288,8 +290,10 @@ class _SurfaceStatePlan:
                         (component_name, float(low)))
             mat = np.array(matrix, copy=True)
             mat.flags.writeable = False
+            marked = getattr(cell, "_optical_bookkeeping_domains", ())
+            bookkeeping = bool(marked[j]) if j < len(marked) else False
             yield _MaterialRecord(actual_owner, role, cell, mat, float(weight),
-                                 float(low), float(high), interval)
+                                 float(low), float(high), interval, bookkeeping)
 
     def _complete_motif(self, height, depth):
         """Check material, not the arbitrary Film/interface component boundary.
@@ -357,8 +361,8 @@ class _SurfaceStatePlan:
         # atomic plane. The native UnitCell still owns all scattering math.
         groups = {}
         for record in records:
-            # Zero-weight protected domains still anchor native optical slab
-            # boundaries. Removing them changes the native profile grouping.
+            # Preserve protected zero-weight domains for their geometry;
+            # only explicitly marked subtraction slots are optically inert.
             group = (self.surface.name if record.role in {
                 "growth", "termination", "termination_reference"}
                 else record.interval[0])
@@ -369,11 +373,13 @@ class _SurfaceStatePlan:
                 cell.basis_0 = cell.basis_0.copy()
                 cell.coherentDomainMatrix = []
                 cell.coherentDomainOccupancy = []
+                cell._optical_bookkeeping_domains = []
                 groups[key] = cell
                 components.setdefault(group, []).append(cell)
             cell = groups[key]
             cell.coherentDomainMatrix.append(record.matrix)
             cell.coherentDomainOccupancy.append(record.weight)
+            cell._optical_bookkeeping_domains.append(record.optical_bookkeeping)
         source = self.source
         cells = [_FrozenMaterial(parts, name, source.reference_area)
                  for name, parts in components.items()]
@@ -519,7 +525,8 @@ class _SurfaceStatePlan:
                         *self._extra_records(int(index))]
             records.extend(_MaterialRecord(
                 r.owner, r.role, r.cell, r.matrix, r.weight*probability,
-                r.lower_A, r.upper_A, r.interval) for r in selected)
+                r.lower_A, r.upper_A, r.interval, r.optical_bookkeeping)
+                           for r in selected)
         return self._crystal(records)
 
     def _snapshot(self):
