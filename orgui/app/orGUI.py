@@ -2064,8 +2064,40 @@ ub : gui for UB matrix and angle calculations
                 chi = self.ubcalc.chi
                 phi = self.ubcalc.phi
                 xtal.setEnergy(ub.getEnergy() * 1e3)
-                hkls, yx, angles = rn.thscanBragg(
-                    xtal, ub, mu, dc, (ommin, ommax), chi=chi, phi=phi
+                # Enumerate before detector visibility filtering: a reflection
+                # outside the calibration image can enter a moving detector.
+                arm_groups = self.armFrameGroups()
+                max_q = max(
+                    dc.qRangeAtArm(gamma_arm, delta_arm)[1]
+                    for _selection, gamma_arm, delta_arm in arm_groups
+                )
+                hkls, angles = rn.anglesAllowedReflections_G(
+                    xtal, None, mu, max_q, ub=ub, chi=chi, phi=phi,
+                    mirror="both", negative=True,
+                )
+                in_scan = (angles[:, 3] > ommin) & (angles[:, 3] < ommax)
+                hkls, angles = hkls[in_scan], angles[in_scan]
+                yx = np.empty((len(angles), 2), dtype=float)
+                image_indices = np.array([
+                    self.axisToImageNo(-np.rad2deg(pos[3])) for pos in angles
+                ], dtype=np.int64)
+                frame_groups = np.empty(len(self.fscan), dtype=np.int64)
+                for group, (selection, _gamma, _delta) in enumerate(arm_groups):
+                    frame_groups[selection] = group
+                candidate_groups = frame_groups[image_indices]
+                for group in np.unique(candidate_groups):
+                    _selection, gamma_arm, delta_arm = arm_groups[group]
+                    selected = candidate_groups == group
+                    pos = angles[selected]
+                    yx[selected] = dc.pixelsSurfaceAngles(
+                        pos[:, 2], pos[:, 1], pos[:, 0], gamma_arm, delta_arm
+                    )
+                on_detector = (
+                    (yx[:, 0] >= 0) & (yx[:, 0] < dc.detector.shape[0])
+                    & (yx[:, 1] >= 0) & (yx[:, 1] < dc.detector.shape[1])
+                )
+                hkls, yx, angles = (
+                    hkls[on_detector], yx[on_detector], angles[on_detector]
                 )
                 self.reflectionSel.setBraggReflections(hkls, yx, angles)
             except Exception:
@@ -2287,10 +2319,10 @@ ub : gui for UB matrix and angle calculations
         The reference reflections are taken from the reflection selector. For
         each selected reflection, the detector pixel coordinate is converted to
         surface detector angles ``delta`` and ``gamma`` in rad, and the image
-        number is converted to ``omega`` in rad. The returned angle rows use
+        number resolves the frame's sample and detector-arm angles in rad.
+        The returned angle rows use
         the Vlieg six-circle order ``[alpha, delta, gamma, omega, chi, phi]``.
-        In this GUI workflow, ``alpha`` is the current fixed incidence angle
-        stored as ``self.ubcalc.mu``.
+        ``alpha`` follows the scan incidence angle returned by ``getMuOm``.
 
         :returns:
             Tuple ``(hkls, angles)``. ``hkls`` has columns ``[h, k, l]`` in
@@ -2312,19 +2344,20 @@ ub : gui for UB matrix and angle calculations
                     refl.imageno,
                 )
                 continue
-            # print(refl.xy)
+            mu, omega = self.getMuOm(refl.imageno)
             gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(
-                np.array([refl.xy[1]]), np.array([refl.xy[0]]), self.ubcalc.mu
+                np.array([refl.xy[1]]), np.array([refl.xy[0]]), mu,
+                *self.getArmAngles(refl.imageno),
             )
             delta = float(delta[0])
             gamma = float(gamma[0])
             try:
                 pos = np.array(
                     [
-                        self.ubcalc.mu,
+                        mu,
                         delta,
                         gamma,
-                        self.imageNoToOmega(refl.imageno),
+                        omega,
                         self.ubcalc.chi,
                         self.ubcalc.phi,
                     ]
@@ -2337,25 +2370,35 @@ ub : gui for UB matrix and angle calculations
             angles.append(pos)
         return np.array(hkls), np.array(angles)
 
-    def getReflectionFitData(self):
+    def getReflectionFitData(self, include_arm_angles=False):
         """Return reference reflections including detector pixel positions.
 
+        :param bool include_arm_angles:
+            Append the known detector-arm positions of the returned reflections
+            as an ``(N, 2)`` array of primary-beam-frame
+            ``(gamma_arm, delta_arm)`` in rad. These are fixed measurements,
+            independent of the detector parameters selected for fitting.
         :returns:
             ``(hkls, angles, xy)`` with HKL in r.l.u., Vlieg angles in rad,
-            and detector coordinates ``(x, y)`` in pixels.
-        :rtype: tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]
+            and detector coordinates ``(x, y)`` in pixels; optionally followed
+            by the arm-angle array. Stale reference frames are skipped in all
+            arrays together.
+        :rtype: tuple
         """
         hkls = []
         angles = []
         xy = []
+        arm_angles = []
         for refl in self.reflectionSel.reflections:
             if not self.isValidImageNo(refl.imageno):
                 continue
             mu, omega = self.getMuOm(refl.imageno)
+            arm = self.getArmAngles(refl.imageno)
             gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(
                 np.array([refl.xy[1]]),
                 np.array([refl.xy[0]]),
                 mu,
+                *arm,
             )
             hkls.append(refl.hkl)
             angles.append(
@@ -2369,7 +2412,11 @@ ub : gui for UB matrix and angle calculations
                 ]
             )
             xy.append(refl.xy)
-        return np.asarray(hkls), np.asarray(angles), np.asarray(xy)
+            arm_angles.append(arm)
+        data = np.asarray(hkls), np.asarray(angles), np.asarray(xy)
+        if include_arm_angles:
+            return (*data, np.asarray(arm_angles, dtype=float).reshape(-1, 2))
+        return data
 
     def _onPlotMachineParams(self, enable=None):
         """GUI/CLI hint: toggle detector center and azimuth plot markers."""
@@ -2457,6 +2504,11 @@ ub : gui for UB matrix and angle calculations
             refldict["imageno_1"] = imageno1
         except Exception:
             imageno1 = None
+        if imageno1 is not None:
+            alpha, delta, gamma = refldict["angles_1"][:3]
+            refldict["xy_1"] = dc.pixelsSurfaceAngles(
+                gamma, delta, alpha, *self.getArmAngles(imageno1)
+            )[0, ::-1]
         xy = refldict["xy_1"]
         onDetector = (xy[0] >= 0 and xy[0] < dc.detector.shape[1]) and (
             xy[1] >= 0 and xy[1] < dc.detector.shape[0]
@@ -2473,6 +2525,11 @@ ub : gui for UB matrix and angle calculations
             refldict["imageno_2"] = imageno2
         except Exception:
             imageno2 = None
+        if imageno2 is not None:
+            alpha, delta, gamma = refldict["angles_2"][:3]
+            refldict["xy_2"] = dc.pixelsSurfaceAngles(
+                gamma, delta, alpha, *self.getArmAngles(imageno2)
+            )[0, ::-1]
         xy = refldict["xy_2"]
         onDetector = (xy[0] >= 0 and xy[0] < dc.detector.shape[1]) and (
             xy[1] >= 0 and xy[1] < dc.detector.shape[0]

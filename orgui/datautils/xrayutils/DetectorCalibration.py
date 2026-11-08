@@ -1265,13 +1265,20 @@ class Detector2D_SXRD(geometry.Geometry):
         gamrange = np.amin(gamma_p), np.amax(gamma_p)
         return gamrange, delrange
 
-    def rangegamdel(self, alpha_i):
+    def rangegamdel(self, alpha_i, gamma_arm=None, delta_arm=None):
         """Is not identical to _rangegamdel_full_det, where each pixel is calculated, but close within 1e-5
 
         Not sure why...
+
+        :param float alpha_i: Incidence angle in rad.
+        :param float gamma_arm, delta_arm:
+            Primary-beam-frame arm angles in rad; omission uses calibration.
+        :returns: Surface-frame ``(gamma_range, delta_range)`` in rad.
         """  # noqa: E501
         xx, yy = self._edge_pixcoord()
-        gamma, delta = self.surfaceAnglesPoint(xx, yy, alpha_i)
+        gamma, delta = self.surfaceAnglesPoint(
+            xx, yy, alpha_i, gamma_arm, delta_arm
+        )
         delrange = np.amin(delta), np.amax(delta)
         gamrange = np.amin(gamma), np.amax(gamma)
         return gamrange, delrange

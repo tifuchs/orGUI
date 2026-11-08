@@ -194,10 +194,12 @@ class AutoBraggWorkflow:
 
         excluded_images = self.excludedImagesDialog.getData()
         self.ubcalc.crystal.setEnergy(self.ubcalc.ubCal.getEnergy() * 1e3)
-        max_q = kwargs.get(
-            "max_q",
-            getattr(self.ubcalc.detectorCal, "Qmax", None),
-        )
+        max_q = kwargs.get("max_q")
+        if max_q is None:
+            # Peak indexing and confirmation must cover the detector's reach
+            # over the scan, including Q beyond the calibration image.
+            _lower, upper = self._qRangePerFrame((len(self.fscan),))
+            max_q = float(np.max(upper))
 
         logger.info("Start online automatic Bragg max-pixel search")
         report(
@@ -239,8 +241,13 @@ class AutoBraggWorkflow:
             )
             observed_xy = np.asarray(peak.xy, dtype=float)
             keep = np.zeros(len(hkls), dtype=bool)
-            for key in ("xy_1", "xy_2"):
-                xy = np.atleast_2d(np.asarray(refldict[key], dtype=float))
+            gamma_arm, delta_arm = self.getArmAngles(peak.imageno)
+            for solution in (1, 2):
+                positions = np.atleast_2d(refldict[f"angles_{solution}"])
+                xy = self.ubcalc.detectorCal.pixelsSurfaceAngles(
+                    positions[:, 2], positions[:, 1], positions[:, 0],
+                    gamma_arm, delta_arm,
+                )[:, ::-1]
                 finite = np.all(np.isfinite(xy), axis=1)
                 in_region = np.all(
                     np.abs(xy - observed_xy) <= half_width,
@@ -288,25 +295,19 @@ class AutoBraggWorkflow:
                 predicted_2 = np.full((len(matches), 2), np.inf)
 
             peaks = [match["peak"] for match in matches]
-            mus = np.array([self.getMuOm(peak.imageno)[0] for peak in peaks])
-            measured_gamma, measured_delta = self.ubcalc.detectorCal.surfaceAnglesPoint(
-                np.array([peak.xy[1] for peak in peaks]),
-                np.array([peak.xy[0] for peak in peaks]),
-                mus,
+            measured = np.array(
+                [self._automaticPeakAngles(peak)[[1, 2]] for peak in peaks]
             )
-            measured = np.column_stack((measured_delta, measured_gamma))
             try:
-                gamrange, delrange = self.ubcalc.detectorCal.rangegamdel(
-                    float(np.nanmedian(mus))
-                )
-                angle_half_width = adaptive_scale_outlier_angle_fraction * (
-                    np.array(
-                        [
-                            abs(delrange[1] - delrange[0]),
-                            abs(gamrange[1] - gamrange[0]),
-                        ],
-                        dtype=float,
+                widths = []
+                for peak in peaks:
+                    mu, _omega = self.getMuOm(peak.imageno)
+                    gamrange, delrange = self.ubcalc.detectorCal.rangegamdel(
+                        mu, *self.getArmAngles(peak.imageno)
                     )
+                    widths.append([np.ptp(delrange), np.ptp(gamrange)])
+                angle_half_width = (
+                    adaptive_scale_outlier_angle_fraction * np.asarray(widths)
                 )
             except Exception:
                 logger.debug(
@@ -350,6 +351,7 @@ class AutoBraggWorkflow:
                     qnorm_tolerance=current_qnorm_tolerance,
                     max_q=max_q,
                     qnorm_scale=qnorm_scale,
+                    arm_resolver=self.getArmAngles,
                 )
             else:
                 seeds = self._rankAutomaticSeedsByDetectorPosition(
@@ -590,6 +592,7 @@ class AutoBraggWorkflow:
                     adaptive_qnorm_tolerance,
                     max_q=max_q,
                     hkl_filter=scale_fit_detector_filter,
+                    arm_resolver=self.getArmAngles,
                 )
                 last_scale_fit_count = len(unmatched_peaks)
                 adaptive_matching = True
@@ -808,6 +811,7 @@ class AutoBraggWorkflow:
             self.ubcalc.chi,
             self.ubcalc.phi,
             self.ubcalc.ubCal.getK(),
+            arm_resolver=self.getArmAngles,
         )
         qnorm = float(np.linalg.norm(q_phi))
         hkls, intensity, norms = autoBraggSearch.allowed_bragg_in_q_region(
@@ -887,22 +891,7 @@ class AutoBraggWorkflow:
                 score, pixel_error = min(solution_mismatches)
                 if pixel_error > pixel_tolerance:
                     continue
-                mu, omega = self.getMuOm(peak.imageno)
-                gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(
-                    np.array([peak.xy[1]]),
-                    np.array([peak.xy[0]]),
-                    mu,
-                )
-                pos = np.array(
-                    [
-                        mu,
-                        float(delta[0]),
-                        float(gamma[0]),
-                        omega,
-                        self.ubcalc.chi,
-                        self.ubcalc.phi,
-                    ]
-                )
+                pos = self._automaticPeakAngles(peak)
                 try:
                     U = autoBraggSearch.seed_u_from_single_reflection(
                         self.ubcalc.ubCal, pos, hkl
@@ -1019,22 +1008,7 @@ class AutoBraggWorkflow:
             if any(is_same_peak(peak, existing) for existing in tested_peaks):
                 continue
             tested_peaks.append(peak)
-            mu, omega = self.getMuOm(peak.imageno)
-            gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(
-                np.array([peak.xy[1]]),
-                np.array([peak.xy[0]]),
-                mu,
-            )
-            angles = np.array(
-                [
-                    mu,
-                    float(delta[0]),
-                    float(gamma[0]),
-                    omega,
-                    self.ubcalc.chi,
-                    self.ubcalc.phi,
-                ]
-            )
+            angles = self._automaticPeakAngles(peak)
             try:
                 h, k, l = self.ubcalc.angles.anglesToHkl(*angles)  # noqa: E741
             except Exception:
@@ -1151,21 +1125,9 @@ class AutoBraggWorkflow:
 
     def _automaticPeakAngles(self, peak):
         """Return Vlieg angles in rad for one refined automatic peak."""
-        mu, omega = self.getMuOm(peak.imageno)
-        gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(
-            np.array([peak.xy[1]]),
-            np.array([peak.xy[0]]),
-            mu,
-        )
-        return np.array(
-            [
-                mu,
-                float(delta[0]),
-                float(gamma[0]),
-                omega,
-                self.ubcalc.chi,
-                self.ubcalc.phi,
-            ]
+        return autoBraggSearch.angles_from_peak(
+            peak, self.ubcalc.detectorCal, self.getMuOm,
+            self.ubcalc.chi, self.ubcalc.phi, arm_resolver=self.getArmAngles,
         )
 
     def _recalculateAutomaticUFromReflections(self):
@@ -1523,9 +1485,8 @@ class AutoBraggWorkflow:
            predicted positions and always restores the previous U.
         """
         if max_q is None:
-            max_q = getattr(self.ubcalc.detectorCal, "Qmax", None)
-        if max_q is None:
-            return None
+            _lower, upper = self._qRangePerFrame((len(self.fscan),))
+            max_q = float(np.max(upper))
         hkls, _intensity, _norms = autoBraggSearch.allowed_bragg_with_intensity(
             self.ubcalc.crystal, max_q
         )

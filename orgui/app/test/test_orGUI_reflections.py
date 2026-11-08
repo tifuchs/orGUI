@@ -98,7 +98,7 @@ class FakeScan:
 
 
 class FakeDetectorCalibration:
-    def surfaceAnglesPoint(self, y, x, mu):
+    def surfaceAnglesPoint(self, y, x, mu, gamma_arm=None, delta_arm=None):
         return np.array([0.5]), np.array([0.25])
 
 
@@ -334,6 +334,7 @@ def test_get_reflections_accepts_scalar_omega_from_mu_scan():
 
     np.testing.assert_array_equal(hkls, [refl.hkl for refl in reflections])
     assert angles.shape == (2, 6)
+    np.testing.assert_allclose(angles[:, 0], np.deg2rad([0.1, 0.2]))
     np.testing.assert_allclose(angles[:, 3], np.deg2rad(-12.5))
 
 
@@ -357,7 +358,7 @@ def test_get_reflections_skips_stale_image_numbers(caplog):
 
     assert hkls.tolist() == [[1.0, 0.0, 0.0]]
     assert angles.shape == (1, 6)
-    assert angles[0, 3] == pytest.approx(np.deg2rad(1.0))
+    assert angles[0, 3] == pytest.approx(gui.getMuOm(1)[1])
     assert "Skipping stale reflection" in caplog.text
 
 
@@ -799,7 +800,10 @@ def test_experiment_fit_recovers_detector_distance():
     ub_calculator.setU(np.eye(3))
     calculator = SimpleNamespace(
         mainGui=SimpleNamespace(
-            getReflectionFitData=lambda: (hkls, angles, xy),
+            getReflectionFitData=lambda include_arm_angles=False: (
+                (hkls, angles, xy, np.zeros((len(hkls), 2)))
+                if include_arm_angles else (hkls, angles, xy)
+            ),
             reflectionSel=SimpleNamespace(updateEditor=lambda: None),
         ),
         detectorCal=starting_detector,
@@ -897,7 +901,11 @@ def test_lattice_only_fit_does_not_copy_trial_detector(monkeypatch):
     ub_calculator.setU(np.eye(3))
     calculator = SimpleNamespace(
         mainGui=SimpleNamespace(
-            getReflectionFitData=lambda: (hkls, angles, np.zeros((len(hkls), 2))),
+            getReflectionFitData=lambda include_arm_angles=False: (
+                (hkls, angles, np.zeros((len(hkls), 2)), np.zeros((len(hkls), 2)))
+                if include_arm_angles
+                else (hkls, angles, np.zeros((len(hkls), 2)))
+            ),
             reflectionSel=SimpleNamespace(updateEditor=lambda: None),
         ),
         detectorCal=detector,

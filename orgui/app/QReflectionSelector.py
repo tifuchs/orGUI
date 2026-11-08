@@ -503,7 +503,8 @@ class QReflectionSelector(qt.QWidget):
         mu, om = self.orparent.getMuOm(refl.imageno)
 
         gamma, delta = self.ubcalc.detectorCal.surfaceAnglesPoint(
-            np.array([refl.xy[1]]), np.array([refl.xy[0]]), mu
+            np.array([refl.xy[1]]), np.array([refl.xy[0]]), mu,
+            *self.orparent.getArmAngles(refl.imageno),
         )
         pos = [mu, delta[0], gamma[0], om, self.ubcalc.chi, self.ubcalc.phi]
         pos = HKLVlieg.crystalAngles(pos, self.ubcalc.n)

@@ -33,6 +33,14 @@ current matrix should be a reasonable geometry convention for the mounted
 sample. The slower Q-norm path can be selected when the current detector
 prediction is not useful.
 
+Peak-to-Q conversion, predicted detector positions, and reference-based ``U``
+recalculation use the detector-arm position of each scan frame, relative to the
+arm reference stored with the calibration. Scan arm readbacks are in degrees;
+the shared scan geometry resolves them to primary-beam-frame angles in radians,
+including scans that declare surface-frame arm angles. When arm readbacks are
+absent, the configured fixed arm angles apply, defaulting to zero. Mu scans
+also use each reflection's incidence angle.
+
 Overview of the Automatic Workflow
 ----------------------------------
 

@@ -505,7 +505,31 @@ def estimate_rocking_intensity(peak, peak_half_width=1):
     }
 
 
-def q_phi_from_peak(peak, detector, angle_resolver, chi, phi, k):
+def angles_from_peak(peak, detector, angle_resolver, chi, phi, arm_resolver=None):
+    """Return measured Vlieg angles at a refined peak's frame.
+
+    :param RefinedPeak peak: Refined position, with ``xy`` in pixels.
+    :param detector: Calibrated detector geometry, including its arm reference.
+    :param callable angle_resolver: Return ``(mu, omega)`` in rad by image index.
+    :param float chi: Fixed diffractometer chi in rad.
+    :param float phi: Fixed diffractometer phi in rad.
+    :param callable arm_resolver:
+        Optional image-index resolver of primary-beam-frame
+        ``(gamma_arm, delta_arm)`` in rad, e.g. ``orGUI.getArmAngles``.
+        Omission preserves the calibrated detector position.
+    :returns: ``[mu, delta, gamma, omega, chi, phi]`` in rad, in the
+        surface-frame Vlieg convention used by :func:`HKLVlieg.calculate_q_phi`.
+    :rtype: numpy.ndarray
+    """
+    mu, omega = angle_resolver(peak.imageno)
+    arm = () if arm_resolver is None else arm_resolver(peak.imageno)
+    gamma, delta = detector.surfaceAnglesPoint(
+        np.array([peak.xy[1]]), np.array([peak.xy[0]]), mu, *arm
+    )
+    return np.array([mu, float(delta[0]), float(gamma[0]), omega, chi, phi])
+
+
+def q_phi_from_peak(peak, detector, angle_resolver, chi, phi, k, arm_resolver=None):
     """Calculate the measured Q vector for a refined peak.
 
     :param RefinedPeak peak:
@@ -520,15 +544,16 @@ def q_phi_from_peak(peak, detector, angle_resolver, chi, phi, k):
         Diffractometer phi angle in rad.
     :param float k:
         Incident wave-vector magnitude in Angstrom^-1.
+    :param callable arm_resolver:
+        Optional per-image primary-beam-frame arm angles in rad; see
+        :func:`angles_from_peak`. Omission uses the calibrated position.
     :returns:
         Momentum transfer in the phi frame in Angstrom^-1.
     :rtype: numpy.ndarray
     """
-    mu, omega = angle_resolver(peak.imageno)
-    gamma, delta = detector.surfaceAnglesPoint(
-        np.array([peak.xy[1]]), np.array([peak.xy[0]]), mu
+    pos = angles_from_peak(
+        peak, detector, angle_resolver, chi, phi, arm_resolver
     )
-    pos = [mu, float(delta[0]), float(gamma[0]), omega, chi, phi]
     return HKLVlieg.calculate_q_phi(pos, k).flatten()
 
 
@@ -724,6 +749,7 @@ def estimate_qnorm_scale(
     tolerance,
     max_q=None,
     hkl_filter=None,
+    arm_resolver=None,
 ):
     """Estimate systematic reciprocal-length scale from unmatched peaks.
 
@@ -749,6 +775,9 @@ def estimate_qnorm_scale(
         Optional vectorized predicate ``hkl_filter(peak, hkls, norms)`` that
         returns a boolean mask. If provided, only accepted reflections are used
         for the closest-Q tentative match.
+    :param callable arm_resolver:
+        Optional per-image primary-beam-frame arm angles in rad; see
+        :func:`angles_from_peak`.
     :returns:
         Dictionary with ``qnorm_scale`` and diagnostic match information, or
         ``None`` if too few finite tentative matches are available.
@@ -758,7 +787,8 @@ def estimate_qnorm_scale(
     matches = []
     for peak in peaks:
         q_phi = q_phi_from_peak(
-            peak, detector, angle_resolver, chi, phi, ub_calculator.getK()
+            peak, detector, angle_resolver, chi, phi, ub_calculator.getK(),
+            arm_resolver=arm_resolver,
         )
         qnorm = float(np.linalg.norm(q_phi))
         hkls, _intensity, norms = allowed_bragg_in_q_region(
@@ -855,6 +885,7 @@ def rank_ub_seeds(
     qnorm_tolerance=0.05,
     max_q=None,
     qnorm_scale=1.0,
+    arm_resolver=None,
 ):
     """Rank automatic UB seeds from refined Bragg-peak candidates.
 
@@ -879,6 +910,9 @@ def rank_ub_seeds(
     :param float qnorm_scale:
         Multiplicative scale applied to predicted reciprocal-vector norms
         before Q-shell matching.
+    :param callable arm_resolver:
+        Optional per-image primary-beam-frame arm angles in rad; see
+        :func:`angles_from_peak`.
     :returns:
         Candidate UB seeds sorted by increasing score.
     :rtype: list[UBSeed]
@@ -888,11 +922,9 @@ def rank_ub_seeds(
     positions = []
     observed_q = []
     for peak in peaks:
-        mu, omega = angle_resolver(peak.imageno)
-        gamma, delta = detector.surfaceAnglesPoint(
-            np.array([peak.xy[1]]), np.array([peak.xy[0]]), mu
+        pos = angles_from_peak(
+            peak, detector, angle_resolver, chi, phi, arm_resolver
         )
-        pos = np.array([mu, float(delta[0]), float(gamma[0]), omega, chi, phi])
         positions.append(pos)
         observed_q.append(HKLVlieg.calculate_q_phi(pos, ub_calculator.getK()).flatten())
     observed_q = np.asarray(observed_q)

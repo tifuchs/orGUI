@@ -1037,13 +1037,20 @@ class QUBCalculator(qt.QSplitter):
         Kabsch alignment of normalized vectors, and the remaining relative Q
         residual is minimized.
 
+        Detector-arm gamma/delta are read once for each reference frame and
+        held fixed throughout the fit. Trial detector parameters describe the
+        geometry at the calibration's arm reference; arm positions are never
+        optimization variables.
+
         :param set[str] enabled_parameters:
             Parameter names selected in :class:`QUBFitDialog`.
         :returns:
             Final RMS relative Q-vector discrepancy.
         :rtype: float
         """
-        hkls, base_angles, xy = self.mainGui.getReflectionFitData()
+        hkls, base_angles, xy, arm_angles = self.mainGui.getReflectionFitData(
+            include_arm_angles=True
+        )
         if len(hkls) < 3:
             raise ValueError("At least 3 reflections are required for fitting")
 
@@ -1056,6 +1063,15 @@ class QUBCalculator(qt.QSplitter):
                 "be fitted together"
             )
         fit_geometry = any(name in enabled_parameters for name in geometry_names)
+        arm_groups = []
+        if fit_geometry:
+            # The scan resolver has already converted motor degrees and any
+            # surface-frame readbacks into primary-beam-frame radians.
+            arms, group_indices = np.unique(arm_angles, axis=0, return_inverse=True)
+            arm_groups = [
+                (group_indices == index, float(gamma_arm), float(delta_arm))
+                for index, (gamma_arm, delta_arm) in enumerate(arms)
+            ]
         initial_geometry = {
             name: float(getattr(self.detectorCal, name)) for name in geometry_names
         }
@@ -1114,15 +1130,18 @@ class QUBCalculator(qt.QSplitter):
                     trial[name] = initial[name] * scale
             if fit_geometry:
                 geometry_param = np.array([trial[name] for name in geometry_names])
-                gamma, delta = self.detectorCal.surfaceAnglesPointParam(
-                    xy[:, 1],
-                    xy[:, 0],
-                    base_angles[:, 0],
-                    geometry_param,
-                )
                 angles = base_angles.copy()
-                angles[:, 1] = delta
-                angles[:, 2] = gamma
+                for selected, gamma_arm, delta_arm in arm_groups:
+                    gamma, delta = self.detectorCal.surfaceAnglesPointParam(
+                        xy[selected, 1],
+                        xy[selected, 0],
+                        base_angles[selected, 0],
+                        geometry_param,
+                        gamma_arm,
+                        delta_arm,
+                    )
+                    angles[selected, 1] = delta
+                    angles[selected, 2] = gamma
                 q_phi = np.array(
                     [
                         HKLVlieg.calculate_q_phi(pos, self.ubCal.getK()).flatten()
