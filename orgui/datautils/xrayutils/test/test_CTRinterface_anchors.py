@@ -50,8 +50,10 @@ def _stack(width=32, reverse=False, coupling=1.0, offset=0.0,
     film = CTRfilm.Film(copy.deepcopy(top), name="film")
     film.basis[:] = film.basis_0[:] = width
     if termination == "poisson":
+        # Audit native interface registration independently of dissolution fronts.
         surface = CTRfilm.PoissonSurface(
             copy.deepcopy(top), profile=PoissonProfile(0.0), name="surface",
+            boundary=None,
         )
     else:
         surface = copy.deepcopy(top)

@@ -528,6 +528,12 @@ def stratify_profile(profile, delta_tolerance=None, beta_tolerance=None):
     """
     profile = np.asarray(profile, dtype=np.float64)
     boundaries = profile_boundaries(profile)
+    return _stratify_at_boundaries(
+        profile, boundaries, delta_tolerance, beta_tolerance)
+
+
+def _stratify_at_boundaries(profile, boundaries, delta_tolerance, beta_tolerance):
+    """Simplify an already validated layered profile without moving its edges."""
     if delta_tolerance is None:
         return StratifiedProfile(
             np.ascontiguousarray(profile.copy()), boundaries

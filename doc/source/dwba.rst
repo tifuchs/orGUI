@@ -772,7 +772,8 @@ API reference
 Finite-film dissolution ensembles
 -------------------------------------
 
-``FiniteFilmDissolution.dwba`` evaluates complete native atomic states, including
+``SurfaceHeightDomains.dwba`` on a surface with ``FiniteFilmBoundary``
+evaluates complete native atomic states, including
 the protected bulk, all surviving mixed-interface populations and the selected
 exposed termination. It supports the usual geometry and polarization entry
 points. ``optical_reference="state_specific"`` recomputes each state's native
@@ -783,7 +784,10 @@ interchangeable numerical settings.
 Amplitudes are transformed to a common ambient phase origin before mixing.
 For incoherent fraction kappa, the result is
 ``(1-kappa)*abs(sum(p*A))**2 + kappa*sum(p*abs(A)**2)``. The shared-policy
-coherent endpoint equals the native averaged structure. Bare-bulk states on
+coherent endpoint equals ``crystal.dwba.evaluate(...)``. Both use the same
+all-state union optical grid, including boundaries introduced by exposed bulk.
+Native coherent kinematics do not construct optical grids or solve wavefields.
+Bare-bulk states on
 shared multilayer fields use the complete multilayer kernel, even though their
 atomic model contains only one record.
 

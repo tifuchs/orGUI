@@ -68,7 +68,11 @@ Other user-visible changes:
   reference density in earlier termination models. Affected DWBA fits and
   crystallinity-to-disorder conversion fractions need reevaluation.
 
-- The opt-in `FiniteFilmDissolution` ensemble removes complete selected finite
+- New native `SkellamSurface` and `PoissonSurface` objects default to complete
+  dissolution through all finite Films. Explicit `FiniteFilmBoundary(films=...)`
+  restricts the removable upper sequence; `boundary=None` and old saved models
+  without boundary metadata retain legacy surface corrections. This changes
+  the default physical model for newly constructed surfaces. It removes finite
   Film inventories, including their mixed-interface populations, while protecting
   the semi-infinite bulk. Exhausted probability, material inventories, realized
   height moments and numerical tail certificates are exposed explicitly. Native

@@ -9,10 +9,13 @@ import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 
 from ..CTRcalc import SXRDCrystal
-from ..CTRdistributions import RecenteredSkellamProfile, capped_skellam_states
-from ..CTRdissolution import DissolutionPath
+from ..CTRdistributions import (
+    RecenteredSkellamProfile, HeightSupport, bounded_height_states,
+)
+from ._surface_boundary_helpers import _path
 from ..CTRfilm import EpitaxyInterface, Film, SkellamSurface
-from ..CTRincoherent import FiniteFilmDissolution, create_incoherent_model_from_config
+from ..CTRincoherent import create_incoherent_model_from_config
+from ._surface_boundary_helpers import _bounded_model
 from .._CTRincoherent_dwba import _phase_to, _shared_preparation
 from ._poisson_oracle import layered_cell
 
@@ -33,7 +36,8 @@ def _crystal(width=6, interface=False, substrate_film=False):
         transition.basis_0[:] = transition.basis
         components.append(transition)
     film = Film(film_cell, width_layers=width, name="film")
-    surface = SkellamSurface(copy.deepcopy(film_cell), name="surface")
+    # Build the independent pre-dissolution reference using legacy corrections.
+    surface = SkellamSurface(copy.deepcopy(film_cell), boundary=None, name="surface")
     components.extend((film, surface))
     crystal = SXRDCrystal(bulk, *components,
                           stacking=np.arange(1, len(components)+1))
@@ -68,7 +72,7 @@ def _hkl():
 def test_bounded_probability_and_moments(up, down, offset):
     """Cap an independent parent PMF; exhausted mass is not conditioning."""
     parent = RecenteredSkellamProfile(1, up, down, offset)
-    indices, probabilities, certificate = capped_skellam_states(parent, -6)
+    indices, probabilities, certificate = bounded_height_states(parent, -6)
     raw = np.arange(-300, 301)
     pmf = parent.probability(raw)
     bounded = np.maximum(raw, -6)
@@ -86,8 +90,8 @@ def test_bounded_probability_and_moments(up, down, offset):
 def test_explicit_resource_limit():
     """The resource ceiling raises instead of clipping probability."""
     with pytest.raises(ValueError, match="max_states"):
-        capped_skellam_states(RecenteredSkellamProfile(1, 20, 20), -6,
-                              max_states=4)
+        bounded_height_states(RecenteredSkellamProfile(1, 20, 20), -6,
+                              support=HeightSupport(max_states=4))
 
 
 @pytest.mark.parametrize("index", [-6, -5, -2, 0, 1, 4])
@@ -95,7 +99,7 @@ def test_deterministic_states_against_plain_films(index):
     """Each structural state equals an independently built finite Film."""
     original = _crystal()
     before = original.F(*_hkl())
-    path = DissolutionPath(original, films=["film"], surface="surface")
+    path = _path(original, films=["film"], surface="surface")
     state = path.state(index)
     expected = _flat(6+index)
     assert_allclose(state.crystal.F(*_hkl()), expected.F(*_hkl()),
@@ -111,7 +115,7 @@ def test_deterministic_states_against_plain_films(index):
 def test_interface_inventory_exhaustion_and_protected_material(substrate_film):
     """Film material in the mixed interface is removed without restoring STO."""
     crystal = _crystal(width=40, interface=True, substrate_film=substrate_film)
-    path = DissolutionPath(crystal, films=["film"], surface="surface",
+    path = _path(crystal, films=["film"], surface="surface",
                            exposure_policy="preserve")
     assert_allclose(path.state(0).crystal.F(*_hkl()), crystal.F(*_hkl()),
                     rtol=1e-12, atol=2e-11)
@@ -137,7 +141,7 @@ def test_interface_inventory_exhaustion_and_protected_material(substrate_film):
 def test_explicit_substrate_film_can_dissolve():
     """A finite Film of bulk material is removable without making bulk finite."""
     crystal = _crystal(width=40, interface=True, substrate_film=True)
-    path = DissolutionPath(crystal, films=["substrate_film", "film"],
+    path = _path(crystal, films=["substrate_film", "film"],
                            surface="surface", exposure_policy="preserve")
     endpoint = path.state(path.minimum)
     assert endpoint.inventory["film"] == {}
@@ -151,7 +155,7 @@ def test_explicit_substrate_film_can_dissolve():
 def test_complete_kinematic_ensemble(fraction):
     """An independent two-height ensemble includes full substrate interference."""
     crystal = _crystal()
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         crystal, films=["film"], surface="surface",
         profile=RecenteredSkellamProfile(offset=-5.25),
         incoherent_fraction=fraction)
@@ -175,7 +179,7 @@ def test_complete_kinematic_ensemble(fraction):
 @pytest.mark.parametrize("fraction", [0., .205425229351, 1.])
 def test_dwba_exhausted_deterministic_limit(policy, fraction):
     """Exhaustion recovers the native protected bulk for both field policies."""
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         _crystal(), films=["film"], surface="surface",
         profile=RecenteredSkellamProfile(offset=-20),
         optical_reference=policy, incoherent_fraction=fraction)
@@ -188,7 +192,7 @@ def test_dwba_exhausted_deterministic_limit(policy, fraction):
                                      ("p", "s"), ("p", "p")])
 def test_state_specific_dwba_independent_states(channels):
     """State-specific fields mix total amplitudes in a common ambient gauge."""
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         _crystal(), films=["film"], surface="surface",
         profile=RecenteredSkellamProfile(offset=-5.25), incoherent_fraction=.3)
     options = dict(polarization_i=channels[0], polarization_f=channels[1])
@@ -207,14 +211,16 @@ def test_state_specific_dwba_independent_states(channels):
 
 def test_config_copy_pickle_and_parameter_update():
     """The native fit/configuration APIs retain physical boundary policies."""
-    model = FiniteFilmDissolution(_crystal(), films=["film"], surface="surface",
+    model = _bounded_model(_crystal(), films=["film"], surface="surface",
                                  profile=RecenteredSkellamProfile(offset=-5.25))
-    model.addFitParameter("offset", name="parent_offset", limits=(-20, 2))
+    model.target_surface().addFitParameter(
+        "offset", name="parent_offset", limits=(-20, 2))
     model.setParameters([-7.])
     expected = model.F2(*_hkl())
     config = json.loads(json.dumps(model.to_config(), default=lambda a: a.tolist()))
     for other in [copy.deepcopy(model), pickle.loads(pickle.dumps(model)),
-                  create_incoherent_model_from_config(model.coherent_model, config)]:
+                  create_incoherent_model_from_config(
+                      copy.deepcopy(model.coherent_model), config)]:
         assert_allclose(other.F2(*_hkl()), expected)
         other.setParameters([-5.5])
         assert other.statistics()["exhausted_probability"] == .5
@@ -226,20 +232,20 @@ def test_invalid_ownership_and_recovery():
     crystal = _crystal(width=40, interface=True, substrate_film=True)
     for films in [["substrate"], ["substrate_film"], ["film", "film"]]:
         with pytest.raises(ValueError):
-            DissolutionPath(crystal, films=films, surface="surface")
-    model = FiniteFilmDissolution(crystal, films=["film"], surface="surface")
+            _path(crystal, films=films, surface="surface")
+    model = _bounded_model(crystal, films=["film"], surface="surface")
     expected = model.F2(*_hkl())
-    model.basis[1] = -1
+    model.target_surface().basis[1] = -1
     with pytest.raises(ValueError, match="nonnegative"):
         model.F2(*_hkl())
-    model.basis[1] = 0
+    model.target_surface().basis[1] = 0
     assert_allclose(model.F2(*_hkl()), expected)
 
 
 def test_native_text_and_companion_config_roundtrip(tmp_path):
     """Native text plus required ensemble metadata preserve the physical model."""
     crystal = _crystal(width=40, interface=True)
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         crystal, films=["film"], surface="surface",
         profile=RecenteredSkellamProfile(1., 0., 3., -35.),
         incoherent_fraction=.3)
@@ -262,10 +268,11 @@ def test_native_optimizer_parameter_updates(dwba):
     """The ordinary optimizer evaluates live dissolution parameters natively."""
     from ..CTRopt import CTROptimizer
     from ..CTRplotutil import CTR, CTRCollection
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         _crystal(), films=["film"], surface="surface",
         profile=RecenteredSkellamProfile(offset=-5.25))
-    model.addFitParameter("offset", name="parent_offset", limits=(-10., 2.))
+    model.target_surface().addFitParameter(
+        "offset", name="parent_offset", limits=(-10., 2.))
     ell = np.array([.4, .6, .8])
     data = CTRCollection([CTR((1., 0.), ell, np.ones(3), np.ones(3))])
     if dwba:
@@ -286,7 +293,7 @@ def test_native_optimizer_parameter_updates(dwba):
     else:
         expected = abs(reference.F(np.ones(3), np.zeros(3), ell))
     assert_allclose(prediction, expected, rtol=1e-10, atol=1e-10)
-    assert model.profile.offset == -5.25
+    assert model.target_surface()._make_profile().offset == -5.25
 
 
 def test_tight_support_keeps_existing_certificates():
@@ -309,13 +316,13 @@ def test_material_between_interfaces(remove_lower, lateral):
     from .test_CTRmultilayer import _parts
     bulk, components = _parts(lateral=lateral, roughness=.1)
     components.append(SkellamSurface(
-        copy.deepcopy(components[-1].unitcell), name="surface"))
+        copy.deepcopy(components[-1].unitcell), boundary=None, name="surface"))
     crystal = SXRDCrystal(bulk, *components,
                           stacking=np.arange(1, len(components)+1))
     crystal.setEnergy(18000.)
     crystal.apply_stacking()
     owners = ["film_0", "film_1"] if remove_lower else ["film_1"]
-    path = DissolutionPath(crystal, films=owners, surface="surface",
+    path = _path(crystal, films=owners, surface="surface",
                            exposure_policy="preserve")
     assert_allclose(path.state(0).crystal.F(*_hkl()), crystal.F(*_hkl()),
                     rtol=1e-12, atol=1e-10)
@@ -341,10 +348,10 @@ def test_upper_support_convergence_and_crystallinity():
     source = _crystal()
     source["film"].unitcell.crystallinity = .45
     parent = RecenteredSkellamProfile(1., 3., 5., -3., 1e-8, 1e-8)
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         source, films=["film"], surface="surface", profile=parent,
         incoherent_fraction=.2, exposure_policy="preserve")
-    tighter = FiniteFilmDissolution(
+    tighter = _bounded_model(
         source, films=["film"], surface="surface", profile=parent,
         incoherent_fraction=.2, exposure_policy="preserve",
         tail_probability=1e-12, moment_tolerance=1e-12,
@@ -357,7 +364,7 @@ def test_upper_support_convergence_and_crystallinity():
 
 def test_shared_dwba_independent_state_fields():
     """The averaged optical medium is used consistently for every full state."""
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         _crystal(), films=["film"], surface="surface",
         profile=RecenteredSkellamProfile(offset=-5.25),
         incoherent_fraction=.3, optical_reference="shared")
@@ -383,13 +390,13 @@ def test_shared_dwba_independent_state_fields():
 @pytest.mark.parametrize("change", ["profile", "occupancy", "geometry", "domain"])
 def test_live_changes_match_fresh_and_batch(policy, change):
     """No state or wavefield from an earlier standalone call survives mutation."""
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         _crystal(), films=["film"], surface="surface",
         profile=RecenteredSkellamProfile(offset=-5.25), optical_reference=policy,
         incoherent_fraction=.3)
     model.dwba.evaluate(*_hkl())
     if change == "profile":
-        model.basis[3] = -4.75
+        model.target_surface().basis[3] = -4.75
     elif change == "occupancy":
         film = model.coherent_model["film"].unitcell
         film.basis[:, 6] *= .9
@@ -412,8 +419,8 @@ def test_live_changes_match_fresh_and_batch(policy, change):
 def test_interface_exhaustion_dwba_and_statistics(policy):
     """Interface depletion preserves protected records in optical and atomic sums."""
     source = _crystal(width=40, interface=True)
-    path = DissolutionPath(source, films=["film"], surface="surface")
-    model = FiniteFilmDissolution(
+    path = _path(source, films=["film"], surface="surface")
+    model = _bounded_model(
         source, films=["film"], surface="surface", optical_reference=policy,
         profile=RecenteredSkellamProfile(offset=path.minimum-2))
     expected = copy.deepcopy(source)
@@ -441,7 +448,7 @@ def test_interface_exhaustion_dwba_and_statistics(policy):
 def test_nominal_dwba_matches_original_native_crystal(policy, interface):
     """The zero-removal state preserves atomic and optical native geometry."""
     source = _crystal(width=40, interface=interface)
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         source, films=["film"], surface="surface", optical_reference=policy)
     assert_allclose(model.dwba.evaluate(*_hkl()).reflectivity,
                     source.dwba.evaluate(*_hkl()).reflectivity,
@@ -465,10 +472,10 @@ def test_motif_follows_material_across_support_partition():
     options = dict(films=["film"], surface="surface",
                    profile=RecenteredSkellamProfile(offset=-18.5),
                    incoherent_fraction=.2)
-    model, wider = (FiniteFilmDissolution(c, **options)
+    model, wider = (_bounded_model(c, **options)
                     for c in (source, expanded))
-    assert model.path().top_film._layers_to_create != (
-        wider.path().top_film._layers_to_create)
+    assert model.coherent_model._surface_state_plan().top_film._layers_to_create != (
+        wider.coherent_model._surface_state_plan().top_film._layers_to_create)
     assert_allclose(wider.F2(*_hkl()), model.F2(*_hkl()), rtol=1e-10)
 
 
@@ -480,7 +487,7 @@ def test_nonuniform_spacing_and_finite_substrate_partition():
     source["film"].set_ucs(source["film"].unitcell)
     source["surface"].set_ucs(source["surface"].unitcell)
     source.apply_stacking()
-    path = DissolutionPath(source, films=["film"], surface="surface",
+    path = _path(source, films=["film"], surface="surface",
                            exposure_policy="preserve")
     assert_allclose([path.state(i).front_height_A for i in range(-6, 1)],
                     [0., 1.8, 6., 7.8, 12., 13.8, 18.])
@@ -488,7 +495,7 @@ def test_nonuniform_spacing_and_finite_substrate_partition():
     # must equal the same perfect crystal after a common origin translation.
     bulk = layered_cell(2, "bulk")
     film = Film(copy.deepcopy(bulk), width_layers=4, name="finite_substrate")
-    surface = SkellamSurface(copy.deepcopy(bulk), name="surface")
+    surface = SkellamSurface(copy.deepcopy(bulk), boundary=None, name="surface")
     # Native F_bulk includes repeat zero. Shift its atoms down by one complete
     # cell so the finite replacement starts directly above the protected bulk.
     bulk.basis[:, 3] -= 1
@@ -496,7 +503,7 @@ def test_nonuniform_spacing_and_finite_substrate_partition():
     crystal = SXRDCrystal(bulk, film, surface, stacking=np.array([1, 2]), atten=0.)
     crystal.setEnergy(10000)
     crystal.apply_stacking()
-    path = DissolutionPath(crystal, films=["finite_substrate"], surface="surface")
+    path = _path(crystal, films=["finite_substrate"], surface="surface")
     h, k, l = _hkl()  # noqa: E741
     reference = _flat(0, bulk=bulk)
     reference.atten = 0

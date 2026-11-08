@@ -8,7 +8,7 @@ from numpy.testing import assert_allclose, assert_array_equal
 
 from .. import CTRdwba, CTRoptics
 from ..CTRdistributions import RecenteredSkellamProfile, SkellamProfile
-from ..CTRincoherent import FiniteFilmDissolution
+from ._surface_boundary_helpers import _bounded_model
 from .test_CTRdissolution import _crystal, _hkl
 
 
@@ -114,7 +114,7 @@ def test_native_dwba_support_invariant(polarization):
 def test_dissolution_dwba_support_invariant(
         policy, polarization, incoherent_fraction):
     """Both field policies preserve coherent, incoherent and mixed observables."""
-    models = [FiniteFilmDissolution(
+    models = [_bounded_model(
         c, films=["film"], surface="surface", optical_reference=policy,
         profile=RecenteredSkellamProfile(offset=-18.5),
         incoherent_fraction=incoherent_fraction) for c in _support_pair()]

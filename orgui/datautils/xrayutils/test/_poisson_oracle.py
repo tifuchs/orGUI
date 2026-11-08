@@ -131,7 +131,9 @@ def poisson_crystal(
         if termination_cells is not None
         else layered_cell(n_layers, "film")
     )
-    surface = CTRfilm.PoissonSurface(source, profile=profile, name="surface")
+    # This oracle exercises legacy surface corrections against plain Films.
+    surface = CTRfilm.PoissonSurface(
+        source, boundary=None, profile=profile, name="surface")
     crystal = _crystal(
         layered_cell(n_layers, "bulk"),
         (film, surface),

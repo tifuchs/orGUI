@@ -70,7 +70,6 @@ __all__ = [
     "PoissonHeightDomains",
     "SurfaceHeightDomains",
     "SurfaceHeightDWBA",
-    "FiniteFilmDissolution",
     "available_incoherent_models",
     "create_incoherent_model",
     "create_incoherent_model_from_config",
@@ -456,6 +455,8 @@ class IncoherentModel(LinearFitFunctions, ABC):
 
     def _local_parameters_from_dict(self, data, override_values=True):
         """Restore only the wrapper-local parameter subtree."""
+        data = dict(data)
+        data["basis_0"] = np.asarray(data["basis_0"], dtype=float)
         LinearFitFunctions.parametersFromDict(self, data, override_values)
 
     def parametersToDict(self):  # noqa: N802
@@ -1049,6 +1050,9 @@ class SurfaceHeightDomains(CoherentStateEnsembleModel):
 
     def _validate_model(self, forward_model):
         """Check that the target is bound to the Film it corrects."""
+        if self.target_surface().boundary is not None:
+            self._snapshot()
+            return
         target = self._bound_target()
         if target.underlying_film is None:
             raise ValueError(
@@ -1081,7 +1085,29 @@ class SurfaceHeightDomains(CoherentStateEnsembleModel):
                 h, k, l, exact_layer_count=self.exact_layer_count
             )
 
+        if self.target_surface().boundary is not None:
+            path, indices, probabilities, _ = self._snapshot()
+            active = probabilities != 0
+            amplitudes = path._iter_kinematic_amplitudes(
+                indices[active], *context.coordinates)
+            return (IncoherentState(index, float(probability), amplitude)
+                    for (index, amplitude), probability
+                    in zip(amplitudes, probabilities[active]))
         return context.iter_component_states(self.surface, state_evaluator)
+
+    def _snapshot(self):
+        return self.coherent_model._surface_state_plan(self.surface)._snapshot()
+
+    def _evaluate_F2(self, context):  # noqa: N802
+        if self.target_surface().boundary is None:
+            return super()._evaluate_F2(context)
+        incoherent, amplitude, _ = self.accumulate_states(context)
+        fraction = self._validated_fraction()
+        return (1-fraction)*np.abs(amplitude)**2 + fraction*incoherent
+
+    def statistics(self):
+        """Return bounded heights in Angstrom and material inventories."""
+        return self.coherent_model.surface_height_statistics(surface=self.surface)
 
     def _config_settings(self):
         """Return the non-basis settings. The fraction is not among them."""
@@ -1103,227 +1129,3 @@ class PoissonHeightDomains(SurfaceHeightDomains):
 
     model_type = "poisson_height_domains"
     _surface_type = PoissonSurface
-
-
-@register_incoherent_model(builtin=True)
-class FiniteFilmDissolution(CoherentStateEnsembleModel):
-    """Dissolve complete finite Film inventories while protecting bulk.
-
-    The frozen-interface closure removes only designated material populations.
-    Probability below the exhausted state accumulates there explicitly. Rates
-    and time describe the parent Skellam distribution, not a bounded kinetic
-    process. Geometry is in Angstrom; height indices are structural intervals.
-
-    :param SXRDCrystal crystal: Native structure and fitting parameters.
-    :param films: Connected upper finite Film names, including the top Film.
-    :param str surface: Top native rough-surface template name.
-    :param profile: Optional RecenteredSkellamProfile; defaults to the surface's.
-    :param float incoherent_fraction: Intensity mixing fraction in [0, 1].
-    :param str exposure_policy: Native motif with explicit unreconstructed
-        thin-film fallback, or ``preserve`` for every state.
-    :param str optical_reference: ``shared`` or ``state_specific`` DWBA fields.
-    :param int max_states: Resource limit; exceeding it raises, never clips.
-    """
-
-    model_type = "finite_film_dissolution"
-    supported_forward_models = frozenset({"kinematical", "dwba"})
-    parameterLookup = {"t": 0, "k_up": 1, "k_down": 2, "offset": 3,
-                       "incoherent_fraction": 4}
-    parameterLookup_inv = {v: k for k, v in parameterLookup.items()}
-
-    def __init__(self, crystal, *, films, surface, profile=None,
-                 incoherent_fraction=0.,
-                 exposure_policy="native_or_unreconstructed",
-                 optical_reference="state_specific", max_states=4096,
-                 tail_probability=None, moment_tolerance=None,
-                 second_moment_tolerance=1e-8, interface_owners=None,
-                 boundary_policy="accumulate_at_exhaustion",
-                 interface_closure="frozen_material_selective",
-                 upper_policy="continue_top_film", schema_version=1,
-                 name="dissolution"):
-        from .CTRdistributions import RecenteredSkellamProfile
-        super().__init__(crystal, name=name)
-        if (schema_version != 1 or boundary_policy != "accumulate_at_exhaustion"
-                or interface_closure != "frozen_material_selective"
-                or upper_policy != "continue_top_film"):
-            raise ValueError("Unsupported dissolution schema or physical policy")
-        self.films = tuple(films)
-        self.surface = str(surface)
-        self.exposure_policy = exposure_policy
-        self.optical_reference = optical_reference
-        self.max_states = max_states
-        self.second_moment_tolerance = second_moment_tolerance
-        self.interface_owners = interface_owners
-        if profile is None:
-            selected = [c for c in crystal.uc_surface_list if c.name == surface]
-            if len(selected) != 1:
-                raise ValueError("surface must identify one native rough surface")
-            profile = selected[0]._make_profile()
-        if not isinstance(profile, RecenteredSkellamProfile):
-            raise TypeError("Dissolution requires a RecenteredSkellamProfile")
-        self.tail_probability = (profile.tail_probability if tail_probability is None
-                                 else tail_probability)
-        self.moment_tolerance = (profile.moment_tolerance if moment_tolerance is None
-                                 else moment_tolerance)
-        self.basis = np.array([profile.t, profile.k_up, profile.k_down,
-                               profile.offset, incoherent_fraction], dtype=float)
-        self.basis_0 = self.basis.copy()
-        self.errors = None
-        self._snapshot()
-
-    @property
-    def profile(self):
-        """Return the live unbounded parent distribution in structural indices."""
-        from .CTRdistributions import RecenteredSkellamProfile
-        return RecenteredSkellamProfile(*self.basis[:4], self.tail_probability,
-                                        self.moment_tolerance)
-
-    @property
-    def incoherent_fraction(self):
-        """Return the dimensionless intensity mixing fraction."""
-        return float(self.basis[4])
-
-    @incoherent_fraction.setter
-    def incoherent_fraction(self, value):
-        if not np.isfinite(value) or not 0 <= value <= 1:
-            raise ValueError("incoherent_fraction must lie in [0, 1]")
-        self.basis[4] = self.basis_0[4] = float(value)
-
-    @property
-    def optical_reference(self):
-        """Return the explicitly selected DWBA field policy."""
-        return self._optical_reference
-
-    @optical_reference.setter
-    def optical_reference(self, value):
-        if value not in {"shared", "state_specific"}:
-            raise ValueError("optical_reference must be shared or state_specific")
-        self._optical_reference = value
-
-    def path(self):
-        """Snapshot live native geometry and finite material ownership."""
-        from .CTRdissolution import DissolutionPath
-        return DissolutionPath(self.coherent_model, films=self.films,
-                               surface=self.surface,
-                               exposure_policy=self.exposure_policy,
-                               interface_owners=self.interface_owners)
-
-    def _snapshot(self):
-        from .CTRdistributions import capped_skellam_states
-        self._validated_fraction()
-        path = self.path()
-        indices, probabilities, certificate = capped_skellam_states(
-            self.profile, path.minimum, max_states=self.max_states,
-            second_moment_tolerance=self.second_moment_tolerance)
-        return path, indices, probabilities, certificate
-
-    def _validate_model(self, forward_model):
-        self._snapshot()
-
-    def _local_parameters_from_dict(self, data, override_values=True):
-        data = dict(data)
-        data["basis_0"] = np.asarray(data["basis_0"], dtype=float)
-        super()._local_parameters_from_dict(data, override_values)
-
-    def _iter_states(self, context):
-        path, indices, probabilities, _ = self._snapshot()
-        active = probabilities != 0
-        amplitudes = path._iter_kinematic_amplitudes(
-            indices[active], *context.coordinates)
-        for (index, amplitude), probability in zip(amplitudes, probabilities[active]):
-            yield IncoherentState(index, float(probability), amplitude)
-
-    def _evaluate_F2(self, context):  # noqa: N802
-        incoherent, amplitude, _ = self.accumulate_states(context)
-        kappa = self._validated_fraction()
-        return (1-kappa)*np.abs(amplitude)**2 + kappa*incoherent
-
-    def coherence_reconstruction_error(self, h, k, l):  # noqa: E741
-        """Compare state amplitudes to the native averaged atomic crystal."""
-        path, indices, probabilities, _ = self._snapshot()
-        amplitude = sum(p*path.state(int(j)).crystal.F(h, k, l)
-                        for j, p in zip(indices, probabilities) if p)
-        average = path.averaged_crystal(indices, probabilities).F(h, k, l)
-        return float(np.max(np.abs(amplitude-average)))
-
-    def statistics(self):
-        """Return realized front moments and species inventories, with tail audit.
-
-        Heights are Angstrom; atom counts are per reference lateral area.
-        A porous interface's front coordinate is not a unique atomic surface.
-        """
-        from dataclasses import asdict
-        path, indices, probabilities, certificate = self._snapshot()
-        states = [path.state(int(j)) for j in indices]
-        heights = np.array([s.front_height_A for s in states])
-        mean = float(probabilities @ heights)
-        variance = float(probabilities @ (heights-mean)**2)
-        inventory = {}
-        exposed = {}
-        for state, p in zip(states, probabilities):
-            for owner, atoms in state.inventory.items():
-                values = inventory.setdefault(owner, {})
-                for species, number in atoms.items():
-                    values[species] = values.get(species, 0.) + float(p*number)
-            for owner in state.exposed_owners:
-                exposed[owner] = exposed.get(owner, 0.) + float(p)
-        # Report additions/removals state by state: changes of termination
-        # chemistry must not be hidden by cancellation in the ensemble mean.
-        added, removed = {}, {}
-        for state, p in zip(states, probabilities):
-            for owner in path.films:
-                initial = path.initial_inventory.get(owner, {})
-                current = state.inventory.get(owner, {})
-                for species in initial.keys() | current.keys():
-                    delta = current.get(species, 0.) - initial.get(species, 0.)
-                    for target, value in ((added, max(delta, 0.)),
-                                          (removed, max(-delta, 0.))):
-                        atoms = target.setdefault(owner, {})
-                        atoms[species] = atoms.get(species, 0.) + float(p*value)
-        # For omitted positive indices, |z| <= |z0| + a_c*(J+1).
-        # This conservative bound covers unequal top-cycle spacings. Include
-        # the explicitly reported redistribution of upper-tail probability.
-        scale = float(path.top_film.unitcell.a[2])
-        intercept = abs(path.nominal_height_A) + scale
-        first_bound = (intercept*certificate.omitted_probability
-                       + scale*certificate.omitted_first_moment)
-        second_bound = (intercept**2*certificate.omitted_probability
-                        + 2*intercept*scale*certificate.omitted_first_moment
-                        + scale**2*certificate.omitted_second_moment)
-        first_bound += certificate.omitted_probability*float(np.max(abs(heights)))
-        second_bound += certificate.omitted_probability*float(np.max(heights**2))
-        return dict(parent_mean_index=self.profile.mean,
-                    parent_variance_index2=self.profile.variance,
-                    mean_front_height_A=mean, variance_front_height_A2=variance,
-                    rms_front_height_A=float(np.sqrt(variance)),
-                    exhausted_probability=float(probabilities[0]),
-                    exhausted_index=path.minimum, exposed_owner_probabilities=exposed,
-                    initial_inventory=path.initial_inventory,
-                    remaining_inventory=inventory, added_inventory=added,
-                    removed_inventory=removed, support=asdict(certificate),
-                    height_first_moment_error_bound_A=first_bound,
-                    height_second_moment_error_bound_A2=second_bound,
-                    interface_support_audit=path.interface_support_audit,
-                    interface_owners=path.interface_owners)
-
-    @property
-    def dwba(self):
-        """Return native complete-state DWBA with the chosen optical policy."""
-        from ._CTRdissolution_dwba import DissolutionDWBA
-        if getattr(self, "_dwba_ensemble", None) is None:
-            self._dwba_ensemble = DissolutionDWBA(self)
-        return self._dwba_ensemble
-
-    def _config_settings(self):
-        return dict(films=list(self.films), surface=self.surface,
-                    exposure_policy=self.exposure_policy,
-                    optical_reference=self.optical_reference,
-                    max_states=self.max_states,
-                    tail_probability=self.tail_probability,
-                    moment_tolerance=self.moment_tolerance,
-                    second_moment_tolerance=self.second_moment_tolerance,
-                    interface_owners=self.path().interface_owners,
-                    boundary_policy="accumulate_at_exhaustion",
-                    interface_closure="frozen_material_selective",
-                    upper_policy="continue_top_film", schema_version=1,
-                    name=self.name)

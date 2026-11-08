@@ -31,7 +31,7 @@ import psutil  # noqa: E402
 
 from .benchmark_dwba_c1 import _load, _setup  # noqa: E402
 from orgui.datautils.xrayutils import CTRdwba, CTRoptics  # noqa: E402
-from orgui.datautils.xrayutils.CTRincoherent import FiniteFilmDissolution  # noqa: E402
+from ._surface_boundary import _bounded_model  # noqa: E402
 from orgui.datautils.xrayutils.CTRuc import UnitCell, _coherent_domain_arrays  # noqa: E402
 
 
@@ -44,7 +44,7 @@ def _model(kind, policy):
     legacy = _load(policy)
     if kind == "legacy":
         return legacy
-    return FiniteFilmDissolution(
+    return _bounded_model(
         legacy.coherent_model, films=["LaNiO3"], surface="LaNiO3_surface",
         incoherent_fraction=legacy.incoherent_fraction, optical_reference=policy)
 

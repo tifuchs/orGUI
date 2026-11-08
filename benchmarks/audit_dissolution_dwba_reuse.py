@@ -19,7 +19,7 @@ from .benchmark_dissolution_performance import (
 )
 import numpy as np
 
-from orgui.datautils.xrayutils import CTRdwba, _CTRdissolution_dwba as dissolution
+from orgui.datautils.xrayutils import CTRdwba, _CTRincoherent_dwba as dissolution
 from orgui.datautils.xrayutils._CTRincoherent_dwba import _regrid_model, _shared_grid
 
 
@@ -28,7 +28,7 @@ def _control(mode):
     if mode == "baseline":
         yield
         return
-    original_batch = dissolution.DissolutionDWBA.batch
+    original_batch = dissolution.SurfaceHeightDWBA.batch
 
     @contextmanager
     def batch(self):
@@ -82,7 +82,8 @@ def _control(mode):
                        _atomic_model=rebinned[key])
 
     with ExitStack() as patches:
-        patches.enter_context(patch.object(dissolution.DissolutionDWBA, "batch", batch))
+        patches.enter_context(patch.object(
+            dissolution.SurfaceHeightDWBA, "batch", batch))
         if mode == "shared_prepared":
             patches.enter_context(patch.object(
                 dissolution, "_shared_preparation", common_preparation))
@@ -152,17 +153,18 @@ def _counts(policy, mode, points=32):
 
 
 def _edge_checks(policy, modes):
-    from orgui.datautils.xrayutils.CTRincoherent import FiniteFilmDissolution
+    from ._surface_boundary import _bounded_model
     from orgui.datautils.xrayutils.CTRdistributions import RecenteredSkellamProfile
     from orgui.datautils.xrayutils.test.test_CTRdissolution import _crystal, _hkl
     checked, maximum = 0, 0.
     for near_boundary in (False, True):
-        model = FiniteFilmDissolution(
+        model = _bounded_model(
             _crystal(interface=True), films=["film"], surface="surface",
             profile=RecenteredSkellamProfile(offset=-5.5), optical_reference=policy,
             incoherent_fraction=.3)
         if near_boundary:
-            model.basis[3] = model.path().minimum + .5
+            model.target_surface().basis[3] = (
+                model.coherent_model._surface_state_plan().minimum + .5)
         for incoming, outgoing in (("s", "s"), ("s", "p"),
                                    ("p", "s"), ("p", "p")):
             options = dict(polarization_i=incoming, polarization_f=outgoing,

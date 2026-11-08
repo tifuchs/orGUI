@@ -7,9 +7,10 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 
-from ..CTRdissolution import DissolutionPath
+from ._surface_boundary_helpers import _path
+from .._CTRsurface_states import _SurfaceStatePlan
 from ..CTRdistributions import RecenteredSkellamProfile
-from ..CTRincoherent import FiniteFilmDissolution
+from ._surface_boundary_helpers import _bounded_model
 from ..CTRuc import UnitCell
 from .test_CTRdissolution import _crystal, _hkl
 from ._dissolution_dwba_oracle import _complete_dwba_batch, _complete_dwba_oracle
@@ -30,7 +31,7 @@ def test_prefix_amplitudes_match_complete_native_states(interface, substrate,
     source.domains = [[(np.eye(3), .7), (rotation, .3)]
                       for _ in source.uc_surface_list]
     films = ["film", "substrate_film"] if substrate else ["film"]
-    path = DissolutionPath(source, films=films, surface="surface",
+    path = _path(source, films=films, surface="surface",
                            exposure_policy=exposure)
     indices = sorted({path.minimum, path.minimum+1, -3, -1, 0, 1, 4})
     hkl = ((1., -1., .43) if shape == "scalar" else
@@ -47,7 +48,7 @@ def test_prefix_amplitudes_match_complete_native_states(interface, substrate,
 @pytest.mark.parametrize("fraction", [0., .2054, 1.])
 def test_kinematic_work_and_mixture(monkeypatch, fraction):
     """Native fast path evaluates bulk once and constructs no full states."""
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         _crystal(), films=["film"], surface="surface",
         profile=RecenteredSkellamProfile(1., 2., 3., -4.25),
         incoherent_fraction=fraction)
@@ -68,10 +69,14 @@ def test_kinematic_work_and_mixture(monkeypatch, fraction):
 
     from .. import CTRdwba
     monkeypatch.setattr(UnitCell, "F_bulk", bulk)
-    monkeypatch.setattr(DissolutionPath, "state", forbidden)
+    monkeypatch.setattr(_SurfaceStatePlan, "state", forbidden)
     monkeypatch.setattr(CTRdwba.DWBAState, "_atomic_model_snapshot", forbidden)
     monkeypatch.setattr(CTRdwba, "solve_electric_field", forbidden)
     assert_allclose(model.F2(*_hkl()), expected, rtol=2e-12, atol=1e-9)
+    assert counts["bulk"] == 1
+    counts.clear()
+    assert_allclose(model.coherent_model.F2(*_hkl()),
+                    abs(probabilities @ amplitudes)**2, rtol=2e-12, atol=1e-9)
     assert counts["bulk"] == 1
 
 
@@ -82,7 +87,7 @@ def test_custom_cell_retains_complete_state_fallback(monkeypatch):
 
     source = _crystal()
     source.uc_bulk.__class__ = CustomCell
-    path = DissolutionPath(source, films=["film"], surface="surface")
+    path = _path(source, films=["film"], surface="surface")
     indices = [-6, -3, 1]
     expected = [path.state(index).crystal.F(*_hkl()) for index in indices]
     calls = []
@@ -96,6 +101,29 @@ def test_custom_cell_retains_complete_state_fallback(monkeypatch):
     actual = list(path._iter_kinematic_amplitudes(indices, *_hkl()))
     assert calls == indices
     assert_array_equal([value for _, value in actual], expected)
+
+
+def test_native_coherent_custom_cell_fallback(monkeypatch):
+    """The native coherent endpoint retains complete custom evaluator states."""
+    class CustomCell(UnitCell):
+        pass
+
+    source = _crystal()
+    source.uc_bulk.__class__ = CustomCell
+    model = _bounded_model(
+        source, films=("film",), surface="surface",
+        profile=RecenteredSkellamProfile(offset=-5.25))
+    expected = model.F2(*_hkl())
+    calls = []
+    original = _SurfaceStatePlan.state
+
+    def state(self, index):
+        calls.append(index)
+        return original(self, index)
+
+    monkeypatch.setattr(_SurfaceStatePlan, "state", state)
+    assert_allclose(source.F2(*_hkl()), expected, rtol=1e-12)
+    assert calls == [-6, -5]
 
 
 @pytest.mark.parametrize("remove_lower", [False, True])
@@ -113,7 +141,7 @@ def test_prefix_lateral_areas_and_reference_frame(remove_lower):
         reference_rotation=np.diag([-1., -1., 1.]))
     source.setEnergy(18000.)
     source.apply_stacking()
-    path = DissolutionPath(
+    path = _path(
         source, films=["film_0", "film_1"] if remove_lower else ["film_1"],
         surface="surface", exposure_policy="preserve")
     indices = [path.minimum, path.minimum+1, -20, 0, 3]
@@ -129,18 +157,19 @@ def test_prefix_lateral_areas_and_reference_frame(remove_lower):
 def test_dwba_reuse_matches_complete_states(monkeypatch, policy, channels,
                                            fraction):
     """Reused fields preserve all mixtures and polarization near exhaustion."""
-    from .._CTRdissolution_dwba import DissolutionDWBA
+    from .._CTRincoherent_dwba import SurfaceHeightDWBA
     source = _crystal(interface=True)
     source["film"].unitcell.crystallinity = .63
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         source, films=["film"], surface="surface", optical_reference=policy,
         incoherent_fraction=fraction)
-    model.basis[3] = model.path().minimum+.5
+    model.target_surface().basis[3] = (
+        model.coherent_model._surface_state_plan().minimum+.5)
     options = dict(polarization_i=channels[0], polarization_f=channels[1],
                    bulk_attenuation=.025)
     with monkeypatch.context() as context:
-        context.setattr(DissolutionDWBA, "batch", _complete_dwba_batch)
-        context.setattr(DissolutionDWBA, "_evaluate_in_batch", _complete_dwba_oracle)
+        context.setattr(SurfaceHeightDWBA, "batch", _complete_dwba_batch)
+        context.setattr(SurfaceHeightDWBA, "_evaluate_in_batch", _complete_dwba_oracle)
         expected = model.dwba.evaluate(*_hkl(), **options)
     with model.dwba.batch():
         actual = model.dwba.evaluate(*_hkl(), **options)
@@ -161,7 +190,7 @@ def test_dwba_reuse_matches_complete_states(monkeypatch, policy, channels,
 def test_dwba_batch_work_and_cleanup(monkeypatch, policy, fail):
     """No repeat packing/field solves; all private caches leave with the batch."""
     from .. import CTRdwba
-    from .. import _CTRdissolution_dwba as dissolution
+    from .. import _CTRincoherent_dwba as dissolution
     counts = Counter()
     for name, key in [("_atomic_model_snapshot", "snapshot_builds"),
                       ("_pack_atomic_records", "packing_builds")]:
@@ -183,7 +212,7 @@ def test_dwba_batch_work_and_cleanup(monkeypatch, policy, fail):
             return _original(*args, **kwargs)
 
         monkeypatch.setattr(obj, name, counted)
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         _crystal(), films=["film"], surface="surface", optical_reference=policy,
         profile=RecenteredSkellamProfile(offset=-5.25), incoherent_fraction=.3)
     retained = []
@@ -227,8 +256,8 @@ def test_dwba_batch_work_and_cleanup(monkeypatch, policy, fail):
 @pytest.mark.parametrize("policy", ["shared", "state_specific"])
 def test_dwba_changed_channels_and_rays_in_batch(monkeypatch, policy):
     """Common-grid reuse does not bind fields to a prior channel or ray block."""
-    from .._CTRdissolution_dwba import DissolutionDWBA
-    model = FiniteFilmDissolution(
+    from .._CTRincoherent_dwba import SurfaceHeightDWBA
+    model = _bounded_model(
         _crystal(), films=["film"], surface="surface", optical_reference=policy,
         profile=RecenteredSkellamProfile(offset=-5.25), incoherent_fraction=.3)
 
@@ -246,8 +275,8 @@ def test_dwba_changed_channels_and_rays_in_batch(monkeypatch, policy):
         return values
 
     with monkeypatch.context() as context:
-        context.setattr(DissolutionDWBA, "batch", _complete_dwba_batch)
-        context.setattr(DissolutionDWBA, "_evaluate_in_batch", _complete_dwba_oracle)
+        context.setattr(SurfaceHeightDWBA, "batch", _complete_dwba_batch)
+        context.setattr(SurfaceHeightDWBA, "_evaluate_in_batch", _complete_dwba_oracle)
         expected = scan()
     assert_allclose(scan(), expected, rtol=1e-10, atol=1e-28)
 
@@ -255,7 +284,7 @@ def test_dwba_changed_channels_and_rays_in_batch(monkeypatch, policy):
 @pytest.mark.parametrize("policy", ["shared", "state_specific"])
 def test_dwba_explicit_preparation_cache_bypass(policy):
     """An explicit cache=False keeps native preparation caching disabled."""
-    model = FiniteFilmDissolution(
+    model = _bounded_model(
         _crystal(), films=["film"], surface="surface", optical_reference=policy,
         profile=RecenteredSkellamProfile(offset=-5.25), incoherent_fraction=.3)
     with model.dwba.batch():

@@ -34,7 +34,7 @@ from .. import util
 import re
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 # random.seed(45)
 
 
@@ -51,6 +51,7 @@ from .CTRuc import UnitCell, WaterModel, ctr_accel_enabled
 from .CTRdistributions import (
     DEFAULT_MOMENT_TOLERANCE,
     DEFAULT_TAIL_PROBABILITY,
+    HeightSupport,
     PoissonProfile,
     RecenteredSkellamProfile,
     SkellamProfile,
@@ -2560,6 +2561,48 @@ class Film(_LayerStackingMixin, LinearFitFunctions):
             return "   ".join(l)
 
 
+@dataclass(frozen=True)
+class FiniteFilmBoundary:
+    """Material boundary on a native surface/Film stack.
+
+    ``films=None`` selects all finite Films in the bound stack. An explicit
+    sequence names a connected upper sequence of existing finite Films.
+    Bulk is protected; substrate removal requires an explicit finite Film.
+    Exhausted probability accumulates at the last remaining physical state.
+    Interfaces retain their geometry and lose only selected material owners.
+    """
+
+    films: tuple[str, ...] | None = None
+    boundary_policy: str = "accumulate_at_exhaustion"
+    interface_closure: str = "frozen_material_selective"
+    exposure_policy: str = "native_or_unreconstructed"
+    upper_policy: str = "continue_top_film"
+    schema_version: int = 1
+
+    def __post_init__(self):
+        for key in ("boundary_policy", "interface_closure", "exposure_policy",
+                    "upper_policy", "schema_version"):
+            value = np.asarray(getattr(self, key))
+            if value.ndim != 0:
+                raise ValueError(f"{key} must be scalar")
+            object.__setattr__(self, key, value.item())
+        if self.films is not None:
+            if isinstance(self.films, str):
+                raise TypeError("films must be a sequence of component names")
+            object.__setattr__(self, "films", tuple(self.films))
+            if (not self.films or len(set(self.films)) != len(self.films)
+                    or any(not isinstance(name, str) or not name
+                           for name in self.films)):
+                raise ValueError("films must contain distinct finite Film names")
+        if (self.schema_version != 1
+                or self.boundary_policy != "accumulate_at_exhaustion"
+                or self.interface_closure != "frozen_material_selective"
+                or self.upper_policy != "continue_top_film"
+                or self.exposure_policy not in {
+                    "preserve", "native_or_unreconstructed"}):
+            raise ValueError("Unsupported finite Film boundary policy")
+
+
 class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
     """Shared Film replacement and termination assembly for height profiles.
 
@@ -2571,6 +2614,9 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
     _profile_type = None
     _numerical_defaults = {"tail_probability": DEFAULT_TAIL_PROBABILITY}
     _settings_format = ".12g"
+    # Older native pickles retain their original surface-correction semantics.
+    boundary = None
+    height_support = None
 
     def __init__(self, unitcell, **kwargs):
         if self._profile_type is None:
@@ -2579,6 +2625,22 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
         self.water = None
         water = kwargs.pop("water", None)
         profile = kwargs.pop("profile", None)
+        self.boundary = kwargs.pop("boundary", FiniteFilmBoundary())
+        self.height_support = kwargs.pop("height_support", None)
+        if self.boundary is not None:
+            if not isinstance(self.boundary, FiniteFilmBoundary):
+                raise TypeError("boundary must be FiniteFilmBoundary or None")
+            if self.height_support is None:
+                self.height_support = HeightSupport(
+                    tail_probability=getattr(profile, "tail_probability",
+                                             DEFAULT_TAIL_PROBABILITY),
+                    moment_tolerance=getattr(profile, "moment_tolerance",
+                                             DEFAULT_MOMENT_TOLERANCE))
+        elif self.height_support is not None:
+            raise ValueError("height_support requires a finite Film boundary")
+        if (self.height_support is not None
+                and not isinstance(self.height_support, HeightSupport)):
+            raise TypeError("height_support must be HeightSupport")
         if profile is not None and not isinstance(profile, self._profile_type):
             raise TypeError(
                 f"{type(self).__name__} profile must be "
@@ -2622,7 +2684,8 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
         return cls._profile_type(*basis, **settings)
 
     def _profile_settings(self):
-        return {name: getattr(self.profile, name, default)
+        source = self.height_support if self.boundary is not None else self.profile
+        return {name: getattr(source, name, default)
                 for name, default in self._numerical_defaults.items()}
 
     def _make_profile(self):
@@ -2631,7 +2694,8 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
     def _repeat_signature(self):
         # Numerical profile settings also invalidate layer and optical caches.
         return (super()._repeat_signature(),
-                tuple(self._profile_settings().items()))
+                tuple(self._profile_settings().items()),
+                self.boundary, self.height_support)
 
     def set_ucs(self, unitcell, **kwargs):
         """Set a legacy source cell or explicit termination-cell mapping."""
@@ -3058,6 +3122,10 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
     @property
     def stacking_height_absolute(self):
         """Return the expected surface height in Angstrom."""
+        if self.boundary is not None:
+            # Geometry binding uses the nominal boundary; realized heights
+            # belong to the complete stack's state plan. Overlayers are rejected.
+            return self.below_H
         return self.mean_height_absolute
 
     @property
@@ -3068,6 +3136,9 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
     @property
     def mean_height_absolute(self):
         """Return the expected surface height in Angstrom."""
+        if self.boundary is not None:
+            raise ValueError(
+                "Use crystal.surface_height_statistics for bounded heights")
         film_uc = (
             self.underlying_film.unitcell
             if self.underlying_film
@@ -3524,6 +3595,19 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
             ref.basis[:, 1:4] = (film_basis[source_rows, 1:4]
                                   / [1, 1, repeats_z] + offsets)
 
+        if self.boundary is not None:
+            # Bind and synchronize geometry only. The complete stack owns the
+            # material selection; do not fabricate a flat probability profile.
+            for cell in (*self.layer_ucs, *self.film_layer_ucs,
+                         *self._film_termination_ucs.values()):
+                cell.coherentDomainMatrix = []
+                cell.coherentDomainOccupancy = []
+            self._end_layer_number = self.layer_order[-1]
+            self._height_absolute = self.below_H
+            self._basis_created = self.basis.copy()
+            self._repeat_created = self._repeat_signature()
+            return
+
         n_layers_in_uc = len(self._layer_ids)
         candidates = self._profile_candidates()
         tail_probability = candidates.tail_probability
@@ -3617,6 +3701,9 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
             Complex surface-correction amplitude in electrons.
         :rtype: numpy.ndarray
         """
+        if self.boundary is not None:
+            raise ValueError(
+                "A bounded surface requires the complete SXRDCrystal evaluator")
         if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         if ctr_accel_enabled():
@@ -3638,6 +3725,9 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
         return F
 
     def zDensity_G(self, z, h, k):
+        if self.boundary is not None:
+            raise ValueError(
+                "A bounded surface requires the complete SXRDCrystal evaluator")
         if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         rho = np.zeros_like(z, dtype=np.complex128)
@@ -3661,6 +3751,9 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
             ``beta``.
         :rtype: numpy.ndarray
         """
+        if self.boundary is not None:
+            raise ValueError(
+                "A bounded surface requires the complete SXRDCrystal evaluator")
         if np.any(self._basis_created != self.basis) or self._repeat_state_changed():
             self.createLayers()
         profiles = []
@@ -3786,6 +3879,9 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
             cell.name: cell.parametersToDict() for cell in self._owned_unitcells()
         }
         d["crystallinity_profiles"] = self._order_settings(include_fit=True)
+        if self.boundary is not None:
+            d["height_boundary"] = asdict(self.boundary)
+            d["height_support"] = asdict(self.height_support)
         if self.water is not None:
             d["water"] = self.water.parametersToDict()
         return d
@@ -3796,6 +3892,13 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
             cell.clearParameters()
 
     def parametersFromDict(self, d, override_values=True):
+        boundary = d.get("height_boundary")
+        support = d.get("height_support")
+        if (boundary is None) != (support is None):
+            raise ValueError(
+                "height_boundary and height_support must be stored together")
+        self.boundary = None if boundary is None else FiniteFilmBoundary(**boundary)
+        self.height_support = None if support is None else HeightSupport(**support)
         self._restore_order_settings(d.get("crystallinity_profiles", {}))
         cells = self._owned_unitcells()
         if self.water is not None and "water" in d:
@@ -3859,6 +3962,15 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
 
     @classmethod
     def fromStr(cls, string):
+        boundary = support = None
+        if string.startswith("FiniteFilmBoundaryV1 "):
+            header, string = string.split("\n", 1)
+            guard, string = string.split("\n", 1)
+            if guard.strip() != "RequiresFiniteFilmBoundary":
+                raise ValueError("Missing finite-boundary format guard")
+            metadata = json.loads(header.split(" ", 1)[1])
+            boundary = FiniteFilmBoundary(**metadata["height_boundary"])
+            support = HeightSupport(**metadata["height_support"])
         water = None
         if "\nAttachedWater " in string:
             string, water_text = string.split("\nAttachedWater ", 1)
@@ -3937,10 +4049,14 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
 
         settings = {key: _parse_float_metadata(string, key, default)
                     for key, default in cls._numerical_defaults.items()}
+        if support is not None:
+            settings = {key: getattr(support, key) for key in cls._numerical_defaults}
         profile = cls._profile_from_basis(basis, **settings)
         film = cls(
             unitcells,
             profile=profile,
+            boundary=boundary,
+            height_support=support,
             water=water,
             layer_transition=_parse_layer_transition(string),
         )
@@ -3962,7 +4078,13 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
         """
         # s = "type %s" % self.type
         s = "\n" + self.parameterOrder + "\n" + self.filmToStr(showErrors=showErrors)
-        for key, value in self._profile_settings().items():
+        if self.boundary is not None:
+            s = "FiniteFilmBoundaryV1 " + json.dumps({
+                "height_boundary": asdict(self.boundary),
+                "height_support": asdict(self.height_support)}) + (
+                    "\nRequiresFiniteFilmBoundary\n" + s)
+        settings = self._profile_settings() if self.boundary is None else {}
+        for key, value in settings.items():
             if value != self._numerical_defaults[key]:
                 s += f"\n{key} = {value:{self._settings_format}}"
         s += self._order_to_str()
@@ -4002,11 +4124,19 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
 class PoissonSurface(RoughSurface):
     """Signed step--Poisson growth or etching at a Film boundary.
 
+    :param FiniteFilmBoundary boundary:
+        Complete-stack material-removal policy. Omission selects all finite
+        Films; an explicit policy can restrict removal to named Films.
+        ``None`` preserves legacy surface corrections. Bulk remains protected.
+    :param HeightSupport height_support:
+        Numerical state budgets for finite-film dissolution.
+
     ``W`` is the signed process mean in structural layers. ``alpha`` assigns
     a fraction of its magnitude to Poisson roughening and the remainder to
     ideal layer-by-layer progression. ``offset`` is an independent,
     deterministic structural height shift. Positive ``W`` models growth and
-    negative ``W`` models dissolution or etching.
+    negative ``W`` models dissolution or etching. Files saved without boundary
+    metadata retain legacy surface-correction behavior when loaded.
     """
 
     parameterOrder = "W/layers alpha offset/layers"
@@ -4056,12 +4186,21 @@ class SkellamSurface(RoughSurface):
     :param RecenteredSkellamProfile profile:
         Optional profile specifying time in seconds, rates in inverse seconds,
         and a mean displacement in structural layers. The default is flat.
+    :param FiniteFilmBoundary boundary:
+        Complete-stack material-removal policy. Omission selects all finite
+        Films; an explicit policy can restrict removal to named Films.
+        ``None`` retains the legacy finite-support rejection.
+    :param HeightSupport height_support:
+        Numerical state budgets, separate from the physical boundary law.
 
     The basis is ``[t, k_up, k_down, offset]``. At zero offset this conserves
     layer coverage, and mass when transported layers have equal inventories.
     Fractional recentering mixes adjacent integer heights, adding at most
     0.25 layers squared to the raw Skellam variance. Fix time when fitting rates
-    to a single snapshot. Etching support must stay inside the underlying Film.
+    to a single snapshot. By default, exhausted probability accumulates at
+    the exposed protected bulk. With ``boundary=None``, etching support must
+    stay inside the underlying Film. Files saved without boundary metadata
+    retain that legacy behavior when loaded.
     """
 
     parameterOrder = "t/s k_up/s^-1 k_down/s^-1 offset/layers"
@@ -4113,12 +4252,19 @@ class SkellamSurface(RoughSurface):
     def parametersToDict(self):
         """Return fit settings including numerical profile tolerances."""
         result = super().parametersToDict()
-        result["profile_settings"] = self._profile_settings()
+        if self.boundary is None:
+            result["profile_settings"] = self._profile_settings()
         return result
 
     def parametersFromDict(self, d, override_values=True):
         """Restore fit settings and numerical profile tolerances."""
         settings = d.get("profile_settings", self._profile_settings())
+        if d.get("height_boundary") is not None:
+            if "profile_settings" in d:
+                raise ValueError(
+                    "A bounded surface stores budgets only in height_support")
+            settings = {key: d["height_support"][key]
+                        for key in self._numerical_defaults}
         if set(settings) != set(self._numerical_defaults):
             raise ValueError("Invalid SkellamSurface profile_settings")
         self.profile = self._profile_from_basis(self.basis, **settings)

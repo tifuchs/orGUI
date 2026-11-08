@@ -4,6 +4,11 @@ Status: implemented in `codex/finite-film-dissolution`; see
 `finite_film_dissolution_validation.md` for executed checks and limits.
 Date: 2026-11-07.
 
+Architecture follow-up: the unpublished wrapper is proposed for removal in the
+[native surface boundary design](native_surface_finite_film_boundary_design.md).
+That proposal retains this physical model while moving parameter ownership to
+native surfaces and evaluation into the existing stack/domain APIs.
+
 Implement an opt-in native model that permits complete dissolution of designated
 finite Films, including their material represented inside EpitaxyInterface
 components. Preserve the semi-infinite substrate. If substrate dissolution is

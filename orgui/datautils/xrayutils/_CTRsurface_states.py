@@ -10,19 +10,22 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .CTRcalc import SXRDCrystal, _broadcast_kinematic_hkl
+from .CTRcalc import (
+    SXRDCrystal, KinematicAmplitudeResult, KinematicComponentAmplitude,
+    _broadcast_kinematic_hkl,
+)
 from .CTRdistributions import (
-    DEFAULT_TAIL_PROBABILITY, PoissonProfile, RecenteredSkellamProfile,
+    DEFAULT_TAIL_PROBABILITY, RecenteredSkellamProfile, bounded_height_states,
     SkellamProfile,
 )
 from .CTRfilm import (
-    EpitaxyInterface, Film, RoughSurface, SkellamSurface, _FrozenMaterial,
+    EpitaxyInterface, Film, RoughSurface, _FrozenMaterial,
 )
 from .CTRuc import UnitCell
 
 
 @dataclass(frozen=True)
-class MaterialRecord:
+class _MaterialRecord:
     """One native domain with owner and algebraic-reference provenance.
 
     ``lower_A`` and ``upper_A`` are structural boundaries, not atom extrema.
@@ -41,7 +44,7 @@ class MaterialRecord:
 
 
 @dataclass(frozen=True)
-class DissolutionState:
+class _SurfaceHeightState:
     """Complete native state and species inventories per reference area."""
 
     index: int
@@ -80,31 +83,21 @@ def _copy_geometry(source, target):
     target.dwba.set_field_cache_capacity(source.dwba._field_cache_capacity)
 
 
-class DissolutionPath:
+def _native_linear_cells(cells):
+    return all(type(cell) is UnitCell and not cell._special_formfactors_present
+               and "F_uc" not in cell.__dict__ and "F_bulk" not in cell.__dict__
+               for cell in cells)
+
+
+class _SurfaceStatePlan:
     """Snapshot a connected finite-material path above protected bulk.
 
     :param SXRDCrystal crystal: Native source; never mutated.
-    :param films: Stable names of a connected upper sequence of finite Films.
     :param str surface: Name of the top RoughSurface carrying native motifs.
-    :param str exposure_policy:
-        ``preserve`` retains unmodified survivors. ``native_or_unreconstructed``
-        uses the native top-Film motif only when its complete depth is present;
-        otherwise it explicitly exposes the unmodified survivors.
-    :param dict interface_owners:
-        Optional persisted mapping from interface names to [lower, upper]
-        owner names. The protected bulk is represented by None.
     :raises ValueError: For ambiguous topology, geometry, or ownership.
     """
 
-    def __init__(self, crystal, *, films, surface,
-                 exposure_policy="native_or_unreconstructed",
-                 interface_owners=None):
-        if exposure_policy not in {"preserve", "native_or_unreconstructed"}:
-            raise ValueError("Unknown exposure_policy")
-        self.films = tuple(films)
-        if not self.films or len(set(self.films)) != len(self.films):
-            raise ValueError("films must contain distinct finite Film names")
-        self.exposure_policy = exposure_policy
+    def __init__(self, crystal, *, surface):
         self.source = copy.deepcopy(crystal, {id(crystal.dwba): None})
         _copy_geometry(crystal, self.source)
         components = self.source.uc_surface_list
@@ -115,24 +108,21 @@ class DissolutionPath:
         if len(matches) != 1 or not isinstance(matches[0], RoughSurface):
             raise ValueError("surface must identify one top RoughSurface")
         self.surface = matches[0]
-        if any(self.surface.parameters.values()):
-            raise ValueError("Fit parent height parameters on the dissolution wrapper")
         if self.surface.water is not None:
             raise ValueError("Dissolution water placement is not defined")
         if self.surface.crystallinity_profile is not None:
             raise ValueError("Dissolution depth-dependent surface order is not defined")
-        # The distribution belongs to the ensemble. Lay out a deterministic
-        # nominal source without asking the old surface to etch below its Film.
-        self.surface.profile = (RecenteredSkellamProfile()
-                                if isinstance(self.surface, SkellamSurface)
-                                else PoissonProfile(0))
-        self.surface.basis = np.array([
-            getattr(self.surface.profile, key) for key in self.surface._basis_fields])
-        self.surface.basis_0 = self.surface.basis.copy()
+        if self.surface.boundary is None:
+            raise ValueError("A finite Film boundary is required")
+        self.films = self.surface.boundary.films
+        self.exposure_policy = self.surface.boundary.exposure_policy
+        self.profile = self.surface._make_profile()
         order = np.argsort(self.source.uc_stacking)
         if len(set(self.source.uc_stacking)) != len(components):
             raise ValueError("Dissolution requires an ordered single stack")
         ordered = [components[i] for i in order]
+        if sum(isinstance(c, RoughSurface) for c in ordered) != 1:
+            raise ValueError("A finite boundary requires exactly one top surface")
         if ordered[-1] is not self.surface:
             raise ValueError("Overlayers above the dissolution surface are unsupported")
         if any(not isinstance(c, (Film, EpitaxyInterface, RoughSurface))
@@ -142,6 +132,10 @@ class DissolutionPath:
             raise ValueError(
                 "Dissolution depth-dependent interface order is not defined")
         available = [c.name for c in ordered if isinstance(c, Film)]
+        if not available:
+            raise ValueError("Dissolution requires at least one finite Film")
+        if self.films is None:
+            self.films = tuple(available)
         if any(name not in available for name in self.films):
             raise ValueError(
                 "Only explicit finite Films may dissolve; bulk is protected")
@@ -192,8 +186,6 @@ class DissolutionPath:
                     omitted_absolute_first_moment_bound=moment,
                     missing_plane_inventory_bound=(
                         moment + max(abs(low), abs(high)+1)*probability))
-        if interface_owners is not None and interface_owners != self.interface_owners:
-            raise ValueError("Persisted interface ownership disagrees with the stack")
         interfaces = [c for c in ordered if isinstance(c, EpitaxyInterface)]
         for lower, upper in zip(interfaces, interfaces[1:]):
             if lower._support_bounds[1] > upper._support_bounds[0] + 1e-9:
@@ -230,7 +222,7 @@ class DissolutionPath:
             key = _geometry_key(record)
             if key in combined:
                 old = combined[key]
-                combined[key] = MaterialRecord(
+                combined[key] = _MaterialRecord(
                     old.owner, old.role, old.cell, old.matrix,
                     old.weight+record.weight, old.lower_A, old.upper_A,
                     old.interval)
@@ -296,7 +288,7 @@ class DissolutionPath:
                         (component_name, float(low)))
             mat = np.array(matrix, copy=True)
             mat.flags.writeable = False
-            yield MaterialRecord(actual_owner, role, cell, mat, float(weight),
+            yield _MaterialRecord(actual_owner, role, cell, mat, float(weight),
                                  float(low), float(high), interval)
 
     def _complete_motif(self, height, depth):
@@ -339,7 +331,7 @@ class DissolutionPath:
             geometry = surface._layer_domain_geometry(index)
             matrix = surface._with_below_translation(
                 geometry.film_matrix, geometry.film_uc)
-            records.append(MaterialRecord(
+            records.append(_MaterialRecord(
                 self.top_film.name, "growth", geometry.film_uc, matrix, 1.,
                 0., 0., ("growth", index)))
         depth = max(len(c.crystallinity_layers)
@@ -353,7 +345,7 @@ class DissolutionPath:
                 ("termination_reference", geometry.reference_uc,
                  geometry.reference_matrix, -1.),
             ):
-                records.append(MaterialRecord(
+                records.append(_MaterialRecord(
                     self.top_film.name, role, cell,
                     surface._with_below_translation(matrix, cell), weight,
                     0., 0., (role, height)))
@@ -375,7 +367,6 @@ class DissolutionPath:
                 cell = copy.copy(record.cell)
                 cell.basis = cell.basis.copy()
                 cell.basis_0 = cell.basis_0.copy()
-                cell.name = f"dissolution_{len(groups)}"
                 cell.coherentDomainMatrix = []
                 cell.coherentDomainOccupancy = []
                 groups[key] = cell
@@ -384,8 +375,8 @@ class DissolutionPath:
             cell.coherentDomainMatrix.append(record.matrix)
             cell.coherentDomainOccupancy.append(record.weight)
         source = self.source
-        cells = [_FrozenMaterial(parts, f"dissolution_{i}", source.reference_area)
-                 for i, parts in enumerate(components.values())]
+        cells = [_FrozenMaterial(parts, name, source.reference_area)
+                 for name, parts in components.items()]
         crystal = SXRDCrystal(
             copy.deepcopy(source.uc_bulk), *cells,
             reference_uc=source.reference_uc,
@@ -433,9 +424,7 @@ class DissolutionPath:
         # oracle rather than assuming that an unknown evaluator is additive.
         bulk = self.source.uc_bulk
         native_cells = [bulk, *cells.values()]
-        if any(type(cell) is not UnitCell or cell._special_formfactors_present
-               or "F_uc" in cell.__dict__ or "F_bulk" in cell.__dict__
-               for cell in native_cells):
+        if not _native_linear_cells(native_cells):
             for index in indices:
                 yield int(index), self.state(index).crystal.F(h, k, l)
             return
@@ -515,7 +504,7 @@ class DissolutionPath:
             protected = {r.owner or "__bulk__" for r in self._protected
                          if r.interval == interval and r.weight > 0}
             exposed = tuple(sorted(set(exposed) | protected))
-        return DissolutionState(index, float(height), exposed, inventory,
+        return _SurfaceHeightState(index, float(height), exposed, inventory,
                                 self._crystal(records))
 
     def averaged_crystal(self, indices, probabilities):
@@ -528,7 +517,123 @@ class DissolutionPath:
             selected = [*self._protected,
                         *(r for r in self._removable if self._rank[r.interval] < keep),
                         *self._extra_records(int(index))]
-            records.extend(MaterialRecord(
+            records.extend(_MaterialRecord(
                 r.owner, r.role, r.cell, r.matrix, r.weight*probability,
                 r.lower_A, r.upper_A, r.interval) for r in selected)
         return self._crystal(records)
+
+    def _snapshot(self):
+        indices, probabilities, certificate = bounded_height_states(
+            self.profile, self.minimum, support=self.surface.height_support)
+        return self, indices, probabilities, certificate
+
+    def _average(self):
+        _, indices, probabilities, _ = self._snapshot()
+        return self.averaged_crystal(indices, probabilities)
+
+    def _evaluate_kinematic(self, h, k, ell):
+        average = self._average()
+        cells = [average.uc_bulk, *(cell for c in average.uc_surface_list
+                                   for cell in c.cells)]
+        if _native_linear_cells(cells):
+            return average.evaluate_kinematic(h, k, ell)
+        # Unknown evaluators need not commute with probability averaging.
+        # Keep their complete-state behavior and component decomposition.
+        _, indices, probabilities, _ = self._snapshot()
+        bulk = total = 0.
+        components = {}
+        for index, probability in zip(indices, probabilities):
+            if not probability:
+                continue
+            result = self.state(int(index)).crystal.evaluate_kinematic(h, k, ell)
+            bulk = bulk + probability * result.bulk
+            total = total + probability * result.total
+            for component in result.components:
+                components[component.name] = (components.get(component.name, 0.)
+                                              + probability * component.amplitude)
+        return KinematicAmplitudeResult(bulk, tuple(
+            KinematicComponentAmplitude(index, name, value)
+            for index, (name, value) in enumerate(components.items())), total)
+
+    def _optical_snapshot(self):
+        """Return native average optics on the all-state union support grid."""
+        from ._CTRincoherent_dwba import _shared_grid, _regrid_model
+        _, indices, probabilities, _ = self._snapshot()
+        average = self.averaged_crystal(indices, probabilities)
+        records, model, profile = average.dwba._atomic_model_snapshot()
+        boundaries = [self.state(int(index)).crystal.dwba
+                      ._atomic_model_snapshot()[2].boundaries
+                      for index, probability in zip(indices, probabilities)
+                      if probability]
+        grid = _shared_grid(profile, np.concatenate(boundaries))
+        return records, _regrid_model(model, profile, grid.values[:, 0]), grid
+    def statistics(self):
+        """Return realized front moments and species inventories, with tail audit.
+
+        Heights are Angstrom; atom counts are per reference lateral area.
+        A porous interface's front coordinate is not a unique atomic surface.
+        """
+        from dataclasses import asdict
+        path, indices, probabilities, certificate = self._snapshot()
+        states = [path.state(int(j)) for j in indices]
+        heights = np.array([s.front_height_A for s in states])
+        mean_index = float(probabilities @ indices)
+        variance_index = float(probabilities @ (indices-mean_index)**2)
+        mean = float(probabilities @ heights)
+        variance = float(probabilities @ (heights-mean)**2)
+        inventory = {}
+        exposed = {}
+        for state, p in zip(states, probabilities):
+            for owner, atoms in state.inventory.items():
+                values = inventory.setdefault(owner, {})
+                for species, number in atoms.items():
+                    values[species] = values.get(species, 0.) + float(p*number)
+            for owner in state.exposed_owners:
+                exposed[owner] = exposed.get(owner, 0.) + float(p)
+        # Report additions/removals state by state: changes of termination
+        # chemistry must not be hidden by cancellation in the ensemble mean.
+        added, removed = {}, {}
+        for state, p in zip(states, probabilities):
+            for owner in path.films:
+                initial = path.initial_inventory.get(owner, {})
+                current = state.inventory.get(owner, {})
+                for species in initial.keys() | current.keys():
+                    delta = current.get(species, 0.) - initial.get(species, 0.)
+                    for target, value in ((added, max(delta, 0.)),
+                                          (removed, max(-delta, 0.))):
+                        atoms = target.setdefault(owner, {})
+                        atoms[species] = atoms.get(species, 0.) + float(p*value)
+        # For omitted positive indices, |z| <= |z0| + a_c*(J+1).
+        # This conservative bound covers unequal top-cycle spacings. Include
+        # the explicitly reported redistribution of upper-tail probability.
+        scale = float(path.top_film.unitcell.a[2])
+        intercept = abs(path.nominal_height_A) + scale
+        first_bound = (intercept*certificate.omitted_probability
+                       + scale*certificate.omitted_first_moment)
+        second_bound = (intercept**2*certificate.omitted_probability
+                        + 2*intercept*scale*certificate.omitted_first_moment
+                        + scale**2*certificate.omitted_second_moment)
+        first_bound += certificate.omitted_probability*float(np.max(abs(heights)))
+        second_bound += certificate.omitted_probability*float(np.max(heights**2))
+        return dict(parent_mean_index=self.profile.expected_height_change,
+                    parent_variance_index2=self._parent_variance(),
+                    realized_mean_index=mean_index,
+                    realized_variance_index2=variance_index,
+                    mean_front_height_A=mean, variance_front_height_A2=variance,
+                    rms_front_height_A=float(np.sqrt(variance)),
+                    exhausted_probability=float(probabilities[0]),
+                    exhausted_index=path.minimum, exposed_owner_probabilities=exposed,
+                    initial_inventory=path.initial_inventory,
+                    remaining_inventory=inventory, added_inventory=added,
+                    removed_inventory=removed, support=asdict(certificate),
+                    height_first_moment_error_bound_A=first_bound,
+                    height_second_moment_error_bound_A2=second_bound,
+                    interface_support_audit=path.interface_support_audit,
+                    interface_owners=path.interface_owners)
+
+    def _parent_variance(self):
+        from .CTRdistributions import PoissonProfile
+        if isinstance(self.profile, PoissonProfile):
+            _, _, fraction = self.profile._step_parameters()
+            return self.profile.rate + fraction * (1 - fraction)
+        return self.profile.variance

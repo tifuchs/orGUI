@@ -12,6 +12,34 @@ DEFAULT_MOMENT_TOLERANCE = 1e-10
 SURFACE_OCCUPANCY_TOLERANCE = 1e-12
 
 
+@dataclass(frozen=True)
+class HeightSupport:
+    """Error budgets for bounded height states, in structural index units.
+
+    The physical boundary is independent of these numerical tolerances.
+    Exceeding ``max_states`` raises instead of dropping physical probability.
+    """
+
+    tail_probability: float = DEFAULT_TAIL_PROBABILITY
+    moment_tolerance: float = DEFAULT_MOMENT_TOLERANCE
+    second_moment_tolerance: float = 1e-8
+    max_states: int = 4096
+
+    def __post_init__(self):
+        for key in ("tail_probability", "moment_tolerance", "second_moment_tolerance",
+                    "max_states"):
+            value = np.asarray(getattr(self, key))
+            if value.ndim != 0:
+                raise ValueError(f"{key} must be scalar")
+            object.__setattr__(self, key, value.item())
+        _validate_tail_probability(self.tail_probability)
+        for value in (self.moment_tolerance, self.second_moment_tolerance):
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError("Moment budgets must be finite and positive")
+        if int(self.max_states) != self.max_states or self.max_states < 1:
+            raise ValueError("max_states must be a positive integer")
+
+
 def _validate_tail_probability(tail_probability):
     tail_probability = float(tail_probability)
     if not 0.0 < tail_probability < 1.0:
@@ -533,27 +561,34 @@ class SupportCertificate:
     normalization_factor: float
 
 
-def capped_skellam_states(profile, minimum, *, second_moment_tolerance=1e-8,
-                          max_states=4096):
-    """Return states of ``max(H, minimum)`` and an upper-tail certificate.
+@dataclass(frozen=True)
+class _DiscreteHeightLaw:
+    """Private probability/moment contract, independent of fit parameter names."""
 
-    :param RecenteredSkellamProfile profile: Unbounded parent distribution.
-    :param int minimum: Physical exhausted state in structural indices.
-    :param float second_moment_tolerance: Omitted index-squared budget.
-    :param int max_states: Explicit resource limit; never a clipping policy.
-    :returns: Read-only indices, probabilities, and a SupportCertificate.
-    :raises ValueError: For invalid settings or insufficient resources.
-    """
-    if not isinstance(profile, RecenteredSkellamProfile):
-        raise TypeError("A RecenteredSkellamProfile is required")
-    if int(minimum) != minimum or minimum > 0:
-        raise ValueError("minimum must be an integer at or below zero")
-    if (not np.isfinite(second_moment_tolerance)
-            or second_moment_tolerance <= 0):
-        raise ValueError("second_moment_tolerance must be finite and positive")
-    if int(max_states) != max_states or max_states < 1:
-        raise ValueError("max_states must be a positive integer")
-    minimum = int(minimum)
+    mean: float
+    variance: float
+    upper_endpoint: int | None
+    probability: object
+    cdf: object
+    survival: object
+    upper_bounds: object
+
+
+def _height_law(profile):
+    """Adapt the two native height laws without changing their parameters."""
+    if isinstance(profile, PoissonProfile):
+        # Exact equality in law: signed Step(s) is floor(s)+Bernoulli(frac(s)).
+        # The recentered representation supplies stable PMF/SF and cumulants;
+        # it does not change the native W/alpha/offset parameterization.
+        profile = RecenteredSkellamProfile(
+            1., profile.rate if profile.mean_change > 0 else 0.,
+            profile.rate if profile.mean_change < 0 else 0.,
+            profile.expected_height_change,
+            profile.tail_probability, DEFAULT_MOMENT_TOLERANCE)
+    elif isinstance(profile, RecenteredSkellamProfile):
+        pass
+    else:
+        raise TypeError("A native Skellam or Poisson height profile is required")
     shift, fraction = profile._shift()
     variance = profile.variance
     mean = profile.mean
@@ -564,7 +599,7 @@ def capped_skellam_states(profile, minimum, *, second_moment_tolerance=1e-8,
     fourth = max(0., fourth_cumulant + 4*mean*third + 3*variance**2
                  + 6*mean**2*variance + mean**4)
 
-    def bounds(upper):
+    def _bounds(upper):
         if profile.mu_up == 0 and upper >= shift + int(fraction > 0):
             return 0., 0., 0.
         distance = upper + 1 - mean
@@ -581,13 +616,46 @@ def capped_skellam_states(profile, minimum, *, second_moment_tolerance=1e-8,
         return (np.exp(logp), np.sqrt(variance + mean**2)*rootp,
                 np.sqrt(fourth)*rootp)
 
+    endpoint = shift + int(fraction > 0) if profile.mu_up == 0 else None
+    return _DiscreteHeightLaw(mean, variance, endpoint, profile.probability,
+                              profile._height_cdf, profile.occupancy, _bounds)
+
+
+def bounded_height_states(profile, minimum, *, support=None):
+    """Return states of ``max(H, minimum)`` and an upper-tail certificate.
+
+    :param profile: Native Skellam or signed Poisson parent distribution.
+    :param int minimum: Physical exhausted state in structural indices.
+    :param HeightSupport support: Numerical budgets; never a clipping policy.
+    :returns: Read-only indices, probabilities, and a SupportCertificate.
+    :raises ValueError: For invalid settings or insufficient resources.
+    """
+    law = _height_law(profile)
+    if support is None:
+        support = HeightSupport(
+            tail_probability=profile.tail_probability,
+            moment_tolerance=getattr(profile, "moment_tolerance",
+                                     DEFAULT_MOMENT_TOLERANCE))
+    if not isinstance(support, HeightSupport):
+        raise TypeError("support must be HeightSupport")
+    second_moment_tolerance = support.second_moment_tolerance
+    max_states = support.max_states
+    if int(minimum) != minimum or minimum > 0:
+        raise ValueError("minimum must be an integer at or below zero")
+    if (not np.isfinite(second_moment_tolerance)
+            or second_moment_tolerance <= 0):
+        raise ValueError("second_moment_tolerance must be finite and positive")
+    if int(max_states) != max_states or max_states < 1:
+        raise ValueError("max_states must be a positive integer")
+    minimum = int(minimum)
+    mean, variance = law.mean, law.variance
     upper = max(0, int(np.ceil(mean + 8*np.sqrt(variance))))
-    if profile.mu_up == 0:
-        upper = max(minimum, shift + int(fraction > 0))
+    if law.upper_endpoint is not None:
+        upper = max(minimum, law.upper_endpoint)
     while True:
-        p_bound, m_bound, s_bound = bounds(upper)
-        if (p_bound <= profile.tail_probability/4
-                and m_bound <= profile.moment_tolerance/4
+        p_bound, m_bound, s_bound = law.upper_bounds(upper)
+        if (p_bound <= support.tail_probability/4
+                and m_bound <= support.moment_tolerance/4
                 and s_bound <= second_moment_tolerance/4):
             break
         upper += max(1, (upper - minimum)//4)
@@ -596,10 +664,10 @@ def capped_skellam_states(profile, minimum, *, second_moment_tolerance=1e-8,
     if upper - minimum + 1 > max_states:
         raise ValueError("max_states cannot represent the physical state range")
     indices = np.arange(minimum, upper + 1, dtype=np.int64)
-    probabilities = profile.probability(indices)
-    probabilities[0] = float(profile._height_cdf(minimum))
+    probabilities = law.probability(indices)
+    probabilities[0] = float(law.cdf(minimum))
     retained = float(probabilities.sum())
-    above = float(profile.occupancy(minimum))
+    above = float(law.survival(minimum))
     retained_above = float(probabilities[1:].sum())
     factor = above/retained_above if retained_above else 1.
     if above and not retained_above:
@@ -608,7 +676,7 @@ def capped_skellam_states(profile, minimum, *, second_moment_tolerance=1e-8,
     if (not np.all(np.isfinite(probabilities))
             or np.any(probabilities < 0)
             or abs(probabilities.sum() - 1) > 1e-12):
-        raise ValueError("Could not normalize bounded Skellam states accurately")
+        raise ValueError("Could not normalize bounded height states accurately")
     indices.flags.writeable = probabilities.flags.writeable = False
     return indices, probabilities, SupportCertificate(
         upper, float(p_bound), float(m_bound), float(s_bound), retained,

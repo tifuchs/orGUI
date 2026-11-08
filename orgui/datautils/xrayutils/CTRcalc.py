@@ -502,6 +502,8 @@ class SXRDCrystal:
             )
         if self._stack_policy is not None:
             self.apply_stacking()
+        if self._has_height_boundary():
+            self._surface_state_plan()._snapshot()
 
     def updateFromParameters(self):
         self.weights = np.copy(self.weights_0)
@@ -565,6 +567,9 @@ class SXRDCrystal:
             Complex surface amplitude in electrons per reference lateral cell.
         :rtype: numpy.ndarray
         """
+        if self._has_height_boundary():
+            result = self.evaluate_kinematic(harray, karray, Larray)
+            return result.total - result.bulk
         if self._stack_policy is not None:
             self.apply_stacking()
         F = np.zeros_like(Larray, dtype=np.complex128)
@@ -746,6 +751,32 @@ class SXRDCrystal:
         for matrix, occup in self.domains[index]:
             yield matrix, area_scale * occup * weight
 
+    def _has_height_boundary(self):
+        return any(getattr(component, "boundary", None) is not None
+                   for component in self.uc_surface_list)
+
+    def _surface_state_plan(self, surface=None):
+        from ._CTRsurface_states import _SurfaceStatePlan
+        targets = [c for c in self.uc_surface_list
+                   if getattr(c, "boundary", None) is not None]
+        if len(targets) != 1 or (surface is not None and targets[0].name != surface):
+            raise ValueError(
+                "Exactly one named surface with a finite boundary is required")
+        target = targets[0]
+        return _SurfaceStatePlan(self, surface=target.name)
+
+    def surface_height_statistics(self, *, surface):
+        """Return realized front moments (Angstrom) and finite atom inventories.
+
+        Inventories are per reference lateral area. Parent index moments and
+        numerical tail certificates are reported separately from exhaustion.
+        """
+        return self._surface_state_plan(surface).statistics()
+
+    def surface_height_state(self, *, surface, index):
+        """Inspect one complete native crystal at a structural height index."""
+        return self._surface_state_plan(surface).state(index)
+
     def evaluate_kinematic(self, harray, karray, Larray):
         """Return the decomposed kinematical evaluation behind :meth:`F`.
 
@@ -765,6 +796,14 @@ class SXRDCrystal:
             their total.
         :rtype: KinematicAmplitudeResult
         """
+        if self._has_height_boundary():
+            result = self._surface_state_plan()._evaluate_kinematic(
+                harray, karray, Larray)
+            amplitudes = {c.name: c.amplitude for c in result.components}
+            components = tuple(KinematicComponentAmplitude(
+                index, c.name, amplitudes.get(c.name, np.zeros_like(result.bulk)))
+                for index, c in enumerate(self.uc_surface_list))
+            return KinematicAmplitudeResult(result.bulk, components, result.total)
         (harray, karray, Larray), output_shape = _broadcast_kinematic_hkl(
             harray, karray, Larray
         )
@@ -1592,6 +1631,8 @@ class SXRDCrystal:
         return state
 
     def zDensity_G(self, z, h, k):
+        if self._has_height_boundary():
+            return self._surface_state_plan()._average().zDensity_G(z, h, k)
         if self.enable_uc_stacking or self._stack_policy is not None:
             self.apply_stacking()
         rho = self.uc_bulk.zDensity_G_asbulk(z, h, k)
@@ -1607,6 +1648,10 @@ class SXRDCrystal:
         vacuum row is appended one top-layer spacing above the highest atomic
         layer.
 
+        Bounded surfaces return samples of their averaged material on the
+        all-state grid. Use :meth:`stratified_optical_profile` for its explicit
+        interfaces; these must not be inferred from sample-center midpoints.
+
         :returns:
             C-contiguous ``(N, 3)`` array with columns ``z`` in Angstrom,
             ``delta``, and ``beta``.
@@ -1614,6 +1659,8 @@ class SXRDCrystal:
         :raises NotImplementedError:
             If a component does not expose an atomistic optical profile.
         """
+        if self._has_height_boundary():
+            return self.dwba._atomic_model_snapshot()[2].values.copy()
         if self.enable_uc_stacking or self._stack_policy is not None:
             self.apply_stacking()
         profiles = [self.uc_bulk.optical_profile_asbulk()]
@@ -1679,6 +1726,9 @@ class SXRDCrystal:
             Simplified ``(N, 3)`` optical profile.
         :rtype: numpy.ndarray
         """
+        if self._has_height_boundary():
+            return self.stratified_optical_profile(
+                delta_tolerance, beta_tolerance).values
         return simplify_profile(
             self.optical_profile(), delta_tolerance, beta_tolerance
         )
@@ -1702,6 +1752,11 @@ class SXRDCrystal:
             Layer-center optical constants and substrate-to-ambient edges.
         :rtype: CTRoptics.StratifiedProfile
         """
+        if self._has_height_boundary():
+            from .CTRoptics import _stratify_at_boundaries
+            profile = self.dwba._atomic_model_snapshot()[2]
+            return _stratify_at_boundaries(
+                profile.values, profile.boundaries, delta_tolerance, beta_tolerance)
         return stratify_profile(
             self.optical_profile(), delta_tolerance, beta_tolerance
         )
@@ -1811,6 +1866,8 @@ class SXRDCrystal:
         return result.reshape(alpha_array.shape)
 
     def toRODStr(self):
+        if self._has_height_boundary():
+            self._surface_state_plan()._snapshot()
         s = f"E = {self.uc_bulk._E * 1e-3:.5f} keV\n"
         for i, w, uc in zip(self.uc_stacking, self.weights, self.uc_surface_list):
             s += f"# {uc.__class__.__name__} {uc.name}\n"
@@ -1929,6 +1986,8 @@ class SXRDCrystal:
         xtal._stack_policy = policy
         if policy is not None:
             xtal.apply_stacking()
+        if xtal._has_height_boundary():
+            xtal._surface_state_plan()._snapshot()
         return xtal
 
     def __getitem__(self, uc_name_or_index):

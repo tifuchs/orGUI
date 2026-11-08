@@ -893,6 +893,9 @@ class DWBAState:
         return 1 - _scale(water._E)*water.bulk_density*self._crystal.weights[index]
 
     def _live_records(self):
+        if self._crystal._has_height_boundary():
+            average = self._crystal._surface_state_plan()._average()
+            return self._surface_records(average.dwba._live_records())
         if self._crystal.enable_uc_stacking or self._crystal._stack_policy is not None:
             self._crystal.apply_stacking()
         self._require_available()
@@ -1058,6 +1061,23 @@ class DWBAState:
                 values, shares, density_count=density_count)
         return values, shares
 
+    def _surface_records(self, records):
+        """Preserve native component provenance and stable preparation identity."""
+        crystal = self._crystal
+        by_name = {c.name: (i, c) for i, c in enumerate(crystal.uc_surface_list)}
+        result = []
+        for record in records:
+            if record.component_index == -1:
+                result.append(replace(
+                    record, identity_token=("bulk", id(crystal.uc_bulk))))
+                continue
+            index, component = by_name[record.component_name]
+            result.append(replace(
+                record, component_index=index, component_type=type(component).__name__,
+                identity_token=("bounded_surface", id(component), record.record_index,
+                                record.role, record.layer)))
+        return tuple(result)
+
     def _atomic_model_snapshot(self, *, raw_structure=False):
         if not raw_structure and self._batch_depth and self._batch_snapshot is not None:
             if self._crystal._stack_policy is not None:
@@ -1073,6 +1093,23 @@ class DWBAState:
             return self._batch_snapshot
 
         self._cache_counters["snapshot_builds"] += 1
+        if self._crystal._has_height_boundary():
+            plan = self._crystal._surface_state_plan()
+            records, model, profile = plan._optical_snapshot()
+            if raw_structure:
+                return profile.values.copy()
+            records = self._surface_records(records)
+            geometry = _hash_record_geometry(records)
+            descriptors = tuple(_record_descriptor(r) for r in records)
+            model = replace(
+                model, descriptors=descriptors, geometry_fingerprint=geometry,
+                decomposition_fingerprint=_hash_arrays(
+                    model.reference_shares, model.layer_reference_shares)
+                + geometry + repr(descriptors).encode("utf-8"))
+            snapshot = records, model, profile
+            if self._batch_depth:
+                self._batch_snapshot = snapshot
+            return snapshot
         records = self._live_records()
         record_count = len(records)
         layout = _layer_reference_layout(records)

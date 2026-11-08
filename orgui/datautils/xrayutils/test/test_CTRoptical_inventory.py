@@ -22,7 +22,9 @@ def _crystal(strain=1.0, repeats=1, roughness=0.0):
     bank = generate_surface_termination_cells(
         cell.supercell((1, 1, repeats)), cell.layer_cycle
     )
-    surface = PoissonSurface(bank, profile=PoissonProfile(roughness), name="surface")
+    # This oracle audits legacy termination records and depth-dependent order.
+    surface = PoissonSurface(
+        bank, boundary=None, profile=PoissonProfile(roughness), name="surface")
     crystal = SXRDCrystal(bulk, film, surface, stacking=np.array([1, 2]))
     crystal.setEnergy(20000.0)
     return crystal, surface

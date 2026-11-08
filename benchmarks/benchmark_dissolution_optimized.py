@@ -20,8 +20,8 @@ from .audit_dissolution_dwba_reuse import _counts
 import numpy as np
 
 from orgui.datautils.xrayutils import CTRdwba
-from orgui.datautils.xrayutils.CTRdissolution import DissolutionPath
-from orgui.datautils.xrayutils._CTRdissolution_dwba import DissolutionDWBA
+from orgui.datautils.xrayutils._CTRsurface_states import _SurfaceStatePlan
+from orgui.datautils.xrayutils._CTRincoherent_dwba import SurfaceHeightDWBA
 from orgui.datautils.xrayutils.test._dissolution_dwba_oracle import (
     _complete_dwba_batch, _complete_dwba_oracle,
 )
@@ -35,13 +35,13 @@ def _kinematic_oracle(self, indices, h, k, ell):
 def _oracle(mode):
     stack = ExitStack()
     if mode == "kinematic":
-        stack.enter_context(patch.object(DissolutionPath,
+        stack.enter_context(patch.object(_SurfaceStatePlan,
                                         "_iter_kinematic_amplitudes",
                                         _kinematic_oracle))
     else:
-        stack.enter_context(patch.object(DissolutionDWBA, "batch",
+        stack.enter_context(patch.object(SurfaceHeightDWBA, "batch",
                                         _complete_dwba_batch))
-        stack.enter_context(patch.object(DissolutionDWBA, "_evaluate_in_batch",
+        stack.enter_context(patch.object(SurfaceHeightDWBA, "_evaluate_in_batch",
                                         _complete_dwba_oracle))
     return stack
 
@@ -69,8 +69,8 @@ def main():
     _setup(args.request_dir, None)
     root = Path(__file__).resolve().parents[1]
     files = [root / "orgui/datautils/xrayutils" / name for name in (
-        "CTRdissolution.py", "CTRincoherent.py", "CTRdwba.py",
-        "_CTRdissolution_dwba.py", "test/_dissolution_dwba_oracle.py")]
+        "_CTRsurface_states.py", "CTRincoherent.py", "CTRdwba.py",
+        "_CTRincoherent_dwba.py", "test/_dissolution_dwba_oracle.py")]
     files.append(Path(CTRdwba._CTRcalc_cpp.__file__))
     data = args.request_dir.resolve().parents[3] / "settings/1V2"
     files.extend(data / name for name in ("0056_C1.xtal", "0056_C1.json"))

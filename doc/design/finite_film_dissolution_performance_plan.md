@@ -4,6 +4,11 @@ Status: Stages 1 and 2 implemented; later stages remain open. Date: 2026-11-07.
 Baseline: `0a38763`, including authoritative DWBA
 master `5fc381b` and optical-position correction `898bca1`.
 
+Before continuing the remaining stages, review the
+[native surface boundary design](native_surface_finite_film_boundary_design.md).
+It proposes reusing the optimized material/state machinery through the existing
+Film/surface/domain APIs and deleting the unpublished parallel wrapper.
+
 The [implementation measurements](finite_film_dissolution_performance.md#first-implementation-stages)
 record the first production changes and their validation. The initial C1
 kinematic goal is met. DWBA preparation reuse is an intermediate improvement;

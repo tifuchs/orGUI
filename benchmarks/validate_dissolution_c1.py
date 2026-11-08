@@ -22,10 +22,11 @@ for _key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
 import numpy as np
 from scipy.sparse import load_npz
 
+from ._surface_boundary import _bounded_model
 from orgui.datautils.xrayutils import CTRincoherent
 from orgui.datautils.xrayutils.CTRcalc import SXRDCrystal
 from orgui.datautils.xrayutils.CTRincoherent import (
-    FiniteFilmDissolution, create_incoherent_model_from_config,
+    create_incoherent_model_from_config,
 )
 from orgui.datautils.xrayutils.CTRuc import UnitCell
 
@@ -67,11 +68,12 @@ def main():
     config = meta["native_incoherent_config"]
     config["parameters"]["basis_0"] = np.asarray(config["parameters"]["basis_0"])
     old = create_incoherent_model_from_config(crystal, config)
-    new = FiniteFilmDissolution(
+    new = _bounded_model(
         crystal, films=["LaNiO3"], surface="LaNiO3_surface",
         incoherent_fraction=meta["physical"]["incoherent_fraction"])
-    tight = FiniteFilmDissolution(
-        crystal, films=new.films, surface=new.surface, profile=new.profile,
+    tight = _bounded_model(
+        crystal, films=new.target_surface().boundary.films, surface=new.surface,
+        profile=new.target_surface()._make_profile(),
         incoherent_fraction=new.incoherent_fraction, tail_probability=1e-12,
         moment_tolerance=1e-12, second_moment_tolerance=1e-12)
     models = [("legacy", old), ("dissolution", new), ("tight", tight)]
@@ -82,8 +84,9 @@ def main():
         interface = expanded["STO_to_LaNiO3"]
         interface.fixed_ucs = args.interface_fixed_ucs
         interface.createInterfaceCells()
-        models.append(("wider_interface", FiniteFilmDissolution(
-            expanded, films=new.films, surface=new.surface, profile=new.profile,
+        models.append(("wider_interface", _bounded_model(
+            expanded, films=new.target_surface().boundary.films, surface=new.surface,
+        profile=new.target_surface()._make_profile(),
             incoherent_fraction=new.incoherent_fraction)))
     predictions, timings, raw_intensities = {}, {}, {}
     for name, model in models:

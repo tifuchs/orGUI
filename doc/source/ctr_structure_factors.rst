@@ -1500,29 +1500,60 @@ and the executed RuO2/TiO2 comparison.
 Complete finite-film dissolution
 -------------------------------------
 
-``CTRincoherent.FiniteFilmDissolution`` is an opt-in physical ensemble. It
-replaces the selected surface's height distribution and removes a connected
-upper sequence of named finite Films, including their populations within mixed
+New ``SkellamSurface`` and ``PoissonSurface`` objects allow dissolution of all
+finite Films by default. Omitting ``boundary=`` is equivalent to
+``boundary=FiniteFilmBoundary()``. To protect lower Films, pass
+``FiniteFilmBoundary(films=("film",))`` with a connected upper sequence of names.
+The native surface owns its height parameters; native Film and interface
+components own all material, including their populations within mixed
 interfaces. The semi-infinite bulk remains protected. To model substrate
 dissolution, represent its removable inventory as an explicit finite Film of
-substrate material and include that Film's name. Creating such a Film does not
+substrate material; the default includes it automatically. Creating such a Film does not
 automatically subtract material from the bulk: the finite/bulk partition must
 preserve atomic registry, chemical inventory and the original complex amplitude.
 
-For an existing native crystal, construct the wrapper explicitly::
+Configure the native surface when constructing the stack::
 
-    from orgui.datautils.xrayutils.CTRdistributions import RecenteredSkellamProfile
-    from orgui.datautils.xrayutils.CTRincoherent import FiniteFilmDissolution
+    import numpy as np
+    from orgui.datautils.xrayutils.CTRcalc import SXRDCrystal
+    from orgui.datautils.xrayutils.CTRdistributions import (
+        RecenteredSkellamProfile, HeightSupport,
+    )
+    from orgui.datautils.xrayutils.CTRfilm import SkellamSurface, FiniteFilmBoundary
+    from orgui.datautils.xrayutils.CTRincoherent import SurfaceHeightDomains
 
-    model = FiniteFilmDissolution(
-        crystal, films=["LaNiO3"], surface="LaNiO3_surface",
+    surface = SkellamSurface(
+        surface_cell, name="surface",
         profile=RecenteredSkellamProfile(
             t=1., k_up=0., k_down=12., offset=-4.),
-        incoherent_fraction=0.2,
-        exposure_policy="native_or_unreconstructed",
-        optical_reference="state_specific")
+        boundary=FiniteFilmBoundary(films=("film",)),
+        height_support=HeightSupport())
+    # The existing Film named "film" supplies the removable inventory.
+    crystal = SXRDCrystal(substrate, film, surface,
+                          stacking=np.array([1, 2]))
+    coherent_amplitude = crystal.F(h, k, l)
+    audit = crystal.surface_height_statistics(surface="surface")
+    state = crystal.surface_height_state(surface="surface", index=-2)
+    model = SurfaceHeightDomains(
+        crystal, surface="surface", incoherent_fraction=0.2,
+        optical_reference="shared")
     intensity = model.F2(h, k, l)
-    audit = model.statistics()
+
+The same policy works with ``PoissonSurface(profile=PoissonProfile(...))``.
+Its native ``W``, ``alpha`` and ``offset`` parameters remain unchanged. The
+parent mean is ``W + offset``; the variance includes Poisson variance and
+fractional structural-step variance. Explicit ``boundary=None`` preserves
+legacy surface corrections and support selection. Old saved crystals and
+parameter dictionaries without boundary metadata also retain legacy behavior.
+New default models save the boundary policy explicitly; automatic Film selection
+is resolved from the stack at evaluation time, including after a round trip.
+An empty explicit ``films=()`` is rejected rather than treated as unrestricted.
+
+Finite dissolution currently requires a single top surface, unit component
+weights, common outer domains and ordered interface-front heights. Configurations
+with nonmonotonic front heights, attached water, overlayers or depth-dependent
+crystallinity are unsupported and raise errors. Existing models using these
+features can retain their surface-correction behavior with ``boundary=None``.
 
 The frozen material-selective interface closure retains each surviving owner's
 native coordinates, occupancies and displacement factors. Removing LaNiO3 from
@@ -1531,12 +1562,13 @@ not refill vacancies with STO. This is a static ensemble, not a model of
 dissolution kinetics, atomic relaxation or microscopic lateral interface
 correlations.
 
-The latent Skellam index H maps to ``max(H, exhausted_index)``. Its entire
+The latent surface-height index H maps to ``max(H, exhausted_index)``. Its entire
 lower-tail probability accumulates at the fully exhausted state; it is not
 conditioned on survival. Consequently parent mean/variance and realized front
 mean/variance differ when exhaustion is appreciable. The front is a structural
 coordinate in Angstrom, not the highest occupied atom in a porous interface.
-``statistics()`` reports both moment sets, exhausted and exposed-owner
+``surface_height_statistics()`` (also ``model.statistics()``) reports both
+moment sets, exhausted and exposed-owner
 probabilities, and initial, remaining, removed and added species inventories
 per reference lateral cell. At exhaustion the selected owners have zero
 inventory. Positive states continue the top Film's native structural cycle.
@@ -1548,7 +1580,7 @@ inside an interface component. No probability cutoff makes a partial population
 full. Thinner states expose the unchanged surviving material, with no ghost
 termination at exhaustion. ``"preserve"`` exposes unchanged material in every
 state. This
-choice changes the physical model and is saved in the wrapper configuration.
+choice changes the physical model and is saved on the native surface.
 
 Numerical support is separate from this boundary rule. The upper-tail
 certificate bounds omitted probability and absolute first and second index
@@ -1566,9 +1598,23 @@ surface support or opt old models into dissolution.
 The first version rejects water/overlayers, overlapping interfaces, non-unit
 component weights, differing outer domains and depth-dependent surface/interface
 crystallinity profiles. Common outer domains and constant native crystallinity
-remain supported. Fit the parent parameters on the wrapper; remove local
-surface-height fit parameters first. Existing legacy models retain their
-finite-support rejection. No fit data or saved crystals are migrated implicitly.
+remain supported. Fit parent parameters on the native surface; only the
+incoherent fraction belongs to ``SurfaceHeightDomains``. Existing legacy models
+retain their finite-support rejection. No fit data or saved crystals are
+migrated implicitly.
+
+Native crystal text and parameter dictionaries store ``height_boundary`` and
+``height_support`` with the surface. Text includes a mandatory format guard so
+older readers fail instead of silently evaluating an unbounded model. A
+companion wrapper configuration is needed only for incoherent mixing and its
+optical policy. The unpublished ``FiniteFilmDissolution`` API has been removed;
+there is no compatibility constructor, basis or configuration key.
+
+Native ``F``, ``F2``, ``F_surf``, ``evaluate_kinematic`` and ``zDensity_G`` use
+the complete averaged material. Decomposition retains original component
+names. Realized bounded heights require the complete stack; use
+``crystal.surface_height_statistics`` instead of the surface-only
+``mean_height_absolute`` property. The nominal stacking boundary does not move.
 
 Kinematic evaluation constructs native material amplitudes once per request
 and accumulates the retained material across heights. Complete states remain

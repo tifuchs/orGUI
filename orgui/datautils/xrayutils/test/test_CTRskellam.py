@@ -31,7 +31,8 @@ def _crystal(profile=None, n_layers=2, bank=False, width=80):
             cell.basis_0[:] = cell.basis
     cls = (CTRfilm.PoissonSurface if isinstance(profile, PoissonProfile)
            else CTRfilm.SkellamSurface)
-    surface = cls(template, profile=profile, name="surface")
+    # Retain coverage of the legacy correction/support contract explicitly.
+    surface = cls(template, profile=profile, name="surface", boundary=None)
     crystal = CTRcalc.SXRDCrystal(
         oracle.layered_cell(n_layers, "bulk"), film, surface,
         stacking=np.array([1, 2]))
@@ -193,7 +194,8 @@ def test_water_order_and_dwba_cache_invalidation():
 def test_rejects_wrong_profiles_invalid_rates_and_film_overlap():
     """Invalid candidates must fail explicitly without clipping or shifting."""
     with pytest.raises(TypeError, match="RecenteredSkellamProfile"):
-        CTRfilm.SkellamSurface(oracle.layered_cell(), profile=PoissonProfile(1))
+        CTRfilm.SkellamSurface(
+            oracle.layered_cell(), boundary=None, profile=PoissonProfile(1))
     with pytest.raises(ValueError, match="below the underlying Film"):
         _crystal(width=1)
     crystal, surface = _crystal()

@@ -16,7 +16,7 @@ from orgui.datautils.xrayutils import CTRdwba
 from orgui.datautils.xrayutils.CTRdistributions import (
     RecenteredSkellamProfile, SkellamProfile,
 )
-from orgui.datautils.xrayutils.CTRincoherent import FiniteFilmDissolution
+from ._surface_boundary import _bounded_model
 from orgui.datautils.xrayutils.test.test_CTRdissolution import _crystal, _hkl
 
 
@@ -51,7 +51,7 @@ def _report(source, expanded):
         native_dwba=_errors(expanded.dwba.evaluate(*_hkl()).reflectivity,
                             source.dwba.evaluate(*_hkl()).reflectivity))
     for policy in ("shared", "state_specific"):
-        models = [FiniteFilmDissolution(
+        models = [_bounded_model(
             c, films=["film"], surface="surface", optical_reference=policy,
             profile=RecenteredSkellamProfile(offset=-18.5),
             incoherent_fraction=.2) for c in (source, expanded)]
