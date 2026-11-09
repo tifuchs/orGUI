@@ -2704,6 +2704,7 @@ class TestLayerStacking(unittest.TestCase):
         self.assertAlmostEqual(
             interface.stacking_loc_absolute,
             interface.loc_absolute
+            + interface._interface_reference_shift
             + interface._strain_coupling_displacement,
         )
         self.assertAlmostEqual(film.pos_absolute, interface.height_absolute)
@@ -3387,19 +3388,24 @@ class TestLayerStacking(unittest.TestCase):
             40.028295180092 + 0.034223926465j,
             rtol=1e-8,
         )
-        mid_row = optical_profile.shape[0] // 2
         # The lower material contributes at 0.007419... Angstrom; its old
         # sharp-boundary subtraction at zero has exactly zero weight. It must
         # not select the merged optical coordinate. Density and F are unchanged.
+        # Locate the physical row by coordinate: removing empty bookkeeping
+        # changes row counts and eliminates the former zero-weight z=10 row.
+        physical_row = np.flatnonzero(np.isclose(
+            optical_profile[:, 0], 0.007419160637154795, rtol=0, atol=1e-12,
+        ))
+        self.assertEqual(len(physical_row), 1)
         np.testing.assert_allclose(
-            optical_profile[[0, mid_row, -1]],
+            optical_profile[[0, physical_row[0]]],
             [
                 [-12.0, -7.72147920e-10, -7.18561204e-13],
                 [0.007419160637154795, 2.94802391e-06, 2.74343239e-09],
-                [10.0, 0.0, 0.0],
             ],
             atol=1e-9,
         )
+        self.assertFalse(np.any(np.isclose(optical_profile[:, 0], 10.0)))
 
 
 class TestLegacyLayeredCTR(unittest.TestCase):

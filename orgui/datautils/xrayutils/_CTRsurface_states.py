@@ -1,7 +1,8 @@
 """Material-resolved finite-film dissolution using native crystal states.
 
 The interface closure is frozen and material selective. A structural front
-removes finite-owner populations; it never replenishes the protected substrate.
+removes finite-owner populations. The original substrate profile, including
+its interface extension and signed reference terms, is fixed in every state.
 Amplitudes and optical profiles use native unit-cell and crystal evaluators.
 """
 
@@ -94,7 +95,7 @@ class _SurfaceStatePlan:
     """Snapshot a connected finite-material path above protected bulk.
 
     :param SXRDCrystal crystal: Native source; never mutated.
-    :param str surface: Name of the top RoughSurface carrying native motifs.
+    :param str surface: Name of the RoughSurface carrying native motifs.
     :raises ValueError: For ambiguous topology, geometry, or ownership.
     """
 
@@ -107,7 +108,7 @@ class _SurfaceStatePlan:
             raise ValueError("Component names must be unique")
         matches = [c for c in components if c.name == surface]
         if len(matches) != 1 or not isinstance(matches[0], RoughSurface):
-            raise ValueError("surface must identify one top RoughSurface")
+            raise ValueError("surface must identify one RoughSurface")
         self.surface = matches[0]
         if self.surface.water is not None:
             raise ValueError("Dissolution water placement is not defined")
@@ -123,9 +124,10 @@ class _SurfaceStatePlan:
             raise ValueError("Dissolution requires an ordered single stack")
         ordered = [components[i] for i in order]
         if sum(isinstance(c, RoughSurface) for c in ordered) != 1:
-            raise ValueError("A finite boundary requires exactly one top surface")
-        if ordered[-1] is not self.surface:
-            raise ValueError("Overlayers above the dissolution surface are unsupported")
+            raise ValueError("A finite boundary requires exactly one surface")
+        surface_slot = ordered.index(self.surface)
+        overlayer_indices = order[surface_slot+1:]
+        ordered = ordered[:surface_slot+1]
         if any(not isinstance(c, (Film, EpitaxyInterface, RoughSurface))
                for c in ordered):
             raise ValueError("Dissolution requires Film/interface components")
@@ -139,20 +141,24 @@ class _SurfaceStatePlan:
             self.films = tuple(available)
         if any(name not in available for name in self.films):
             raise ValueError(
-                "Only explicit finite Films may dissolve; bulk is protected")
+                "Only finite Films below the target surface may dissolve; "
+                "bulk is protected")
         selected = [name for name in available if name in self.films]
         if selected != available[-len(selected):]:
             raise ValueError("Removable Films must form a connected upper sequence")
         self.films = tuple(selected)
-        if not np.all(self.source.weights == 1):
+        if not np.all(self.source.weights[order[:surface_slot+1]] == 1):
             raise ValueError("Dissolution requires unit component weights")
-        self.domains = copy.deepcopy(self.source.domains[order[-1]])
-        for domains in self.source.domains:
+        self.domains = copy.deepcopy(self.source.domains[order[surface_slot]])
+        for index in order[:surface_slot+1]:
+            domains = self.source.domains[index]
             if (len(domains) != len(self.domains)
                     or any(w != v or not np.array_equal(a, b)
                            for (a, w), (b, v) in zip(domains, self.domains))):
                 raise ValueError("Dissolution requires common outer domains")
-        self.source.apply_stacking()
+        # First bind only nominal geometry. The realized mean requires the
+        # lower material inventory, so resolve the overlayer anchor afterwards.
+        self.source.apply_stacking(_surface_heights={})
         self.top_film = self.surface.underlying_film
         if self.top_film is None or self.top_film.name != self.films[-1]:
             raise ValueError("Surface must be bound to the highest removable Film")
@@ -219,6 +225,10 @@ class _SurfaceStatePlan:
         protected = []
         for record in records:
             if record.owner not in self.films:
+                # Keep the complete initial substrate/interface profile at
+                # all heights, including positive-z populations and signed
+                # reference terms. Its difference from pristine sharp bulk
+                # is initial interface structure, not dissolved substrate.
                 protected.append(record)
                 continue
             key = _geometry_key(record)
@@ -258,6 +268,16 @@ class _SurfaceStatePlan:
             key: tuple(r for r in removable if r.interval == key)
             for key in self._intervals}
         self.initial_inventory = self._selected_material(0)[3]
+        self._overlayers = []
+        if len(overlayer_indices):
+            _, indices, probabilities, _ = self._snapshot()
+            self.overlayer_anchor_A = float(probabilities @ np.array([
+                self._front_height(int(index)) for index in indices]))
+            self.source.apply_stacking(
+                _surface_heights={self.surface.name: self.overlayer_anchor_A})
+            self._overlayers = [
+                (components[i], self.source.weights[i], self.source.domains[i])
+                for i in overlayer_indices]
 
     def _domains(self, cell, parent, owner, role, component_name, order=None):
         layer = float(cell.layers[0])
@@ -383,13 +403,21 @@ class _SurfaceStatePlan:
         source = self.source
         cells = [_FrozenMaterial(parts, name, source.reference_area)
                  for name, parts in components.items()]
+        count = len(cells)
+        # Overlayers are common native components at the realized mean front,
+        # not removable material or height-dependent terrace decorations.
+        cells.extend(copy.deepcopy(component) for component, _, _ in self._overlayers)
         crystal = SXRDCrystal(
             copy.deepcopy(source.uc_bulk), *cells,
             reference_uc=source.reference_uc,
             reference_rotation=source.reference_rotation, atten=source.atten)
-        crystal.weights = np.ones(len(cells))
+        crystal.enable_uc_stacking = False
+        crystal.weights = np.r_[np.ones(count),
+                                [weight for _, weight, _ in self._overlayers]]
         crystal.weights_0 = crystal.weights.copy()
-        crystal.domains = [copy.deepcopy(self.domains) for _ in cells]
+        crystal.domains = ([copy.deepcopy(self.domains) for _ in range(count)]
+                           + [copy.deepcopy(domains)
+                              for _, _, domains in self._overlayers])
         _copy_geometry(source, crystal)
         return crystal
 
@@ -441,9 +469,9 @@ class _SurfaceStatePlan:
         hkl = np.vstack(coordinates)
         common = self._crystal(self._protected)
         protected = common.F(*coordinates)
-        # All accepted components share outer domains. A native one-component
-        # carrier supplies their canonical scales even for a bare common bulk.
-        carrier = common if common.uc_surface_list else self._crystal(
+        # Removable components share outer domains. Their native carrier must
+        # not borrow the independent domains of a common overlayer.
+        carrier = common if self._protected else self._crystal(
             self._removable[:1])
         templates = {}
         for key, original in cells.items():
@@ -488,18 +516,21 @@ class _SurfaceStatePlan:
             yield index, amplitude.reshape(shape)
             previous_keep, previous_growth = keep, max(0, index)
 
+    def _front_height(self, index):
+        """Return the physical structural-front coordinate in Angstrom."""
+        if index <= 0:
+            return self._heights[len(self._intervals)+index]
+        return (self.surface.below_H
+                + (index//len(self.surface.layer_order)
+                   + self.surface.layerpos[index % len(self.surface.layer_order)]
+                   - self.surface.layerpos[0])*self.top_film.unitcell.a[2])
+
     def state(self, index):
         """Build one complete state; index zero is the nominal Film boundary."""
         keep, retained, extra, inventory = self._selected_material(index)
         index = int(index)
         records = [*self._protected, *retained, *extra]
-        if index <= 0:
-            height = self._heights[keep]
-        else:
-            height = (self.surface.below_H
-                      + (index//len(self.surface.layer_order)
-                         + self.surface.layerpos[index % len(self.surface.layer_order)]
-                         - self.surface.layerpos[0])*self.top_film.unitcell.a[2])
+        height = self._front_height(index)
         exposed = (tuple(sorted({r.owner for r in retained
                                  if self._rank[r.interval] == keep-1}))
                    if keep else (self.protected_owner,))
@@ -515,13 +546,15 @@ class _SurfaceStatePlan:
 
     def averaged_crystal(self, indices, probabilities):
         """Build the native averaged atomic/optical structure on shared fields."""
-        records = []
+        # Protected material is independent of the surface distribution. Keep
+        # its original coordinates and weights once, including signed interface
+        # references; only removable populations carry state probabilities.
+        records = list(self._protected)
         for index, probability in zip(indices, probabilities):
             if probability == 0:
                 continue
             keep = len(self._intervals) + min(int(index), 0)
-            selected = [*self._protected,
-                        *(r for r in self._removable if self._rank[r.interval] < keep),
+            selected = [*(r for r in self._removable if self._rank[r.interval] < keep),
                         *self._extra_records(int(index))]
             records.extend(_MaterialRecord(
                 r.owner, r.role, r.cell, r.matrix, r.weight*probability,
@@ -540,7 +573,10 @@ class _SurfaceStatePlan:
 
     def _evaluate_kinematic(self, h, k, ell):
         average = self._average()
+        # Only averaged material must commute with probability weighting.
+        # Native overlayers are common components evaluated without averaging.
         cells = [average.uc_bulk, *(cell for c in average.uc_surface_list
+                                   if isinstance(c, _FrozenMaterial)
                                    for cell in c.cells)]
         if _native_linear_cells(cells):
             return average.evaluate_kinematic(h, k, ell)
@@ -563,11 +599,17 @@ class _SurfaceStatePlan:
             for index, (name, value) in enumerate(components.items())), total)
 
     def _optical_snapshot(self):
-        """Return native average optics on the all-state union support grid."""
+        """Retain analytic references; otherwise use the all-state union grid."""
         from ._CTRincoherent_dwba import _shared_grid, _regrid_model
         _, indices, probabilities, _ = self._snapshot()
         average = self.averaged_crystal(indices, probabilities)
         records, model, profile = average.dwba._atomic_model_snapshot()
+        if profile.continuous is not None:
+            # Native analytic water requires its onset/reference metadata.
+            # A sampled union grid cannot replace that physical reference.
+            # State-specific ensembles use each native reference separately;
+            # shared continuous references retain their explicit rejection.
+            return records, model, profile
         boundaries = [self.state(int(index)).crystal.dwba
                       ._atomic_model_snapshot()[2].boundaries
                       for index, probability in zip(indices, probabilities)

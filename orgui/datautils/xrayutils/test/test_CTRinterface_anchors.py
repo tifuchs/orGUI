@@ -150,7 +150,7 @@ def test_anchor_matches_cumulative_boundaries_in_every_rotation(positions, ids):
             profile=SkellamProfile(1.0), fixed_ucs=12,
         )
         interface._set_start_layer(ids[start])
-        interface.basis[2] = 0.0  # The ideal support starts at -anchor.
+        interface.basis[2] = 0.0  # Isolate the independently registered lattice.
         intervals = np.diff(positions, append=positions[0] + 1.0)
         intervals = np.roll(intervals, -start)
         boundaries = np.concatenate(([0.0], np.cumsum(np.tile(intervals, 24 // n))))
@@ -164,9 +164,16 @@ def test_anchor_matches_cumulative_boundaries_in_every_rotation(positions, ids):
                 expected = np.interp(
                     mean - support_first, np.arange(25), boundaries,
                 ) * interface.uc_top.a[2]
+                fixed_anchor = np.interp(
+                    -support_first, np.arange(25), boundaries,
+                ) * interface.uc_top.a[2]
                 interface.createInterfaceCells()
                 np.testing.assert_allclose(
-                    -interface.pos_absolute, expected, rtol=0, atol=1e-11,
+                    -interface.pos_absolute, fixed_anchor, rtol=0, atol=1e-11,
+                )
+                np.testing.assert_allclose(
+                    interface._interface_reference_shift, expected - fixed_anchor,
+                    rtol=0, atol=1e-11,
                 )
 
 

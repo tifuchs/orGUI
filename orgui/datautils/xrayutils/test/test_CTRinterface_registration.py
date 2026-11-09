@@ -79,8 +79,9 @@ def _oracle(crystal, skew):
     ]
     distances = np.tile(intervals, len(indices) // n)
     ideal = np.r_[0.0, np.cumsum(distances)]
-    mean = interface.basis[0] ** 2 * n**2 * skew
-    upper_anchor = np.interp(mean - indices[0], np.arange(len(ideal)), ideal)
+    # Independent lattices share structural index zero; the statistical mean
+    # changes populations without introducing an unrequested registry shift.
+    upper_anchor = np.interp(-indices[0], np.arange(len(ideal)), ideal)
     # Repeat zero belongs to F_bulk. Finite Film uses its actual top boundary.
     if len(crystal.uc_surface_list) == 3:
         bulk = crystal.uc_bulk
@@ -109,7 +110,7 @@ def _oracle(crystal, skew):
     offset = interface.basis[3] * bottom.a[2]
     offset_profile = offset * (p - p.min()) / (p.max() - p.min())
     upper_z = (
-        (1 - k) * (interface.below_H + (ideal[:-1] - upper_anchor) * top.a[2])
+        (1 - k) * (origin + (ideal[:-1] - upper_anchor) * top.a[2])
         + k * coupled[:-1]
         + (1 - k) * offset
         + k * offset_profile

@@ -7,6 +7,25 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- Added an executable RuO2/TiO2 dissolution notebook with five material-inventory
+  stages, native density and paired CTR plots, and checks for complete RuO2
+  removal while preserving the original TiO2 interface.
+
+- Epitaxy interfaces now register both independent lattices at the same fixed
+  structural-layer reference. This removes skew-dependent depleted/overfilled
+  interfaces under partial strain coupling, including artificial interfaces
+  between identical materials. Substrate domains, statistical occupancies and
+  Film layer counts are preserved; affected upper positions and kinematic/DWBA
+  predictions change. Reevaluate affected saved fits. Old generated-domain
+  caches rebuild automatically; saved parameters and numerical tolerances stay
+  unchanged.
+
+- Finite-film ensemble averaging retains the complete protected substrate once
+  at its original coordinates and weights, including signed interface terms.
+  Unrelated surface-distribution changes no longer duplicate and probability-
+  weight those records. Substrate/interface parameters remain active, and
+  explicit finite substrate Films can still dissolve.
+
 - Optical-profile coalescing now places a merged plane at its lowest nonzero
   contributor, preserving signed reference shares and wholly empty groups.
   Exactly zero interface subtraction records no longer shift occupied optical
@@ -69,7 +88,8 @@ Other user-visible changes:
   crystallinity-to-disorder conversion fractions need reevaluation.
 
 - New native `SkellamSurface` and `PoissonSurface` objects default to complete
-  dissolution through all finite Films; omitted `boundary` and `boundary=None`
+  dissolution through all finite Films below the target surface;
+  omitted `boundary` and `boundary=None`
   are equivalent. Explicit `FiniteFilmBoundary(films=...)`
   restricts the removable upper sequence; `boundary=LegacySurfaceBoundary()` and old saved models
   without boundary metadata retain legacy surface corrections. This changes
@@ -83,6 +103,11 @@ Other user-visible changes:
   evaluates the protected bulk once. DWBA batches reuse state snapshots and
   packing, share wavefields on the common optical grid where requested, and
   release private caches on exit. State-specific optics retain distinct fields.
+  Overlayers remain at the realized mean front height as common contributions
+  in every state, preserving native weights, domains and optical references.
+  They are not removed with the underlying Film. Separately stacked water works
+  with coherent and state-specific DWBA; shared analytic-water fields remain
+  unsupported.
 
 - Copying plots to the clipboard works with silx 3.1.3 and PySide6 again.
   PNG buffer exports used by copying and printing retain the colorbar.

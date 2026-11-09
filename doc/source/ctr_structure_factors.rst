@@ -5,6 +5,11 @@ The CTR calculation API uses canonical structure-factor units throughout:
 every public ``F`` or ``F_uc`` method returns a complex scattering amplitude
 in electrons.
 
+For a worked calculation, see :doc:`ctr_film_dissolution`: five stages of
+RuO2 removal from TiO2, with native electron densities and corresponding
+(00L) and (20L) CTRs. The executed notebook includes the plots and checks
+for complete film removal with the substrate interface preserved.
+
 .. warning::
 
    This convention changes amplitudes produced by older releases that divided
@@ -1024,8 +1029,17 @@ interval; the final support endpoint uses the last interval's upper boundary.
 Coordinates outside generated support and nonpositive or nonfinite layer
 interval widths are rejected.
 
-``stacking_loc_absolute`` is the Film-side nominal origin, including strain
-displacement and offset.  ``stacking_height_absolute`` is the physical top of
+Both independent lattices register structural index zero at the lower-stack
+cycle origin :math:`R`. The statistical mean selects occupancies; it does not
+set a separate upper-lattice phase. At zero strain coupling, changing skew
+therefore leaves retained independent lattice sites fixed. Identical materials
+with zero offset remain one uninterrupted crystal at every coupling and skew.
+
+The same interval map separately locates the statistical Film-width reference.
+Its shift to the fixed structural reference is included in
+``stacking_loc_absolute``, together with strain displacement and offset. This
+preserves the requested Film inventory when the upper lattice is registered
+correctly. ``stacking_height_absolute`` is the physical top of
 interface support.  Both are in Angstrom.  Film starts at the latter so it does
 not regenerate interface-owned layers.  Its ``W`` remains a nominal width in
 structural layers: consumed support height is converted using the average
@@ -1035,8 +1049,13 @@ unequally spaced cycles, ``W`` is not an exact physical-height specification.
 The upper-anchor correction removes the artificial zero-skew Film-layer loss
 for rotated cycles.  Affected geometries and complex amplitudes can change;
 previously saved fit parameters remain historical records and should be
-explicitly reevaluated before reusing a fit.  Default uniformly spaced cycles
-with a zero native origin retain their existing anchor convention.
+explicitly reevaluated before reusing a fit. The fixed structural-reference
+correction also changes nonzero-skew predictions for uniformly spaced cycles:
+the former independent upper anchor followed the statistical mean while the
+lower anchor stayed fixed, producing depleted or overfilled interfaces under
+partial coupling. Saved parameter values are retained; stale generated-domain
+caches are rebuilt. No probability law, tail tolerance or density normalization
+is changed.
 
 The lower reference is also fixed independently of skew.  Write :math:`R` for
 its absolute cycle origin, :math:`j_0` for the first structural support index,
@@ -1755,13 +1774,33 @@ and the executed RuO2/TiO2 comparison.
 Complete finite-film dissolution
 -------------------------------------
 
+The executable :doc:`ctr_film_dissolution` example follows a RuO2/TiO2 film
+through five stages, from a flat film to zero remaining Ru inventory. It pairs
+native electron densities with coherent kinematic (00L) and (20L) CTRs and
+checks that the complete TiO2 interface remains protected.
+The :download:`notebook source <ctr_film_dissolution.ipynb>` can also be run
+locally from within the repository checkout.
+
 New ``SkellamSurface`` and ``PoissonSurface`` objects allow dissolution of all
-finite Films by default. Omitting ``boundary=`` or passing ``boundary=None`` is equivalent to
+finite Films below the target surface by default. Omitting ``boundary=`` or
+passing ``boundary=None`` is equivalent to
 ``boundary=FiniteFilmBoundary()``. To protect lower Films, pass
 ``FiniteFilmBoundary(films=("film",))`` with a connected upper sequence of names.
 The native surface owns its height parameters; native Film and interface
 components own all material, including their populations within mixed
-interfaces. The semi-infinite bulk remains protected. To model substrate
+interfaces. Bulk protection preserves the complete original substrate profile,
+including its mixed-interface populations above the nominal interface, in every
+dissolution state. It does not replace that profile with a sharp bare substrate
+or discard substrate populations according to the sign of their height.
+Protection also holds between evaluations with different surface distributions:
+width, asymmetry, mean and support changes do not translate or reweight the
+substrate. Averaging includes the protected records once at their original
+weights, and applies state probabilities only to removable populations.
+Explicit changes to substrate or substrate-interface parameters still rebuild
+that material. In DWBA its intrinsic material profile is protected; fields
+illuminating it can change when the overlying film changes.
+The same material assembly supplies density, kinematic amplitudes and DWBA
+atomic and optical profiles. To model substrate
 dissolution, represent its removable inventory as an explicit finite Film of
 substrate material; the default includes it automatically. Creating such a Film does not
 automatically subtract material from the bulk: the finite/bulk partition must
@@ -1806,18 +1845,35 @@ New default models save the boundary policy explicitly; automatic Film selection
 is resolved from the stack at evaluation time, including after a round trip.
 An empty explicit ``films=()`` is rejected rather than treated as unrestricted.
 
-Finite dissolution currently requires a single top surface, unit component
-weights, common outer domains and ordered interface-front heights. Configurations
-with nonmonotonic front heights, attached water, overlayers or depth-dependent
+Finite dissolution currently requires one rough surface, unit component
+weights and common outer domains within the dissolving stack, and ordered
+interface-front heights. Configurations
+with nonmonotonic front heights, attached water or depth-dependent
 crystallinity are unsupported and raise errors. Existing models using these
 features can retain their surface-correction behavior with ``boundary=LegacySurfaceBoundary()``.
 
+Native overlayers above the target surface remain outside the removable
+inventory. They are stacked at the realized mean front height in Angstrom and
+held at that common position in every height state, retaining their own weights
+and outer domains. This preserves the established common-overlayer approximation;
+they do not follow individual terraces. At complete exhaustion they remain above
+the protected material. Inventory and exposed-owner statistics describe the
+stack below the target surface, excluding these common overlayers.
+Separately stacked water retains its native analytic optical reference for
+coherent and ``state_specific`` DWBA. Shared ensemble fields with analytic water
+remain unsupported and raise explicitly.
+
 The frozen material-selective interface closure retains each surviving owner's
 native coordinates, occupancies and displacement factors. Removing LaNiO3 from
-a mixed interface leaves the existing STO populations and vacancies; it does
-not refill vacancies with STO. This is a static ensemble, not a model of
-dissolution kinetics, atomic relaxation or microscopic lateral interface
-correlations.
+a mixed interface leaves the original STO populations unchanged, including
+those above z=0. Its negative sharp-substrate reference terms must also remain:
+they encode replacement by the initial mixed/displaced interface, not substrate
+lost during dissolution. Consequently ``total_density - bare_substrate_density``
+is a signed correction and must not be labelled a standalone material density.
+Comparisons of substrate preservation must use the complete original substrate
+profile, not a different sharp-substrate reference. This is a static ensemble,
+not a model of dissolution kinetics, atomic relaxation or microscopic lateral
+interface correlations.
 
 The latent surface-height index H maps to ``max(H, exhausted_index)``. Its entire
 lower-tail probability accumulates at the fully exhausted state; it is not
@@ -1852,8 +1908,9 @@ the requested accuracy cannot be represented; it never clips a distribution.
 using the existing probability/first-moment budgets. It does not change legacy
 surface support or opt old models into dissolution.
 
-The first version rejects water/overlayers, overlapping interfaces, non-unit
-component weights, differing outer domains and depth-dependent surface/interface
+The first version rejects surface-attached water, overlapping interfaces, non-unit
+component weights or differing outer domains within the dissolving stack,
+and depth-dependent surface/interface
 crystallinity profiles. Common outer domains and constant native crystallinity
 remain supported. Fit parent parameters on the native surface; only the
 incoherent fraction belongs to ``SurfaceHeightDomains``. Existing legacy models

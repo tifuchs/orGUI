@@ -579,8 +579,19 @@ class SXRDCrystal:
             F += area_scale * weight * uc.F_uc(harray, karray, Larray)
         return F
 
-    def apply_stacking(self):
-        """Generate object positions and cyclic layers from bottom to top."""
+    def apply_stacking(self, *, _surface_heights=None):
+        """Generate positions in Angstrom and cyclic layers from bottom to top.
+
+        Components above a finite-boundary surface share its realized mean
+        front height. The private override lets its material planner bind
+        nominal geometry before computing that mean, without recursive planning.
+        """
+        if _surface_heights is None:
+            _surface_heights = {}
+            if any(isinstance(getattr(c, "boundary", None), FiniteFilmBoundary)
+                   for c in self.uc_surface_list_ordered[:-1]):
+                plan = self._surface_state_plan()
+                _surface_heights[plan.surface.name] = plan.overlayer_anchor_A
         component_ids = {id(c) for c in self.uc_surface_list}
         if any(
             id(getattr(c, "water", None)) in component_ids
@@ -643,6 +654,8 @@ class SXRDCrystal:
                     loc_new = uc.stacking_loc_absolute
                 else:
                     loc_new = uc.loc_absolute
+                if uc.name in _surface_heights:
+                    height_new = loc_new = _surface_heights[uc.name]
                 layer_number_new = uc.end_layer_number
                 layer_state_new = getattr(uc, "layer_state", None)
                 component_new = uc

@@ -6,6 +6,51 @@
 
 ## Context and decision
 
+### Complete substrate preservation (2026-11-08)
+
+The protected reference is the complete original substrate/interface profile,
+not pristine sharp bulk alone. The original frozen closure already retains
+that profile at every dissolution depth. Signed reference terms describe its
+initial departure from the sharp substrate; they are not substrate dissolution.
+The maintainer explicitly confirmed preservation of the original profile on
+both sides of z=0. An attempted bare-bulk-only correction removed the real
+upper substrate extension and was reverted before commit, together with its
+experimental `substrate_policy` API and erroneous refit warning. Density
+differences from a sharp reference do not establish invalidity of earlier fits.
+
+Regressions now isolate complete STO cells, including oxygen and signed
+references, and compare density and complex amplitude before, during and after
+removal. Exhaustion must recover the same original rough-substrate density and
+native DWBA scattering for both optical-reference and coherence policies.
+Removable substrate material still requires an explicit finite substrate Film.
+
+Protection is independence from parameters that do not belong to the substrate
+or its interface, not a permanently cached substrate. Across evaluations,
+surface width, asymmetry, mean, numerical support and unrelated Film/overlayer
+changes must retain the same protected coordinates, occupancies and intrinsic
+optical profile. Changes to the substrate/interface itself still regenerate
+those records. DWBA illumination can change with the overlying material even
+when the substrate material is unchanged.
+
+The averaged crystal now inserts protected records once with their original
+weights and applies probabilities only to removable populations. This removes
+distribution-dependent duplication and summation of signed substrate records.
+No interface coordinates, probability tolerances or scattering kernels change.
+Regressions check exact protected atom records, density, amplitude and optical
+profiles under unrelated parameter changes, as well as sensitivity to actual
+interface changes. An explicit finite substrate partition is checked against
+the original nominal density and, with bulk damping disabled, its complex
+amplitude after accounting for the common origin translation. The latter
+qualification matters: native numerical bulk damping is not applied to finite
+Film terms, so repartitioning at nonzero damping is not an exact kinematic
+amplitude identity. Density comparisons retain the saved damping setting,
+which does not enter their evaluation.
+
+Validation of this follow-up: 258 focused tests passed, covering the unchanged
+interface anchors and registration, native dissolution, boundaries, overlayers,
+substrate independence and finite-substrate partitioning. Local Ruff and diff
+whitespace checks passed. No geometry-test expectations were changed.
+
 Keep `Film`, `EpitaxyInterface`, `SkellamSurface` and `PoissonSurface` as the
 structural model. Make complete finite-material dissolution an explicit boundary
 policy of a native surface within that stack. Use `SurfaceHeightDomains` for
@@ -233,8 +278,10 @@ zeroing its fit parameters, or catching and suppressing the old finite-support
 exception. Internal geometry-only binding must have an explicit contract and
 must not recursively invoke statistical scattering.
 
-Retain one top active finite-boundary surface initially. Reject unsupported
-overlayers, attached water, overlapping interfaces, incompatible cycles,
+Retain one active finite-boundary surface initially. Overlayers above it are
+common native components at the realized mean front, outside the removable
+inventory; they retain their own weights and domains. Reject unsupported
+attached water, overlapping interfaces, incompatible cycles,
 non-unit component weights, differing outer domains and depth-dependent order
 where the current finite-material engine does not define them. The design is
 general across native Poisson/Skellam families and selected finite Films; it
@@ -486,6 +533,27 @@ Related records: [original physical implementation](finite_film_dissolution_impl
 [measured implementation](finite_film_dissolution_performance.md).
 
 ## Implementation and validation
+
+### Common-overlayer regression fix
+
+The original dissolution engine rejected any component above its target. Making
+that engine the native default exposed a regression: the established native
+surface/domain model already allowed a common overlayer at the mean surface
+height. The planner now partitions the stack at the selected surface, computes
+the realized mean from the bounded distribution, and binds the suffix with
+native stacking at that height. Suffix components remain common in all states;
+they are not included in removable-film selection or material inventory audits.
+The original native components retain their scattering, density, weights,
+outer domains and optical references. Kinematic evaluation still computes the
+bulk and common suffix once. Separately stacked analytic water retains its
+native reference; shared analytic-water ensemble fields remain unsupported.
+
+Validation: 26 overlayer regressions cover both height laws, native Film and
+UnitCell caps, zero-crystallinity caps, separate layered/step water, fixed mean
+placement through exhaustion, native complete-state DWBA references, mixing,
+weights/domains, persistence and one-bulk/no-optics kinematic evaluation. Across
+the focused scattering, water, optical and native API runs, 619 unique tests
+and 118 subtests passed. Ruff and diff whitespace checks passed.
 
 ### Default-policy follow-up
 

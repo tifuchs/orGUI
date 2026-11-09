@@ -746,6 +746,8 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
     Stacking continues the structural-layer cycle of the component below,
     including cyclic rotations and explicit ``layer_transition`` mappings.
+    Both independent lattices register structural index zero to that stack;
+    skew changes occupancies, not their independent lattice phases.
     The ideal upper anchor interpolates the actual ordered layer intervals;
     layer identifiers do not specify distances. The Film above measures its
     nominal width from :attr:`stacking_loc_absolute` and starts its remaining
@@ -830,6 +832,11 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
 
     def _owned_components(self):
         return [self.uc_top, self.uc_bottom, *self.crystallinity_profiles.values()]
+
+    def _repeat_signature(self):
+        # Saved generated domains used a mean-centered upper lattice before
+        # this convention. Rebuild those caches without changing parameters.
+        return ("fixed_structural_origin_v1", super()._repeat_signature())
 
     def _order_factor(self, side, offset, depth):
         profile = self.crystallinity_profiles.get(side)
@@ -1247,9 +1254,10 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
     def stacking_loc_absolute(self):
         """Return the translated film-side boundary in Angstrom.
 
-        The statistical reference remains at :attr:`loc_absolute`; lower
-        lattice registration is derived separately from the underlying stack.
-        The strain displacement accumulated upward from
+        Both lattices register to the underlying stack. The shift from the
+        upper statistical width reference to that fixed structural reference
+        preserves the requested Film inventory. That shift, the displacement
+        accumulated upward from
         the fixed bulk and the explicit film offset translate the film-side
         boundary. A Film uses this location as the origin of its requested
         total width, while
@@ -1260,6 +1268,7 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             self.createInterfaceCells()
         return (
             self.loc_absolute
+            + self._interface_reference_shift
             + self._strain_coupling_displacement
             + self._offset_absolute
         )
@@ -1309,8 +1318,9 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
     def createInterfaceCells(self):
         """Generate interface domains and absolute boundaries in Angstrom.
 
-        The ideal upper anchor follows physical cyclic layer intervals. The
-        separate integer-repeat lower-bulk registration is retained.
+        Both independent lattices use the fixed lower-stack structural origin.
+        Physical cyclic intervals also locate the statistical Film-width
+        reference, which is separate from lattice registration.
 
         :raises ValueError:
             If upper layer intervals are invalid or the statistical anchor
@@ -1542,13 +1552,22 @@ class EpitaxyInterface(_LayerStackingMixin, LinearFitFunctions):
             # A domain translation already includes its layer-dependent
             # registry offset. Transform a native point within that layer,
             # not the whole-cycle remainder, to avoid counting it twice.
-            ideal_top_loc = self._ideal_top_anchor(
+            statistical_top_loc = self._ideal_top_anchor(
                 loc_rescaled, ideal_top, top_layer_space,
             )
             # Support indices are absolute structural indices on a fixed
             # lower lattice. Moving the support start by a complete cycle
             # therefore only changes the local origin, never the registry.
             lower_origin = self._lower_reference_origin()
+            # Complementary occupancies belong to the same structural index.
+            # Register index zero on both independent lattices, rather than
+            # anchoring only the upper lattice at the statistical mean. The
+            # latter separates the materials whenever skew and partial strain
+            # coupling coexist, even for an identical-material interface.
+            ideal_top_loc = self._ideal_top_anchor(
+                -unitcells[0], ideal_top, top_layer_space,
+            ) - lower_origin
+            self._interface_reference_shift = statistical_top_loc - ideal_top_loc
             ideal_bottom_loc = -unitcells[0] / n_layers * a3_bottom - lower_origin
 
             offset_absolute = self._offset_absolute
@@ -2605,7 +2624,10 @@ class FiniteFilmBoundary:
 
     ``films=None`` selects all finite Films in the bound stack. An explicit
     sequence names a connected upper sequence of existing finite Films.
-    Bulk is protected; substrate removal requires an explicit finite Film.
+    Bulk protection retains the complete original substrate/interface profile,
+    including substrate populations above the nominal interface. Its signed
+    reference terms encode the initial structure, not dissolution. Substrate
+    removal requires an explicit finite Film.
     Exhausted probability accumulates at the last remaining physical state.
     Interfaces retain their geometry and lose only selected material owners.
     """
@@ -3199,8 +3221,8 @@ class RoughSurface(_LayerStackingMixin, LinearFitFunctions):
     def stacking_height_absolute(self):
         """Return the expected surface height in Angstrom."""
         if self._has_finite_boundary():
-            # Geometry binding uses the nominal boundary; realized heights
-            # belong to the complete stack's state plan. Overlayers are rejected.
+            # Lower-material binding uses the nominal boundary. The complete
+            # crystal resolves the realized mean separately for its overlayers.
             return self.below_H
         return self.mean_height_absolute
 

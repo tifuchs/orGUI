@@ -185,19 +185,21 @@ def test_default_native_boundary_and_unpublished_api_removal():
                        height_support=HeightSupport())
 
 
-def test_native_boundary_rejects_overlayer_and_protects_bulk():
+def test_native_boundary_retains_overlayer_and_protects_bulk():
     crystal = _native(SkellamSurface, RecenteredSkellamProfile(offset=-50))
     overlayer = Film(
         copy.deepcopy(crystal["film"].unitcell), width_layers=2, name="cap"
     )
-    invalid = SXRDCrystal(
+    capped = SXRDCrystal(
         crystal.uc_bulk,
         *crystal.uc_surface_list,
         overlayer,
         stacking=np.array([1, 2, 3]),
     )
-    with pytest.raises(ValueError, match="Overlayers"):
-        invalid.F(*_hkl())
+    capped.setEnergy(10000)
+    assert_allclose(capped.F(*_hkl()), _flat(2).F(*_hkl()), atol=1e-10)
+    capped.apply_stacking()
+    assert capped["cap"].pos_absolute == 0
     assert_allclose(crystal.F(*_hkl()), _flat(0).F(*_hkl()), atol=1e-10)
     stats = crystal.surface_height_statistics(surface="surface")
     assert stats["parent_mean_index"] == -50

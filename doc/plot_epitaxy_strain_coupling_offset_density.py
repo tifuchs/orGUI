@@ -85,10 +85,11 @@ def _make_model(
 
 
 def _densities(bulk, interface, film):
+    """Include exact source-subtraction domains in the lower density."""
     bottom = np.real(bulk.zDensity_G_asbulk(Z, 0, 0))
     bottom += sum(
         np.real(layer.zDensity_G(Z, 0, 0))
-        for layer in interface.bottom_layers
+        for layer in (*interface.bottom_layers, *interface._reference_layers)
     )
     top = sum(
         np.real(layer.zDensity_G(Z, 0, 0))

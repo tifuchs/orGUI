@@ -5,6 +5,7 @@ API
    :maxdepth: 1
 
    ctr_data_workflow
+   ctr_film_dissolution
    ctr_structure_factors
    dwba
    ctr_resolution

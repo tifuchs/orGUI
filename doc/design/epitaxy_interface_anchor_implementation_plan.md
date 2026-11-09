@@ -1,6 +1,241 @@
 # Epitaxy interface anchor implementation plan
 
 Status: Stages 1 and 2 implemented; final Stage 2 validation recorded below.
+
+### Withdrawn common-origin experiment (2026-11-08)
+
+An uncommitted density investigation translated the independent upper lattice
+so its statistical mean coincided with the lower mean. That changed the
+established coordinate convention and propagated a translation into the Film
+above it. The original signed-atom and upper-anchor tests were then modified
+to expect that new geometry; passing those modified tests did not establish
+compatibility with the validated stage-2 implementation.
+
+The common-origin experiment is withdrawn. The original geometry tests are
+restored without changing their expected positions, and the corresponding
+upper-anchor, lower-registration and Film stacking implementation is restored.
+The dissolution and overlayer work must preserve this geometry. Any remaining
+interface-density concern requires a separate diagnosis against the unchanged
+native baseline; density plots alone do not justify moving either lattice.
+Experimental scripts and test expectations are archived under the ignored
+`output/native_surface_refactor/withdrawn_common_origin` directory. Earlier
+claims that this experiment established a correction or invalidated saved fits
+are withdrawn.
+
+Restoration validation: the unchanged anchor/registration tests reproduced
+21 failures with the experimental code (84 passed). With the committed
+interface implementation restored, the combined original geometry, CTR,
+substrate-preservation, overlayer and boundary suites passed 328 tests and
+81 subtests. Four additional nominal-state DWBA comparisons against the native
+crystal passed; local Ruff and whitespace checks passed. A saved-model replay
+matched all 170 sampled original total-density values exactly. Its nominal
+state matched unchanged native density within 8.9e-16 electrons/Angstrom^3 and
+complex amplitude within 2.4e-13 electrons. Complete STO density was identical
+at nominal, partial and exhausted states. This restores the baseline; it does
+not settle the remaining concern about the initial interface profile.
+
+### Proposed fixed structural reference after history audit (2026-11-08)
+
+Status at proposal: diagnosis and isolated-process prototype only. The
+subsequent authorized implementation and validation are recorded below.
+
+The relevant commits on master are:
+
+- `1e54f7d` (2026-07-13), "fix: gap in zDensity": restored full upper
+  occupancy because Film already starts above generated interface support.
+- `d5fdb3d` (2026-07-28), "anchor film correctly to the bulk at lower end":
+  anchored the coupled field to the lower side and propagated its displacement
+  into the Film-side width reference.
+- `994a616` (2026-07-29), "extend epitaxy interface strain coupling":
+  generalized independent/coupled lattices and the explicit offset field.
+- `9b1ba8d` (2026-08-26), "classify EpitaxyInterface cells by their own
+  occupancy": replaced the mean-index subtraction mask with a CDF threshold.
+- `c256ab6` (2026-08-26), "register EpitaxyInterface bulk domains on whole
+  unit cells": corrected a layer/cell conversion and rounded the lower anchor.
+- `d020372` (2026-10-16), "preserve cyclic epitaxy anchors and lower
+  registration": removed skew-dependent lower rounding, used actual source
+  subtraction, and corrected cyclic upper-anchor interpolation. The lower
+  origin became fixed, while the independent upper origin remained tied to
+  the Skellam mean. This combination leaves the present partial-coupling hole.
+
+The August regressions compare neighboring skew values (1e-4 and a selected
+structural-layer crossing), partly using absolute density. The October atom
+oracle explicitly centers the upper lattice at the statistical mean while
+fixing the lower lattice. These establish continuity and consistency with that
+formula, not closure of a mixed interface in physical space. Do not restore
+the old subtraction masks or rounded lower origin: those have separate known
+failures.
+
+The RuO2/TiO2 notebook uses symmetric interfaces. With its actual executable
+width of 10 Angstrom, skew -0.8 and coupling 0.16372235324140877, the current
+native bulk/interface/Film model has a one-repeat mean density of 0.424273
+against bulk TiO2 1.189340 electrons/Angstrom^3. Positive skew yields excess
+density instead. No dissolution, DWBA, surface roughness or explicit offset is
+needed. A TiO2/TiO2 control falls to 29.1% of its plain-crystal density, while
+full coupling reproduces the plain crystal to about 2e-12 electrons/Angstrom^3.
+
+Historical interface-class replays against the current UnitCell evaluator
+reproduce the progression: the August whole-cell anchor has a partial-coupling
+minimum around 81% of bulk for this fixture; October and HEAD both give 36%.
+These replays isolate interface algebra; they are not full historical builds.
+Scripts and numerical evidence are under ignored `output/native_surface_refactor`.
+
+Proposed correction:
+
+1. Use the existing lower-stack registry to define structural index zero.
+   Anchor both independent cyclic lattice maps at that same index. Interpolate
+   real cyclic intervals, preserving nonuniform spacing and explicit transitions.
+   At zero coupling, changing skew must not slide either independent lattice.
+2. Keep the raw Skellam law, its occupancies and tail policy unchanged. Skew
+   then changes which registered structural layers are occupied. Do not align
+   two separate statistical means, recenter the law silently, clip densities,
+   or refill missing material by changing occupancies.
+3. Retain the actual-source signed subtraction and the lower coupled field.
+   Correct upper registration consistently in all three coordinates. Check
+   oblique repeats explicitly; matching z alone is insufficient.
+4. Preserve Film inventory and continuity: if delta is the change from the old
+   upper statistical anchor to the fixed-layer anchor (in Angstrom), include
+   delta in the Film nominal reference while recomputing the strain displacement
+   relative to the new upper lattice. This prevents the new anchor from silently
+   adding/removing a Film layer. It does change affected physical upper positions.
+5. Keep this correction separate from dissolution. The complete substrate
+   generated by the chosen substrate/interface parameters remains invariant
+   under changes to unrelated surface-distribution parameters.
+
+An isolated-process prototype using the fixed structural anchor eliminates the
+broad RuO2/TiO2 depletion and overlap over skew -0.8/0/+0.8 and coupling
+0/0.1637/0.5/1. Identical-material coupling sweeps agree to 1.5e-12 in density
+and 4.8e-12 in complex amplitude. This is preliminary evidence, not release
+validation. In contrast with the withdrawn common-statistical-mean experiment,
+the independent upper registry is fixed at structural index zero, not adjusted
+to track a lower-material statistical mean through a different lattice map.
+
+Required validation before implementation can be accepted:
+
+- Add a failing physical closure test against an independently constructed
+  plain crystal, with identical materials, zero offset, both skew signs and
+  all coupling regimes. Compare raw density, atom coordinates, signed inventory,
+  complex F and native DWBA; average-density plots are diagnostic only.
+- Preserve original continuity, exact lower-subtraction, cyclic-rotation,
+  support-convergence, persistence and overlayer tests. Identify the existing
+  upper-mean-anchor expectations individually as the obsolete convention;
+  review their replacements against the independent physical reference before
+  modifying them. A green suite obtained by copying the new implementation's
+  expectations is not sufficient.
+- Cover unequal intervals, explicit layer transitions, oblique translations,
+  finite registry Films, all domain rotations, nonzero offsets, forward/reverse
+  parameter updates and support changes. Check Film counts and inventories.
+- Validate native kinematic and DWBA paths, shared/state-specific fields,
+  coherent/incoherent mixing and complete-STO preservation during dissolution.
+- Recompute RuO2/TiO2 and the actual LaNiO3 density and atom-position diagnostics
+  with saved parameters held fixed. Do not silently refit or migrate parameters.
+  Explicitly document changed predictions and invalidate stale derived caches.
+
+### Fixed structural reference implemented (2026-11-09)
+
+The authorized correction is implemented in `EpitaxyInterface`. Both
+independent lattice maps now register structural index zero to the existing
+lower-stack reference. The Film width reference includes the corresponding
+translation, preserving generated Film counts and interface occupancies.
+The repeat signature invalidates cached domains from the previous convention
+without migrating saved parameter values. This is distinct from the withdrawn
+experiment: at zero coupling, skew cannot translate either independent lattice.
+
+Before changing production code, the new independent physical checks produced
+50 failures and 23 passes (the cache test was excluded). The completed new
+suite contains 90 tests, including plain-Film density, complex-amplitude and
+native-DWBA comparisons, unequal cyclic layers, oblique repeats, nonzero
+offsets and cache rebuilding. Original continuity and lower-subtraction tests
+were retained. Three existing expectation sites were deliberately updated:
+the cyclic anchor test separates the statistical width reference from the
+fixed structural anchor; the signed-atom oracle enumerates the upper lattice
+from index zero; and one Film stacking assertion includes the reference shift.
+These changes followed the failing independent physical tests, rather than
+using a plot or a rewritten oracle alone as evidence.
+
+Validation passed 824 tests and 81 subtests across the focused geometry,
+dissolution, substrate-preservation, overlayer, native-DWBA, optical-profile,
+multilayer and coherent/incoherent suites. Ruff on all of
+`orgui/datautils/xrayutils` and whitespace checks passed. Existing NumPy/spglib
+deprecation warnings remain unrelated to this change. The Sphinx HTML build
+succeeded with four warnings in unchanged DWBA/geometry text, notebook toctree
+membership and an older release-note link; no warning points to the new topic
+text. Importing the documentation also emitted the environment's pyFAI
+strided-array diagnostic.
+
+At unchanged saved LaNiO3 parameters, complete lower/reference domain arrays
+are bitwise unchanged, upper occupancies are unchanged, and the generated Film
+count remains 22. The complete STO density changes by at most 8.0e-14
+electrons/Angstrom^3 from summation roundoff. The corrected upper geometry
+removes the broad interface depletion in both the LaNiO3 model and the skewed,
+partially coupled RuO2/TiO2 control. No density clipping or tail-policy changes
+are used. The LaNiO3 mean front changes from 52.519410 to 45.480294 Angstrom;
+affected scattering predictions therefore change and require reassessment.
+No fit was rerun and the source model files were not modified.
+
+Numerical records and the before/after plot are in ignored
+`output/native_surface_refactor/fixed_reference_real_model_inventory.json`,
+`fixed_reference_corrected_density_audit.json` and
+`corrected_interface_density_comparison.png`. Raw native density is shown
+separately from the explicitly labeled one-repeat averages used to make the
+broad depletion visible.
+
+### Full CTR and notebook validation (2026-11-09)
+
+All 38 `test_CTR*.py` modules passed: 1,548 tests and 193 subtests in
+265.21 seconds. Three optional optimizer/trace tests skipped because `arviz`
+is not installed. The separate scattering-factor cache suite passed all three
+tests. No production code or test expectations were changed in this validation
+round. Ruff on the scientific core and the documentation figure generator
+passed.
+
+The strain-coupling notebook in `examples/CTR` was executed in full, including
+its five-value coupling sweep and both five-value offset sweeps. The worktree
+version uses a 30 Angstrom interface and has no stored outputs; the edited
+notebook in the main checkout uses 10 Angstrom while retaining a 3 nm title.
+Both versions were executed as copies, replacing only the widget plotting
+backend with inline output and adding result-capture cells. The original
+notebooks, parameters and stored figures were not overwritten.
+
+For each width, a separate process replayed HEAD's pre-correction
+`EpitaxyInterface` class using the same native evaluators. All 15 cases per
+width have bitwise-identical sampled CTR magnitudes and native densities with
+the corrected class. These symmetric, zero-skew examples are unchanged by
+the fixed-reference correction. This is an isolated interface comparison,
+not a full historical environment replay, and does not establish pixel-level
+identity to older saved notebook images.
+
+The documentation PNG generator exposed a separate pre-existing omission:
+its manual lower-density sum included `bottom_layers` but not the exact
+signed source-subtraction `_reference_layers`. The uncorrected generator
+differed from native density by up to 6.684334 electrons/Angstrom^3 in the
+checked zero-offset, half-coupling case. Including the reference layers fixes
+that component sum. All nine coupling/offset cases then agree with native
+`zDensity_G` to floating-point roundoff. The pre-correction and corrected
+interface classes already produced bitwise-identical arrays in that script;
+the generator error therefore predates the fixed-reference change.
+
+Executed notebook copies, numerical arrays, original embedded images and
+separately regenerated documentation figures are under ignored
+`output/native_surface_refactor/notebook_validation`; `validation_summary.json`
+records the comparisons. Full pytest results are in
+`output/native_surface_refactor/all_ctr_nov09.log` and `.xml`. The checked-in
+documentation PNG was preserved; regenerated output is not pixel-identical
+to that historical raster.
+
+After replay onto master `301974e`, the full CTR/cache run passed 1,557 tests
+and 193 subtests, skipped three optional ArviZ tests, and exposed one stale
+optical snapshot assertion. An isolated replay of master's interface class
+reproduced the same failure and a bitwise-identical optical array: master's
+empty-bookkeeping removal had changed its row count. The test now locates
+the existing expected physical coordinate explicitly and checks that the old
+zero-weight z=10 row is absent. Its physical density and complex-amplitude
+expectations remain unchanged; no production calculation was modified for
+this compatibility adjustment. The rerun of CTR calculation, optical-position
+and fixed-reference suites passed 260 tests and 81 subtests; Ruff passed.
+
+## Original staged implementation record
+
 Assessment date: 2026-10-16.
 Assessed revision: `2f7b1b63df79a988f7b80791b503e1fb7b49551a`.
 The remote was fetched during assessment; local `master` and `origin/master`
