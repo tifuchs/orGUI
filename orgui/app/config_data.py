@@ -77,6 +77,7 @@ class CorrectionState:
     use_background: bool = False
     use_solid_angle: bool = False
     use_polarization: bool = False
+    polarization_mode: str = "pixel"
     # Tri-state on purpose: ``None`` is "this configuration predates the
     # switch being stored", which must leave the GUI as it is rather than
     # silently turning the correction off.
@@ -518,6 +519,7 @@ def corrections_to_nxdict(state):
             "use_background": state.use_background,
             "use_solid_angle": state.use_solid_angle,
             "use_polarization": state.use_polarization,
+            "polarization_mode": state.polarization_mode,
             "use_lorentz": state.use_lorentz,
             "use_footprint": state.use_footprint,
             "use_normalization": state.use_normalization,
@@ -649,6 +651,7 @@ def corrections_from_nxdict(nxdict):
         "use_background": bool(switches.get("use_background", False)),
         "use_solid_angle": bool(switches.get("use_solid_angle", False)),
         "use_polarization": bool(switches.get("use_polarization", False)),
+        "polarization_mode": str(switches.get("polarization_mode", "pixel")),
         "repair_masked_pixels": bool(repair.get("enabled", False)),
         "repair_use_pyfai_gaps": bool(repair.get("use_pyfai_gaps", True)),
         "repair_gap_size_px": int(repair.get("gap_size_px", 1)),
@@ -1293,6 +1296,7 @@ class ConfigData:
                 is not None,
                 use_solid_angle=bool(options.get("solid_angle", False)),
                 use_polarization=bool(options.get("polarization", False)),
+                polarization_mode=options.get("polarization_mode", "pixel"),
                 use_lorentz=bool(options.get("lorentz", False)),
                 use_footprint=bool(options.get("footprint", False)),
                 use_normalization=bool(options.get("normalization", False)),
@@ -1434,6 +1438,7 @@ class ConfigData:
                 "mask": self.corrections.use_mask,
                 "solid_angle": self.corrections.use_solid_angle,
                 "polarization": self.corrections.use_polarization,
+                "polarization_mode": self.corrections.polarization_mode,
                 "lines": self.roi.lines,
             }
             # Only switches this configuration actually recorded. A file

@@ -64,6 +64,9 @@ def test_close_and_reopen_preserves_contents_and_settings(qapp):
         qapp.processEvents()
         groups = tuple(dialog.findChildren(qt.QGroupBox))
         selector.useSolidAngleBox.setChecked(True)
+        selector.usePolarizationBox.setChecked(True)
+        assert selector.polarizationMode.currentData() == "pixel"
+        selector.polarizationMode.setCurrentIndex(1)
 
         assert not dialog.testAttribute(qt.Qt.WA_DeleteOnClose)
         assert {group.title() for group in groups} == {
@@ -82,6 +85,8 @@ def test_close_and_reopen_preserves_contents_and_settings(qapp):
         assert tuple(dialog.findChildren(qt.QGroupBox)) == groups
         assert all(group.isVisibleTo(dialog) for group in groups)
         assert selector.useSolidAngleBox.isChecked()
+        assert selector.polarizationMode.currentData() == "center"
+        assert selector.polarizationMode.isEnabled()
     finally:
         dialog.deleteLater()
         main_window.deleteLater()

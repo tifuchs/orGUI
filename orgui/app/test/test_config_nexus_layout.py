@@ -50,6 +50,7 @@ def _populated_corrections():
         use_background=True,
         use_solid_angle=True,
         use_polarization=True,
+        polarization_mode="center",
         use_lorentz=True,
         use_footprint=True,
         use_normalization=False,

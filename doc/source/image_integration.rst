@@ -449,6 +449,28 @@ while the arm is at its calibrated position, so a fixed-arm scan is unchanged.
 The reciprocal-space reconstruction applies the polarization per pixel and
 does not carry this correction.
 
+In **Corrections and normalization → Detector signal**, polarization offers
+two ROI integration methods:
+
+* **Per-pixel polarization (default)** preserves the existing valid-pixel
+  average and arm correction. Stationary integration collects polarization
+  sums alongside image extraction. Mask-repair acceptance is prepared once,
+  avoiding a second serial repair pass after the integration progress ends.
+* **ROI center polarization (approximate)** evaluates one inverse polarization
+  factor at the signal ROI center, using calibrated pixel coordinates and
+  each frame's incidence and detector arm angles. The same scalar scales
+  the background-subtracted signal and its uncertainty. It skips the full
+  polarization map and the sampled ROI arm correction. This ignores
+  variation across the signal and background ROIs; the error depends on ROI
+  angular extent and can grow near a polarization minimum.
+
+Both stationary and rocking ROI extraction support these methods. The
+selection is saved with the configuration; older configurations default to
+per-pixel polarization. Scripts select the approximation with
+``set_integration_options({"polarization": True, "polarization_mode": "center"})``;
+use ``"pixel"`` for the default. Reciprocal-space reconstruction continues
+to apply per-pixel polarization independently of this ROI-only setting.
+
 Fitted Local Background
 ~~~~~~~~~~~~~~~~~~~~~~~
 

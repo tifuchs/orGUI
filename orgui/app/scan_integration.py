@@ -557,7 +557,8 @@ def _integrate_stationary_job(context, lines, geometry_provider):
             for frame in range(frame_count):
                 yield (
                     frame,
-                    tuple(array[frame, 2 * index : 2 * index + 2] for array in arrays),
+                    tuple(array[frame, 2 * index : 2 * index + 2]
+                          for array in arrays[:-1]),
                 )
 
         def save(data, description, line=line):
@@ -572,6 +573,7 @@ def _integrate_stationary_job(context, lines, geometry_provider):
             counters=counter_rows(),
             geometry=trajectories[index],
             line=line,
+            polarization_counters=arrays[-1][:, 2 * index : 2 * index + 2],
         )
         if result["status"] != "success":
             result["completed_lines"] = completed
@@ -971,6 +973,61 @@ def _rocking_arm_snapshot(gamma_arm, delta_arm, curve_shape):
     }
 
 
+def _polarization_mode(context):
+    if not hasattr(context, "scanSelector"):
+        return "pixel"
+    mode = context.scanSelector.get_integration_options().get(
+        "polarization_mode", "pixel"
+    )
+    if mode not in ("pixel", "center"):
+        raise ValueError(f"Unknown polarization mode: {mode!r}")
+    return mode
+
+
+def _prepare_polarization_counter(correction, mask, repair=None,
+                                  row_gaps=None, col_gaps=None):
+    """Capture fixed correction validity once, then sum only ROI slices.
+
+    The historical polarization pass repaired an all-ones image for every
+    frame. Its acceptance therefore depends only on mask/repair geometry,
+    not measured counts. Compute that same acceptance once per job. Repaired
+    pixels contribute to the center only; background pixels remain masked.
+    """
+    valid = ~mask
+    center_valid = valid
+    if correction is not None and repair is not None:
+        repaired = np.zeros(mask.shape, dtype=bool)
+        _roi_sum_accel.repair_masked_pixels_inplace(
+            np.ones(mask.shape, dtype=np.float64), mask, row_gaps, col_gaps,
+            repaired, repair.max_component_pixels, repair.max_span,
+            repair.radius, repair.min_valid_neighbors,
+        )
+        center_valid = valid | repaired
+    if correction is not None:
+        finite = np.isfinite(correction)
+        valid = valid & finite
+        center_valid = center_valid & finite
+
+    def region_sum(region, available):
+        """Sum a correction over the accepted pixels of one ROI."""
+        selection = region[::-1]
+        accepted = available[selection]
+        pixels = np.count_nonzero(accepted)
+        summed = (pixels if correction is None
+                  else np.sum(correction[selection][accepted]))
+        return summed, pixels
+
+    def count(center, backgrounds):
+        """Return center and background correction sums and pixel counts."""
+        result = np.zeros(4, dtype=np.float64)
+        result[:2] = region_sum(center, center_valid)
+        for region in backgrounds:
+            result[2:] += region_sum(region, valid)
+        return result
+
+    return count
+
+
 def _correction_region_counters(correction, mask, center, backgrounds):
     """Sum one correction array over the exact valid ROI pixels.
 
@@ -1213,6 +1270,9 @@ def _polarization_arm_factor(self, dc, row, column, row_size, column_size, alpha
     reference for the default calibration and therefore leaves the
     correction at one.
 
+    In ROI-center mode the extraction maps contain no polarization. Return
+    the full inverse polarization at the center instead of an arm ratio.
+
     :param dc: The calibrated
         :class:`~orgui.datautils.xrayutils.DetectorCalibration.Detector2D_SXRD`.
     :param row: Region centre row per frame, in pixels (orGUI's ``y``).
@@ -1224,6 +1284,10 @@ def _polarization_arm_factor(self, dc, row, column, row_size, column_size, alpha
     :rtype: numpy.ndarray
     """
     gamma_arm, delta_arm = self.getArmAngles()
+    if _polarization_mode(self) == "center":
+        return detector_corrections.roi_center_inverse_polarization(
+            dc, row, column, alpha, gamma_arm, delta_arm
+        )
     row, column, row_size, column_size, alpha, gamma_arm, delta_arm = (
         np.broadcast_arrays(
             np.asarray(row, dtype=np.float64),
@@ -1295,7 +1359,8 @@ def _polarization_arm_factor(self, dc, row, column, row_size, column_size, alpha
     return factor
 
 
-def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None):
+def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None,
+                               polarization_counters=None):
     """Integrate the active ROI workflow and save data to the database.
 
     The active tab in ``self.scanSelector.scanstab`` selects the
@@ -1404,6 +1469,7 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
 
     use_solid_angle = self.scanSelector.useSolidAngleBox.isChecked()
     use_polarization = self.scanSelector.usePolarizationBox.isChecked()
+    pixel_polarization = use_polarization and _polarization_mode(self) == "pixel"
     corr = use_solid_angle or use_polarization
 
     # One definition of the per-pixel factors, shared with the rocking
@@ -1415,13 +1481,11 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
     C_arr = detector_corrections.pixel_factors(
         dc,
         solid_angle=use_solid_angle,
-        polarization=use_polarization,
+        polarization=pixel_polarization,
     )
     if C_arr is None:
         C_arr = np.ones(dc.detector.shape, dtype=np.float64)
-    P_arr = detector_corrections.pixel_factors(dc, polarization=use_polarization)
-    if P_arr is None:
-        P_arr = np.ones(dc.detector.shape, dtype=np.float64)
+    P_arr = detector_corrections.pixel_factors(dc, polarization=pixel_polarization)
 
     hkl_del_gam_s1, hkl_del_gam_s2 = (
         geometry if geometry is not None else self.getROIloc()
@@ -1856,6 +1920,25 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
                                 Carr_counters[intersect, 3] = bgpixel1
                         return all_counters, Carr_counters
 
+    if polarization_counters is None:
+        polarization_counters = np.zeros((nodatapoints, 2, 4), dtype=np.float64)
+        polarization_count = _prepare_polarization_counter(
+            P_arr, mask, repair if HAS_ACCEL and repair_enabled else None,
+            row_gaps, col_gaps,
+        )
+        image_worker = sumImage
+
+        def sumImage(i):
+            """Collect image and polarization counters in the same worker pass."""
+            result = image_worker(i)
+            for intersect, trajectory in enumerate((hkl_del_gam_1, hkl_del_gam_2)):
+                if trajectory[i, -1]:
+                    coordinates = trajectory[i, 6:8]
+                    polarization_counters[i, intersect] = polarization_count(
+                        self.intkey(coordinates), self.bkgkeys(coordinates)
+                    )
+            return result
+
     cancelled = False
     try:
         results = (
@@ -1931,44 +2014,7 @@ def _integrate_stationary_line(self, *, counters=None, geometry=None, line=None)
     roi_size1 = roi_hsize1_a * roi_vsize1_a
     roi_size2 = roi_hsize2_a * roi_vsize2_a
 
-    # Polarization-only factors must be accumulated over the same valid
-    # pixels as the combined correction. This creates the direct CTR
-    # photon branch and avoids estimating it later as mean(S*P)/mean(S).
-    polarization_counters = np.zeros((nodatapoints, 2, 4), dtype=np.float64)
-    if use_polarization and HAS_ACCEL and repair_enabled:
-        for i in range(nodatapoints):
-            if not dataavail[i]:
-                continue
-            dummy_counters = np.zeros((2, 4), dtype=np.float64)
-            _roi_sum_accel.processImage_repair_Carr(
-                np.ones(image.img.shape, dtype=np.float64),
-                mask,
-                np.ascontiguousarray(P_arr, dtype=np.float64),
-                *roi_lists_accel[i],
-                row_gaps,
-                col_gaps,
-                dummy_counters,
-                polarization_counters[i],
-                repair.max_component_pixels,
-                repair.max_span,
-                repair.radius,
-                repair.min_valid_neighbors,
-            )
-    else:
-        for i in range(nodatapoints):
-            for intersect, hkl_del_gam_current in enumerate(
-                (hkl_del_gam_1, hkl_del_gam_2)
-            ):
-                if not hkl_del_gam_current[i, -1]:
-                    continue
-                coordinates = hkl_del_gam_current[i, 6:8]
-                polarization_counters[i, intersect] = _correction_region_counters(
-                    P_arr,
-                    mask,
-                    self.intkey(coordinates),
-                    self.bkgkeys(coordinates),
-                )
-
+    # Already accumulated by the image workers, including shared-line jobs.
     P_croi1 = integration_corrections.roi_mean_correction(
         polarization_counters[:, 0, 0], polarization_counters[:, 0, 1]
     )
@@ -2843,6 +2889,7 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
 
     use_solid_angle = self.scanSelector.useSolidAngleBox.isChecked()
     use_polarization = self.scanSelector.usePolarizationBox.isChecked()
+    pixel_polarization = use_polarization and _polarization_mode(self) == "pixel"
     corr = use_solid_angle or use_polarization
     mask = (
         np.array(imgmask, dtype=bool, order="C", copy=True)
@@ -2859,13 +2906,11 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
     C_arr = detector_corrections.pixel_factors(
         dc,
         solid_angle=use_solid_angle,
-        polarization=use_polarization,
+        polarization=pixel_polarization,
     )
     if C_arr is None:
         C_arr = np.ones(dc.detector.shape, dtype=np.float64)
-    P_arr = detector_corrections.pixel_factors(dc, polarization=use_polarization)
-    if P_arr is None:
-        P_arr = np.ones(dc.detector.shape, dtype=np.float64)
+    P_arr = detector_corrections.pixel_factors(dc, polarization=pixel_polarization)
 
     def fill_counters(image, pixelavail, key, bkgkey):
         """CLI-safe: sum one center ROI and its background ROIs."""
@@ -3119,38 +3164,31 @@ def _prepare_rocking_worker(self, xylist, rois, *, frame_rois=None):
                 return all_counters, Carr_counters, BgImg_counters
             return all_counters, Carr_counters
 
+    polarization_count = _prepare_polarization_counter(
+        P_arr, mask, repair if repair_enabled else None,
+        row_gaps if repair_enabled else None, col_gaps if repair_enabled else None,
+    )
     if frame_rois is not None:
+        image_worker = sumImage
+
+        def sumImage(i):
+            """Integrate all stationary lines and their polarization together."""
+            result = image_worker(i)
+            polarization = np.zeros_like(result[0])
+            for crnr in range(xylist.shape[0]):
+                polarization[crnr] = polarization_count(
+                    _rectangle_key(frame_rois[i][0][crnr]),
+                    [_rectangle_key(array[crnr]) for array in frame_rois[i][1:]],
+                )
+            return (*result, polarization)
+
         return sumImage, None, None
-    polarization_counters = np.zeros((xylist.shape[0], 4), dtype=np.float64)
-    if use_polarization and HAS_ACCEL and repair_enabled:
-        dummy_counters = np.zeros_like(polarization_counters)
-        _roi_sum_accel.processImage_repair_Carr(
-            np.ones(image.img.shape, dtype=np.float64),
-            mask,
-            np.ascontiguousarray(P_arr, dtype=np.float64),
-            *roi_lists_accel,
-            row_gaps,
-            col_gaps,
-            dummy_counters,
-            polarization_counters,
-            repair.max_component_pixels,
-            repair.max_span,
-            repair.radius,
-            repair.min_valid_neighbors,
-        )
-    else:
-        for crnr in range(xylist.shape[0]):
-            polarization_counters[crnr] = _correction_region_counters(
-                P_arr,
-                mask,
-                rois["center"][crnr],
-                [
-                    rois["left"][crnr],
-                    rois["right"][crnr],
-                    rois["top"][crnr],
-                    rois["bottom"][crnr],
-                ],
-            )
+    # Fixed rocking ROIs share these factors across all frames.
+    polarization_counters = np.array([
+        polarization_count(rois["center"][crnr], [
+            rois[name][crnr] for name in ("left", "right", "top", "bottom")
+        ]) for crnr in range(xylist.shape[0])
+    ])
     P_croi = integration_corrections.roi_mean_correction(
         polarization_counters[:, 0], polarization_counters[:, 1]
     )

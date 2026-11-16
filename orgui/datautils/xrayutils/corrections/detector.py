@@ -263,6 +263,42 @@ def roi_mean_inverse_polarization(
     return float(np.mean(1.0 / np.asarray(polarization, dtype=np.float64)))
 
 
+def roi_center_inverse_polarization(detector, row, column, alpha,
+                                    gamma_arm, delta_arm):
+    """Evaluate ``1/P`` at each ROI center and its actual detector arm position.
+
+    Coordinates are pixels: ``row`` is pyFAI dimension 1 (GUI y), ``column``
+    is dimension 2 (GUI x). Incidence and arm angles are in radian. Inputs
+    broadcast per frame; undefined positions return the neutral factor one.
+    This approximation ignores polarization variation across the ROI.
+    """
+    row, column, alpha, gamma_arm, delta_arm = np.broadcast_arrays(
+        *[np.asarray(value, dtype=np.float64)
+          for value in (row, column, alpha, gamma_arm, delta_arm)]
+    )
+    result = np.ones(row.shape, dtype=np.float64)
+    valid = (np.isfinite(row) & np.isfinite(column) & np.isfinite(alpha)
+             & np.isfinite(gamma_arm) & np.isfinite(delta_arm))
+    if not np.any(valid):
+        return result
+    # Batch fixed-pixel scans without constructing a frame-by-frame Cartesian
+    # product of moving ROI coordinates and arm positions.
+    if (np.all(row[valid] == row[valid][0])
+            and np.all(column[valid] == column[valid][0])):
+        polarization = detector.polarizationAtPointsFrames(
+            np.array([row[valid][0]]), np.array([column[valid][0]]),
+            alpha[valid], gamma_arm[valid], delta_arm[valid],
+        )
+        result[valid] = 1.0 / np.asarray(polarization)[:, 0]
+    else:
+        for index in zip(*np.nonzero(valid)):
+            result[index] = 1.0 / float(np.asarray(detector.polarizationAtPoints(
+                np.array([row[index]]), np.array([column[index]]),
+                float(alpha[index]), float(gamma_arm[index]), float(delta_arm[index]),
+            )).item())
+    return result
+
+
 def polarization_arm_correction(
     detector,
     row,

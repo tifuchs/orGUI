@@ -1078,6 +1078,11 @@ class QScanSelector(qt.QMainWindow):
         for key, value in ddict.items():
             if key in boxes:
                 boxes[key].setChecked(bool(value))
+            elif key == "polarization_mode":
+                index = self.polarizationMode.findData(value)
+                if index < 0:
+                    raise ValueError(f"Unknown polarization mode: {value!r}")
+                self.polarizationMode.setCurrentIndex(index)
             elif key == "advanced":
                 self.roioptions.set_parameters(value)
             elif key == "region":
@@ -1127,6 +1132,8 @@ class QScanSelector(qt.QMainWindow):
             automatic sizing) and ``rocking_scan`` (the ``s`` sampling).
             ``lines`` holds ordered stationary and rocking line collections
             with vectors in r.l.u.; an empty collection uses the existing controls.
+            ``polarization_mode`` is ``"pixel"`` (default) or ``"center"``
+            (one approximate factor at the signal ROI center).
             Reading a legacy key off the result still works, with a
             deprecation warning.
         :rtype: LegacyKeyDict
@@ -1135,6 +1142,7 @@ class QScanSelector(qt.QMainWindow):
             (name, box.isChecked()) for name, box in self._switch_boxes.items()
         )
         ddict["advanced"] = self.roioptions.get_parameters()
+        ddict["polarization_mode"] = self.polarizationMode.currentData()
         ddict["region"] = LegacyKeyDict(
             (name, control.isChecked() if name.startswith("auto_")
              else control.value())
@@ -2179,6 +2187,20 @@ class IntegrationOptionsDialog(qt.QDialog):
         )
         detectorLayout.addWidget(selector.useSolidAngleBox)
         detectorLayout.addWidget(selector.usePolarizationBox)
+        selector.polarizationMode = qt.QComboBox()
+        selector.polarizationMode.addItem("Per-pixel polarization (default)", "pixel")
+        selector.polarizationMode.addItem(
+            "ROI center polarization (approximate)", "center"
+        )
+        selector.polarizationMode.setToolTip(
+            "ROI integration only: evaluate one polarization factor at the ROI "
+            "center using each frame's detector arm angles. Faster, but ignores "
+            "variation across the signal and background ROIs. The approximation "
+            "can be less accurate for large ROIs or near a polarization minimum."
+        )
+        selector.polarizationMode.setEnabled(selector.usePolarizationBox.isChecked())
+        selector.usePolarizationBox.toggled.connect(selector.polarizationMode.setEnabled)
+        detectorLayout.addWidget(selector.polarizationMode)
         selector.useSolidAngleBox.setText(
             "Solid-angle normalization (intensity output only)"
         )

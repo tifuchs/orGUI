@@ -9,6 +9,8 @@ Unreleased (2026-07-19)
 
 Other user-visible changes:
 
+- ROI integration now collects polarization factors during image extraction, reusing mask-repair acceptance instead of repeating repair for every frame after the progress bar closes. An optional ROI-center polarization method provides a faster approximation; per-pixel averaging remains the default.
+
 - Added an executable RuO2/TiO2 dissolution notebook with five material-inventory stages, native density and paired CTR plots, and checks for complete RuO2 removal while preserving the original TiO2 interface.
 
 - Epitaxy interfaces now register both independent lattices at the same fixed structural-layer reference. This removes skew-dependent depleted/overfilled interfaces under partial strain coupling, including artificial interfaces between identical materials. Substrate domains, statistical occupancies and Film layer counts are preserved; affected upper positions and kinematic/DWBA predictions change. Reevaluate affected saved fits. Old generated-domain caches rebuild automatically; saved parameters and numerical tolerances stay unchanged.

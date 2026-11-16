@@ -7,6 +7,11 @@ This is the changelog for the software orGUI, written by Timo Fuchs
 
 Other user-visible changes:
 
+- ROI integration now collects polarization factors during image extraction,
+  reusing mask-repair acceptance instead of repeating repair for every frame
+  after the progress bar closes. An optional ROI-center polarization method
+  provides a faster approximation; per-pixel averaging remains the default.
+
 - Added an executable RuO2/TiO2 dissolution notebook with five material-inventory
   stages, native density and paired CTR plots, and checks for complete RuO2
   removal while preserving the original TiO2 interface.

@@ -39,6 +39,44 @@ def _calibrated_detector():
     return det
 
 
+@pytest.mark.parametrize("moving_roi", [False, True])
+def test_center_polarization_follows_actual_arm(moving_roi):
+    """Scalar and moving centers use calibrated pixel geometry and radian arms."""
+    det = _calibrated_detector()
+    rows = np.array([310., 340., 380.]) if moving_roi else np.full(3, 310.)
+    columns = np.full(3, 240.)
+    alpha = np.deg2rad([1., 4., 9.])
+    gamma = 2 * alpha
+    delta = np.deg2rad([2., 3., 5.])
+    actual = detector_corrections.roi_center_inverse_polarization(
+        det, rows, columns, alpha, gamma, delta,
+    )
+    expected = [1 / det.polarizationAtPoints(
+        np.array([r]), np.array([c]), a, g, d,
+    ).item() for r, c, a, g, d in zip(rows, columns, alpha, gamma, delta)]
+    np.testing.assert_allclose(actual, expected, rtol=1e-12)
+    scalar = detector_corrections.roi_center_inverse_polarization(
+        det, rows[0], columns[0], alpha[0], gamma[0], delta[0],
+    )
+    np.testing.assert_allclose(scalar, expected[0], rtol=1e-12)
+    assert detector_corrections.roi_center_inverse_polarization(
+        det, np.nan, 240., 0., 0., 0.,
+    ) == 1.
+
+
+def test_center_approximation_for_small_roi():
+    """A 20-pixel ROI at 0.3 m differs by less than 0.01% in this geometry."""
+    det = _calibrated_detector()
+    alpha, gamma, delta = np.deg2rad([10., 20., 5.])
+    center = detector_corrections.roi_center_inverse_polarization(
+        det, 310., 240., alpha, gamma, delta,
+    )
+    average = detector_corrections.roi_mean_inverse_polarization(
+        det, 310., 240., 20., 20., alpha, gamma, delta, samples=20,
+    )
+    np.testing.assert_allclose(center, average, rtol=1e-4)
+
+
 def test_the_region_mean_is_one_at_normal_incidence():
     """At the point of normal incidence the correction is nearly neutral.
 
